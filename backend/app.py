@@ -401,52 +401,6 @@ async def get_models():
     """获取可用模型列表"""
     return AI_MODELS
 
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    """上传PDF文件"""
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="只支持PDF文件")
-    
-    try:
-        content = await file.read()
-        pdf_file = io.BytesIO(content)
-        
-        extracted_data = extract_text_from_pdf(pdf_file)
-        doc_id = generate_doc_id(extracted_data["full_text"])
-        
-        documents_store[doc_id] = {
-            "filename": file.filename,
-            "upload_time": datetime.now().isoformat(),
-            "data": extracted_data
-        }
-        
-        return {
-            "doc_id": doc_id,
-            "filename": file.filename,
-            "total_pages": extracted_data["total_pages"],
-            "total_chars": len(extracted_data["full_text"]),
-            "message": "PDF上传成功"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF处理失败: {str(e)}")
-
-@app.get("/document/{doc_id}")
-async def get_document_info(doc_id: str):
-    """获取文档信息和内容"""
-    if doc_id not in documents_store:
-        raise HTTPException(status_code=404, detail="文档未找到")
-    
-    doc = documents_store[doc_id]
-    return {
-        "doc_id": doc_id,
-        "filename": doc["filename"],
-        "upload_time": doc["upload_time"],
-        "total_pages": doc["data"]["total_pages"],
-        "total_chars": len(doc["data"]["full_text"]),
-        "pages": doc["data"]["pages"]
-    }
-
 @app.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     """与PDF文档对话（不带截图）"""
@@ -758,47 +712,44 @@ async def upload_pdf(file: UploadFile = File(...)):
     """上传PDF文件"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
-    
+
     try:
         # 读取文件内容
         content = await file.read()
         pdf_file = io.BytesIO(content)
-        
+
         # 提取文本
-        text, pages = extract_text_from_pdf(pdf_file)
-        
-        # 生成文档ID
-        doc_id = generate_doc_id(file.filename)
-        
+        extracted_data = extract_text_from_pdf(pdf_file)
+
+        # 生成文档ID（使用文本内容生成唯一ID）
+        doc_id = generate_doc_id(extracted_data["full_text"])
+
         # 保存PDF文件到磁盘
         pdf_filename = f"{doc_id}.pdf"
         pdf_path = os.path.join("uploads", pdf_filename)
         with open(pdf_path, "wb") as f:
             f.write(content)
-        
+
         # 生成PDF访问URL
         pdf_url = f"/uploads/{pdf_filename}"
-        
+
         # 存储文档（包含pdf_url）
         documents_store[doc_id] = {
             "filename": file.filename,
-            "content": text,
-            "pages": pages,
-            "total_pages": len(pages),
             "upload_time": datetime.now().isoformat(),
-            "doc_id": doc_id,
+            "data": extracted_data,
             "pdf_url": pdf_url
         }
-        
+
         return {
-            "message": "文件上传成功",
+            "message": "PDF上传成功",
             "doc_id": doc_id,
             "filename": file.filename,
-            "total_pages": len(pages),
-            "pdf_url": pdf_url,
-            "preview": text[:500] + "..." if len(text) > 500 else text
+            "total_pages": extracted_data["total_pages"],
+            "total_chars": len(extracted_data["full_text"]),
+            "pdf_url": pdf_url
         }
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF处理失败: {str(e)}")
 
@@ -806,14 +757,18 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def get_document(doc_id: str):
     """获取文档详情"""
     if doc_id not in documents_store:
-        raise HTTPException(status_code=404, detail="文档不存在")
-    
-    return documents_store[doc_id]
+        raise HTTPException(status_code=404, detail="文档未找到")
 
-@app.get("/models")
-async def get_models():
-    """获取所有可用的AI模型配置"""
-    return AI_MODELS
+    doc = documents_store[doc_id]
+    return {
+        "doc_id": doc_id,
+        "filename": doc["filename"],
+        "upload_time": doc["upload_time"],
+        "total_pages": doc["data"]["total_pages"],
+        "total_chars": len(doc["data"]["full_text"]),
+        "pages": doc["data"]["pages"],
+        "pdf_url": doc.get("pdf_url")
+    }
 
 @app.get("/health")
 async def health_check():
