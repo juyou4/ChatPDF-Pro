@@ -1,73 +1,132 @@
 #!/bin/bash
 
-# 颜色定义
+# 颜色和样式定义
+BOLD='\033[1m'
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+BLUE='\033[0;36m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
 
-echo -e "${BLUE}🚀 正在启动 ChatPDF Pro...${NC}"
+# 清屏
+clear
+
+# 打印 Banner
+echo -e "${BLUE}${BOLD}"
+cat << "EOF"
+  ╔═══════════════════════════════════════╗
+  ║                                       ║
+  ║     ChatPDF Pro v2.0.2               ║
+  ║     智能文档助手                      ║
+  ║                                       ║
+  ╚═══════════════════════════════════════╝
+EOF
+echo -e "${NC}"
+
+# 进度显示函数
+show_progress() {
+    echo -ne "${BLUE}  ▶${NC} $1"
+}
+
+show_success() {
+    echo -e "\r${GREEN}  ✓${NC} $1"
+}
+
+show_error() {
+    echo -e "\r${RED}  ✗${NC} $1"
+}
 
 # ==================== 自动更新 ====================
-echo -e "${BLUE}🔄 检查更新...${NC}"
-git pull origin main
+show_progress "检查代码更新..."
+
+git pull origin main > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 代码已更新到最新版本${NC}"
+    show_success "代码已更新到最新版本"
 else
-    echo -e "${BLUE}⚠️ 更新失败或已是最新 (可忽略)${NC}"
+    show_success "已是最新版本 (或更新跳过)"
 fi
 
-# ==================== 后端检查与启动 ====================
-echo -e "${BLUE}📦 检查后端依赖...${NC}"
+# ==================== 环境检查 ====================
+show_progress "检查运行环境..."
 
-# 清理端口 8000（如果被占用）
-echo "检查端口 8000..."
-if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null 2>&1 ; then
-    echo "端口 8000 被占用，正在清理..."
-    lsof -ti :8000 | xargs kill -9 2>/dev/null
-    sleep 1
-fi
-
-# 额外清理：杀掉所有可能的旧后端进程
-echo "清理旧的后端进程..."
-pkill -f "python.*backend/app.py" 2>/dev/null
-sleep 1
-
-# 清理 Python 缓存
-echo "清理 Python 缓存..."
-find backend -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
-find backend -name "*.pyc" -delete 2>/dev/null
-
-# 检查是否安装了 python3
+# 检查 Python
 if ! command -v python3 &> /dev/null; then
-    echo "❌ 未找到 python3，请先安装 Python 3"
+    show_error "未找到 Python3，请先安装"
     exit 1
 fi
 
-# 安装后端依赖
-echo "正在安装/更新后端依赖..."
-pip3 install -r backend/requirements.txt
-
-# 启动后端 (后台运行)
-echo -e "${GREEN}🔥 启动后端服务...${NC}"
-python3 backend/app.py &
-BACKEND_PID=$!
-
-# ==================== 前端检查与启动 ====================
-echo -e "${BLUE}📦 检查前端依赖...${NC}"
-
-cd frontend
-
-# 检查 node_modules 是否存在
-if [ ! -d "node_modules" ]; then
-    echo "首次运行，正在安装前端依赖 (这可能需要几分钟)..."
-    npm install
+# 检查 Node.js
+if ! command -v node &> /dev/null; then
+    show_error "未找到 Node.js，请先安装"
+    exit 1
 fi
 
-# 启动前端
-echo -e "${GREEN}✨ 启动前端界面...${NC}"
-echo "按 Ctrl+C 停止所有服务"
-npm run dev
+show_success "环境检查通过"
 
-# ==================== 清理工作 ====================
-# 当脚本退出时，杀掉后端进程
-kill $BACKEND_PID
+# ==================== 清理旧进程 ====================
+show_progress "清理旧进程..."
+
+# 清理端口 8000
+lsof -ti :8000 | xargs kill -9 2>/dev/null
+pkill -f "python.*backend/app.py" 2>/dev/null
+find backend -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+
+show_success "清理完成"
+
+# ==================== 安装依赖 ====================
+show_progress "检查依赖..."
+
+# 后端依赖（静默安装）
+pip3 install -q -r backend/requirements.txt 2>&1 | grep -i "error" || true
+
+# 前端依赖
+cd frontend
+if [ ! -d "node_modules" ]; then
+    show_progress "首次运行，安装前端依赖 (需要1-2分钟)..."
+    npm install --silent > /dev/null 2>&1
+fi
+cd ..
+
+show_success "依赖检查完成"
+
+# ==================== 启动服务 ====================
+show_progress "启动后端服务..."
+nohup python3 backend/app.py > /dev/null 2>&1 &
+BACKEND_PID=$!
+sleep 2
+
+# 检查后端是否成功启动
+if ps -p $BACKEND_PID > /dev/null; then
+    show_success "后端服务启动成功 (PID: $BACKEND_PID)"
+else
+    show_error "后端启动失败"
+    exit 1
+fi
+
+show_progress "启动前端服务..."
+cd frontend
+
+# 延迟打开浏览器（等待前端服务完全启动）
+(sleep 3 && python3 -m webbrowser http://localhost:3000 2>/dev/null || \
+ open http://localhost:3000 2>/dev/null || \
+ xdg-open http://localhost:3000 2>/dev/null) &
+
+echo ""
+echo -e "${GREEN}${BOLD}  🎉 ChatPDF Pro 已启动！${NC}"
+echo ""
+echo -e "  ${BLUE}访问地址:${NC} ${BOLD}http://localhost:3000${NC}"
+echo -e "  ${BLUE}后端API:${NC}  ${BOLD}http://127.0.0.1:8000${NC}"
+echo ""
+echo -e "  ${YELLOW}提示:${NC} 浏览器将自动打开，按 ${BOLD}Ctrl+C${NC} 停止服务"
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+# 启动前端（过滤大部分输出，只保留关键信息）
+npm run dev 2>&1 | grep -E "Local:|Network:|ready in|error|Error|ERROR" || npm run dev
+
+# ==================== 清理 ====================
+echo ""
+show_progress "正在停止服务..."
+kill $BACKEND_PID 2>/dev/null
+show_success "已停止所有服务"
