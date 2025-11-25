@@ -71,11 +71,19 @@ const ChatPDF = () => {
   // Effects
   useEffect(() => {
     fetchAvailableModels();
+    loadHistory();  // 加载历史记录
   }, []);
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // 保存当前会话到历史记录
+  useEffect(() => {
+    if (docId && docInfo) {
+      saveCurrentSession();
+    }
+  }, [docId, docInfo, messages]);
 
   useEffect(() => {
     localStorage.setItem('apiKey', apiKey);
@@ -348,6 +356,101 @@ const ChatPDF = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  // ==================== 历史记录管理 ====================
+  const loadHistory = () => {
+    try {
+      const saved = localStorage.getItem('chatHistory');
+      if (saved) {
+        setHistory(JSON.parse(saved));
+      }
+    } catch (error) {
+      console.error('Failed to load history:', error);
+    }
+  };
+
+  const saveCurrentSession = () => {
+    try {
+      const sessionId = docId;
+      const existingHistory = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+
+      const sessionIndex = existingHistory.findIndex(s => s.id === sessionId);
+      const sessionData = {
+        id: sessionId,
+        docId: docId,
+        filename: docInfo.filename,
+        messages: messages,
+        createdAt: sessionIndex >= 0 ? existingHistory[sessionIndex].createdAt : Date.now(),
+        updatedAt: Date.now()
+      };
+
+      if (sessionIndex >= 0) {
+        existingHistory[sessionIndex] = sessionData;
+      } else {
+        existingHistory.unshift(sessionData);
+      }
+
+      // 最多保留 50 个历史记录
+      const limitedHistory = existingHistory.slice(0, 50);
+      localStorage.setItem('chatHistory', JSON.stringify(limitedHistory));
+      setHistory(limitedHistory);
+    } catch (error) {
+      console.error('Failed to save session:', error);
+    }
+  };
+
+  const loadSession = async (session) => {
+    try {
+      // 加载文档信息
+      const docResponse = await fetch(`${API_BASE_URL}/document/${session.docId}?t=${new Date().getTime()}`);
+      if (!docResponse.ok) {
+        alert('文档已不存在');
+        return;
+      }
+
+      const docData = await docResponse.json();
+
+      // 恢复会话状态
+      setDocId(session.docId);
+      setDocInfo(docData);
+      setMessages(session.messages || []);
+      setCurrentPage(1);
+    } catch (error) {
+      console.error('Failed to load session:', error);
+      alert('加载会话失败: ' + error.message);
+    }
+  };
+
+  const deleteSession = (sessionId) => {
+    try {
+      const confirmed = window.confirm('确定要删除这个对话吗？');
+      if (!confirmed) return;
+
+      const existingHistory = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+      const updatedHistory = existingHistory.filter(s => s.id !== sessionId);
+
+      localStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+      setHistory(updatedHistory);
+
+      // 如果删除的是当前会话，清空界面
+      if (sessionId === docId) {
+        setDocId(null);
+        setDocInfo(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+    }
+  };
+
+  const startNewChat = () => {
+    setDocId(null);
+    setDocInfo(null);
+    setMessages([]);
+    setCurrentPage(1);
+    setSelectedText('');
+    setScreenshot(null);
+  };
+
   const captureFullPage = async () => {
     if (!pdfContainerRef.current) return;
     setIsLoading(true);
@@ -388,7 +491,7 @@ const ChatPDF = () => {
 
             <div className="px-4 mb-4">
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
               >
                 <Plus className="w-5 h-5" />
@@ -400,10 +503,17 @@ const ChatPDF = () => {
             <div className="flex-1 overflow-y-auto px-4 space-y-2">
               <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
               {history.map((item, idx) => (
-                <div key={idx} className="p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors">
+                <div
+                  key={idx}
+                  onClick={() => loadSession(item)}
+                  className={`p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
+                >
                   <MessageSquare className="w-5 h-5 text-blue-500" />
-                  <div className="flex-1 truncate text-sm font-medium">{item.title}</div>
-                  <button className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity">
+                  <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
+                  >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
@@ -425,6 +535,15 @@ const ChatPDF = () => {
         {/* Header */}
         <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm transition-all duration-200">
           <div className="flex items-center gap-4">
+            {/* 菜单按钮 - 始终在左侧 */}
+            <button
+              onClick={() => setShowSidebar(!showSidebar)}
+              className="p-2 hover:bg-black/5 rounded-lg transition-colors"
+              title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
+            >
+              <Menu className="w-6 h-6" />
+            </button>
+
             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
               <FileText className="w-6 h-6" />
             </div>
@@ -436,11 +555,6 @@ const ChatPDF = () => {
             </div>
           </div>
           {docInfo && <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full">{docInfo.filename}</div>}
-          <div className="flex items-center gap-4">
-            <button onClick={() => setShowSidebar(!showSidebar)} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
-              <Menu className="w-6 h-6" />
-            </button>
-          </div>
         </header>
         {/* Content Area */}
         <div className="flex-1 flex overflow-hidden p-6 gap-0 pt-0">
@@ -480,15 +594,16 @@ const ChatPDF = () => {
                         </div>
                       )}
                     </div>
-                    <div ref={pdfContainerRef} className="h-full overflow-auto p-8 flex justify-center bg-gray-50/50">
-                      <div
-                        className="bg-white shadow-2xl p-12 rounded-lg max-w-4xl"
-                        style={{ transform: `scale(${pdfScale})`, transformOrigin: 'top center' }}
-                        onMouseUp={handleTextSelection}
-                      >
-                        <pre className="whitespace-pre-wrap font-serif text-gray-800 leading-relaxed">
-                          {(docInfo.pages || docInfo.data?.pages)?.[currentPage - 1]?.content || 'No content'}
-                        </pre>
+                    <div ref={pdfContainerRef} className="h-full overflow-auto bg-gray-50/50">
+                      <div className="min-h-full flex items-start justify-center p-8" style={{ zoom: pdfScale }}>
+                        <div
+                          className="bg-white shadow-2xl p-12 rounded-lg max-w-4xl w-full"
+                          onMouseUp={handleTextSelection}
+                        >
+                          <pre className="whitespace-pre-wrap font-serif text-gray-800 leading-relaxed">
+                            {(docInfo.pages || docInfo.data?.pages)?.[currentPage - 1]?.content || 'No content'}
+                          </pre>
+                        </div>
                       </div>
                     </div>
                   </>
