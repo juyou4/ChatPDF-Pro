@@ -28,7 +28,6 @@ const ChatPDF = () => {
   const [showSidebar, setShowSidebar] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [history, setHistory] = useState([]); // Mock history for now
-  const [updateAvailable, setUpdateAvailable] = useState(null); // {version, changelog}
 
   // PDF State
   const [currentPage, setCurrentPage] = useState(1);
@@ -72,12 +71,19 @@ const ChatPDF = () => {
   // Effects
   useEffect(() => {
     fetchAvailableModels();
-    checkForUpdates(); // Check for updates on startup
+    loadHistory();  // 加载历史记录
   }, []);
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // 保存当前会话到历史记录
+  useEffect(() => {
+    if (docId && docInfo) {
+      saveCurrentSession();
+    }
+  }, [docId, docInfo, messages]);
 
   useEffect(() => {
     localStorage.setItem('apiKey', apiKey);
@@ -350,40 +356,99 @@ const ChatPDF = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const checkForUpdates = async () => {
+  // ==================== 历史记录管理 ====================
+  const loadHistory = () => {
     try {
-      // Fetch local version
-      const localVersionRes = await fetch('/version.json');
-      const localVersion = await localVersionRes.json();
-
-      // Fetch GitHub latest release
-      const githubApi = `https://api.github.com/repos/${localVersion.githubOwner}/${localVersion.githubRepo}/releases/latest`;
-      const response = await fetch(githubApi);
-
-      if (!response.ok) return; // Silently fail if GitHub is unreachable
-
-      const latestRelease = await response.json();
-      const latestVersion = latestRelease.tag_name.replace('v', '');
-
-      // Compare versions (simple string comparison, can use semver library)
-      if (latestVersion !== localVersion.version) {
-        setUpdateAvailable({
-          version: latestVersion,
-          changelog: latestRelease.body || localVersion.changelog,
-          url: latestRelease.html_url
-        });
+      const saved = localStorage.getItem('chatHistory');
+      if (saved) {
+        setHistory(JSON.parse(saved));
       }
     } catch (error) {
-      console.log('Update check failed:', error);
-      // Silently fail, don't bother user
+      console.error('Failed to load history:', error);
     }
   };
 
-  const handleUpdate = () => {
-    const isWindows = navigator.platform.toLowerCase().includes('win');
-    const script = isWindows ? 'update.bat' : 'update.sh';
-    alert(`请运行项目根目录下的 ${script} 脚本进行升级\n\n升级完成后请重启应用。`);
-    window.open('https://github.com/juyou4/ChatPDF/releases/latest', '_blank');
+  const saveCurrentSession = () => {
+    try {
+      const sessionId = docId;
+      const existingHistory = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+
+      const sessionIndex = existingHistory.findIndex(s => s.id === sessionId);
+      const sessionData = {
+        id: sessionId,
+        docId: docId,
+        filename: docInfo.filename,
+        messages: messages,
+        createdAt: sessionIndex >= 0 ? existingHistory[sessionIndex].createdAt : Date.now(),
+        updatedAt: Date.now()
+      };
+
+      if (sessionIndex >= 0) {
+        existingHistory[sessionIndex] = sessionData;
+      } else {
+        existingHistory.unshift(sessionData);
+      }
+
+      // 最多保留 50 个历史记录
+      const limitedHistory = existingHistory.slice(0, 50);
+      localStorage.setItem('chatHistory', JSON.stringify(limitedHistory));
+      setHistory(limitedHistory);
+    } catch (error) {
+      console.error('Failed to save session:', error);
+    }
+  };
+
+  const loadSession = async (session) => {
+    try {
+      // 加载文档信息
+      const docResponse = await fetch(`${API_BASE_URL}/document/${session.docId}?t=${new Date().getTime()}`);
+      if (!docResponse.ok) {
+        alert('文档已不存在');
+        return;
+      }
+
+      const docData = await docResponse.json();
+
+      // 恢复会话状态
+      setDocId(session.docId);
+      setDocInfo(docData);
+      setMessages(session.messages || []);
+      setCurrentPage(1);
+    } catch (error) {
+      console.error('Failed to load session:', error);
+      alert('加载会话失败: ' + error.message);
+    }
+  };
+
+  const deleteSession = (sessionId) => {
+    try {
+      const confirmed = window.confirm('确定要删除这个对话吗？');
+      if (!confirmed) return;
+
+      const existingHistory = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+      const updatedHistory = existingHistory.filter(s => s.id !== sessionId);
+
+      localStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+      setHistory(updatedHistory);
+
+      // 如果删除的是当前会话，清空界面
+      if (sessionId === docId) {
+        setDocId(null);
+        setDocInfo(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+    }
+  };
+
+  const startNewChat = () => {
+    setDocId(null);
+    setDocInfo(null);
+    setMessages([]);
+    setCurrentPage(1);
+    setSelectedText('');
+    setScreenshot(null);
   };
 
   const captureFullPage = async () => {
@@ -404,49 +469,14 @@ const ChatPDF = () => {
   return (
     <div className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}>
 
-      {/* Update Banner */}
-      <AnimatePresence>
-        {updateAvailable && (
-          <motion.div
-            initial={{ y: -100, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: -100, opacity: 0 }}
-            className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-blue-500 to-blue-600 text-white px-6 py-3 shadow-lg"
-          >
-            <div className="max-w-6xl mx-auto flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🎉</span>
-                <div>
-                  <div className="font-semibold">新版本 v{updateAvailable.version} 可用！</div>
-                  <div className="text-sm opacity-90">{updateAvailable.changelog?.substring(0, 60)}...</div>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleUpdate}
-                  className="px-4 py-2 bg-white text-blue-600 rounded-lg font-medium hover:bg-blue-50 transition-colors"
-                >
-                  一键升级
-                </button>
-                <button
-                  onClick={() => setUpdateAvailable(null)}
-                  className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Sidebar (History) */}
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {showSidebar && (
           <motion.div
             initial={{ x: -300, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: -300, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
             className={`w-72 flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
           >
             <div className="p-6 flex items-center justify-between">
@@ -461,7 +491,7 @@ const ChatPDF = () => {
 
             <div className="px-4 mb-4">
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
               >
                 <Plus className="w-5 h-5" />
@@ -473,10 +503,17 @@ const ChatPDF = () => {
             <div className="flex-1 overflow-y-auto px-4 space-y-2">
               <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
               {history.map((item, idx) => (
-                <div key={idx} className="p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors">
+                <div
+                  key={idx}
+                  onClick={() => loadSession(item)}
+                  className={`p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
+                >
                   <MessageSquare className="w-5 h-5 text-blue-500" />
-                  <div className="flex-1 truncate text-sm font-medium">{item.title}</div>
-                  <button className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity">
+                  <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
+                  >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
@@ -494,10 +531,19 @@ const ChatPDF = () => {
       </AnimatePresence>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col h-full relative">
+      <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
         {/* Header */}
-        <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm">
+        <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm transition-all duration-200">
           <div className="flex items-center gap-4">
+            {/* 菜单按钮 - 始终在左侧 */}
+            <button
+              onClick={() => setShowSidebar(!showSidebar)}
+              className="p-2 hover:bg-black/5 rounded-lg transition-colors"
+              title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
+            >
+              <Menu className="w-6 h-6" />
+            </button>
+
             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
               <FileText className="w-6 h-6" />
             </div>
@@ -509,11 +555,6 @@ const ChatPDF = () => {
             </div>
           </div>
           {docInfo && <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full">{docInfo.filename}</div>}
-          <div className="flex items-center gap-4">
-            <button onClick={() => setShowSidebar(!showSidebar)} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
-              <Menu className="w-6 h-6" />
-            </button>
-          </div>
         </header>
         {/* Content Area */}
         <div className="flex-1 flex overflow-hidden p-6 gap-0 pt-0">
@@ -526,25 +567,6 @@ const ChatPDF = () => {
               className={`glass-panel rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
               style={{ width: `${pdfPanelWidth}%` }}
             >
-              {/* PDF Toolbar */}
-              <div className="h-14 border-b border-black/5 flex items-center justify-between px-6 bg-white/30 backdrop-blur-sm">
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ChevronLeft className="w-5 h-5" /></button>
-                  <span className="text-sm font-medium w-16 text-center">{currentPage} / {docInfo?.total_pages || docInfo?.data?.total_pages || 1}</span>
-                  <button onClick={() => setCurrentPage(Math.min(docInfo?.total_pages || docInfo?.data?.total_pages || 1, currentPage + 1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ChevronRight className="w-5 h-5" /></button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setPdfScale(s => Math.max(0.5, s - 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomOut className="w-5 h-5" /></button>
-                  <span className="text-sm font-medium w-12 text-center">{Math.round(pdfScale * 100)}%</span>
-                  <button onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomIn className="w-5 h-5" /></button>
-                </div>
-                {enableScreenshot && (
-                  <div className="flex items-center gap-2">
-                    <button onClick={captureFullPage} className="p-1.5 hover:bg-purple-100 text-purple-600 rounded-lg" title="Screenshot"><Camera className="w-5 h-5" /></button>
-                  </div>
-                )}
-              </div>
-
               {/* PDF Content */}
               <div className="flex-1 overflow-hidden">
                 {docInfo?.pdf_url ? (
@@ -553,17 +575,38 @@ const ChatPDF = () => {
                     onTextSelect={(text) => setSelectedText(text)}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
-                  <div ref={pdfContainerRef} className="h-full overflow-auto p-8 flex justify-center bg-gray-50/50">
-                    <div
-                      className="bg-white shadow-2xl p-12 rounded-lg max-w-4xl"
-                      style={{ transform: `scale(${pdfScale})`, transformOrigin: 'top center' }}
-                      onMouseUp={handleTextSelection}
-                    >
-                      <pre className="whitespace-pre-wrap font-serif text-gray-800 leading-relaxed">
-                        {(docInfo.pages || docInfo.data?.pages)?.[currentPage - 1]?.content || 'No content'}
-                      </pre>
+                  <>
+                    {/* Text-based PDF Toolbar */}
+                    <div className="h-14 border-b border-black/5 flex items-center justify-between px-6 bg-white/30 backdrop-blur-sm">
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ChevronLeft className="w-5 h-5" /></button>
+                        <span className="text-sm font-medium w-16 text-center">{currentPage} / {docInfo?.total_pages || docInfo?.data?.total_pages || 1}</span>
+                        <button onClick={() => setCurrentPage(Math.min(docInfo?.total_pages || docInfo?.data?.total_pages || 1, currentPage + 1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ChevronRight className="w-5 h-5" /></button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setPdfScale(s => Math.max(0.5, s - 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomOut className="w-5 h-5" /></button>
+                        <span className="text-sm font-medium w-12 text-center">{Math.round(pdfScale * 100)}%</span>
+                        <button onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomIn className="w-5 h-5" /></button>
+                      </div>
+                      {enableScreenshot && (
+                        <div className="flex items-center gap-2">
+                          <button onClick={captureFullPage} className="p-1.5 hover:bg-purple-100 text-purple-600 rounded-lg" title="Screenshot"><Camera className="w-5 h-5" /></button>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                    <div ref={pdfContainerRef} className="h-full overflow-auto bg-gray-50/50">
+                      <div className="min-h-full flex items-start justify-center p-8" style={{ zoom: pdfScale }}>
+                        <div
+                          className="bg-white shadow-2xl p-12 rounded-lg max-w-4xl w-full"
+                          onMouseUp={handleTextSelection}
+                        >
+                          <pre className="whitespace-pre-wrap font-serif text-gray-800 leading-relaxed">
+                            {(docInfo.pages || docInfo.data?.pages)?.[currentPage - 1]?.content || 'No content'}
+                          </pre>
+                        </div>
+                      </div>
+                    </div>
+                  </>
                 ) : (
                   <div className="flex items-center justify-center h-full text-gray-400">
                     <p>Loading PDF...</p>

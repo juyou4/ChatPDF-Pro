@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
 import PyPDF2
+import pdfplumber
 import io
 import os
 import hashlib
@@ -139,21 +140,40 @@ AI_MODELS = {
 # ==================== PDF处理 ====================
 
 def extract_text_from_pdf(pdf_file) -> dict:
-    """从PDF提取文本"""
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    """从PDF提取文本 - 使用pdfplumber提供更好的文本提取质量"""
     pages_content = []
-    
-    for page_num in range(len(pdf_reader.pages)):
-        page = pdf_reader.pages[page_num]
-        text = page.extract_text()
-        pages_content.append({
-            "page": page_num + 1,
-            "content": text,
-            "char_count": len(text)
-        })
-    
+
+    # Reset file pointer to beginning
+    pdf_file.seek(0)
+
+    with pdfplumber.open(pdf_file) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            # Extract text with better layout handling
+            text = page.extract_text(layout=True) or ""
+
+            # Try to extract tables if they exist
+            tables = page.extract_tables()
+            table_text = ""
+            if tables:
+                table_text = "\n\n[表格内容]\n"
+                for table in tables:
+                    # Format table as markdown-like text
+                    for row in table:
+                        if row:
+                            table_text += " | ".join(str(cell) if cell else "" for cell in row) + "\n"
+                    table_text += "\n"
+
+            combined_text = text + table_text
+
+            pages_content.append({
+                "page": page_num + 1,
+                "content": combined_text.strip(),
+                "char_count": len(combined_text),
+                "has_tables": len(tables) > 0 if tables else False
+            })
+
     return {
-        "total_pages": len(pdf_reader.pages),
+        "total_pages": len(pages_content),
         "pages": pages_content,
         "full_text": "\n\n".join([p["content"] for p in pages_content])
     }
