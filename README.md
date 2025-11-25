@@ -17,9 +17,11 @@
 
 ## 应用预览
 
-![ChatPDF Pro Screenshot](https://via.placeholder.com/1200x700/F6F8FA/2563EB?text=ChatPDF+Pro+v2.0.2)
+![ChatPDF Pro Screenshot](docs/screenshot.png)
 
 *专业的 PDF 阅读和 AI 对话界面，支持原生 PDF 渲染、对话历史管理、智能文本提取*
+
+> **提示**: 将应用截图保存为 `docs/screenshot.png` 即可显示预览图
 
 ---
 
