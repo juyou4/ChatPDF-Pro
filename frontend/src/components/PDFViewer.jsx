@@ -4,12 +4,8 @@ import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 
-// Configure worker - 使用本地 worker 文件以避免 CDN 访问问题
-// 使用 Vite 的方式引入本地 worker
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url
-).toString();
+// Configure worker - 直接指定版本以确保匹配
+pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs`;
 
 const PDFViewer = ({ pdfUrl, onTextSelect }) => {
     const [numPages, setNumPages] = useState(null);

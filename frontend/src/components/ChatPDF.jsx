@@ -28,7 +28,6 @@ const ChatPDF = () => {
   const [showSidebar, setShowSidebar] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [history, setHistory] = useState([]); // Mock history for now
-  const [updateAvailable, setUpdateAvailable] = useState(null); // {version, changelog}
 
   // PDF State
   const [currentPage, setCurrentPage] = useState(1);
@@ -72,7 +71,6 @@ const ChatPDF = () => {
   // Effects
   useEffect(() => {
     fetchAvailableModels();
-    checkForUpdates(); // Check for updates on startup
   }, []);
 
   useEffect(() => {
@@ -350,42 +348,6 @@ const ChatPDF = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const checkForUpdates = async () => {
-    try {
-      // Fetch local version
-      const localVersionRes = await fetch('/version.json');
-      const localVersion = await localVersionRes.json();
-
-      // Fetch GitHub latest release
-      const githubApi = `https://api.github.com/repos/${localVersion.githubOwner}/${localVersion.githubRepo}/releases/latest`;
-      const response = await fetch(githubApi);
-
-      if (!response.ok) return; // Silently fail if GitHub is unreachable
-
-      const latestRelease = await response.json();
-      const latestVersion = latestRelease.tag_name.replace('v', '');
-
-      // Compare versions (simple string comparison, can use semver library)
-      if (latestVersion !== localVersion.version) {
-        setUpdateAvailable({
-          version: latestVersion,
-          changelog: latestRelease.body || localVersion.changelog,
-          url: latestRelease.html_url
-        });
-      }
-    } catch (error) {
-      console.log('Update check failed:', error);
-      // Silently fail, don't bother user
-    }
-  };
-
-  const handleUpdate = () => {
-    const isWindows = navigator.platform.toLowerCase().includes('win');
-    const script = isWindows ? 'update.bat' : 'update.sh';
-    alert(`请运行项目根目录下的 ${script} 脚本进行升级\n\n升级完成后请重启应用。`);
-    window.open('https://github.com/juyou4/ChatPDF/releases/latest', '_blank');
-  };
-
   const captureFullPage = async () => {
     if (!pdfContainerRef.current) return;
     setIsLoading(true);
@@ -404,49 +366,14 @@ const ChatPDF = () => {
   return (
     <div className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}>
 
-      {/* Update Banner */}
-      <AnimatePresence>
-        {updateAvailable && (
-          <motion.div
-            initial={{ y: -100, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: -100, opacity: 0 }}
-            className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-blue-500 to-blue-600 text-white px-6 py-3 shadow-lg"
-          >
-            <div className="max-w-6xl mx-auto flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🎉</span>
-                <div>
-                  <div className="font-semibold">新版本 v{updateAvailable.version} 可用！</div>
-                  <div className="text-sm opacity-90">{updateAvailable.changelog?.substring(0, 60)}...</div>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleUpdate}
-                  className="px-4 py-2 bg-white text-blue-600 rounded-lg font-medium hover:bg-blue-50 transition-colors"
-                >
-                  一键升级
-                </button>
-                <button
-                  onClick={() => setUpdateAvailable(null)}
-                  className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Sidebar (History) */}
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {showSidebar && (
           <motion.div
             initial={{ x: -300, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: -300, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
             className={`w-72 flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
           >
             <div className="p-6 flex items-center justify-between">
@@ -494,9 +421,9 @@ const ChatPDF = () => {
       </AnimatePresence>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col h-full relative">
+      <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
         {/* Header */}
-        <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm">
+        <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm transition-all duration-200">
           <div className="flex items-center gap-4">
             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
               <FileText className="w-6 h-6" />
