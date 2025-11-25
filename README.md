@@ -1,49 +1,66 @@
-# ChatPDF 2.0 - 治愈系AI文档助手
+# ChatPDF Pro v2.0.2
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF-2.0-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-2.0.2-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![Vite](https://img.shields.io/badge/Vite-6.0-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev/)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
-**中文** | **[English](README_EN.md)**
+**智能文档助手 - 与 PDF 对话，让知识触手可及**
 
-**全新 ChatPDF 2.0**：治愈系蓝白UI，极速Vite驱动，支持本地模型免费运行！
-
-[快速开始](#快速开始) • [新版特性](#-新版特性) • [技术栈](#-技术栈) • [文档](#-文档)
+[快速开始](#快速开始) • [核心功能](#核心功能) • [技术栈](#技术栈) • [配置指南](#配置指南)
 
 </div>
 
 ---
 
-## ✨ 新版特性 (v2.0)
+## 应用预览
 
-### 🎨 治愈系蓝白 UI
-- **极致视觉体验**: 采用 `#F6F8FA` → `#E9F4FF` 极浅冷色渐变背景，搭配高饱和亮蓝按钮。
-- **悬浮卡片布局**: 内容区采用大圆角悬浮玻璃卡片，配合流畅的漂浮动画。
-- **强毛玻璃质感**: 深度优化的 Glassmorphism 效果，带来清爽的科技感。
-- **深色模式**: 支持一键切换深色/浅色主题，夜间阅读更舒适。
+![ChatPDF Pro Screenshot](https://via.placeholder.com/1200x700/F6F8FA/2563EB?text=ChatPDF+Pro+v2.0.2)
 
-### ⚡ 极速性能
-- **Vite 6.0 驱动**: 启动速度提升 10 倍，热更新毫秒级响应。
-- **React 18.3**: 采用最新并发特性，交互更丝滑。
-
-### 🦙 本地模型支持 (免费!)
-- **Ollama 集成**: 直接支持 **Llama 3**, **Mistral**, **Qwen** 等本地模型。
-- **隐私安全**: 本地运行，数据不出本机，完全免费。
-
-### 📸 AI视觉分析
-- **智能截图**: 一键截取PDF页面或框选区域。
-- **多模态分析**: 支持 GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro 等视觉模型。
-- **图表理解**: 精准识别图表、公式、表格数据。
+*专业的 PDF 阅读和 AI 对话界面，支持原生 PDF 渲染、对话历史管理、智能文本提取*
 
 ---
 
-## 🚀 快速开始
+## 核心功能
 
-### 方式一：一键启动 (推荐)
+### PDF 文档处理
+- **原生 PDF 渲染** - 基于 PDF.js 的高保真文档显示，支持缩放、翻页、文本选择
+- **智能文本提取** - 使用 pdfplumber 进行高质量文本提取，支持复杂布局识别
+- **表格识别** - 自动检测和提取 PDF 中的表格内容，转换为结构化文本
+- **分页处理** - 逐页提取和索引，支持精确定位到特定页面
+- **可调节缩放** - 支持 50%-200% 无级缩放，自动适应阅读习惯
+
+### AI 对话功能
+- **多模型支持** - 集成 OpenAI、Anthropic、Google Gemini、Grok、Ollama 等多个 AI 提供商
+- **上下文理解** - 基于文档内容进行智能问答，提供准确的引用和解释
+- **流式输出** - 支持打字机效果的实时响应，可调节速度或关闭
+- **Markdown 渲染** - 完整支持代码高亮、数学公式（KaTeX）、表格、列表等格式
+- **对话历史** - 自动保存对话记录，支持切换和删除历史会话（最多保存 50 条）
+
+### 视觉分析能力
+- **截图功能** - 支持整页截图和区域选择，配合多模态 AI 进行图像分析
+- **图表识别** - 利用 GPT-4V、Claude Sonnet 等视觉模型理解图表、公式、示意图
+- **多模态问答** - 结合文本和图像内容进行综合分析
+
+### 向量检索（可选）
+- **语义搜索** - 基于 Sentence Transformers 的向量化文本检索
+- **相似度匹配** - 使用 FAISS 快速查找文档中的相关段落
+- **智能引用** - 自动定位答案来源的具体页面和段落
+
+### 用户界面
+- **治愈系设计** - 蓝白配色的现代化 UI，毛玻璃效果，流畅动画
+- **响应式布局** - 可拖拽调整 PDF 预览和对话区域的比例
+- **深色模式** - 支持浅色/深色主题切换，适应不同使用环境
+- **会话管理** - 侧边栏显示历史对话列表，一键切换或删除
+- **键盘快捷键** - Enter 发送消息，Shift+Enter 换行
+
+---
+
+## 快速开始
+
+### 一键启动（推荐）
 
 **Windows:**
 ```bash
@@ -56,105 +73,216 @@ chmod +x start.sh
 ./start.sh
 ```
 
-### 方式二：手动启动
+启动脚本会自动：
+- 检查并更新到最新版本
+- 安装缺失的依赖
+- 启动后端服务（端口 8000）
+- 启动前端服务（端口 3000）
+- 自动打开浏览器
 
-**1. 启动后端**
+### 手动启动
+
+**后端:**
 ```bash
 cd backend
 pip install -r requirements.txt
 python app.py
 ```
-*后端运行在: http://localhost:8000*
 
-**2. 启动前端**
+**前端:**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-*前端运行在: http://localhost:3000*
+
+访问 http://localhost:3000 即可使用。
 
 ---
 
-## 🔧 模型配置
+## 配置指南
 
-### 1. 在线模型 (API Key)
-支持所有主流 AI 提供商：
-- **OpenAI**: GPT-4o, GPT-4 Turbo
-- **Anthropic**: Claude 3.5 Sonnet, Claude 3 Opus
-- **Google**: Gemini 1.5 Pro
-- **DeepSeek**: DeepSeek Chat
+### API Key 配置
 
-### 2. 本地模型 (Ollama)
-1. 下载并安装 [Ollama](https://ollama.com/)
+首次使用需要配置 AI 服务商的 API Key：
+
+1. 点击左下角"设置 & API Key"按钮
+2. 选择 API Provider（OpenAI、Anthropic、Google 等）
+3. 选择对应的模型
+4. 输入 API Key
+5. 保存设置
+
+配置会自动保存到浏览器 localStorage，下次无需重新输入。
+
+### 支持的 AI 提供商
+
+| 提供商 | 模型示例 | 视觉支持 | 备注 |
+|--------|----------|----------|------|
+| OpenAI | GPT-4o, GPT-4 Turbo, GPT-4o Mini | ✓ | 最佳多模态体验 |
+| Anthropic | Claude Sonnet 4.5, Claude 3 Opus | ✓ | 长文档理解优秀 |
+| Google | Gemini 2.5 Pro, Gemini 2.5 Flash | ✓ | 高性价比 |
+| Grok | Grok 4.1, Grok Vision | ✓ | xAI 出品 |
+| Ollama | Llama 3, Qwen, Mistral | ✗ | 本地运行，完全免费 |
+
+### 本地模型（Ollama）
+
+无需 API Key，完全本地运行：
+
+1. 安装 Ollama: https://ollama.com/
 2. 拉取模型: `ollama pull llama3`
-3. 在 ChatPDF 设置中选择 **Provider: Local (Ollama)**
+3. 在设置中选择"Local (Ollama)"提供商
+4. 开始使用
+
+### 功能开关
+
+在设置中可以启用/禁用以下功能：
+
+- **Vector Search** - 向量检索增强（需要更长的索引时间）
+- **Screenshot Analysis** - 截图分析功能（仅视觉模型可用）
+- **流式输出速度** - 快速/正常/慢速/关闭
 
 ---
 
-## 🔄 自动更新
+## 技术栈
 
-ChatPDF 支持自动版本检测和一键升级！
-
-### 如何升级到最新版
-
-**Windows:**
-```bash
-update.bat
-```
-
-**Mac/Linux:**
-```bash
-chmod +x update.sh   # 首次需要
-./update.sh
-```
-
-**工作原理**：
-- 启动应用时自动检测 GitHub 最新版本
-- 发现新版本时顶部显示蓝色更新横幅
-- 点击"一键升级"提示运行更新脚本
-- 脚本自动执行 `git pull` + 依赖更新
-
----
-
-## 📝 Mac 完整命令
-
-```bash
-# 首次设置（赋予执行权限）
-chmod +x start.sh update.sh stop.sh
-
-# 启动应用
-./start.sh
-
-# 升级版本
-./update.sh
-
-# 停止服务
-./stop.sh
-```
-
----
-
-## 🛠 技术栈
-
-### 前端 (v2.0)
-- **构建工具**: Vite 6.0
-- **框架**: React 18.3
-- **样式**: Tailwind CSS 3.4 + Framer Motion (动画)
-- **渲染**: React Markdown + KaTeX (数学公式) + Highlight.js (代码高亮)
+### 前端
+- **构建工具**: Vite 6.0 - 极速开发体验
+- **框架**: React 18.3 - 现代化组件开发
+- **PDF 渲染**: react-pdf 9.0 + PDF.js 4.8.69
+- **样式**: Tailwind CSS 3.4 - 实用优先的 CSS 框架
+- **动画**: Framer Motion - 流畅的页面过渡和交互
+- **Markdown**: ReactMarkdown + rehype/remark 插件生态
+- **数学公式**: KaTeX
+- **代码高亮**: Highlight.js
 
 ### 后端
-- **框架**: FastAPI 0.115+
-- **AI编排**: LangChain 0.3
-- **PDF处理**: PyPDF2 + pdfplumber
-- **向量检索**: FAISS + Sentence Transformers
+- **框架**: FastAPI 0.115 - 高性能异步 API
+- **PDF 处理**: pdfplumber 0.11 - 高质量文本和表格提取
+- **AI 编排**: LangChain 0.3 - 统一的 LLM 接口
+- **向量数据库**: FAISS - 高效相似度搜索
+- **文本嵌入**: Sentence Transformers 3.3
+- **HTTP 客户端**: httpx - 异步 HTTP 请求
+
+### AI SDK
+- openai 1.57
+- anthropic 0.40
+- google-generativeai 0.8
 
 ---
 
-## 📄 许可证
+## 项目结构
 
-本项目采用 [MIT许可证](LICENSE)
+```
+ChatPDF/
+├── frontend/               # React 前端
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ChatPDF.jsx      # 主应用组件
+│   │   │   └── PDFViewer.jsx    # PDF 渲染组件
+│   │   └── main.jsx
+│   ├── package.json
+│   └── vite.config.js
+├── backend/                # FastAPI 后端
+│   ├── app.py              # 主应用和路由
+│   ├── requirements.txt
+│   └── uploads/            # PDF 文件存储
+├── start.sh / start.bat    # 启动脚本
+└── README.md
+```
+
+---
+
+## 使用技巧
+
+### 高效阅读
+1. **文本选择问答** - 在 PDF 中选择文本后，在对话框中提问可以针对选中内容回答
+2. **分页查看** - 使用上下翻页按钮浏览文档，问答会基于整个文档内容
+3. **调整布局** - 拖动中间分隔线调整 PDF 和对话区域的比例
+
+### 对话管理
+1. **新建对话** - 点击"新对话 / 上传PDF"按钮清空当前会话并上传新文档
+2. **切换历史** - 在左侧边栏点击历史记录快速切换到之前的对话
+3. **删除对话** - 鼠标悬停在历史记录上，点击垃圾桶图标删除
+
+### 视觉分析
+1. 点击截图按钮捕获当前 PDF 页面
+2. 输入问题（如"解释这个图表的含义"）
+3. 发送后 AI 会结合截图内容进行分析
+
+---
+
+## 常见问题
+
+**Q: PDF 无法显示？**
+A: 确保后端服务正常运行（端口 8000），检查浏览器控制台是否有错误信息。
+
+**Q: API 调用失败？**
+A: 检查 API Key 是否正确，确认账户有足够额度，查看网络连接是否正常。
+
+**Q: 本地模型无响应？**
+A: 确认 Ollama 服务已启动（`ollama serve`），模型已下载（`ollama list`）。
+
+**Q: 文本提取质量差？**
+A: v2.0.2 已升级到 pdfplumber，对于扫描版 PDF 仍建议先进行 OCR 处理。
+
+**Q: 对话历史丢失？**
+A: 历史记录保存在浏览器 localStorage，清除浏览器数据会导致丢失。建议定期导出重要对话。
+
+---
+
+## 更新日志
+
+### v2.0.2 (当前版本)
+- 修复侧边栏菜单按钮位置错误
+- 改进 PDF 缩放功能（使用 CSS zoom 替代 transform）
+- 实现完整的对话历史管理（加载、切换、删除）
+- 升级到 pdfplumber 进行更高质量的文本提取
+- 新增表格自动识别和格式化
+- 优化新对话按钮逻辑
+
+### v2.0.1
+- 修复 PDF 上传后无法预览的问题
+- 解决 PDF.js worker 版本不匹配
+- 移除重复的工具栏
+- 优化启动脚本，添加自动更新和浏览器跳转
+
+### v2.0.0
+- 全新蓝白治愈系 UI 设计
+- 升级到 Vite 6.0 + React 18.3
+- 支持深色模式
+- 集成多个 AI 提供商
+- 添加截图和视觉分析功能
+
+---
+
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+如需贡献代码：
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 提交 Pull Request
+
+---
+
+## 许可证
+
+本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+
+---
+
+## 联系方式
+
+- GitHub Issues: https://github.com/yourusername/ChatPDF/issues
+- 项目主页: https://github.com/yourusername/ChatPDF
 
 <div align="center">
+
+**如果这个项目对你有帮助，请给一个 ⭐ Star 支持一下！**
+
 Made with ❤️ by ChatPDF Team
+
 </div>
