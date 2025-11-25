@@ -36,6 +36,16 @@ show_error() {
     echo -e "\r${RED}  ✗${NC} $1"
 }
 
+# ==================== 自动更新 ====================
+show_progress "检查代码更新..."
+
+git pull origin main > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    show_success "代码已更新到最新版本"
+else
+    show_success "已是最新版本 (或更新跳过)"
+fi
+
 # ==================== 环境检查 ====================
 show_progress "检查运行环境..."
 
