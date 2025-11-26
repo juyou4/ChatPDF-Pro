@@ -154,18 +154,24 @@ const StreamingMarkdown = ({
       {/* 使用 Framer Motion 对新增文本做逐字符模糊显现 */}
       {animatedChars.length > 0 && (
         <motion.span
+          key={activeChunk.id}
           className="typing-buffer inline-flex flex-wrap"
           variants={containerVariants}
           initial="hidden"
           animate="visible"
-        >
+          >
           {animatedChars.map((ch, idx) => (
             <motion.span
               key={`${activeChunk.id}-${idx}`}
               variants={childVariants}
-              style={{ marginRight: ch === ' ' ? '4px' : '0px', whiteSpace: 'pre' }}
+              style={{
+                marginRight: ch === ' ' ? '4px' : '0px',
+                whiteSpace: 'pre',
+                display: 'inline-block',
+                willChange: 'filter, transform, opacity'
+              }}
             >
-              {ch}
+              {ch === ' ' ? '\u00A0' : ch}
             </motion.span>
           ))}
         </motion.span>
