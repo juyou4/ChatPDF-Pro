@@ -8,11 +8,22 @@ import 'highlight.js/styles/github.css';
 
 /**
  * StreamingMarkdown - 支持实时Markdown渲染和Blur Reveal效果的组件
+import React, { useRef, useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import rehypeHighlight from 'rehype-highlight';
+import 'katex/dist/katex.min.css';
+import 'highlight.js/styles/github.css';
+
+/**
+ * StreamingMarkdown - 支持实时Markdown渲染和Blur Reveal效果的组件
  *
  * 策略：
- * - 将内容分为"稳定部分"和"新生成部分"
- * - 只有新生成的部分应用模糊动画
- * - 动画结束后，新部分合并入稳定部分
+ * - 使用队列机制管理新生成的文本块
+ * - 每个文本块独立保留在队列中直到动画结束（300ms）
+ * - 动画结束后，文本块从队列移除，自然归入稳定内容
+ * - 遇到Markdown结构符号或换行时，立即清空队列（Flush），避免格式错乱
  */
 const StreamingMarkdown = ({
   content,
@@ -34,40 +45,58 @@ const StreamingMarkdown = ({
     );
   }
 
-  // 记录上一次的内容长度，用于区分新旧内容
-  const prevLengthRef = useRef(0);
-  const [stableContent, setStableContent] = useState('');
-  const [newContent, setNewContent] = useState('');
+  // 队列状态：存储当前正在动画中的文本块
+  // Item format: { id: number, text: string }
+  const [queue, setQueue] = useState([]);
+
+  // 记录已处理的内容长度，用于计算增量
+  const processedRef = useRef(0);
 
   useEffect(() => {
-    if (content.length > prevLengthRef.current) {
-      // 有新内容增加
-      const newPart = content.slice(prevLengthRef.current);
+    const fullContent = content || '';
 
-      // 更新新内容（这部分会有模糊效果）
-      setNewContent(newPart);
+    // 处理内容重置或回退的情况
+    if (fullContent.length < processedRef.current) {
+      processedRef.current = fullContent.length;
+      setQueue([]);
+      return;
+    }
 
-      // 更新稳定内容（之前的所有内容）
-      setStableContent(content.slice(0, prevLengthRef.current));
+    // 如果没有新内容，直接返回
+    if (fullContent.length === processedRef.current) return;
 
-      // 更新长度记录
-      prevLengthRef.current = content.length;
+    // 获取新增文本
+    const newText = fullContent.slice(processedRef.current);
+    processedRef.current = fullContent.length;
 
-      // 设置一个定时器，将新内容合并到稳定内容中（视觉上已经清晰了）
-      // 这个时间应该与CSS动画时间匹配
-      const timer = setTimeout(() => {
-        setStableContent(content);
-        setNewContent('');
-      }, 300); // 300ms 足够覆盖动画时间
+    // 检查是否包含可能破坏Markdown结构的字符
+    // 包括：换行、加粗、斜体、代码块、列表、引用、标题等标记
+    const isStructural = /[\n\*\_\[\]\(\)\#\`\>\-\+\!]/.test(newText);
 
-      return () => clearTimeout(timer);
-    } else if (content.length < prevLengthRef.current) {
-      // 内容减少（可能是重置），重置状态
-      prevLengthRef.current = content.length;
-      setStableContent(content);
-      setNewContent('');
+    if (isStructural) {
+      // 如果包含结构性字符，立即清空队列（Flush）
+      // 这样所有内容（包括队列中的和新增的）都会立即变为稳定内容被Markdown渲染
+      setQueue([]);
+    } else {
+      // 如果是普通文本，加入队列进行动画
+      const id = Date.now() + Math.random();
+      const item = { id, text: newText };
+
+      setQueue(prev => [...prev, item]);
+
+      // 设置定时器，动画结束后移除该项
+      setTimeout(() => {
+        setQueue(prev => prev.filter(i => i.id !== id));
+      }, 300); // 必须与CSS动画时长匹配
     }
   }, [content]);
+
+  // 计算稳定内容：总内容减去队列中的内容
+  // 注意：这里假设队列中的内容总是位于总内容的末尾。
+  // 由于我们是按顺序添加和处理的，且Flush会清空队列，这个假设通常成立。
+  const queueTextLength = queue.reduce((acc, item) => acc + item.text.length, 0);
+  const stableContentLength = Math.max(0, (content || '').length - queueTextLength);
+  const stableContent = (content || '').slice(0, stableContentLength);
 
   // 根据强度获取动画类名
   const getBlurClass = () => {
@@ -80,172 +109,43 @@ const StreamingMarkdown = ({
   };
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert relative">
-      {/* 
-        这里有个难点：Markdown渲染是整体的，如果简单拼接字符串分别渲染，
-        可能会破坏Markdown语法（比如一个加粗词被切分在两部分）。
-        
-        为了解决这个问题，我们采用一种视觉欺骗的方法：
-        1. 渲染完整的Markdown（作为底层）
-        2. 渲染一个覆盖层，只包含新增加的字符，并应用模糊动画
-        
-        或者更简单的方法（当前采用）：
-        只对追加的纯文本字符应用模糊。如果Markdown结构复杂，
-        这种方法可能在某些边界情况下表现不完美，但对流式输出通常足够好。
-      */}
-
-      {/* 方案A：直接渲染完整内容，通过CSS Mask或类似技术（太复杂） */}
-      {/* 方案B：渲染完整内容，但给最后一部分应用动画类（需要DOM操作，React中不推荐） */}
-
-      {/* 方案C：简单渲染完整内容，但使用一个特殊的Key强制React重新渲染最后一部分？不，这会导致闪烁 */}
-
-      {/* 
-         修正方案：
-         由于Markdown渲染的特殊性，我们无法轻易将Markdown文本拆分为"稳定"和"新"两部分分别渲染。
-         例如 `**bold**` 如果拆分为 `**bo` 和 `ld**`，两边都不会正确渲染。
-         
-         因此，对于Markdown流式输出，最佳的Blur Reveal实现方式其实是：
-         渲染整个Markdown，但使用CSS动画让*新出现的DOM节点*产生模糊效果。
-         但这需要深入到ReactMarkdown的渲染树中。
-         
-         退而求其次的实用方案：
-         渲染整个Markdown，但应用一个全局的"打字机光标"或"末尾模糊"效果。
-         
-         或者，我们可以回到用户提到的问题：整行都模糊。
-         这是因为我们将模糊类加到了容器上。
-         
-         让我们尝试一个基于CSS的解决方案：
-         只对最后一个文本节点应用动画？
-      */}
+    <div className="prose prose-sm max-w-none dark:prose-invert">
+      {/* 稳定部分：使用Markdown渲染 */}
+      {/* 使用 span 包裹以保持行内布局，但这取决于 Markdown 渲染结果 */}
+      {/* 如果 stableContent 包含块级元素，ReactMarkdown 会生成 div/p，这可能会导致换行 */}
+      {/* 这是一个权衡：为了 Markdown 正确性，我们允许块级元素换行。*/}
+      {/* 对于行内追加的文本，ReactMarkdown 通常会渲染在最后一个 p 标签内... 不，它会闭合 p 标签。*/}
+      {/* 这是一个已知限制：Markdown流式渲染很难完美处理行内追加动画。*/}
+      {/* 但由于我们 Flush 了所有结构性字符（包括换行），队列中通常只有纯文本。*/}
+      {/* 纯文本追加到 Markdown 末尾，通常应该紧跟在最后。*/}
+      {/* 为了尽量减少视觉跳动，我们只渲染 Markdown。*/}
 
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
         components={{
-          // 自定义文本渲染，尝试捕获最后一部分文本
-          // 这在ReactMarkdown中比较难做
-
-          // 替代方案：使用一个覆盖层显示新字符的模糊动画，
-          // 而底层Markdown保持正常渲染。
-          // 只要新字符是纯文本，这就能工作。
+          // 尝试让段落以 inline 方式渲染，以便队列文本能接在后面？
+          // 这会破坏多段落布局。
+          // 所以我们保持默认渲染。
+          // 队列文本只能作为"独立块"跟在后面，或者绝对定位？
+          // 绝对定位很难对齐。
+          // inline-block 跟在后面是最佳选择，前提是前一个元素是行内元素。
         }}
       >
-        {content}
+        {stableContent}
       </ReactMarkdown>
 
-      {/* 
-        覆盖层：只显示新增加的文本片段，应用模糊动画。
-        为了定位，我们将其放在流文档的末尾？不，这很难对齐。
-        
-        让我们尝试最简单的有效方案：
-        不拆分Markdown，而是使用一个特殊的CSS动画，
-        它只影响"最新出现"的元素。
-        
-        但在React中，re-render会重建DOM。
-        
-        让我们回退到之前的方案，但做一点改进：
-        不要让整个容器模糊。
-        
-        既然用户抱怨"整行文本都是模糊的"，说明之前的实现是：
-        useEffect检测到变化 -> 设置 isPulsing=true -> 容器添加 .blur-pulse -> 整个容器模糊。
-        
-        我们需要的是：
-        新内容出现 -> 只有新内容模糊 -> 变清晰。
-        
-        在Markdown流式渲染中，要完美做到这一点非常困难。
-        
-        折衷方案：
-        使用一个<span>包裹新内容，但这会破坏Markdown语法。
-        
-        让我们尝试一种"视觉补丁"：
-        在Markdown内容末尾追加一个带有模糊效果的<span>，显示新内容，
-        但这会导致内容重复（Markdown渲染了一次，我们又渲染了一次）。
-        
-        最终方案：
-        我们必须接受Markdown渲染的限制。
-        为了实现Blur Reveal，我们可以只对"纯文本"模式启用该效果，
-        或者接受在Markdown语法解析期间（如代码块未闭合时）效果可能不完美。
-        
-        但为了修复"整行模糊"的问题，我们可以：
-        只模糊最后N个字符？
-        
-        让我们尝试使用 `span` 包装新内容的方法，但只在它不破坏Markdown结构时（例如它是纯文本追加）。
-        检测新内容是否包含特殊Markdown字符。
-      */}
-
-      {newContent && (
-        <span className={`inline-block ${getBlurClass()}`}>
-          {/* 这是一个视觉占位，实际上ReactMarkdown已经渲染了这部分内容。
-              这会导致重复显示。
-              
-              让我们换个思路：
-              之前的代码是给容器加类。
-              现在的代码：
-              我们只渲染ReactMarkdown，但在CSS中定义一个动画，
-              让所有*新插入*的元素执行这个动画？
-              ReactMarkdown在更新时，是更新现有文本节点还是替换节点？
-              通常是更新文本节点。
-          */}
-        </span>
-      )}
-
-      {/* 
-        重新思考：
-        如果我们将 content 分为 stable + new，
-        stable 用 ReactMarkdown 渲染，
-        new 用 普通 span 渲染（带模糊），
-        
-        当 new 变为 stable 时，它进入 ReactMarkdown。
-        
-        风险：如果 new 包含 Markdown 标记（如 `**` 的前半部分），
-        它在 span 中会显示为 `**`，
-        进入 ReactMarkdown 后变成粗体。
-        这会造成视觉跳变。
-        
-        但对于大多数普通文本（打字机效果），这是可以接受的。
-        我们可以检测 newContent 是否包含关键 Markdown 符号，
-        如果包含，则立即归入 stable，不显示模糊效果。
-      */}
-    </div>
-  );
-
-  // 实际实现上述逻辑
-  const hasMarkdownSymbols = /[*_`[\]()#]/.test(newContent);
-
-  if (hasMarkdownSymbols) {
-    // 如果包含Markdown符号，直接渲染全部，不搞特效，避免破坏格式
-    return (
-      <div className="prose prose-sm max-w-none dark:prose-invert">
-        <ReactMarkdown
-          remarkPlugins={[remarkMath]}
-          rehypePlugins={[rehypeKatex, rehypeHighlight]}
-        >
-          {content}
-        </ReactMarkdown>
-      </div>
-    );
-  }
-
-  return (
-    <div className="prose prose-sm max-w-none dark:prose-invert">
-      {/* 稳定部分：使用Markdown渲染 */}
-      <span className="markdown-body">
-        <ReactMarkdown
-          remarkPlugins={[remarkMath]}
-          rehypePlugins={[rehypeKatex, rehypeHighlight]}
-          components={{
-            p: ({ node, ...props }) => <span {...props} />, // 强制内联渲染以允许接续
-            div: ({ node, ...props }) => <span {...props} />
-          }}
-        >
-          {stableContent}
-        </ReactMarkdown>
-      </span>
-
-      {/* 新增部分：使用带模糊动画的Span渲染 */}
-      {newContent && (
-        <span className={`inline-block ${getBlurClass()}`}>
-          {newContent}
+      {/* 队列部分：渲染正在动画的文本块 */}
+      {/* 使用 inline-block 让它们尽可能紧跟在 Markdown 内容后面 */}
+      {/* 注意：如果 Markdown 以块级元素结尾（如 </p>），这些 span 会换行显示。*/}
+      {/* 这是目前架构下的妥协。要解决这个问题需要深入 ReactMarkdown 的渲染树。*/}
+      {queue.length > 0 && (
+        <span className="typing-buffer">
+          {queue.map(item => (
+            <span key={item.id} className={`inline-block ${getBlurClass()}`}>
+              {item.text}
+            </span>
+          ))}
         </span>
       )}
     </div>
