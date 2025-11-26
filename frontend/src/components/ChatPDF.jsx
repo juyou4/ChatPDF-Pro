@@ -133,10 +133,40 @@ const ChatPDF = () => {
   const fetchAvailableEmbeddingModels = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/embedding_models`);
+      if (!response.ok) throw new Error('Failed to fetch');
       const data = await response.json();
       setAvailableEmbeddingModels(data);
     } catch (error) {
       console.error('Failed to fetch embedding models:', error);
+      // Fallback to minimal default list if API fails
+      setAvailableEmbeddingModels({
+        "local-minilm": {
+          "name": "Local: MiniLM-L6 (Default)",
+          "provider": "local",
+          "dimension": 384,
+          "description": "Fast, general purpose"
+        },
+        "local-multilingual": {
+          "name": "Local: Multilingual",
+          "provider": "local",
+          "dimension": 384,
+          "description": "Better for Chinese/multilingual"
+        },
+        "text-embedding-3-small": {
+          "name": "OpenAI: text-embedding-3-small",
+          "provider": "openai",
+          "dimension": 1536,
+          "price": "$0.02/M tokens",
+          "description": "Best value"
+        },
+        "text-embedding-3-large": {
+          "name": "OpenAI: text-embedding-3-large",
+          "provider": "openai",
+          "dimension": 3072,
+          "price": "$0.13/M tokens",
+          "description": "Best overall quality"
+        }
+      });
     }
   };
 
