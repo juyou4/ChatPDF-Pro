@@ -97,6 +97,24 @@ const ChatPDF = () => {
     localStorage.setItem('streamSpeed', streamSpeed);
   }, [apiKey, apiProvider, model, enableVectorSearch, enableScreenshot, streamSpeed]);
 
+  // Validate model when availableModels loads or provider changes
+  useEffect(() => {
+    if (Object.keys(availableModels).length === 0) return; // Wait for models to load
+
+    const providerModels = availableModels[apiProvider]?.models;
+    if (!providerModels) return;
+
+    // Check if current model is valid for current provider
+    if (!providerModels[model]) {
+      // Model is invalid, select first available model for this provider
+      const firstModel = Object.keys(providerModels)[0];
+      if (firstModel) {
+        console.log(`Model ${model} invalid for provider ${apiProvider}, switching to ${firstModel}`);
+        setModel(firstModel);
+      }
+    }
+  }, [availableModels, apiProvider]);
+
   // API Functions
   const fetchAvailableModels = async () => {
     try {

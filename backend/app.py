@@ -39,6 +39,8 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 # Persistence configuration
 DATA_DIR = "data"
 DOCS_DIR = os.path.join(DATA_DIR, "docs")
+# Ensure parent directory exists first
+os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 documents_store = {}
