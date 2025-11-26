@@ -8,7 +8,7 @@ cls
 echo.
 echo   ╔═══════════════════════════════════════╗
 echo   ║                                       ║
-echo   ║     ChatPDF Pro v2.0.2               ║
+echo   ║     ChatPDF Pro v2.0.2                ║
 echo   ║     智能文档助手                      ║
 echo   ║                                       ║
 echo   ╚═══════════════════════════════════════╝

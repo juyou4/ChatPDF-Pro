@@ -18,6 +18,7 @@ from datetime import datetime
 import httpx
 import json
 import base64
+import glob
 
 app = FastAPI(title="ChatPDF Pro with Vision API")
 
@@ -35,7 +36,41 @@ os.makedirs("uploads", exist_ok=True)
 # Mount static files for serving PDFs
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+# Persistence configuration
+DATA_DIR = "data"
+DOCS_DIR = os.path.join(DATA_DIR, "docs")
+os.makedirs(DOCS_DIR, exist_ok=True)
+
 documents_store = {}
+
+def save_document(doc_id: str, data: dict):
+    """Save document data to disk"""
+    try:
+        file_path = os.path.join(DOCS_DIR, f"{doc_id}.json")
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"Saved document {doc_id} to {file_path}")
+    except Exception as e:
+        print(f"Error saving document {doc_id}: {e}")
+
+def load_documents():
+    """Load all documents from disk"""
+    print("Loading documents from disk...")
+    count = 0
+    for file_path in glob.glob(os.path.join(DOCS_DIR, "*.json")):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                doc_id = os.path.splitext(os.path.basename(file_path))[0]
+                documents_store[doc_id] = data
+                count += 1
+        except Exception as e:
+            print(f"Error loading document from {file_path}: {e}")
+    print(f"Loaded {count} documents.")
+
+@app.on_event("startup")
+async def startup_event():
+    load_documents()
 
 class ChatRequest(BaseModel):
     doc_id: str
@@ -823,6 +858,9 @@ async def upload_pdf(file: UploadFile = File(...)):
             "data": extracted_data,
             "pdf_url": pdf_url
         }
+
+        # Persist to disk
+        save_document(doc_id, documents_store[doc_id])
 
         return {
             "message": "PDF上传成功",
