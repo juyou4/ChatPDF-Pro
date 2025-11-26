@@ -1,14 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu } from 'lucide-react';
 import html2canvas from 'html2canvas';
-import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'framer-motion';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import rehypeHighlight from 'rehype-highlight';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
+import StreamingMarkdown from './StreamingMarkdown';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -55,6 +52,7 @@ const ChatPDF = () => {
   const [streamingMessageId, setStreamingMessageId] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
   const [enableBlurReveal, setEnableBlurReveal] = useState(localStorage.getItem('enableBlurReveal') !== 'false');
+  const [blurIntensity, setBlurIntensity] = useState(localStorage.getItem('blurIntensity') || 'medium'); // strong, medium, light
   const [copiedMessageId, setCopiedMessageId] = useState(null);
 
   // Refs
@@ -106,7 +104,8 @@ const ChatPDF = () => {
     localStorage.setItem('enableScreenshot', enableScreenshot);
     localStorage.setItem('streamSpeed', streamSpeed);
     localStorage.setItem('enableBlurReveal', enableBlurReveal);
-  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed, enableBlurReveal]);
+    localStorage.setItem('blurIntensity', blurIntensity);
+  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed, enableBlurReveal, blurIntensity]);
 
   // Validate model when availableModels loads or provider changes
   useEffect(() => {
@@ -896,22 +895,12 @@ const ChatPDF = () => {
                         </div>
                       </div>
                     )}
-                    <div
-                      className={`prose prose-sm max-w-none dark:prose-invert ${
-                        enableBlurReveal && msg.isStreaming ? 'blur-reveal' : ''
-                      }`}
-                      style={enableBlurReveal && msg.isStreaming ? {
-                        filter: `blur(${Math.max(0, 8 - (msg.content.length / 50))}px)`,
-                        transition: 'filter 0.3s ease-out'
-                      } : {}}
-                    >
-                      <ReactMarkdown
-                        remarkPlugins={[remarkMath]}
-                        rehypePlugins={[rehypeKatex, rehypeHighlight]}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
+                    <StreamingMarkdown
+                      content={msg.content}
+                      isStreaming={msg.isStreaming || false}
+                      enableBlurReveal={enableBlurReveal}
+                      blurIntensity={blurIntensity}
+                    />
                     {msg.model && <div className="text-xs text-gray-400 mt-2">Model: {msg.model}</div>}
                   </div>
 
@@ -1227,7 +1216,23 @@ const ChatPDF = () => {
                     <span className="font-medium">Blur Reveal 效果</span>
                     <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-blue-600 w-5 h-5" />
                   </label>
-                  <p className="text-xs text-gray-500 ml-2">流式输出时显示模糊到清晰的渐变效果</p>
+                  <p className="text-xs text-gray-500 ml-2 mb-2">流式输出时每个新字符从模糊到清晰的渐变效果（逐字符效果）</p>
+
+                  {enableBlurReveal && (
+                    <div className="ml-2 mt-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">模糊效果强度</label>
+                      <select
+                        value={blurIntensity}
+                        onChange={(e) => setBlurIntensity(e.target.value)}
+                        className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="light">轻度 ✨ (3px blur, 0.2s)</option>
+                        <option value="medium">中度 💫 (5px blur, 0.25s)</option>
+                        <option value="strong">强烈 🌟 (8px blur, 0.3s)</option>
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* 存储位置信息 */}
