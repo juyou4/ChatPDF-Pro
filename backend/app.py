@@ -18,6 +18,12 @@ from datetime import datetime
 import httpx
 import json
 import base64
+import glob
+import numpy as np
+import faiss
+import pickle
+from sentence_transformers import SentenceTransformer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 app = FastAPI(title="ChatPDF Pro with Vision API")
 
@@ -35,7 +41,258 @@ os.makedirs("uploads", exist_ok=True)
 # Mount static files for serving PDFs
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+# Persistence configuration
+DATA_DIR = "data"
+DOCS_DIR = os.path.join(DATA_DIR, "docs")
+VECTOR_STORE_DIR = os.path.join(DATA_DIR, "vector_stores")
+# Ensure parent directory exists first
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
+
 documents_store = {}
+
+# Embedding Models Configuration
+EMBEDDING_MODELS = {
+    "local-minilm": {
+        "name": "Local: MiniLM-L6 (Default)",
+        "provider": "local",
+        "model_name": "all-MiniLM-L6-v2",
+        "dimension": 384,
+        "max_tokens": 256,
+        "price": "Free (Local)",
+        "description": "Fast, general purpose"
+    },
+    "local-multilingual": {
+        "name": "Local: Multilingual",
+        "provider": "local",
+        "model_name": "paraphrase-multilingual-MiniLM-L12-v2",
+        "dimension": 384,
+        "max_tokens": 128,
+        "price": "Free (Local)",
+        "description": "Better for Chinese/multilingual"
+    },
+    "text-embedding-3-large": {
+        "name": "OpenAI: text-embedding-3-large",
+        "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "dimension": 3072,
+        "max_tokens": 8191,
+        "price": "$0.13/M tokens",
+        "description": "Best overall quality"
+    },
+    "text-embedding-3-small": {
+        "name": "OpenAI: text-embedding-3-small",
+        "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "dimension": 1536,
+        "max_tokens": 8191,
+        "price": "$0.02/M tokens",
+        "description": "Best value"
+    },
+    "text-embedding-v3": {
+        "name": "Alibaba: text-embedding-v3",
+        "provider": "openai",
+        "base_url": "https://dashscope.aliyuncs.com/api/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.007/M tokens",
+        "description": "Chinese optimized, cheapest"
+    },
+    "moonshot-embedding-v1": {
+        "name": "Moonshot: moonshot-embedding-v1",
+        "provider": "openai",
+        "base_url": "https://api.moonshot.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.011/M tokens",
+        "description": "Kimi, OpenAI compatible"
+    },
+    "deepseek-embedding-v1": {
+        "name": "DeepSeek: deepseek-embedding-v1",
+        "provider": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.01/M tokens",
+        "description": "Low cost OpenAI compatible"
+    },
+    "glm-embedding-2": {
+        "name": "Zhipu: glm-embedding-2",
+        "provider": "openai",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.014/M tokens",
+        "description": "GLM series"
+    },
+    "minimax-embedding-v2": {
+        "name": "MiniMax: minimax-embedding-v2",
+        "provider": "openai",
+        "base_url": "https://api.minimaxi.chat/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.014/M tokens",
+        "description": "ABAB series"
+    },
+    "BAAI/bge-m3": {
+        "name": "SiliconFlow: BAAI/bge-m3",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "$0.02/M tokens",
+        "description": "Open source, hosted"
+    }
+}
+
+# Lazy-loaded local embedding models cache
+local_embedding_models = {}
+
+def save_document(doc_id: str, data: dict):
+    """Save document data to disk"""
+    try:
+        file_path = os.path.join(DOCS_DIR, f"{doc_id}.json")
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"Saved document {doc_id} to {file_path}")
+    except Exception as e:
+        print(f"Error saving document {doc_id}: {e}")
+
+def load_documents():
+    """Load all documents from disk"""
+    print("Loading documents from disk...")
+    count = 0
+    for file_path in glob.glob(os.path.join(DOCS_DIR, "*.json")):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                doc_id = os.path.splitext(os.path.basename(file_path))[0]
+                documents_store[doc_id] = data
+                count += 1
+        except Exception as e:
+            print(f"Error loading document from {file_path}: {e}")
+    print(f"Loaded {count} documents.")
+
+def get_embedding_function(embedding_model_id: str, api_key: str = None):
+    """Get embedding function for the specified model"""
+    if embedding_model_id not in EMBEDDING_MODELS:
+        raise ValueError(f"Unknown embedding model: {embedding_model_id}")
+    
+    config = EMBEDDING_MODELS[embedding_model_id]
+    provider = config["provider"]
+    
+    if provider == "local":
+        # Use local SentenceTransformer
+        model_name = config["model_name"]
+        if model_name not in local_embedding_models:
+            print(f"Loading local embedding model: {model_name}")
+            local_embedding_models[model_name] = SentenceTransformer(model_name)
+        model = local_embedding_models[model_name]
+        return lambda texts: model.encode(texts)
+    
+    elif provider == "openai":
+        # OpenAI-compatible API (OpenAI, Alibaba, Moonshot, DeepSeek, etc.)
+        if not api_key:
+            raise ValueError(f"API key required for {embedding_model_id}")
+        
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=config["base_url"])
+        
+        def embed_texts(texts):
+            response = client.embeddings.create(
+                model=embedding_model_id,
+                input=texts
+            )
+            return np.array([item.embedding for item in response.data])
+        
+        return embed_texts
+    
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
+
+def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-minilm", api_key: str = None):
+    """Build and save vector index for a document"""
+    try:
+        print(f"Building vector index for {doc_id}...")
+        # 1. Chunk text
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            length_function=len,
+        )
+        chunks = text_splitter.split_text(text)
+        print(f"Split into {len(chunks)} chunks.")
+        
+        if not chunks:
+            return
+
+        # 2. Generate embeddings using selected model
+        embed_fn = get_embedding_function(embedding_model_id, api_key)
+        embeddings = embed_fn(chunks)
+        
+        # 3. Create FAISS index
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(np.array(embeddings).astype('float32'))
+        
+        # 4. Save index and chunks
+        index_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.index")
+        chunks_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.pkl")
+        
+        faiss.write_index(index, index_path)
+        with open(chunks_path, "wb") as f:
+            pickle.dump({"chunks": chunks, "embedding_model": embedding_model_id}, f)
+            
+        print(f"Vector index saved to {index_path}")
+        
+    except Exception as e:
+        print(f"Error building vector index for {doc_id}: {e}")
+
+def get_relevant_context(doc_id: str, query: str, api_key: str = None, top_k: int = 5) -> str:
+    """Retrieve relevant context using vector search"""
+    try:
+        index_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.index")
+        chunks_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.pkl")
+        
+        if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+            print(f"Vector index not found for {doc_id}")
+            return ""
+            
+        # Load index and chunks with metadata
+        index = faiss.read_index(index_path)
+        with open(chunks_path, "rb") as f:
+            data = pickle.load(f)
+            
+        # Handle old format (just chunks) or new format (dict with metadata)
+        if isinstance(data, dict):
+            chunks = data["chunks"]
+            embedding_model_id = data.get("embedding_model", "local-minilm")
+        else:
+            chunks = data
+            embedding_model_id = "local-minilm"  # Default for old indexes
+            
+        # Get embedding function using the same model that was used for indexing
+        embed_fn = get_embedding_function(embedding_model_id, api_key)
+        
+        # Embed query
+        query_vector = embed_fn([query])
+        
+        # Search
+        D, I = index.search(np.array(query_vector).astype('float32'), top_k)
+        
+        # Retrieve chunks
+        relevant_chunks = [chunks[i] for i in I[0] if i < len(chunks)]
+        
+        return "\n\n...\n\n".join(relevant_chunks)
+        
+    except Exception as e:
+        print(f"Error retrieving context for {doc_id}: {e}")
+        return ""
+
+@app.on_event("startup")
+async def startup_event():
+    load_documents()
 
 class ChatRequest(BaseModel):
     doc_id: str
@@ -44,6 +301,7 @@ class ChatRequest(BaseModel):
     model: str
     api_provider: str
     selected_text: Optional[str] = None
+    enable_vector_search: bool = False
 
 class ChatVisionRequest(BaseModel):
     """支持截图的对话请求"""
@@ -63,19 +321,26 @@ class SummaryRequest(BaseModel):
 
 # 支持视觉的模型配置
 VISION_MODELS = {
-    "openai": ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"],
+    "openai": ["gpt-5.1-2025-11-13", "gpt-4.1", "gpt-5-nano", "o4-mini", "gpt-4o", "gpt-4-turbo", "gpt-4o-mini"],
     "anthropic": [
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-1-20250805",
+        "claude-haiku-4-5-20250219",
         "claude-3-opus-20240229", 
         "claude-3-sonnet-20240229", 
-        "claude-3-haiku-20240307",
-        "claude-sonnet-4-5-20250929"
+        "claude-3-haiku-20240307"
     ],
     "gemini": [
-        "gemini-pro-vision", 
-        "gemini-2.5-pro", 
-        "gemini-2.5-flash-preview-09-2025"
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-preview-09-2025",
+        "gemini-2.5-flash-lite-preview-09-2025",
+        "gemini-2.0-flash",
+        "gemini-pro-vision"
     ],
-    "grok": ["grok-4.1", "grok-vision-beta"]
+    "grok": ["grok-4.1", "grok-4.1-fast", "grok-3", "grok-vision-beta"],
+    "doubao": ["doubao-1.5-pro-256k", "doubao-1.5-pro-32k"],
+    "qwen": ["qwen-max-2025-01-25", "qwen3-235b-a22b-instruct-2507", "qwen3-coder-plus-2025-09-23"],
+    "minimax": ["abab6.5-chat", "abab6.5s-chat", "minimax-m2"]
 }
 
 # AI模型配置
@@ -84,6 +349,10 @@ AI_MODELS = {
         "name": "OpenAI GPT",
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "models": {
+            "gpt-5.1-2025-11-13": "GPT-5.1 (视觉/MoE)",
+            "gpt-4.1": "GPT-4.1 (视觉)",
+            "gpt-5-nano": "GPT-5 Nano (视觉)",
+            "o4-mini": "o4-mini (视觉)",
             "gpt-4o": "GPT-4o (视觉)",
             "gpt-4-turbo": "GPT-4 Turbo (视觉)",
             "gpt-4o-mini": "GPT-4o Mini (视觉)",
@@ -95,6 +364,8 @@ AI_MODELS = {
         "endpoint": "https://api.anthropic.com/v1/messages",
         "models": {
             "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (视觉)",
+            "claude-opus-4-1-20250805": "Claude Opus 4.1 (视觉)",
+            "claude-haiku-4-5-20250219": "Claude Haiku 4.5 (视觉)",
             "claude-3-opus-20240229": "Claude 3 Opus (视觉)",
             "claude-3-sonnet-20240229": "Claude 3 Sonnet (视觉)",
             "claude-3-haiku-20240307": "Claude 3 Haiku (视觉)"
@@ -106,6 +377,8 @@ AI_MODELS = {
         "models": {
             "gemini-2.5-pro": "Gemini 2.5 Pro (视觉)",
             "gemini-2.5-flash-preview-09-2025": "Gemini 2.5 Flash (视觉)",
+            "gemini-2.5-flash-lite-preview-09-2025": "Gemini 2.5 Flash-Lite (视觉)",
+            "gemini-2.0-flash": "Gemini 2.0 Flash (视觉)",
             "gemini-pro-vision": "Gemini Pro Vision"
         }
     },
@@ -114,15 +387,63 @@ AI_MODELS = {
         "endpoint": "https://api.x.ai/v1/chat/completions",
         "models": {
             "grok-4.1": "Grok 4.1 (视觉)",
+            "grok-4.1-fast": "Grok 4.1 Fast (视觉)",
+            "grok-3": "Grok 3 (视觉)",
             "grok-vision-beta": "Grok Vision Beta"
+        }
+    },
+    "doubao": {
+        "name": "ByteDance Doubao (豆包)",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "models": {
+            "doubao-1.5-pro-256k": "Doubao 1.5 Pro 256K (视觉)",
+            "doubao-1.5-pro-32k": "Doubao 1.5 Pro 32K (视觉)",
+            "doubao-seed-code": "Doubao Seed Code"
+        }
+    },
+    "qwen": {
+        "name": "Alibaba Qwen (通义千问)",
+        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "models": {
+            "qwen-max-2025-01-25": "Qwen3-Max (视觉)",
+            "qwen3-235b-a22b-instruct-2507": "Qwen3-235B-A22B (视觉)",
+            "qwen3-coder-plus-2025-09-23": "Qwen3-Coder-Plus (视觉)"
+        }
+    },
+    "minimax": {
+        "name": "MiniMax ABAB",
+        "endpoint": "https://api.minimaxi.chat/v1/chat/completions",
+        "models": {
+            "abab6.5-chat": "ABAB 6.5 (视觉)",
+            "abab6.5s-chat": "ABAB 6.5s (视觉)",
+            "minimax-m2": "MiniMax-M2 (视觉)"
+        }
+    },
+    "glm": {
+        "name": "Zhipu GLM (智谱)",
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "models": {
+            "glm-4.6": "GLM-4.6 (MoE)",
+            "glm-4.5": "GLM-4.5",
+            "glm-4.5-air": "GLM-4.5-Air"
         }
     },
     "deepseek": {
         "name": "DeepSeek",
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
         "models": {
-            "deepseek-chat": "DeepSeek Chat",
-            "deepseek-v3.2-exp": "DeepSeek V3.2"
+            "deepseek-v3.2-exp": "DeepSeek V3.2-Exp",
+            "deepseek-reasoner": "DeepSeek-R1 (推理)",
+            "deepseek-chat": "DeepSeek Chat"
+        }
+    },
+    "kimi": {
+        "name": "Moonshot Kimi (月之暗面)",
+        "endpoint": "https://api.moonshot.cn/v1/chat/completions",
+        "models": {
+            "kimi-k2-instruct-0905": "Kimi-K2-Instruct",
+            "kimi-k2-thinking": "Kimi-K2-Thinking",
+            "moonshot-v1": "Moonshot-V1"
         }
     },
     "ollama": {
@@ -421,6 +742,11 @@ async def get_models():
     """获取可用模型列表"""
     return AI_MODELS
 
+@app.get("/embedding_models")
+async def get_embedding_models():
+    """获取可用嵌入模型列表"""
+    return EMBEDDING_MODELS
+
 @app.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     """与PDF文档对话（不带截图）"""
@@ -433,6 +759,13 @@ async def chat_with_pdf(request: ChatRequest):
     context = ""
     if request.selected_text:
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
+    elif request.enable_vector_search:
+        print(f"Using vector search for doc {request.doc_id}")
+        relevant_text = get_relevant_context(request.doc_id, request.question, request.api_key)
+        if relevant_text:
+            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+        else:
+            context = doc["data"]["full_text"][:8000]
     else:
         context = doc["data"]["full_text"][:8000]
     
@@ -477,6 +810,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
     context = ""
     if request.selected_text:
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
+    elif request.enable_vector_search:
+        print(f"Using vector search for doc {request.doc_id}")
+        relevant_text = get_relevant_context(request.doc_id, request.question, request.api_key)
+        if relevant_text:
+            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+        else:
+            context = doc["data"]["full_text"][:8000]
     else:
         context = doc["data"]["full_text"][:8000]
     
@@ -728,7 +1068,11 @@ async def generate_summary(request: SummaryRequest):
 # ==================== 文档上传和管理 ====================
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    embedding_model: str = "local-minilm",
+    embedding_api_key: str = None
+):
     """上传PDF文件"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
@@ -760,6 +1104,12 @@ async def upload_pdf(file: UploadFile = File(...)):
             "data": extracted_data,
             "pdf_url": pdf_url
         }
+
+        # Persist to disk
+        save_document(doc_id, documents_store[doc_id])
+        
+        # Build vector index with selected embedding model
+        build_vector_index(doc_id, extracted_data["full_text"], embedding_model, embedding_api_key)
 
         return {
             "message": "PDF上传成功",

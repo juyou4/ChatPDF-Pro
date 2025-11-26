@@ -46,6 +46,8 @@ const ChatPDF = () => {
   const [apiProvider, setApiProvider] = useState(localStorage.getItem('apiProvider') || 'openai');
   const [model, setModel] = useState(localStorage.getItem('model') || 'gpt-4o');
   const [availableModels, setAvailableModels] = useState({});
+  const [embeddingModel, setEmbeddingModel] = useState(localStorage.getItem('embeddingModel') || 'local-minilm');
+  const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [enableVectorSearch, setEnableVectorSearch] = useState(localStorage.getItem('enableVectorSearch') === 'true');
   const [enableScreenshot, setEnableScreenshot] = useState(localStorage.getItem('enableScreenshot') !== 'false');
   const [streamSpeed, setStreamSpeed] = useState(localStorage.getItem('streamSpeed') || 'normal'); // fast, normal, slow, off
@@ -61,16 +63,20 @@ const ChatPDF = () => {
 
   // Constants
   const VISION_MODELS = {
-    'openai': ['gpt-4o', 'gpt-4-turbo', 'gpt-4o-mini'],
-    'anthropic': ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-sonnet-4-5-20250929'],
-    'gemini': ['gemini-pro-vision', 'gemini-2.5-pro', 'gemini-2.5-flash-preview-09-2025'],
-    'grok': ['grok-4.1', 'grok-vision-beta'],
+    'openai': ['gpt-5.1-2025-11-13', 'gpt-4.1', 'gpt-5-nano', 'o4-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-4o-mini'],
+    'anthropic': ['claude-sonnet-4-5-20250929', 'claude-opus-4-1-20250805', 'claude-haiku-4-5-20250219', 'claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307'],
+    'gemini': ['gemini-2.5-pro', 'gemini-2.5-flash-preview-09-2025', 'gemini-2.5-flash-lite-preview-09-2025', 'gemini-2.0-flash', 'gemini-pro-vision'],
+    'grok': ['grok-4.1', 'grok-4.1-fast', 'grok-3', 'grok-vision-beta'],
+    'doubao': ['doubao-1.5-pro-256k', 'doubao-1.5-pro-32k'],
+    'qwen': ['qwen-max-2025-01-25', 'qwen3-235b-a22b-instruct-2507', 'qwen3-coder-plus-2025-09-23'],
+    'minimax': ['abab6.5-chat', 'abab6.5s-chat', 'minimax-m2'],
     'ollama': ['llava']
   };
 
   // Effects
   useEffect(() => {
     fetchAvailableModels();
+    fetchAvailableEmbeddingModels();
     loadHistory();  // 加载历史记录
   }, []);
 
@@ -89,10 +95,29 @@ const ChatPDF = () => {
     localStorage.setItem('apiKey', apiKey);
     localStorage.setItem('apiProvider', apiProvider);
     localStorage.setItem('model', model);
+    localStorage.setItem('embeddingModel', embeddingModel);
     localStorage.setItem('enableVectorSearch', enableVectorSearch);
     localStorage.setItem('enableScreenshot', enableScreenshot);
     localStorage.setItem('streamSpeed', streamSpeed);
-  }, [apiKey, apiProvider, model, enableVectorSearch, enableScreenshot, streamSpeed]);
+  }, [apiKey, apiProvider, model, embeddingModel, enableVectorSearch, enableScreenshot, streamSpeed]);
+
+  // Validate model when availableModels loads or provider changes
+  useEffect(() => {
+    if (Object.keys(availableModels).length === 0) return; // Wait for models to load
+
+    const providerModels = availableModels[apiProvider]?.models;
+    if (!providerModels) return;
+
+    // Check if current model is valid for current provider
+    if (!providerModels[model]) {
+      // Model is invalid, select first available model for this provider
+      const firstModel = Object.keys(providerModels)[0];
+      if (firstModel) {
+        console.log(`Model ${model} invalid for provider ${apiProvider}, switching to ${firstModel}`);
+        setModel(firstModel);
+      }
+    }
+  }, [availableModels, apiProvider]);
 
   // API Functions
   const fetchAvailableModels = async () => {
@@ -105,6 +130,16 @@ const ChatPDF = () => {
     }
   };
 
+  const fetchAvailableEmbeddingModels = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/embedding_models`);
+      const data = await response.json();
+      setAvailableEmbeddingModels(data);
+    } catch (error) {
+      console.error('Failed to fetch embedding models:', error);
+    }
+  };
+
   const handleFileUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -112,9 +147,14 @@ const ChatPDF = () => {
     setIsUploading(true);
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('embedding_model', embeddingModel);
+    if (apiKey) {
+      formData.append('embedding_api_key', apiKey);
+    }
 
     try {
       console.log('🔵 Uploading file:', file.name);
+      console.log('🔵 Using embedding model:', embeddingModel);
       const response = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData,
@@ -403,7 +443,11 @@ const ChatPDF = () => {
       // 加载文档信息
       const docResponse = await fetch(`${API_BASE_URL}/document/${session.docId}?t=${new Date().getTime()}`);
       if (!docResponse.ok) {
-        alert('文档已不存在');
+        if (docResponse.status === 404) {
+          alert('无法加载文档：文件不存在。\n\n可能原因：\n1. 这是旧版本的历史记录（未开启持久化存储）\n2. 服务器数据已被清理');
+        } else {
+          alert('加载文档失败');
+        }
         return;
       }
 
@@ -768,7 +812,16 @@ const ChatPDF = () => {
                   <label className="block text-sm font-medium text-gray-700 mb-1">API Provider</label>
                   <select
                     value={apiProvider}
-                    onChange={(e) => setApiProvider(e.target.value)}
+                    onChange={(e) => {
+                      const newProvider = e.target.value;
+                      setApiProvider(newProvider);
+                      // Auto-select first model for the new provider
+                      const providerModels = availableModels[newProvider]?.models;
+                      if (providerModels) {
+                        const firstModel = Object.keys(providerModels)[0];
+                        if (firstModel) setModel(firstModel);
+                      }
+                    }}
                     className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   >
                     {Object.keys(availableModels).map(p => (
@@ -799,6 +852,22 @@ const ChatPDF = () => {
                     className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                     placeholder="sk-..."
                   />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Embedding Model</label>
+                  <select
+                    value={embeddingModel}
+                    onChange={(e) => setEmbeddingModel(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                  >
+                    {Object.entries(availableEmbeddingModels).map(([k, v]) => (
+                      <option key={k} value={k}>{v.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {availableEmbeddingModels[embeddingModel]?.description || '选择嵌入模型用于向量搜索'}
+                  </p>
                 </div>
 
                 <div className="pt-4 border-t border-gray-100">
