@@ -294,14 +294,18 @@ const ChatPDF = () => {
         content: `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`
       }]);
 
-      // Add to history
-      setHistory(prev => [{ id: data.doc_id, title: data.filename, date: new Date().toLocaleDateString() }, ...prev]);
+      // Note: History will be auto-saved by the useEffect watching docId/docInfo/messages
 
     } catch (error) {
       console.error('❌ Upload error:', error);
-      alert('上传失败: ' + error.message);
+      const errorMsg = error.message || '未知错误';
+      alert(`上传失败: ${errorMsg}\n\n可能原因：\n1. 后端服务未启动\n2. 网络连接问题\n3. PDF文件格式不支持\n\n请检查浏览器控制台查看详细错误信息`);
     } finally {
       setIsUploading(false);
+      // Reset file input to allow re-uploading the same file
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -539,27 +543,40 @@ const ChatPDF = () => {
 
   const loadSession = async (session) => {
     try {
+      console.log('🔵 Loading session:', session);
+
+      // Show loading state
+      setIsLoading(true);
+
       // 加载文档信息
       const docResponse = await fetch(`${API_BASE_URL}/document/${session.docId}?t=${new Date().getTime()}`);
+      console.log('🔵 Document response status:', docResponse.status);
+
       if (!docResponse.ok) {
         if (docResponse.status === 404) {
-          alert('无法加载文档：文件不存在。\n\n可能原因：\n1. 这是旧版本的历史记录（未开启持久化存储）\n2. 服务器数据已被清理');
+          alert('无法加载文档：文件不存在。\n\n可能原因：\n1. 这是旧版本的历史记录（未开启持久化存储）\n2. 服务器数据已被清理\n3. 后端服务未启动');
         } else {
-          alert('加载文档失败');
+          alert(`加载文档失败 (HTTP ${docResponse.status})\n\n请检查：\n1. 后端服务是否正常运行\n2. 网络连接是否正常`);
         }
+        setIsLoading(false);
         return;
       }
 
       const docData = await docResponse.json();
+      console.log('🟢 Document data loaded:', docData);
 
       // 恢复会话状态
       setDocId(session.docId);
       setDocInfo(docData);
       setMessages(session.messages || []);
       setCurrentPage(1);
+
+      console.log('✅ Session loaded successfully');
     } catch (error) {
-      console.error('Failed to load session:', error);
-      alert('加载会话失败: ' + error.message);
+      console.error('❌ Failed to load session:', error);
+      alert(`加载会话失败: ${error.message}\n\n可能原因：\n1. 后端服务未启动\n2. 网络连接问题\n\n请检查浏览器控制台查看详细错误`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -894,19 +911,23 @@ const ChatPDF = () => {
       {/* Settings Modal */}
       < AnimatePresence >
         {showSettings && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4"
+            onClick={() => setShowSettings(false)}
+          >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-white rounded-3xl shadow-2xl p-8 w-[500px] max-w-[90vw]"
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-3xl shadow-2xl w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col"
             >
-              <div className="flex justify-between items-center mb-6">
+              <div className="flex justify-between items-center p-8 pb-4 flex-shrink-0">
                 <h2 className="text-2xl font-bold text-gray-800">Settings</h2>
-                <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-gray-100 rounded-full"><X className="w-5 h-5" /></button>
+                <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
               </div>
 
-              <div className="space-y-4">
+              <div className="space-y-4 px-8 overflow-y-auto flex-1">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">API Provider</label>
                   <select
@@ -1081,12 +1102,14 @@ const ChatPDF = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => setShowSettings(false)}
-                className="w-full mt-8 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors"
-              >
-                Save Changes
-              </button>
+              <div className="p-8 pt-4 flex-shrink-0 border-t border-gray-100">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="w-full py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors"
+                >
+                  Save Changes
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
