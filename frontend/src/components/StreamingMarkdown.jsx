@@ -20,91 +20,8 @@ const StreamingMarkdown = ({
   enableBlurReveal,
   blurIntensity = 'medium'
 }) => {
-  const shouldAnimate = enableBlurReveal && isStreaming;
-
-  // 当前正在模糊动画中的文本块 { id, text }
-  const [activeChunk, setActiveChunk] = useState(null);
-
-  // 记录已处理的内容长度，用于计算增量
-  const processedRef = useRef(0);
-  const clearTimerRef = useRef(null);
-
-  // 根据强度获取动画类名
-  const getBlurClass = () => {
-    switch (blurIntensity) {
-      case 'strong': return 'animate-blur-reveal-strong';
-      case 'light': return 'animate-blur-reveal-light';
-      case 'medium':
-      default: return 'animate-blur-reveal-medium';
-    }
-  };
-
-  const getAnimationDuration = () => {
-    switch (blurIntensity) {
-      case 'strong': return 300;
-      case 'light': return 200;
-      case 'medium':
-      default: return 250;
-    }
-  };
-
-  useEffect(() => {
-    // 未启用动画或不在流式过程中，重置内部状态
-    if (!shouldAnimate) {
-      if (clearTimerRef.current) {
-        clearTimeout(clearTimerRef.current);
-        clearTimerRef.current = null;
-      }
-      processedRef.current = (content || '').length;
-      setActiveChunk(null);
-      return;
-    }
-
-    const fullContent = content || '';
-
-    // 处理内容重置或回退的情况
-    if (fullContent.length < processedRef.current) {
-      if (clearTimerRef.current) {
-        clearTimeout(clearTimerRef.current);
-        clearTimerRef.current = null;
-      }
-      processedRef.current = fullContent.length;
-      setActiveChunk(null);
-      return;
-    }
-
-    // 如果没有新内容，保持现有动画
-    if (fullContent.length === processedRef.current) return;
-
-    // 获取新增文本
-    const newText = fullContent.slice(processedRef.current);
-    processedRef.current = fullContent.length;
-
-    // 仅针对最新的文本块做动画展示（保留全部字符，包括换行）
-    const id = Date.now() + Math.random();
-    setActiveChunk({ id, text: newText });
-
-    if (clearTimerRef.current) {
-      clearTimeout(clearTimerRef.current);
-      clearTimerRef.current = null;
-    }
-
-    const duration = getAnimationDuration();
-    clearTimerRef.current = setTimeout(() => {
-      setActiveChunk(current => (current && current.id === id ? null : current));
-    }, duration); // 必须与CSS动画时长匹配
-  }, [content, shouldAnimate, blurIntensity]);
-
-  useEffect(() => {
-    return () => {
-      if (clearTimerRef.current) {
-        clearTimeout(clearTimerRef.current);
-      }
-    };
-  }, []);
-
   // 如果不启用特效或不在流式传输中，直接渲染普通Markdown
-  if (!shouldAnimate) {
+  if (!enableBlurReveal || !isStreaming) {
     return (
       <div className="prose prose-sm max-w-none dark:prose-invert">
         <ReactMarkdown
@@ -117,13 +34,69 @@ const StreamingMarkdown = ({
     );
   }
 
-  // 只保留末尾正在动画的文本，其余立即进入稳定内容
-  const activeTextLength = activeChunk?.text?.length || 0;
-  const stableContentLength = Math.max(0, (content || '').length - activeTextLength);
+  // 队列状态：存储当前正在动画中的文本块
+  // Item format: { id: number, text: string }
+  const [queue, setQueue] = useState([]);
+
+  // 记录已处理的内容长度，用于计算增量
+  const processedRef = useRef(0);
+
+  // 根据强度获取动画类名
+  const getBlurClass = () => {
+    switch (blurIntensity) {
+      case 'strong': return 'animate-blur-reveal-strong';
+      case 'light': return 'animate-blur-reveal-light';
+      case 'medium':
+      default: return 'animate-blur-reveal-medium';
+    }
+  };
+
+  useEffect(() => {
+    const fullContent = content || '';
+
+    // 处理内容重置或回退的情况
+    if (fullContent.length < processedRef.current) {
+      processedRef.current = fullContent.length;
+      setQueue([]);
+      return;
+    }
+
+    // 如果没有新内容，直接返回
+    if (fullContent.length === processedRef.current) return;
+
+    // 获取新增文本
+    const newText = fullContent.slice(processedRef.current);
+    processedRef.current = fullContent.length;
+
+    // 检查是否包含可能破坏Markdown结构的字符
+    // 包括：换行、加粗、斜体、代码块、列表、引用、标题等标记
+    const isStructural = /[\n\*\_\[\]\(\)\#\`\>\-\+\!]/.test(newText);
+
+    if (isStructural) {
+      // 如果包含结构性字符，立即清空队列（Flush）
+      // 这样所有内容（包括队列中的和新增的）都会立即变为稳定内容被Markdown渲染
+      setQueue([]);
+    } else {
+      // 如果是普通文本，加入队列进行动画
+      const id = Date.now() + Math.random();
+      const item = { id, text: newText };
+
+      setQueue(prev => [...prev, item]);
+
+      // 设置定时器，动画结束后移除该项
+      setTimeout(() => {
+        setQueue(prev => prev.filter(i => i.id !== id));
+      }, 300); // 必须与CSS动画时长匹配
+    }
+  }, [content]);
+
+  // 计算稳定内容：总内容减去队列中的内容
+  const queueTextLength = queue.reduce((acc, item) => acc + item.text.length, 0);
+  const stableContentLength = Math.max(0, (content || '').length - queueTextLength);
   const stableContent = (content || '').slice(0, stableContentLength);
 
   return (
-    <div className="streaming-active prose prose-sm max-w-none dark:prose-invert">
+    <div className={`streaming-active prose prose-sm max-w-none dark:prose-invert`}>
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
@@ -131,13 +104,14 @@ const StreamingMarkdown = ({
         {stableContent}
       </ReactMarkdown>
 
-      {/* 动画部分：只渲染当前新增的文本块 */}
-      {/* 使用 inline-block 让它尽可能紧跟在 Markdown 内容后面 */}
-      {activeChunk?.text && (
+      {/* 队列部分：渲染正在动画的文本块 */}
+      {queue.length > 0 && (
         <span className="typing-buffer">
-          <span key={activeChunk.id} className={`inline-block ${getBlurClass()}`}>
-            {activeChunk.text}
-          </span>
+          {queue.map(item => (
+            <span key={item.id} className={`inline-block ${getBlurClass()}`}>
+              {item.text}
+            </span>
+          ))}
         </span>
       )}
     </div>

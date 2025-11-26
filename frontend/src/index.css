@@ -114,73 +114,26 @@ body {
 }
 
 .typing-cursor::after {
-  content: '▋';
-  animation: blink 1s infinite;
-  margin-left: 2px;
-  color: #3B82F6;
-}
-
-/* Blur Reveal 动画 - 从模糊到清晰 */
-@keyframes blur-reveal-strong {
-  0% {
-    filter: blur(8px);
-    opacity: 0;
+  .animate-blur-reveal-medium {
+    animation: blur-reveal-medium 0.25s ease-out forwards;
   }
 
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
-}
-
-@keyframes blur-reveal-medium {
-  0% {
-    filter: blur(5px);
-    opacity: 0;
+  .animate-blur-reveal-light {
+    animation: blur-reveal-light 0.2s ease-out forwards;
   }
 
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
-}
-
-@keyframes blur-reveal-light {
-  0% {
-    filter: blur(3px);
-    opacity: 0;
-  }
-
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
-}
-
-.animate-blur-reveal-strong {
-  animation: blur-reveal-strong 0.3s ease-out forwards;
-}
-
-.animate-blur-reveal-medium {
-  animation: blur-reveal-medium 0.25s ease-out forwards;
-}
-
-.animate-blur-reveal-light {
-  animation: blur-reveal-light 0.2s ease-out forwards;
-}
-
-/* 
+  /* 
   流式输出布局修正：
   当有正在动画的文本（Queue）时，强制 Markdown 的最后一个元素（通常是 p）
   显示为 inline，以便 Queue 中的 span 能紧跟其后，而不是换行。
   
   注意：.typing-buffer 是最后一个子元素，所以我们要选倒数第二个子元素。
 */
-.streaming-active>*:nth-last-child(2) {
-  display: inline;
-  margin-bottom: 0;
-}
+  .streaming-active>*:nth-last-child(2) {
+    display: inline;
+    margin-bottom: 0;
+  }
 
-.typing-buffer {
-  display: inline;
-}
+  .typing-buffer {
+    display: inline;
+  }
