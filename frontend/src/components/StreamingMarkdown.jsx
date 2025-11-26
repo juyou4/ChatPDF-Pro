@@ -9,8 +9,8 @@ import rehypeHighlight from 'rehype-highlight';
  *
  * 策略：
  * - 始终实时渲染Markdown（避免显示##等原始符号）
- * - 流式输出时：通过动态添加/移除CSS类触发blur reveal动画
- * - 不重新挂载组件，避免震动
+ * - 流式输出时：使用CSS transition产生微妙的脉冲效果
+ * - 通过节流避免频繁触发，防止闪烁
  *
  * @param {string} content - Markdown内容
  * @param {boolean} isStreaming - 是否正在流式输出
@@ -23,46 +23,54 @@ const StreamingMarkdown = ({
   enableBlurReveal,
   blurIntensity = 'medium'
 }) => {
-  const [showAnimation, setShowAnimation] = useState(false);
+  const [isPulsing, setIsPulsing] = useState(false);
   const previousContentRef = useRef('');
-  const containerRef = useRef(null);
+  const pulseTimeoutRef = useRef(null);
 
-  // 当内容更新时触发动画
+  // 当内容更新时触发微妙的脉冲效果
   useEffect(() => {
     if (isStreaming && enableBlurReveal && content !== previousContentRef.current) {
       previousContentRef.current = content;
 
-      // 移除动画类
-      setShowAnimation(false);
+      // 触发脉冲效果
+      setIsPulsing(true);
 
-      // 在下一帧添加动画类，重新触发动画
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setShowAnimation(true);
-        });
-      });
+      // 清除之前的定时器
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current);
+      }
+
+      // 脉冲效果持续很短时间后自动消失
+      pulseTimeoutRef.current = setTimeout(() => {
+        setIsPulsing(false);
+      }, 100); // 100ms后恢复正常
     } else if (!isStreaming) {
-      // 流式结束，移除动画
-      setShowAnimation(false);
+      // 流式结束，确保移除脉冲效果
+      setIsPulsing(false);
       previousContentRef.current = '';
     }
+
+    return () => {
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current);
+      }
+    };
   }, [content, isStreaming, enableBlurReveal]);
 
   // 根据强度选择CSS类
   const getBlurClass = () => {
-    if (!showAnimation) return '';
+    if (!isPulsing || !isStreaming || !enableBlurReveal) return '';
 
     switch (blurIntensity) {
-      case 'strong': return 'blur-reveal-strong';
-      case 'medium': return 'blur-reveal-medium';
-      case 'light': return 'blur-reveal-light';
-      default: return 'blur-reveal-medium';
+      case 'strong': return 'blur-pulse-strong';
+      case 'medium': return 'blur-pulse-medium';
+      case 'light': return 'blur-pulse-light';
+      default: return 'blur-pulse-medium';
     }
   };
 
   return (
     <div
-      ref={containerRef}
       className={`prose prose-sm max-w-none dark:prose-invert ${getBlurClass()}`}
     >
       <ReactMarkdown

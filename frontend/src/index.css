@@ -120,55 +120,26 @@ body {
   color: #3B82F6;
 }
 
-/* Blur Reveal 容器效果 - 应用于整个内容块 */
-@keyframes blurRevealStrong {
-  0% {
-    filter: blur(8px);
-    opacity: 0.4;
-    transform: translateY(4px);
-  }
-  100% {
-    filter: blur(0px);
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* Blur Reveal 脉冲效果 - 微妙的过渡，不闪烁 */
+.blur-pulse-strong {
+  filter: blur(2px);
+  opacity: 0.85;
+  transition: filter 0.15s ease-out, opacity 0.15s ease-out;
 }
 
-@keyframes blurRevealMedium {
-  0% {
-    filter: blur(5px);
-    opacity: 0.5;
-    transform: translateY(3px);
-  }
-  100% {
-    filter: blur(0px);
-    opacity: 1;
-    transform: translateY(0);
-  }
+.blur-pulse-medium {
+  filter: blur(1.5px);
+  opacity: 0.9;
+  transition: filter 0.12s ease-out, opacity 0.12s ease-out;
 }
 
-@keyframes blurRevealLight {
-  0% {
-    filter: blur(3px);
-    opacity: 0.6;
-    transform: translateY(2px);
-  }
-  100% {
-    filter: blur(0px);
-    opacity: 1;
-    transform: translateY(0);
-  }
+.blur-pulse-light {
+  filter: blur(1px);
+  opacity: 0.95;
+  transition: filter 0.1s ease-out, opacity 0.1s ease-out;
 }
 
-/* Blur Reveal CSS 类 */
-.blur-reveal-strong {
-  animation: blurRevealStrong 0.4s ease-out;
-}
-
-.blur-reveal-medium {
-  animation: blurRevealMedium 0.3s ease-out;
-}
-
-.blur-reveal-light {
-  animation: blurRevealLight 0.25s ease-out;
+/* 确保过渡平滑 */
+.prose {
+  transition: filter 0.15s ease-out, opacity 0.15s ease-out;
 }
