@@ -211,7 +211,8 @@ const ChatPDF = () => {
       model: model,
       api_provider: apiProvider,
       selected_text: selectedText || null,
-      image_base64: screenshot ? screenshot.split(',')[1] : null
+      image_base64: screenshot ? screenshot.split(',')[1] : null,
+      enable_vector_search: enableVectorSearch
     };
 
     // Add placeholder message for streaming effect
