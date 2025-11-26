@@ -742,6 +742,11 @@ async def get_models():
     """获取可用模型列表"""
     return AI_MODELS
 
+@app.get("/embedding_models")
+async def get_embedding_models():
+    """获取可用嵌入模型列表"""
+    return EMBEDDING_MODELS
+
 @app.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     """与PDF文档对话（不带截图）"""
@@ -756,7 +761,7 @@ async def chat_with_pdf(request: ChatRequest):
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
     elif request.enable_vector_search:
         print(f"Using vector search for doc {request.doc_id}")
-        relevant_text = get_relevant_context(request.doc_id, request.question)
+        relevant_text = get_relevant_context(request.doc_id, request.question, request.api_key)
         if relevant_text:
             context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
         else:
@@ -807,7 +812,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
     elif request.enable_vector_search:
         print(f"Using vector search for doc {request.doc_id}")
-        relevant_text = get_relevant_context(request.doc_id, request.question)
+        relevant_text = get_relevant_context(request.doc_id, request.question, request.api_key)
         if relevant_text:
             context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
         else:
@@ -1063,7 +1068,11 @@ async def generate_summary(request: SummaryRequest):
 # ==================== 文档上传和管理 ====================
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    embedding_model: str = "local-minilm",
+    embedding_api_key: str = None
+):
     """上传PDF文件"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
@@ -1099,8 +1108,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Persist to disk
         save_document(doc_id, documents_store[doc_id])
         
-        # Build vector index (in background ideally, but synchronous for now)
-        build_vector_index(doc_id, extracted_data["full_text"])
+        # Build vector index with selected embedding model
+        build_vector_index(doc_id, extracted_data["full_text"], embedding_model, embedding_api_key)
 
         return {
             "message": "PDF上传成功",
