@@ -53,6 +53,7 @@ const ChatPDF = () => {
   const [enableScreenshot, setEnableScreenshot] = useState(localStorage.getItem('enableScreenshot') !== 'false');
   const [streamSpeed, setStreamSpeed] = useState(localStorage.getItem('streamSpeed') || 'normal'); // fast, normal, slow, off
   const [streamingMessageId, setStreamingMessageId] = useState(null);
+  const [storageInfo, setStorageInfo] = useState(null);
 
   // Refs
   const fileInputRef = useRef(null);
@@ -78,6 +79,7 @@ const ChatPDF = () => {
   useEffect(() => {
     fetchAvailableModels();
     fetchAvailableEmbeddingModels();
+    fetchStorageInfo();
     loadHistory();  // 加载历史记录
   }, []);
 
@@ -129,6 +131,17 @@ const ChatPDF = () => {
       setAvailableModels(data);
     } catch (error) {
       console.error('Failed to fetch models:', error);
+    }
+  };
+
+  const fetchStorageInfo = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/storage_info`);
+      if (!response.ok) throw new Error('Failed to fetch storage info');
+      const data = await response.json();
+      setStorageInfo(data);
+    } catch (error) {
+      console.error('Failed to fetch storage info:', error);
     }
   };
 
@@ -683,7 +696,7 @@ const ChatPDF = () => {
             </div>
 
             <div className="p-4 border-t border-white/20">
-              <button onClick={() => setShowSettings(true)} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/50 transition-colors text-sm font-medium">
+              <button onClick={() => { setShowSettings(true); fetchStorageInfo(); }} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/50 transition-colors text-sm font-medium">
                 <Settings className="w-5 h-5" />
                 <span>设置 & API Key</span>
               </button>
@@ -909,6 +922,29 @@ const ChatPDF = () => {
         </div>
       </div >
 
+      {/* Upload Progress Modal */}
+      <AnimatePresence>
+        {isUploading && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="bg-white rounded-3xl shadow-2xl p-8 flex flex-col items-center gap-4"
+            >
+              <div className="relative w-20 h-20">
+                <div className="absolute inset-0 border-4 border-blue-200 rounded-full"></div>
+                <div className="absolute inset-0 border-4 border-blue-600 rounded-full border-t-transparent animate-spin"></div>
+              </div>
+              <div className="text-center">
+                <h3 className="text-lg font-semibold text-gray-800 mb-1">上传中...</h3>
+                <p className="text-sm text-gray-500">正在处理PDF文件，请稍候</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Settings Modal */}
       < AnimatePresence >
         {showSettings && (
@@ -1100,6 +1136,64 @@ const ChatPDF = () => {
                     </select>
                     <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度</p>
                   </div>
+                </div>
+
+                {/* 存储位置信息 */}
+                <div className="pt-4 border-t border-gray-100">
+                  <h3 className="text-sm font-semibold text-gray-800 mb-3">📁 文件存储位置</h3>
+                  {storageInfo ? (
+                    <div className="space-y-2">
+                      <div className="bg-gray-50 p-3 rounded-lg">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-medium text-gray-600">PDF文件</span>
+                          <span className="text-xs text-gray-500">{storageInfo.pdf_count} 个文件</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
+                            {storageInfo.uploads_dir}
+                          </code>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(storageInfo.uploads_dir);
+                              alert('路径已复制到剪贴板！');
+                            }}
+                            className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
+                            title="复制路径"
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-50 p-3 rounded-lg">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-medium text-gray-600">对话历史</span>
+                          <span className="text-xs text-gray-500">{storageInfo.doc_count} 个文档</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
+                            {storageInfo.data_dir}
+                          </code>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(storageInfo.data_dir);
+                              alert('路径已复制到剪贴板！');
+                            }}
+                            className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
+                            title="复制路径"
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="text-xs text-gray-500 mt-2">
+                        💡 点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-gray-500">加载中...</div>
+                  )}
                 </div>
               </div>
 

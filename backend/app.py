@@ -1150,6 +1150,31 @@ async def get_version():
     """检查后端代码版本"""
     return {"version": "2.0.1", "build_time": "2025-11-25 19:30:00", "feature": "native_pdf_url"}
 
+@app.get("/storage_info")
+async def get_storage_info():
+    """获取文件存储路径信息"""
+    import platform
+
+    # 获取绝对路径
+    uploads_path = os.path.abspath("uploads")
+    data_path = os.path.abspath(DATA_DIR)
+    docs_path = os.path.abspath(DOCS_DIR)
+    vector_stores_path = os.path.abspath(VECTOR_STORE_DIR)
+
+    # 统计文件数量
+    pdf_count = len(glob.glob(os.path.join(uploads_path, "*.pdf")))
+    doc_count = len(glob.glob(os.path.join(docs_path, "*.json")))
+
+    return {
+        "uploads_dir": uploads_path,
+        "data_dir": data_path,
+        "docs_dir": docs_path,
+        "vector_stores_dir": vector_stores_path,
+        "pdf_count": pdf_count,
+        "doc_count": doc_count,
+        "platform": platform.system()
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
