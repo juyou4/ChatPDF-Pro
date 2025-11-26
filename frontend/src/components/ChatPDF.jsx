@@ -855,18 +855,82 @@ const ChatPDF = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Embedding Model</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Embedding Model
+                    <span className="ml-2 text-xs font-normal text-gray-500">
+                      (用于文档向量化检索)
+                    </span>
+                  </label>
                   <select
                     value={embeddingModel}
                     onChange={(e) => setEmbeddingModel(e.target.value)}
                     className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   >
-                    {Object.entries(availableEmbeddingModels).map(([k, v]) => (
-                      <option key={k} value={k}>{v.name}</option>
-                    ))}
+                    {Object.keys(availableEmbeddingModels).length > 0 ? (
+                      <>
+                        {/* 本地模型组 */}
+                        <optgroup label="🏠 本地模型 (免费, 无需API Key)">
+                          {Object.entries(availableEmbeddingModels)
+                            .filter(([k, v]) => v.provider === 'local')
+                            .map(([k, v]) => (
+                              <option key={k} value={k}>
+                                {v.name} - {v.description}
+                              </option>
+                            ))}
+                        </optgroup>
+
+                        {/* OpenAI及兼容API模型组 */}
+                        <optgroup label="☁️ 云端API模型 (需要API Key)">
+                          {Object.entries(availableEmbeddingModels)
+                            .filter(([k, v]) => v.provider === 'openai')
+                            .map(([k, v]) => (
+                              <option key={k} value={k}>
+                                {v.name} - {v.price} - {v.description}
+                              </option>
+                            ))}
+                        </optgroup>
+                      </>
+                    ) : (
+                      <option value="">加载中...</option>
+                    )}
                   </select>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {availableEmbeddingModels[embeddingModel]?.description || '选择嵌入模型用于向量搜索'}
+
+                  {/* API Key 提示 */}
+                  {availableEmbeddingModels[embeddingModel]?.provider === 'openai' && (
+                    <div className="mt-2 p-2 bg-blue-50 rounded-lg border border-blue-200">
+                      <p className="text-xs text-blue-700">
+                        💡 <strong>API Key说明：</strong>
+                        {embeddingModel.startsWith('text-embedding-3') && ' 使用上方的OpenAI API Key'}
+                        {embeddingModel.startsWith('text-embedding-v3') && ' 需要阿里云DashScope API Key (通义千问)'}
+                        {embeddingModel.startsWith('moonshot') && ' 需要Moonshot AI API Key (Kimi)'}
+                        {embeddingModel.startsWith('deepseek') && ' 需要DeepSeek API Key'}
+                        {embeddingModel.startsWith('glm') && ' 需要智谱AI API Key (ChatGLM)'}
+                        {embeddingModel.startsWith('minimax') && ' 需要MiniMax API Key'}
+                        {embeddingModel.startsWith('BAAI') && ' 需要SiliconFlow API Key'}
+                        {!embeddingModel.startsWith('text-embedding-3') &&
+                         !embeddingModel.startsWith('text-embedding-v3') &&
+                         !embeddingModel.startsWith('moonshot') &&
+                         !embeddingModel.startsWith('deepseek') &&
+                         !embeddingModel.startsWith('glm') &&
+                         !embeddingModel.startsWith('minimax') &&
+                         !embeddingModel.startsWith('BAAI') &&
+                         ' 请输入对应提供商的API Key'}
+                      </p>
+                    </div>
+                  )}
+
+                  {availableEmbeddingModels[embeddingModel]?.provider === 'local' && (
+                    <div className="mt-2 p-2 bg-green-50 rounded-lg border border-green-200">
+                      <p className="text-xs text-green-700">
+                        ✅ 本地模型，无需API Key，首次使用会自动下载模型文件
+                      </p>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-gray-500 mt-2">
+                    <strong>当前选择：</strong> {availableEmbeddingModels[embeddingModel]?.name || embeddingModel}
+                    {availableEmbeddingModels[embeddingModel]?.dimension &&
+                      ` | 向量维度: ${availableEmbeddingModels[embeddingModel].dimension}`}
                   </p>
                 </div>
 
