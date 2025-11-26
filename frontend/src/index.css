@@ -169,8 +169,14 @@ body {
   animation: blur-reveal-light 0.2s ease-out forwards;
 }
 
-/* Streaming 布局：最后一个元素内联，便于拼接打字队列 */
-.streaming-active > *:last-child {
+/* 
+  流式输出布局修正：
+  当有正在动画的文本（Queue）时，强制 Markdown 的最后一个元素（通常是 p）
+  显示为 inline，以便 Queue 中的 span 能紧跟其后，而不是换行。
+  
+  注意：.typing-buffer 是最后一个子元素，所以我们要选倒数第二个子元素。
+*/
+.streaming-active>*:nth-last-child(2) {
   display: inline;
   margin-bottom: 0;
 }
