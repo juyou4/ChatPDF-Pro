@@ -9,8 +9,8 @@ import rehypeHighlight from 'rehype-highlight';
  *
  * 策略：
  * - 始终实时渲染Markdown（避免显示##等原始符号）
- * - 流式输出时：如果启用blur reveal，对整个容器应用渐入动画
- * - 流式完成后：移除动画效果
+ * - 流式输出时：通过动态添加/移除CSS类触发blur reveal动画
+ * - 不重新挂载组件，避免震动
  *
  * @param {string} content - Markdown内容
  * @param {boolean} isStreaming - 是否正在流式输出
@@ -23,46 +23,47 @@ const StreamingMarkdown = ({
   enableBlurReveal,
   blurIntensity = 'medium'
 }) => {
-  const [contentVersion, setContentVersion] = useState(0);
+  const [showAnimation, setShowAnimation] = useState(false);
   const previousContentRef = useRef('');
+  const containerRef = useRef(null);
 
-  // 当内容更新时触发版本号变化（用于重新触发动画）
+  // 当内容更新时触发动画
   useEffect(() => {
-    if (isStreaming && content !== previousContentRef.current) {
+    if (isStreaming && enableBlurReveal && content !== previousContentRef.current) {
       previousContentRef.current = content;
-      setContentVersion(v => v + 1);
-    }
-  }, [content, isStreaming]);
 
-  // 根据强度选择动画持续时间和模糊程度
-  const getAnimationStyle = () => {
-    if (!isStreaming || !enableBlurReveal) return {};
+      // 移除动画类
+      setShowAnimation(false);
+
+      // 在下一帧添加动画类，重新触发动画
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setShowAnimation(true);
+        });
+      });
+    } else if (!isStreaming) {
+      // 流式结束，移除动画
+      setShowAnimation(false);
+      previousContentRef.current = '';
+    }
+  }, [content, isStreaming, enableBlurReveal]);
+
+  // 根据强度选择CSS类
+  const getBlurClass = () => {
+    if (!showAnimation) return '';
 
     switch (blurIntensity) {
-      case 'strong':
-        return {
-          animation: 'blurRevealContainer 0.3s ease-out',
-        };
-      case 'medium':
-        return {
-          animation: 'blurRevealContainer 0.25s ease-out',
-        };
-      case 'light':
-        return {
-          animation: 'blurRevealContainer 0.2s ease-out',
-        };
-      default:
-        return {
-          animation: 'blurRevealContainer 0.25s ease-out',
-        };
+      case 'strong': return 'blur-reveal-strong';
+      case 'medium': return 'blur-reveal-medium';
+      case 'light': return 'blur-reveal-light';
+      default: return 'blur-reveal-medium';
     }
   };
 
   return (
     <div
-      key={contentVersion}
-      className="prose prose-sm max-w-none dark:prose-invert"
-      style={getAnimationStyle()}
+      ref={containerRef}
+      className={`prose prose-sm max-w-none dark:prose-invert ${getBlurClass()}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
