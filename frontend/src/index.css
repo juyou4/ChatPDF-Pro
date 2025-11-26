@@ -114,122 +114,6 @@ body {
 }
 
 .typing-cursor::after {
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  /* 治愈系蓝白配色 */
-  --color-bg-start: #F6F8FA;
-  --color-bg-end: #E9F4FF;
-  --color-primary: #3B82F6;
-  /* 高饱和亮蓝 */
-  --color-primary-soft: #60A5FA;
-  --color-text-main: #1F2937;
-  --color-text-sub: #6B7280;
-
-  /* 毛玻璃参数 */
-  --glass-blur: 24px;
-  --glass-opacity: 0.7;
-  --glass-border: rgba(255, 255, 255, 0.6);
-
-  /* 阴影参数 */
-  --shadow-air: 0 4px 30px rgba(0, 0, 0, 0.08);
-}
-
-body {
-  margin: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background: linear-gradient(135deg, var(--color-bg-start) 0%, var(--color-bg-end) 100%);
-  min-height: 100vh;
-  color: var(--color-text-main);
-}
-
-/* 自定义滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.1);
-  border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.2);
-}
-
-/* 强毛玻璃效果工具类 */
-.glass-panel {
-  background: rgba(255, 255, 255, var(--glass-opacity));
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-air);
-}
-
-.glass-input {
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.8);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
-}
-
-/* 漂浮动画 */
-@keyframes float {
-  0% {
-    transform: translateY(0px);
-  }
-
-  50% {
-    transform: translateY(-6px);
-  }
-
-  100% {
-    transform: translateY(0px);
-  }
-}
-
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
-
-/* 消息气泡 */
-.message-bubble-user {
-  background: linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%);
-  color: white;
-  box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
-}
-
-.message-bubble-ai {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
-}
-
-/* 打字机光标动画 */
-@keyframes blink {
-
-  0%,
-  50% {
-    opacity: 1;
-  }
-
-  51%,
-  100% {
-    opacity: 0;
-  }
-}
-
-.typing-cursor::after {
   content: '▋';
   animation: blink 1s infinite;
   margin-left: 2px;
@@ -242,6 +126,7 @@ body {
     filter: blur(8px);
     opacity: 0;
   }
+
   100% {
     filter: blur(0);
     opacity: 1;
@@ -253,6 +138,7 @@ body {
     filter: blur(5px);
     opacity: 0;
   }
+
   100% {
     filter: blur(0);
     opacity: 1;
@@ -264,6 +150,7 @@ body {
     filter: blur(3px);
     opacity: 0;
   }
+
   100% {
     filter: blur(0);
     opacity: 1;
