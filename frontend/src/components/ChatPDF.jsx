@@ -47,6 +47,7 @@ const ChatPDF = () => {
   const [model, setModel] = useState(localStorage.getItem('model') || 'gpt-4o');
   const [availableModels, setAvailableModels] = useState({});
   const [embeddingModel, setEmbeddingModel] = useState(localStorage.getItem('embeddingModel') || 'local-minilm');
+  const [embeddingApiKey, setEmbeddingApiKey] = useState(localStorage.getItem('embeddingApiKey') || '');
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [enableVectorSearch, setEnableVectorSearch] = useState(localStorage.getItem('enableVectorSearch') === 'true');
   const [enableScreenshot, setEnableScreenshot] = useState(localStorage.getItem('enableScreenshot') !== 'false');
@@ -96,10 +97,11 @@ const ChatPDF = () => {
     localStorage.setItem('apiProvider', apiProvider);
     localStorage.setItem('model', model);
     localStorage.setItem('embeddingModel', embeddingModel);
+    localStorage.setItem('embeddingApiKey', embeddingApiKey);
     localStorage.setItem('enableVectorSearch', enableVectorSearch);
     localStorage.setItem('enableScreenshot', enableScreenshot);
     localStorage.setItem('streamSpeed', streamSpeed);
-  }, [apiKey, apiProvider, model, embeddingModel, enableVectorSearch, enableScreenshot, streamSpeed]);
+  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed]);
 
   // Validate model when availableModels loads or provider changes
   useEffect(() => {
@@ -138,33 +140,97 @@ const ChatPDF = () => {
       setAvailableEmbeddingModels(data);
     } catch (error) {
       console.error('Failed to fetch embedding models:', error);
-      // Fallback to minimal default list if API fails
+      // Fallback to complete default list if API fails
       setAvailableEmbeddingModels({
         "local-minilm": {
           "name": "Local: MiniLM-L6 (Default)",
           "provider": "local",
+          "model_name": "all-MiniLM-L6-v2",
           "dimension": 384,
+          "max_tokens": 256,
+          "price": "Free (Local)",
           "description": "Fast, general purpose"
         },
         "local-multilingual": {
           "name": "Local: Multilingual",
           "provider": "local",
+          "model_name": "paraphrase-multilingual-MiniLM-L12-v2",
           "dimension": 384,
+          "max_tokens": 128,
+          "price": "Free (Local)",
           "description": "Better for Chinese/multilingual"
-        },
-        "text-embedding-3-small": {
-          "name": "OpenAI: text-embedding-3-small",
-          "provider": "openai",
-          "dimension": 1536,
-          "price": "$0.02/M tokens",
-          "description": "Best value"
         },
         "text-embedding-3-large": {
           "name": "OpenAI: text-embedding-3-large",
           "provider": "openai",
+          "base_url": "https://api.openai.com/v1",
           "dimension": 3072,
+          "max_tokens": 8191,
           "price": "$0.13/M tokens",
           "description": "Best overall quality"
+        },
+        "text-embedding-3-small": {
+          "name": "OpenAI: text-embedding-3-small",
+          "provider": "openai",
+          "base_url": "https://api.openai.com/v1",
+          "dimension": 1536,
+          "max_tokens": 8191,
+          "price": "$0.02/M tokens",
+          "description": "Best value"
+        },
+        "text-embedding-v3": {
+          "name": "Alibaba: text-embedding-v3",
+          "provider": "openai",
+          "base_url": "https://dashscope.aliyuncs.com/api/v1",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.007/M tokens",
+          "description": "Chinese optimized, cheapest"
+        },
+        "moonshot-embedding-v1": {
+          "name": "Moonshot: moonshot-embedding-v1",
+          "provider": "openai",
+          "base_url": "https://api.moonshot.cn/v1",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.011/M tokens",
+          "description": "Kimi, OpenAI compatible"
+        },
+        "deepseek-embedding-v1": {
+          "name": "DeepSeek: deepseek-embedding-v1",
+          "provider": "openai",
+          "base_url": "https://api.deepseek.com/v1",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.01/M tokens",
+          "description": "Low cost OpenAI compatible"
+        },
+        "glm-embedding-2": {
+          "name": "Zhipu: glm-embedding-2",
+          "provider": "openai",
+          "base_url": "https://open.bigmodel.cn/api/paas/v4",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.014/M tokens",
+          "description": "GLM series"
+        },
+        "minimax-embedding-v2": {
+          "name": "MiniMax: minimax-embedding-v2",
+          "provider": "openai",
+          "base_url": "https://api.minimaxi.chat/v1",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.014/M tokens",
+          "description": "ABAB series"
+        },
+        "BAAI/bge-m3": {
+          "name": "SiliconFlow: BAAI/bge-m3",
+          "provider": "openai",
+          "base_url": "https://api.siliconflow.cn/v1",
+          "dimension": 1024,
+          "max_tokens": 8192,
+          "price": "$0.02/M tokens",
+          "description": "Open source, hosted"
         }
       });
     }
@@ -178,8 +244,11 @@ const ChatPDF = () => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('embedding_model', embeddingModel);
-    if (apiKey) {
-      formData.append('embedding_api_key', apiKey);
+
+    // Use embeddingApiKey if set, otherwise fallback to apiKey for convenience
+    const effectiveApiKey = embeddingApiKey || apiKey;
+    if (effectiveApiKey) {
+      formData.append('embedding_api_key', effectiveApiKey);
     }
 
     try {
@@ -884,7 +953,28 @@ const ChatPDF = () => {
                   />
                 </div>
 
-                <div>
+                <div className="pt-4 border-t border-gray-100">
+                  <h3 className="text-sm font-semibold text-gray-800 mb-3">🔍 Embedding 配置</h3>
+
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Embedding API Key
+                      <span className="ml-2 text-xs font-normal text-gray-500">
+                        (可选，默认使用上方聊天API Key)
+                      </span>
+                    </label>
+                    <input
+                      type="password"
+                      value={embeddingApiKey}
+                      onChange={(e) => setEmbeddingApiKey(e.target.value)}
+                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      placeholder="留空则使用上方API Key"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      💡 如需使用不同提供商的embedding（如OpenAI聊天+阿里云embedding），请在此单独配置
+                    </p>
+                  </div>
+
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Embedding Model
                     <span className="ml-2 text-xs font-normal text-gray-500">
