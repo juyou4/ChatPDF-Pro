@@ -406,7 +406,11 @@ const ChatPDF = () => {
       // 加载文档信息
       const docResponse = await fetch(`${API_BASE_URL}/document/${session.docId}?t=${new Date().getTime()}`);
       if (!docResponse.ok) {
-        alert('文档已不存在');
+        if (docResponse.status === 404) {
+          alert('无法加载文档：文件不存在。\n\n可能原因：\n1. 这是旧版本的历史记录（未开启持久化存储）\n2. 服务器数据已被清理');
+        } else {
+          alert('加载文档失败');
+        }
         return;
       }
 
@@ -771,7 +775,16 @@ const ChatPDF = () => {
                   <label className="block text-sm font-medium text-gray-700 mb-1">API Provider</label>
                   <select
                     value={apiProvider}
-                    onChange={(e) => setApiProvider(e.target.value)}
+                    onChange={(e) => {
+                      const newProvider = e.target.value;
+                      setApiProvider(newProvider);
+                      // Auto-select first model for the new provider
+                      const providerModels = availableModels[newProvider]?.models;
+                      if (providerModels) {
+                        const firstModel = Object.keys(providerModels)[0];
+                        if (firstModel) setModel(firstModel);
+                      }
+                    }}
                     className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   >
                     {Object.keys(availableModels).map(p => (
