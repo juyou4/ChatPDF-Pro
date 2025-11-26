@@ -630,15 +630,17 @@ const ChatPDF = () => {
     <div className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}>
 
       {/* Sidebar (History) */}
-      <AnimatePresence mode="wait">
-        {showSidebar && (
-          <motion.div
-            initial={{ x: -300, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: -300, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={`w-72 flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
-          >
+      <motion.div
+        initial={false}
+        animate={{
+          width: showSidebar ? 288 : 0,
+          opacity: showSidebar ? 1 : 0
+        }}
+        transition={{ duration: 0.2, ease: "easeInOut" }}
+        style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
+        className={`flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
+      >
+        <div className="w-72 flex flex-col h-full">
             <div className="p-6 flex items-center justify-between">
               <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
                 <Bot className="w-8 h-8" />
@@ -686,9 +688,8 @@ const ChatPDF = () => {
                 <span>设置 & API Key</span>
               </button>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        </div>
+      </motion.div>
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
