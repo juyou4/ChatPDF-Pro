@@ -61,10 +61,13 @@ const ChatPDF = () => {
 
   // Constants
   const VISION_MODELS = {
-    'openai': ['gpt-4o', 'gpt-4-turbo', 'gpt-4o-mini'],
-    'anthropic': ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-sonnet-4-5-20250929'],
-    'gemini': ['gemini-pro-vision', 'gemini-2.5-pro', 'gemini-2.5-flash-preview-09-2025'],
-    'grok': ['grok-4.1', 'grok-vision-beta'],
+    'openai': ['gpt-5.1-2025-11-13', 'gpt-4.1', 'gpt-5-nano', 'o4-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-4o-mini'],
+    'anthropic': ['claude-sonnet-4-5-20250929', 'claude-opus-4-1-20250805', 'claude-haiku-4-5-20250219', 'claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307'],
+    'gemini': ['gemini-2.5-pro', 'gemini-2.5-flash-preview-09-2025', 'gemini-2.5-flash-lite-preview-09-2025', 'gemini-2.0-flash', 'gemini-pro-vision'],
+    'grok': ['grok-4.1', 'grok-4.1-fast', 'grok-3', 'grok-vision-beta'],
+    'doubao': ['doubao-1.5-pro-256k', 'doubao-1.5-pro-32k'],
+    'qwen': ['qwen-max-2025-01-25', 'qwen3-235b-a22b-instruct-2507', 'qwen3-coder-plus-2025-09-23'],
+    'minimax': ['abab6.5-chat', 'abab6.5s-chat', 'minimax-m2'],
     'ollama': ['llava']
   };
 

@@ -63,19 +63,26 @@ class SummaryRequest(BaseModel):
 
 # 支持视觉的模型配置
 VISION_MODELS = {
-    "openai": ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"],
+    "openai": ["gpt-5.1-2025-11-13", "gpt-4.1", "gpt-5-nano", "o4-mini", "gpt-4o", "gpt-4-turbo", "gpt-4o-mini"],
     "anthropic": [
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-1-20250805",
+        "claude-haiku-4-5-20250219",
         "claude-3-opus-20240229", 
         "claude-3-sonnet-20240229", 
-        "claude-3-haiku-20240307",
-        "claude-sonnet-4-5-20250929"
+        "claude-3-haiku-20240307"
     ],
     "gemini": [
-        "gemini-pro-vision", 
-        "gemini-2.5-pro", 
-        "gemini-2.5-flash-preview-09-2025"
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-preview-09-2025",
+        "gemini-2.5-flash-lite-preview-09-2025",
+        "gemini-2.0-flash",
+        "gemini-pro-vision"
     ],
-    "grok": ["grok-4.1", "grok-vision-beta"]
+    "grok": ["grok-4.1", "grok-4.1-fast", "grok-3", "grok-vision-beta"],
+    "doubao": ["doubao-1.5-pro-256k", "doubao-1.5-pro-32k"],
+    "qwen": ["qwen-max-2025-01-25", "qwen3-235b-a22b-instruct-2507", "qwen3-coder-plus-2025-09-23"],
+    "minimax": ["abab6.5-chat", "abab6.5s-chat", "minimax-m2"]
 }
 
 # AI模型配置
@@ -84,6 +91,10 @@ AI_MODELS = {
         "name": "OpenAI GPT",
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "models": {
+            "gpt-5.1-2025-11-13": "GPT-5.1 (视觉/MoE)",
+            "gpt-4.1": "GPT-4.1 (视觉)",
+            "gpt-5-nano": "GPT-5 Nano (视觉)",
+            "o4-mini": "o4-mini (视觉)",
             "gpt-4o": "GPT-4o (视觉)",
             "gpt-4-turbo": "GPT-4 Turbo (视觉)",
             "gpt-4o-mini": "GPT-4o Mini (视觉)",
@@ -95,6 +106,8 @@ AI_MODELS = {
         "endpoint": "https://api.anthropic.com/v1/messages",
         "models": {
             "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (视觉)",
+            "claude-opus-4-1-20250805": "Claude Opus 4.1 (视觉)",
+            "claude-haiku-4-5-20250219": "Claude Haiku 4.5 (视觉)",
             "claude-3-opus-20240229": "Claude 3 Opus (视觉)",
             "claude-3-sonnet-20240229": "Claude 3 Sonnet (视觉)",
             "claude-3-haiku-20240307": "Claude 3 Haiku (视觉)"
@@ -106,6 +119,8 @@ AI_MODELS = {
         "models": {
             "gemini-2.5-pro": "Gemini 2.5 Pro (视觉)",
             "gemini-2.5-flash-preview-09-2025": "Gemini 2.5 Flash (视觉)",
+            "gemini-2.5-flash-lite-preview-09-2025": "Gemini 2.5 Flash-Lite (视觉)",
+            "gemini-2.0-flash": "Gemini 2.0 Flash (视觉)",
             "gemini-pro-vision": "Gemini Pro Vision"
         }
     },
@@ -114,15 +129,63 @@ AI_MODELS = {
         "endpoint": "https://api.x.ai/v1/chat/completions",
         "models": {
             "grok-4.1": "Grok 4.1 (视觉)",
+            "grok-4.1-fast": "Grok 4.1 Fast (视觉)",
+            "grok-3": "Grok 3 (视觉)",
             "grok-vision-beta": "Grok Vision Beta"
+        }
+    },
+    "doubao": {
+        "name": "ByteDance Doubao (豆包)",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "models": {
+            "doubao-1.5-pro-256k": "Doubao 1.5 Pro 256K (视觉)",
+            "doubao-1.5-pro-32k": "Doubao 1.5 Pro 32K (视觉)",
+            "doubao-seed-code": "Doubao Seed Code"
+        }
+    },
+    "qwen": {
+        "name": "Alibaba Qwen (通义千问)",
+        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "models": {
+            "qwen-max-2025-01-25": "Qwen3-Max (视觉)",
+            "qwen3-235b-a22b-instruct-2507": "Qwen3-235B-A22B (视觉)",
+            "qwen3-coder-plus-2025-09-23": "Qwen3-Coder-Plus (视觉)"
+        }
+    },
+    "minimax": {
+        "name": "MiniMax ABAB",
+        "endpoint": "https://api.minimaxi.chat/v1/chat/completions",
+        "models": {
+            "abab6.5-chat": "ABAB 6.5 (视觉)",
+            "abab6.5s-chat": "ABAB 6.5s (视觉)",
+            "minimax-m2": "MiniMax-M2 (视觉)"
+        }
+    },
+    "glm": {
+        "name": "Zhipu GLM (智谱)",
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "models": {
+            "glm-4.6": "GLM-4.6 (MoE)",
+            "glm-4.5": "GLM-4.5",
+            "glm-4.5-air": "GLM-4.5-Air"
         }
     },
     "deepseek": {
         "name": "DeepSeek",
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
         "models": {
-            "deepseek-chat": "DeepSeek Chat",
-            "deepseek-v3.2-exp": "DeepSeek V3.2"
+            "deepseek-v3.2-exp": "DeepSeek V3.2-Exp",
+            "deepseek-reasoner": "DeepSeek-R1 (推理)",
+            "deepseek-chat": "DeepSeek Chat"
+        }
+    },
+    "kimi": {
+        "name": "Moonshot Kimi (月之暗面)",
+        "endpoint": "https://api.moonshot.cn/v1/chat/completions",
+        "models": {
+            "kimi-k2-instruct-0905": "Kimi-K2-Instruct",
+            "kimi-k2-thinking": "Kimi-K2-Thinking",
+            "moonshot-v1": "Moonshot-V1"
         }
     },
     "ollama": {
