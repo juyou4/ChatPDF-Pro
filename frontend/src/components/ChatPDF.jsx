@@ -54,6 +54,8 @@ const ChatPDF = () => {
   const [streamSpeed, setStreamSpeed] = useState(localStorage.getItem('streamSpeed') || 'normal'); // fast, normal, slow, off
   const [streamingMessageId, setStreamingMessageId] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
+  const [enableBlurReveal, setEnableBlurReveal] = useState(localStorage.getItem('enableBlurReveal') !== 'false');
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
 
   // Refs
   const fileInputRef = useRef(null);
@@ -103,7 +105,8 @@ const ChatPDF = () => {
     localStorage.setItem('enableVectorSearch', enableVectorSearch);
     localStorage.setItem('enableScreenshot', enableScreenshot);
     localStorage.setItem('streamSpeed', streamSpeed);
-  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed]);
+    localStorage.setItem('enableBlurReveal', enableBlurReveal);
+  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed, enableBlurReveal]);
 
   // Validate model when availableModels loads or provider changes
   useEffect(() => {
@@ -438,20 +441,20 @@ const ChatPDF = () => {
           ));
           setStreamingMessageId(null);
         } else {
-          // Client-side streaming effect
-          const words = fullAnswer.split(' ');
+          // Client-side streaming effect - optimized for smoother display
           let currentText = '';
 
           const speedConfig = {
-            fast: { baseDelay: 10, variation: 10 },
-            normal: { baseDelay: 20, variation: 20 },
-            slow: { baseDelay: 40, variation: 30 }
+            fast: { charsPerChunk: 3, baseDelay: 15, variation: 10 },      // ~3 chars every 15-25ms
+            normal: { charsPerChunk: 2, baseDelay: 25, variation: 15 },    // ~2 chars every 25-40ms
+            slow: { charsPerChunk: 1, baseDelay: 50, variation: 20 }       // ~1 char every 50-70ms
           };
 
-          const { baseDelay, variation } = speedConfig[streamSpeed] || speedConfig.normal;
+          const { charsPerChunk, baseDelay, variation } = speedConfig[streamSpeed] || speedConfig.normal;
 
-          for (let i = 0; i < words.length; i++) {
-            currentText += (i > 0 ? ' ' : '') + words[i];
+          // Process in small chunks for smoother effect
+          for (let i = 0; i < fullAnswer.length; i += charsPerChunk) {
+            currentText = fullAnswer.substring(0, i + charsPerChunk);
             const delay = baseDelay + Math.random() * variation;
             await new Promise(resolve => setTimeout(resolve, delay));
 
@@ -462,10 +465,10 @@ const ChatPDF = () => {
             ));
           }
 
-          // Mark streaming complete
+          // Ensure complete text is shown
           setMessages(prev => prev.map(msg =>
             msg.id === tempMsgId
-              ? { ...msg, isStreaming: false }
+              ? { ...msg, content: fullAnswer, isStreaming: false }
               : msg
           ));
           setStreamingMessageId(null);
@@ -481,6 +484,37 @@ const ChatPDF = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Message Action Functions
+  const copyMessage = (content, messageId) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId(null), 2000);
+    }).catch(err => {
+      console.error('Failed to copy:', err);
+    });
+  };
+
+  const regenerateMessage = async (messageIndex) => {
+    if (!docId || !apiKey) {
+      alert('请先配置API Key');
+      return;
+    }
+
+    // Find the last user message before this assistant message
+    const userMessage = messages.slice(0, messageIndex).reverse().find(msg => msg.type === 'user');
+    if (!userMessage) return;
+
+    // Remove all messages after the user message
+    setMessages(prev => prev.slice(0, messageIndex));
+
+    // Resend the user message
+    setInputMessage(userMessage.content);
+    // Trigger send in next tick
+    setTimeout(() => {
+      sendMessage();
+    }, 100);
   };
 
   // Helper Functions
@@ -849,7 +883,7 @@ const ChatPDF = () => {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={idx}
-                  className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                  className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
                 >
                   <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${msg.type === 'user'
                     ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-tr-none'
@@ -862,7 +896,15 @@ const ChatPDF = () => {
                         </div>
                       </div>
                     )}
-                    <div className="prose prose-sm max-w-none dark:prose-invert">
+                    <div
+                      className={`prose prose-sm max-w-none dark:prose-invert ${
+                        enableBlurReveal && msg.isStreaming ? 'blur-reveal' : ''
+                      }`}
+                      style={enableBlurReveal && msg.isStreaming ? {
+                        filter: `blur(${Math.max(0, 8 - (msg.content.length / 50))}px)`,
+                        transition: 'filter 0.3s ease-out'
+                      } : {}}
+                    >
                       <ReactMarkdown
                         remarkPlugins={[remarkMath]}
                         rehypePlugins={[rehypeKatex, rehypeHighlight]}
@@ -872,6 +914,50 @@ const ChatPDF = () => {
                     </div>
                     {msg.model && <div className="text-xs text-gray-400 mt-2">Model: {msg.model}</div>}
                   </div>
+
+                  {/* Action Buttons - Only show for assistant messages that are not streaming */}
+                  {msg.type === 'assistant' && !msg.isStreaming && (
+                    <div className="flex items-center gap-1 mt-1 ml-2">
+                      <button
+                        onClick={() => copyMessage(msg.content, msg.id || idx)}
+                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                        title="复制"
+                      >
+                        {copiedMessageId === (msg.id || idx) ? (
+                          <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => regenerateMessage(idx)}
+                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                        title="重新生成"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </button>
+                      <button
+                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                        title="点赞"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+                        </svg>
+                      </button>
+                      <button
+                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                        title="点踩"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </motion.div>
               ))}
               {isLoading && (
@@ -1129,13 +1215,19 @@ const ChatPDF = () => {
                       onChange={(e) => setStreamSpeed(e.target.value)}
                       className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                     >
-                      <option value="fast">快速 ⚡</option>
-                      <option value="normal">正常 ✨</option>
-                      <option value="slow">慢速 🐢</option>
+                      <option value="fast">快速 ⚡ (3字符/次, ~20ms)</option>
+                      <option value="normal">正常 ✨ (2字符/次, ~30ms)</option>
+                      <option value="slow">慢速 🐢 (1字符/次, ~60ms)</option>
                       <option value="off">关闭流式（直接显示）</option>
                     </select>
-                    <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度</p>
+                    <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度（已优化为按字符流式）</p>
                   </div>
+
+                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg mt-3">
+                    <span className="font-medium">Blur Reveal 效果</span>
+                    <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-blue-600 w-5 h-5" />
+                  </label>
+                  <p className="text-xs text-gray-500 ml-2">流式输出时显示模糊到清晰的渐变效果</p>
                 </div>
 
                 {/* 存储位置信息 */}
