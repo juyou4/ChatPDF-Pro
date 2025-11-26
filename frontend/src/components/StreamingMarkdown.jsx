@@ -80,32 +80,19 @@ const StreamingMarkdown = ({
     const newText = fullContent.slice(processedRef.current);
     processedRef.current = fullContent.length;
 
-    // 检查是否包含可能破坏Markdown结构的字符
-    // 包括：换行、加粗、斜体、代码块、列表、引用、标题等标记
-    const isStructural = /[\n\*\_\[\]\(\)\#\`\>\-\+\!]/.test(newText);
+    // 仅针对最新的文本块做动画展示（保留全部字符，包括换行）
+    const id = Date.now() + Math.random();
+    setActiveChunk({ id, text: newText });
 
-    if (isStructural) {
-      // 如果包含结构性字符，立即清空动画（Flush）
-      if (clearTimerRef.current) {
-        clearTimeout(clearTimerRef.current);
-        clearTimerRef.current = null;
-      }
-      setActiveChunk(null);
-    } else {
-      // 仅针对最新的文本块做动画展示
-      const id = Date.now() + Math.random();
-      setActiveChunk({ id, text: newText });
-
-      if (clearTimerRef.current) {
-        clearTimeout(clearTimerRef.current);
-        clearTimerRef.current = null;
-      }
-
-      const duration = getAnimationDuration();
-      clearTimerRef.current = setTimeout(() => {
-        setActiveChunk(current => (current && current.id === id ? null : current));
-      }, duration); // 必须与CSS动画时长匹配
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
     }
+
+    const duration = getAnimationDuration();
+    clearTimerRef.current = setTimeout(() => {
+      setActiveChunk(current => (current && current.id === id ? null : current));
+    }, duration); // 必须与CSS动画时长匹配
   }, [content, shouldAnimate, blurIntensity]);
 
   useEffect(() => {
