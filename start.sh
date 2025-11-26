@@ -39,11 +39,19 @@ show_error() {
 # ==================== 自动更新 ====================
 show_progress "检查代码更新..."
 
-git pull origin main > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    show_success "代码已更新到最新版本"
+# 获取当前分支名
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# 只在main分支时自动更新，其他分支跳过
+if [ "$CURRENT_BRANCH" = "main" ]; then
+    git pull origin main > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        show_success "代码已更新到最新版本"
+    else
+        show_success "已是最新版本 (或更新跳过)"
+    fi
 else
-    show_success "已是最新版本 (或更新跳过)"
+    show_success "当前在分支 $CURRENT_BRANCH (跳过自动更新)"
 fi
 
 # ==================== 环境检查 ====================
