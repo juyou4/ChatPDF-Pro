@@ -120,65 +120,28 @@ body {
   color: #3B82F6;
 }
 
-/* Blur Reveal 动画 - 从模糊到清晰 */
-@keyframes blur-reveal-strong {
-  0% {
-    filter: blur(8px);
-    opacity: 0;
-  }
+/* Blur Reveal 脉冲效果 - 流式输出时的微妙视觉反馈 */
+/* 在内容更新时触发短暂的脉冲，不干扰阅读 */
 
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
+.blur-pulse-strong {
+  filter: blur(2px);
+  opacity: 0.85;
+  transition: filter 0.1s ease-out, opacity 0.1s ease-out;
 }
 
-@keyframes blur-reveal-medium {
-  0% {
-    filter: blur(5px);
-    opacity: 0;
-  }
-
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
+.blur-pulse-medium {
+  filter: blur(1.5px);
+  opacity: 0.9;
+  transition: filter 0.08s ease-out, opacity 0.08s ease-out;
 }
 
-@keyframes blur-reveal-light {
-  0% {
-    filter: blur(3px);
-    opacity: 0;
-  }
-
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
+.blur-pulse-light {
+  filter: blur(1px);
+  opacity: 0.95;
+  transition: filter 0.06s ease-out, opacity 0.06s ease-out;
 }
 
-.animate-blur-reveal-strong {
-  animation: blur-reveal-strong 0.3s ease-out forwards;
-}
-
-.animate-blur-reveal-medium {
-  animation: blur-reveal-medium 0.25s ease-out forwards;
-}
-
-.animate-blur-reveal-light {
-  animation: blur-reveal-light 0.2s ease-out forwards;
-}
-
-/* 
-  流式输出布局修正：
-  当有正在动画的文本（Queue）时，强制 Markdown 的最后一个元素（通常是 p）
-  显示为 inline，以便 Queue 中的 span 能紧跟其后，而不是换行。
-*/
-.streaming-active>*:last-child {
-  display: inline;
-  margin-bottom: 0;
-}
-
-.typing-buffer {
-  display: inline;
+/* 确保prose容器有平滑过渡 */
+.prose {
+  transition: filter 0.1s ease-out, opacity 0.1s ease-out;
 }
