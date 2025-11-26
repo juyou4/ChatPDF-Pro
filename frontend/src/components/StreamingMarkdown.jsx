@@ -1,13 +1,3 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import rehypeHighlight from 'rehype-highlight';
-import 'katex/dist/katex.min.css';
-import 'highlight.js/styles/github.css';
-
-/**
- * StreamingMarkdown - 支持实时Markdown渲染和Blur Reveal效果的组件
 import React, { useRef, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
@@ -103,32 +93,32 @@ const StreamingMarkdown = ({
     switch (blurIntensity) {
       case 'strong': return 'animate-blur-reveal-strong';
       case 'light': return 'animate-blur-reveal-light';
-      // 所以我们保持默认渲染。
-      // 队列文本只能作为"独立块"跟在后面，或者绝对定位？
-      // 绝对定位很难对齐。
-      // inline-block 跟在后面是最佳选择，前提是前一个元素是行内元素。
+      case 'medium':
+      default: return 'animate-blur-reveal-medium';
     }
-  }
-      >
-    { stableContent }
-      </ReactMarkdown >
+  };
 
-  {/* 队列部分：渲染正在动画的文本块 */ }
-{/* 使用 inline-block 让它们尽可能紧跟在 Markdown 内容后面 */ }
-{/* 注意：如果 Markdown 以块级元素结尾（如 </p>），这些 span 会换行显示。*/ }
-{/* 这是目前架构下的妥协。要解决这个问题需要深入 ReactMarkdown 的渲染树。*/ }
-{
-  queue.length > 0 && (
-    <span className="typing-buffer">
-      {queue.map(item => (
-        <span key={item.id} className={`inline-block ${getBlurClass()}`}>
-          {item.text}
+  return (
+    <div className="streaming-active prose prose-sm max-w-none dark:prose-invert">
+      <ReactMarkdown
+        remarkPlugins={[remarkMath]}
+        rehypePlugins={[rehypeKatex, rehypeHighlight]}
+      >
+        {stableContent}
+      </ReactMarkdown>
+
+      {/* 队列部分：渲染正在动画的文本块 */}
+      {/* 使用 inline-block 让它们尽可能紧跟在 Markdown 内容后面 */}
+      {queue.length > 0 && (
+        <span className="typing-buffer">
+          {queue.map(item => (
+            <span key={item.id} className={`inline-block ${getBlurClass()}`}>
+              {item.text}
+            </span>
+          ))}
         </span>
-      ))}
-    </span>
-  )
-}
-    </div >
+      )}
+    </div>
   );
 };
 
