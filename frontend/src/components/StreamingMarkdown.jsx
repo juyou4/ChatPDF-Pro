@@ -7,13 +7,12 @@ import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 
 /**
- * StreamingMarkdown - 支持实时Markdown渲染和Blur Reveal效果的组件
+ * StreamingMarkdown - 支持实时Markdown渲染和微妙Blur Reveal效果的组件
  *
  * 策略：
- * - 使用队列机制管理新生成的文本块
- * - 每个文本块独立保留在队列中直到动画结束（300ms）
- * - 动画结束后，文本块从队列移除，自然归入稳定内容
- * - 遇到Markdown结构符号或换行时，立即清空队列（Flush），避免格式错乱
+ * - 始终实时渲染完整的Markdown内容（保证顺序正确）
+ * - 流式输出时在整个容器上应用微妙的脉冲效果
+ * - 使用节流避免过于频繁的动画触发
  */
 const StreamingMarkdown = ({
   content,
@@ -21,103 +20,79 @@ const StreamingMarkdown = ({
   enableBlurReveal,
   blurIntensity = 'medium'
 }) => {
-  // 如果不启用特效或不在流式传输中，直接渲染普通Markdown
-  if (!enableBlurReveal || !isStreaming) {
-    return (
-      <div className="prose prose-sm max-w-none dark:prose-invert">
-        <ReactMarkdown
-          remarkPlugins={[remarkMath]}
-          rehypePlugins={[rehypeKatex, rehypeHighlight]}
-        >
-          {content}
-        </ReactMarkdown>
-      </div>
-    );
-  }
+  const [showPulse, setShowPulse] = useState(false);
+  const previousContentRef = useRef('');
+  const pulseTimeoutRef = useRef(null);
+  const lastUpdateRef = useRef(0);
 
-  // 队列状态：存储当前正在动画中的文本块
-  // Item format: { id: number, text: string }
-  const [queue, setQueue] = useState([]);
-
-  // 记录已处理的内容长度，用于计算增量
-  const processedRef = useRef(0);
-
+  // 监听内容变化，触发脉冲效果
   useEffect(() => {
-    const fullContent = content || '';
-
-    // 处理内容重置或回退的情况
-    if (fullContent.length < processedRef.current) {
-      processedRef.current = fullContent.length;
-      setQueue([]);
+    if (!isStreaming || !enableBlurReveal) {
+      setShowPulse(false);
       return;
     }
 
-    // 如果没有新内容，直接返回
-    if (fullContent.length === processedRef.current) return;
+    const currentContent = content || '';
 
-    // 获取新增文本
-    const newText = fullContent.slice(processedRef.current);
-    processedRef.current = fullContent.length;
+    // 内容发生变化
+    if (currentContent !== previousContentRef.current) {
+      previousContentRef.current = currentContent;
 
-    // 检查是否包含可能破坏Markdown结构的字符
-    // 包括：换行、加粗、斜体、代码块、列表、引用、标题等标记
-    const isStructural = /[\n\*\_\[\]\(\)\#\`\>\-\+\!]/.test(newText);
+      // 节流：至少间隔50ms才触发一次脉冲
+      const now = Date.now();
+      if (now - lastUpdateRef.current < 50) {
+        return;
+      }
+      lastUpdateRef.current = now;
 
-    if (isStructural) {
-      // 如果包含结构性字符，立即清空队列（Flush）
-      // 这样所有内容（包括队列中的和新增的）都会立即变为稳定内容被Markdown渲染
-      setQueue([]);
-    } else {
-      // 如果是普通文本，加入队列进行动画
-      const id = Date.now() + Math.random();
-      const item = { id, text: newText };
+      // 触发脉冲
+      setShowPulse(true);
 
-      setQueue(prev => [...prev, item]);
+      // 清除之前的定时器
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current);
+      }
 
-      // 设置定时器，动画结束后移除该项
-      setTimeout(() => {
-        setQueue(prev => prev.filter(i => i.id !== id));
-      }, 300); // 必须与CSS动画时长匹配
+      // 100ms后移除脉冲效果
+      pulseTimeoutRef.current = setTimeout(() => {
+        setShowPulse(false);
+      }, 100);
     }
-  }, [content]);
 
-  // 计算稳定内容：总内容减去队列中的内容
-  // 注意：这里假设队列中的内容总是位于总内容的末尾。
-  // 由于我们是按顺序添加和处理的，且Flush会清空队列，这个假设通常成立。
-  const queueTextLength = queue.reduce((acc, item) => acc + item.text.length, 0);
-  const stableContentLength = Math.max(0, (content || '').length - queueTextLength);
-  const stableContent = (content || '').slice(0, stableContentLength);
+    return () => {
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current);
+      }
+    };
+  }, [content, isStreaming, enableBlurReveal]);
 
-  // 根据强度获取动画类名
-  const getBlurClass = () => {
-    switch (blurIntensity) {
-      case 'strong': return 'animate-blur-reveal-strong';
-      case 'light': return 'animate-blur-reveal-light';
-      case 'medium':
-      default: return 'animate-blur-reveal-medium';
+  // 根据强度和状态选择CSS类
+  const getClassName = () => {
+    let baseClass = 'prose prose-sm max-w-none dark:prose-invert';
+
+    if (showPulse && isStreaming && enableBlurReveal) {
+      switch (blurIntensity) {
+        case 'strong':
+          return `${baseClass} blur-pulse-strong`;
+        case 'light':
+          return `${baseClass} blur-pulse-light`;
+        case 'medium':
+        default:
+          return `${baseClass} blur-pulse-medium`;
+      }
     }
+
+    return baseClass;
   };
 
   return (
-    <div className="streaming-active prose prose-sm max-w-none dark:prose-invert">
+    <div className={getClassName()}>
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
       >
-        {stableContent}
+        {content || ''}
       </ReactMarkdown>
-
-      {/* 队列部分：渲染正在动画的文本块 */}
-      {/* 使用 inline-block 让它们尽可能紧跟在 Markdown 内容后面 */}
-      {queue.length > 0 && (
-        <span className="typing-buffer">
-          {queue.map(item => (
-            <span key={item.id} className={`inline-block ${getBlurClass()}`}>
-              {item.text}
-            </span>
-          ))}
-        </span>
-      )}
     </div>
   );
 };
