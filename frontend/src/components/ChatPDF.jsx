@@ -54,6 +54,13 @@ const ChatPDF = () => {
   const [storageInfo, setStorageInfo] = useState(null);
   const [enableBlurReveal, setEnableBlurReveal] = useState(localStorage.getItem('enableBlurReveal') !== 'false');
   const [blurIntensity, setBlurIntensity] = useState(localStorage.getItem('blurIntensity') || 'medium'); // strong, medium, light
+  const [searchEngine, setSearchEngine] = useState(localStorage.getItem('searchEngine') || 'google'); // google, baidu, bing, sogou
+  const [searchEngineUrl, setSearchEngineUrl] = useState(
+    localStorage.getItem('searchEngineUrl') || 'https://www.google.com/search?q={query}'
+  );
+  const [toolbarSize, setToolbarSize] = useState(localStorage.getItem('toolbarSize') || 'normal'); // compact, normal, large
+  const [toolbarScale, setToolbarScale] = useState(parseFloat(localStorage.getItem('toolbarScale') || '1'));
+  const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
   const [copiedMessageId, setCopiedMessageId] = useState(null);
 
   // Refs
@@ -106,7 +113,26 @@ const ChatPDF = () => {
     localStorage.setItem('streamSpeed', streamSpeed);
     localStorage.setItem('enableBlurReveal', enableBlurReveal);
     localStorage.setItem('blurIntensity', blurIntensity);
-  }, [apiKey, apiProvider, model, embeddingModel, embeddingApiKey, enableVectorSearch, enableScreenshot, streamSpeed, enableBlurReveal, blurIntensity]);
+    localStorage.setItem('searchEngine', searchEngine);
+    localStorage.setItem('searchEngineUrl', searchEngineUrl);
+    localStorage.setItem('toolbarSize', toolbarSize);
+    localStorage.setItem('toolbarScale', toolbarScale);
+  }, [
+    apiKey,
+    apiProvider,
+    model,
+    embeddingModel,
+    embeddingApiKey,
+    enableVectorSearch,
+    enableScreenshot,
+    streamSpeed,
+    enableBlurReveal,
+    blurIntensity,
+    searchEngine,
+    searchEngineUrl,
+    toolbarSize,
+    toolbarScale
+  ]);
 
   // Validate model when availableModels loads or provider changes
   useEffect(() => {
@@ -538,7 +564,9 @@ const ChatPDF = () => {
       setShowTextMenu(true);
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
-      setMenuPosition({ x: rect.left + rect.width / 2, y: rect.top - 10 });
+      const nextPos = { x: rect.left + rect.width / 2, y: rect.top - 10 };
+      setMenuPosition(nextPos);
+      setToolbarPosition(nextPos);
     } else {
       setShowTextMenu(false);
     }
@@ -612,9 +640,18 @@ const ChatPDF = () => {
   // 6. 联网搜索
   const handleWebSearch = () => {
     const searchQuery = encodeURIComponent(selectedText);
-    // 可以选择不同的搜索引擎
-    const searchUrl = `https://www.google.com/search?q=${searchQuery}`;
-    window.open(searchUrl, '_blank');
+    const searchTemplates = {
+      google: 'https://www.google.com/search?q={query}',
+      baidu: 'https://www.baidu.com/s?wd={query}',
+      bing: 'https://www.bing.com/search?q={query}',
+      sogou: 'https://www.sogou.com/web?query={query}',
+      custom: searchEngineUrl
+    };
+    const template = searchTemplates[searchEngine] || searchTemplates.google;
+    const searchUrl = template.includes('{query}')
+      ? template.replace('{query}', searchQuery)
+      : `${template}${template.includes('?') ? '&' : '?'}q=${searchQuery}`;
+    window.open(searchUrl, '_blank', 'noopener,noreferrer');
     setShowTextMenu(false);
   };
 
@@ -633,6 +670,10 @@ const ChatPDF = () => {
     setSelectedText('');
     window.getSelection()?.removeAllRanges();
   };
+
+  // 手动拖动/缩放时更新位置与缩放
+  const handleToolbarPositionChange = (pos) => setToolbarPosition(pos);
+  const handleToolbarScaleChange = (scale) => setToolbarScale(scale);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -786,7 +827,10 @@ const ChatPDF = () => {
         <div className="text-selection-toolbar-container">
           <TextSelectionToolbar
             selectedText={selectedText}
-            position={menuPosition}
+            position={toolbarPosition.x === 0 && toolbarPosition.y === 0 ? menuPosition : toolbarPosition}
+            onPositionChange={handleToolbarPositionChange}
+            scale={toolbarScale}
+            onScaleChange={handleToolbarScaleChange}
             onClose={handleCloseToolbar}
             onCopy={handleCopy}
             onHighlight={handleHighlight}
@@ -795,6 +839,7 @@ const ChatPDF = () => {
             onTranslate={handleTranslate}
             onWebSearch={handleWebSearch}
             onShare={handleShare}
+            size={toolbarSize}
           />
         </div>
       )}
@@ -912,10 +957,12 @@ const ChatPDF = () => {
                         if (selection.rangeCount > 0) {
                           const range = selection.getRangeAt(0);
                           const rect = range.getBoundingClientRect();
-                          setMenuPosition({
+                          const nextPos = {
                             x: rect.left + rect.width / 2,
                             y: rect.top - 10
-                          });
+                          };
+                          setMenuPosition(nextPos);
+                          setToolbarPosition(nextPos);
                         }
                       }
                     }}
@@ -1372,6 +1419,54 @@ const ChatPDF = () => {
                       <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
                     </div>
                   )}
+                </div>
+
+                {/* 工具栏设置 */}
+                <div className="pt-4 border-t border-gray-100 space-y-3">
+                  <h3 className="text-sm font-semibold text-gray-800">🛠️ 划词工具栏</h3>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
+                    <select
+                      value={searchEngine}
+                      onChange={(e) => setSearchEngine(e.target.value)}
+                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="google">Google</option>
+                      <option value="bing">Bing</option>
+                      <option value="baidu">百度</option>
+                      <option value="sogou">搜狗</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                    {searchEngine === 'custom' && (
+                      <div className="mt-2 space-y-1">
+                        <input
+                          type="text"
+                          value={searchEngineUrl}
+                          onChange={(e) => setSearchEngineUrl(e.target.value)}
+                          className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                          placeholder="例如：https://www.google.com/search?q={query}"
+                        />
+                        <p className="text-xs text-gray-500">
+                          使用 <code className="font-mono">{'{query}'}</code> 作为搜索词占位符（若不填将自动追加 <code className="font-mono">?q=</code>）。
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">工具栏尺寸</label>
+                    <select
+                      value={toolbarSize}
+                      onChange={(e) => setToolbarSize(e.target.value)}
+                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="compact">紧凑</option>
+                      <option value="normal">常规</option>
+                      <option value="large">大号</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">影响划词工具栏按钮尺寸与间距</p>
+                  </div>
                 </div>
 
                 {/* 存储位置信息 */}
