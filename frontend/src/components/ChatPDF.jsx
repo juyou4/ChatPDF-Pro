@@ -6,6 +6,7 @@ import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
 import StreamingMarkdown from './StreamingMarkdown';
+import TextSelectionToolbar from './TextSelectionToolbar';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -537,8 +538,100 @@ const ChatPDF = () => {
       setShowTextMenu(true);
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
-      setMenuPosition({ x: rect.left, y: rect.top - 40 });
+      setMenuPosition({ x: rect.left + rect.width / 2, y: rect.top - 10 });
+    } else {
+      setShowTextMenu(false);
     }
+  };
+
+  // ==================== 划词工具箱功能 ====================
+
+  // 1. 复制选中文本
+  const handleCopy = () => {
+    navigator.clipboard.writeText(selectedText).then(() => {
+      alert('✅ 已复制到剪贴板');
+    }).catch(err => {
+      console.error('复制失败:', err);
+    });
+  };
+
+  // 2. 高亮标注（保存到 localStorage）
+  const handleHighlight = () => {
+    const highlights = JSON.parse(localStorage.getItem(`highlights_${docId}`) || '[]');
+    const newHighlight = {
+      id: Date.now(),
+      text: selectedText,
+      page: currentPage,
+      color: 'yellow',
+      createdAt: new Date().toISOString()
+    };
+    highlights.push(newHighlight);
+    localStorage.setItem(`highlights_${docId}`, JSON.stringify(highlights));
+    alert('✅ 已添加高亮标注');
+    setShowTextMenu(false);
+  };
+
+  // 3. 添加笔记
+  const handleAddNote = () => {
+    const note = prompt('请输入您的笔记：', '');
+    if (note) {
+      const notes = JSON.parse(localStorage.getItem(`notes_${docId}`) || '[]');
+      const newNote = {
+        id: Date.now(),
+        text: selectedText,
+        note: note,
+        page: currentPage,
+        createdAt: new Date().toISOString()
+      };
+      notes.push(newNote);
+      localStorage.setItem(`notes_${docId}`, JSON.stringify(notes));
+      alert('✅ 笔记已保存');
+    }
+    setShowTextMenu(false);
+  };
+
+  // 4. AI 解读
+  const handleAIExplain = () => {
+    setInputMessage(`请解释这段话：\n\n"${selectedText}"`);
+    setShowTextMenu(false);
+    // 自动聚焦输入框
+    setTimeout(() => {
+      document.querySelector('textarea')?.focus();
+    }, 100);
+  };
+
+  // 5. 翻译
+  const handleTranslate = () => {
+    setInputMessage(`请将以下内容翻译成中文：\n\n"${selectedText}"`);
+    setShowTextMenu(false);
+    setTimeout(() => {
+      document.querySelector('textarea')?.focus();
+    }, 100);
+  };
+
+  // 6. 联网搜索
+  const handleWebSearch = () => {
+    const searchQuery = encodeURIComponent(selectedText);
+    // 可以选择不同的搜索引擎
+    const searchUrl = `https://www.google.com/search?q=${searchQuery}`;
+    window.open(searchUrl, '_blank');
+    setShowTextMenu(false);
+  };
+
+  // 7. 分享（生成卡片）
+  const handleShare = () => {
+    const shareText = `📄 来自《${docInfo?.filename || '文档'}》第 ${currentPage} 页：\n\n"${selectedText}"\n\n--- ChatPDF Pro ---`;
+    navigator.clipboard.writeText(shareText).then(() => {
+      alert('✅ 引用卡片已复制到剪贴板，可直接粘贴分享');
+    });
+    setShowTextMenu(false);
+  };
+
+  // 关闭工具栏
+  const handleCloseToolbar = () => {
+    setShowTextMenu(false);
+    setSelectedText('');
+    window.getSelection()?.removeAllRanges();
   };
 
   const scrollToBottom = () => {
@@ -673,7 +766,38 @@ const ChatPDF = () => {
 
   // Render Components
   return (
-    <div className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}>
+    <div
+      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}
+      onClick={(e) => {
+        if (!showTextMenu) return;
+        // 避免刚选中文本时被同一次点击事件立刻关闭
+        const selection = window.getSelection();
+        const hasActiveSelection = selection && selection.toString().trim().length > 0;
+        if (hasActiveSelection) return;
+
+        // 点击工具栏外部才关闭
+        if (!e.target.closest('.text-selection-toolbar-container')) {
+          handleCloseToolbar();
+        }
+      }}
+    >
+      {/* 划词工具栏 */}
+      {showTextMenu && selectedText && (
+        <div className="text-selection-toolbar-container">
+          <TextSelectionToolbar
+            selectedText={selectedText}
+            position={menuPosition}
+            onClose={handleCloseToolbar}
+            onCopy={handleCopy}
+            onHighlight={handleHighlight}
+            onAddNote={handleAddNote}
+            onAIExplain={handleAIExplain}
+            onTranslate={handleTranslate}
+            onWebSearch={handleWebSearch}
+            onShare={handleShare}
+          />
+        </div>
+      )}
 
       {/* Sidebar (History) */}
       <motion.div
@@ -687,53 +811,53 @@ const ChatPDF = () => {
         className={`flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
       >
         <div className="w-72 flex flex-col h-full">
-            <div className="p-6 flex items-center justify-between">
-              <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
-                <Bot className="w-8 h-8" />
-                <span>ChatPDF</span>
-              </div>
-              <button onClick={() => setDarkMode(!darkMode)} className="p-2 hover:bg-black/5 rounded-full transition-colors">
-                {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-              </button>
+          <div className="p-6 flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
+              <Bot className="w-8 h-8" />
+              <span>ChatPDF</span>
             </div>
+            <button onClick={() => setDarkMode(!darkMode)} className="p-2 hover:bg-black/5 rounded-full transition-colors">
+              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            </button>
+          </div>
 
-            <div className="px-4 mb-4">
-              <button
-                onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+          <div className="px-4 mb-4">
+            <button
+              onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
+              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Plus className="w-5 h-5" />
+              <span>新对话 / 上传PDF</span>
+            </button>
+            <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 space-y-2">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
+            {history.map((item, idx) => (
+              <div
+                key={idx}
+                onClick={() => loadSession(item)}
+                className={`p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
               >
-                <Plus className="w-5 h-5" />
-                <span>新对话 / 上传PDF</span>
-              </button>
-              <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-4 space-y-2">
-              <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
-              {history.map((item, idx) => (
-                <div
-                  key={idx}
-                  onClick={() => loadSession(item)}
-                  className={`p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
+                <MessageSquare className="w-5 h-5 text-blue-500" />
+                <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
                 >
-                  <MessageSquare className="w-5 h-5 text-blue-500" />
-                  <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
-                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
 
-            <div className="p-4 border-t border-white/20">
-              <button onClick={() => { setShowSettings(true); fetchStorageInfo(); }} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/50 transition-colors text-sm font-medium">
-                <Settings className="w-5 h-5" />
-                <span>设置 & API Key</span>
-              </button>
-            </div>
+          <div className="p-4 border-t border-white/20">
+            <button onClick={() => { setShowSettings(true); fetchStorageInfo(); }} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/50 transition-colors text-sm font-medium">
+              <Settings className="w-5 h-5" />
+              <span>设置 & API Key</span>
+            </button>
+          </div>
         </div>
       </motion.div>
 
@@ -779,7 +903,22 @@ const ChatPDF = () => {
                 {docInfo?.pdf_url ? (
                   <PDFViewer
                     pdfUrl={docInfo.pdf_url}
-                    onTextSelect={(text) => setSelectedText(text)}
+                    onTextSelect={(text) => {
+                      if (text) {
+                        setSelectedText(text);
+                        setShowTextMenu(true);
+                        // 获取选中文本的位置
+                        const selection = window.getSelection();
+                        if (selection.rangeCount > 0) {
+                          const range = selection.getRangeAt(0);
+                          const rect = range.getBoundingClientRect();
+                          setMenuPosition({
+                            x: rect.left + rect.width / 2,
+                            y: rect.top - 10
+                          });
+                        }
+                      }
+                    }}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
                   <>
@@ -1161,13 +1300,13 @@ const ChatPDF = () => {
                         {embeddingModel.startsWith('minimax') && ' 需要MiniMax API Key'}
                         {embeddingModel.startsWith('BAAI') && ' 需要SiliconFlow API Key'}
                         {!embeddingModel.startsWith('text-embedding-3') &&
-                         !embeddingModel.startsWith('text-embedding-v3') &&
-                         !embeddingModel.startsWith('moonshot') &&
-                         !embeddingModel.startsWith('deepseek') &&
-                         !embeddingModel.startsWith('glm') &&
-                         !embeddingModel.startsWith('minimax') &&
-                         !embeddingModel.startsWith('BAAI') &&
-                         ' 请输入对应提供商的API Key'}
+                          !embeddingModel.startsWith('text-embedding-v3') &&
+                          !embeddingModel.startsWith('moonshot') &&
+                          !embeddingModel.startsWith('deepseek') &&
+                          !embeddingModel.startsWith('glm') &&
+                          !embeddingModel.startsWith('minimax') &&
+                          !embeddingModel.startsWith('BAAI') &&
+                          ' 请输入对应提供商的API Key'}
                       </p>
                     </div>
                   )}
