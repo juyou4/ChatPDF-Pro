@@ -7,7 +7,7 @@
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
-**智能文档助手 - 与 PDF 对话，让知识触手可及**
+**智能文档助手 - 与 PDF 对话，让知识触手可及** · [English](README_EN.md)
 
 [快速开始](#快速开始) • [核心功能](#核心功能) • [技术栈](#技术栈) • [配置指南](#配置指南)
 
@@ -125,7 +125,11 @@ npm run dev
 | Anthropic | Claude Sonnet 4.5, Claude 3 Opus | ✓ | 长文档理解优秀 |
 | Google | Gemini 2.5 Pro, Gemini 2.5 Flash | ✓ | 高性价比 |
 | Grok | Grok 4.1, Grok Vision | ✓ | xAI 出品 |
+| 通义千问 (DashScope) | qwen-max, qwen-long, qwen-vl | 部分 | 低成本，支持长文本（视觉需支持的模型） |
+| 火山豆包 | doubao-1.5-pro-256k | 部分 | 国内可用，长文本性价比高 |
+| MiniMax | abab6.5-chat / s-chat | ✗ | 国内可用，OpenAI 兼容接口 |
 | Ollama | Llama 3, Qwen, Mistral | ✗ | 本地运行，完全免费 |
+| 自定义 OpenAI 兼容 | 任意兼容 `chat/completions` 接口 | 取决于后端 | 配置自定义 base_url + API Key 即可接入 |
 
 ### 本地模型（Ollama）
 
