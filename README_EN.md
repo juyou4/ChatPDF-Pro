@@ -60,6 +60,12 @@ chmod +x start.sh
 ./start.sh
 ```
 
+### One-Click Start UI (Preview)
+
+![ChatPDF Pro One-Click Start](docs/one-click-start.png)
+
+> `start.bat` / `start.sh` will check for updates, install dependencies, start backend/frontend, and open the browser automatically. Closing the terminal stops all services.
+
 ### Option 2: Manual Start
 
 **1. Start Backend**

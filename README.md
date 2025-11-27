@@ -21,6 +21,12 @@
 
 *专业的 PDF 阅读和 AI 对话界面，支持原生 PDF 渲染、对话历史管理、智能文本提取*
 
+### 一键启动界面示例
+
+![ChatPDF Pro One-Click Start](docs/one-click-start.png)
+
+> `start.bat` / `start.sh` 运行时自动检查更新、安装依赖并启动前后端，浏览器会自动打开，关闭窗口即停止服务。
+
 > **提示**: 将应用截图保存为 `docs/screenshot.png` 即可显示预览图
 
 ---
