@@ -1070,9 +1070,11 @@ const ChatPDF = () => {
                   key={idx}
                   className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
                 >
-                  <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${msg.type === 'user'
-                    ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-tr-none'
-                    : 'bg-white/80 backdrop-blur-sm text-gray-800 rounded-tl-none border border-white/50'
+                  <div className={`max-w-[85%] rounded-2xl p-5 ${msg.type === 'user'
+                    ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-tr-none shadow-[4px_4px_15px_rgba(59,130,246,0.4)]'
+                    : darkMode
+                      ? 'glass-3d-dark text-gray-100 rounded-tl-none'
+                      : 'glass-3d text-gray-800 rounded-tl-none'
                     }`}>
                     {msg.hasImage && (
                       <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
@@ -1134,21 +1136,24 @@ const ChatPDF = () => {
                     </div>
                   )}
                 </motion.div>
-              ))}
-              {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-white/50 rounded-2xl p-4 flex gap-2 items-center">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              ))
+              }
+              {
+                isLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-white/50 rounded-2xl p-4 flex gap-2 items-center">
+                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              }
               <div ref={messagesEndRef} />
-            </div>
+            </div >
 
             {/* Input Area */}
-            <div className="p-4 bg-white/30 backdrop-blur-md border-t border-white/20">
+            < div className="p-4 bg-white/30 backdrop-blur-md border-t border-white/20" >
               {screenshot && (
                 <div className="mb-2 inline-flex items-center gap-2 bg-purple-100 text-purple-700 px-3 py-1 rounded-full text-xs font-medium">
                   <ImageIcon className="w-3 h-3" />
@@ -1178,13 +1183,13 @@ const ChatPDF = () => {
                   <Send className="w-5 h-5 ml-0.5" />
                 </button>
               </div>
-            </div>
-          </motion.div>
-        </div>
+            </div >
+          </motion.div >
+        </div >
       </div >
 
       {/* Upload Progress Modal */}
-      <AnimatePresence>
+      < AnimatePresence >
         {isUploading && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
             <motion.div
@@ -1204,7 +1209,7 @@ const ChatPDF = () => {
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+      </AnimatePresence >
 
       {/* Settings Modal */}
       < AnimatePresence >
