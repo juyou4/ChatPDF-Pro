@@ -940,8 +940,8 @@ const ChatPDF = () => {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`glass-panel rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
-              style={{ width: `${pdfPanelWidth}%` }}
+              className={`glass-panel rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+              style={{ width: `${pdfPanelWidth}%`, minWidth: '400px' }}
             >
               {/* PDF Content */}
               <div className="flex-1 overflow-hidden">
@@ -1058,8 +1058,8 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`glass-panel rounded-[32px] flex flex-col overflow-hidden shadow-xl ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
-            style={{ width: `${100 - pdfPanelWidth}%` }}
+            className={`glass-panel rounded-[32px] flex flex-col overflow-hidden shadow-xl flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+            style={{ width: `${100 - pdfPanelWidth}%`, minWidth: '400px' }}
           >
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">

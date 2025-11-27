@@ -152,3 +152,27 @@ body {
 .typing-buffer {
   display: inline;
 }
+
+/* 消息内容换行与溢出处理 */
+.message-content {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.message-content pre,
+.message-content code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.message-content p {
+  margin: 0 0 0.5rem 0;
+  line-height: 1.6;
+}
+
+.message-content ul,
+.message-content ol {
+  margin: 0 0 0.5rem 1.25rem;
+  line-height: 1.6;
+}

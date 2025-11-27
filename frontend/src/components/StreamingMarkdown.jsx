@@ -43,6 +43,12 @@ const remarkBlurReveal = (options) => {
           const charOffset = start + i;
           const delay = Math.min((charOffset - stableOffset) * 0.015, 1.0); // 限制最大延迟
 
+          // 如果是空格或换行，直接返回文本节点，不加动画
+          // 这可以避免 inline-block 元素导致的排版间距问题
+          if (/\s/.test(char)) {
+            return { type: 'text', value: char };
+          }
+
           return {
             type: 'text',
             value: char,
@@ -140,7 +146,9 @@ const StreamingMarkdown = ({
   }, [enableBlurReveal, isStreaming, stableOffset]);
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert">
+    <div
+      className="prose prose-sm max-w-none dark:prose-invert message-content leading-7"
+    >
       <ReactMarkdown
         remarkPlugins={plugins}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
