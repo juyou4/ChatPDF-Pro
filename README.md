@@ -1,8 +1,8 @@
-# ChatPDF Pro v2.0.2
+# ChatPDF Pro v2.0.3
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-2.0.2-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-2.0.3-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
@@ -56,6 +56,7 @@
 - **响应式布局** - 可拖拽调整 PDF 预览和对话区域的比例
 - **深色模式** - 支持浅色/深色主题切换，适应不同使用环境
 - **会话管理** - 侧边栏显示历史对话列表，一键切换或删除
+- **划词工具栏** - 可复制，直接用搜索引擎搜索、ai解读/翻译选中文本，支持自定义搜索引擎模板（`{query}` 占位）
 - **键盘快捷键** - Enter 发送消息，Shift+Enter 换行
 
 ---
@@ -142,6 +143,7 @@ npm run dev
 - **Vector Search** - 向量检索增强（需要更长的索引时间）
 - **Screenshot Analysis** - 截图分析功能（仅视觉模型可用）
 - **流式输出速度** - 快速/正常/慢速/关闭
+- **自定义搜索引擎** - 选择“自定义”后输入模板 URL，使用 `{query}` 作为搜索词占位符（未包含时默认追加 `?q=`）
 
 ---
 
@@ -234,7 +236,12 @@ A: 历史记录保存在浏览器 localStorage，清除浏览器数据会导致�
 
 ## 更新日志
 
-### v2.0.2 (当前版本)
+### v2.0.3 (当前版本)
+- 划词工具栏支持拖动和四角缩放，交互区提示更友好
+- 搜索引擎可自定义模板 URL，支持 `{query}` 占位符
+- 修复悬浮工具栏按钮无效、缩放区域提示缺失等问题
+
+### v2.0.2
 - 修复侧边栏菜单按钮位置错误
 - 改进 PDF 缩放功能（使用 CSS zoom 替代 transform）
 - 实现完整的对话历史管理（加载、切换、删除）
