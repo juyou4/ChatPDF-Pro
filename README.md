@@ -25,9 +25,9 @@
 
 ![ChatPDF Pro One-Click Start](docs/one-click-start.png)
 
-> `start.bat` / `start.sh` 运行时自动检查更新、安装依赖并启动前后端，浏览器会自动打开，关闭窗口即停止服务。
+> `start.bat` / `start.sh` 运行时自动检查版本更新、安装依赖并启动前后端，浏览器会自动打开，关闭窗口即停止服务。
 
-> **提示**: 将应用截图保存为 `docs/screenshot.png` 即可显示预览图
+
 
 ---
 
