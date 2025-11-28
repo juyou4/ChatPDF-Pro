@@ -1340,21 +1340,6 @@ const ChatPDF = () => {
                   })()}
                 </div>
 
-                  {availableEmbeddingModels[embeddingModel]?.provider === 'local' && (
-                    <div className="mt-2 p-2 bg-green-50 rounded-lg border border-green-200">
-                      <p className="text-xs text-green-700">
-                        ✅ 本地模型，无需API Key，首次使用会自动下载模型文件
-                      </p>
-                    </div>
-                  )}
-
-                  <p className="text-xs text-gray-500 mt-2">
-                    <strong>当前选择：</strong> {availableEmbeddingModels[embeddingModel]?.name || embeddingModel}
-                    {availableEmbeddingModels[embeddingModel]?.dimension &&
-                      ` | 向量维度: ${availableEmbeddingModels[embeddingModel].dimension}`}
-                  </p>
-                </div>
-
                 <div className="pt-4 border-t border-gray-100">
                   <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
                     <span className="font-medium">Vector Search</span>
