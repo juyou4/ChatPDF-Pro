@@ -7,6 +7,9 @@ import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
 import StreamingMarkdown from './StreamingMarkdown';
 import TextSelectionToolbar from './TextSelectionToolbar';
+import { useEmbedding } from '../contexts/EmbeddingContext';
+import EmbeddingModelSelector from './EmbeddingModelSelector';
+import EmbeddingSettings from './EmbeddingSettings';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -23,6 +26,7 @@ const ChatPDF = () => {
 
   // UI State
   const [showSettings, setShowSettings] = useState(false);
+  const [showEmbeddingSettings, setShowEmbeddingSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [history, setHistory] = useState([]); // Mock history for now
@@ -61,7 +65,13 @@ const ChatPDF = () => {
   const [toolbarSize, setToolbarSize] = useState(localStorage.getItem('toolbarSize') || 'normal'); // compact, normal, large
   const [toolbarScale, setToolbarScale] = useState(parseFloat(localStorage.getItem('toolbarScale') || '1'));
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
+
   const [copiedMessageId, setCopiedMessageId] = useState(null);
+
+  const {
+    getCurrentProvider,
+    getCurrentEmbeddingModel
+  } = useEmbedding();
 
   // Refs
   const fileInputRef = useRef(null);
@@ -285,12 +295,23 @@ const ChatPDF = () => {
     setIsUploading(true);
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('embedding_model', embeddingModel);
 
-    // Use embeddingApiKey if set, otherwise fallback to apiKey for convenience
-    const effectiveApiKey = embeddingApiKey || apiKey;
-    if (effectiveApiKey) {
-      formData.append('embedding_api_key', effectiveApiKey);
+    // Use new embedding context
+    const provider = getCurrentProvider();
+    const model = getCurrentEmbeddingModel();
+
+    if (model) {
+      formData.append('embedding_model', model.id);
+      console.log('🔵 Using embedding model:', model.id);
+
+      if (provider && provider.type !== 'local') {
+        // Use provider specific API key, fallback to main apiKey if empty (for convenience)
+        formData.append('embedding_api_key', provider.apiKey || apiKey);
+        formData.append('embedding_api_host', provider.apiHost);
+      }
+    } else {
+      // Fallback
+      formData.append('embedding_model', 'all-MiniLM-L6-v2');
     }
 
     try {
@@ -1153,7 +1174,7 @@ const ChatPDF = () => {
             </div >
 
             {/* Input Area */}
-            < div className="p-4 bg-white/30 backdrop-blur-md border-t border-white/20" >
+            <div className="p-4 bg-white/30 backdrop-blur-md border-t border-white/20">
               {screenshot && (
                 <div className="mb-2 inline-flex items-center gap-2 bg-purple-100 text-purple-700 px-3 py-1 rounded-full text-xs font-medium">
                   <ImageIcon className="w-3 h-3" />
@@ -1183,13 +1204,13 @@ const ChatPDF = () => {
                   <Send className="w-5 h-5 ml-0.5" />
                 </button>
               </div>
-            </div >
-          </motion.div >
-        </div >
-      </div >
+            </div>
+          </motion.div>
+        </div>
+      </div>
 
       {/* Upload Progress Modal */}
-      < AnimatePresence >
+      <AnimatePresence>
         {isUploading && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
             <motion.div
@@ -1209,10 +1230,10 @@ const ChatPDF = () => {
             </motion.div>
           </div>
         )}
-      </AnimatePresence >
+      </AnimatePresence>
 
       {/* Settings Modal */}
-      < AnimatePresence >
+      <AnimatePresence>
         {showSettings && (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4"
@@ -1281,87 +1302,43 @@ const ChatPDF = () => {
                   <h3 className="text-sm font-semibold text-gray-800 mb-3">🔍 Embedding 配置</h3>
 
                   <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Embedding API Key
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Embedding Model
                       <span className="ml-2 text-xs font-normal text-gray-500">
-                        (可选，默认使用上方聊天API Key)
+                        (用于文档向量化检索)
                       </span>
                     </label>
-                    <input
-                      type="password"
-                      value={embeddingApiKey}
-                      onChange={(e) => setEmbeddingApiKey(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      placeholder="留空则使用上方API Key"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">
-                      💡 如需使用不同提供商的embedding（如OpenAI聊天+阿里云embedding），请在此单独配置
-                    </p>
+                    <EmbeddingModelSelector />
                   </div>
 
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Embedding Model
-                    <span className="ml-2 text-xs font-normal text-gray-500">
-                      (用于文档向量化检索)
-                    </span>
-                  </label>
-                  <select
-                    value={embeddingModel}
-                    onChange={(e) => setEmbeddingModel(e.target.value)}
-                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                  <button
+                    onClick={() => setShowEmbeddingSettings(true)}
+                    className="glass-3d w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
                   >
-                    {Object.keys(availableEmbeddingModels).length > 0 ? (
-                      <>
-                        {/* 本地模型组 */}
-                        <optgroup label="🏠 本地模型 (免费, 无需API Key)">
-                          {Object.entries(availableEmbeddingModels)
-                            .filter(([k, v]) => v.provider === 'local')
-                            .map(([k, v]) => (
-                              <option key={k} value={k}>
-                                {v.name} - {v.description}
-                              </option>
-                            ))}
-                        </optgroup>
+                    <Settings className="w-4 h-4" />
+                    管理嵌入模型服务
+                  </button>
 
-                        {/* OpenAI及兼容API模型组 */}
-                        <optgroup label="☁️ 云端API模型 (需要API Key)">
-                          {Object.entries(availableEmbeddingModels)
-                            .filter(([k, v]) => v.provider === 'openai')
-                            .map(([k, v]) => (
-                              <option key={k} value={k}>
-                                {v.name} - {v.price} - {v.description}
-                              </option>
-                            ))}
-                        </optgroup>
-                      </>
-                    ) : (
-                      <option value="">加载中...</option>
-                    )}
-                  </select>
-
-                  {/* API Key 提示 */}
-                  {availableEmbeddingModels[embeddingModel]?.provider === 'openai' && (
-                    <div className="mt-2 p-2 bg-blue-50 rounded-lg border border-blue-200">
-                      <p className="text-xs text-blue-700">
-                        💡 <strong>API Key说明：</strong>
-                        {embeddingModel.startsWith('text-embedding-3') && ' 使用上方的OpenAI API Key'}
-                        {embeddingModel.startsWith('text-embedding-v3') && ' 需要阿里云DashScope API Key (通义千问)'}
-                        {embeddingModel.startsWith('moonshot') && ' 需要Moonshot AI API Key (Kimi)'}
-                        {embeddingModel.startsWith('deepseek') && ' 需要DeepSeek API Key'}
-                        {embeddingModel.startsWith('glm') && ' 需要智谱AI API Key (ChatGLM)'}
-                        {embeddingModel.startsWith('minimax') && ' 需要MiniMax API Key'}
-                        {embeddingModel.startsWith('BAAI') && ' 需要SiliconFlow API Key'}
-                        {!embeddingModel.startsWith('text-embedding-3') &&
-                          !embeddingModel.startsWith('text-embedding-v3') &&
-                          !embeddingModel.startsWith('moonshot') &&
-                          !embeddingModel.startsWith('deepseek') &&
-                          !embeddingModel.startsWith('glm') &&
-                          !embeddingModel.startsWith('minimax') &&
-                          !embeddingModel.startsWith('BAAI') &&
-                          ' 请输入对应提供商的API Key'}
-                      </p>
-                    </div>
-                  )}
+                  {(() => {
+                    const provider = getCurrentProvider();
+                    const model = getCurrentEmbeddingModel();
+                    if (provider && model && provider.type !== 'local') {
+                      return (
+                        <div className="mt-3 p-3 glass-panel rounded-xl border border-blue-200/50">
+                          <p className="text-xs text-blue-700">
+                            💡 <strong>当前使用:</strong> {provider.name} - {model.name}
+                          </p>
+                          {!provider.apiKey && (
+                            <p className="text-xs text-amber-700 mt-1">
+                              ⚠️ 请在设置中配置 API Key
+                            </p>
+                          )}
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
 
                   {availableEmbeddingModels[embeddingModel]?.provider === 'local' && (
                     <div className="mt-2 p-2 bg-green-50 rounded-lg border border-green-200">
@@ -1544,8 +1521,13 @@ const ChatPDF = () => {
             </motion.div>
           </div>
         )}
-      </AnimatePresence >
-    </div >
+      </AnimatePresence>
+
+      <EmbeddingSettings
+        isOpen={showEmbeddingSettings}
+        onClose={() => setShowEmbeddingSettings(false)}
+      />
+    </div>
   );
 };
 

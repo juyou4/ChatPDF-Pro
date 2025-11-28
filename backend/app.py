@@ -72,6 +72,7 @@ EMBEDDING_MODELS = {
         "price": "Free (Local)",
         "description": "Better for Chinese/multilingual"
     },
+    # OpenAI
     "text-embedding-3-large": {
         "name": "OpenAI: text-embedding-3-large",
         "provider": "openai",
@@ -90,59 +91,73 @@ EMBEDDING_MODELS = {
         "price": "$0.02/M tokens",
         "description": "Best value"
     },
+    # Alibaba
     "text-embedding-v3": {
         "name": "Alibaba: text-embedding-v3",
         "provider": "openai",
-        "base_url": "https://dashscope.aliyuncs.com/api/v1",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "dimension": 1024,
         "max_tokens": 8192,
         "price": "$0.007/M tokens",
         "description": "Chinese optimized, cheapest"
     },
-    "moonshot-embedding-v1": {
-        "name": "Moonshot: moonshot-embedding-v1",
-        "provider": "openai",
-        "base_url": "https://api.moonshot.cn/v1",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "$0.011/M tokens",
-        "description": "Kimi, OpenAI compatible"
-    },
-    "deepseek-embedding-v1": {
-        "name": "DeepSeek: deepseek-embedding-v1",
-        "provider": "openai",
-        "base_url": "https://api.deepseek.com/v1",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "$0.01/M tokens",
-        "description": "Low cost OpenAI compatible"
-    },
-    "glm-embedding-2": {
-        "name": "Zhipu: glm-embedding-2",
-        "provider": "openai",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "$0.014/M tokens",
-        "description": "GLM series"
-    },
-    "minimax-embedding-v2": {
-        "name": "MiniMax: minimax-embedding-v2",
-        "provider": "openai",
-        "base_url": "https://api.minimaxi.chat/v1",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "$0.014/M tokens",
-        "description": "ABAB series"
-    },
+    # SiliconFlow
     "BAAI/bge-m3": {
-        "name": "SiliconFlow: BAAI/bge-m3",
+        "name": "SiliconFlow: BGE-M3",
         "provider": "openai",
         "base_url": "https://api.siliconflow.cn/v1",
         "dimension": 1024,
         "max_tokens": 8192,
-        "price": "$0.02/M tokens",
-        "description": "Open source, hosted"
+        "price": "Free (Limited)",
+        "description": "State-of-the-art multilingual"
+    },
+    "BAAI/bge-large-zh-v1.5": {
+        "name": "SiliconFlow: BGE-Large-ZH",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 512,
+        "price": "Free (Limited)",
+        "description": "Best for Chinese"
+    },
+    "Pro/BAAI/bge-m3": {
+        "name": "SiliconFlow Pro: BGE-M3",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "High performance BGE-M3"
+    },
+    # Moonshot
+    "moonshot-v1-8k": {
+        "name": "Moonshot: v1-8k",
+        "provider": "openai",
+        "base_url": "https://api.moonshot.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "Kimi embedding"
+    },
+    # Zhipu
+    "embedding-3": {
+        "name": "Zhipu: embedding-3",
+        "provider": "openai",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "dimension": 2048,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "ChatGLM embedding"
+    },
+    # MiniMax
+    "embo-01": {
+        "name": "MiniMax: embo-01",
+        "provider": "openai",
+        "base_url": "https://api.minimax.chat/v1",
+        "dimension": 1536,
+        "max_tokens": 4096,
+        "price": "Paid",
+        "description": "MiniMax embedding"
     }
 }
 
@@ -174,12 +189,14 @@ def load_documents():
             print(f"Error loading document from {file_path}: {e}")
     print(f"Loaded {count} documents.")
 
-def get_embedding_function(embedding_model_id: str, api_key: str = None):
+def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
     """Get embedding function for the specified model"""
-    if embedding_model_id not in EMBEDDING_MODELS:
-        raise ValueError(f"Unknown embedding model: {embedding_model_id}")
+    # Allow unknown models if they are provided by a known provider (fallback)
+    config = EMBEDDING_MODELS.get(embedding_model_id, {
+        "provider": "openai", # Default to openai compatible if unknown
+        "base_url": base_url or "https://api.openai.com/v1"
+    })
     
-    config = EMBEDDING_MODELS[embedding_model_id]
     provider = config["provider"]
     
     if provider == "local":
@@ -197,7 +214,11 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None):
             raise ValueError(f"API key required for {embedding_model_id}")
         
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=config["base_url"])
+        
+        # Use provided base_url or fallback to config
+        api_base = base_url or config.get("base_url")
+        
+        client = OpenAI(api_key=api_key, base_url=api_base)
         
         def embed_texts(texts):
             response = client.embeddings.create(
@@ -211,7 +232,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None):
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
-def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-minilm", api_key: str = None):
+def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-minilm", api_key: str = None, api_host: str = None):
     """Build and save vector index for a document"""
     try:
         print(f"Building vector index for {doc_id}...")
@@ -228,7 +249,7 @@ def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-
             return
 
         # 2. Generate embeddings using selected model
-        embed_fn = get_embedding_function(embedding_model_id, api_key)
+        embed_fn = get_embedding_function(embedding_model_id, api_key, api_host)
         embeddings = embed_fn(chunks)
         
         # 3. Create FAISS index
@@ -1071,7 +1092,8 @@ async def generate_summary(request: SummaryRequest):
 async def upload_pdf(
     file: UploadFile = File(...),
     embedding_model: str = "local-minilm",
-    embedding_api_key: str = None
+    embedding_api_key: str = None,
+    embedding_api_host: str = None
 ):
     """上传PDF文件"""
     if not file.filename.endswith('.pdf'):
@@ -1109,7 +1131,7 @@ async def upload_pdf(
         save_document(doc_id, documents_store[doc_id])
         
         # Build vector index with selected embedding model
-        build_vector_index(doc_id, extracted_data["full_text"], embedding_model, embedding_api_key)
+        build_vector_index(doc_id, extracted_data["full_text"], embedding_model, embedding_api_key, embedding_api_host)
 
         return {
             "message": "PDF上传成功",
