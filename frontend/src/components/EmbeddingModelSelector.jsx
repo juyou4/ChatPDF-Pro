@@ -49,7 +49,7 @@ export default function EmbeddingModelSelector() {
                 whileTap={{ scale: 0.98 }}
                 onClick={() => setIsOpen(!isOpen)}
                 className={`
-          w-full glass-3d rounded-2xl p-4 transition-all duration-200
+          w-full soft-card rounded-2xl p-4 transition-all duration-200
           ${isOpen ? 'shadow-xl ring-2 ring-blue-500/50' : 'shadow-lg hover:shadow-xl'}
         `}
             >
@@ -99,7 +99,7 @@ export default function EmbeddingModelSelector() {
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: -10, scale: 0.95 }}
                         transition={{ duration: 0.2 }}
-                        className="absolute z-50 mt-2 w-full glass-panel rounded-2xl shadow-2xl overflow-hidden max-h-96"
+                        className="absolute z-50 mt-2 w-full soft-panel rounded-2xl shadow-2xl overflow-hidden max-h-96"
                     >
                         <div className="overflow-y-auto max-h-96">
                             {enabledProviders.length > 0 ? (
@@ -148,7 +148,7 @@ export default function EmbeddingModelSelector() {
                                                                     </div>
                                                                 )}
                                                                 <div className="flex items-center gap-2 mt-1.5">
-                                                                    <span className="px-2 py-0.5 glass-panel rounded text-xs text-gray-600">
+                                                                    <span className="px-2 py-0.5 soft-panel rounded text-xs text-gray-600">
                                                                         📐 {model.metadata?.dimension || '?'}维
                                                                     </span>
                                                                     {model.metadata?.pricing ? (

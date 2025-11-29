@@ -849,7 +849,7 @@ const ChatPDF = () => {
   // Render Components
   return (
     <div
-      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-[#F6F8FA] to-[#E9F4FF] text-gray-800'}`}
+      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'text-gray-800'}`}
       onClick={(e) => {
         if (!showTextMenu) return;
         // 避免刚选中文本时被同一次点击事件立刻关闭
@@ -894,7 +894,7 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 glass-3d border-r border-white/40 flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
+        className={`flex-shrink-0 soft-panel m-4 mr-0 h-[calc(100vh-2rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
       >
         <div className="w-72 flex flex-col h-full">
           <div className="p-6 flex items-center justify-between">
@@ -910,7 +910,7 @@ const ChatPDF = () => {
           <div className="px-4 mb-4">
             <button
               onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+              className="w-full py-3 soft-button soft-button-primary flex items-center justify-center gap-2"
             >
               <Plus className="w-5 h-5" />
               <span>新对话 / 上传PDF</span>
@@ -950,7 +950,7 @@ const ChatPDF = () => {
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
         {/* Header */}
-        <header className="flex items-center justify-between px-8 py-5 bg-white/80 backdrop-blur-md border-b border-white/20 sticky top-0 z-10 shadow-sm transition-all duration-200">
+        <header className="flex items-center justify-between px-6 py-4 soft-panel mx-6 mt-4 mb-2 sticky top-4 z-10 transition-all duration-200">
           <div className="flex items-center gap-4">
             {/* 菜单按钮 - 始终在左侧 */}
             <button
@@ -974,14 +974,14 @@ const ChatPDF = () => {
           {docInfo && <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full">{docInfo.filename}</div>}
         </header>
         {/* Content Area */}
-        <div className="flex-1 flex overflow-hidden p-6 gap-0 pt-0">
+        <div className="flex-1 flex overflow-hidden p-6 gap-0 pt-2">
 
           {/* Left: PDF Preview (Floating Card) */}
           {docId ? (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`glass-3d rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+              className={`soft-panel rounded-[32px] overflow-hidden flex flex-col relative mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
@@ -1099,7 +1099,7 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`glass-3d rounded-[32px] flex flex-col overflow-hidden shadow-xl ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+            className={`soft-panel rounded-[32px] flex flex-col overflow-hidden ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `${100 - pdfPanelWidth}%`, minWidth: '350px' }}
           >
             {/* Messages */}
@@ -1112,10 +1112,10 @@ const ChatPDF = () => {
                   className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
                 >
                   <div className={`max-w-[85%] rounded-2xl p-5 ${msg.type === 'user'
-                    ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-tr-none shadow-[4px_4px_15px_rgba(59,130,246,0.4)]'
+                    ? 'message-bubble-user rounded-tr-none'
                     : darkMode
                       ? 'glass-3d-dark text-gray-100 rounded-tl-none'
-                      : 'glass-3d text-gray-800 rounded-tl-none'
+                      : 'message-bubble-ai rounded-tl-none'
                     }`}>
                     {msg.hasImage && (
                       <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
@@ -1194,7 +1194,7 @@ const ChatPDF = () => {
             </div >
 
             {/* Input Area */}
-            <div className="p-4 bg-white/30 backdrop-blur-md border-t border-white/20">
+            <div className="p-4 border-t border-gray-100/50">
               {screenshot && (
                 <div className="mb-2 inline-flex items-center gap-2 bg-purple-100 text-purple-700 px-3 py-1 rounded-full text-xs font-medium">
                   <ImageIcon className="w-3 h-3" />
@@ -1209,7 +1209,7 @@ const ChatPDF = () => {
                     onChange={(e) => setInputMessage(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
                     placeholder="Ask anything about the document..."
-                    className="w-full glass-input rounded-[24px] py-3 pl-4 pr-12 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm min-h-[48px] max-h-32"
+                    className="w-full soft-input rounded-[24px] py-3 pl-4 pr-12 resize-none text-sm min-h-[48px] max-h-32"
                     rows={1}
                   />
                   <button className="absolute right-2 bottom-2 p-2 text-gray-400 hover:text-blue-600 transition-colors">
@@ -1219,7 +1219,7 @@ const ChatPDF = () => {
                 <button
                   onClick={sendMessage}
                   disabled={isLoading || (!inputMessage.trim() && !screenshot)}
-                  className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg shadow-blue-500/30 hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-12 h-12 soft-button soft-button-primary rounded-full flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="w-5 h-5 ml-0.5" />
                 </button>
@@ -1237,7 +1237,7 @@ const ChatPDF = () => {
               initial={{ scale: 0.8, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.8, opacity: 0 }}
-              className="bg-white rounded-3xl shadow-2xl p-8 flex flex-col items-center gap-4"
+              className="soft-panel p-8 flex flex-col items-center gap-4"
             >
               <div className="relative w-20 h-20">
                 <div className="absolute inset-0 border-4 border-blue-200 rounded-full"></div>
@@ -1264,7 +1264,7 @@ const ChatPDF = () => {
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-white rounded-3xl shadow-2xl w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col"
+              className="soft-panel w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col"
             >
               <div className="flex justify-between items-center p-8 pb-4 flex-shrink-0">
                 <h2 className="text-2xl font-bold text-gray-800">Settings</h2>
@@ -1333,7 +1333,7 @@ const ChatPDF = () => {
 
                   <button
                     onClick={() => setShowEmbeddingSettings(true)}
-                    className="glass-3d w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
                   >
                     <Settings className="w-4 h-4" />
                     管理嵌入模型服务
@@ -1344,7 +1344,7 @@ const ChatPDF = () => {
                     const model = getCurrentEmbeddingModel();
                     if (provider && model && provider.type !== 'local') {
                       return (
-                        <div className="mt-3 p-3 glass-panel rounded-xl border border-blue-200/50">
+                        <div className="mt-3 p-3 soft-card rounded-xl border border-blue-200/50">
                           <p className="text-xs text-blue-700">
                             💡 <strong>当前使用:</strong> {provider.name} - {model.name}
                           </p>
@@ -1415,7 +1415,7 @@ const ChatPDF = () => {
                       setShowSettings(false);
                       setShowGlobalSettings(true);
                     }}
-                    className="glass-3d w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
                   >
                     <Type className="w-4 h-4" />
                     全局设置（字体、缩放）
@@ -1532,7 +1532,7 @@ const ChatPDF = () => {
               <div className="p-8 pt-4 flex-shrink-0 border-t border-gray-100">
                 <button
                   onClick={() => setShowSettings(false)}
-                  className="w-full py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors"
+                  className="w-full py-3 soft-button soft-button-primary rounded-xl font-medium hover:shadow-lg transition-all"
                 >
                   Save Changes
                 </button>

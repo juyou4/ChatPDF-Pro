@@ -3,28 +3,65 @@
 @tailwind utilities;
 
 :root {
-  /* 全局字体设置 */
-  --global-font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  /* 全局字体 - 保持现代感 */
+  --global-font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
 
-  /* 全局缩放设置 */
+  /* 全局缩放 */
   --global-scale: 1;
 
-  /* 治愈系蓝白配色 */
-  --color-bg-start: #F6F8FA;
-  --color-bg-end: #E9F4FF;
-  --color-primary: #3B82F6;
-  /* 高饱和亮蓝 */
-  --color-primary-soft: #60A5FA;
-  --color-text-main: #1F2937;
-  --color-text-sub: #6B7280;
+  /* --- 2. Material Neutrality (Refined) --- */
+  /* 暖调中性色 - 模仿纸张/陶土质感 */
+  --color-bg-base: #F2F0ED;
+  /* 暖灰/米色底 */
+  --color-bg-surface: #FFFFFF;
+  --color-bg-subtle: #F7F5F3;
 
-  /* 毛玻璃参数 */
-  --glass-blur: 24px;
-  --glass-opacity: 0.7;
-  --glass-border: rgba(255, 255, 255, 0.6);
+  /* 品牌色 - 更加柔和的蓝 */
+  --color-primary: #5B8BF7;
+  /* Soft Royal Blue */
+  --color-primary-soft: #8CABFF;
+  --color-primary-light: #E1E9FF;
 
-  /* 阴影参数 */
-  --shadow-air: 0 4px 30px rgba(0, 0, 0, 0.08);
+  /* 文本颜色 */
+  --color-text-main: #2D3138;
+  /* 软黑 */
+  --color-text-sub: #838894;
+  /* 暖灰字 */
+  --color-text-muted: #B0B4BC;
+
+  /* --- 1. Light Restraint & 3. Soft Depth (Enhanced) --- */
+  /* 阴影系统 - 更加弥散，带有环境色 */
+  --shadow-sm:
+    0 2px 4px rgba(166, 173, 186, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+
+  --shadow-md:
+    0 6px 12px -2px rgba(166, 173, 186, 0.25),
+    0 3px 6px -3px rgba(0, 0, 0, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+
+  --shadow-lg:
+    0 15px 25px -5px rgba(166, 173, 186, 0.25),
+    0 8px 10px -6px rgba(166, 173, 186, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+
+  --shadow-float:
+    0 25px 50px -12px rgba(166, 173, 186, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+
+  /* 内阴影 - 更深邃的凹陷感 */
+  --shadow-inner:
+    inset 0 2px 4px 0 rgba(166, 173, 186, 0.15),
+    inset 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+
+  --shadow-inner-deep:
+    inset 0 4px 8px 0 rgba(166, 173, 186, 0.2),
+    inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+
+  /* 毛玻璃 - 更加通透，减少模糊，增加光泽 */
+  --glass-blur: 12px;
+  --glass-bg: rgba(255, 255, 255, 0.65);
+  --glass-border: rgba(255, 255, 255, 0.4);
 }
 
 body {
@@ -32,12 +69,15 @@ body {
   font-family: var(--global-font-family);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: linear-gradient(135deg, var(--color-bg-start) 0%, var(--color-bg-end) 100%);
+  background-color: var(--color-bg-base);
+  /* 极淡的暖光照射效果 */
+  background-image:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.8) 0%, transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(255, 255, 255, 0.6) 0%, transparent 50%);
   min-height: 100vh;
   color: var(--color-text-main);
 }
 
-/* 全局缩放容器 */
 #root {
   transform: scale(var(--global-scale));
   transform-origin: top left;
@@ -45,7 +85,7 @@ body {
   height: calc(100vh / var(--global-scale));
 }
 
-/* 自定义滚动条 */
+/* 滚动条 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -56,88 +96,151 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(166, 173, 186, 0.3);
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(166, 173, 186, 0.5);
 }
 
-/* 强毛玻璃效果工具类 */
-.glass-panel {
-  background: rgba(255, 255, 255, 0.65);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  box-shadow:
-    0 8px 32px 0 rgba(31, 38, 135, 0.15),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+/* --- 组件样式 (Enhanced Soft/Clay) --- */
+
+/* 1. 柔和面板 - 增加"厚度"感 */
+.soft-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: var(--shadow-lg);
+  border-radius: 32px;
+  /* 更大的圆角 */
 }
 
-/* 增强的输入框毛玻璃 */
-.glass-input {
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+/* 2. 凹陷输入框 - 更深的凹陷 */
+.soft-input {
+  background: #EEF0F4;
+  /* 稍深一点的灰，增加对比 */
+  border: 1px solid transparent;
+  box-shadow: var(--shadow-inner);
+  border-radius: 20px;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: var(--color-text-main);
 }
 
-.glass-input:focus {
-  background: rgba(255, 255, 255, 0.8);
-  border-color: rgba(59, 130, 246, 0.5);
+.soft-input:focus {
+  background: #FFFFFF;
+  border-color: var(--color-primary-soft);
   box-shadow:
-    inset 0 2px 4px 0 rgba(0, 0, 0, 0.05),
-    0 0 0 3px rgba(59, 130, 246, 0.2);
-  transform: translateY(-1px);
+    0 0 0 4px rgba(91, 139, 247, 0.15),
+    var(--shadow-inner);
+  outline: none;
 }
 
-/* 3D 拟物毛玻璃效果 - 浅色 (高对比度) */
-.glass-3d {
-  background: linear-gradient(135deg,
-      rgba(255, 255, 255, 0.8) 0%,
-      rgba(255, 255, 255, 0.4) 100%);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+/* 3. 3D 卡片 - 类似实体卡片 */
+.soft-card {
+  background: #FFFFFF;
   border: 1px solid rgba(255, 255, 255, 0.8);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.4);
-  border-right: 1px solid rgba(255, 255, 255, 0.4);
-  box-shadow:
-    -4px -4px 10px rgba(255, 255, 255, 0.8),
-    4px 4px 10px rgba(0, 0, 0, 0.05),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: var(--shadow-md);
+  border-radius: 24px;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* 弹性动画 */
 }
 
-.glass-3d:hover {
-  transform: translateY(-2px) scale(1.01);
-  box-shadow:
-    -6px -6px 14px rgba(255, 255, 255, 0.9),
-    6px 6px 14px rgba(0, 0, 0, 0.08),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.6);
-  background: linear-gradient(135deg,
-      rgba(255, 255, 255, 0.9) 0%,
-      rgba(255, 255, 255, 0.5) 100%);
+.soft-card:hover {
+  transform: translateY(-3px) scale(1.01);
+  box-shadow: var(--shadow-float);
+  z-index: 10;
 }
 
-.glass-3d:active {
-  transform: translateY(1px) scale(0.99);
-  box-shadow:
-    -2px -2px 6px rgba(255, 255, 255, 0.6),
-    2px 2px 6px rgba(0, 0, 0, 0.04),
-    inset 0 2px 4px rgba(0, 0, 0, 0.05);
+.soft-card:active {
+  transform: translateY(-1px) scale(0.99);
+  box-shadow: var(--shadow-sm);
 }
 
-/* 漂浮动画 */
+/* 4. 消息气泡 */
+.message-bubble-user {
+  background: linear-gradient(135deg, #5B8BF7 0%, #4671D5 100%);
+  color: white;
+  box-shadow:
+    0 8px 16px -4px rgba(91, 139, 247, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  border-radius: 24px 24px 4px 24px;
+}
+
+.message-bubble-ai {
+  background: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: var(--shadow-sm);
+  color: var(--color-text-main);
+  border-radius: 24px 24px 24px 4px;
+}
+
+/* 5. 按钮 - Pill Shape & Soft Gradient */
+.soft-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  /* 完全圆角 */
+  font-weight: 600;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+
+.soft-button-primary {
+  background: linear-gradient(135deg, #5B8BF7 0%, #4B7BEC 100%);
+  color: white;
+  box-shadow:
+    0 6px 12px -2px rgba(91, 139, 247, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.soft-button-primary:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 10px 20px -4px rgba(91, 139, 247, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.soft-button-primary:active {
+  transform: translateY(0);
+  box-shadow: var(--shadow-sm);
+}
+
+.soft-button-secondary {
+  background: #FFFFFF;
+  color: var(--color-text-main);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: var(--shadow-sm);
+}
+
+.soft-button-secondary:hover {
+  background: #F9FAFB;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.soft-button-ghost {
+  background: transparent;
+  color: var(--color-text-sub);
+}
+
+.soft-button-ghost:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--color-text-main);
+}
+
+/* 动画 */
 @keyframes float {
   0% {
     transform: translateY(0px);
   }
 
   50% {
-    transform: translateY(-6px);
+    transform: translateY(-8px);
   }
 
   100% {
@@ -146,24 +249,9 @@ body {
 }
 
 .animate-float {
-  animation: float 6s ease-in-out infinite;
+  animation: float 5s ease-in-out infinite;
 }
 
-/* 消息气泡 */
-.message-bubble-user {
-  background: linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%);
-  color: white;
-  box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
-}
-
-.message-bubble-ai {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
-}
-
-/* 打字机光标动画 */
 @keyframes blink {
 
   0%,
@@ -181,10 +269,9 @@ body {
   content: '▋';
   animation: blink 1s infinite;
   margin-left: 2px;
-  color: #3B82F6;
+  color: var(--color-primary);
 }
 
-/* Blur Reveal 动画 - 从模糊到清晰 */
 @keyframes blur-reveal {
   0% {
     filter: blur(8px);
@@ -203,11 +290,10 @@ body {
   display: inline-block;
   animation: blur-reveal 0.4s cubic-bezier(0.2, 0.65, 0.3, 0.9) forwards;
   will-change: filter, opacity, transform;
-  /* 初始状态不可见，等待动画开始 */
   opacity: 0;
 }
 
-/* Streaming 布局：最后一个元素内联，便于拼接打字队列 */
+/* Streaming 布局 */
 .streaming-active>*:last-child {
   display: inline;
   margin-bottom: 0;
@@ -217,7 +303,7 @@ body {
   display: inline;
 }
 
-/* 消息内容换行与溢出处理 */
+/* 消息内容 */
 .message-content {
   word-break: break-word;
   overflow-wrap: anywhere;

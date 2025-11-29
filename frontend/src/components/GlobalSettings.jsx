@@ -90,11 +90,11 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.9, opacity: 0 }}
                     transition={{ type: 'spring', damping: 20 }}
-                    className="glass-3d rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto"
+                    className="soft-panel rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
-                    <div className="sticky top-0 glass-3d border-b border-white/20 p-6 flex items-center justify-between z-10">
+                    <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-100 p-6 flex items-center justify-between z-10">
                         <div className="flex items-center gap-3">
                             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
                                 <Type className="w-5 h-5 text-white" />
@@ -129,8 +129,8 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             key={font.id}
                                             onClick={() => setFontFamily(font.id)}
                                             className={`p-3 rounded-xl transition-all relative overflow-hidden group ${fontFamily === font.id
-                                                ? 'glass-3d ring-2 ring-blue-500 bg-blue-50/50'
-                                                : 'glass-3d hover:bg-white/60'
+                                                ? 'soft-card ring-2 ring-blue-500 bg-blue-50/50'
+                                                : 'soft-card hover:bg-gray-50'
                                                 }`}
                                             style={{ fontFamily: font.value }}
                                         >
@@ -159,7 +159,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         value={customFontInput}
                                         onChange={(e) => setCustomFontInput(e.target.value)}
                                         placeholder="例如: Noto Serif SC"
-                                        className="flex-1 px-4 py-3 glass-input rounded-xl outline-none text-sm"
+                                        className="flex-1 px-4 py-3 soft-input rounded-xl outline-none text-sm"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') applyCustomFont();
                                         }}
@@ -235,7 +235,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         onClick={() => setGlobalScale(preset.value)}
                                         className={`py-2 rounded-lg transition-all font-medium ${Math.abs(globalScale - preset.value) < 0.01
                                             ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-lg shadow-blue-500/30 transform scale-105'
-                                            : 'glass-3d text-gray-600 hover:text-gray-900'
+                                            : 'soft-card text-gray-600 hover:text-gray-900'
                                             }`}
                                     >
                                         {preset.label}
@@ -260,7 +260,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             setCustomFontInput('');
                                         }
                                     }}
-                                    className="glass-3d flex items-center justify-center gap-2 px-4 py-3 text-gray-700 hover:text-red-600 hover:bg-red-50/50 rounded-xl transition-all"
+                                    className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-gray-700 hover:text-red-600 hover:bg-red-50/50 rounded-xl transition-all"
                                 >
                                     <RotateCcw className="w-4 h-4" />
                                     <span className="font-medium">重置设置</span>
@@ -269,14 +269,14 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 {/* 导出设置 */}
                                 <button
                                     onClick={handleExport}
-                                    className="glass-3d flex items-center justify-center gap-2 px-4 py-3 text-green-700 bg-green-50/30 hover:bg-green-50/80 rounded-xl transition-all"
+                                    className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-green-700 bg-green-50/30 hover:bg-green-50/80 rounded-xl transition-all"
                                 >
                                     <Download className="w-4 h-4" />
                                     <span className="font-medium">导出设置</span>
                                 </button>
 
                                 {/* 导入设置（文件） */}
-                                <label className="glass-3d flex items-center justify-center gap-2 px-4 py-3 text-blue-700 bg-blue-50/30 hover:bg-blue-50/80 rounded-xl transition-all cursor-pointer col-span-1">
+                                <label className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-blue-700 bg-blue-50/30 hover:bg-blue-50/80 rounded-xl transition-all cursor-pointer col-span-1">
                                     <Upload className="w-4 h-4" />
                                     <span className="font-medium">导入文件</span>
                                     <input
@@ -290,7 +290,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 {/* 导入设置（文本） */}
                                 <button
                                     onClick={() => setShowImportDialog(true)}
-                                    className="glass-3d flex items-center justify-center gap-2 px-4 py-3 text-purple-700 bg-purple-50/30 hover:bg-purple-50/80 rounded-xl transition-all"
+                                    className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-purple-700 bg-purple-50/30 hover:bg-purple-50/80 rounded-xl transition-all"
                                 >
                                     <Upload className="w-4 h-4" />
                                     <span className="font-medium">粘贴文本</span>
@@ -309,7 +309,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         onClick={() => setShowImportDialog(false)}
                     >
                         <div
-                            className="glass-3d rounded-2xl p-6 max-w-md w-full"
+                            className="soft-panel rounded-2xl p-6 max-w-md w-full"
                             onClick={(e) => e.stopPropagation()}
                         >
                             <h3 className="text-xl font-bold mb-4">导入设置 (JSON)</h3>
@@ -317,7 +317,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 value={importText}
                                 onChange={(e) => setImportText(e.target.value)}
                                 placeholder='粘贴设置 JSON 文本...'
-                                className="w-full h-48 px-4 py-3 glass-input rounded-xl outline-none text-sm font-mono resize-none"
+                                className="w-full h-48 px-4 py-3 soft-input rounded-xl outline-none text-sm font-mono resize-none"
                             />
                             <div className="flex gap-3 mt-4">
                                 <button

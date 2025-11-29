@@ -123,7 +123,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                     exit={{ scale: 0.95, opacity: 0 }}
                     transition={{ type: "spring", duration: 0.3 }}
                     onClick={(e) => e.stopPropagation()}
-                    className="glass-panel rounded-[32px] w-full max-w-5xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden"
+                    className="soft-panel rounded-[32px] w-full max-w-5xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden"
                 >
                     {/* Header */}
                     <div className="flex items-center justify-between px-8 py-6 border-b border-white/20">
@@ -195,7 +195,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                 value={searchQuery}
                                                 onChange={(e) => setSearchQuery(e.target.value)}
                                                 placeholder="搜索服务商..."
-                                                className="glass-input w-full pl-10 pr-4 py-2.5 rounded-xl text-sm"
+                                                className="soft-input w-full pl-10 pr-4 py-2.5 rounded-xl text-sm"
                                             />
                                         </div>
                                     </div>
@@ -211,7 +211,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                 className={`
                       relative p-4 rounded-2xl cursor-pointer transition-all duration-200
                       ${activeProviderId === provider.id
-                                                        ? 'glass-3d shadow-lg'
+                                                        ? 'soft-card shadow-lg'
                                                         : 'hover:bg-white/30 bg-white/10'}
                     `}
                                             >
@@ -255,14 +255,14 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                             transition={{ duration: 0.3 }}
                                         >
                                             {/* API Configuration */}
-                                            <div className="glass-3d rounded-2xl p-6 mb-6">
+                                            <div className="soft-card rounded-2xl p-6 mb-6">
                                                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                                                     <Server className="w-5 h-5 text-blue-600" />
                                                     API 配置
                                                 </h3>
 
                                                 {activeProvider.type === 'local' ? (
-                                                    <div className="glass-3d bg-gradient-to-br from-green-50/50 to-emerald-50/50 rounded-xl p-5 border border-green-200/50">
+                                                    <div className="soft-card bg-gradient-to-br from-green-50/50 to-emerald-50/50 rounded-xl p-5 border border-green-200/50">
                                                         <div className="flex items-start gap-3">
                                                             <div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center flex-shrink-0">
                                                                 <Zap className="w-5 h-5 text-white" />
@@ -290,7 +290,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                                 value={activeProvider.apiKey || ''}
                                                                 onChange={(e) => updateProvider(activeProvider.id, { apiKey: e.target.value })}
                                                                 placeholder="sk-..."
-                                                                className="glass-input w-full px-4 py-3 rounded-xl text-sm"
+                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm"
                                                             />
                                                         </div>
 
@@ -304,7 +304,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                                 value={activeProvider.apiHost || ''}
                                                                 onChange={(e) => updateProvider(activeProvider.id, { apiHost: e.target.value })}
                                                                 placeholder="https://..."
-                                                                className="glass-input w-full px-4 py-3 rounded-xl text-sm font-mono"
+                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-mono"
                                                             />
                                                         </div>
 
@@ -315,7 +315,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                               px-6 py-3 rounded-xl font-semibold transition-all duration-200
                               ${activeProvider.enabled
                                                                         ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-lg shadow-green-500/30 hover:shadow-green-500/50 hover:scale-105'
-                                                                        : 'glass-3d text-gray-700 hover:scale-105'}
+                                                                        : 'soft-card text-gray-700 hover:scale-105'}
                             `}
                                                             >
                                                                 {activeProvider.enabled ? (
@@ -332,7 +332,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                                 onClick={() => handleTestConnection(activeProvider)}
                                                                 disabled={testingProvider === activeProvider.id}
                                                                 className={`
-                                                            glass-3d px-6 py-3 rounded-xl font-semibold transition-all duration-200
+                                                            soft-card px-6 py-3 rounded-xl font-semibold transition-all duration-200
                                                             ${testingProvider === activeProvider.id
                                                                         ? 'opacity-50 cursor-not-allowed'
                                                                         : 'hover:scale-105'}
@@ -387,7 +387,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                             </div>
 
                                             {/* Provider Models Preview */}
-                                            <div className="glass-3d rounded-2xl p-6 mt-6">
+                                            <div className="soft-card rounded-2xl p-6 mt-6">
                                                 <div className="flex items-center justify-between mb-4">
                                                     <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                                                         <Zap className="w-5 h-5 text-green-600" />
@@ -427,7 +427,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                             {previewModels.map(model => (
                                                                 <div
                                                                     key={`${model.providerId}-${model.id}`}
-                                                                    className="glass-3d rounded-xl p-3 flex items-center gap-3"
+                                                                    className="soft-card rounded-xl p-3 flex items-center gap-3"
                                                                 >
                                                                     <div className="flex-1">
                                                                         <div className="font-semibold text-gray-900 text-sm">{model.name}</div>
@@ -503,7 +503,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                             </div>
 
                                             {/* Embedding 默认模型 */}
-                                            <div className="glass-3d rounded-2xl p-6 space-y-4">
+                                            <div className="soft-card rounded-2xl p-6 space-y-4">
                                                 <div className="flex items-center gap-3 mb-4">
                                                     <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
                                                         <Zap className="w-5 h-5 text-white" />
@@ -526,7 +526,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                                     const value = e.target.value
                                                                     setDefaultModel('embeddingModel', value || null)
                                                                 }}
-                                                                className="glass-input w-full px-4 py-3 rounded-xl text-sm font-medium"
+                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-medium"
                                                             >
                                                                 <option value="">请选择...</option>
                                                                 {embeddingModels.map(model => {
@@ -601,7 +601,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                             </div>
 
                                             {/* Rerank 默认模型（可选） */}
-                                            <div className="glass-3d rounded-2xl p-6 space-y-4">
+                                            <div className="soft-card rounded-2xl p-6 space-y-4">
                                                 <div className="flex items-center gap-3 mb-4">
                                                     <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
                                                         <Zap className="w-5 h-5 text-white" />
@@ -624,7 +624,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                                     const value = e.target.value
                                                                     setDefaultModel('rerankModel', value || null)
                                                                 }}
-                                                                className="glass-input w-full px-4 py-3 rounded-xl text-sm font-medium"
+                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-medium"
                                                             >
                                                                 <option value="">不使用重排模型</option>
                                                                 {rerankModels.map(model => {
@@ -693,7 +693,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                             </div>
 
                                             {/* Configuration Preview */}
-                                            <div className="glass-3d rounded-2xl p-6 bg-gradient-to-br from-green-50 to-blue-50">
+                                            <div className="soft-card rounded-2xl p-6 bg-gradient-to-br from-green-50 to-blue-50">
                                                 <div className="flex items-center gap-3 mb-4">
                                                     <Settings className="w-6 h-6 text-green-600" />
                                                     <h4 className="text-lg font-bold text-gray-900">配置预览</h4>
