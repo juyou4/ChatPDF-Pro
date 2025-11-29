@@ -1197,6 +1197,235 @@ async def get_storage_info():
         "platform": platform.system()
     }
 
+# Provider管理API
+class ProviderTestRequest(BaseModel):
+    providerId: str
+    apiKey: str
+    apiHost: str
+
+@app.post("/api/providers/test")
+async def test_provider_connection(request: ProviderTestRequest):
+    """测试Provider连接
+
+    验证provider的API key和host是否正确配置
+    尝试获取可用模型列表
+    """
+    try:
+        # 根据不同provider测试连接
+        if request.providerId == 'local':
+            return {
+                "success": True,
+                "message": "本地模型无需连接测试",
+                "availableModels": 2
+            }
+
+        # 对于OpenAI兼容的API，尝试获取模型列表
+        models_endpoint = f"{request.apiHost}/models" if not request.apiHost.endswith('/v1') else f"{request.apiHost}/models"
+
+        headers = {
+            "Authorization": f"Bearer {request.apiKey}",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(models_endpoint, headers=headers)
+
+            if response.status_code == 200:
+                data = response.json()
+                model_count = len(data.get('data', [])) if isinstance(data.get('data'), list) else 0
+
+                return {
+                    "success": True,
+                    "message": "连接成功",
+                    "availableModels": model_count
+                }
+            elif response.status_code == 401:
+                return {
+                    "success": False,
+                    "message": "API Key 无效"
+                }
+            elif response.status_code == 404:
+                # 某些provider可能没有/models端点，尝试其他方式验证
+                return {
+                    "success": True,
+                    "message": "连接成功（无法获取模型列表）",
+                    "availableModels": 0
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"连接失败：HTTP {response.status_code}"
+                }
+
+    except httpx.ConnectError:
+        return {
+            "success": False,
+            "message": "无法连接到API服务器，请检查网络或API地址"
+        }
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "message": "连接超时，请稍后重试"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"测试失败：{str(e)}"
+        }
+
+class ModelFetchRequest(BaseModel):
+    providerId: str
+    apiKey: str
+    apiHost: str
+
+@app.post("/api/models/fetch")
+async def fetch_provider_models(request: ModelFetchRequest):
+    """从Provider API获取模型列表
+
+    代理调用provider的/models端点，避免前端CORS问题
+    将响应转换为统一的Model格式
+    """
+    try:
+        # 本地provider返回预定义的模型列表
+        if request.providerId == 'local':
+            return {
+                "models": [
+                    {
+                        "id": "all-MiniLM-L6-v2",
+                        "name": "MiniLM-L6-v2",
+                        "providerId": "local",
+                        "type": "embedding",
+                        "metadata": {
+                            "dimension": 384,
+                            "maxTokens": 256,
+                            "description": "快速通用模型"
+                        },
+                        "isSystem": True,
+                        "isUserAdded": False
+                    },
+                    {
+                        "id": "paraphrase-multilingual-MiniLM-L12-v2",
+                        "name": "Multilingual MiniLM-L12-v2",
+                        "providerId": "local",
+                        "type": "embedding",
+                        "metadata": {
+                            "dimension": 384,
+                            "maxTokens": 128,
+                            "description": "多语言支持"
+                        },
+                        "isSystem": True,
+                        "isUserAdded": False
+                    }
+                ],
+                "providerId": "local",
+                "timestamp": int(datetime.now().timestamp())
+            }
+
+        # 对于OpenAI兼容的API，获取模型列表
+        models_endpoint = f"{request.apiHost}/models"
+
+        headers = {
+            "Authorization": f"Bearer {request.apiKey}",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(models_endpoint, headers=headers)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                # 解析OpenAI格式的响应
+                models = []
+                if 'data' in data and isinstance(data['data'], list):
+                    for item in data['data']:
+                        model_id = item.get('id', '')
+                        model_type = _detect_model_type(model_id)
+
+                        model = {
+                            "id": model_id,
+                            "name": model_id,
+                            "providerId": request.providerId,
+                            "type": model_type,
+                            "metadata": _infer_model_metadata(model_id, model_type),
+                            "isSystem": False,
+                            "isUserAdded": False
+                        }
+
+                        # 添加owned_by信息到description
+                        if 'owned_by' in item:
+                            model["metadata"]["description"] = f"Owned by: {item['owned_by']}"
+
+                        models.append(model)
+
+                return {
+                    "models": models,
+                    "providerId": request.providerId,
+                    "timestamp": int(datetime.now().timestamp())
+                }
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Provider API returned: {response.status_code}"
+                )
+
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="无法连接到Provider API")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Provider API响应超时")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取模型失败：{str(e)}")
+
+def _detect_model_type(model_id: str) -> str:
+    """根据模型ID推断类型"""
+    lower_id = model_id.lower()
+
+    if 'rerank' in lower_id or 'ranker' in lower_id:
+        return 'rerank'
+    elif 'embedding' in lower_id or 'embed' in lower_id:
+        return 'embedding'
+    elif 'dall-e' in lower_id or 'stable-diffusion' in lower_id:
+        return 'image'
+    else:
+        return 'chat'
+
+def _infer_model_metadata(model_id: str, model_type: str) -> dict:
+    """根据模型ID推断元数据"""
+    metadata = {}
+
+    if model_type == 'embedding':
+        # OpenAI
+        if 'text-embedding-3-large' in model_id:
+            metadata['dimension'] = 3072
+            metadata['maxTokens'] = 8191
+        elif 'text-embedding-3-small' in model_id:
+            metadata['dimension'] = 1536
+            metadata['maxTokens'] = 8191
+        elif 'text-embedding-ada-002' in model_id:
+            metadata['dimension'] = 1536
+            metadata['maxTokens'] = 8191
+        # BAAI
+        elif 'bge-m3' in model_id:
+            metadata['dimension'] = 1024
+            metadata['maxTokens'] = 8192
+        # 默认值
+        else:
+            metadata['dimension'] = 1024
+            metadata['maxTokens'] = 512
+
+    elif model_type == 'chat':
+        # GPT-4
+        if 'gpt-4' in model_id:
+            metadata['contextWindow'] = 32768 if '32k' in model_id else 8192
+        # GPT-3.5
+        elif 'gpt-3.5' in model_id:
+            metadata['contextWindow'] = 16384 if '16k' in model_id else 4096
+        # 默认值
+        else:
+            metadata['contextWindow'] = 4096
+
+    return metadata
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

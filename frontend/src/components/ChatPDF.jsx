@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -7,9 +7,12 @@ import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
 import StreamingMarkdown from './StreamingMarkdown';
 import TextSelectionToolbar from './TextSelectionToolbar';
-import { useEmbedding } from '../contexts/EmbeddingContext';
+import { useProvider } from '../contexts/ProviderContext';
+import { useModel } from '../contexts/ModelContext';
+import { useDefaults } from '../contexts/DefaultsContext';
 import EmbeddingModelSelector from './EmbeddingModelSelector';
 import EmbeddingSettings from './EmbeddingSettings';
+import GlobalSettings from './GlobalSettings';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -27,6 +30,7 @@ const ChatPDF = () => {
   // UI State
   const [showSettings, setShowSettings] = useState(false);
   const [showEmbeddingSettings, setShowEmbeddingSettings] = useState(false);
+  const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [history, setHistory] = useState([]); // Mock history for now
@@ -68,10 +72,26 @@ const ChatPDF = () => {
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
 
-  const {
-    getCurrentProvider,
-    getCurrentEmbeddingModel
-  } = useEmbedding();
+  // New three-layer context
+  const { getProviderById } = useProvider();
+  const { getModelById } = useModel();
+  const { getDefaultModel } = useDefaults();
+
+  // Helper functions to get current provider and model
+  const getCurrentProvider = () => {
+    const embeddingModelKey = getDefaultModel('embeddingModel');
+    if (!embeddingModelKey) return null;
+    const [providerId] = embeddingModelKey.split(':');
+    return getProviderById(providerId);
+  };
+
+  const getCurrentEmbeddingModel = () => {
+    const embeddingModelKey = getDefaultModel('embeddingModel');
+    if (!embeddingModelKey) return null;
+    const [providerId, modelId] = embeddingModelKey.split(':');
+    const model = getModelById(modelId, providerId);
+    return model;
+  };
 
   // Refs
   const fileInputRef = useRef(null);
@@ -874,7 +894,7 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 glass-panel border-r border-white/40 flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
+        className={`flex-shrink-0 glass-3d border-r border-white/40 flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : 'bg-white/60'}`}
       >
         <div className="w-72 flex flex-col h-full">
           <div className="p-6 flex items-center justify-between">
@@ -961,8 +981,8 @@ const ChatPDF = () => {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`glass-panel rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
-              style={{ width: `${pdfPanelWidth}%`, minWidth: '400px' }}
+              className={`glass-3d rounded-[32px] overflow-hidden flex flex-col relative shadow-xl mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+              style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
               <div className="flex-1 overflow-hidden">
@@ -1079,8 +1099,8 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`glass-panel rounded-[32px] flex flex-col overflow-hidden shadow-xl flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
-            style={{ width: `${100 - pdfPanelWidth}%`, minWidth: '400px' }}
+            className={`glass-3d rounded-[32px] flex flex-col overflow-hidden shadow-xl ${darkMode ? 'bg-gray-800/50' : 'bg-white/70'}`}
+            style={{ width: `${100 - pdfPanelWidth}%`, minWidth: '350px' }}
           >
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -1357,9 +1377,9 @@ const ChatPDF = () => {
                       onChange={(e) => setStreamSpeed(e.target.value)}
                       className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                     >
-                      <option value="fast">快速 ⚡ (3字符/次, ~20ms)</option>
-                      <option value="normal">正常 ✨ (2字符/次, ~30ms)</option>
-                      <option value="slow">慢速 🐢 (1字符/次, ~60ms)</option>
+                      <option value="fast">快速  (3字符/次, ~20ms)</option>
+                      <option value="normal">正常  (2字符/次, ~30ms)</option>
+                      <option value="slow">慢速  (1字符/次, ~60ms)</option>
                       <option value="off">关闭流式（直接显示）</option>
                     </select>
                     <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度（已优化为按字符流式）</p>
@@ -1388,9 +1408,23 @@ const ChatPDF = () => {
                   )}
                 </div>
 
+                {/* 全局设置入口 */}
+                <div className="pt-4 border-t border-gray-100">
+                  <button
+                    onClick={() => {
+                      setShowSettings(false);
+                      setShowGlobalSettings(true);
+                    }}
+                    className="glass-3d w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                  >
+                    <Type className="w-4 h-4" />
+                    全局设置（字体、缩放）
+                  </button>
+                </div>
+
                 {/* 工具栏设置 */}
                 <div className="pt-4 border-t border-gray-100 space-y-3">
-                  <h3 className="text-sm font-semibold text-gray-800">🛠️ 划词工具栏</h3>
+                  <h3 className="text-sm font-semibold text-gray-800">🎨 划词工具栏</h3>
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
@@ -1505,14 +1539,20 @@ const ChatPDF = () => {
               </div>
             </motion.div>
           </div>
-        )}
-      </AnimatePresence>
+        )
+        }
+      </AnimatePresence >
 
       <EmbeddingSettings
         isOpen={showEmbeddingSettings}
         onClose={() => setShowEmbeddingSettings(false)}
       />
-    </div>
+
+      <GlobalSettings
+        isOpen={showGlobalSettings}
+        onClose={() => setShowGlobalSettings(false)}
+      />
+    </div >
   );
 };
 

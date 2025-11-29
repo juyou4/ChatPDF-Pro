@@ -1,24 +1,27 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Check, Zap, DollarSign } from 'lucide-react'
-import { useEmbedding } from '../contexts/EmbeddingContext'
+import { useProvider } from '../contexts/ProviderContext'
+import { useModel } from '../contexts/ModelContext'
+import { useDefaults } from '../contexts/DefaultsContext'
+import ProviderAvatar from './ProviderAvatar'
 
 export default function EmbeddingModelSelector() {
-    const {
-        providers,
-        selectedProviderId,
-        selectedEmbeddingModelId,
-        selectProvider,
-        selectEmbeddingModel,
-        getCurrentProvider,
-        getCurrentEmbeddingModel
-    } = useEmbedding()
+    const { providers, getProviderById } = useProvider()
+    const { getModelById, getModelsByType } = useModel()
+    const { getDefaultModel, setDefaultModel } = useDefaults()
 
     const [isOpen, setIsOpen] = useState(false)
     const dropdownRef = useRef(null)
 
-    const currentProvider = getCurrentProvider()
-    const currentModel = getCurrentEmbeddingModel()
+    // Get current embedding model
+    const embeddingModelKey = getDefaultModel('embeddingModel')
+    const [currentProviderId, currentModelId] = embeddingModelKey?.split(':') || [null, null]
+    const currentProvider = currentProviderId ? getProviderById(currentProviderId) : null
+    const currentModel = currentModelId ? getModelById(currentModelId, currentProviderId) : null
+
+    // Get all embedding models grouped by provider
+    const embeddingModels = getModelsByType('embedding')
     const enabledProviders = providers.filter(p => p.enabled)
 
     // 点击外部关闭
@@ -53,7 +56,7 @@ export default function EmbeddingModelSelector() {
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                         {currentProvider && (
-                            <span className="text-2xl">{currentProvider.logo}</span>
+                            <ProviderAvatar provider={currentProvider} size={24} />
                         )}
                         <div className="text-left">
                             <div className="text-sm font-semibold text-gray-900">
@@ -62,12 +65,12 @@ export default function EmbeddingModelSelector() {
                             {currentModel && (
                                 <div className="flex items-center gap-3 text-xs text-gray-600 mt-1">
                                     <span className="flex items-center gap-1">
-                                        📐 {currentModel.dimension}维
+                                        📐 {currentModel.metadata?.dimension || '?'}维
                                     </span>
-                                    {currentModel.pricing ? (
+                                    {currentModel.metadata?.pricing ? (
                                         <span className="flex items-center gap-1 px-2 py-0.5 bg-amber-500/20 text-amber-700 rounded font-semibold">
                                             <DollarSign className="w-3 h-3" />
-                                            ${currentModel.pricing.perMillionTokens}/M
+                                            ${currentModel.metadata.pricing.perMillionTokens}/M
                                         </span>
                                     ) : (
                                         <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/20 text-green-700 rounded font-semibold">
@@ -100,71 +103,81 @@ export default function EmbeddingModelSelector() {
                     >
                         <div className="overflow-y-auto max-h-96">
                             {enabledProviders.length > 0 ? (
-                                enabledProviders.map((provider, providerIndex) => (
-                                    <div key={provider.id}>
-                                        {/* Provider Header */}
-                                        <div className="sticky top-0 px-4 py-2 bg-white/60 backdrop-blur-md border-b border-white/40 z-10">
-                                            <div className="flex items-center gap-2 text-xs font-bold text-gray-600">
-                                                <span className="text-lg">{provider.logo}</span>
-                                                <span>{provider.name}</span>
-                                            </div>
-                                        </div>
+                                enabledProviders.map((provider, providerIndex) => {
+                                    // Filter embedding models for this provider
+                                    const providerEmbeddingModels = embeddingModels.filter(m => m.providerId === provider.id)
 
-                                        {/* Embedding Models */}
-                                        {provider.models.filter(m => m.type === 'embedding').map((model, modelIndex) => (
-                                            <motion.button
-                                                key={model.id}
-                                                whileHover={{ backgroundColor: 'rgba(59, 130, 246, 0.05)' }}
-                                                onClick={() => {
-                                                    selectProvider(provider.id)
-                                                    selectEmbeddingModel(model.id)
-                                                    setIsOpen(false)
-                                                }}
-                                                className={`
-                          w-full px-4 py-3 text-left transition-colors
-                          ${selectedEmbeddingModelId === model.id ? 'bg-blue-50/50' : ''}
-                          ${modelIndex === 0 ? '' : 'border-t border-white/30'}
-                        `}
-                                            >
-                                                <div className="flex items-center justify-between">
-                                                    <div className="flex-1 pr-3">
-                                                        <div className="text-sm font-semibold text-gray-900">
-                                                            {model.name}
-                                                        </div>
-                                                        {model.description && (
-                                                            <div className="text-xs text-gray-600 mt-0.5 line-clamp-1">
-                                                                {model.description}
+                                    if (providerEmbeddingModels.length === 0) return null
+
+                                    return (
+                                        <div key={provider.id}>
+                                            {/* Provider Header */}
+                                            <div className="sticky top-0 px-4 py-2 bg-white/60 backdrop-blur-md border-b border-white/40 z-10">
+                                                <div className="flex items-center gap-2 text-xs font-bold text-gray-600">
+                                                    <ProviderAvatar provider={provider} size={20} />
+                                                    <span>{provider.name}</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Embedding Models */}
+                                            {providerEmbeddingModels.map((model, modelIndex) => {
+                                                const isSelected = embeddingModelKey === `${provider.id}:${model.id}`
+
+                                                return (
+                                                    <motion.button
+                                                        key={model.id}
+                                                        whileHover={{ backgroundColor: 'rgba(59, 130, 246, 0.05)' }}
+                                                        onClick={() => {
+                                                            setDefaultModel('embeddingModel', `${provider.id}:${model.id}`)
+                                                            setIsOpen(false)
+                                                        }}
+                                                        className={`
+                                  w-full px-4 py-3 text-left transition-colors
+                                  ${isSelected ? 'bg-blue-50/50' : ''}
+                                  ${modelIndex === 0 ? '' : 'border-t border-white/30'}
+                                `}
+                                                    >
+                                                        <div className="flex items-center justify-between">
+                                                            <div className="flex-1 pr-3">
+                                                                <div className="text-sm font-semibold text-gray-900">
+                                                                    {model.name}
+                                                                </div>
+                                                                {model.metadata?.description && (
+                                                                    <div className="text-xs text-gray-600 mt-0.5 line-clamp-1">
+                                                                        {model.metadata.description}
+                                                                    </div>
+                                                                )}
+                                                                <div className="flex items-center gap-2 mt-1.5">
+                                                                    <span className="px-2 py-0.5 glass-panel rounded text-xs text-gray-600">
+                                                                        📐 {model.metadata?.dimension || '?'}维
+                                                                    </span>
+                                                                    {model.metadata?.pricing ? (
+                                                                        <span className="px-2 py-0.5 bg-amber-500/20 text-amber-700 rounded text-xs font-semibold">
+                                                                            ${model.metadata.pricing.perMillionTokens}/M
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="px-2 py-0.5 bg-green-500/20 text-green-700 rounded text-xs font-semibold">
+                                                                            免费
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                             </div>
-                                                        )}
-                                                        <div className="flex items-center gap-2 mt-1.5">
-                                                            <span className="px-2 py-0.5 glass-panel rounded text-xs text-gray-600">
-                                                                📐 {model.dimension}维
-                                                            </span>
-                                                            {model.pricing ? (
-                                                                <span className="px-2 py-0.5 bg-amber-500/20 text-amber-700 rounded text-xs font-semibold">
-                                                                    ${model.pricing.perMillionTokens}/M
-                                                                </span>
-                                                            ) : (
-                                                                <span className="px-2 py-0.5 bg-green-500/20 text-green-700 rounded text-xs font-semibold">
-                                                                    免费
-                                                                </span>
+                                                            {isSelected && (
+                                                                <motion.div
+                                                                    initial={{ scale: 0 }}
+                                                                    animate={{ scale: 1 }}
+                                                                    className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0"
+                                                                >
+                                                                    <Check className="w-4 h-4 text-white" />
+                                                                </motion.div>
                                                             )}
                                                         </div>
-                                                    </div>
-                                                    {selectedEmbeddingModelId === model.id && (
-                                                        <motion.div
-                                                            initial={{ scale: 0 }}
-                                                            animate={{ scale: 1 }}
-                                                            className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0"
-                                                        >
-                                                            <Check className="w-4 h-4 text-white" />
-                                                        </motion.div>
-                                                    )}
-                                                </div>
-                                            </motion.button>
-                                        ))}
-                                    </div>
-                                ))
+                                                    </motion.button>
+                                                )
+                                            })}
+                                        </div>
+                                    )
+                                })
                             ) : (
                                 <div className="px-4 py-8 text-center">
                                     <div className="text-gray-500 mb-2">😔 没有启用的服务商</div>
