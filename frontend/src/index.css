@@ -11,10 +11,10 @@
 
   /* --- 2. Material Neutrality (Refined) --- */
   /* 暖调中性色 - 模仿纸张/陶土质感 */
-  --color-bg-base: #F2F0ED;
-  /* 暖灰/米色底 */
+  --color-bg-base: #F5F4F2;
+  /* 更淡的米白/羊皮纸色 */
   --color-bg-surface: #FFFFFF;
-  --color-bg-subtle: #F7F5F3;
+  --color-bg-subtle: #FAF9F7;
 
   /* 品牌色 - 更加柔和的蓝 */
   --color-primary: #5B8BF7;
@@ -30,38 +30,38 @@
   --color-text-muted: #B0B4BC;
 
   /* --- 1. Light Restraint & 3. Soft Depth (Enhanced) --- */
-  /* 阴影系统 - 更加弥散，带有环境色 */
+  /* 阴影系统 - 极轻微阴影，避免"脏" */
   --shadow-sm:
-    0 2px 4px rgba(166, 173, 186, 0.2),
-    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    0 2px 8px -2px rgba(166, 173, 186, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
 
   --shadow-md:
-    0 6px 12px -2px rgba(166, 173, 186, 0.25),
-    0 3px 6px -3px rgba(0, 0, 0, 0.1),
+    0 8px 16px -4px rgba(166, 173, 186, 0.15),
+    0 4px 6px -2px rgba(0, 0, 0, 0.02),
     inset 0 1px 0 rgba(255, 255, 255, 1);
 
   --shadow-lg:
-    0 15px 25px -5px rgba(166, 173, 186, 0.25),
-    0 8px 10px -6px rgba(166, 173, 186, 0.1),
+    0 20px 30px -8px rgba(166, 173, 186, 0.15),
+    0 10px 15px -5px rgba(166, 173, 186, 0.05),
     inset 0 1px 0 rgba(255, 255, 255, 1);
 
   --shadow-float:
-    0 25px 50px -12px rgba(166, 173, 186, 0.35),
+    0 30px 60px -12px rgba(166, 173, 186, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 1);
 
-  /* 内阴影 - 更深邃的凹陷感 */
+  /* 内阴影 - 柔和凹陷 */
   --shadow-inner:
-    inset 0 2px 4px 0 rgba(166, 173, 186, 0.15),
-    inset 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    inset 0 2px 4px 0 rgba(166, 173, 186, 0.06),
+    inset 0 1px 2px 0 rgba(0, 0, 0, 0.02);
 
   --shadow-inner-deep:
-    inset 0 4px 8px 0 rgba(166, 173, 186, 0.2),
-    inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+    inset 0 4px 8px 0 rgba(166, 173, 186, 0.1),
+    inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
 
-  /* 毛玻璃 - 更加通透，减少模糊，增加光泽 */
-  --glass-blur: 12px;
-  --glass-bg: rgba(255, 255, 255, 0.65);
-  --glass-border: rgba(255, 255, 255, 0.4);
+  /* 毛玻璃 - 更加通透，光泽感 */
+  --glass-blur: 16px;
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.5);
 }
 
 body {
@@ -72,17 +72,35 @@ body {
   background-color: var(--color-bg-base);
   /* 极淡的暖光照射效果 */
   background-image:
-    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.8) 0%, transparent 50%),
-    radial-gradient(circle at 100% 100%, rgba(255, 255, 255, 0.6) 0%, transparent 50%);
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.9) 0%, transparent 60%),
+    radial-gradient(circle at 100% 100%, rgba(255, 255, 255, 0.7) 0%, transparent 60%);
   min-height: 100vh;
   color: var(--color-text-main);
+  /* 增加字间距和行高 */
+  letter-spacing: 0.015em;
+  line-height: 1.6;
+  /* 与 Cherry Studio 一致的全局缩放方案：优先使用 zoom，整体等比放大/缩小 */
+  zoom: var(--global-scale);
+}
+
+html {
+  width: 100%;
+  height: 100%;
 }
 
 #root {
-  transform: scale(var(--global-scale));
-  transform-origin: top left;
-  width: calc(100% / var(--global-scale));
-  height: calc(100vh / var(--global-scale));
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Safari 等不支持 zoom 的浏览器使用 transform 回退，保持尺寸补偿避免溢出 */
+@supports not (zoom: 1) {
+  body {
+    transform: scale(var(--global-scale));
+    transform-origin: top left;
+    width: calc(100% / var(--global-scale));
+    height: calc(100vh / var(--global-scale));
+  }
 }
 
 /* 滚动条 */
@@ -96,12 +114,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(166, 173, 186, 0.3);
+  background: rgba(166, 173, 186, 0.2);
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(166, 173, 186, 0.5);
+  background: rgba(166, 173, 186, 0.4);
 }
 
 /* --- 组件样式 (Enhanced Soft/Clay) --- */
@@ -111,28 +129,31 @@ body {
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--glass-border);
   box-shadow: var(--shadow-lg);
   border-radius: 32px;
-  /* 更大的圆角 */
+  /* 更大的圆角 32px */
 }
 
 /* 2. 凹陷输入框 - 更深的凹陷 */
 .soft-input {
-  background: #EEF0F4;
-  /* 稍深一点的灰，增加对比 */
+  background: #F0F2F5;
+  /* 极淡灰 */
   border: 1px solid transparent;
   box-shadow: var(--shadow-inner);
-  border-radius: 20px;
+  border-radius: 24px;
+  /* 24px 圆角 */
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   color: var(--color-text-main);
+  padding: 12px 20px;
+  /* 更多内边距 */
 }
 
 .soft-input:focus {
   background: #FFFFFF;
   border-color: var(--color-primary-soft);
   box-shadow:
-    0 0 0 4px rgba(91, 139, 247, 0.15),
+    0 0 0 4px rgba(91, 139, 247, 0.1),
     var(--shadow-inner);
   outline: none;
 }
@@ -140,15 +161,16 @@ body {
 /* 3. 3D 卡片 - 类似实体卡片 */
 .soft-card {
   background: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.9);
   box-shadow: var(--shadow-md);
-  border-radius: 24px;
-  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border-radius: 28px;
+  /* 28px 圆角 */
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   /* 弹性动画 */
 }
 
 .soft-card:hover {
-  transform: translateY(-3px) scale(1.01);
+  transform: translateY(-4px) scale(1.01);
   box-shadow: var(--shadow-float);
   z-index: 10;
 }
@@ -163,8 +185,8 @@ body {
   background: linear-gradient(135deg, #5B8BF7 0%, #4671D5 100%);
   color: white;
   box-shadow:
-    0 8px 16px -4px rgba(91, 139, 247, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    0 10px 20px -5px rgba(91, 139, 247, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
   border-radius: 24px 24px 4px 24px;
 }
 
@@ -184,16 +206,16 @@ body {
   border-radius: 9999px;
   /* 完全圆角 */
   font-weight: 600;
-  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   cursor: pointer;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
 }
 
 .soft-button-primary {
   background: linear-gradient(135deg, #5B8BF7 0%, #4B7BEC 100%);
   color: white;
   box-shadow:
-    0 6px 12px -2px rgba(91, 139, 247, 0.4),
+    0 8px 16px -4px rgba(91, 139, 247, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -201,8 +223,9 @@ body {
 .soft-button-primary:hover {
   transform: translateY(-2px);
   box-shadow:
-    0 10px 20px -4px rgba(91, 139, 247, 0.5),
+    0 12px 24px -6px rgba(91, 139, 247, 0.45),
     inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  filter: brightness(1.05);
 }
 
 .soft-button-primary:active {
@@ -219,7 +242,7 @@ body {
 
 .soft-button-secondary:hover {
   background: #F9FAFB;
-  transform: translateY(-1px);
+  transform: translateY(-2px);
   box-shadow: var(--shadow-md);
 }
 
@@ -229,7 +252,7 @@ body {
 }
 
 .soft-button-ghost:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(0, 0, 0, 0.03);
   color: var(--color-text-main);
 }
 

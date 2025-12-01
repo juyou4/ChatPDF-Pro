@@ -98,12 +98,7 @@ const PDFViewer = ({ pdfUrl, onTextSelect }) => {
                     </Document>
                 )}
             </div>
-            {selectedText && (
-                <div className="p-3 bg-blue-50 border-t border-blue-100">
-                    <div className="text-xs text-blue-600 font-medium">已选择文本</div>
-                    <div className="text-sm text-gray-700 mt-1 line-clamp-2">{selectedText}</div>
-                </div>
-            )}
+            {/* selectedText footer removed as per user request */}
         </div>
     );
 };

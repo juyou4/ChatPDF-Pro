@@ -9,6 +9,7 @@ import { useProvider } from '../contexts/ProviderContext'
 import { useModel } from '../contexts/ModelContext'
 import { useDefaults } from '../contexts/DefaultsContext'
 import ProviderAvatar from './ProviderAvatar'
+import ManageModelsPopup from './ManageModelsPopup'
 
 export default function EmbeddingSettings({ isOpen, onClose }) {
     const {
@@ -38,6 +39,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     const [searchQuery, setSearchQuery] = useState('')
     const [testingProvider, setTestingProvider] = useState(null)
     const [testResult, setTestResult] = useState(null)
+    const [manageModelsOpen, setManageModelsOpen] = useState(false)
 
     const activeProvider = providers.find(p => p.id === activeProviderId)
 
@@ -109,6 +111,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     if (!isOpen) return null
 
     return (
+        <>
         <AnimatePresence>
             <motion.div
                 initial={{ opacity: 0 }}
@@ -394,10 +397,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                                         模型预览
                                                     </h3>
                                                     <button
-                                                        onClick={() => {
-                                                            // TODO: Open ManageModelsPopup
-                                                            console.log('Open ManageModelsPopup for provider:', activeProvider.id)
-                                                        }}
+                                                        onClick={() => setManageModelsOpen(true)}
                                                         className="bg-gradient-to-r from-blue-500 to-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:scale-105 transition-all flex items-center gap-2 shadow-lg"
                                                     >
                                                         <Zap className="w-4 h-4" />
@@ -736,5 +736,15 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                 </motion.div>
             </motion.div>
         </AnimatePresence>
+
+        {/* Manage Models Popup */}
+        {activeProvider && (
+            <ManageModelsPopup
+                isOpen={manageModelsOpen}
+                onClose={() => setManageModelsOpen(false)}
+                providerId={activeProvider.id}
+            />
+        )}
+    </>
     )
 }

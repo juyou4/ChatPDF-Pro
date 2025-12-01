@@ -23,7 +23,8 @@ export async function fetchModelsFromProvider(
             body: JSON.stringify({
                 providerId: provider.id,
                 apiKey: provider.apiKey,
-                apiHost: provider.apiHost
+                apiHost: provider.apiHost,
+                fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint
             })
         })
 

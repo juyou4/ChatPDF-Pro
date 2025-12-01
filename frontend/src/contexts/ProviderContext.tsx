@@ -122,7 +122,8 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
                 body: JSON.stringify({
                     providerId: provider.id,
                     apiKey: provider.apiKey,
-                    apiHost: provider.apiHost
+                    apiHost: provider.apiHost,
+                    fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint
                 })
             })
 

@@ -1202,6 +1202,17 @@ class ProviderTestRequest(BaseModel):
     providerId: str
     apiKey: str
     apiHost: str
+    fetchModelsEndpoint: str | None = None
+
+def _build_endpoint(base: str, path: str | None) -> str:
+    """Join base url and relative endpoint safely"""
+    if not base:
+        return path or ""
+    base_clean = base.rstrip('/')
+    if not path:
+        return base_clean
+    path_clean = path.lstrip('/')
+    return f"{base_clean}/{path_clean}"
 
 @app.post("/api/providers/test")
 async def test_provider_connection(request: ProviderTestRequest):
@@ -1220,7 +1231,7 @@ async def test_provider_connection(request: ProviderTestRequest):
             }
 
         # 对于OpenAI兼容的API，尝试获取模型列表
-        models_endpoint = f"{request.apiHost}/models" if not request.apiHost.endswith('/v1') else f"{request.apiHost}/models"
+        models_endpoint = _build_endpoint(request.apiHost, request.fetchModelsEndpoint or "/models")
 
         headers = {
             "Authorization": f"Bearer {request.apiKey}",
@@ -1277,6 +1288,7 @@ class ModelFetchRequest(BaseModel):
     providerId: str
     apiKey: str
     apiHost: str
+    fetchModelsEndpoint: str | None = None
 
 @app.post("/api/models/fetch")
 async def fetch_provider_models(request: ModelFetchRequest):
@@ -1322,7 +1334,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
             }
 
         # 对于OpenAI兼容的API，获取模型列表
-        models_endpoint = f"{request.apiHost}/models"
+        models_endpoint = _build_endpoint(request.apiHost, request.fetchModelsEndpoint or "/models")
 
         headers = {
             "Authorization": f"Bearer {request.apiKey}",
@@ -1376,6 +1388,177 @@ async def fetch_provider_models(request: ModelFetchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取模型失败：{str(e)}")
 
+class ModelTestRequest(BaseModel):
+    providerId: str
+    modelId: str
+    apiKey: str
+    apiHost: str
+    modelType: str  # 'embedding' or 'rerank'
+    embeddingEndpoint: str | None = None
+    rerankEndpoint: str | None = None
+
+@app.post("/api/models/test")
+async def test_model(request: ModelTestRequest):
+    """测试具体模型的功能
+
+    对本地模型：使用sentence-transformers加载并测试
+    对API模型：调用embedding或rerank端点测试
+    返回：维度、响应时间等信息
+    """
+    from datetime import datetime
+    import time
+
+    start_time = time.time()
+
+    try:
+        # 测试本地模型
+        if request.providerId == 'local':
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                # 加载模型
+                model = SentenceTransformer(request.modelId)
+
+                # 测试文本
+                test_text = "这是一个测试句子用于验证模型功能"
+
+                # 生成embedding
+                embedding = model.encode([test_text])
+
+                response_time = int((time.time() - start_time) * 1000)
+
+                return {
+                    "success": True,
+                    "message": "本地模型测试成功",
+                    "embeddingDimension": len(embedding[0]),
+                    "responseTime": response_time,
+                    "modelId": request.modelId
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "message": f"本地模型加载失败: {str(e)}"
+                }
+
+        # 测试API模型
+        else:
+            if request.modelType == 'embedding':
+                # 测试embedding模型
+                embeddings_endpoint = _build_endpoint(request.apiHost, request.embeddingEndpoint or "/embeddings")
+
+                headers = {
+                    "Authorization": f"Bearer {request.apiKey}",
+                    "Content-Type": "application/json"
+                }
+
+                data = {
+                    "model": request.modelId,
+                    "input": "This is a test sentence to verify the model functionality"
+                }
+
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(embeddings_endpoint, json=data, headers=headers)
+
+                    if response.status_code == 200:
+                        result = response.json()
+
+                        # 提取embedding
+                        embedding = result['data'][0]['embedding']
+                        response_time = int((time.time() - start_time) * 1000)
+
+                        return {
+                            "success": True,
+                            "message": f"模型 {request.modelId} 测试成功",
+                            "embeddingDimension": len(embedding),
+                            "responseTime": response_time,
+                            "modelId": request.modelId
+                        }
+                    elif response.status_code == 401:
+                        return {
+                            "success": False,
+                            "message": "API Key 无效"
+                        }
+                    elif response.status_code == 404:
+                        return {
+                            "success": False,
+                            "message": f"模型 {request.modelId} 不存在或不支持"
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "message": f"HTTP {response.status_code}: {response.text[:200]}"
+                        }
+
+            elif request.modelType == 'rerank':
+                # 测试rerank模型
+                # 注意：不同provider的rerank API可能不同
+                # 这里使用通用的格式
+                rerank_endpoint = _build_endpoint(request.apiHost, request.rerankEndpoint or "/rerank")
+
+                headers = {
+                    "Authorization": f"Bearer {request.apiKey}",
+                    "Content-Type": "application/json"
+                }
+
+                data = {
+                    "model": request.modelId,
+                    "query": "测试查询",
+                    "documents": [
+                        "这是第一个测试文档",
+                        "这是第二个测试文档"
+                    ]
+                }
+
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(rerank_endpoint, json=data, headers=headers)
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        response_time = int((time.time() - start_time) * 1000)
+
+                        return {
+                            "success": True,
+                            "message": f"Rerank模型 {request.modelId} 测试成功",
+                            "responseTime": response_time,
+                            "modelId": request.modelId
+                        }
+                    elif response.status_code == 401:
+                        return {
+                            "success": False,
+                            "message": "API Key 无效"
+                        }
+                    elif response.status_code == 404:
+                        return {
+                            "success": False,
+                            "message": f"模型 {request.modelId} 不存在或不支持rerank"
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "message": f"HTTP {response.status_code}: {response.text[:200]}"
+                        }
+            else:
+                return {
+                    "success": False,
+                    "message": f"不支持的模型类型: {request.modelType}"
+                }
+
+    except httpx.ConnectError:
+        return {
+            "success": False,
+            "message": "无法连接到API服务器，请检查网络或API地址"
+        }
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "message": "请求超时，请稍后重试"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"测试失败: {str(e)}"
+        }
+
 def _detect_model_type(model_id: str) -> str:
     """根据模型ID推断类型"""
     lower_id = model_id.lower()
@@ -1392,6 +1575,7 @@ def _detect_model_type(model_id: str) -> str:
 def _infer_model_metadata(model_id: str, model_type: str) -> dict:
     """根据模型ID推断元数据"""
     metadata = {}
+    lower_id = model_id.lower()
 
     if model_type == 'embedding':
         # OpenAI
@@ -1412,6 +1596,24 @@ def _infer_model_metadata(model_id: str, model_type: str) -> dict:
         else:
             metadata['dimension'] = 1024
             metadata['maxTokens'] = 512
+
+        # 定价映射（参考 SiliconFlow 常见模型）
+        pricing_map = [
+            ('qwen3-embedding-8b', 0.28),
+            ('qwen3-embedding-4b', 0.14),
+            ('qwen3-embedding-0.6b', 0.07),
+            ('qwen-embedding-8b', 0.28),
+            ('qwen-embedding-4b', 0.14),
+            ('qwen-embedding-0.6b', 0.07),
+            ('pro/baai/bge-m3', 0.07)
+        ]
+        for key, price in pricing_map:
+            if key in lower_id:
+                metadata['pricing'] = {
+                    "perMillionTokens": price,
+                    "currency": "CNY"
+                }
+                break
 
     elif model_type == 'chat':
         # GPT-4

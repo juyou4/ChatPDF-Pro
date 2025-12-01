@@ -29,7 +29,7 @@ interface ModelContextType {
     getModelById: (modelId: string, providerId: string) => Model | null
 
     // 从provider API获取模型
-    fetchAndAddModels: (provider: Provider) => Promise<void>
+    fetchAndAddModels: (provider: Provider, options?: { autoAdd?: boolean }) => Promise<Model[]>
     isFetching: boolean
     fetchError: string | null
 }
@@ -59,8 +59,10 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         if (saved && savedVersion === CONFIG_VERSION) {
             try {
                 const parsed = JSON.parse(saved) as Model[]
+                // 仅保留用户真正添加的模型，过滤掉之前缓存的系统模型
+                const filtered = parsed.filter(m => m.isUserAdded || !m.isSystem)
                 console.log('✅ Loaded user model collection (v' + CONFIG_VERSION + ')')
-                return parsed
+                return filtered
             } catch (error) {
                 console.warn('Failed to parse saved user models')
             }
@@ -69,9 +71,8 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         // 保存新版本号
         localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
 
-        // 默认将所有系统模型添加到collection
-        // 不标记为用户添加，这样删除后不会重新出现
-        return systemModels.map(m => ({ ...m, isUserAdded: false }))
+        // 默认不注入系统模型，用户模型集合仅存储用户新增的模型
+        return []
     })
 
     const [isFetching, setIsFetching] = useState(false)
@@ -147,28 +148,32 @@ export function ModelProvider({ children }: { children: ReactNode }) {
     /**
      * 从provider API获取模型并添加到collection
      */
-    const fetchAndAddModels = async (provider: Provider) => {
+    const fetchAndAddModels = async (provider: Provider, options?: { autoAdd?: boolean }) => {
         setIsFetching(true)
         setFetchError(null)
 
         try {
             const models = await fetchModelsFromProvider(provider)
 
-            // 将获取到的模型添加到collection
-            models.forEach(model => {
-                addModelToCollection(model)
-            })
+            // 可选：将获取到的模型添加到collection
+            if (options?.autoAdd !== false) {
+                models.forEach(model => {
+                    addModelToCollection(model)
+                })
 
-            // 更新最后同步时间
-            const lastSync = JSON.parse(localStorage.getItem(LAST_SYNC_KEY) || '{}')
-            lastSync[provider.id] = Date.now()
-            localStorage.setItem(LAST_SYNC_KEY, JSON.stringify(lastSync))
+                // 更新最后同步时间
+                const lastSync = JSON.parse(localStorage.getItem(LAST_SYNC_KEY) || '{}')
+                lastSync[provider.id] = Date.now()
+                localStorage.setItem(LAST_SYNC_KEY, JSON.stringify(lastSync))
+            }
 
             console.log(`✅ Fetched ${models.length} models from ${provider.name}`)
+            return models
         } catch (error) {
             const message = error instanceof Error ? error.message : '获取模型失败'
             setFetchError(message)
             console.error('Error fetching models:', error)
+            return []
         } finally {
             setIsFetching(false)
         }

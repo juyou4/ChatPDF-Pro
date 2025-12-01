@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -32,6 +32,7 @@ const ChatPDF = () => {
   const [showEmbeddingSettings, setShowEmbeddingSettings] = useState(false);
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [isHeaderExpanded, setIsHeaderExpanded] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [history, setHistory] = useState([]); // Mock history for now
 
@@ -894,26 +895,37 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 soft-panel m-4 mr-0 h-[calc(100vh-2rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
+        className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
       >
         <div className="w-72 flex flex-col h-full">
-          <div className="p-6 flex items-center justify-between">
-            <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
-              <Bot className="w-8 h-8" />
+          <div className="p-8 flex items-center justify-between">
+            <div className="flex items-center gap-3 font-bold text-2xl text-blue-600 tracking-tight">
+              <Bot className="w-9 h-9" />
               <span>ChatPDF</span>
             </div>
-            <button onClick={() => setDarkMode(!darkMode)} className="p-2 hover:bg-black/5 rounded-full transition-colors">
-              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-            </button>
+            <div className="flex items-center gap-2">
+              {!isHeaderExpanded && (
+                <button
+                  onClick={() => setIsHeaderExpanded(true)}
+                  className="p-2.5 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
+                  title="展开顶栏"
+                >
+                  <ChevronDown className="w-5 h-5" />
+                </button>
+              )}
+              <button onClick={() => setDarkMode(!darkMode)} className="p-2.5 hover:bg-black/5 rounded-full transition-colors">
+                {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              </button>
+            </div>
           </div>
 
           <div className="px-4 mb-4">
             <button
               onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
-              className="w-full py-3 soft-button soft-button-primary flex items-center justify-center gap-2"
+              className="w-full py-4 soft-button soft-button-primary flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all"
             >
               <Plus className="w-5 h-5" />
-              <span>新对话 / 上传PDF</span>
+              <span className="font-semibold tracking-wide">新对话 / 上传PDF</span>
             </button>
             <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
           </div>
@@ -949,39 +961,102 @@ const ChatPDF = () => {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
-        {/* Header */}
-        <header className="flex items-center justify-between px-6 py-4 soft-panel mx-6 mt-4 mb-2 sticky top-4 z-10 transition-all duration-200">
-          <div className="flex items-center gap-4">
-            {/* 菜单按钮 - 始终在左侧 */}
-            <button
-              onClick={() => setShowSidebar(!showSidebar)}
-              className="p-2 hover:bg-black/5 rounded-lg transition-colors"
-              title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
+        {/* Header - Collapsible */}
+        <AnimatePresence>
+          {isHeaderExpanded && (
+            <motion.header
+              initial={{ height: 0, opacity: 0, marginTop: 0, marginBottom: 0 }}
+              animate={{
+                height: 'auto',
+                opacity: 1,
+                marginBottom: '16px',
+                marginTop: '24px'
+              }}
+              exit={{
+                height: 0,
+                opacity: 0,
+                marginTop: 0,
+                marginBottom: 0,
+                transition: { duration: 0.3, ease: "easeInOut" }
+              }}
+              transition={{ duration: 0.3, ease: "easeInOut" }}
+              className="px-8 soft-panel mx-8 sticky top-4 z-10 overflow-hidden flex flex-col justify-center"
             >
-              <Menu className="w-6 h-6" />
-            </button>
+              <div className="flex items-center justify-between w-full py-3">
+                <div className="flex items-center gap-4">
+                  {/* 菜单按钮 */}
+                  <button
+                    onClick={() => setShowSidebar(!showSidebar)}
+                    className="p-2 hover:bg-black/5 rounded-lg transition-colors"
+                    title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
+                  >
+                    <Menu className="w-6 h-6" />
+                  </button>
 
-            <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
-              <FileText className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-700">
-                ChatPDF Pro <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
-              </h1>
-              <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
-            </div>
-          </div>
-          {docInfo && <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full">{docInfo.filename}</div>}
-        </header>
+                  <div className="flex items-center gap-4">
+                    <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
+                      <FileText className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-700">
+                        ChatPDF Pro <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
+                      </h1>
+                      <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  {docInfo && (
+                    <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full truncate max-w-[200px]">
+                      {docInfo.filename}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setIsHeaderExpanded(false)}
+                    className="p-2 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
+                    title="收起顶栏"
+                  >
+                    <ChevronUp className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            </motion.header>
+          )}
+        </AnimatePresence>
+
+        {/* Floating Controls when Header is Collapsed AND Sidebar is Hidden */}
+        <AnimatePresence>
+          {!isHeaderExpanded && !showSidebar && (
+            <motion.div
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="absolute top-4 left-2 z-20 flex flex-col gap-2"
+            >
+              <button
+                onClick={() => {
+                  setShowSidebar(true);
+                  setIsHeaderExpanded(true);
+                }}
+                className="p-2 bg-white/80 backdrop-blur-md shadow-sm rounded-full hover:bg-white hover:scale-105 transition-all text-gray-700 border border-white/50"
+                title="显示侧边栏 & 展开顶栏"
+              >
+                <Menu className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
         {/* Content Area */}
-        <div className="flex-1 flex overflow-hidden p-6 gap-0 pt-2">
+        <div className="flex-1 flex overflow-hidden px-8 pb-8 gap-4 pt-2">
 
           {/* Left: PDF Preview (Floating Card) */}
           {docId ? (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`soft-panel rounded-[32px] overflow-hidden flex flex-col relative mr-6 flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+              className={`soft-panel rounded-[32px] overflow-hidden flex flex-col relative flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
@@ -1069,7 +1144,7 @@ const ChatPDF = () => {
 
           {/* Resizable Divider */}
           <div
-            className="w-2 cursor-col-resize hover:bg-blue-500/20 transition-colors flex-shrink-0 relative group"
+            className="w-4 cursor-col-resize flex-shrink-0 relative group -ml-2 z-10 flex justify-center"
             onMouseDown={(e) => {
               e.preventDefault();
               const startX = e.clientX;
@@ -1092,7 +1167,8 @@ const ChatPDF = () => {
               document.addEventListener('mouseup', handleMouseUp);
             }}
           >
-            <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-1 bg-gray-300 group-hover:bg-blue-500 transition-colors" />
+            {/* Invisible trigger area, visible line on hover */}
+            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-blue-500/50 transition-colors duration-200" />
           </div>
 
           {/* Right: Chat Area (Floating Card) */}
@@ -1100,7 +1176,7 @@ const ChatPDF = () => {
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             className={`soft-panel rounded-[32px] flex flex-col overflow-hidden ${darkMode ? 'bg-gray-800/50' : ''}`}
-            style={{ width: `${100 - pdfPanelWidth}%`, minWidth: '350px' }}
+            style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -1111,7 +1187,7 @@ const ChatPDF = () => {
                   key={idx}
                   className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
                 >
-                  <div className={`max-w-[85%] rounded-2xl p-5 ${msg.type === 'user'
+                  <div className={`max-w-[85%] rounded-3xl p-6 shadow-sm ${msg.type === 'user'
                     ? 'message-bubble-user rounded-tr-none'
                     : darkMode
                       ? 'glass-3d-dark text-gray-100 rounded-tl-none'
@@ -1194,34 +1270,34 @@ const ChatPDF = () => {
             </div >
 
             {/* Input Area */}
-            <div className="p-4 border-t border-gray-100/50">
+            <div className="p-6 border-t border-gray-100/50 bg-white/40 backdrop-blur-sm">
               {screenshot && (
-                <div className="mb-2 inline-flex items-center gap-2 bg-purple-100 text-purple-700 px-3 py-1 rounded-full text-xs font-medium">
+                <div className="mb-3 inline-flex items-center gap-2 bg-purple-50 text-purple-700 px-4 py-1.5 rounded-full text-xs font-medium border border-purple-100 shadow-sm">
                   <ImageIcon className="w-3 h-3" />
                   Screenshot ready
-                  <button onClick={() => setScreenshot(null)} className="hover:text-purple-900"><X className="w-3 h-3" /></button>
+                  <button onClick={() => setScreenshot(null)} className="hover:text-purple-900 ml-1"><X className="w-3 h-3" /></button>
                 </div>
               )}
-              <div className="relative flex items-end gap-2">
-                <div className="flex-1 relative">
+              <div className="relative flex items-end gap-3">
+                <div className="flex-1 relative group">
                   <textarea
                     value={inputMessage}
                     onChange={(e) => setInputMessage(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
                     placeholder="Ask anything about the document..."
-                    className="w-full soft-input rounded-[24px] py-3 pl-4 pr-12 resize-none text-sm min-h-[48px] max-h-32"
+                    className="w-full soft-input rounded-[28px] py-4 pl-6 pr-14 resize-none text-base min-h-[56px] max-h-32 focus:shadow-md transition-all"
                     rows={1}
                   />
-                  <button className="absolute right-2 bottom-2 p-2 text-gray-400 hover:text-blue-600 transition-colors">
-                    <Bot className="w-5 h-5" />
+                  <button className="absolute right-3 bottom-3 p-2 text-gray-400 hover:text-blue-600 transition-colors hover:bg-blue-50 rounded-full">
+                    <Bot className="w-6 h-6" />
                   </button>
                 </div>
                 <button
                   onClick={sendMessage}
                   disabled={isLoading || (!inputMessage.trim() && !screenshot)}
-                  className="w-12 h-12 soft-button soft-button-primary rounded-full flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-14 h-14 soft-button soft-button-primary rounded-full flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl hover:scale-105 transition-all"
                 >
-                  <Send className="w-5 h-5 ml-0.5" />
+                  <Send className="w-6 h-6 ml-0.5" />
                 </button>
               </div>
             </div>

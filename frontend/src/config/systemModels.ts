@@ -132,7 +132,11 @@ export const SILICON_MODELS: Model[] = [
             description: '阿里通义千问嵌入模型'
         },
         isSystem: true,
-        isUserAdded: false
+        isUserAdded: false,
+        pricing: {
+            input: 0.28,
+            currency: 'CNY'
+        }
     },
     {
         id: 'BAAI/bge-reranker-v2-m3',
