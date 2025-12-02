@@ -49,9 +49,9 @@
     0 30px 60px -12px rgba(166, 173, 186, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 1);
 
-  /* 内阴影 - 柔和凹陷 */
+  /* 内阴影 - 凹陷效果 */
   --shadow-inner:
-    inset 0 2px 4px 0 rgba(166, 173, 186, 0.06),
+    inset 0 2px 6px 0 rgba(166, 173, 186, 0.08),
     inset 0 1px 2px 0 rgba(0, 0, 0, 0.02);
 
   --shadow-inner-deep:
@@ -348,4 +348,27 @@ html {
 .message-content ol {
   margin: 0 0 0.5rem 1.25rem;
   line-height: 1.6;
+}
+
+/* Search highlight animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
 }

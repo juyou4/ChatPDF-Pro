@@ -23,9 +23,17 @@ const VERSION_KEY = 'defaultModelsVersion'
  * 初始默认配置
  * 使用系统推荐的模型作为默认值
  */
+const normalizeEmbeddingKey = (value?: string | null) => {
+    if (!value) return undefined
+    // 如果已经包含 provider 前缀则直接返回
+    if (value.includes(':')) return value
+    // 旧格式只存模型ID时，默认加上 local 前缀
+    return `local:${value}`
+}
+
 const INITIAL_DEFAULTS: DefaultModels = {
-    embeddingModel: 'all-MiniLM-L6-v2',  // 本地模型作为默认
-    rerankModel: undefined                // rerank为可选
+    embeddingModel: 'local:all-MiniLM-L6-v2',  // 本地模型作为默认（带前缀）
+    rerankModel: undefined                     // rerank为可选
 }
 
 export function DefaultsProvider({ children }: { children: ReactNode }) {
@@ -44,7 +52,10 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
             try {
                 const parsed = JSON.parse(saved) as DefaultModels
                 console.log('✅ Loaded default models (v' + CONFIG_VERSION + ')')
-                return parsed
+                return {
+                    ...parsed,
+                    embeddingModel: normalizeEmbeddingKey(parsed.embeddingModel) || INITIAL_DEFAULTS.embeddingModel
+                }
             } catch (error) {
                 console.warn('Failed to parse saved default models')
             }
@@ -60,7 +71,7 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
         if (oldEmbeddingModel || oldRerankModel) {
             console.log('📦 Migrating old default models configuration')
             return {
-                embeddingModel: oldEmbeddingModel || INITIAL_DEFAULTS.embeddingModel,
+                embeddingModel: normalizeEmbeddingKey(oldEmbeddingModel) || INITIAL_DEFAULTS.embeddingModel,
                 rerankModel: oldRerankModel || undefined
             }
         }
@@ -80,7 +91,9 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
     const setDefaultModel = (type: DefaultModelType, modelId: string | null) => {
         setDefaults(prev => ({
             ...prev,
-            [type]: modelId || undefined
+            [type]: type === 'embeddingModel'
+                ? normalizeEmbeddingKey(modelId) || INITIAL_DEFAULTS.embeddingModel
+                : modelId || undefined
         }))
     }
 

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -42,6 +42,14 @@ const ChatPDF = () => {
   const [selectedText, setSelectedText] = useState('');
   const [showTextMenu, setShowTextMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [currentResultIndex, setCurrentResultIndex] = useState(0);
+  const [activeHighlight, setActiveHighlight] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [useRerank, setUseRerank] = useState(localStorage.getItem('useRerank') !== 'false');
+  const [rerankerModel, setRerankerModel] = useState(localStorage.getItem('rerankerModel') || 'BAAI/bge-reranker-base');
+  const [searchHistory, setSearchHistory] = useState([]);
 
   // Screenshot State
   const [screenshot, setScreenshot] = useState(null);
@@ -53,7 +61,6 @@ const ChatPDF = () => {
   const [apiProvider, setApiProvider] = useState(localStorage.getItem('apiProvider') || 'openai');
   const [model, setModel] = useState(localStorage.getItem('model') || 'gpt-4o');
   const [availableModels, setAvailableModels] = useState({});
-  const [embeddingModel, setEmbeddingModel] = useState(localStorage.getItem('embeddingModel') || 'local-minilm');
   const [embeddingApiKey, setEmbeddingApiKey] = useState(localStorage.getItem('embeddingApiKey') || '');
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [enableVectorSearch, setEnableVectorSearch] = useState(localStorage.getItem('enableVectorSearch') === 'true');
@@ -126,6 +133,21 @@ const ChatPDF = () => {
     scrollToBottom();
   }, [messages]);
 
+  // Reset search state when document changes
+  useEffect(() => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setCurrentResultIndex(0);
+    setActiveHighlight(null);
+
+    if (docId) {
+      const storedHistory = JSON.parse(localStorage.getItem(`search_history_${docId}`) || '[]');
+      setSearchHistory(storedHistory);
+    } else {
+      setSearchHistory([]);
+    }
+  }, [docId]);
+
   // 保存当前会话到历史记录
   useEffect(() => {
     if (docId && docInfo) {
@@ -137,7 +159,6 @@ const ChatPDF = () => {
     localStorage.setItem('apiKey', apiKey);
     localStorage.setItem('apiProvider', apiProvider);
     localStorage.setItem('model', model);
-    localStorage.setItem('embeddingModel', embeddingModel);
     localStorage.setItem('embeddingApiKey', embeddingApiKey);
     localStorage.setItem('enableVectorSearch', enableVectorSearch);
     localStorage.setItem('enableScreenshot', enableScreenshot);
@@ -148,11 +169,12 @@ const ChatPDF = () => {
     localStorage.setItem('searchEngineUrl', searchEngineUrl);
     localStorage.setItem('toolbarSize', toolbarSize);
     localStorage.setItem('toolbarScale', toolbarScale);
+    localStorage.setItem('useRerank', useRerank);
+    localStorage.setItem('rerankerModel', rerankerModel);
   }, [
     apiKey,
     apiProvider,
     model,
-    embeddingModel,
     embeddingApiKey,
     enableVectorSearch,
     enableScreenshot,
@@ -162,7 +184,9 @@ const ChatPDF = () => {
     searchEngine,
     searchEngineUrl,
     toolbarSize,
-    toolbarScale
+    toolbarScale,
+    useRerank,
+    rerankerModel
   ]);
 
   // Validate model when availableModels loads or provider changes
@@ -182,6 +206,13 @@ const ChatPDF = () => {
       }
     }
   }, [availableModels, apiProvider]);
+
+  // Auto-hide highlight overlay after a short delay
+  useEffect(() => {
+    if (!activeHighlight) return;
+    const timer = setTimeout(() => setActiveHighlight(null), 2500);
+    return () => clearTimeout(timer);
+  }, [activeHighlight]);
 
   // API Functions
   const fetchAvailableModels = async () => {
@@ -332,12 +363,11 @@ const ChatPDF = () => {
       }
     } else {
       // Fallback
-      formData.append('embedding_model', 'all-MiniLM-L6-v2');
+      formData.append('embedding_model', 'local:all-MiniLM-L6-v2');
     }
 
     try {
       console.log('🔵 Uploading file:', file.name);
-      console.log('🔵 Using embedding model:', embeddingModel);
       const response = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData,
@@ -596,6 +626,151 @@ const ChatPDF = () => {
     } catch (error) {
       console.error('Failed to load document:', error);
     }
+  };
+
+  const formatSimilarity = (result) => {
+    if (result?.similarity_percent !== undefined) {
+      return result.similarity_percent;
+    }
+    const rawScore = typeof result?.score === 'number' ? result.score : 0;
+    return Math.round((1 / (1 + Math.max(rawScore, 0))) * 10000) / 100;
+  };
+
+  const renderHighlightedSnippet = (snippet, highlights = []) => {
+    if (!snippet) return '...';
+    if (!highlights.length) return snippet;
+
+    const ordered = [...highlights].sort((a, b) => a.start - b.start);
+    const parts = [];
+    let cursor = 0;
+
+    ordered.forEach((h, idx) => {
+      const start = Math.max(0, Math.min(snippet.length, h.start || 0));
+      const end = Math.max(start, Math.min(snippet.length, h.end || 0));
+
+      if (start > cursor) {
+        parts.push(snippet.slice(cursor, start));
+      }
+
+      parts.push(
+        <mark key={`hl-${idx}`} className="bg-yellow-200 px-0.5 rounded">
+          {snippet.slice(start, end)}
+        </mark>
+      );
+      cursor = end;
+    });
+
+    if (cursor < snippet.length) {
+      parts.push(snippet.slice(cursor));
+    }
+    return parts;
+  };
+
+  const persistSearchHistory = (query) => {
+    if (!docId || !query) return;
+    setSearchHistory((prev) => {
+      const next = [query, ...prev.filter(item => item !== query)].slice(0, 8);
+      localStorage.setItem(`search_history_${docId}`, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const clearSearchHistory = () => {
+    if (!docId) return;
+    localStorage.removeItem(`search_history_${docId}`);
+    setSearchHistory([]);
+  };
+
+  // Document semantic search
+  const focusResult = (index, results = searchResults) => {
+    if (!results.length) {
+      setCurrentResultIndex(0);
+      setActiveHighlight(null);
+      return;
+    }
+
+    const total = results.length;
+    const normalizedIndex = ((index % total) + total) % total;
+    const target = results[normalizedIndex];
+    const totalPages = docInfo?.total_pages || docInfo?.data?.total_pages || target?.page || 1;
+    const nextPage = Math.max(1, Math.min(target?.page || 1, totalPages));
+
+    setCurrentResultIndex(normalizedIndex);
+    setCurrentPage(nextPage);
+    setActiveHighlight({
+      page: nextPage,
+      text: target?.chunk || '',
+      at: Date.now()
+    });
+  };
+
+  const handleSearch = async (customQuery) => {
+    if (!docId) {
+      alert('请先上传文档后再搜索');
+      return;
+    }
+
+    const query = (customQuery ?? searchQuery).trim();
+    if (!query) {
+      setSearchResults([]);
+      setCurrentResultIndex(0);
+      setActiveHighlight(null);
+      return;
+    }
+
+    setIsSearching(true);
+    setSearchQuery(query);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          doc_id: docId,
+          query,
+          api_key: embeddingApiKey || apiKey || undefined,
+          top_k: 5,
+          candidate_k: 20,
+          use_rerank: useRerank,
+          reranker_model: useRerank ? rerankerModel : undefined
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || '搜索失败');
+      }
+
+      const data = await response.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      setSearchResults(results);
+
+      if (results.length) {
+        focusResult(0, results);
+        persistSearchHistory(query);
+      } else {
+        setCurrentResultIndex(0);
+        setActiveHighlight(null);
+        alert('未找到匹配结果');
+      }
+    } catch (error) {
+      console.error('Failed to search document:', error);
+      alert(`搜索失败：${error.message}`);
+      setSearchResults([]);
+      setActiveHighlight(null);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const goToNextResult = () => {
+    if (!searchResults.length) return;
+    focusResult(currentResultIndex + 1);
+  };
+
+  const goToPrevResult = () => {
+    if (!searchResults.length) return;
+    focusResult(currentResultIndex - 1);
   };
 
   const handleTextSelection = () => {
@@ -1006,6 +1181,87 @@ const ChatPDF = () => {
                   </div>
                 </div>
 
+                {/* Search Box - Center */}
+                {docId && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    transition={{ duration: 0.3 }}
+                    className="flex-1 max-w-2xl mx-4 flex items-center gap-2"
+                  >
+                    <div className="relative flex-1">
+                      <input
+                        type="search"
+                        placeholder="搜索文档内容..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !isSearching) handleSearch();
+                        }}
+                        className="w-full px-4 py-2 pl-10 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-blue-400"
+                        disabled={isSearching}
+                      />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    </div>
+                    <motion.button
+                      whileHover={{ scale: isSearching ? 1 : 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => handleSearch()}
+                      disabled={isSearching}
+                      className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching
+                          ? 'bg-blue-200 text-blue-700 cursor-wait'
+                          : 'bg-blue-600 text-white hover:shadow-md hover:bg-blue-700'
+                        }`}
+                    >
+                      {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                      <span>{isSearching ? '搜索中...' : '搜索'}</span>
+                    </motion.button>
+                    <button
+                      onClick={() => setUseRerank(v => !v)}
+                      className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerank ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200'
+                        }`}
+                      title="使用重排模型提高结果质量"
+                    >
+                      <Wand2 className="w-4 h-4" />
+                      <span>重排</span>
+                    </button>
+                    <AnimatePresence>
+                      {searchResults.length > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.8 }}
+                          transition={{ duration: 0.2 }}
+                          className="flex items-center gap-1"
+                        >
+                          <span className="text-xs text-gray-500 px-2 font-medium">
+                            {currentResultIndex + 1}/{searchResults.length}
+                          </span>
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={goToPrevResult}
+                            className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
+                            title="上一个结果"
+                          >
+                            <ChevronUp className="w-4 h-4" />
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={goToNextResult}
+                            className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
+                            title="下一个结果"
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                          </motion.button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
+                )}
+
                 <div className="flex items-center gap-4">
                   {docInfo && (
                     <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full truncate max-w-[200px]">
@@ -1064,6 +1320,9 @@ const ChatPDF = () => {
                 {docInfo?.pdf_url ? (
                   <PDFViewer
                     pdfUrl={docInfo.pdf_url}
+                    page={currentPage}
+                    onPageChange={setCurrentPage}
+                    highlightInfo={activeHighlight}
                     onTextSelect={(text) => {
                       if (text) {
                         setSelectedText(text);
@@ -1180,6 +1439,86 @@ const ChatPDF = () => {
           >
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {(searchResults.length > 0 || isSearching || searchHistory.length > 0) && (
+                <div className="rounded-3xl border border-black/5 bg-white/70 backdrop-blur-sm p-4 space-y-3 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Search className="w-4 h-4 text-blue-500" />
+                      <span className="font-semibold text-sm text-gray-800">文档搜索</span>
+                      {useRerank && (
+                        <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
+                          已开启重排
+                        </span>
+                      )}
+                      {isSearching && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+                    </div>
+                    {searchResults.length > 0 && (
+                      <span className="text-xs text-gray-500">找到 {searchResults.length} 个候选</span>
+                    )}
+                  </div>
+
+                  {searchHistory.length > 0 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-gray-500">历史:</span>
+                      {searchHistory.map((item, idx) => (
+                        <button
+                          key={`history-${idx}`}
+                          onClick={() => handleSearch(item)}
+                          className="text-xs px-2 py-1 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
+                        >
+                          {item}
+                        </button>
+                      ))}
+                      <button
+                        onClick={clearSearchHistory}
+                        className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded-full hover:bg-black/5 transition-colors"
+                      >
+                        清除
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                    {isSearching && (
+                      <div className="text-sm text-gray-500 flex items-center gap-2 px-2">
+                        <Loader2 className="w-4 h-4 animate-spin" /> 正在检索匹配片段...
+                      </div>
+                    )}
+
+                    {!isSearching && !searchResults.length && (
+                      <p className="text-sm text-gray-500 px-2">
+                        输入查询并点击“搜索”查看匹配片段，支持关键词上下文和匹配度展示。
+                      </p>
+                    )}
+
+                    {searchResults.map((result, idx) => (
+                      <button
+                        key={`result-${idx}`}
+                        onClick={() => focusResult(idx)}
+                        className="w-full text-left p-3 rounded-2xl border border-gray-100 hover:border-blue-200 hover:bg-blue-50/40 transition-all relative"
+                      >
+                        <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                          <div className="flex items-center gap-1.5">
+                            <span>第 {result.page || 1} 页 · #{idx + 1}</span>
+                            {result.reranked && (
+                              <span className="text-[10px] text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded-full border border-purple-100">
+                                Rerank
+                              </span>
+                            )}
+                          </div>
+                          <span className={`font-semibold ${formatSimilarity(result) >= 80 ? 'text-green-600' : 'text-blue-600'}`}>
+                            匹配度 {formatSimilarity(result)}%
+                          </span>
+                        </div>
+                        <div className="text-sm text-gray-800 leading-relaxed max-h-20 overflow-hidden">
+                          {renderHighlightedSnippet(result.snippet || result.chunk || '', result.highlights || [])}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {messages.map((msg, idx) => (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import PyPDF2
 import pdfplumber
 import io
@@ -19,6 +19,7 @@ import httpx
 import json
 import base64
 import glob
+import re
 import numpy as np
 import faiss
 import pickle
@@ -61,7 +62,8 @@ EMBEDDING_MODELS = {
         "dimension": 384,
         "max_tokens": 256,
         "price": "Free (Local)",
-        "description": "Fast, general purpose"
+        "description": "Fast, general purpose",
+        "embedding_endpoint": None
     },
     "local-multilingual": {
         "name": "Local: Multilingual",
@@ -77,6 +79,7 @@ EMBEDDING_MODELS = {
         "name": "OpenAI: text-embedding-3-large",
         "provider": "openai",
         "base_url": "https://api.openai.com/v1",
+        "embedding_endpoint": "/embeddings",
         "dimension": 3072,
         "max_tokens": 8191,
         "price": "$0.13/M tokens",
@@ -96,6 +99,7 @@ EMBEDDING_MODELS = {
         "name": "Alibaba: text-embedding-v3",
         "provider": "openai",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "embedding_endpoint": "/embeddings",
         "dimension": 1024,
         "max_tokens": 8192,
         "price": "$0.007/M tokens",
@@ -149,6 +153,16 @@ EMBEDDING_MODELS = {
         "price": "Paid",
         "description": "ChatGLM embedding"
     },
+    # SiliconFlow - Qwen embeddings (OpenAI兼容)
+    "Qwen/Qwen3-Embedding-8B": {
+        "name": "SiliconFlow: Qwen3-Embedding-8B",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Free/Limited",
+        "description": "Hosted Qwen3 embedding (SiliconFlow)"
+    },
     # MiniMax
     "embo-01": {
         "name": "MiniMax: embo-01",
@@ -163,6 +177,79 @@ EMBEDDING_MODELS = {
 
 # Lazy-loaded local embedding models cache
 local_embedding_models = {}
+# Lazy-loaded reranker models cache
+reranker_models = {}
+
+# Embedding and rerank model detection regex (from cherry-studio)
+EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-)', re.I)
+RERANKING_REGEX = re.compile(r'(?:rerank|re-rank|re-ranker|re-ranking|retrieval|retriever)', re.I)
+
+def is_embedding_model(model_id: str) -> bool:
+    """Check if a model ID is an embedding model using regex (like cherry-studio)"""
+    if not model_id:
+        return False
+
+    # Check if it's a rerank model first
+    if is_rerank_model(model_id):
+        return False
+
+    model_id_lower = model_id.lower()
+
+    # Check against regex pattern
+    return bool(EMBEDDING_REGEX.search(model_id_lower))
+
+def is_rerank_model(model_id: str) -> bool:
+    """Check if a model ID is a rerank model using regex (like cherry-studio)"""
+    if not model_id:
+        return False
+
+    model_id_lower = model_id.lower()
+    return bool(RERANKING_REGEX.search(model_id_lower))
+
+def get_model_provider(model_id: str) -> str:
+    """Infer provider from model ID"""
+    if not model_id:
+        return "openai"  # Default fallback
+
+    model_id_lower = model_id.lower()
+
+    # Check for specific providers
+    if "doubao" in model_id_lower:
+        return "doubao"
+    elif "moonshot" in model_id_lower or "kimi" in model_id_lower:
+        return "moonshot"
+    elif "zhipu" in model_id_lower or "glm" in model_id_lower:
+        return "zhipu"
+    elif "minimax" in model_id_lower:
+        return "minimax"
+    elif "qwen" in model_id_lower or "alibaba" in model_id_lower:
+        return "openai"  # qwen uses openai-compatible API
+    elif model_id_lower.startswith("gpt") or model_id_lower.startswith("text-embedding"):
+        return "openai"
+    elif model_id_lower.startswith("claude"):
+        return "anthropic"
+    elif model_id_lower.startswith("gemini"):
+        return "gemini"
+    else:
+        return "openai"  # Default for unknown models (OpenAI compatible)
+
+def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[str]:
+    """兼容 provider:model 和旧的模型ID，返回在 EMBEDDING_MODELS 中存在的键"""
+    if not embedding_model_id:
+        return None
+
+    if embedding_model_id in EMBEDDING_MODELS:
+        return embedding_model_id
+
+    if ":" in embedding_model_id:
+        provider_part, model_part = embedding_model_id.split(":", 1)
+        if model_part in EMBEDDING_MODELS:
+            return model_part
+        combined_key = f"{provider_part}:{model_part}"
+        if combined_key in EMBEDDING_MODELS:
+            return combined_key
+
+    return None
 
 def save_document(doc_id: str, data: dict):
     """Save document data to disk"""
@@ -190,52 +277,183 @@ def load_documents():
     print(f"Loaded {count} documents.")
 
 def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
-    """Get embedding function for the specified model"""
-    # Allow unknown models if they are provided by a known provider (fallback)
-    config = EMBEDDING_MODELS.get(embedding_model_id, {
-        "provider": "openai", # Default to openai compatible if unknown
-        "base_url": base_url or "https://api.openai.com/v1"
-    })
-    
-    provider = config["provider"]
-    
+    """Get embedding function for the specified model
+
+    Enhanced version with automatic model detection and provider inference
+    (Inspired by cherry-studio's model detection approach)
+    """
+    normalized_id = normalize_embedding_model_id(embedding_model_id)
+    if normalized_id:
+        embedding_model_id = normalized_id
+    else:
+        # Unknown model id, but keep original for inference and clear warning
+        print(f"Warning: embedding model '{embedding_model_id}' not in configuration, attempting inference")
+
+    # Check if it's actually an embedding model
+    if not is_embedding_model(embedding_model_id):
+        # If it's a rerank model, raise error
+        if is_rerank_model(embedding_model_id):
+            raise ValueError(f"Model {embedding_model_id} is a rerank model, not an embedding model")
+        # Otherwise, warn but continue
+        print(f"Warning: {embedding_model_id} doesn't match embedding model patterns, attempting to use anyway")
+
+    # Get model configuration
+    config = EMBEDDING_MODELS.get(embedding_model_id)
+
+    if config:
+        # Known model from configuration
+        provider = config["provider"]
+        model_name = config.get("model_name", embedding_model_id)
+        api_base = base_url or config.get("base_url")
+    else:
+        # Unknown model - try to infer provider
+        print(f"Unknown embedding model: {embedding_model_id}, attempting to infer provider...")
+        provider = get_model_provider(embedding_model_id)
+        model_name = embedding_model_id
+        api_base = base_url or "https://api.openai.com/v1"  # Default fallback
+
+        # Add embedding endpoint if not provided
+        if not api_base.endswith('/embeddings') and not api_base.endswith('/v1'):
+            if provider in ['openai', 'alibaba', 'moonshot', 'zhipu', 'minimax']:
+                api_base = api_base.rstrip('/') + '/v1'
+
+        print(f"Inferred provider: {provider}, base_url: {api_base}")
+
+    # Use local SentenceTransformer for local models
     if provider == "local":
-        # Use local SentenceTransformer
-        model_name = config["model_name"]
         if model_name not in local_embedding_models:
             print(f"Loading local embedding model: {model_name}")
-            local_embedding_models[model_name] = SentenceTransformer(model_name)
+            try:
+                local_embedding_models[model_name] = SentenceTransformer(model_name)
+            except Exception as e:
+                print(f"Error loading local model {model_name}: {e}")
+                raise
         model = local_embedding_models[model_name]
         return lambda texts: model.encode(texts)
-    
-    elif provider == "openai":
-        # OpenAI-compatible API (OpenAI, Alibaba, Moonshot, DeepSeek, etc.)
+
+    # Use OpenAI-compatible API for other providers
+    else:
         if not api_key:
             raise ValueError(f"API key required for {embedding_model_id}")
-        
+
         from openai import OpenAI
-        
-        # Use provided base_url or fallback to config
-        api_base = base_url or config.get("base_url")
-        
+
+        # Ensure base_url is properly formatted
+        api_base = api_base or "https://api.openai.com/v1"
+        if not api_base.endswith('/v1') and not api_base.endswith('/v1/'):
+            api_base = api_base.rstrip('/') + '/v1'
+
         client = OpenAI(api_key=api_key, base_url=api_base)
-        
+
         def embed_texts(texts):
-            response = client.embeddings.create(
-                model=embedding_model_id,
-                input=texts
-            )
-            return np.array([item.embedding for item in response.data])
-        
+            try:
+                response = client.embeddings.create(
+                    model=embedding_model_id,
+                    input=texts
+                )
+                return np.array([item.embedding for item in response.data])
+            except Exception as e:
+                print(f"Error calling embeddings API: {e}")
+                raise
+
         return embed_texts
-    
+
+def _distance_to_similarity(distance: float) -> float:
+    """Map FAISS距离为相似度（0-1），距离越小相似度越高"""
+    try:
+        safe_distance = max(distance, 0.0)
+        return float(1.0 / (1.0 + safe_distance))
+    except Exception:
+        return 0.0
+
+def _extract_snippet_and_highlights(text: str, query: str, window: int = 100) -> Tuple[str, List[dict]]:
+    """从文本中提取带上下文的片段，并标出查询词的位置"""
+    if not text:
+        return "", []
+
+    normalized_text = " ".join(text.split())
+    lower_text = normalized_text.lower()
+    terms = [t for t in re.split(r"[\\s,;，。；、]+", query.lower()) if t]
+
+    matches = []
+    for term in terms:
+        start = lower_text.find(term)
+        while start != -1:
+            end = start + len(term)
+            matches.append((start, end, normalized_text[start:end]))
+            start = lower_text.find(term, end)
+    matches.sort(key=lambda x: x[0])
+
+    if matches:
+        snippet_start = max(0, matches[0][0] - window)
+        snippet_end = min(len(normalized_text), matches[0][1] + window)
     else:
-        raise ValueError(f"Unsupported provider: {provider}")
+        snippet_start = 0
+        snippet_end = min(len(normalized_text), window * 2)
+
+    snippet = normalized_text[snippet_start:snippet_end]
+    highlights = []
+    for start, end, original_text in matches:
+        if end <= snippet_start or start >= snippet_end:
+            continue
+        local_start = max(0, start - snippet_start)
+        local_end = min(snippet_end - snippet_start, end - snippet_start)
+        highlights.append({
+            "start": int(local_start),
+            "end": int(local_end),
+            "text": normalized_text[start:end]
+        })
+
+    return snippet, highlights
+
+def _find_page_for_chunk(chunk_text: str, pages: List[dict]) -> int:
+    """尝试根据文本块找到所在页码"""
+    if not pages:
+        return 1
+
+    for page in pages:
+        content = page.get("content", "")
+        if chunk_text[:80] in content:
+            return page.get("page", 1)
+        if chunk_text[:60].lower() in content.lower():
+            return page.get("page", 1)
+    return pages[0].get("page", 1)
+
+def _apply_rerank(query: str, candidates: List[dict], reranker_model: Optional[str] = None) -> List[dict]:
+    """使用重排模型对候选结果重新排序，失败时降级为相似度排序"""
+    if not candidates:
+        return []
+
+    model_name = reranker_model or "BAAI/bge-reranker-base"
+    try:
+        from sentence_transformers import CrossEncoder
+
+        if model_name not in reranker_models:
+            print(f"Loading reranker model: {model_name}")
+            reranker_models[model_name] = CrossEncoder(model_name)
+        model = reranker_models[model_name]
+
+        pairs = [(query, item["chunk"]) for item in candidates]
+        scores = model.predict(pairs)
+
+        for item, score in zip(candidates, scores):
+            item["rerank_score"] = float(score)
+            item["reranked"] = True
+
+        return sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
+    except Exception as e:
+        print(f"Rerank failed with {model_name}, fallback to vector similarity: {e}")
+        return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
 
 def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-minilm", api_key: str = None, api_host: str = None):
     """Build and save vector index for a document"""
     try:
         print(f"Building vector index for {doc_id}...")
+        normalized_model_id = normalize_embedding_model_id(embedding_model_id)
+        if not normalized_model_id:
+            raise ValueError(f"Embedding model '{embedding_model_id}' 未配置或不受支持，请检查模型选择")
+        embedding_model_id = normalized_model_id
+
         # 1. Chunk text
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=500,
@@ -263,50 +481,113 @@ def build_vector_index(doc_id: str, text: str, embedding_model_id: str = "local-
         
         faiss.write_index(index, index_path)
         with open(chunks_path, "wb") as f:
-            pickle.dump({"chunks": chunks, "embedding_model": embedding_model_id}, f)
+            pickle.dump({
+                "chunks": chunks, 
+                "embedding_model": embedding_model_id,
+                "base_url": api_host
+            }, f)
             
         print(f"Vector index saved to {index_path}")
         
     except Exception as e:
         print(f"Error building vector index for {doc_id}: {e}")
 
-def get_relevant_context(doc_id: str, query: str, api_key: str = None, top_k: int = 5) -> str:
-    """Retrieve relevant context using vector search"""
+def search_document_chunks(
+    doc_id: str,
+    query: str,
+    api_key: str = None,
+    top_k: int = 5,
+    candidate_k: int = 20,
+    use_rerank: bool = False,
+    reranker_model: Optional[str] = None
+) -> List[dict]:
+    """向量检索 + 可选重排，返回包含上下文的丰富结果"""
+    index_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.index")
+    chunks_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.pkl")
+
+    if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+        raise HTTPException(status_code=404, detail="向量索引未找到,请重新上传PDF")
+
+    # Load index and chunks with metadata
+    index = faiss.read_index(index_path)
+    with open(chunks_path, "rb") as f:
+        data = pickle.load(f)
+
+    # Handle old format (just chunks) or new format (dict with metadata)
+    if isinstance(data, dict):
+        chunks = data["chunks"]
+        embedding_model_id = data.get("embedding_model", "local-minilm")
+    else:
+        chunks = data
+        embedding_model_id = "local-minilm"  # Default for old indexes
+        base_url = None
+
+    base_url = data.get("base_url") if isinstance(data, dict) else None
+    embed_fn = get_embedding_function(embedding_model_id, api_key, base_url=base_url)
+
+    # Embed query
+    query_vector = embed_fn([query])
+
+    # Candidate size should be >= top_k to give reranker空间
+    search_k = max(candidate_k, top_k)
+    D, I = index.search(np.array(query_vector).astype('float32'), search_k)
+
+    doc = documents_store.get(doc_id, {})
+    pages = doc.get("data", {}).get("pages", [])
+
+    # Build results with page numbers and snippets
+    results = []
+    for dist, idx in zip(D[0], I[0]):
+        if idx < len(chunks):
+            chunk_text = chunks[idx]
+            page_num = _find_page_for_chunk(chunk_text, pages)
+            similarity = _distance_to_similarity(float(dist))
+            snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
+
+            results.append({
+                "chunk": chunk_text,
+                "page": page_num,
+                "score": float(dist),
+                "similarity": similarity,
+                "similarity_percent": round(similarity * 100, 2),
+                "snippet": snippet,
+                "highlights": highlights,
+                "reranked": False
+            })
+
+    if use_rerank:
+        results = _apply_rerank(query, results, reranker_model)
+    else:
+        results = sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)
+
+    return results[:top_k]
+
+def get_relevant_context(
+    doc_id: str,
+    query: str,
+    api_key: str = None,
+    top_k: int = 5,
+    use_rerank: bool = False,
+    reranker_model: Optional[str] = None,
+    candidate_k: int = 20
+) -> str:
+    """Retrieve relevant context using vector search + optional rerank"""
     try:
-        index_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.index")
-        chunks_path = os.path.join(VECTOR_STORE_DIR, f"{doc_id}.pkl")
-        
-        if not os.path.exists(index_path) or not os.path.exists(chunks_path):
-            print(f"Vector index not found for {doc_id}")
-            return ""
-            
-        # Load index and chunks with metadata
-        index = faiss.read_index(index_path)
-        with open(chunks_path, "rb") as f:
-            data = pickle.load(f)
-            
-        # Handle old format (just chunks) or new format (dict with metadata)
-        if isinstance(data, dict):
-            chunks = data["chunks"]
-            embedding_model_id = data.get("embedding_model", "local-minilm")
-        else:
-            chunks = data
-            embedding_model_id = "local-minilm"  # Default for old indexes
-            
-        # Get embedding function using the same model that was used for indexing
-        embed_fn = get_embedding_function(embedding_model_id, api_key)
-        
-        # Embed query
-        query_vector = embed_fn([query])
-        
-        # Search
-        D, I = index.search(np.array(query_vector).astype('float32'), top_k)
-        
-        # Retrieve chunks
-        relevant_chunks = [chunks[i] for i in I[0] if i < len(chunks)]
-        
+        results = search_document_chunks(
+            doc_id,
+            query,
+            api_key=api_key,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            use_rerank=use_rerank,
+            reranker_model=reranker_model
+        )
+        relevant_chunks = [item["chunk"] for item in results]
         return "\n\n...\n\n".join(relevant_chunks)
-        
+
+    except HTTPException:
+        # Propagate HTTP errors to caller for consistent handling
+        raise
     except Exception as e:
         print(f"Error retrieving context for {doc_id}: {e}")
         return ""
@@ -339,6 +620,17 @@ class SummaryRequest(BaseModel):
     api_key: str
     model: str
     api_provider: str
+
+class SearchRequest(BaseModel):
+    """PDF搜索请求"""
+    doc_id: str
+    query: str
+    api_key: Optional[str] = None
+    top_k: int = 3
+    candidate_k: int = 20
+    use_rerank: bool = False
+    reranker_model: Optional[str] = None
+
 
 # 支持视觉的模型配置
 VISION_MODELS = {
@@ -764,9 +1056,32 @@ async def get_models():
     return AI_MODELS
 
 @app.get("/embedding_models")
-async def get_embedding_models():
-    """获取可用嵌入模型列表"""
-    return EMBEDDING_MODELS
+async def get_embedding_models(as_list: bool = False):
+    """获取可用嵌入模型列表
+
+    as_list=True 时返回标准化列表（包含 full_id=provider:model）以便前端直接使用
+    """
+    if not as_list:
+        return EMBEDDING_MODELS
+
+    items = []
+    for key, cfg in EMBEDDING_MODELS.items():
+        provider = cfg.get("provider", "openai")
+        full_id = key if ":" in key else f"{provider}:{key}"
+        items.append({
+            "id": key,
+            "full_id": full_id,
+            "provider": provider,
+            "name": cfg.get("name", key),
+            "dimension": cfg.get("dimension"),
+            "max_tokens": cfg.get("max_tokens"),
+            "description": cfg.get("description"),
+            "price": cfg.get("price"),
+            "base_url": cfg.get("base_url"),
+            "embedding_endpoint": cfg.get("embedding_endpoint"),
+        })
+
+    return {"models": items}
 
 @app.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
@@ -1104,6 +1419,11 @@ async def upload_pdf(
         content = await file.read()
         pdf_file = io.BytesIO(content)
 
+        normalized_model = normalize_embedding_model_id(embedding_model)
+        if not normalized_model:
+            raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置或格式不正确（建议使用 provider:model 格式）")
+        embedding_model = normalized_model
+
         # 提取文本
         extracted_data = extract_text_from_pdf(pdf_file)
 
@@ -1214,6 +1534,29 @@ def _build_endpoint(base: str, path: str | None) -> str:
     path_clean = path.lstrip('/')
     return f"{base_clean}/{path_clean}"
 
+async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: List[str]):
+    """Try multiple endpoints to fetch models list, return (json, used_endpoint)"""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    last_error = None
+
+    for ep in endpoints:
+        if not ep:
+            continue
+        url = _build_endpoint(api_host, ep)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.json(), url
+            last_error = f"HTTP {response.status_code}"
+        except Exception as e:
+            last_error = str(e)
+            continue
+    return None, last_error
+
 @app.post("/api/providers/test")
 async def test_provider_connection(request: ProviderTestRequest):
     """测试Provider连接
@@ -1231,42 +1574,24 @@ async def test_provider_connection(request: ProviderTestRequest):
             }
 
         # 对于OpenAI兼容的API，尝试获取模型列表
-        models_endpoint = _build_endpoint(request.apiHost, request.fetchModelsEndpoint or "/models")
+        # 常见端点兜底列表：优先使用用户配置，然后尝试 /v1/models 与 /models
+        endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
+        data, last_error = await _fetch_models_with_fallback(request.apiHost, request.apiKey, endpoints)
 
-        headers = {
-            "Authorization": f"Bearer {request.apiKey}",
-            "Content-Type": "application/json"
+        if data is not None:
+            model_count = len(data.get('data', [])) if isinstance(data.get('data'), list) else 0
+            return {
+                "success": True,
+                "message": "连接成功",
+                "availableModels": model_count
+            }
+
+        # 若仍未获取到列表，提示连接成功但无列表，便于前端继续使用手动配置
+        return {
+            "success": True,
+            "message": f"连接成功（无法获取模型列表: {last_error or '无响应'})",
+            "availableModels": 0
         }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(models_endpoint, headers=headers)
-
-            if response.status_code == 200:
-                data = response.json()
-                model_count = len(data.get('data', [])) if isinstance(data.get('data'), list) else 0
-
-                return {
-                    "success": True,
-                    "message": "连接成功",
-                    "availableModels": model_count
-                }
-            elif response.status_code == 401:
-                return {
-                    "success": False,
-                    "message": "API Key 无效"
-                }
-            elif response.status_code == 404:
-                # 某些provider可能没有/models端点，尝试其他方式验证
-                return {
-                    "success": True,
-                    "message": "连接成功（无法获取模型列表）",
-                    "availableModels": 0
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": f"连接失败：HTTP {response.status_code}"
-                }
 
     except httpx.ConnectError:
         return {
@@ -1333,53 +1658,44 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 "timestamp": int(datetime.now().timestamp())
             }
 
-        # 对于OpenAI兼容的API，获取模型列表
-        models_endpoint = _build_endpoint(request.apiHost, request.fetchModelsEndpoint or "/models")
+        # 对于OpenAI兼容的API，获取模型列表（带兜底端点）
+        endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
+        data, last_error = await _fetch_models_with_fallback(request.apiHost, request.apiKey, endpoints)
 
-        headers = {
-            "Authorization": f"Bearer {request.apiKey}",
-            "Content-Type": "application/json"
-        }
+        if data is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"获取模型失败: {last_error or '无响应'}"
+            )
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(models_endpoint, headers=headers)
+        # 解析OpenAI格式的响应
+        models = []
+        if 'data' in data and isinstance(data['data'], list):
+            for item in data['data']:
+                model_id = item.get('id', '')
+                model_type = _detect_model_type(model_id)
 
-            if response.status_code == 200:
-                data = response.json()
-
-                # 解析OpenAI格式的响应
-                models = []
-                if 'data' in data and isinstance(data['data'], list):
-                    for item in data['data']:
-                        model_id = item.get('id', '')
-                        model_type = _detect_model_type(model_id)
-
-                        model = {
-                            "id": model_id,
-                            "name": model_id,
-                            "providerId": request.providerId,
-                            "type": model_type,
-                            "metadata": _infer_model_metadata(model_id, model_type),
-                            "isSystem": False,
-                            "isUserAdded": False
-                        }
-
-                        # 添加owned_by信息到description
-                        if 'owned_by' in item:
-                            model["metadata"]["description"] = f"Owned by: {item['owned_by']}"
-
-                        models.append(model)
-
-                return {
-                    "models": models,
+                model = {
+                    "id": model_id,
+                    "name": model_id,
                     "providerId": request.providerId,
-                    "timestamp": int(datetime.now().timestamp())
+                    "type": model_type,
+                    "metadata": _infer_model_metadata(model_id, model_type),
+                    "isSystem": False,
+                    "isUserAdded": False
                 }
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Provider API returned: {response.status_code}"
-                )
+
+                # 添加owned_by信息到description
+                if 'owned_by' in item:
+                    model["metadata"]["description"] = f"Owned by: {item['owned_by']}"
+
+                models.append(model)
+
+        return {
+            "models": models,
+            "providerId": request.providerId,
+            "timestamp": int(datetime.now().timestamp())
+        }
 
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="无法连接到Provider API")
@@ -1627,6 +1943,35 @@ def _infer_model_metadata(model_id: str, model_type: str) -> dict:
             metadata['contextWindow'] = 4096
 
     return metadata
+
+@app.post("/api/search")
+async def search_in_pdf(request: SearchRequest):
+    """语义搜索PDF内容并返回匹配位置"""
+    try:
+        if request.doc_id not in documents_store:
+            raise HTTPException(status_code=404, detail="文档未找到")
+
+        results = search_document_chunks(
+            request.doc_id,
+            request.query,
+            api_key=request.api_key,
+            top_k=request.top_k,
+            candidate_k=max(request.candidate_k, request.top_k),
+            use_rerank=request.use_rerank,
+            reranker_model=request.reranker_model
+        )
+
+        return {
+            "results": results,
+            "rerank_enabled": request.use_rerank and len(results) > 0,
+            "candidate_k": max(request.candidate_k, request.top_k)
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
