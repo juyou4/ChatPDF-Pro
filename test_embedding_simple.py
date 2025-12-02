@@ -9,8 +9,8 @@ import os
 # 添加backend路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
 
-def test_core_functionality():
-    """测试核心功能"""
+def _run_core_functionality():
+    """测试核心功能，返回是否全部通过（供 pytest 断言和 __main__ 使用）"""
     print("=" * 70)
     print("ChatPDF - 向量检索和嵌入模型核心功能测试")
     print("=" * 70)
@@ -98,7 +98,8 @@ def test_core_functionality():
     print("\n[测试 3/3] 测试应用的完整索引和检索流程")
     print("-" * 70)
     try:
-        from app import build_vector_index, get_relevant_context, EMBEDDING_MODELS
+        from services.embedding_service import build_vector_index, get_relevant_context
+        from models.model_registry import EMBEDDING_MODELS
         import tempfile
         import shutil
         
@@ -130,7 +131,7 @@ def test_core_functionality():
             """
             
             print(f"\n正在为测试文档构建向量索引...")
-            build_vector_index(test_doc_id, test_text, embedding_model_id="local-minilm")
+            build_vector_index(test_doc_id, test_text, vector_store_dir=test_dir, embedding_model_id="local-minilm")
             
             # 验证文件
             index_path = os.path.join(test_dir, f"{test_doc_id}.index")
@@ -150,7 +151,13 @@ def test_core_functionality():
             print(f"\n测试向量检索:")
             for query in queries:
                 print(f"\n  查询: '{query}'")
-                context = get_relevant_context(test_doc_id, query, top_k=2)
+                context = get_relevant_context(
+                    test_doc_id,
+                    query,
+                    vector_store_dir=test_dir,
+                    pages=[],
+                    top_k=2
+                )
                 
                 if context:
                     # 只显示前150个字符
@@ -189,9 +196,13 @@ def test_core_functionality():
     return all_passed
 
 
+def test_core_functionality():
+    assert _run_core_functionality() is True
+
+
 if __name__ == "__main__":
     try:
-        success = test_core_functionality()
+        success = _run_core_functionality()
         sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         print("\n\n测试被用户中断")

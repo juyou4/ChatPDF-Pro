@@ -10,6 +10,7 @@ import React, { useState } from 'react'
  */
 export default function ProviderAvatar({
   provider,
+  providerId,
   size = 32,
   className = ''
 }) {
@@ -37,7 +38,10 @@ export default function ProviderAvatar({
     return '#ffffff'
   }
 
-  const backgroundColor = generateColor(provider.name)
+  // 兼容只传 providerId 的场景
+  const safeProvider = provider || { id: providerId || 'unknown', name: providerId || '未知', logo: null }
+
+  const backgroundColor = generateColor(safeProvider.name)
   const color = getForegroundColor(backgroundColor)
 
   /**
@@ -65,15 +69,15 @@ export default function ProviderAvatar({
     )
   }
 
-  const logoIsImage = isImageUrl(provider.logo)
-  const logoIsEmoji = provider.logo && !logoIsImage && String(provider.logo).length <= 4
+  const logoIsImage = isImageUrl(safeProvider.logo)
+  const logoIsEmoji = safeProvider.logo && !logoIsImage && String(safeProvider.logo).length <= 4
 
   // 调试输出
   if (process.env.NODE_ENV === 'development') {
-    console.log(`Provider ${provider.name}:`, {
-      logo: provider.logo,
+    console.log(`Provider ${safeProvider.name}:`, {
+      logo: safeProvider.logo,
       logoType: logoIsImage ? 'image' : logoIsEmoji ? 'emoji' : 'fallback',
-      logoValue: typeof provider.logo
+      logoValue: typeof safeProvider.logo
     })
   }
 
@@ -90,8 +94,8 @@ export default function ProviderAvatar({
       {logoIsImage && !imageError ? (
         // 图片logo
         <img
-          src={provider.logo}
-          alt={provider.name}
+          src={safeProvider.logo}
+          alt={safeProvider.name}
           className="w-full h-full object-contain"
           onError={() => setImageError(true)}
           style={{ imageRendering: 'crisp-edges' }}
@@ -111,7 +115,7 @@ export default function ProviderAvatar({
             fontSize: size * 0.45
           }}
         >
-          {provider.name ? provider.name[0].toUpperCase() : '?'}
+          {safeProvider.name ? safeProvider.name[0].toUpperCase() : '?'}
         </div>
       )}
     </div>

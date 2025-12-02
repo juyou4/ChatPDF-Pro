@@ -12,7 +12,7 @@ import pickle
 # 添加backend路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
 
-def test_local_embedding_model():
+def _run_local_embedding_model():
     """测试本地嵌入模型 - all-MiniLM-L6-v2"""
     print("=" * 60)
     print("测试1: 测试本地嵌入模型加载和嵌入生成")
@@ -48,7 +48,6 @@ def test_local_embedding_model():
         # 显示向量的前几个值
         print(f"\n第一个向量的前10个值:")
         print(f"  {embeddings[0][:10]}")
-        
         return True, embeddings
         
     except Exception as e:
@@ -58,7 +57,7 @@ def test_local_embedding_model():
         return False, None
 
 
-def test_multilingual_embedding_model():
+def _run_multilingual_embedding_model():
     """测试多语言嵌入模型"""
     print("\n" + "=" * 60)
     print("测试2: 测试多语言嵌入模型")
@@ -105,7 +104,7 @@ def test_multilingual_embedding_model():
         return False, None
 
 
-def test_vector_search():
+def _run_vector_search():
     """测试FAISS向量检索功能"""
     print("\n" + "=" * 60)
     print("测试3: 测试FAISS向量检索")
@@ -177,7 +176,7 @@ def test_vector_search():
         return False
 
 
-def test_app_embedding_function():
+def _run_app_embedding_function():
     """测试应用中的嵌入函数"""
     print("\n" + "=" * 60)
     print("测试4: 测试应用的嵌入函数接口")
@@ -185,7 +184,8 @@ def test_app_embedding_function():
     
     try:
         # 导入应用代码
-        from app import get_embedding_function, EMBEDDING_MODELS
+        from services.embedding_service import get_embedding_function
+        from models.model_registry import EMBEDDING_MODELS
         
         print(f"\n可用的嵌入模型:")
         for model_id, config in EMBEDDING_MODELS.items():
@@ -212,14 +212,14 @@ def test_app_embedding_function():
         return False
 
 
-def test_build_and_search_index():
+def _run_build_and_search_index():
     """测试完整的索引构建和检索流程"""
     print("\n" + "=" * 60)
     print("测试5: 测试完整的索引构建和检索流程")
     print("=" * 60)
     
     try:
-        from app import build_vector_index, get_relevant_context
+        from services.embedding_service import build_vector_index, get_relevant_context
         import tempfile
         import shutil
         
@@ -245,7 +245,7 @@ def test_build_and_search_index():
             
             # 构建向量索引
             print(f"\n为测试文档构建向量索引...")
-            build_vector_index(test_doc_id, test_text, embedding_model_id="local-minilm")
+            build_vector_index(test_doc_id, test_text, vector_store_dir=test_dir, embedding_model_id="local-minilm")
             
             # 验证文件是否创建
             index_path = os.path.join(test_dir, f"{test_doc_id}.index")
@@ -272,7 +272,13 @@ def test_build_and_search_index():
             
             for query in test_queries:
                 print(f"\n查询: '{query}'")
-                context = get_relevant_context(test_doc_id, query, top_k=2)
+                context = get_relevant_context(
+                    test_doc_id,
+                    query,
+                    vector_store_dir=test_dir,
+                    pages=[],
+                    top_k=2
+                )
                 
                 if context:
                     print(f"✓ 检索到相关内容:")
@@ -301,6 +307,28 @@ def test_build_and_search_index():
         return False
 
 
+def test_local_embedding_model():
+    success, _ = _run_local_embedding_model()
+    assert success is True
+
+
+def test_multilingual_embedding_model():
+    success, _ = _run_multilingual_embedding_model()
+    assert success is True
+
+
+def test_vector_search():
+    assert _run_vector_search() is True
+
+
+def test_app_embedding_function():
+    assert _run_app_embedding_function() is True
+
+
+def test_build_and_search_index():
+    assert _run_build_and_search_index() is True
+
+
 def main():
     """运行所有测试"""
     print("\n" + "=" * 60)
@@ -317,19 +345,19 @@ def main():
     results = []
     
     # 运行测试
-    success1, _ = test_local_embedding_model()
+    success1, _ = _run_local_embedding_model()
     results.append(("本地嵌入模型", success1))
     
-    success2, _ = test_multilingual_embedding_model()
+    success2, _ = _run_multilingual_embedding_model()
     results.append(("多语言嵌入模型", success2))
     
-    success3 = test_vector_search()
+    success3 = _run_vector_search()
     results.append(("FAISS向量检索", success3))
     
-    success4 = test_app_embedding_function()
+    success4 = _run_app_embedding_function()
     results.append(("应用嵌入函数", success4))
     
-    success5 = test_build_and_search_index()
+    success5 = _run_build_and_search_index()
     results.append(("完整索引流程", success5))
     
     # 总结

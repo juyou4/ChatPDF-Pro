@@ -10,7 +10,6 @@ import TextSelectionToolbar from './TextSelectionToolbar';
 import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
-import EmbeddingModelSelector from './EmbeddingModelSelector';
 import EmbeddingSettings from './EmbeddingSettings';
 import GlobalSettings from './GlobalSettings';
 
@@ -49,6 +48,13 @@ const ChatPDF = () => {
   const [isSearching, setIsSearching] = useState(false);
   const [useRerank, setUseRerank] = useState(localStorage.getItem('useRerank') !== 'false');
   const [rerankerModel, setRerankerModel] = useState(localStorage.getItem('rerankerModel') || 'BAAI/bge-reranker-base');
+  const [lastCallInfo, setLastCallInfo] = useState(null); // {provider, model, fallback}
+  const [customProviders, setCustomProviders] = useState({});
+  const [customModels, setCustomModels] = useState({});
+  const [newProvider, setNewProvider] = useState({ id: '', name: '', endpoint: '', type: 'openai' });
+  const [newModel, setNewModel] = useState({ id: '', name: '', providerId: '', type: 'embedding' });
+  const [providerError, setProviderError] = useState('');
+  const [modelError, setModelError] = useState('');
   const [searchHistory, setSearchHistory] = useState([]);
 
   // Screenshot State
@@ -101,6 +107,14 @@ const ChatPDF = () => {
     return model;
   };
 
+  const getDefaultModelLabel = (key, fallback = '未选择') => {
+    if (!key) return fallback;
+    const [providerId, modelId] = key.split(':');
+    const provider = getProviderById(providerId);
+    const modelObj = getModelById(modelId, providerId);
+    return `${provider?.name || providerId} - ${modelObj?.name || modelId}`;
+  };
+
   // Refs
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -125,6 +139,8 @@ const ChatPDF = () => {
   useEffect(() => {
     fetchAvailableModels();
     fetchAvailableEmbeddingModels();
+    fetchCustomProviders();
+    fetchCustomModels();
     fetchStorageInfo();
     loadHistory();  // 加载历史记录
   }, []);
@@ -171,6 +187,9 @@ const ChatPDF = () => {
     localStorage.setItem('toolbarScale', toolbarScale);
     localStorage.setItem('useRerank', useRerank);
     localStorage.setItem('rerankerModel', rerankerModel);
+    if (lastCallInfo) {
+      localStorage.setItem('lastCallInfo', JSON.stringify(lastCallInfo));
+    }
   }, [
     apiKey,
     apiProvider,
@@ -186,7 +205,8 @@ const ChatPDF = () => {
     toolbarSize,
     toolbarScale,
     useRerank,
-    rerankerModel
+    rerankerModel,
+    lastCallInfo
   ]);
 
   // Validate model when availableModels loads or provider changes
@@ -337,6 +357,114 @@ const ChatPDF = () => {
           "description": "Open source, hosted"
         }
       });
+    }
+  };
+
+  const addCustomProvider = async () => {
+    if (!newProvider.id || !newProvider.name || !newProvider.endpoint) {
+      setProviderError('请填写 Provider ID、名称和 Endpoint');
+      return;
+    }
+    setProviderError('');
+    if (!newProvider.id || !newProvider.name || !newProvider.endpoint) {
+      alert('请填写 Provider ID/名称/Endpoint');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/providers/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: newProvider.id,
+          name: newProvider.name,
+          endpoint: newProvider.endpoint,
+          type: newProvider.type
+        })
+      });
+      if (res.ok) {
+        await fetchCustomProviders();
+        setNewProvider({ id: '', name: '', endpoint: '', type: 'openai' });
+      } else {
+        alert('保存 Provider 失败');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('保存 Provider 失败');
+    }
+  };
+
+  const deleteCustomProvider = async (id) => {
+    try {
+      await fetch(`${API_BASE_URL}/api/providers/custom/${id}`, { method: 'DELETE' });
+      await fetchCustomProviders();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const addCustomModel = async () => {
+    if (!newModel.id || !newModel.name || !newModel.providerId) {
+      setModelError('请填写模型ID、名称和 Provider ID');
+      return;
+    }
+    setModelError('');
+    if (!newModel.id || !newModel.name || !newModel.providerId) {
+      alert('请填写模型ID/名称/Provider');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/models/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modelId: newModel.id,
+          name: newModel.name,
+          providerId: newModel.providerId,
+          type: newModel.type
+        })
+      });
+      if (res.ok) {
+        await fetchCustomModels();
+        setNewModel({ id: '', name: '', providerId: '', type: 'embedding' });
+      } else {
+        alert('保存模型失败');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('保存模型失败');
+    }
+  };
+
+  const deleteCustomModel = async (id) => {
+    try {
+      await fetch(`${API_BASE_URL}/api/models/custom/${id}`, { method: 'DELETE' });
+      await fetchCustomModels();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchCustomProviders = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/providers/custom`);
+      if (res.ok) {
+        const data = await res.json();
+        setCustomProviders(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch custom providers', e);
+    }
+  };
+
+  const fetchCustomModels = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/models/custom`);
+      if (res.ok) {
+        const data = await res.json();
+        setCustomModels(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch custom models', e);
     }
   };
 
@@ -529,6 +657,11 @@ const ChatPDF = () => {
 
         const data = await response.json();
         const fullAnswer = data.answer;
+        setLastCallInfo({
+          provider: data.used_provider,
+          model: data.used_model,
+          fallback: data.fallback_used
+        });
 
         if (streamSpeed === 'off') {
           // Show entire message immediately
@@ -744,6 +877,11 @@ const ChatPDF = () => {
       const data = await response.json();
       const results = Array.isArray(data.results) ? data.results : [];
       setSearchResults(results);
+      setLastCallInfo({
+        provider: data.used_provider,
+        model: data.used_model,
+        fallback: data.fallback_used
+      });
 
       if (results.length) {
         focusResult(0, results);
@@ -1199,10 +1337,10 @@ const ChatPDF = () => {
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !isSearching) handleSearch();
                         }}
-                        className="w-full px-4 py-2 pl-10 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-blue-400"
+                        className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-blue-400"
                         disabled={isSearching}
                       />
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                     </div>
                     <motion.button
                       whileHover={{ scale: isSearching ? 1 : 1.02 }}
@@ -1210,8 +1348,8 @@ const ChatPDF = () => {
                       onClick={() => handleSearch()}
                       disabled={isSearching}
                       className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching
-                          ? 'bg-blue-200 text-blue-700 cursor-wait'
-                          : 'bg-blue-600 text-white hover:shadow-md hover:bg-blue-700'
+                        ? 'bg-blue-200 text-blue-700 cursor-wait'
+                        : 'bg-blue-600 text-white hover:shadow-md hover:bg-blue-700'
                         }`}
                     >
                       {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
@@ -1644,6 +1782,7 @@ const ChatPDF = () => {
         </div>
       </div>
 
+
       {/* Upload Progress Modal */}
       <AnimatePresence>
         {isUploading && (
@@ -1686,277 +1825,303 @@ const ChatPDF = () => {
                 <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
               </div>
 
-              <div className="space-y-4 px-8 overflow-y-auto flex-1">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API Provider</label>
-                  <select
-                    value={apiProvider}
-                    onChange={(e) => {
-                      const newProvider = e.target.value;
-                      setApiProvider(newProvider);
-                      // Auto-select first model for the new provider
-                      const providerModels = availableModels[newProvider]?.models;
-                      if (providerModels) {
-                        const firstModel = Object.keys(providerModels)[0];
-                        if (firstModel) setModel(firstModel);
-                      }
-                    }}
-                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                  >
-                    {Object.keys(availableModels).map(p => (
-                      <option key={p} value={p}>{availableModels[p]?.name || p}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
-                  <select
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                  >
-                    {availableModels[apiProvider]?.models && Object.entries(availableModels[apiProvider].models).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    placeholder="sk-..."
-                  />
-                </div>
-
-                <div className="pt-4 border-t border-gray-100">
-                  <h3 className="text-sm font-semibold text-gray-800 mb-3">🔍 Embedding 配置</h3>
-
-                  <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Embedding Model
-                      <span className="ml-2 text-xs font-normal text-gray-500">
-                        (用于文档向量化检索)
-                      </span>
-                    </label>
-                    <EmbeddingModelSelector />
-                  </div>
-
-                  <button
-                    onClick={() => setShowEmbeddingSettings(true)}
-                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
-                  >
-                    <Settings className="w-4 h-4" />
-                    管理嵌入模型服务
-                  </button>
-
-                  {(() => {
-                    const provider = getCurrentProvider();
-                    const model = getCurrentEmbeddingModel();
-                    if (provider && model && provider.type !== 'local') {
-                      return (
-                        <div className="mt-3 p-3 soft-card rounded-xl border border-blue-200/50">
-                          <p className="text-xs text-blue-700">
-                            💡 <strong>当前使用:</strong> {provider.name} - {model.name}
-                          </p>
-                          {!provider.apiKey && (
-                            <p className="text-xs text-amber-700 mt-1">
-                              ⚠️ 请在设置中配置 API Key
-                            </p>
-                          )}
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                </div>
-
-                <div className="pt-4 border-t border-gray-100">
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <span className="font-medium">Vector Search</span>
-                    <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-blue-600 w-5 h-5" />
-                  </label>
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <span className="font-medium">Screenshot Analysis</span>
-                    <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-blue-600 w-5 h-5" />
-                  </label>
-
-                  <div className="mt-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">流式输出速度</label>
-                    <select
-                      value={streamSpeed}
-                      onChange={(e) => setStreamSpeed(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="fast">快速  (3字符/次, ~20ms)</option>
-                      <option value="normal">正常  (2字符/次, ~30ms)</option>
-                      <option value="slow">慢速  (1字符/次, ~60ms)</option>
-                      <option value="off">关闭流式（直接显示）</option>
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度（已优化为按字符流式）</p>
-                  </div>
-
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg mt-3">
-                    <span className="font-medium">Blur Reveal 效果</span>
-                    <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-blue-600 w-5 h-5" />
-                  </label>
-                  <p className="text-xs text-gray-500 ml-2 mb-2">流式输出时每个新字符从模糊到清晰的渐变效果（逐字符效果）</p>
-
-                  {enableBlurReveal && (
-                    <div className="ml-2 mt-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-2">模糊效果强度</label>
-                      <select
-                        value={blurIntensity}
-                        onChange={(e) => setBlurIntensity(e.target.value)}
-                        className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="light">轻度 ✨ (3px blur, 0.2s)</option>
-                        <option value="medium">中度 💫 (5px blur, 0.25s)</option>
-                        <option value="strong">强烈 🌟 (8px blur, 0.3s)</option>
-                      </select>
-                      <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* 全局设置入口 */}
-                <div className="pt-4 border-t border-gray-100">
-                  <button
-                    onClick={() => {
-                      setShowSettings(false);
-                      setShowGlobalSettings(true);
-                    }}
-                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
-                  >
-                    <Type className="w-4 h-4" />
-                    全局设置（字体、缩放）
-                  </button>
-                </div>
-
-                {/* 工具栏设置 */}
-                <div className="pt-4 border-t border-gray-100 space-y-3">
-                  <h3 className="text-sm font-semibold text-gray-800">🎨 划词工具栏</h3>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
-                    <select
-                      value={searchEngine}
-                      onChange={(e) => setSearchEngine(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="google">Google</option>
-                      <option value="bing">Bing</option>
-                      <option value="baidu">百度</option>
-                      <option value="sogou">搜狗</option>
-                      <option value="custom">自定义</option>
-                    </select>
-                    {searchEngine === 'custom' && (
-                      <div className="mt-2 space-y-1">
-                        <input
-                          type="text"
-                          value={searchEngineUrl}
-                          onChange={(e) => setSearchEngineUrl(e.target.value)}
-                          className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                          placeholder="例如：https://www.google.com/search?q={query}"
-                        />
-                        <p className="text-xs text-gray-500">
-                          使用 <code className="font-mono">{'{query}'}</code> 作为搜索词占位符（若不填将自动追加 <code className="font-mono">?q=</code>）。
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">工具栏尺寸</label>
-                    <select
-                      value={toolbarSize}
-                      onChange={(e) => setToolbarSize(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="compact">紧凑</option>
-                      <option value="normal">常规</option>
-                      <option value="large">大号</option>
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">影响划词工具栏按钮尺寸与间距</p>
-                  </div>
-                </div>
-
-                {/* 存储位置信息 */}
-                <div className="pt-4 border-t border-gray-100">
-                  <h3 className="text-sm font-semibold text-gray-800 mb-3">📁 文件存储位置</h3>
-                  {storageInfo ? (
-                    <div className="space-y-2">
-                      <div className="bg-gray-50 p-3 rounded-lg">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-600">PDF文件</span>
-                          <span className="text-xs text-gray-500">{storageInfo.pdf_count} 个文件</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
-                            {storageInfo.uploads_dir}
-                          </code>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(storageInfo.uploads_dir);
-                              alert('路径已复制到剪贴板！');
-                            }}
-                            className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
-                            title="复制路径"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-50 p-3 rounded-lg">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-600">对话历史</span>
-                          <span className="text-xs text-gray-500">{storageInfo.doc_count} 个文档</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
-                            {storageInfo.data_dir}
-                          </code>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(storageInfo.data_dir);
-                              alert('路径已复制到剪贴板！');
-                            }}
-                            className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
-                            title="复制路径"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <p className="text-xs text-gray-500 mt-2">
-                        💡 点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="text-sm text-gray-500">加载中...</div>
-                  )}
+        <div className="space-y-4 px-8 overflow-y-auto flex-1">
+          {/* 模型服务管理入口（对话/嵌入/重排统一管理） */}
+          <div className="soft-card p-4 rounded-xl border border-blue-100 bg-blue-50/60">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  ☁️ 模型服务
+                  <span className="text-xs text-gray-500 font-normal">
+                    （统一管理提供商与模型，含对话/嵌入/重排）
+                  </span>
+                </h3>
+                <p className="text-xs text-gray-600 mt-1">
+                  支持单一厂商与集成厂商，模型默认值在此集中配置。
+                </p>
+              </div>
+              <button
+                onClick={() => setShowEmbeddingSettings(true)}
+                className="soft-button soft-button-primary px-4 py-2 rounded-xl text-sm flex items-center gap-2"
+              >
+                <Settings className="w-4 h-4" />
+                打开模型服务管理
+              </button>
+            </div>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-gray-700">
+              <div className="p-3 rounded-lg border border-white/80 bg-white/60">
+                <div className="text-[11px] text-gray-500 mb-1">对话默认</div>
+                <div className="font-medium text-gray-900">
+                  {getDefaultModelLabel(getDefaultModel('assistantModel'))}
                 </div>
               </div>
-
-              <div className="p-8 pt-4 flex-shrink-0 border-t border-gray-100">
-                <button
-                  onClick={() => setShowSettings(false)}
-                  className="w-full py-3 soft-button soft-button-primary rounded-xl font-medium hover:shadow-lg transition-all"
-                >
-                  Save Changes
-                </button>
+              <div className="p-3 rounded-lg border border-white/80 bg-white/60">
+                <div className="text-[11px] text-gray-500 mb-1">嵌入默认</div>
+                <div className="font-medium text-gray-900">
+                  {getDefaultModelLabel(getDefaultModel('embeddingModel'))}
+                </div>
               </div>
-            </motion.div>
+              <div className="p-3 rounded-lg border border-white/80 bg-white/60">
+                <div className="text-[11px] text-gray-500 mb-1">重排默认</div>
+                <div className="font-medium text-gray-900">
+                  {getDefaultModelLabel(getDefaultModel('rerankModel'))}
+                </div>
+              </div>
+            </div>
           </div>
-        )
-        }
-      </AnimatePresence >
+
+          <div className="pt-4 border-t border-gray-100">
+            <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
+              <span className="font-medium">Vector Search</span>
+              <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-blue-600 w-5 h-5" />
+            </label>
+            <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
+              <span className="font-medium">Screenshot Analysis</span>
+              <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-blue-600 w-5 h-5" />
+            </label>
+            {lastCallInfo && (
+              <div className="mt-3 p-3 rounded-xl border text-xs text-gray-700 bg-gray-50">
+                <div>调用来源: <strong>{lastCallInfo.provider || '未知'}</strong></div>
+                <div>模型: <strong>{lastCallInfo.model || '未返回'}</strong></div>
+                {lastCallInfo.fallback && <div className="text-amber-700">已切换备用</div>}
+              </div>
+            )}
+
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">流式输出速度</label>
+              <select
+                value={streamSpeed}
+                onChange={(e) => setStreamSpeed(e.target.value)}
+                className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                <option value="fast">快速  (3字符/次, ~20ms)</option>
+                <option value="normal">正常  (2字符/次, ~30ms)</option>
+                <option value="slow">慢速  (1字符/次, ~60ms)</option>
+                <option value="off">关闭流式（直接显示）</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度（已优化为按字符流式）</p>
+            </div>
+
+            <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg mt-3">
+              <span className="font-medium">Blur Reveal 效果</span>
+              <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-blue-600 w-5 h-5" />
+            </label>
+            <p className="text-xs text-gray-500 ml-2 mb-2">流式输出时每个新字符从模糊到清晰的渐变效果（逐字符效果）</p>
+
+            {enableBlurReveal && (
+              <div className="ml-2 mt-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">模糊效果强度</label>
+                <select
+                  value={blurIntensity}
+                  onChange={(e) => setBlurIntensity(e.target.value)}
+                  className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="light">轻度 ✨ (3px blur, 0.2s)</option>
+                  <option value="medium">中度 💫 (5px blur, 0.25s)</option>
+                  <option value="strong">强烈 🌟 (8px blur, 0.3s)</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
+              </div>
+            )}
+          </div>
+
+          {/* 全局设置入口 */}
+          <div className="pt-4 border-t border-gray-100">
+            <button
+              onClick={() => {
+                setShowSettings(false);
+                setShowGlobalSettings(true);
+              }}
+              className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+            >
+              <Type className="w-4 h-4" />
+              全局设置（字体、缩放）
+            </button>
+          </div>
+
+          {/* 自定义 Provider & 模型 */}
+          <div className="pt-4 border-t border-gray-100 space-y-3">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              🧩 自定义 Provider
+              <span className="text-xs text-gray-500 font-normal">（OpenAI 兼容端点）</span>
+            </h3>
+            {providerError && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded-lg">{providerError}</div>}
+            <div className="grid grid-cols-2 gap-2">
+              <input className="soft-input" placeholder="providerId" value={newProvider.id} onChange={e => setNewProvider({ ...newProvider, id: e.target.value })} />
+              <input className="soft-input" placeholder="名称" value={newProvider.name} onChange={e => setNewProvider({ ...newProvider, name: e.target.value })} />
+              <input className="soft-input col-span-2" placeholder="Endpoint (OpenAI 兼容)" value={newProvider.endpoint} onChange={e => setNewProvider({ ...newProvider, endpoint: e.target.value })} />
+              <select className="soft-input" value={newProvider.type} onChange={e => setNewProvider({ ...newProvider, type: e.target.value })}>
+                <option value="openai">openai</option>
+                <option value="anthropic">anthropic</option>
+                <option value="gemini">gemini</option>
+                <option value="ollama">ollama</option>
+              </select>
+              <button className="soft-btn bg-blue-600 text-white" onClick={addCustomProvider}>保存Provider</button>
+            </div>
+            {Object.keys(customProviders).length > 0 && (
+              <div className="text-xs text-gray-600 space-y-1 max-h-36 overflow-auto pr-1">
+                {Object.entries(customProviders).map(([id, cfg]) => (
+                  <div key={id} className="flex items-center justify-between bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                    <div className="flex flex-col">
+                      <span className="font-semibold">{cfg.name} <span className="text-gray-500 text-[11px]">({id})</span></span>
+                      <span className="text-[11px] text-gray-500 truncate max-w-[200px]">{cfg.endpoint}</span>
+                    </div>
+                    <button className="text-red-500 text-xs hover:text-red-600" onClick={() => deleteCustomProvider(id)}>删除</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              🧠 自定义模型
+              <span className="text-xs text-gray-500 font-normal">（与自定义 Provider 配套）</span>
+            </h3>
+            {modelError && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded-lg">{modelError}</div>}
+            <div className="grid grid-cols-2 gap-2">
+              <input className="soft-input" placeholder="modelId" value={newModel.id} onChange={e => setNewModel({ ...newModel, id: e.target.value })} />
+              <input className="soft-input" placeholder="名称" value={newModel.name} onChange={e => setNewModel({ ...newModel, name: e.target.value })} />
+              <input className="soft-input" placeholder="Provider ID" value={newModel.providerId} onChange={e => setNewModel({ ...newModel, providerId: e.target.value })} />
+              <select className="soft-input" value={newModel.type} onChange={e => setNewModel({ ...newModel, type: e.target.value })}>
+                <option value="embedding">embedding</option>
+                <option value="rerank">rerank</option>
+                <option value="chat">chat</option>
+              </select>
+              <button className="soft-btn bg-blue-600 text-white" onClick={addCustomModel}>保存模型</button>
+            </div>
+            {Object.keys(customModels).length > 0 && (
+              <div className="text-xs text-gray-600 space-y-1 max-h-36 overflow-auto pr-1">
+                {Object.entries(customModels).map(([id, cfg]) => (
+                  <div key={id} className="flex items-center justify-between bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                    <div className="flex flex-col">
+                      <span className="font-semibold">{cfg.name || cfg.model_name || id} <span className="text-gray-500 text-[11px]">({cfg.provider || cfg.providerId || 'n/a'})</span></span>
+                      <span className="text-[11px] text-gray-500 truncate max-w-[200px]">{cfg.type || cfg.model_type || 'embedding'}</span>
+                    </div>
+                    <button className="text-red-500 text-xs hover:text-red-600" onClick={() => deleteCustomModel(id)}>删除</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 工具栏设置 */}
+          <div className="pt-4 border-t border-gray-100 space-y-3">
+            <h3 className="text-sm font-semibold text-gray-800">🎨 划词工具栏</h3>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
+              <select
+                value={searchEngine}
+                onChange={(e) => setSearchEngine(e.target.value)}
+                className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                <option value="google">Google</option>
+                <option value="bing">Bing</option>
+                <option value="baidu">百度</option>
+                <option value="sogou">搜狗</option>
+                <option value="custom">自定义</option>
+              </select>
+              {searchEngine === 'custom' && (
+                <div className="mt-2 space-y-1">
+                  <input
+                    type="text"
+                    value={searchEngineUrl}
+                    onChange={(e) => setSearchEngineUrl(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="例如：https://www.google.com/search?q={query}"
+                  />
+                  <p className="text-xs text-gray-500">
+                    使用 <code className="font-mono">{'{query}'}</code> 作为搜索词占位符（若不填将自动追加 <code className="font-mono">?q=</code>）。
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">工具栏尺寸</label>
+              <select
+                value={toolbarSize}
+                onChange={(e) => setToolbarSize(e.target.value)}
+                className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                <option value="compact">紧凑</option>
+                <option value="normal">常规</option>
+                <option value="large">大号</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">影响划词工具栏按钮尺寸与间距</p>
+            </div>
+          </div>
+
+          {/* 存储位置信息 */}
+          <div className="pt-4 border-t border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-800 mb-3">📁 文件存储位置</h3>
+            {storageInfo ? (
+              <div className="space-y-2">
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-600">PDF文件</span>
+                    <span className="text-xs text-gray-500">{storageInfo.pdf_count} 个文件</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
+                      {storageInfo.uploads_dir}
+                    </code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(storageInfo.uploads_dir);
+                        alert('路径已复制到剪贴板！');
+                      }}
+                      className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
+                      title="复制路径"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-600">对话历史</span>
+                    <span className="text-xs text-gray-500">{storageInfo.doc_count} 个文档</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">
+                      {storageInfo.data_dir}
+                    </code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(storageInfo.data_dir);
+                        alert('路径已复制到剪贴板！');
+                      }}
+                      className="p-1.5 hover:bg-blue-100 text-blue-600 rounded transition-colors"
+                      title="复制路径"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <p className="text-xs text-gray-500 mt-2">
+                  💡 点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
+                </p>
+              </div>
+            ) : (
+              <div className="text-sm text-gray-500">加载中...</div>
+            )}
+          </div>
+        </div>
+
+        <div className="p-8 pt-4 flex-shrink-0 border-t border-gray-100">
+          <button
+            onClick={() => setShowSettings(false)}
+            className="w-full py-3 soft-button soft-button-primary rounded-xl font-medium hover:shadow-lg transition-all"
+          >
+            Save Changes
+          </button>
+        </div>
+      </motion.div>
+    </div>
+        )}
+      </AnimatePresence>
 
       <EmbeddingSettings
         isOpen={showEmbeddingSettings}

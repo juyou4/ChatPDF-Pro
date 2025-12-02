@@ -1,750 +1,465 @@
-import React, { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import React, { useEffect, useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
-    Settings, X, ChevronRight, Check, Key, Server,
-    Zap, DollarSign, Search, AlertCircle, CheckCircle,
-    Database, TrendingUp, Layers
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Key,
+  Plug,
+  Plus,
+  RefreshCw,
+  Search,
+  Server,
+  Settings,
+  Shield,
+  Trash2,
+  X
 } from 'lucide-react'
 import { useProvider } from '../contexts/ProviderContext'
 import { useModel } from '../contexts/ModelContext'
 import { useDefaults } from '../contexts/DefaultsContext'
 import ProviderAvatar from './ProviderAvatar'
-import ManageModelsPopup from './ManageModelsPopup'
 
+/**
+ * “模型服务管理”面板
+ * 对齐 cherry-studio 的三栏结构：左侧 Provider 列表，中间连接配置，右侧模型清单。
+ */
 export default function EmbeddingSettings({ isOpen, onClose }) {
-    const {
-        providers,
-        updateProvider,
-        getProviderById
-    } = useProvider()
+  const {
+    providers,
+    updateProvider,
+    testConnection,
+    getProviderById
+  } = useProvider()
 
-    const {
-        getModelsByProvider,
-        removeModelFromCollection,
-        fetchAndAddModels,
-        isFetching,
-        fetchError
-    } = useModel()
+  const {
+    getModelsByProvider,
+    addModelToCollection,
+    removeModelFromCollection,
+    fetchAndAddModels,
+    isFetching,
+    fetchError
+  } = useModel()
 
-    const {
-        defaults,
-        setDefaultModel,
-        getDefaultModel
-    } = useDefaults()
+  const { getDefaultModel, setDefaultModel } = useDefaults()
 
-    const [activeTab, setActiveTab] = useState('providers') // 'providers' | 'defaults'
-    const [activeProviderId, setActiveProviderId] = useState(
-        providers.length > 0 ? providers[0].id : null
-    )
-    const [searchQuery, setSearchQuery] = useState('')
-    const [testingProvider, setTestingProvider] = useState(null)
-    const [testResult, setTestResult] = useState(null)
-    const [manageModelsOpen, setManageModelsOpen] = useState(false)
+  const [activeProviderId, setActiveProviderId] = useState(
+    providers[0]?.id || null
+  )
+  const [providerSearch, setProviderSearch] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState(null)
+  const [addModelForm, setAddModelForm] = useState({
+    id: '',
+    name: '',
+    type: 'chat'
+  })
 
-    const activeProvider = providers.find(p => p.id === activeProviderId)
+  // 默认模型键名映射
+  const DEFAULT_TYPE_MAP = {
+    embedding: 'embeddingModel',
+    rerank: 'rerankModel',
+    chat: 'assistantModel'
+  }
 
-    // Tab配置
-    const tabs = [
-        { id: 'providers', label: '服务商配置', icon: Server },
-        { id: 'defaults', label: '默认模型', icon: CheckCircle }
-    ]
+  const activeProvider = useMemo(
+    () => providers.find(p => p.id === activeProviderId) || providers[0] || null,
+    [providers, activeProviderId]
+  )
 
-    // 切换Provider时清除测试结果
-    React.useEffect(() => {
-        setTestResult(null)
-    }, [activeProviderId])
-
-    // 确保在providers加载后设置activeProviderId
-    React.useEffect(() => {
-        if (!activeProviderId && providers.length > 0) {
-            setActiveProviderId(providers[0].id)
-        }
-    }, [providers, activeProviderId])
-
-    // 测试Provider连接
-    const handleTestConnection = async (provider) => {
-        setTestingProvider(provider.id)
-        setTestResult(null)
-
-        try {
-            const response = await fetch('/api/providers/test', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    providerId: provider.id,
-                    apiKey: provider.apiKey,
-                    apiHost: provider.apiHost
-                })
-            })
-
-            // 添加：检查HTTP状态
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-            }
-
-            const result = await response.json()
-
-            // 修改：添加 providerId 字段
-            setTestResult({
-                ...result,
-                providerId: provider.id
-            })
-        } catch (error) {
-            setTestResult({
-                success: false,
-                message: error.message || '网络错误，请检查后端服务是否运行',
-                providerId: provider.id
-            })
-        } finally {
-            setTestingProvider(null)
-        }
+  // 当 providers 变化时，保持选中第一项
+  useEffect(() => {
+    if (!activeProvider && providers.length > 0) {
+      setActiveProviderId(providers[0].id)
     }
+  }, [providers, activeProvider])
 
+  const filteredProviders = providers.filter(p =>
+    `${p.name} ${p.id}`.toLowerCase().includes(providerSearch.toLowerCase())
+  )
 
-    // 过滤服务商
-    const filteredProviders = providers.filter(p =>
-        p.name.toLowerCase().includes(searchQuery.toLowerCase())
-    )
+  const modelsByType = useMemo(() => {
+    if (!activeProvider) return {}
+    const list = getModelsByProvider(activeProvider.id)
+    return list.reduce((acc, model) => {
+      acc[model.type] = acc[model.type] || []
+      acc[model.type].push(model)
+      return acc
+    }, {})
+  }, [activeProvider, getModelsByProvider])
 
-    if (!isOpen) return null
+  if (!isOpen) return null
 
-    return (
-        <>
-        <AnimatePresence>
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm"
-                onClick={onClose}
-            >
-                <motion.div
-                    initial={{ scale: 0.95, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.95, opacity: 0 }}
-                    transition={{ type: "spring", duration: 0.3 }}
-                    onClick={(e) => e.stopPropagation()}
-                    className="soft-panel rounded-[32px] w-full max-w-5xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden"
-                >
-                    {/* Header */}
-                    <div className="flex items-center justify-between px-8 py-6 border-b border-white/20">
-                        <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/30">
-                                <Settings className="w-6 h-6 text-white" />
-                            </div>
-                            <div>
-                                <h2 className="text-2xl font-bold text-gray-900">嵌入模型管理</h2>
-                                <p className="text-sm text-gray-500 mt-0.5">管理向量检索和重排模型服务</p>
-                            </div>
-                        </div>
-                        <button
-                            onClick={onClose}
-                            className="p-2 hover:bg-black/5 rounded-xl transition-colors"
-                        >
-                            <X className="w-6 h-6 text-gray-600" />
-                        </button>
-                    </div>
+  const handleProviderUpdate = (field, value) => {
+    if (!activeProvider) return
+    updateProvider(activeProvider.id, { [field]: value })
+  }
 
-                    {/* Tab Navigation */}
-                    <div className="border-b border-white/20 bg-white/30">
-                        <div className="flex px-8 gap-2">
-                            {tabs.map(tab => {
-                                const Icon = tab.icon
-                                const isActive = activeTab === tab.id
+  const handleTest = async () => {
+    if (!activeProvider) {
+      setTesting(false)
+      return
+    }
+    setTesting(true)
+    setTestResult(null)
+    const result = await testConnection(activeProvider.id)
+    setTestResult(result)
+    setTesting(false)
+  }
 
-                                return (
-                                    <button
-                                        key={tab.id}
-                                        onClick={() => setActiveTab(tab.id)}
-                                        className={`
-                                            relative px-6 py-4 flex items-center gap-2 font-semibold transition-all
-                                            ${isActive
-                                                ? 'text-blue-600'
-                                                : 'text-gray-600 hover:text-gray-900'
-                                            }
-                                        `}
-                                    >
-                                        <Icon className="w-5 h-5" />
-                                        {tab.label}
+  const handleSyncModels = async () => {
+    if (!activeProvider) return
+    await fetchAndAddModels(activeProvider)
+  }
 
-                                        {isActive && (
-                                            <motion.div
-                                                layoutId="activeTab"
-                                                className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-blue-600 rounded-t-full"
-                                                transition={{ type: "spring", duration: 0.5 }}
-                                            />
-                                        )}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
+  const handleAddModel = () => {
+    if (!activeProvider || !addModelForm.id.trim()) return
+    addModelToCollection({
+      id: addModelForm.id.trim(),
+      name: addModelForm.name.trim() || addModelForm.id.trim(),
+      providerId: activeProvider.id,
+      type: addModelForm.type,
+      metadata: {},
+      isSystem: false,
+      isUserAdded: true
+    })
+    setAddModelForm({ id: '', name: '', type: 'chat' })
+  }
 
-                    {/* Content */}
-                    <div className="flex-1 flex overflow-hidden">
-                        {/* Tab 1: 服务商配置 */}
-                        {activeTab === 'providers' && (
-                            <>
-                                {/* Left Sidebar - Provider List */}
-                                <div className="w-80 border-r border-white/20 flex flex-col">
-                                    {/* Search Box */}
-                                    <div className="p-4 border-b border-white/20">
-                                        <div className="relative">
-                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                                            <input
-                                                type="text"
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
-                                                placeholder="搜索服务商..."
-                                                className="soft-input w-full pl-10 pr-4 py-2.5 rounded-xl text-sm"
-                                            />
-                                        </div>
-                                    </div>
+  const buildDefaultKey = (type, modelId) => `${activeProvider?.id || ''}:${modelId}`
+  const isDefaultModel = (type, modelId) => {
+    const key = DEFAULT_TYPE_MAP[type]
+    if (!key) return false
+    return getDefaultModel(key) === buildDefaultKey(type, modelId)
+  }
 
-                                    {/* Provider List */}
-                                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                                        {filteredProviders.map(provider => (
-                                            <motion.div
-                                                key={provider.id}
-                                                whileHover={{ scale: 1.02 }}
-                                                whileTap={{ scale: 0.98 }}
-                                                onClick={() => setActiveProviderId(provider.id)}
-                                                className={`
-                      relative p-4 rounded-2xl cursor-pointer transition-all duration-200
-                      ${activeProviderId === provider.id
-                                                        ? 'soft-card shadow-lg'
-                                                        : 'hover:bg-white/30 bg-white/10'}
-                    `}
-                                            >
-                                                <div className="flex items-center justify-between">
-                                                    <div className="flex items-center gap-3">
-                                                        <ProviderAvatar provider={provider} size={32} />
-                                                        <div>
-                                                            <div className="font-semibold text-gray-900 text-sm">
-                                                                {provider.name}
-                                                            </div>
-                                                            <div className="text-xs text-gray-500 mt-0.5">
-                                                                {getModelsByProvider(provider.id).length} 个模型
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    {provider.enabled && (
-                                                        <div className="px-2.5 py-1 bg-green-500/20 text-green-700 text-xs font-bold rounded-lg backdrop-blur-sm">
-                                                            ON
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                {activeProviderId === provider.id && (
-                                                    <motion.div
-                                                        layoutId="activeIndicator"
-                                                        className="absolute inset-0 border-2 border-blue-500 rounded-2xl pointer-events-none"
-                                                        transition={{ type: "spring", duration: 0.5 }}
-                                                    />
-                                                )}
-                                            </motion.div>
-                                        ))}
-                                    </div>
-                                </div>
+  const handleSetDefault = (type, modelId) => {
+    const key = DEFAULT_TYPE_MAP[type]
+    if (!key) return
+    setDefaultModel(key, buildDefaultKey(type, modelId))
+  }
 
-                                {/* Right Content - Provider Config */}
-                                {activeProvider ? (
-                                    <div className="flex-1 overflow-y-auto p-6">
-                                        <motion.div
-                                            key={activeProvider.id}
-                                            initial={{ opacity: 0, x: 20 }}
-                                            animate={{ opacity: 1, x: 0 }}
-                                            transition={{ duration: 0.3 }}
-                                        >
-                                            {/* API Configuration */}
-                                            <div className="soft-card rounded-2xl p-6 mb-6">
-                                                <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                                                    <Server className="w-5 h-5 text-blue-600" />
-                                                    API 配置
-                                                </h3>
-
-                                                {activeProvider.type === 'local' ? (
-                                                    <div className="soft-card bg-gradient-to-br from-green-50/50 to-emerald-50/50 rounded-xl p-5 border border-green-200/50">
-                                                        <div className="flex items-start gap-3">
-                                                            <div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center flex-shrink-0">
-                                                                <Zap className="w-5 h-5 text-white" />
-                                                            </div>
-                                                            <div>
-                                                                <div className="font-semibold text-green-900">本地模型 (免费)</div>
-                                                                <div className="text-sm text-green-700 mt-1">
-                                                                    ✨ 无需 API Key，首次使用会自动下载模型文件
-                                                                </div>
-                                                                <div className="text-xs text-green-600/80 mt-2">
-                                                                    模型会缓存在本地，后续使用无需联网
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                ) : (
-                                                    <div className="space-y-4">
-                                                        <div>
-                                                            <label className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-2">
-                                                                <Key className="w-4 h-4 text-blue-600" />
-                                                                API Key
-                                                            </label>
-                                                            <input
-                                                                type="password"
-                                                                value={activeProvider.apiKey || ''}
-                                                                onChange={(e) => updateProvider(activeProvider.id, { apiKey: e.target.value })}
-                                                                placeholder="sk-..."
-                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm"
-                                                            />
-                                                        </div>
-
-                                                        <div>
-                                                            <label className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-2">
-                                                                <Server className="w-4 h-4 text-blue-600" />
-                                                                API 地址
-                                                            </label>
-                                                            <input
-                                                                type="text"
-                                                                value={activeProvider.apiHost || ''}
-                                                                onChange={(e) => updateProvider(activeProvider.id, { apiHost: e.target.value })}
-                                                                placeholder="https://..."
-                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-mono"
-                                                            />
-                                                        </div>
-
-                                                        <div className="flex items-center gap-3 pt-2">
-                                                            <button
-                                                                onClick={() => updateProvider(activeProvider.id, { enabled: !activeProvider.enabled })}
-                                                                className={`
-                              px-6 py-3 rounded-xl font-semibold transition-all duration-200
-                              ${activeProvider.enabled
-                                                                        ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-lg shadow-green-500/30 hover:shadow-green-500/50 hover:scale-105'
-                                                                        : 'soft-card text-gray-700 hover:scale-105'}
-                            `}
-                                                            >
-                                                                {activeProvider.enabled ? (
-                                                                    <span className="flex items-center gap-2">
-                                                                        <CheckCircle className="w-4 h-4" />
-                                                                        已启用
-                                                                    </span>
-                                                                ) : (
-                                                                    '点击启用'
-                                                                )}
-                                                            </button>
-
-                                                            <button
-                                                                onClick={() => handleTestConnection(activeProvider)}
-                                                                disabled={testingProvider === activeProvider.id}
-                                                                className={`
-                                                            soft-card px-6 py-3 rounded-xl font-semibold transition-all duration-200
-                                                            ${testingProvider === activeProvider.id
-                                                                        ? 'opacity-50 cursor-not-allowed'
-                                                                        : 'hover:scale-105'}
-                                                        `}
-                                                            >
-                                                                {testingProvider === activeProvider.id ? (
-                                                                    <span className="flex items-center gap-2">
-                                                                        <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                                                                        测试中...
-                                                                    </span>
-                                                                ) : (
-                                                                    '测试连接'
-                                                                )}
-                                                            </button>
-                                                        </div>
-
-                                                        {/* Test Result Display */}
-                                                        {testResult && testResult.providerId === activeProvider.id && (
-                                                            <motion.div
-                                                                initial={{ opacity: 0, y: -10 }}
-                                                                animate={{ opacity: 1, y: 0 }}
-                                                                transition={{ duration: 0.3 }}
-                                                                className={`
-                                                            mt-4 p-4 rounded-xl border-2 flex items-start gap-3
-                                                            ${testResult.success
-                                                                        ? 'bg-green-50 border-green-300 text-green-800'
-                                                                        : 'bg-red-50 border-red-300 text-red-800'}
-                                                        `}
-                                                            >
-                                                                {testResult.success ? (
-                                                                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                                                                ) : (
-                                                                    <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                                                                )}
-                                                                <div className="flex-1">
-                                                                    <p className="font-semibold mb-1">
-                                                                        {testResult.success ? '✅ 连接成功' : '❌ 连接失败'}
-                                                                    </p>
-                                                                    <p className="text-sm opacity-90">
-                                                                        {testResult.message}
-                                                                    </p>
-                                                                    {testResult.success && testResult.availableModels !== undefined && (
-                                                                        <p className="text-sm mt-2 opacity-80">
-                                                                            可用模型数: <span className="font-semibold">{testResult.availableModels}</span>
-                                                                        </p>
-                                                                    )}
-                                                                </div>
-                                                            </motion.div>
-                                                        )}
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Provider Models Preview */}
-                                            <div className="soft-card rounded-2xl p-6 mt-6">
-                                                <div className="flex items-center justify-between mb-4">
-                                                    <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                                                        <Zap className="w-5 h-5 text-green-600" />
-                                                        模型预览
-                                                    </h3>
-                                                    <button
-                                                        onClick={() => setManageModelsOpen(true)}
-                                                        className="bg-gradient-to-r from-blue-500 to-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:scale-105 transition-all flex items-center gap-2 shadow-lg"
-                                                    >
-                                                        <Zap className="w-4 h-4" />
-                                                        管理模型
-                                                    </button>
-                                                </div>
-
-                                                {/* Display first 5 models for this provider */}
-                                                {(() => {
-                                                    const providerModels = getModelsByProvider(activeProvider.id)
-                                                    const previewModels = providerModels.slice(0, 5)
-
-                                                    if (providerModels.length === 0) {
-                                                        return (
-                                                            <div className="text-center py-12">
-                                                                <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                                                                    <Zap className="w-8 h-8 text-gray-400" />
-                                                                </div>
-                                                                <p className="text-gray-600 font-semibold mb-2">暂无模型</p>
-                                                                <p className="text-sm text-gray-500">点击「管理模型」添加模型到此服务商</p>
-                                                            </div>
-                                                        )
-                                                    }
-
-                                                    return (
-                                                        <div className="space-y-2">
-                                                            {previewModels.map(model => (
-                                                                <div
-                                                                    key={`${model.providerId}-${model.id}`}
-                                                                    className="soft-card rounded-xl p-3 flex items-center gap-3"
-                                                                >
-                                                                    <div className="flex-1">
-                                                                        <div className="font-semibold text-gray-900 text-sm">{model.name}</div>
-                                                                        <div className="text-xs text-gray-500 mt-0.5">
-                                                                            {model.type === 'embedding' ? '📊 Embedding' : '🔄 Rerank'}
-                                                                            {model.metadata?.dimension && ` · 维度: ${model.metadata.dimension}`}
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            ))}
-                                                            {providerModels.length > 5 && (
-                                                                <div className="text-center pt-2 text-sm text-gray-500">
-                                                                    还有 {providerModels.length - 5} 个模型，点击「管理模型」查看全部
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )
-                                                })()}
-                                            </div>
-                                        </motion.div>
-                                    </div>
-                                ) : (
-                                    <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
-                                        <div className="text-center max-w-md">
-                                            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-6">
-                                                <Server className="w-10 h-10 text-gray-400" />
-                                            </div>
-                                            <h3 className="text-xl font-bold text-gray-900 mb-3">暂无服务商</h3>
-                                            <p className="text-gray-600 text-sm leading-relaxed">
-                                                服务商配置正在加载中...
-                                                <br />
-                                                如果此问题持续存在，请尝试刷新页面
-                                            </p>
-                                        </div>
-                                    </div>
-                                )}
-                            </>
-                        )}
-
-                        {/* Tab 2: 默认模型 */}
-                        {activeTab === 'defaults' && (
-                            <div className="flex-1 overflow-y-auto p-6">
-                                {(() => {
-                                    const { getModelsByType } = useModel()
-                                    const embeddingModels = getModelsByType('embedding')
-                                    const rerankModels = getModelsByType('rerank')
-
-                                    // 获取当前默认模型的完整键（providerId:modelId）
-                                    const currentEmbeddingKey = getDefaultModel('embeddingModel')
-                                    const currentRerankKey = getDefaultModel('rerankModel')
-
-                                    // 从复合键解析出当前选中的模型
-                                    const parseModelKey = (key) => {
-                                        if (!key) return null
-                                        const [providerId, modelId] = key.split(':')
-                                        return embeddingModels.concat(rerankModels).find(
-                                            m => m.providerId === providerId && m.id === modelId
-                                        )
-                                    }
-
-                                    const currentEmbeddingModel = parseModelKey(currentEmbeddingKey)
-                                    const currentRerankModel = parseModelKey(currentRerankKey)
-
-                                    return (
-                                        <div className="max-w-3xl mx-auto space-y-6">
-                                            {/* Header */}
-                                            <div className="text-center mb-8">
-                                                <CheckCircle className="w-12 h-12 mx-auto text-green-600 mb-3" />
-                                                <h3 className="text-2xl font-bold text-gray-900 mb-2">默认模型配置</h3>
-                                                <p className="text-gray-600 text-sm">
-                                                    选择您偏好的默认模型，用于文档处理和问答
-                                                </p>
-                                            </div>
-
-                                            {/* Embedding 默认模型 */}
-                                            <div className="soft-card rounded-2xl p-6 space-y-4">
-                                                <div className="flex items-center gap-3 mb-4">
-                                                    <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
-                                                        <Zap className="w-5 h-5 text-white" />
-                                                    </div>
-                                                    <h4 className="text-lg font-bold text-gray-900">Embedding 模型</h4>
-                                                    <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-semibold rounded-lg">
-                                                        必选
-                                                    </span>
-                                                </div>
-
-                                                {embeddingModels.length > 0 ? (
-                                                    <>
-                                                        <div>
-                                                            <label className="text-sm font-semibold text-gray-700 mb-2 block">
-                                                                选择默认 Embedding 模型
-                                                            </label>
-                                                            <select
-                                                                value={currentEmbeddingKey || ''}
-                                                                onChange={(e) => {
-                                                                    const value = e.target.value
-                                                                    setDefaultModel('embeddingModel', value || null)
-                                                                }}
-                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-medium"
-                                                            >
-                                                                <option value="">请选择...</option>
-                                                                {embeddingModels.map(model => {
-                                                                    const provider = providers.find(p => p.id === model.providerId)
-                                                                    const key = `${model.providerId}:${model.id}`
-                                                                    return (
-                                                                        <option key={key} value={key}>
-                                                                            {provider?.name || model.providerId} - {model.name}
-                                                                        </option>
-                                                                    )
-                                                                })}
-                                                            </select>
-                                                        </div>
-
-                                                        {/* Current Selection Info */}
-                                                        {currentEmbeddingModel && (
-                                                            <motion.div
-                                                                initial={{ opacity: 0, y: -10 }}
-                                                                animate={{ opacity: 1, y: 0 }}
-                                                                className="mt-4 p-4 bg-blue-50 border-2 border-blue-200 rounded-xl"
-                                                            >
-                                                                <div className="flex items-start gap-4">
-                                                                    {(() => {
-                                                                        const provider = providers.find(p => p.id === currentEmbeddingModel.providerId)
-                                                                        return provider && <ProviderAvatar provider={provider} size={48} />
-                                                                    })()}
-                                                                    <div className="flex-1">
-                                                                        <div className="flex items-center gap-2 mb-2">
-                                                                            <CheckCircle className="w-4 h-4 text-green-600" />
-                                                                            <span className="font-semibold text-gray-900">
-                                                                                当前默认模型
-                                                                            </span>
-                                                                        </div>
-                                                                        <div className="space-y-1 text-sm">
-                                                                            <div>
-                                                                                <span className="text-gray-600">服务商:</span>{' '}
-                                                                                <span className="font-semibold">
-                                                                                    {providers.find(p => p.id === currentEmbeddingModel.providerId)?.name || currentEmbeddingModel.providerId}
-                                                                                </span>
-                                                                            </div>
-                                                                            <div>
-                                                                                <span className="text-gray-600">模型:</span>{' '}
-                                                                                <span className="font-semibold">{currentEmbeddingModel.name}</span>
-                                                                            </div>
-                                                                            {currentEmbeddingModel.metadata?.dimension && (
-                                                                                <div>
-                                                                                    <span className="text-gray-600">向量维度:</span>{' '}
-                                                                                    <span className="font-semibold">{currentEmbeddingModel.metadata.dimension}</span>
-                                                                                </div>
-                                                                            )}
-                                                                            {currentEmbeddingModel.metadata?.description && (
-                                                                                <div>
-                                                                                    <span className="text-gray-600">说明:</span>{' '}
-                                                                                    <span className="text-gray-800">{currentEmbeddingModel.metadata.description}</span>
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            </motion.div>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    <div className="p-4 bg-gray-50 border-2 border-gray-200 rounded-xl text-center text-sm text-gray-600">
-                                                        暂无可用的 Embedding 模型
-                                                        <br />
-                                                        <span className="text-xs text-gray-500 mt-1 block">
-                                                            前往「服务商配置」添加 Embedding 模型
-                                                        </span>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Rerank 默认模型（可选） */}
-                                            <div className="soft-card rounded-2xl p-6 space-y-4">
-                                                <div className="flex items-center gap-3 mb-4">
-                                                    <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
-                                                        <Zap className="w-5 h-5 text-white" />
-                                                    </div>
-                                                    <h4 className="text-lg font-bold text-gray-900">Rerank 模型</h4>
-                                                    <span className="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg">
-                                                        可选
-                                                    </span>
-                                                </div>
-
-                                                {rerankModels.length > 0 ? (
-                                                    <>
-                                                        <div>
-                                                            <label className="text-sm font-semibold text-gray-700 mb-2 block">
-                                                                选择重排模型（可提高搜索准确性）
-                                                            </label>
-                                                            <select
-                                                                value={currentRerankKey || ''}
-                                                                onChange={(e) => {
-                                                                    const value = e.target.value
-                                                                    setDefaultModel('rerankModel', value || null)
-                                                                }}
-                                                                className="soft-input w-full px-4 py-3 rounded-xl text-sm font-medium"
-                                                            >
-                                                                <option value="">不使用重排模型</option>
-                                                                {rerankModels.map(model => {
-                                                                    const provider = providers.find(p => p.id === model.providerId)
-                                                                    const key = `${model.providerId}:${model.id}`
-                                                                    return (
-                                                                        <option key={key} value={key}>
-                                                                            {provider?.name || model.providerId} - {model.name}
-                                                                        </option>
-                                                                    )
-                                                                })}
-                                                            </select>
-                                                        </div>
-
-                                                        {/* Current Rerank Selection */}
-                                                        {currentRerankModel && (
-                                                            <motion.div
-                                                                initial={{ opacity: 0, y: -10 }}
-                                                                animate={{ opacity: 1, y: 0 }}
-                                                                className="mt-4 p-4 bg-purple-50 border-2 border-purple-200 rounded-xl"
-                                                            >
-                                                                <div className="flex items-start gap-4">
-                                                                    {(() => {
-                                                                        const provider = providers.find(p => p.id === currentRerankModel.providerId)
-                                                                        return provider && <ProviderAvatar provider={provider} size={48} />
-                                                                    })()}
-                                                                    <div className="flex-1">
-                                                                        <div className="flex items-center gap-2 mb-2">
-                                                                            <CheckCircle className="w-4 h-4 text-green-600" />
-                                                                            <span className="font-semibold text-gray-900">
-                                                                                当前 Rerank 模型
-                                                                            </span>
-                                                                        </div>
-                                                                        <div className="space-y-1 text-sm">
-                                                                            <div>
-                                                                                <span className="text-gray-600">服务商:</span>{' '}
-                                                                                <span className="font-semibold">
-                                                                                    {providers.find(p => p.id === currentRerankModel.providerId)?.name || currentRerankModel.providerId}
-                                                                                </span>
-                                                                            </div>
-                                                                            <div>
-                                                                                <span className="text-gray-600">模型:</span>{' '}
-                                                                                <span className="font-semibold">{currentRerankModel.name}</span>
-                                                                            </div>
-                                                                            {currentRerankModel.metadata?.description && (
-                                                                                <div>
-                                                                                    <span className="text-gray-600">说明:</span>{' '}
-                                                                                    <span className="text-gray-800">{currentRerankModel.metadata.description}</span>
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            </motion.div>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    <div className="p-4 bg-gray-50 border-2 border-gray-200 rounded-xl text-center text-sm text-gray-600">
-                                                        暂无可用的 Rerank 模型
-                                                        <br />
-                                                        <span className="text-xs text-gray-500 mt-1 block">
-                                                            前往「服务商配置」添加 Rerank 模型
-                                                        </span>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Configuration Preview */}
-                                            <div className="soft-card rounded-2xl p-6 bg-gradient-to-br from-green-50 to-blue-50">
-                                                <div className="flex items-center gap-3 mb-4">
-                                                    <Settings className="w-6 h-6 text-green-600" />
-                                                    <h4 className="text-lg font-bold text-gray-900">配置预览</h4>
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-4">
-                                                    <div className="bg-white rounded-xl p-4 border border-gray-200">
-                                                        <div className="text-xs text-gray-600 mb-1">Embedding 模型</div>
-                                                        <div className="font-semibold text-gray-900">
-                                                            {currentEmbeddingModel?.name || '未设置'}
-                                                        </div>
-                                                        {currentEmbeddingModel && (
-                                                            <div className="text-xs text-gray-500 mt-1">
-                                                                {providers.find(p => p.id === currentEmbeddingModel.providerId)?.name || currentEmbeddingModel.providerId}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    <div className="bg-white rounded-xl p-4 border border-gray-200">
-                                                        <div className="text-xs text-gray-600 mb-1">Rerank 模型</div>
-                                                        <div className="font-semibold text-gray-900">
-                                                            {currentRerankModel?.name || '未设置'}
-                                                        </div>
-                                                        {currentRerankModel && (
-                                                            <div className="text-xs text-gray-500 mt-1">
-                                                                {providers.find(p => p.id === currentRerankModel.providerId)?.name || currentRerankModel.providerId}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                                <div className="mt-4 text-xs text-gray-600 flex items-center gap-2">
-                                                    <AlertCircle className="w-3 h-3" />
-                                                    配置更改会立即保存到本地存储
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )
-                                })()}
-                            </div>
-                        )}
-                    </div>
-                </motion.div>
-            </motion.div>
-        </AnimatePresence>
-
-        {/* Manage Models Popup */}
-        {activeProvider && (
-            <ManageModelsPopup
-                isOpen={manageModelsOpen}
-                onClose={() => setManageModelsOpen(false)}
-                providerId={activeProvider.id}
-            />
+  const renderModelRow = (model) => (
+    <div
+      key={`${model.providerId}-${model.id}`}
+      className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 border border-gray-100"
+    >
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-purple-100 flex items-center justify-center text-sm text-blue-600 font-semibold">
+          {model.name?.[0]?.toUpperCase() || 'M'}
+        </div>
+        <div>
+          <div className="text-sm font-semibold text-gray-800">{model.name || model.id}</div>
+          <div className="text-xs text-gray-500">{model.id}</div>
+        </div>
+        {model.metadata?.dimension && (
+          <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-100">
+            {model.metadata.dimension} 维
+          </span>
         )}
-    </>
+        {model.type === 'chat' && (
+          <span className="text-[11px] text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100">
+            Chat
+          </span>
+        )}
+        {model.type === 'embedding' && (
+          <span className="text-[11px] text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
+            Embedding
+          </span>
+        )}
+        {model.type === 'rerank' && (
+          <span className="text-[11px] text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-100">
+            Rerank
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => handleSetDefault(model.type, model.id)}
+          className={`px-2 py-1 rounded-lg text-xs border ${isDefaultModel(model.type, model.id)
+            ? 'border-blue-200 text-blue-700 bg-blue-50'
+            : 'border-gray-200 text-gray-600 hover:border-blue-200 hover:text-blue-700'
+            }`}
+        >
+          {isDefaultModel(model.type, model.id) ? '当前默认' : '设为默认'}
+        </button>
+        {model.isUserAdded && (
+          <button
+            onClick={() => removeModelFromCollection(model.id, model.providerId)}
+            className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50"
+            title="删除模型"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+
+  try {
+    return (
+      <AnimatePresence>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 backdrop-blur-sm p-4"
+        >
+          <motion.div
+            initial={{ scale: 0.96, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.96, opacity: 0 }}
+            className="w-full max-w-6xl max-h-[92vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+          >
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-blue-50 text-blue-700">
+                <Server className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-lg font-bold text-gray-900">模型服务管理</div>
+                <div className="text-xs text-gray-500">集中配置所有厂商与模型（对话 / 嵌入 / 重排）</div>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="flex flex-1 min-h-0">
+            {/* Left: provider list */}
+            <div className="w-64 border-r border-gray-100 p-4 flex flex-col">
+              <div className="relative mb-3">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+                <input
+                  value={providerSearch}
+                  onChange={(e) => setProviderSearch(e.target.value)}
+                  placeholder="搜索模型平台..."
+                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div className="space-y-2 overflow-y-auto pr-1">
+                {filteredProviders.length === 0 && (
+                  <div className="text-xs text-gray-500 px-3 py-2">
+                    暂无服务商，请先添加或检查配置。
+                  </div>
+                )}
+                {filteredProviders.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => setActiveProviderId(p.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl border text-left transition-colors ${p.id === activeProvider?.id
+                      ? 'border-blue-200 bg-blue-50/60 text-blue-700'
+                      : 'border-gray-200 hover:border-blue-200 hover:bg-blue-50/30 text-gray-700'
+                      }`}
+                  >
+                    <ProviderAvatar providerId={p.id} className="w-8 h-8" />
+                    <div className="flex-1">
+                      <div className="text-sm font-semibold">{p.name}</div>
+                      <div className="text-[11px] text-gray-500">{p.id}</div>
+                    </div>
+                    <div
+                      className={`w-2.5 h-2.5 rounded-full ${p.enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                      title={p.enabled ? '已启用' : '未启用'}
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Middle + Right */}
+            <div className="flex-1 grid grid-cols-2 gap-0 min-w-0">
+              {/* Provider detail */}
+              <div className="border-r border-gray-100 p-4 flex flex-col gap-4 min-h-0">
+                <div className="flex items-center gap-3">
+                  <ProviderAvatar providerId={activeProvider?.id} className="w-10 h-10" />
+                  <div>
+                    <div className="text-base font-semibold text-gray-900">{activeProvider?.name || '未选择'}</div>
+                    <div className="text-xs text-gray-500">{activeProvider?.id}</div>
+                  </div>
+                  <label className="ml-auto inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={!!activeProvider?.enabled}
+                      onChange={e => handleProviderUpdate('enabled', e.target.checked)}
+                      className="accent-blue-600 w-4 h-4"
+                    />
+                    启用
+                  </label>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs text-gray-600">API Key</label>
+                    <div className="relative mt-1">
+                      <Key className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+                      <input
+                        value={activeProvider?.apiKey || ''}
+                        onChange={e => handleProviderUpdate('apiKey', e.target.value)}
+                        placeholder="sk-..."
+                        type="password"
+                        className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-600">API 地址</label>
+                    <div className="relative mt-1">
+                      <Plug className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+                      <input
+                        value={activeProvider?.apiHost || ''}
+                        onChange={e => handleProviderUpdate('apiHost', e.target.value)}
+                        placeholder="https://api.openai.com/v1"
+                        className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleTest}
+                    disabled={!activeProvider || testing}
+                    className="soft-button soft-button-primary px-4 py-2 rounded-xl text-sm flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {testing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
+                    测试连接
+                  </button>
+                  <button
+                    onClick={handleSyncModels}
+                    disabled={!activeProvider || isFetching}
+                    className="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-700 hover:border-blue-200 hover:text-blue-700 flex items-center gap-2 disabled:opacity-60"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    同步模型
+                  </button>
+                </div>
+
+                {testResult && (
+                  <div className={`rounded-xl p-3 text-sm border ${testResult.success ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                    {testResult.success ? '连接成功' : '连接失败'} {testResult.message || testResult.error || ''}
+                  </div>
+                )}
+                {fetchError && (
+                  <div className="rounded-xl p-3 text-sm border border-amber-200 bg-amber-50 text-amber-700">
+                    {fetchError}
+                  </div>
+                )}
+
+                {/* Add model form */}
+                <div className="mt-auto border-t border-gray-100 pt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-sm font-semibold text-gray-800">新增模型</div>
+                    <Settings className="w-4 h-4 text-gray-400" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      className="soft-input px-3 py-2 rounded-lg border border-gray-200"
+                      placeholder="modelId"
+                      value={addModelForm.id}
+                      onChange={e => setAddModelForm({ ...addModelForm, id: e.target.value })}
+                    />
+                    <select
+                      className="soft-input px-3 py-2 rounded-lg border border-gray-200"
+                      value={addModelForm.type}
+                      onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
+                    >
+                      <option value="chat">Chat</option>
+                      <option value="embedding">Embedding</option>
+                      <option value="rerank">Rerank</option>
+                      <option value="image">Image</option>
+                    </select>
+                    <input
+                      className="soft-input px-3 py-2 rounded-lg border border-gray-200 col-span-2"
+                      placeholder="显示名称（可选）"
+                      value={addModelForm.name}
+                      onChange={e => setAddModelForm({ ...addModelForm, name: e.target.value })}
+                    />
+                    <button
+                      onClick={handleAddModel}
+                      className="col-span-2 soft-button soft-button-primary rounded-lg py-2 text-sm flex items-center justify-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      保存模型
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Models list */}
+              <div className="p-4 flex flex-col gap-3 min-h-0">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-base font-semibold text-gray-900">模型列表</div>
+                    <div className="text-xs text-gray-500">按类型分组：对话 / 嵌入 / 重排</div>
+                  </div>
+                  <div className="text-xs text-gray-400 flex items-center gap-1">
+                    <ChevronDown className="w-4 h-4" />
+                    {getModelsByProvider(activeProvider?.id || '').length || 0} 个
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+                  {['chat', 'embedding', 'rerank', 'image'].map(type => {
+                    const list = modelsByType[type] || []
+                    if (list.length === 0) return null
+                    return (
+                      <div key={type} className="border border-gray-100 rounded-xl">
+                        <div className="px-3 py-2 flex items-center justify-between bg-gray-50 border-b border-gray-100 rounded-t-xl">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-400" />
+                            {type === 'chat' ? 'Chat 对话' : type === 'embedding' ? 'Embedding 向量' : type === 'rerank' ? 'Rerank 重排' : 'Image 图像'}
+                          </div>
+                          <div className="text-[11px] text-gray-500 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            默认：{(() => {
+                              const key = DEFAULT_TYPE_MAP[type]
+                              if (!key) return '—'
+                              const current = getDefaultModel(key)
+                              return current || '未选择'
+                            })()}
+                          </div>
+                        </div>
+                        <div className="p-3 space-y-2">
+                          {list.map(renderModelRow)}
+                        </div>
+                      </div>
+                    )
+                  })}
+
+                  {(!modelsByType || Object.keys(modelsByType).length === 0) && (
+                    <div className="rounded-xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">
+                      暂无模型，请点击“同步模型”或手动新增。
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
     )
+  } catch (err) {
+    console.error('EmbeddingSettings render error', err)
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
+        <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-lg w-full">
+          <div className="text-lg font-semibold text-gray-900 mb-2">模型服务管理加载失败</div>
+          <div className="text-sm text-gray-600 mb-4">{err?.message || '未知错误'}</div>
+          <button
+            onClick={onClose}
+            className="soft-button soft-button-primary px-4 py-2 rounded-lg"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+    )
+  }
 }
