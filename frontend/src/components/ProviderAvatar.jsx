@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { getProviderLogo } from '../config/providerLogos'
 
 /**
  * Provider头像组件
@@ -41,6 +42,10 @@ export default function ProviderAvatar({
   // 兼容只传 providerId 的场景
   const safeProvider = provider || { id: providerId || 'unknown', name: providerId || '未知', logo: null }
 
+  // 尝试获取本地图标作为fallback
+  const localLogo = getProviderLogo(safeProvider.id)
+  const displayLogo = safeProvider.logo || localLogo
+
   const backgroundColor = generateColor(safeProvider.name)
   const color = getForegroundColor(backgroundColor)
 
@@ -69,15 +74,15 @@ export default function ProviderAvatar({
     )
   }
 
-  const logoIsImage = isImageUrl(safeProvider.logo)
-  const logoIsEmoji = safeProvider.logo && !logoIsImage && String(safeProvider.logo).length <= 4
+  const logoIsImage = isImageUrl(displayLogo)
+  const logoIsEmoji = displayLogo && !logoIsImage && String(displayLogo).length <= 4
 
   // 调试输出
   if (process.env.NODE_ENV === 'development') {
     console.log(`Provider ${safeProvider.name}:`, {
-      logo: safeProvider.logo,
+      logo: displayLogo,
       logoType: logoIsImage ? 'image' : logoIsEmoji ? 'emoji' : 'fallback',
-      logoValue: typeof safeProvider.logo
+      logoValue: typeof displayLogo
     })
   }
 
@@ -94,7 +99,7 @@ export default function ProviderAvatar({
       {logoIsImage && !imageError ? (
         // 图片logo
         <img
-          src={safeProvider.logo}
+          src={displayLogo}
           alt={safeProvider.name}
           className="w-full h-full object-contain"
           onError={() => setImageError(true)}
@@ -103,7 +108,7 @@ export default function ProviderAvatar({
       ) : logoIsEmoji ? (
         // Emoji fallback
         <span style={{ fontSize: size * 0.6 }}>
-          {provider.logo}
+          {displayLogo}
         </span>
       ) : (
         // 首字母头像fallback

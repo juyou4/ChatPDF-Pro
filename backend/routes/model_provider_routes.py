@@ -48,6 +48,27 @@ def _build_endpoint(base: str, path: str | None) -> str:
     return f"{base_clean}/{path_clean}"
 
 
+def _normalize_api_host(provider_id: str, api_host: str | None) -> str:
+    """
+    尝试把传入的 chat endpoint 还原成 base url，避免 /chat/completions 之类的尾部路径导致 /models 请求失败
+    """
+    from urllib.parse import urlparse
+
+    host = (api_host or "").strip()
+    if not host:
+        host = PROVIDER_CONFIG.get(provider_id, {}).get("endpoint", "")
+
+    # 如果是完整 URL，截取 scheme+netloc
+    parsed = urlparse(host)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    # 否则尽量砍掉路径部分，只保留 host 段
+    host = host.split("://")[-1]
+    host = host.split("/")[0]
+    return host.rstrip("/")
+
+
 async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: List[str]):
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -125,7 +146,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 "providerId": request.providerId,
                 "providerType": request.providerType,
                 "timestamp": int(datetime.now().timestamp()),
-                "message": "该提供商不支持自动拉取模型列表，请在前端手动选择/输入模型 ID"
+                "message": "该提供商不支持自动拉取模型列表，请在前端手动输入模型 ID"
             }
 
         if request.providerId == 'local':
@@ -154,11 +175,17 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 "timestamp": int(datetime.now().timestamp())
             }
 
+        api_host = _normalize_api_host(request.providerId, request.apiHost)
         endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
-        data, last_error = await _fetch_models_with_fallback(request.apiHost, request.apiKey, endpoints)
+        data, last_error = await _fetch_models_with_fallback(api_host, request.apiKey, endpoints)
 
         if data is None:
-            raise HTTPException(status_code=502, detail=f"获取模型失败: {last_error or '无响应'}")
+            return {
+                "models": [],
+                "providerId": request.providerId,
+                "timestamp": int(datetime.now().timestamp()),
+                "message": f"获取模型失败: {last_error or '无响应'}，可在前端手动添加模型 ID"
+            }
 
         models = []
         if 'data' in data and isinstance(data['data'], list):
@@ -181,15 +208,18 @@ async def fetch_provider_models(request: ModelFetchRequest):
         return {
             "models": models,
             "providerId": request.providerId,
-            "timestamp": int(datetime.now().timestamp())
+            "timestamp": int(datetime.now().timestamp()),
+            "message": None
         }
 
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="无法连接到Provider API")
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Provider API响应超时")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取模型失败：{str(e)}")
+        # 统一用 200 返回空列表和错误消息，避免前端 500
+        return {
+            "models": [],
+            "providerId": request.providerId,
+            "timestamp": int(datetime.now().timestamp()),
+            "message": f"获取模型失败: {str(e)}，可在前端手动添加模型 ID"
+        }
 
 
 class ModelTestRequest(BaseModel):
