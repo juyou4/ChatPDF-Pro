@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2 } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -49,12 +49,6 @@ const ChatPDF = () => {
   const [useRerank, setUseRerank] = useState(localStorage.getItem('useRerank') !== 'false');
   const [rerankerModel, setRerankerModel] = useState(localStorage.getItem('rerankerModel') || 'BAAI/bge-reranker-base');
   const [lastCallInfo, setLastCallInfo] = useState(null); // {provider, model, fallback}
-  const [customProviders, setCustomProviders] = useState({});
-  const [customModels, setCustomModels] = useState({});
-  const [newProvider, setNewProvider] = useState({ id: '', name: '', endpoint: '', type: 'openai' });
-  const [newModel, setNewModel] = useState({ id: '', name: '', providerId: '', type: 'embedding' });
-  const [providerError, setProviderError] = useState('');
-  const [modelError, setModelError] = useState('');
   const [searchHistory, setSearchHistory] = useState([]);
 
   // Screenshot State
@@ -178,8 +172,6 @@ const ChatPDF = () => {
   useEffect(() => {
     fetchAvailableModels();
     fetchAvailableEmbeddingModels();
-    fetchCustomProviders();
-    fetchCustomModels();
     fetchStorageInfo();
     loadHistory();  // 加载历史记录
   }, []);
@@ -396,114 +388,6 @@ const ChatPDF = () => {
           "description": "Open source, hosted"
         }
       });
-    }
-  };
-
-  const addCustomProvider = async () => {
-    if (!newProvider.id || !newProvider.name || !newProvider.endpoint) {
-      setProviderError('请填写 Provider ID、名称和 Endpoint');
-      return;
-    }
-    setProviderError('');
-    if (!newProvider.id || !newProvider.name || !newProvider.endpoint) {
-      alert('请填写 Provider ID/名称/Endpoint');
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/providers/custom`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          providerId: newProvider.id,
-          name: newProvider.name,
-          endpoint: newProvider.endpoint,
-          type: newProvider.type
-        })
-      });
-      if (res.ok) {
-        await fetchCustomProviders();
-        setNewProvider({ id: '', name: '', endpoint: '', type: 'openai' });
-      } else {
-        alert('保存 Provider 失败');
-      }
-    } catch (e) {
-      console.error(e);
-      alert('保存 Provider 失败');
-    }
-  };
-
-  const deleteCustomProvider = async (id) => {
-    try {
-      await fetch(`${API_BASE_URL}/api/providers/custom/${id}`, { method: 'DELETE' });
-      await fetchCustomProviders();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const addCustomModel = async () => {
-    if (!newModel.id || !newModel.name || !newModel.providerId) {
-      setModelError('请填写模型ID、名称和 Provider ID');
-      return;
-    }
-    setModelError('');
-    if (!newModel.id || !newModel.name || !newModel.providerId) {
-      alert('请填写模型ID/名称/Provider');
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/models/custom`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          modelId: newModel.id,
-          name: newModel.name,
-          providerId: newModel.providerId,
-          type: newModel.type
-        })
-      });
-      if (res.ok) {
-        await fetchCustomModels();
-        setNewModel({ id: '', name: '', providerId: '', type: 'embedding' });
-      } else {
-        alert('保存模型失败');
-      }
-    } catch (e) {
-      console.error(e);
-      alert('保存模型失败');
-    }
-  };
-
-  const deleteCustomModel = async (id) => {
-    try {
-      await fetch(`${API_BASE_URL}/api/models/custom/${id}`, { method: 'DELETE' });
-      await fetchCustomModels();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const fetchCustomProviders = async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/providers/custom`);
-      if (res.ok) {
-        const data = await res.json();
-        setCustomProviders(data);
-      }
-    } catch (e) {
-      console.error('Failed to fetch custom providers', e);
-    }
-  };
-
-  const fetchCustomModels = async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/models/custom`);
-      if (res.ok) {
-        const data = await res.json();
-        setCustomModels(data);
-      }
-    } catch (e) {
-      console.error('Failed to fetch custom models', e);
     }
   };
 
@@ -1256,7 +1140,7 @@ const ChatPDF = () => {
         className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
       >
         <div className="w-72 flex flex-col h-full">
-          <div className="p-8 flex items-center justify-between">
+          <div className="px-6 py-8 flex items-center justify-between">
             <div className="flex items-center gap-3 font-bold text-2xl text-blue-600 tracking-tight">
               <Bot className="w-9 h-9" />
               <span>ChatPDF</span>
@@ -1277,7 +1161,7 @@ const ChatPDF = () => {
             </div>
           </div>
 
-          <div className="px-4 mb-4">
+          <div className="px-6 mb-4">
             <button
               onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
               className="w-full py-4 soft-button soft-button-primary flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all"
@@ -1288,7 +1172,7 @@ const ChatPDF = () => {
             <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
           </div>
 
-          <div className="flex-1 overflow-y-auto px-4 space-y-2">
+          <div className="flex-1 overflow-y-auto px-6 space-y-2">
             <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
             {history.map((item, idx) => (
               <div
@@ -1852,18 +1736,23 @@ const ChatPDF = () => {
       </AnimatePresence>
 
       {/* Settings Modal */}
-      <AnimatePresence>
+      <AnimatePresence initial={false}>
         {showSettings && (
-          <div
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.12 }}
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4"
             onClick={() => setShowSettings(false)}
           >
             <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 10 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
               onClick={(e) => e.stopPropagation()}
-              className="soft-panel w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col"
+              className="soft-panel w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl"
             >
               <div className="flex justify-between items-center p-8 pb-4 flex-shrink-0">
                 <h2 className="text-2xl font-bold text-gray-800">Settings</h2>
@@ -1872,45 +1761,76 @@ const ChatPDF = () => {
 
               <div className="space-y-4 px-8 overflow-y-auto flex-1">
                 {/* 模型服务管理入口（对话/嵌入/重排统一管理） */}
-                <div className="soft-card p-5 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-indigo-50/50">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1">
-                      <h3 className="text-base font-bold text-gray-900 flex items-center gap-2 mb-1">
-                        <span className="text-xl">☁️</span> 模型服务
-                        <span className="text-xs font-normal text-gray-500 bg-white/50 px-2 py-0.5 rounded-full border border-blue-100">
-                          统一管理提供商与模型
-                        </span>
-                      </h3>
-                      <p className="text-xs text-gray-600 leading-relaxed max-w-md">
-                        支持单一厂商与集成厂商（如 SiliconFlow, OpenAI, DeepSeek 等），在此集中配置对话、嵌入(Embedding)和重排(Rerank)模型。
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setShowEmbeddingSettings(true)}
-                      className="soft-button soft-button-primary px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 hover:-translate-y-0.5 transition-all"
-                    >
-                      <Settings className="w-4 h-4" />
-                      打开模型服务管理
-                    </button>
-                  </div>
+                <div className="relative overflow-hidden rounded-[24px] border border-blue-100/50 bg-gradient-to-br from-white/40 to-blue-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
+                  <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-blue-500/10 rounded-full blur-3xl"></div>
+                  <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-20 h-20 bg-purple-500/10 rounded-full blur-2xl"></div>
 
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div className="p-3 rounded-xl border border-white/60 bg-white/40 hover:bg-white/60 transition-colors">
-                      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-bold mb-1">Chat Model</div>
-                      <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('assistantModel'))}
+                  <div className="relative bg-white/30 backdrop-blur-sm rounded-[20px] p-5 border border-white/50">
+                    <div className="flex flex-col gap-5">
+                      {/* Header Section */}
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500/90 to-indigo-600/90 shadow-lg shadow-blue-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
+                            <Server className="w-6 h-6" />
+                          </div>
+                          <div className="space-y-0.5">
+                            <h3 className="text-lg font-bold text-gray-900 tracking-tight">模型服务</h3>
+                            <p className="text-xs text-gray-500 font-medium">统一管理 Chat / Embedding / Rerank</p>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => setShowEmbeddingSettings(true)}
+                          className="group relative overflow-hidden rounded-xl bg-gray-900/90 px-5 py-2.5 text-white shadow-lg transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:scale-95 shrink-0 backdrop-blur-sm"
+                        >
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-in-out" />
+                          <div className="relative flex items-center gap-2 font-medium text-sm">
+                            <span>管理模型</span>
+                            <Settings className="w-4 h-4 transition-transform duration-500 group-hover:rotate-180" />
+                          </div>
+                        </button>
                       </div>
-                    </div>
-                    <div className="p-3 rounded-xl border border-white/60 bg-white/40 hover:bg-white/60 transition-colors">
-                      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-bold mb-1">Embedding Model</div>
-                      <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('embeddingModel'))}
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-xl border border-white/60 bg-white/40 hover:bg-white/60 transition-colors">
-                      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-bold mb-1">Rerank Model</div>
-                      <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('rerankModel'))}
+
+                      {/* Model Status Cards */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        {/* Chat Model Card */}
+                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="p-1.5 rounded-lg bg-blue-50/80 text-blue-600 backdrop-blur-sm">
+                              <MessageSquare className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Chat Model</span>
+                          </div>
+                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
+                            {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
+                          </div>
+                        </div>
+
+                        {/* Embedding Model Card */}
+                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="p-1.5 rounded-lg bg-purple-50/80 text-purple-600 backdrop-blur-sm">
+                              <Database className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Embedding</span>
+                          </div>
+                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
+                            {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
+                          </div>
+                        </div>
+
+                        {/* Rerank Model Card */}
+                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-amber-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="p-1.5 rounded-lg bg-amber-50/80 text-amber-600 backdrop-blur-sm">
+                              <ListFilter className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Rerank</span>
+                          </div>
+                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
+                            {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1983,70 +1903,6 @@ const ChatPDF = () => {
                     <Type className="w-4 h-4" />
                     全局设置（字体、缩放）
                   </button>
-                </div>
-
-                {/* 自定义 Provider & 模型 */}
-                <div className="pt-4 border-t border-gray-100 space-y-3">
-                  <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                    🧩 自定义 Provider
-                    <span className="text-xs text-gray-500 font-normal">（OpenAI 兼容端点）</span>
-                  </h3>
-                  {providerError && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded-lg">{providerError}</div>}
-                  <div className="grid grid-cols-2 gap-2">
-                    <input className="soft-input" placeholder="providerId" value={newProvider.id} onChange={e => setNewProvider({ ...newProvider, id: e.target.value })} />
-                    <input className="soft-input" placeholder="名称" value={newProvider.name} onChange={e => setNewProvider({ ...newProvider, name: e.target.value })} />
-                    <input className="soft-input col-span-2" placeholder="Endpoint (OpenAI 兼容)" value={newProvider.endpoint} onChange={e => setNewProvider({ ...newProvider, endpoint: e.target.value })} />
-                    <select className="soft-input" value={newProvider.type} onChange={e => setNewProvider({ ...newProvider, type: e.target.value })}>
-                      <option value="openai">openai</option>
-                      <option value="anthropic">anthropic</option>
-                      <option value="gemini">gemini</option>
-                      <option value="ollama">ollama</option>
-                    </select>
-                    <button className="soft-btn bg-blue-600 text-white" onClick={addCustomProvider}>保存Provider</button>
-                  </div>
-                  {Object.keys(customProviders).length > 0 && (
-                    <div className="text-xs text-gray-600 space-y-1 max-h-36 overflow-auto pr-1">
-                      {Object.entries(customProviders).map(([id, cfg]) => (
-                        <div key={id} className="flex items-center justify-between bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
-                          <div className="flex flex-col">
-                            <span className="font-semibold">{cfg.name} <span className="text-gray-500 text-[11px]">({id})</span></span>
-                            <span className="text-[11px] text-gray-500 truncate max-w-[200px]">{cfg.endpoint}</span>
-                          </div>
-                          <button className="text-red-500 text-xs hover:text-red-600" onClick={() => deleteCustomProvider(id)}>删除</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                    🧠 自定义模型
-                    <span className="text-xs text-gray-500 font-normal">（与自定义 Provider 配套）</span>
-                  </h3>
-                  {modelError && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded-lg">{modelError}</div>}
-                  <div className="grid grid-cols-2 gap-2">
-                    <input className="soft-input" placeholder="modelId" value={newModel.id} onChange={e => setNewModel({ ...newModel, id: e.target.value })} />
-                    <input className="soft-input" placeholder="名称" value={newModel.name} onChange={e => setNewModel({ ...newModel, name: e.target.value })} />
-                    <input className="soft-input" placeholder="Provider ID" value={newModel.providerId} onChange={e => setNewModel({ ...newModel, providerId: e.target.value })} />
-                    <select className="soft-input" value={newModel.type} onChange={e => setNewModel({ ...newModel, type: e.target.value })}>
-                      <option value="embedding">embedding</option>
-                      <option value="rerank">rerank</option>
-                      <option value="chat">chat</option>
-                    </select>
-                    <button className="soft-btn bg-blue-600 text-white" onClick={addCustomModel}>保存模型</button>
-                  </div>
-                  {Object.keys(customModels).length > 0 && (
-                    <div className="text-xs text-gray-600 space-y-1 max-h-36 overflow-auto pr-1">
-                      {Object.entries(customModels).map(([id, cfg]) => (
-                        <div key={id} className="flex items-center justify-between bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
-                          <div className="flex flex-col">
-                            <span className="font-semibold">{cfg.name || cfg.model_name || id} <span className="text-gray-500 text-[11px]">({cfg.provider || cfg.providerId || 'n/a'})</span></span>
-                            <span className="text-[11px] text-gray-500 truncate max-w-[200px]">{cfg.type || cfg.model_type || 'embedding'}</span>
-                          </div>
-                          <button className="text-red-500 text-xs hover:text-red-600" onClick={() => deleteCustomModel(id)}>删除</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
                 {/* 工具栏设置 */}
@@ -2165,7 +2021,7 @@ const ChatPDF = () => {
                 </button>
               </div>
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 

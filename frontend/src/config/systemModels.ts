@@ -200,6 +200,133 @@ export const DEEPSEEK_MODELS: Model[] = [
 ]
 
 /**
+ * Chat 模型（对话）
+ */
+export const CHAT_MODELS: Model[] = [
+    {
+        id: 'gpt-4o-mini',
+        name: 'GPT-4o mini',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: {
+            description: 'OpenAI 轻量高性价比模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'gpt-4o',
+        name: 'GPT-4o',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: {
+            description: 'OpenAI 旗舰模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'deepseek-chat',
+        name: 'DeepSeek Chat',
+        providerId: 'deepseek',
+        type: 'chat',
+        metadata: {
+            description: 'DeepSeek 对话模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'deepseek-reasoner',
+        name: 'DeepSeek Reasoner',
+        providerId: 'deepseek',
+        type: 'chat',
+        metadata: {
+            description: 'DeepSeek 推理加强版'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'moonshot-v1-8k',
+        name: 'Moonshot v1 8K',
+        providerId: 'moonshot',
+        type: 'chat',
+        metadata: {
+            description: 'Kimi 通用 8K'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'moonshot-v1-32k',
+        name: 'Moonshot v1 32K',
+        providerId: 'moonshot',
+        type: 'chat',
+        metadata: {
+            description: 'Kimi 32K 长上下文'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'glm-4-air',
+        name: 'GLM-4-Air',
+        providerId: 'zhipu',
+        type: 'chat',
+        metadata: {
+            description: '智谱 GLM 轻量模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'glm-4',
+        name: 'GLM-4',
+        providerId: 'zhipu',
+        type: 'chat',
+        metadata: {
+            description: '智谱 GLM 旗舰模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'abab6.5s-chat',
+        name: 'abab6.5s-chat',
+        providerId: 'minimax',
+        type: 'chat',
+        metadata: {
+            description: 'MiniMax 轻量聊天'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'Qwen/Qwen-2.5-7B-Instruct',
+        name: 'Qwen 2.5 7B (SiliconFlow)',
+        providerId: 'silicon',
+        type: 'chat',
+        metadata: {
+            description: '托管于硅基流动的通义 7B 指令模型'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'deepseek-ai/DeepSeek-V3',
+        name: 'DeepSeek V3 (SiliconFlow)',
+        providerId: 'silicon',
+        type: 'chat',
+        metadata: {
+            description: '托管于硅基流动的 DeepSeek V3'
+        },
+        isSystem: true,
+        isUserAdded: false
+    }
+]
+
+/**
  * 智谱模型
  */
 export const ZHIPU_MODELS: Model[] = [
@@ -256,7 +383,8 @@ export const SYSTEM_MODELS: Model[] = [
     ...MOONSHOT_MODELS,
     ...DEEPSEEK_MODELS,
     ...ZHIPU_MODELS,
-    ...MINIMAX_MODELS
+    ...MINIMAX_MODELS,
+    ...CHAT_MODELS
 ]
 
 /**

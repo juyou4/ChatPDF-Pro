@@ -8,6 +8,7 @@ import type { Provider, ProviderUpdate, ProviderTestResult } from '../types/prov
  */
 interface ProviderContextType {
     providers: Provider[]
+    addProvider: (provider: Provider) => void
     updateProvider: (id: string, updates: ProviderUpdate) => void
     testConnection: (id: string) => Promise<ProviderTestResult>
     getProviderById: (id: string) => Provider | null
@@ -163,10 +164,22 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
         return providers.filter(p => p.enabled)
     }
 
+    /**
+     * 新增自定义 Provider（OpenAI 兼容或自建网关）
+     */
+    const addProvider = (provider: Provider) => {
+        setProviders(prev => {
+            const exists = prev.some(p => p.id === provider.id)
+            if (exists) return prev
+            return [...prev, { ...provider, isSystem: false }]
+        })
+    }
+
     return (
         <ProviderContext.Provider
             value={{
                 providers,
+                addProvider,
                 updateProvider,
                 testConnection,
                 getProviderById,
