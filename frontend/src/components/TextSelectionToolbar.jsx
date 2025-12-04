@@ -153,7 +153,7 @@ const TextSelectionToolbar = ({
           <div className="absolute left-1/2 -translate-x-1/2 -bottom-2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-transparent border-t-white/90 drop-shadow-lg" />
 
           {/* 工具按钮组 */}
-          <div className={`bg-white/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/40 ${config.containerPadding} flex items-center ${config.gap}`}>
+          <div className={`soft-panel backdrop-blur-xl rounded-2xl shadow-2xl border border-white/40 ${config.containerPadding} flex items-center ${config.gap}`}>
             {/* 拖动手柄 */}
             <motion.button
               onMouseDown={(e) => {
@@ -184,7 +184,7 @@ const TextSelectionToolbar = ({
                 window.addEventListener('mouseup', handleUp);
               }}
               whileHover={{ scale: 1.05 }}
-              className={`${config.padding} mr-1 rounded-xl text-gray-500 hover:text-gray-800 hover:bg-gray-50/80 cursor-move`}
+              className={`${config.padding} mr-1 rounded-xl text-gray-500 hover:text-gray-800 hover:bg-[var(--color-bg-subtle)]/80 cursor-move`}
               title="拖动移动工具栏"
             >
               <Move className={config.iconSize} strokeWidth={2} />
@@ -202,7 +202,7 @@ const TextSelectionToolbar = ({
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: index * 0.03 }}
-                  className={`group relative ${config.padding} rounded-xl transition-all hover:bg-gray-50/80 ${tool.color}`}
+                  className={`group relative ${config.padding} rounded-xl transition-all hover:bg-[var(--color-bg-subtle)]/80 ${tool.color}`}
                   title={tool.label}
                 >
                   <Icon className={config.iconSize} strokeWidth={2} />

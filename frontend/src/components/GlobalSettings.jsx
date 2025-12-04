@@ -130,7 +130,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             onClick={() => setFontFamily(font.id)}
                                             className={`p-3 rounded-xl transition-all relative overflow-hidden group ${fontFamily === font.id
                                                 ? 'soft-card ring-2 ring-blue-500 bg-blue-50/50'
-                                                : 'soft-card hover:bg-gray-50'
+                                                : 'soft-card hover:bg-[var(--color-bg-subtle)]'
                                                 }`}
                                             style={{ fontFamily: font.value }}
                                         >

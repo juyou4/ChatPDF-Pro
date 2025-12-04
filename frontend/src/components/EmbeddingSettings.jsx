@@ -78,7 +78,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     rerank: { label: 'Rerank 重排' },
     image: { label: 'Image 图像' }
   }
-  const GLASS_CARD_CLASS = 'bg-white/60 backdrop-blur-md border border-white/45 shadow-[0_14px_40px_-20px_rgba(15,23,42,0.35)]'
+  const GLASS_CARD_CLASS = 'soft-card'
   const RADIUS_CLASS = 'rounded-[32px]'
 
   const activeProvider = useMemo(
@@ -233,7 +233,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   const renderModelRow = (model) => (
     <div
       key={`${model.providerId}-${model.id}`}
-      className="group flex items-center justify-between px-4 py-3 rounded-xl hover:bg-gray-50 border border-transparent hover:border-blue-100 transition-all"
+      className="group flex items-center justify-between px-4 py-3 rounded-xl hover:bg-[var(--color-bg-subtle)] border border-transparent hover:border-blue-100 transition-all"
     >
       <div className="flex items-center gap-4 overflow-hidden">
         <ProviderAvatar providerId={getIconProviderId(model)} size={36} className="flex-shrink-0 shadow-sm" />

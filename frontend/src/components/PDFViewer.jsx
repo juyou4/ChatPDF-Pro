@@ -259,7 +259,7 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
     }, [highlightInfo, pageNumber, scale, numPages]);
 
     return (
-        <div className="relative h-full flex flex-col bg-gray-50 rounded-2xl overflow-hidden">
+        <div className="relative h-full flex flex-col bg-[var(--color-bg-base)] rounded-2xl overflow-hidden">
             <div className="flex items-center justify-between p-4 bg-white border-b border-gray-200">
                 <div className="flex items-center gap-2">
                     <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-50">
@@ -280,7 +280,7 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                     </button>
                 </div>
             </div>
-            <div className="flex-1 overflow-auto p-6 flex items-start justify-center bg-gray-50" onMouseUp={handleTextSelection}>
+            <div className="flex-1 overflow-auto p-6 flex items-start justify-center bg-[var(--color-bg-base)]" onMouseUp={handleTextSelection}>
                 {error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>

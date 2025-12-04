@@ -1092,7 +1092,7 @@ const ChatPDF = () => {
   // Render Components
   return (
     <div
-      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'text-gray-800'}`}
+      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-[var(--color-bg-base)] text-[var(--color-text-main)]'}`}
       onClick={(e) => {
         if (!showTextMenu) return;
         // 避免刚选中文本时被同一次点击事件立刻关闭
@@ -1236,11 +1236,11 @@ const ChatPDF = () => {
                   </button>
 
                   <div className="flex items-center gap-4">
-                    <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-2.5 rounded-xl shadow-lg shadow-blue-200">
+                    <div className="bg-blue-600 text-white p-2.5 rounded-xl shadow-sm">
                       <FileText className="w-6 h-6" />
                     </div>
                     <div>
-                      <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-700">
+                      <h1 className="text-2xl font-bold text-[var(--color-text-main)]">
                         ChatPDF Pro <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
                       </h1>
                       <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
@@ -1379,7 +1379,7 @@ const ChatPDF = () => {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`soft-panel rounded-[32px] overflow-hidden flex flex-col relative flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
@@ -1501,7 +1501,7 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`soft-panel rounded-[32px] flex flex-col overflow-hidden ${darkMode ? 'bg-gray-800/50' : ''}`}
+            className={`soft-panel flex flex-col overflow-hidden ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
             {/* Messages */}
@@ -1691,7 +1691,7 @@ const ChatPDF = () => {
                     onChange={(e) => setInputMessage(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
                     placeholder="Ask anything about the document..."
-                    className="w-full soft-input rounded-[28px] py-4 pl-6 pr-14 resize-none text-base min-h-[56px] max-h-32 focus:shadow-md transition-all"
+                    className="w-full soft-input rounded-2xl py-4 pl-6 pr-14 resize-none text-base min-h-[56px] max-h-32"
                     rows={1}
                   />
                   <button className="absolute right-3 bottom-3 p-2 text-gray-400 hover:text-blue-600 transition-colors hover:bg-blue-50 rounded-full">
@@ -1701,7 +1701,7 @@ const ChatPDF = () => {
                 <button
                   onClick={sendMessage}
                   disabled={isLoading || (!inputMessage.trim() && !screenshot)}
-                  className="w-14 h-14 soft-button soft-button-primary rounded-full flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl hover:scale-105 transition-all"
+                  className="w-14 h-14 soft-button soft-button-primary rounded-xl flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="w-6 h-6 ml-0.5" />
                 </button>
