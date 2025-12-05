@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -15,6 +15,91 @@ import GlobalSettings from './GlobalSettings';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
+
+const SendButtonSVG = () => (
+  <svg width="88" height="88" viewBox="0 0 265 265" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <g filter="url(#filter0_f_21_62)">
+      <path d="M225 140C225 186.944 186.944 225 140 225C93.0558 225 55 186.944 55 140C55 93.0558 93.0558 55 140 55C186.944 55 225 93.0558 225 140Z" fill="black" fillOpacity="0.2" />
+    </g>
+    <g filter="url(#filter1_f_21_62)">
+      <circle cx="85" cy="85" r="55" fill="#EDF8FC" />
+    </g>
+    <g filter="url(#filter2_f_21_62)">
+      <path d="M219 85C219 115.376 194.376 140 164 140C133.624 140 109 115.376 109 85C109 54.6243 133.624 30 164 30C194.376 30 219 54.6243 219 85Z" fill="#FCF5FD" />
+    </g>
+    <g filter="url(#filter3_f_21_62)">
+      <path d="M200 156C200 189.137 173.137 216 140 216C106.863 216 80 189.137 80 156C80 122.863 106.863 96 140 96C173.137 96 200 122.863 200 156Z" fill="white" />
+    </g>
+    <rect x="44" y="46" width="170" height="170" rx="85" fill="url(#paint0_linear_21_62)" fillOpacity="0.2" />
+    <g filter="url(#filter5_i_21_62)">
+      <circle cx="129" cy="131" r="85" fill="url(#paint1_linear_21_62)" />
+    </g>
+    <g filter="url(#filter6_di_21_62)">
+      <path d="M112.079 121.87L114.079 125.828C115.353 128.354 115.988 129.615 115.988 131C115.988 132.385 115.353 133.646 114.079 136.167L112.079 140.13C106.385 151.417 103.538 157.057 105.755 159.86C107.976 162.656 113.238 160.052 123.751 154.844L152.615 140.542C160.87 136.453 165 134.406 165 131C165 127.594 160.87 125.547 152.615 121.458L123.751 107.156C113.238 101.948 107.976 99.3436 105.755 102.14C103.533 104.937 106.385 110.578 112.079 121.87Z" fill="url(#paint2_linear_21_62)" />
+    </g>
+    <defs>
+      <filter id="filter0_f_21_62" x="15" y="15" width="250" height="250" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+        <feGaussianBlur stdDeviation="20" result="effect1_foregroundBlur_21_62" />
+      </filter>
+      <filter id="filter1_f_21_62" x="0" y="0" width="170" height="170" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
+      </filter>
+      <filter id="filter2_f_21_62" x="79" y="0" width="170" height="170" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
+      </filter>
+      <filter id="filter3_f_21_62" x="50" y="66" width="180" height="180" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
+      </filter>
+      <filter id="filter5_i_21_62" x="44" y="46" width="171" height="171" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
+        <feOffset dx="1" dy="1" />
+        <feGaussianBlur stdDeviation="0.5" />
+        <feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1" />
+        <feColorMatrix type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 1 0" />
+        <feBlend mode="normal" in2="shape" result="effect1_innerShadow_21_62" />
+      </filter>
+      <filter id="filter6_di_21_62" x="101" y="101" width="68" height="68" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+        <feFlood floodOpacity="0" result="BackgroundImageFix" />
+        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
+        <feOffset dy="4" />
+        <feGaussianBlur stdDeviation="2" />
+        <feComposite in2="hardAlpha" operator="out" />
+        <feColorMatrix type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.25 0" />
+        <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_21_62" />
+        <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_21_62" result="shape" />
+        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
+        <feOffset dy="1" />
+        <feGaussianBlur stdDeviation="0.5" />
+        <feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1" />
+        <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.25 0" />
+        <feBlend mode="normal" in2="shape" result="effect2_innerShadow_21_62" />
+      </filter>
+      <linearGradient id="paint0_linear_21_62" x1="78" y1="66.5" x2="175" y2="204.5" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#D9E4F2" />
+        <stop offset="1" stopColor="#EFE9FD" />
+      </linearGradient>
+      <linearGradient id="paint1_linear_21_62" x1="82" y1="77" x2="170" y2="206" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#EBF2FA" />
+        <stop offset="0.75" stopColor="#F8F3FF" />
+        <stop offset="1" stopColor="white" />
+      </linearGradient>
+      <linearGradient id="paint2_linear_21_62" x1="135" y1="101" x2="135" y2="161" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#CEC6D5" />
+        <stop offset="1" stopColor="#E8E1EE" />
+      </linearGradient>
+    </defs>
+  </svg>
+);
 
 const ChatPDF = () => {
   // Core State
@@ -1092,7 +1177,7 @@ const ChatPDF = () => {
   // Render Components
   return (
     <div
-      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-[var(--color-bg-base)] text-[var(--color-text-main)]'}`}
+      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-transparent text-[var(--color-text-main)]'}`}
       onClick={(e) => {
         if (!showTextMenu) return;
         // 避免刚选中文本时被同一次点击事件立刻关闭
@@ -1106,27 +1191,30 @@ const ChatPDF = () => {
         }
       }}
     >
+
       {/* 划词工具栏 */}
-      {showTextMenu && selectedText && (
-        <div className="text-selection-toolbar-container">
-          <TextSelectionToolbar
-            selectedText={selectedText}
-            position={toolbarPosition.x === 0 && toolbarPosition.y === 0 ? menuPosition : toolbarPosition}
-            onPositionChange={handleToolbarPositionChange}
-            scale={toolbarScale}
-            onScaleChange={handleToolbarScaleChange}
-            onClose={handleCloseToolbar}
-            onCopy={handleCopy}
-            onHighlight={handleHighlight}
-            onAddNote={handleAddNote}
-            onAIExplain={handleAIExplain}
-            onTranslate={handleTranslate}
-            onWebSearch={handleWebSearch}
-            onShare={handleShare}
-            size={toolbarSize}
-          />
-        </div>
-      )}
+      {
+        showTextMenu && selectedText && (
+          <div className="text-selection-toolbar-container">
+            <TextSelectionToolbar
+              selectedText={selectedText}
+              position={toolbarPosition.x === 0 && toolbarPosition.y === 0 ? menuPosition : toolbarPosition}
+              onPositionChange={handleToolbarPositionChange}
+              scale={toolbarScale}
+              onScaleChange={handleToolbarScaleChange}
+              onClose={handleCloseToolbar}
+              onCopy={handleCopy}
+              onHighlight={handleHighlight}
+              onAddNote={handleAddNote}
+              onAIExplain={handleAIExplain}
+              onTranslate={handleTranslate}
+              onWebSearch={handleWebSearch}
+              onShare={handleShare}
+              size={toolbarSize}
+            />
+          </div>
+        )
+      }
 
       {/* Sidebar (History) */}
       <motion.div
@@ -1698,22 +1786,29 @@ const ChatPDF = () => {
                     <Bot className="w-6 h-6" />
                   </button>
                 </div>
-                <button
+                <motion.button
                   onClick={sendMessage}
                   disabled={isLoading || (!inputMessage.trim() && !screenshot)}
-                  className="w-14 h-14 soft-button soft-button-primary rounded-xl flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="relative z-10 rounded-full outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ width: '88px', height: '88px', padding: 0, border: 'none', background: 'transparent' }}
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  initial={{ scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 17 }}
                 >
-                  <Send className="w-6 h-6 ml-0.5" />
-                </button>
+                  <SendButtonSVG />
+                </motion.button>
               </div>
             </div>
           </motion.div>
-        </div>
+        </div >
       </div>
 
 
+
       {/* Upload Progress Modal */}
-      <AnimatePresence>
+      < AnimatePresence >
         {isUploading && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
             <motion.div
@@ -1733,10 +1828,10 @@ const ChatPDF = () => {
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+      </AnimatePresence >
 
       {/* Settings Modal */}
-      <AnimatePresence initial={false}>
+      < AnimatePresence initial={false} >
         {showSettings && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -2023,7 +2118,7 @@ const ChatPDF = () => {
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence >
 
       <EmbeddingSettings
         isOpen={showEmbeddingSettings}

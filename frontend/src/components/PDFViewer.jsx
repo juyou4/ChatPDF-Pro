@@ -280,7 +280,7 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                     </button>
                 </div>
             </div>
-            <div className="flex-1 overflow-auto p-6 flex items-start justify-center bg-[var(--color-bg-base)]" onMouseUp={handleTextSelection}>
+            <div className="flex-1 overflow-auto p-6 flex items-start justify-center bg-[var(--color-bg-base)] pdf-scroll" onMouseUp={handleTextSelection}>
                 {error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>

@@ -3,257 +3,240 @@
 @tailwind utilities;
 
 :root {
-  /* --- Global Typography --- */
-  --global-font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-  --global-scale: 1;
+    /* --- Global Typography --- */
+    --global-font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --global-scale: 1;
 
-  /* --- 2. Material Neutrality (材质中性化) --- */
-  /* 减少纹理细节，保持平整统一 */
-  --color-bg-base: #F2F4F7;
-  /* 冷调浅灰，更中性 */
-  --color-bg-surface: #FFFFFF;
-  /* 纯白表面 */
-  --color-bg-subtle: #F9FAFB;
-  /* 极淡的灰，用于区分层级 */
+    /* --- 2. Material Neutrality --- */
+    --color-bg-base: #F2F4F7;
+    --color-bg-surface: #FFFFFF;
+    --color-bg-subtle: #F9FAFB;
 
-  /* --- Brand Colors (Restrained) --- */
-  --color-primary: #3B82F6;
-  /* 标准蓝，不刺眼 */
-  --color-primary-soft: #93C5FD;
-  /* 柔和蓝 */
-  --color-primary-light: #EFF6FF;
-  /* 极浅蓝背景 */
+    /* --- Brand Colors --- */
+    --color-primary: #3B82F6;
+    --color-primary-soft: #93C5FD;
+    --color-primary-light: #EFF6FF;
 
-  /* --- Text Colors (High Readability) --- */
-  --color-text-main: #1F2937;
-  /* 深灰黑，非纯黑 */
-  --color-text-sub: #6B7280;
-  /* 中灰 */
-  --color-text-muted: #9CA3AF;
-  /* 浅灰 */
+    /* --- Text Colors --- */
+    --color-text-main: #1F2937;
+    --color-text-sub: #6B7280;
+    --color-text-muted: #9CA3AF;
 
-  /* --- 1. Light Restraint & 3. Soft Depth (光线克制 & 柔和纵深) --- */
-  /* 控制光线强度，仅建立必要深度 */
-
-  /* Level 1: 基础悬浮 (Cards, Panels) */
-  --shadow-sm:
-    0 1px 2px 0 rgba(0, 0, 0, 0.05);
-
-  /* Level 2: 交互反馈 (Hover) */
-  --shadow-md:
-    0 4px 6px -1px rgba(0, 0, 0, 0.05),
-    0 2px 4px -1px rgba(0, 0, 0, 0.03);
-
-  /* Level 3: 模态/重要层级 (Dropdowns, Modals) */
-  --shadow-lg:
-    0 10px 15px -3px rgba(0, 0, 0, 0.05),
-    0 4px 6px -2px rgba(0, 0, 0, 0.02);
-
-  /* Level 4: 浮动元素 (Tooltips, Floating Actions) */
-  --shadow-float:
-    0 20px 25px -5px rgba(0, 0, 0, 0.05),
-    0 10px 10px -5px rgba(0, 0, 0, 0.02);
-
-  /* Inner Depth (Input fields) */
-  --shadow-inner:
-    inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
+    /* --- Shadows --- */
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+    --shadow-float: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
+    --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
 }
 
 #root {
-  width: 100%;
-  min-height: 100vh;
-  background-color: var(--color-bg-base);
-  color: var(--color-text-main);
-  font-family: var(--global-font-family);
+    width: 100%;
+    min-height: 100vh;
+    background-color: #FDFBF7;
+    background-image:
+        radial-gradient(at 80% 0%, hsla(270, 100%, 94%, 1) 0px, transparent 50%),
+        radial-gradient(at 0% 50%, hsla(30, 100%, 94%, 1) 0px, transparent 50%),
+        radial-gradient(at 80% 50%, hsla(270, 100%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 0% 100%, hsla(30, 100%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 0% 0%, hsla(40, 100%, 97%, 1) 0px, transparent 50%);
+    background-attachment: fixed;
+    color: var(--color-text-main);
+    font-family: var(--global-font-family);
 }
 
-/* Safari Zoom Fallback */
 @supports not (zoom: 1) {
-  body {
-    transform: scale(var(--global-scale));
-  }
+    body {
+        transform: scale(var(--global-scale));
+    }
 }
 
 /* --- Component Classes --- */
-
-/* Cards: Flat, clean, minimal shadow */
 .soft-card {
-  background-color: var(--color-bg-surface);
-  border: 1px solid rgba(229, 231, 235, 0.5);
-  /* Very subtle border */
-  box-shadow: var(--shadow-sm);
-  border-radius: 16px;
-  /* Moderate rounding */
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
+    background-color: var(--color-bg-surface);
+    border: 1px solid rgba(229, 231, 235, 0.5);
+    box-shadow: var(--shadow-sm);
+    border-radius: 16px;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
 .soft-card:hover {
-  box-shadow: var(--shadow-md);
-  /* No significant movement, just depth change */
-  transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
 }
 
-/* Panels: Slightly translucent but mostly solid for readability */
 .soft-panel {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(229, 231, 235, 0.8);
-  box-shadow: var(--shadow-lg);
-  border-radius: 20px;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(229, 231, 235, 0.8);
+    box-shadow: var(--shadow-lg);
+    border-radius: 20px;
 }
 
-/* 4. Message Bubbles: Context Priority */
 .message-bubble-user {
-  background-color: var(--color-primary);
-  color: white;
-  box-shadow: var(--shadow-sm);
-  border-radius: 18px 18px 4px 18px;
+    background-color: var(--color-primary);
+    color: white;
+    box-shadow: var(--shadow-sm);
+    border-radius: 18px 18px 4px 18px;
 }
 
 .message-bubble-ai {
-  background-color: var(--color-bg-surface);
-  border: 1px solid rgba(229, 231, 235, 1);
-  color: var(--color-text-main);
-  box-shadow: var(--shadow-sm);
-  border-radius: 18px 18px 18px 4px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid rgba(229, 231, 235, 1);
+    color: var(--color-text-main);
+    box-shadow: var(--shadow-sm);
+    border-radius: 18px 18px 18px 4px;
 }
 
-/* 5. Buttons: Consistent Logic */
 .soft-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  /* Slightly less rounded than pill for better structure */
-  font-weight: 500;
-  transition: all 0.2s ease;
-  cursor: pointer;
-  letter-spacing: 0.01em;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    letter-spacing: 0.01em;
 }
 
 .soft-button-primary {
-  background-color: var(--color-primary);
-  color: white;
-  box-shadow: var(--shadow-sm);
-  border: 1px solid transparent;
+    background-color: var(--color-primary);
+    color: white;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid transparent;
 }
 
 .soft-button-primary:hover {
-  background-color: #2563EB;
-  /* Darker shade of primary */
-  box-shadow: var(--shadow-md);
+    background-color: #2563EB;
+    box-shadow: var(--shadow-md);
 }
 
 .soft-button-primary:active {
-  transform: translateY(0);
-  box-shadow: none;
+    transform: translateY(0);
+    box-shadow: none;
 }
 
 .soft-button-secondary {
-  background-color: var(--color-bg-surface);
-  color: var(--color-text-main);
-  border: 1px solid rgba(209, 213, 219, 1);
-  box-shadow: var(--shadow-sm);
+    background-color: var(--color-bg-surface);
+    color: var(--color-text-main);
+    border: 1px solid rgba(209, 213, 219, 1);
+    box-shadow: var(--shadow-sm);
 }
 
 .soft-button-secondary:hover {
-  background-color: var(--color-bg-subtle);
-  border-color: rgba(156, 163, 175, 1);
+    background-color: var(--color-bg-subtle);
+    border-color: rgba(156, 163, 175, 1);
 }
 
 .soft-button-ghost {
-  background: transparent;
-  color: var(--color-text-sub);
+    background: transparent;
+    color: var(--color-text-sub);
 }
 
 .soft-button-ghost:hover {
-  background-color: rgba(0, 0, 0, 0.03);
-  color: var(--color-text-main);
+    background-color: rgba(0, 0, 0, 0.03);
+    color: var(--color-text-main);
 }
 
 /* Animations */
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
 
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
+    animation: fadeIn 0.3s ease-out forwards;
 }
 
 @keyframes blink {
 
-  0%,
-  50% {
-    opacity: 1;
-  }
+    0%,
+    50% {
+        opacity: 1;
+    }
 
-  51%,
-  100% {
-    opacity: 0;
-  }
+    51%,
+    100% {
+        opacity: 0;
+    }
 }
 
 .typing-cursor::after {
-  content: '▋';
-  animation: blink 1s infinite;
-  margin-left: 2px;
-  color: var(--color-primary);
-  font-size: 0.8em;
+    content: '▋';
+    animation: blink 1s infinite;
+    margin-left: 2px;
+    color: var(--color-primary);
+    font-size: 0.8em;
 }
 
-/* Streaming & Markdown */
 .message-content {
-  word-break: break-word;
-  overflow-wrap: anywhere;
+    word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 .message-content pre {
-  background-color: #F3F4F6;
-  /* Neutral gray for code blocks */
-  border-radius: 8px;
-  padding: 1rem;
-  margin: 0.5rem 0;
-  border: 1px solid rgba(229, 231, 235, 1);
+    background-color: #F3F4F6;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    border: 1px solid rgba(229, 231, 235, 1);
 }
 
 .message-content code {
-  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-  font-size: 0.9em;
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
 }
 
 .message-content p {
-  margin-bottom: 0.75rem;
-  line-height: 1.6;
+    margin-bottom: 0.75rem;
+    line-height: 1.6;
 }
 
 .message-content ul,
 .message-content ol {
-  margin: 0.5rem 0 0.5rem 1.5rem;
-  line-height: 1.6;
+    margin: 0.5rem 0 0.5rem 1.5rem;
+    line-height: 1.6;
 }
 
-/* Blur Reveal Animation */
 @keyframes blur-reveal {
-  0% {
-    filter: blur(4px);
-    opacity: 0;
-  }
+    0% {
+        filter: blur(4px);
+        opacity: 0;
+    }
 
-  100% {
-    filter: blur(0);
-    opacity: 1;
-  }
+    100% {
+        filter: blur(0);
+        opacity: 1;
+    }
 }
 
 .animate-blur-reveal {
-  animation: blur-reveal 0.3s ease-out forwards;
+    animation: blur-reveal 0.3s ease-out forwards;
+}
+
+/* --- Glass Button (Legacy/Fallback) --- */
+.glass-btn {
+    position: relative;
+    z-index: 10;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    cursor: pointer;
+    outline: none;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: transform 0.2s ease;
+}
+
+.glass-btn:active {
+    transform: scale(0.98);
 }
