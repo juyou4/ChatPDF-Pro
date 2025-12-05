@@ -238,7 +238,9 @@ const ChatPDF = () => {
   const messagesEndRef = useRef(null);
   const pdfContainerRef = useRef(null);
   const selectionStartRef = useRef(null);
+  const headerContentRef = useRef(null);
 
+  const [headerHeight, setHeaderHeight] = useState(null);
   const API_BASE_URL = ''; // Relative path due to proxy
 
   // Constants
@@ -349,6 +351,21 @@ const ChatPDF = () => {
     const timer = setTimeout(() => setActiveHighlight(null), 2500);
     return () => clearTimeout(timer);
   }, [activeHighlight]);
+
+  // Smooth header height animation by measuring real height instead of animating 'auto'
+  useEffect(() => {
+    const el = headerContentRef.current;
+    if (!el) return;
+
+    const measure = () => setHeaderHeight(el.getBoundingClientRect().height);
+    measure();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(measure);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+  }, [docId, docInfo, searchResults.length, useRerank, darkMode]);
 
   // API Functions
   const fetchAvailableModels = async () => {
@@ -1225,7 +1242,7 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
+        className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
       >
         <div className="w-72 flex flex-col h-full">
           <div className="px-6 py-8 flex items-center justify-between">
@@ -1292,149 +1309,151 @@ const ChatPDF = () => {
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
         {/* Header - Collapsible */}
-        <AnimatePresence>
-          {isHeaderExpanded && (
-            <motion.header
-              initial={{ height: 0, opacity: 0, marginTop: 0, marginBottom: 0 }}
-              animate={{
-                height: 'auto',
-                opacity: 1,
-                marginBottom: '16px',
-                marginTop: '24px'
-              }}
-              exit={{
-                height: 0,
-                opacity: 0,
-                marginTop: 0,
-                marginBottom: 0,
-                transition: { duration: 0.3, ease: "easeInOut" }
-              }}
-              transition={{ duration: 0.3, ease: "easeInOut" }}
-              className="px-8 soft-panel mx-8 sticky top-4 z-10 overflow-hidden flex flex-col justify-center"
-            >
-              <div className="flex items-center justify-between w-full py-3">
-                <div className="flex items-center gap-4">
-                  {/* 菜单按钮 */}
-                  <button
-                    onClick={() => setShowSidebar(!showSidebar)}
-                    className="p-2 hover:bg-black/5 rounded-lg transition-colors"
-                    title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
-                  >
-                    <Menu className="w-6 h-6" />
-                  </button>
+        <motion.header
+          layout
+          initial={false}
+          animate={{
+            height: isHeaderExpanded ? (headerHeight ?? 'auto') : 0,
+            opacity: isHeaderExpanded ? 1 : 0,
+            marginBottom: isHeaderExpanded ? 16 : 0,
+            marginTop: isHeaderExpanded ? 24 : 0,
+            pointerEvents: isHeaderExpanded ? 'auto' : 'none'
+          }}
+          transition={{ duration: 0.28, ease: [0.4, 0, 0.2, 1] }}
+          style={{ overflow: 'hidden' }}
+          className="px-8 soft-panel mx-8 sticky top-4 z-10 flex flex-col justify-center rounded-[var(--radius-panel-lg)]"
+        >
+          <motion.div
+            ref={headerContentRef}
+            initial={false}
+            animate={{
+              opacity: isHeaderExpanded ? 1 : 0,
+              y: isHeaderExpanded ? 0 : -6
+            }}
+            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+          >
+            <div className="flex items-center justify-between w-full py-3">
+              <div className="flex items-center gap-4">
+                {/* 菜单按钮 */}
+                <button
+                  onClick={() => setShowSidebar(!showSidebar)}
+                  className="p-2 hover:bg-black/5 rounded-lg transition-colors"
+                  title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
+                >
+                  <Menu className="w-6 h-6" />
+                </button>
 
-                  <div className="flex items-center gap-4">
-                    <div className="bg-blue-600 text-white p-2.5 rounded-xl shadow-sm">
-                      <FileText className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h1 className="text-2xl font-bold text-[var(--color-text-main)]">
-                        ChatPDF Pro <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
-                      </h1>
-                      <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
-                    </div>
+                <div className="flex items-center gap-4">
+                  <div className="bg-blue-600 text-white p-2.5 rounded-xl shadow-sm">
+                    <FileText className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-bold text-[var(--color-text-main)]">
+                      ChatPDF Pro <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
+                    </h1>
+                    <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
                   </div>
                 </div>
-
-                {/* Search Box - Center */}
-                {docId && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    transition={{ duration: 0.3 }}
-                    className="flex-1 max-w-2xl mx-4 flex items-center gap-2"
-                  >
-                    <div className="relative flex-1">
-                      <input
-                        type="search"
-                        placeholder="搜索文档内容..."
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !isSearching) handleSearch();
-                        }}
-                        className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-blue-400"
-                        disabled={isSearching}
-                      />
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-                    </div>
-                    <motion.button
-                      whileHover={{ scale: isSearching ? 1 : 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => handleSearch()}
-                      disabled={isSearching}
-                      className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching
-                        ? 'bg-blue-200 text-blue-700 cursor-wait'
-                        : 'bg-blue-600 text-white hover:shadow-md hover:bg-blue-700'
-                        }`}
-                    >
-                      {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                      <span>{isSearching ? '搜索中...' : '搜索'}</span>
-                    </motion.button>
-                    <button
-                      onClick={() => setUseRerank(v => !v)}
-                      className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerank ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200'
-                        }`}
-                      title="使用重排模型提高结果质量"
-                    >
-                      <Wand2 className="w-4 h-4" />
-                      <span>重排</span>
-                    </button>
-                    <AnimatePresence>
-                      {searchResults.length > 0 && (
-                        <motion.div
-                          initial={{ opacity: 0, scale: 0.8 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.8 }}
-                          transition={{ duration: 0.2 }}
-                          className="flex items-center gap-1"
-                        >
-                          <span className="text-xs text-gray-500 px-2 font-medium">
-                            {currentResultIndex + 1}/{searchResults.length}
-                          </span>
-                          <motion.button
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                            onClick={goToPrevResult}
-                            className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
-                            title="上一个结果"
-                          >
-                            <ChevronUp className="w-4 h-4" />
-                          </motion.button>
-                          <motion.button
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                            onClick={goToNextResult}
-                            className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
-                            title="下一个结果"
-                          >
-                            <ChevronDown className="w-4 h-4" />
-                          </motion.button>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </motion.div>
-                )}
-
-                <div className="flex items-center gap-4">
-                  {docInfo && (
-                    <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full truncate max-w-[200px]">
-                      {docInfo.filename}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setIsHeaderExpanded(false)}
-                    className="p-2 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
-                    title="收起顶栏"
-                  >
-                    <ChevronUp className="w-5 h-5" />
-                  </button>
-                </div>
               </div>
-            </motion.header>
-          )}
-        </AnimatePresence>
+
+              {/* Search Box - Center */}
+              {docId && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.3 }}
+                  className="flex-1 max-w-2xl mx-4 flex items-center gap-2"
+                >
+                  <div className="relative flex-1">
+                    <input
+                      type="search"
+                      placeholder="搜索文档内容..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isSearching) handleSearch();
+                      }}
+                      className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-blue-400"
+                      disabled={isSearching}
+                    />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                  </div>
+                  <motion.button
+                    whileHover={{ scale: isSearching ? 1 : 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => handleSearch()}
+                    disabled={isSearching}
+                    className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching
+                      ? 'bg-blue-200 text-blue-700 cursor-wait'
+                      : 'bg-blue-600 text-white hover:shadow-md hover:bg-blue-700'
+                      }`}
+                  >
+                    {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    <span>{isSearching ? '搜索中...' : '搜索'}</span>
+                  </motion.button>
+                  <button
+                    onClick={() => setUseRerank(v => !v)}
+                    className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerank ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200'
+                      }`}
+                    title="使用重排模型提高结果质量"
+                  >
+                    <Wand2 className="w-4 h-4" />
+                    <span>重排</span>
+                  </button>
+                  <AnimatePresence>
+                    {searchResults.length > 0 && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        transition={{ duration: 0.2 }}
+                        className="flex items-center gap-1"
+                      >
+                        <span className="text-xs text-gray-500 px-2 font-medium">
+                          {currentResultIndex + 1}/{searchResults.length}
+                        </span>
+                        <motion.button
+                          whileHover={{ scale: 1.1 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={goToPrevResult}
+                          className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
+                          title="上一个结果"
+                        >
+                          <ChevronUp className="w-4 h-4" />
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.1 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={goToNextResult}
+                          className="p-1.5 hover:bg-black/5 rounded-lg transition-colors"
+                          title="下一个结果"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </motion.button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
+              )}
+
+              <div className="flex items-center gap-4">
+                {docInfo && (
+                  <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full truncate max-w-[200px]">
+                    {docInfo.filename}
+                  </div>
+                )}
+                <button
+                  onClick={() => setIsHeaderExpanded(false)}
+                  className="p-2 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
+                  title="收起顶栏"
+                >
+                  <ChevronUp className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </motion.header>
 
         {/* Floating Controls when Header is Collapsed AND Sidebar is Hidden */}
         <AnimatePresence>
@@ -1467,7 +1486,7 @@ const ChatPDF = () => {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 rounded-[var(--radius-panel)] ${darkMode ? 'bg-gray-800/50' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
@@ -1589,7 +1608,7 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`soft-panel flex flex-col overflow-hidden ${darkMode ? 'bg-gray-800/50' : ''}`}
+            className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
             {/* Messages */}
