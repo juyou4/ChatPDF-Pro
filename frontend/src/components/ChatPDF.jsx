@@ -1997,16 +1997,16 @@ const ChatPDF = () => {
 
               <div className="space-y-4 px-8 overflow-y-auto flex-1">
                 {/* 模型服务管理入口（对话/嵌入/重排统一管理） */}
-                <div className="relative overflow-hidden rounded-[24px] border border-blue-100/50 bg-gradient-to-br from-white/40 to-blue-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
+                <div className="relative overflow-hidden rounded-[32px] border border-blue-100/50 bg-gradient-to-br from-white/40 to-blue-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
                   <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-blue-500/10 rounded-full blur-3xl"></div>
                   <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-20 h-20 bg-purple-500/10 rounded-full blur-2xl"></div>
 
-                  <div className="relative bg-white/30 backdrop-blur-sm rounded-[20px] p-5 border border-white/50">
+                  <div className="relative bg-white/30 backdrop-blur-sm rounded-[28px] p-5 border border-white/50">
                     <div className="flex flex-col gap-5">
                       {/* Header Section */}
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500/90 to-indigo-600/90 shadow-lg shadow-blue-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
+                          <div className="w-12 h-12 rounded-[20px] bg-gradient-to-br from-blue-500/90 to-indigo-600/90 shadow-lg shadow-blue-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
                             <Server className="w-6 h-6" />
                           </div>
                           <div className="space-y-0.5">
@@ -2017,7 +2017,7 @@ const ChatPDF = () => {
 
                         <button
                           onClick={() => setShowEmbeddingSettings(true)}
-                          className="group relative overflow-hidden rounded-xl bg-gray-900/90 px-5 py-2.5 text-white shadow-lg transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:scale-95 shrink-0 backdrop-blur-sm"
+                          className="group relative overflow-hidden rounded-[18px] bg-gray-900/90 px-5 py-2.5 text-white shadow-lg transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:scale-95 shrink-0 backdrop-blur-sm"
                         >
                           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-in-out" />
                           <div className="relative flex items-center gap-2 font-medium text-sm">
@@ -2030,7 +2030,7 @@ const ChatPDF = () => {
                       {/* Model Status Cards */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         {/* Chat Model Card */}
-                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
                           <div className="flex items-center gap-3 mb-2">
                             <div className="p-1.5 rounded-lg bg-blue-50/80 text-blue-600 backdrop-blur-sm">
                               <MessageSquare className="w-3.5 h-3.5" />
@@ -2043,7 +2043,7 @@ const ChatPDF = () => {
                         </div>
 
                         {/* Embedding Model Card */}
-                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
                           <div className="flex items-center gap-3 mb-2">
                             <div className="p-1.5 rounded-lg bg-purple-50/80 text-purple-600 backdrop-blur-sm">
                               <Database className="w-3.5 h-3.5" />
@@ -2056,7 +2056,7 @@ const ChatPDF = () => {
                         </div>
 
                         {/* Rerank Model Card */}
-                        <div className="group relative overflow-hidden rounded-xl border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-amber-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-amber-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
                           <div className="flex items-center gap-3 mb-2">
                             <div className="p-1.5 rounded-lg bg-amber-50/80 text-amber-600 backdrop-blur-sm">
                               <ListFilter className="w-3.5 h-3.5" />
@@ -2082,7 +2082,7 @@ const ChatPDF = () => {
                     <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-blue-600 w-5 h-5" />
                   </label>
                   {lastCallInfo && (
-                    <div className="mt-3 p-3 rounded-xl border text-xs text-gray-700 bg-gray-50">
+                    <div className="mt-3 p-3 rounded-[18px] border text-xs text-gray-700 bg-gray-50">
                       <div>调用来源: <strong>{lastCallInfo.provider || '未知'}</strong></div>
                       <div>模型: <strong>{lastCallInfo.model || '未返回'}</strong></div>
                       {lastCallInfo.fallback && <div className="text-amber-700">已切换备用</div>}
@@ -2094,7 +2094,7 @@ const ChatPDF = () => {
                     <select
                       value={streamSpeed}
                       onChange={(e) => setStreamSpeed(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      className="w-full p-3 rounded-[18px] border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                     >
                       <option value="fast">快速  (3字符/次, ~20ms)</option>
                       <option value="normal">正常  (2字符/次, ~30ms)</option>

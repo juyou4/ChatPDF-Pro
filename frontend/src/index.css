@@ -36,9 +36,9 @@
     --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
 
     /* Radii */
-    --radius-panel: 26px;
-    --radius-panel-lg: 30px;
-    --radius-card: 22px;
+    --radius-panel: 32px;
+    --radius-panel-lg: 36px;
+    --radius-card: 28px;
 
     /* Blur reveal defaults */
     --blur-distance: 4px;
@@ -739,8 +739,10 @@
     box-shadow:
         inset 0 4px 32px rgba(255, 255, 255, 0.6),
         inset 0 -8px 30px rgba(207, 209, 217, 0.8),
-        0 30px 60px -15px rgba(180, 185, 200, 0.6),
-        0 10px 20px -5px rgba(180, 185, 200, 0.3);
+        0 40px 80px -20px rgba(180, 185, 200, 0.7),
+        0 20px 40px -10px rgba(180, 185, 200, 0.4),
+        0 10px 20px -5px rgba(180, 185, 200, 0.3),
+        0 4px 8px -2px rgba(0, 0, 0, 0.08);
 }
 
 .tanya-btn::before {
