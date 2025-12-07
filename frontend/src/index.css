@@ -435,3 +435,341 @@
 .glass-btn:active {
     transform: scale(0.98);
 }
+
+.glass-btn-3d:hover .glass-btn-icon {
+    color: #6B728E;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+}
+
+@keyframes blink {
+
+    0%,
+    50% {
+        opacity: 1;
+    }
+
+    51%,
+    100% {
+        opacity: 0;
+    }
+}
+
+.typing-cursor::after {
+    content: '▋';
+    animation: blink 1s infinite;
+    margin-left: 2px;
+    color: var(--color-primary);
+    font-size: 0.8em;
+}
+
+.message-content {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.message-content pre {
+    background-color: #F3F4F6;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    border: 1px solid rgba(229, 231, 235, 1);
+}
+
+.message-content code {
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+.message-content p {
+    margin-bottom: 0.75rem;
+    line-height: 1.6;
+}
+
+.message-content ul,
+.message-content ol {
+    margin: 0.5rem 0 0.5rem 1.5rem;
+    line-height: 1.6;
+}
+
+@keyframes blur-reveal {
+    0% {
+        filter: blur(var(--blur-distance, 4px));
+        opacity: 0;
+    }
+
+    100% {
+        filter: blur(0);
+        opacity: 1;
+    }
+}
+
+.animate-blur-reveal {
+    animation: blur-reveal var(--blur-duration, 0.3s) ease-out forwards;
+}
+
+.blur-intensity-light {
+    --blur-distance: 2px;
+    --blur-duration: 0.2s;
+}
+
+.blur-intensity-medium {
+    --blur-distance: 4px;
+    --blur-duration: 0.32s;
+}
+
+.blur-intensity-strong {
+    --blur-distance: 6px;
+    --blur-duration: 0.45s;
+}
+
+/* Streaming Blur Reveal - Container-level animation for streaming text */
+.streaming-blur-reveal {
+    /* 新内容会触发整体的微妙动画 */
+}
+
+.streaming-blur-reveal.streaming-active {
+    animation: streaming-pulse 0.15s ease-out;
+}
+
+@keyframes streaming-pulse {
+    0% {
+        opacity: 0.92;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+/* 流式输出时，最后一个段落元素有特殊效果 */
+.streaming-blur-reveal>div>*:last-child {
+    animation: text-fade-in 0.25s ease-out;
+}
+
+@keyframes text-fade-in {
+    0% {
+        opacity: 0.7;
+        filter: blur(1px);
+    }
+
+    100% {
+        opacity: 1;
+        filter: blur(0);
+    }
+}
+
+/* 打字光标效果 */
+.streaming-blur-reveal::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    background: var(--color-primary, #3B82F6);
+    margin-left: 2px;
+    animation: cursor-blink 0.8s ease-in-out infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes cursor-blink {
+
+    0%,
+    50% {
+        opacity: 1;
+    }
+
+    51%,
+    100% {
+        opacity: 0;
+    }
+}
+
+/* --- Glass Button (Legacy/Fallback) --- */
+.glass-btn {
+    position: relative;
+    z-index: 10;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    cursor: pointer;
+    outline: none;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: transform 0.2s ease;
+}
+
+.glass-btn:active {
+    transform: scale(0.98);
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+/* Aurora Button Styles */
+.aurora-btn {
+    position: relative;
+    background: rgba(255, 255, 255, 0.45);
+    background-image:
+        url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.06'/%3E%3C/svg%3E"),
+        radial-gradient(circle at 25% 15%, rgba(230, 210, 255, 0.5) 0%, transparent 50%),
+        radial-gradient(circle at 75% 85%, rgba(210, 250, 230, 0.45) 0%, transparent 50%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0%, rgba(245, 247, 250, 0.3) 100%);
+
+    background-blend-mode: overlay, normal, normal, normal;
+
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+
+    border: 1px solid rgba(255, 255, 255, 0.5);
+
+    box-shadow:
+        inset 0 2px 4px rgba(255, 255, 255, 0.9),
+        inset 0 -2px 5px rgba(0, 0, 0, 0.03),
+        0 8px 20px -4px rgba(100, 100, 111, 0.12),
+        0 4px 8px -2px rgba(0, 0, 0, 0.03);
+
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    overflow: hidden;
+
+    font-family: 'Noto Sans SC', sans-serif;
+}
+
+.aurora-btn:hover {
+    transform: translateY(-2px);
+    box-shadow:
+        inset 0 2px 6px rgba(255, 255, 255, 1),
+        inset 0 -2px 6px rgba(0, 0, 0, 0.03),
+        0 12px 25px -5px rgba(100, 100, 111, 0.18),
+        0 6px 10px -3px rgba(0, 0, 0, 0.05);
+}
+
+.aurora-btn:active {
+    transform: translateY(1px) scale(0.99);
+    box-shadow:
+        inset 0 2px 4px rgba(0, 0, 0, 0.05),
+        0 4px 10px -2px rgba(100, 100, 111, 0.1);
+}
+
+.text-gradient {
+    color: #555566;
+    letter-spacing: 0.02em;
+    font-weight: 500;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* Optional Blobs for Empty State */
+.blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.4;
+    z-index: 0;
+}
+
+.animate-blob {
+    animation: blob 7s infinite;
+}
+
+.animation-delay-2000 {
+    animation-delay: 2s;
+}
+
+@keyframes blob {
+    0% {
+        transform: translate(0px, 0px) scale(1);
+    }
+
+    33% {
+        transform: translate(30px, -50px) scale(1.1);
+    }
+
+    66% {
+        transform: translate(-20px, 20px) scale(0.9);
+    }
+
+    100% {
+        transform: translate(0px, 0px) scale(1);
+    }
+}
+
+/* Tanya Button Styles (Matte Frosted) */
+.tanya-btn {
+    position: relative;
+    padding: 24px 32px;
+    border-radius: 30px;
+    font-size: 16px;
+    font-weight: 500;
+    color: #58586a;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    border: none;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+
+    background:
+        url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.08'/%3E%3C/svg%3E"),
+        radial-gradient(circle at 60% 0%, rgba(255, 157, 217, 0.45) 0%, transparent 55%),
+        radial-gradient(circle at 90% 90%, rgba(185, 207, 255, 0.55) 0%, transparent 55%),
+        radial-gradient(circle at 20% 90%, rgba(194, 226, 175, 0.5) 0%, transparent 55%),
+        radial-gradient(circle at 20% 20%, rgba(255, 243, 202, 0.55) 0%, transparent 55%),
+        linear-gradient(180deg, rgba(245, 247, 250, 0.95) 0%, rgba(222, 223, 229, 0.95) 100%);
+
+    background-blend-mode: overlay, normal, normal, normal, normal, normal;
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+
+    box-shadow:
+        inset 0 4px 32px rgba(255, 255, 255, 0.6),
+        inset 0 -8px 30px rgba(207, 209, 217, 0.8),
+        0 30px 60px -15px rgba(180, 185, 200, 0.6),
+        0 10px 20px -5px rgba(180, 185, 200, 0.3);
+}
+
+.tanya-btn::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 30px;
+    padding: 1.5px;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.8) 0%, rgba(210, 215, 225, 0.6) 100%);
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    filter: blur(0.5px);
+}
+
+.tanya-btn:hover {
+    transform: translateY(-2px);
+    box-shadow:
+        inset 0 4px 32px rgba(255, 255, 255, 0.7),
+        inset 0 -8px 30px rgba(207, 209, 217, 0.7),
+        0 40px 80px -15px rgba(180, 185, 200, 0.7);
+}
+
+.tanya-btn:active {
+    transform: translateY(1px);
+    box-shadow:
+        inset 0 2px 15px rgba(207, 209, 217, 0.3),
+        0 10px 30px -10px rgba(180, 185, 200, 0.6);
+}

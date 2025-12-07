@@ -39,6 +39,8 @@ const ChatPDF = () => {
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('uploading'); // 'uploading' | 'processing'
 
   // UI State
   const [showSettings, setShowSettings] = useState(false);
@@ -429,6 +431,9 @@ const ChatPDF = () => {
     if (!file) return;
 
     setIsUploading(true);
+    setUploadProgress(0);
+    setUploadStatus('uploading');
+
     const formData = new FormData();
     formData.append('file', file);
 
@@ -441,50 +446,68 @@ const ChatPDF = () => {
       console.log('🔵 Using embedding model:', model.id);
 
       if (provider && provider.type !== 'local') {
-        // Use provider specific API key, fallback to main apiKey if empty (for convenience)
         formData.append('embedding_api_key', provider.apiKey || apiKey);
         formData.append('embedding_api_host', provider.apiHost);
       }
     } else {
-      // Fallback
       formData.append('embedding_model', 'local:all-MiniLM-L6-v2');
     }
 
     try {
       console.log('🔵 Uploading file:', file.name);
-      const response = await fetch(`${API_BASE_URL}/upload`, {
-        method: 'POST',
-        body: formData,
+
+      // Use XMLHttpRequest for progress tracking
+      const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 70);
+            setUploadProgress(percent);
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadStatus('processing');
+            setUploadProgress(75);
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              reject(new Error('Invalid response'));
+            }
+          } else {
+            reject(new Error('Upload failed'));
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error('Network error')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+
+        xhr.open('POST', `${API_BASE_URL}/upload`);
+        xhr.send(formData);
       });
 
-      if (!response.ok) throw new Error('Upload failed');
-
-      const data = await response.json();
+      setUploadProgress(80);
       console.log('🟢 Upload response:', data);
       setDocId(data.doc_id);
 
-      // Load full document content with pages
+      setUploadProgress(85);
       console.log('🔵 Fetching document details for:', data.doc_id);
-      // Add timestamp to prevent browser caching of the GET request
       const docResponse = await fetch(`${API_BASE_URL}/document/${data.doc_id}?t=${new Date().getTime()}`);
       const docData = await docResponse.json();
 
-      // Merge data from upload response (which might be fresher) with document data
+      setUploadProgress(95);
       const fullDocData = { ...docData, ...data };
-
       console.log('🟢 Document data received:', fullDocData);
 
-      // Debug alert to check PDF URL
       if (fullDocData.pdf_url) {
         console.log('✅ PDF URL found:', fullDocData.pdf_url);
       } else {
         console.warn('⚠️ No PDF URL found in document data');
-        const keys = Object.keys(fullDocData).join(', ');
-        alert(`调试信息 (v2.0.2):\n未找到 PDF URL\n\n返回字段: ${keys}\n\n请截图此弹窗发给我！`);
       }
 
-      console.log('🟢 Pages structure:', fullDocData.pages);
-      console.log('🟢 Total pages:', fullDocData.total_pages);
+      setUploadProgress(100);
       setDocInfo(fullDocData);
 
       setMessages([{
@@ -492,15 +515,17 @@ const ChatPDF = () => {
         content: `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`
       }]);
 
-      // Note: History will be auto-saved by the useEffect watching docId/docInfo/messages
-
     } catch (error) {
       console.error('❌ Upload error:', error);
       const errorMsg = error.message || '未知错误';
       alert(`上传失败: ${errorMsg}\n\n可能原因：\n1. 后端服务未启动\n2. 网络连接问题\n3. PDF文件格式不支持\n\n请检查浏览器控制台查看详细错误信息`);
     } finally {
-      setIsUploading(false);
-      // Reset file input to allow re-uploading the same file
+      setTimeout(() => {
+        setIsUploading(false);
+        setUploadProgress(0);
+        setUploadStatus('uploading');
+      }, 500);
+
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -1215,7 +1240,7 @@ const ChatPDF = () => {
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
         className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
       >
-        <div className="w-72 flex flex-col h-full">
+        <div className="w-72 mx-auto flex flex-col h-full items-stretch">
           <div className="px-6 py-8 flex items-center justify-between">
             <div className="flex items-center gap-3 font-bold text-2xl text-blue-600 tracking-tight">
               <Bot className="w-9 h-9" />
@@ -1237,24 +1262,24 @@ const ChatPDF = () => {
             </div>
           </div>
 
-          <div className="px-6 mb-4">
+          <div className="px-5 mb-4 flex justify-center">
             <button
               onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
-              className="w-full py-4 soft-button soft-button-primary flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all"
+              className="tanya-btn max-w-[260px]"
             >
-              <Plus className="w-5 h-5" />
-              <span className="font-semibold tracking-wide">新对话 / 上传PDF</span>
+              <Plus className="w-5 h-5 opacity-70" />
+              <span>上传文件/新对话</span>
             </button>
             <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
           </div>
 
-          <div className="flex-1 overflow-y-auto px-6 space-y-2">
-            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2">History</div>
+          <div className="flex-1 overflow-y-auto px-5 space-y-2 flex flex-col items-center">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2 w-full max-w-[260px]">History</div>
             {history.map((item, idx) => (
               <div
                 key={idx}
                 onClick={() => loadSession(item)}
-                className={`p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
+                className={`w-full max-w-[260px] p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
               >
                 <MessageSquare className="w-5 h-5 text-blue-500" />
                 <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
@@ -1529,19 +1554,23 @@ const ChatPDF = () => {
             </motion.div>
           ) : (
             // Empty State
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center space-y-6 max-w-md">
-                <div className="w-24 h-24 bg-blue-100 rounded-full flex items-center justify-center mx-auto animate-float">
-                  <Upload className="w-10 h-10 text-blue-600" />
+            <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+              {/* Background Blobs */}
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full max-w-lg max-h-lg pointer-events-none">
+                <div className="blob bg-purple-200 w-72 h-72 top-0 left-0 mix-blend-multiply animate-blob"></div>
+                <div className="blob bg-cyan-100 w-72 h-72 bottom-0 right-0 mix-blend-multiply animate-blob animation-delay-2000"></div>
+              </div>
+
+              <div className="text-center space-y-8 max-w-md relative z-10">
+                <div className="w-24 h-24 bg-white/50 backdrop-blur-md rounded-[32px] flex items-center justify-center mx-auto shadow-sm border border-white/60">
+                  <Upload className="w-10 h-10 text-blue-500/80" />
                 </div>
-                <h2 className="text-3xl font-bold text-gray-800">Upload a PDF to Start</h2>
-                <p className="text-gray-500">Chat with your documents using AI. Supports text analysis, table extraction, and visual understanding.</p>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-8 py-4 bg-blue-600 text-white rounded-full font-medium shadow-lg shadow-blue-500/30 hover:shadow-blue-500/40 hover:scale-105 transition-all"
-                >
-                  Select PDF File
-                </button>
+
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-bold text-gray-800 tracking-tight">Upload a PDF to Start</h2>
+                  <p className="text-gray-500 text-lg">Chat with your documents using AI.</p>
+                </div>
+
               </div>
             </div>
           )}
@@ -1763,7 +1792,7 @@ const ChatPDF = () => {
                 </div>
               )}
 
-              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_12px_40px_-8px_rgba(0,0,0,0.15),0_4px_12px_-4px_rgba(0,0,0,0.1)] p-2 flex items-end gap-2 border border-white ring-1 ring-black/5">
+              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.22),0_8px_24px_-6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-2 flex items-end gap-2 border border-white/50 ring-1 ring-black/5">
                 <div className="flex-1 flex flex-col min-h-[64px] justify-center pl-6 py-2">
                   <div className="flex items-center gap-2 mb-1">
                     {docInfo && (
@@ -1850,27 +1879,97 @@ const ChatPDF = () => {
 
 
       {/* Upload Progress Modal */}
-      < AnimatePresence >
+      <AnimatePresence>
         {isUploading && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px] transition-colors">
             <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.8, opacity: 0 }}
-              className="soft-panel p-8 flex flex-col items-center gap-4"
+              initial={{ scale: 0.9, opacity: 0, y: 10 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 10 }}
+              transition={{ type: 'spring', stiffness: 350, damping: 25 }}
+              className="relative p-10 flex flex-col items-center gap-6 min-w-[340px] rounded-[32px] overflow-hidden"
+              style={{
+                background: 'rgba(255, 255, 255, 0.85)',
+                backdropFilter: 'blur(20px)',
+                boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.15), inset 0 0 0 1px rgba(255, 255, 255, 0.5)'
+              }}
             >
-              <div className="relative w-20 h-20">
-                <div className="absolute inset-0 border-4 border-blue-200 rounded-full"></div>
-                <div className="absolute inset-0 border-4 border-blue-600 rounded-full border-t-transparent animate-spin"></div>
+              {/* Glow Effect */}
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-blue-400/20 blur-[60px] rounded-full pointer-events-none" />
+
+              {/* Animated Icon */}
+              <div className="relative w-28 h-28 flex items-center justify-center z-10">
+                {/* Background ring */}
+                <svg className="w-full h-full rotate-[-90deg]" viewBox="0 0 100 100">
+                  <circle
+                    cx="50" cy="50" r="42"
+                    fill="none"
+                    stroke="#F3F4F6"
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                  />
+                  {/* Progress ring */}
+                  <motion.circle
+                    cx="50" cy="50" r="42"
+                    fill="none"
+                    stroke="url(#progressGradient)"
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeDasharray={264}
+                    strokeDashoffset={264}
+                    animate={{ strokeDashoffset: 264 - (264 * uploadProgress) / 100 }}
+                    transition={{ duration: 0.4, ease: 'easeOut' }}
+                  />
+                  <defs>
+                    <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor="#60A5FA" />
+                      <stop offset="100%" stopColor="#C084FC" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+                {/* Center percentage */}
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <motion.span
+                    key={uploadProgress}
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-br from-blue-600 to-purple-600"
+                  >
+                    {uploadProgress}%
+                  </motion.span>
+                </div>
               </div>
-              <div className="text-center">
-                <h3 className="text-lg font-semibold text-gray-800 mb-1">上传中...</h3>
-                <p className="text-sm text-gray-500">正在处理PDF文件，请稍候</p>
+
+              {/* Status Text */}
+              <div className="text-center space-y-1.5 z-10">
+                <motion.h3
+                  key={uploadStatus}
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="text-xl font-semibold text-gray-800 tracking-tight"
+                >
+                  {uploadStatus === 'uploading' ? '正在上传文档...' : '正在智能解析...'}
+                </motion.h3>
+                <p className="text-sm text-gray-500 font-medium">
+                  {uploadStatus === 'uploading'
+                    ? '请保持网络连接畅通'
+                    : 'AI正在构建知识库索引'}
+                </p>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden z-10">
+                <motion.div
+                  className="h-full bg-gradient-to-r from-blue-400 to-purple-500 rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${uploadProgress}%` }}
+                  transition={{ duration: 0.4, ease: 'easeOut' }}
+                />
               </div>
             </motion.div>
           </div>
         )}
-      </AnimatePresence >
+      </AnimatePresence>
 
       {/* Settings Modal */}
       < AnimatePresence initial={false} >
