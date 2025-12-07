@@ -2091,16 +2091,16 @@ const ChatPDF = () => {
 
                   <div className="mt-4">
                     <label className="block text-sm font-medium text-gray-700 mb-2">流式输出速度</label>
-                    <select
+                    <CustomSelect
                       value={streamSpeed}
-                      onChange={(e) => setStreamSpeed(e.target.value)}
-                      className="w-full p-3 rounded-[18px] border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="fast">快速  (3字符/次, ~20ms)</option>
-                      <option value="normal">正常  (2字符/次, ~30ms)</option>
-                      <option value="slow">慢速  (1字符/次, ~60ms)</option>
-                      <option value="off">关闭流式（直接显示）</option>
-                    </select>
+                      onChange={setStreamSpeed}
+                      options={[
+                        { value: 'fast', label: '快速 (3字符/次, ~20ms)' },
+                        { value: 'normal', label: '正常 (2字符/次, ~30ms)' },
+                        { value: 'slow', label: '慢速 (1字符/次, ~60ms)' },
+                        { value: 'off', label: '关闭流式（直接显示）' }
+                      ]}
+                    />
                     <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度（已优化为按字符流式）</p>
                   </div>
 
@@ -2113,15 +2113,15 @@ const ChatPDF = () => {
                   {enableBlurReveal && (
                     <div className="ml-2 mt-2">
                       <label className="block text-sm font-medium text-gray-700 mb-2">模糊效果强度</label>
-                      <select
+                      <CustomSelect
                         value={blurIntensity}
-                        onChange={(e) => setBlurIntensity(e.target.value)}
-                        className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="light">轻度 ✨ (3px blur, 0.2s)</option>
-                        <option value="medium">中度 💫 (5px blur, 0.25s)</option>
-                        <option value="strong">强烈 🌟 (8px blur, 0.3s)</option>
-                      </select>
+                        onChange={setBlurIntensity}
+                        options={[
+                          { value: 'light', label: '轻度 ✨ (3px blur, 0.2s)' },
+                          { value: 'medium', label: '中度 💫 (5px blur, 0.25s)' },
+                          { value: 'strong', label: '强烈 🌟 (8px blur, 0.3s)' }
+                        ]}
+                      />
                       <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
                     </div>
                   )}
@@ -2147,17 +2147,17 @@ const ChatPDF = () => {
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
-                    <select
+                    <CustomSelect
                       value={searchEngine}
-                      onChange={(e) => setSearchEngine(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="google">Google</option>
-                      <option value="bing">Bing</option>
-                      <option value="baidu">百度</option>
-                      <option value="sogou">搜狗</option>
-                      <option value="custom">自定义</option>
-                    </select>
+                      onChange={setSearchEngine}
+                      options={[
+                        { value: 'google', label: 'Google' },
+                        { value: 'bing', label: 'Bing' },
+                        { value: 'baidu', label: '百度' },
+                        { value: 'sogou', label: '搜狗' },
+                        { value: 'custom', label: '自定义' }
+                      ]}
+                    />
                     {searchEngine === 'custom' && (
                       <div className="mt-2 space-y-1">
                         <input
@@ -2176,15 +2176,15 @@ const ChatPDF = () => {
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">工具栏尺寸</label>
-                    <select
+                    <CustomSelect
                       value={toolbarSize}
-                      onChange={(e) => setToolbarSize(e.target.value)}
-                      className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="compact">紧凑</option>
-                      <option value="normal">常规</option>
-                      <option value="large">大号</option>
-                    </select>
+                      onChange={setToolbarSize}
+                      options={[
+                        { value: 'compact', label: '紧凑' },
+                        { value: 'normal', label: '常规' },
+                        { value: 'large', label: '大号' }
+                      ]}
+                    />
                     <p className="text-xs text-gray-500 mt-1">影响划词工具栏按钮尺寸与间距</p>
                   </div>
                 </div>
@@ -2271,6 +2271,71 @@ const ChatPDF = () => {
         onClose={() => setShowGlobalSettings(false)}
       />
     </div >
+  );
+};
+
+const CustomSelect = ({ value, onChange, options }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selectedLabel = options.find(opt => opt.value === value)?.label || value;
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full p-3 rounded-[18px] border border-gray-200 bg-white/50 backdrop-blur-sm flex items-center justify-between hover:border-blue-300 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+      >
+        <span className="text-sm font-medium text-gray-700">{selectedLabel}</span>
+        <ChevronDown
+          className={`w-4 h-4 text-gray-500 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25, mass: 0.8 }}
+            style={{ transformOrigin: 'top center' }}
+            className="absolute top-full left-0 right-0 mt-2 z-50 overflow-hidden rounded-[18px] border border-gray-100 bg-white/90 backdrop-blur-md shadow-xl ring-1 ring-black/5"
+          >
+            <div className="py-1 max-h-60 overflow-auto custom-scrollbar">
+              {options.map((option) => (
+                <button
+                  key={option.value}
+                  onClick={() => {
+                    onChange(option.value);
+                    setIsOpen(false);
+                  }}
+                  className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between
+                    ${option.value === value
+                      ? 'bg-blue-50 text-blue-600 font-medium'
+                      : 'text-gray-700 hover:bg-gray-50'
+                    }`}
+                >
+                  {option.label}
+                  {option.value === value && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 };
 
