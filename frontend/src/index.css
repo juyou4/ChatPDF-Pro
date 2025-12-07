@@ -39,6 +39,10 @@
     --radius-panel: 26px;
     --radius-panel-lg: 30px;
     --radius-card: 22px;
+
+    /* Blur reveal defaults */
+    --blur-distance: 4px;
+    --blur-duration: 0.3s;
 }
 
 #root {
@@ -152,6 +156,86 @@
     box-shadow: none;
 }
 
+/* Pure Frosted Glass Button - 3D Enhanced (64px) */
+.glass-btn-3d {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    /* 材质层 */
+    background: rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: none;
+    outline: none;
+    cursor: pointer;
+    padding: 0;
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+
+    /* 光影层 - Scaled for 64px size */
+    box-shadow:
+        /* 1. External Shadow */
+        0 12px 24px -6px rgba(166, 175, 195, 0.45),
+        0 5px 10px -3px rgba(166, 175, 195, 0.3),
+        /* 2. White Ring */
+        0 0 0 1px rgba(255, 255, 255, 0.5),
+        /* 3. Rim Light */
+        inset 1px 1px 1px 0 rgba(255, 255, 255, 1.0),
+        /* 4. Internal Glow */
+        inset 0 0 10px rgba(255, 255, 255, 0.3),
+        /* 5. Thickness/Reflection */
+        inset -1px -1px 2px 0 rgba(190, 200, 220, 0.35);
+}
+
+.glass-btn-3d::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: linear-gradient(135deg,
+            rgba(255, 255, 255, 0.5) 0%,
+            rgba(255, 255, 255, 0.0) 45%,
+            rgba(255, 255, 255, 0.0) 100%);
+    pointer-events: none;
+}
+
+.glass-btn-3d:hover {
+    transform: translateY(-2px) scale(1.02);
+    background: rgba(255, 255, 255, 0.3);
+    box-shadow:
+        0 16px 32px -8px rgba(166, 175, 195, 0.5),
+        0 8px 12px -4px rgba(166, 175, 195, 0.35),
+        0 0 0 1px rgba(255, 255, 255, 0.6),
+        inset 1px 1px 2px 0 rgba(255, 255, 255, 1),
+        inset 0 0 12px rgba(255, 255, 255, 0.4),
+        inset -1px -1px 3px 0 rgba(190, 200, 220, 0.4);
+}
+
+.glass-btn-3d:active {
+    transform: translateY(0) scale(0.98);
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow:
+        0 6px 12px -3px rgba(166, 175, 195, 0.4),
+        inset 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.glass-btn-icon {
+    width: 28px;
+    height: 28px;
+    color: #8E94AA;
+    position: relative;
+    z-index: 20;
+    transition: color 0.3s ease;
+    filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.9));
+}
+
+.glass-btn-3d:hover .glass-btn-icon {
+    color: #6B728E;
+}
+
 .soft-button-secondary {
     background-color: var(--color-bg-surface);
     color: var(--color-text-main);
@@ -243,7 +327,7 @@
 
 @keyframes blur-reveal {
     0% {
-        filter: blur(4px);
+        filter: blur(var(--blur-distance, 4px));
         opacity: 0;
     }
 
@@ -254,7 +338,83 @@
 }
 
 .animate-blur-reveal {
-    animation: blur-reveal 0.3s ease-out forwards;
+    animation: blur-reveal var(--blur-duration, 0.3s) ease-out forwards;
+}
+
+.blur-intensity-light {
+    --blur-distance: 2px;
+    --blur-duration: 0.2s;
+}
+
+.blur-intensity-medium {
+    --blur-distance: 4px;
+    --blur-duration: 0.32s;
+}
+
+.blur-intensity-strong {
+    --blur-distance: 6px;
+    --blur-duration: 0.45s;
+}
+
+/* Streaming Blur Reveal - Container-level animation for streaming text */
+.streaming-blur-reveal {
+    /* 新内容会触发整体的微妙动画 */
+}
+
+.streaming-blur-reveal.streaming-active {
+    animation: streaming-pulse 0.15s ease-out;
+}
+
+@keyframes streaming-pulse {
+    0% {
+        opacity: 0.92;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+/* 流式输出时，最后一个段落元素有特殊效果 */
+.streaming-blur-reveal>div>*:last-child {
+    animation: text-fade-in 0.25s ease-out;
+}
+
+@keyframes text-fade-in {
+    0% {
+        opacity: 0.7;
+        filter: blur(1px);
+    }
+
+    100% {
+        opacity: 1;
+        filter: blur(0);
+    }
+}
+
+/* 打字光标效果 */
+.streaming-blur-reveal::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    background: var(--color-primary, #3B82F6);
+    margin-left: 2px;
+    animation: cursor-blink 0.8s ease-in-out infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes cursor-blink {
+
+    0%,
+    50% {
+        opacity: 1;
+    }
+
+    51%,
+    100% {
+        opacity: 0;
+    }
 }
 
 /* --- Glass Button (Legacy/Fallback) --- */

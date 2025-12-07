@@ -81,6 +81,11 @@ if not exist "frontend\node_modules" (
     if errorlevel 1 goto NPMFAIL
 )
 
+:: 确保 rehype-raw 已安装（Blur Reveal 效果依赖）
+pushd frontend
+call npm list rehype-raw >nul 2>&1 || call npm install rehype-raw --silent >nul 2>&1
+popd
+
 echo   [✓] 依赖检查完成
 
 :: ==================== 启动服务 ====================

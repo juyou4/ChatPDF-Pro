@@ -93,6 +93,10 @@ if [ ! -d "node_modules" ]; then
     show_progress "首次运行，安装前端依赖 (需要1-2分钟)..."
     npm install --silent > /dev/null 2>&1
 fi
+
+# 确保 rehype-raw 已安装（Blur Reveal 效果依赖）
+npm list rehype-raw > /dev/null 2>&1 || npm install rehype-raw --silent > /dev/null 2>&1
+
 cd ..
 
 show_success "依赖检查完成"

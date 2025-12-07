@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -16,90 +16,19 @@ import GlobalSettings from './GlobalSettings';
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
 
-const SendButtonSVG = () => (
-  <svg width="88" height="88" viewBox="0 0 265 265" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <g filter="url(#filter0_f_21_62)">
-      <path d="M225 140C225 186.944 186.944 225 140 225C93.0558 225 55 186.944 55 140C55 93.0558 93.0558 55 140 55C186.944 55 225 93.0558 225 140Z" fill="black" fillOpacity="0.2" />
-    </g>
-    <g filter="url(#filter1_f_21_62)">
-      <circle cx="85" cy="85" r="55" fill="#EDF8FC" />
-    </g>
-    <g filter="url(#filter2_f_21_62)">
-      <path d="M219 85C219 115.376 194.376 140 164 140C133.624 140 109 115.376 109 85C109 54.6243 133.624 30 164 30C194.376 30 219 54.6243 219 85Z" fill="#FCF5FD" />
-    </g>
-    <g filter="url(#filter3_f_21_62)">
-      <path d="M200 156C200 189.137 173.137 216 140 216C106.863 216 80 189.137 80 156C80 122.863 106.863 96 140 96C173.137 96 200 122.863 200 156Z" fill="white" />
-    </g>
-    <rect x="44" y="46" width="170" height="170" rx="85" fill="url(#paint0_linear_21_62)" fillOpacity="0.2" />
-    <g filter="url(#filter5_i_21_62)">
-      <circle cx="129" cy="131" r="85" fill="url(#paint1_linear_21_62)" />
-    </g>
-    <g filter="url(#filter6_di_21_62)">
-      <path d="M112.079 121.87L114.079 125.828C115.353 128.354 115.988 129.615 115.988 131C115.988 132.385 115.353 133.646 114.079 136.167L112.079 140.13C106.385 151.417 103.538 157.057 105.755 159.86C107.976 162.656 113.238 160.052 123.751 154.844L152.615 140.542C160.87 136.453 165 134.406 165 131C165 127.594 160.87 125.547 152.615 121.458L123.751 107.156C113.238 101.948 107.976 99.3436 105.755 102.14C103.533 104.937 106.385 110.578 112.079 121.87Z" fill="url(#paint2_linear_21_62)" />
-    </g>
-    <defs>
-      <filter id="filter0_f_21_62" x="15" y="15" width="250" height="250" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
-        <feGaussianBlur stdDeviation="20" result="effect1_foregroundBlur_21_62" />
-      </filter>
-      <filter id="filter1_f_21_62" x="0" y="0" width="170" height="170" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
-        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
-      </filter>
-      <filter id="filter2_f_21_62" x="79" y="0" width="170" height="170" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
-        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
-      </filter>
-      <filter id="filter3_f_21_62" x="50" y="66" width="180" height="180" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
-        <feGaussianBlur stdDeviation="15" result="effect1_foregroundBlur_21_62" />
-      </filter>
-      <filter id="filter5_i_21_62" x="44" y="46" width="171" height="171" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
-        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
-        <feOffset dx="1" dy="1" />
-        <feGaussianBlur stdDeviation="0.5" />
-        <feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1" />
-        <feColorMatrix type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 1 0" />
-        <feBlend mode="normal" in2="shape" result="effect1_innerShadow_21_62" />
-      </filter>
-      <filter id="filter6_di_21_62" x="101" y="101" width="68" height="68" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
-        <feFlood floodOpacity="0" result="BackgroundImageFix" />
-        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
-        <feOffset dy="4" />
-        <feGaussianBlur stdDeviation="2" />
-        <feComposite in2="hardAlpha" operator="out" />
-        <feColorMatrix type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.25 0" />
-        <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_21_62" />
-        <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_21_62" result="shape" />
-        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha" />
-        <feOffset dy="1" />
-        <feGaussianBlur stdDeviation="0.5" />
-        <feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1" />
-        <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.25 0" />
-        <feBlend mode="normal" in2="shape" result="effect2_innerShadow_21_62" />
-      </filter>
-      <linearGradient id="paint0_linear_21_62" x1="78" y1="66.5" x2="175" y2="204.5" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#D9E4F2" />
-        <stop offset="1" stopColor="#EFE9FD" />
-      </linearGradient>
-      <linearGradient id="paint1_linear_21_62" x1="82" y1="77" x2="170" y2="206" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#EBF2FA" />
-        <stop offset="0.75" stopColor="#F8F3FF" />
-        <stop offset="1" stopColor="white" />
-      </linearGradient>
-      <linearGradient id="paint2_linear_21_62" x1="135" y1="101" x2="135" y2="161" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#CEC6D5" />
-        <stop offset="1" stopColor="#E8E1EE" />
-      </linearGradient>
-    </defs>
+const SendIcon = () => (
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
   </svg>
 );
+
+const PauseIcon = () => (
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <rect x="7" y="6" width="4" height="12" rx="2" />
+    <rect x="13" y="6" width="4" height="12" rx="2" />
+  </svg>
+);
+
 
 const ChatPDF = () => {
   // Core State
@@ -239,6 +168,8 @@ const ChatPDF = () => {
   const pdfContainerRef = useRef(null);
   const selectionStartRef = useRef(null);
   const headerContentRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const streamingAbortRef = useRef({ cancelled: false });
 
   const [headerHeight, setHeaderHeight] = useState(null);
   const API_BASE_URL = ''; // Relative path due to proxy
@@ -606,6 +537,10 @@ const ChatPDF = () => {
     };
 
     // Add placeholder message for streaming effect
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+    streamingAbortRef.current.cancelled = false;
+
     const tempMsgId = Date.now();
     setStreamingMessageId(tempMsgId);
     setMessages(prev => [...prev, {
@@ -677,6 +612,7 @@ const ChatPDF = () => {
         const response = await fetch(`${API_BASE_URL}${endpoint}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: abortControllerRef.current.signal,
           body: JSON.stringify(requestBody)
         });
 
@@ -690,8 +626,50 @@ const ChatPDF = () => {
           fallback: data.fallback_used
         });
 
-        if (streamSpeed === 'off') {
-          // Show entire message immediately
+        // OPTIMIZED SPEED PROFILES for Performance
+        const runClientStream = async (answerText) => {
+          if (streamSpeed === 'off') {
+            setMessages(prev => prev.map(msg =>
+              msg.id === tempMsgId
+                ? { ...msg, content: answerText, isStreaming: false }
+                : msg
+            ));
+            setStreamingMessageId(null);
+            return true;
+          }
+
+          // Increased baseDelay and minChunk to reduce render frequency
+          const speedProfiles = {
+            fast: { minChunk: 5, maxChunk: 12, maxUpdates: 30, baseDelay: 20, variation: 10 },
+            normal: { minChunk: 3, maxChunk: 8, maxUpdates: 40, baseDelay: 35, variation: 15 },
+            slow: { minChunk: 2, maxChunk: 5, maxUpdates: 60, baseDelay: 60, variation: 30 }
+          };
+
+          const profile = speedProfiles[streamSpeed] || speedProfiles.normal;
+          const approxChunk = Math.ceil(answerText.length / profile.maxUpdates) || 1;
+          const chunkSize = Math.max(profile.minChunk, Math.min(profile.maxChunk, approxChunk));
+
+          let pointer = 0;
+          while (pointer < answerText.length) {
+            if (streamingAbortRef.current.cancelled) return false;
+            pointer = Math.min(pointer + chunkSize, answerText.length);
+            const nextContent = answerText.slice(0, pointer);
+
+            setMessages(prev => prev.map(msg =>
+              msg.id === tempMsgId
+                ? { ...msg, content: nextContent }
+                : msg
+            ));
+
+            const delay = profile.baseDelay + Math.random() * profile.variation;
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+
+          return true;
+        };
+
+        const completed = await runClientStream(fullAnswer);
+        if (completed) {
           setMessages(prev => prev.map(msg =>
             msg.id === tempMsgId
               ? { ...msg, content: fullAnswer, isStreaming: false }
@@ -699,37 +677,11 @@ const ChatPDF = () => {
           ));
           setStreamingMessageId(null);
         } else {
-          // Client-side streaming effect - optimized for smoother display
-          let currentText = '';
-
-          const speedConfig = {
-            fast: { charsPerChunk: 3, baseDelay: 15, variation: 10 },      // ~3 chars every 15-25ms
-            normal: { charsPerChunk: 2, baseDelay: 25, variation: 15 },    // ~2 chars every 25-40ms
-            slow: { charsPerChunk: 1, baseDelay: 50, variation: 20 }       // ~1 char every 50-70ms
-          };
-
-          const { charsPerChunk, baseDelay, variation } = speedConfig[streamSpeed] || speedConfig.normal;
-
-          // Process in small chunks for smoother effect
-          for (let i = 0; i < fullAnswer.length; i += charsPerChunk) {
-            currentText = fullAnswer.substring(0, i + charsPerChunk);
-            const delay = baseDelay + Math.random() * variation;
-            await new Promise(resolve => setTimeout(resolve, delay));
-
-            setMessages(prev => prev.map(msg =>
-              msg.id === tempMsgId
-                ? { ...msg, content: currentText }
-                : msg
-            ));
-          }
-
-          // Ensure complete text is shown
           setMessages(prev => prev.map(msg =>
             msg.id === tempMsgId
-              ? { ...msg, content: fullAnswer, isStreaming: false }
+              ? { ...msg, isStreaming: false }
               : msg
           ));
-          setStreamingMessageId(null);
         }
       }
 
@@ -742,6 +694,25 @@ const ChatPDF = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsLoading(false);
+    }
+    streamingAbortRef.current.cancelled = true;
+    if (streamingMessageId) {
+      setMessages(prev => {
+        const next = [...prev];
+        const idx = next.findIndex(msg => msg.id === streamingMessageId);
+        if (idx === -1) return prev;
+        next[idx] = { ...next[idx], isStreaming: false };
+        return next;
+      });
+    }
+    setStreamingMessageId(null);
   };
 
   // Message Action Functions
@@ -1782,42 +1753,94 @@ const ChatPDF = () => {
               <div ref={messagesEndRef} />
             </div >
 
-            {/* Input Area */}
-            <div className="p-6 border-t border-gray-100/50 bg-white/40 backdrop-blur-sm">
+            {/* Input Area - Clean Card Style */}
+            <div className="p-6 pt-0 bg-transparent">
               {screenshot && (
-                <div className="mb-3 inline-flex items-center gap-2 bg-purple-50 text-purple-700 px-4 py-1.5 rounded-full text-xs font-medium border border-purple-100 shadow-sm">
+                <div className="mb-3 inline-flex items-center gap-2 bg-purple-50 text-purple-700 px-4 py-1.5 rounded-full text-xs font-medium border border-purple-100 shadow-sm ml-4">
                   <ImageIcon className="w-3 h-3" />
                   Screenshot ready
                   <button onClick={() => setScreenshot(null)} className="hover:text-purple-900 ml-1"><X className="w-3 h-3" /></button>
                 </div>
               )}
-              <div className="relative flex items-end gap-3">
-                <div className="flex-1 relative group">
-                  <textarea
-                    value={inputMessage}
-                    onChange={(e) => setInputMessage(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
-                    placeholder="Ask anything about the document..."
-                    className="w-full soft-input rounded-2xl py-4 pl-6 pr-14 resize-none text-base min-h-[56px] max-h-32"
-                    rows={1}
-                  />
-                  <button className="absolute right-3 bottom-3 p-2 text-gray-400 hover:text-blue-600 transition-colors hover:bg-blue-50 rounded-full">
-                    <Bot className="w-6 h-6" />
-                  </button>
+
+              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_12px_40px_-8px_rgba(0,0,0,0.15),0_4px_12px_-4px_rgba(0,0,0,0.1)] p-2 flex items-end gap-2 border border-white ring-1 ring-black/5">
+                <div className="flex-1 flex flex-col min-h-[64px] justify-center pl-6 py-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    {docInfo && (
+                      <div className="flex items-center gap-1.5 bg-gray-100/50 hover:bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wide border border-transparent hover:border-black/5 transition-all group/badge cursor-default">
+                        <span>1 file</span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDocId(null);
+                            setDocInfo(null);
+                          }}
+                          className="p-0.5 rounded-full hover:bg-black/10 text-gray-400 hover:text-gray-600 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                    <textarea
+                      value={inputMessage}
+                      onChange={(e) => setInputMessage(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
+                      placeholder="Summarize, rephrase, convert..."
+                      className="w-full bg-transparent border-none outline-none text-gray-800 placeholder:text-gray-400 font-medium resize-none h-[24px] overflow-hidden leading-relaxed py-0 focus:ring-0 text-[15px]"
+                      rows={1}
+                      style={{ minHeight: '24px', maxHeight: '120px' }}
+                      onInput={(e) => {
+                        e.target.style.height = '24px';
+                        e.target.style.height = e.target.scrollHeight + 'px';
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-4 text-gray-400 mt-2">
+                    <button className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
+                      <SlidersHorizontal className="w-5 h-5" />
+                    </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50"
+                    >
+                      <Paperclip className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
-                <motion.button
-                  onClick={sendMessage}
-                  disabled={isLoading || (!inputMessage.trim() && !screenshot)}
-                  className="relative z-10 rounded-full outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ width: '88px', height: '88px', padding: 0, border: 'none', background: 'transparent' }}
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.9 }}
-                  initial={{ scale: 0.8, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                >
-                  <SendButtonSVG />
-                </motion.button>
+
+                <AnimatePresence mode="wait">
+                  {isLoading ? (
+                    <motion.button
+                      key="pause-btn"
+                      onClick={handleStop}
+                      className="glass-btn-3d relative z-10 flex-shrink-0"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.8, opacity: 0 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                    >
+                      <PauseIcon />
+                    </motion.button>
+                  ) : (
+                    <motion.button
+                      key="send-btn"
+                      onClick={sendMessage}
+                      disabled={(!inputMessage.trim() && !screenshot)}
+                      className="glass-btn-3d relative z-10 flex-shrink-0"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.8, opacity: 0 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                    >
+                      <SendIcon />
+                    </motion.button>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
           </motion.div>
