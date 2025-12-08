@@ -1838,38 +1838,39 @@ const ChatPDF = () => {
                   </div>
                 </div>
 
-                <AnimatePresence mode="wait">
-                  {isLoading ? (
-                    <motion.button
-                      key="pause-btn"
-                      onClick={handleStop}
-                      className="glass-btn-3d relative z-10 flex-shrink-0"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      initial={{ scale: 0.8, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      exit={{ scale: 0.8, opacity: 0 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                    >
-                      <PauseIcon />
-                    </motion.button>
-                  ) : (
-                    <motion.button
-                      key="send-btn"
-                      onClick={sendMessage}
-                      disabled={(!inputMessage.trim() && !screenshot)}
-                      className="glass-btn-3d relative z-10 flex-shrink-0"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      initial={{ scale: 0.8, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      exit={{ scale: 0.8, opacity: 0 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                    >
-                      <SendIcon />
-                    </motion.button>
-                  )}
-                </AnimatePresence>
+                <motion.button
+                  onClick={isLoading ? handleStop : sendMessage}
+                  disabled={!isLoading && (!inputMessage.trim() && !screenshot)}
+                  className="glass-btn-3d relative z-10 flex-shrink-0"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <AnimatePresence initial={false}>
+                    {isLoading ? (
+                      <motion.div
+                        key="pause"
+                        initial={{ rotate: -90, scale: 0.5, opacity: 0 }}
+                        animate={{ rotate: 0, scale: 1, opacity: 1 }}
+                        exit={{ rotate: 90, scale: 0.5, opacity: 0 }}
+                        transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }}
+                        className="absolute inset-0 flex items-center justify-center"
+                      >
+                        <PauseIcon />
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="send"
+                        initial={{ rotate: -90, scale: 0.5, opacity: 0 }}
+                        animate={{ rotate: 0, scale: 1, opacity: 1 }}
+                        exit={{ rotate: 90, scale: 0.5, opacity: 0 }}
+                        transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }}
+                        className="absolute inset-0 flex items-center justify-center"
+                      >
+                        <SendIcon />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.button>
               </div>
             </div>
           </motion.div>
@@ -2028,7 +2029,8 @@ const ChatPDF = () => {
                       </div>
 
                       {/* Model Status Cards */}
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {/* Model Status Cards */}
+                      <div className="flex flex-col gap-3">
                         {/* Chat Model Card */}
                         <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
                           <div className="flex items-center gap-3 mb-2">
@@ -2117,9 +2119,9 @@ const ChatPDF = () => {
                         value={blurIntensity}
                         onChange={setBlurIntensity}
                         options={[
-                          { value: 'light', label: '轻度 ✨ (3px blur, 0.2s)' },
-                          { value: 'medium', label: '中度 💫 (5px blur, 0.25s)' },
-                          { value: 'strong', label: '强烈 🌟 (8px blur, 0.3s)' }
+                          { value: 'light', label: '轻度 (3px blur, 0.2s)' },
+                          { value: 'medium', label: '中度 (5px blur, 0.25s)' },
+                          { value: 'strong', label: '强烈 (8px blur, 0.3s)' }
                         ]}
                       />
                       <p className="text-xs text-gray-500 mt-1">调整每个新字符出现时的模糊程度和动画时长</p>
@@ -2143,7 +2145,7 @@ const ChatPDF = () => {
 
                 {/* 工具栏设置 */}
                 <div className="pt-4 border-t border-gray-100 space-y-3">
-                  <h3 className="text-sm font-semibold text-gray-800">🎨 划词工具栏</h3>
+                  <h3 className="text-sm font-semibold text-gray-800">划词工具栏</h3>
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
@@ -2191,7 +2193,7 @@ const ChatPDF = () => {
 
                 {/* 存储位置信息 */}
                 <div className="pt-4 border-t border-gray-100">
-                  <h3 className="text-sm font-semibold text-gray-800 mb-3">📁 文件存储位置</h3>
+                  <h3 className="text-sm font-semibold text-gray-800 mb-3">文件存储位置</h3>
                   {storageInfo ? (
                     <div className="space-y-2">
                       <div className="bg-gray-50 p-3 rounded-lg">
@@ -2239,7 +2241,7 @@ const ChatPDF = () => {
                       </div>
 
                       <p className="text-xs text-gray-500 mt-2">
-                        💡 点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
+                        点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
                       </p>
                     </div>
                   ) : (
