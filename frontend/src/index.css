@@ -35,10 +35,13 @@
     --shadow-hover: 0 30px 60px -12px rgba(0, 0, 0, 0.15);
     --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
 
-    /* Radii */
-    --radius-panel: 32px;
-    --radius-panel-lg: 36px;
-    --radius-card: 28px;
+    /* Radii - Smoother, more organic curves */
+    --radius-panel: 40px;
+    /* Main containers */
+    --radius-panel-lg: 48px;
+    /* Outer wrappers */
+    --radius-card: 32px;
+    /* Content cards */
 
     /* Blur reveal defaults */
     --blur-distance: 4px;
