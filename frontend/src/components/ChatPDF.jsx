@@ -95,6 +95,7 @@ const ChatPDF = () => {
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [thinkingExpanded, setThinkingExpanded] = useState({});
 
   // New three-layer context
   const { getProviderById } = useProvider();
@@ -573,13 +574,13 @@ const ChatPDF = () => {
       type: 'assistant',
       content: '',
       model: chatModel,
-      isStreaming: true
+      isStreaming: true,
+      thinking: '思考中...'
     }]);
 
     try {
-      // Temporarily disable SSE due to stability issues - use regular fetch
-      // Use SSE streaming if enabled and no screenshot
-      if (false && streamSpeed !== 'off' && !screenshot) {
+      // Use SSE streaming if开启并且无截图（vision）
+      if (streamSpeed !== 'off' && !screenshot) {
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -591,6 +592,7 @@ const ChatPDF = () => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let currentText = '';
+        let currentThinking = '';
 
         while (true) {
           const { value, done } = await reader.read();
@@ -606,28 +608,44 @@ const ChatPDF = () => {
 
               try {
                 const parsed = JSON.parse(data);
-                if (parsed.error) {
-                  throw new Error(parsed.error);
-                }
-                if (!parsed.done) {
-                  currentText += parsed.content;
-                  setMessages(prev => prev.map(msg =>
-                    msg.id === tempMsgId
-                      ? { ...msg, content: currentText }
-                      : msg
-                  ));
-                }
-              } catch (e) {
+                  if (parsed.error) {
+                    throw new Error(parsed.error);
+                  }
+                  const chunkContent = parsed.content || '';
+                  const chunkThinking = parsed.reasoning_content || '';
+                  if (!parsed.done) {
+                    if (chunkContent) {
+                      currentText += chunkContent;
+                    }
+                    if (chunkThinking) {
+                      currentThinking += chunkThinking;
+                    }
+                    if (chunkContent || chunkThinking) {
+                      setMessages(prev => prev.map(msg =>
+                        msg.id === tempMsgId
+                          ? { ...msg, content: currentText, thinking: currentThinking }
+                          : msg
+                      ));
+                    }
+                  } else if (chunkThinking) {
+                    currentThinking += chunkThinking;
+                    setMessages(prev => prev.map(msg =>
+                      msg.id === tempMsgId
+                        ? { ...msg, content: currentText, thinking: currentThinking }
+                        : msg
+                    ));
+                  }
+                } catch (e) {
                 // Skip invalid JSON
               }
             }
           }
         }
 
-        // Mark streaming complete
+        // Mark streaming complete and finalize thinking text (clear if none)
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, isStreaming: false }
+            ? { ...msg, isStreaming: false, thinking: currentThinking || '' }
             : msg
         ));
         setStreamingMessageId(null);
@@ -645,11 +663,18 @@ const ChatPDF = () => {
 
         const data = await response.json();
         const fullAnswer = data.answer;
+        const reasoningContent = data.reasoning_content || '';
         setLastCallInfo({
           provider: data.used_provider,
           model: data.used_model,
           fallback: data.fallback_used
         });
+
+        setMessages(prev => prev.map(msg =>
+          msg.id === tempMsgId
+            ? { ...msg, thinking: reasoningContent || '' }
+            : msg
+        ));
 
         // OPTIMIZED SPEED PROFILES for Performance
         const runClientStream = async (answerText) => {
@@ -769,6 +794,14 @@ const ChatPDF = () => {
     setTimeout(() => {
       sendMessage();
     }, 100);
+  };
+
+  const toggleThinkingPanel = (messageId) => {
+    const key = String(messageId);
+    setThinkingExpanded((prev) => ({
+      ...prev,
+      [key]: !(prev[key] ?? true)
+    }));
   };
 
   // Helper Functions
@@ -1693,80 +1726,118 @@ const ChatPDF = () => {
                 </div>
               )}
 
-              {messages.map((msg, idx) => (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  key={idx}
-                  className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
-                >
-                  <div className={`max-w-[85%] rounded-3xl p-6 shadow-sm ${msg.type === 'user'
-                    ? 'message-bubble-user rounded-tr-none'
-                    : darkMode
-                      ? 'glass-3d-dark text-gray-100 rounded-tl-none'
-                      : 'message-bubble-ai rounded-tl-none'
-                    }`}>
-                    {msg.hasImage && (
-                      <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
-                        <div className="bg-black/10 p-2 flex items-center gap-2 text-xs">
-                          <ImageIcon className="w-3 h-3" /> Image attached
+              {messages.map((msg, idx) => {
+                const messageKey = msg.id ?? idx;
+                const thinkingKey = String(messageKey);
+                const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
+                const isThinkingOpen = thinkingExpanded[thinkingKey] ?? true;
+
+                return (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    key={messageKey}
+                    className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
+                  >
+                    <div className={`max-w-[85%] rounded-3xl p-6 shadow-sm ${msg.type === 'user'
+                      ? 'message-bubble-user rounded-tr-none'
+                      : darkMode
+                        ? 'glass-3d-dark text-gray-100 rounded-tl-none'
+                        : 'message-bubble-ai rounded-tl-none'
+                      }`}>
+                      {hasThinking && (
+                        <div className={`mt-4 rounded-2xl border ${darkMode ? 'border-blue-900/50 bg-blue-950/30' : 'border-blue-100 bg-blue-50/60'}`}>
+                          <button
+                            onClick={() => toggleThinkingPanel(thinkingKey)}
+                            className="w-full flex items-center justify-between px-3 py-2 text-xs text-blue-700 dark:text-blue-200"
+                          >
+                            <div className="flex items-center gap-2 font-semibold">
+                              <Bot className="w-4 h-4" />
+                              <span>思考过程</span>
+                              <span className="text-[11px] text-blue-500/80 dark:text-blue-300/80">Thinking</span>
+                              {msg.isStreaming && <span className="text-[11px] text-blue-500/70">思考中...</span>}
+                            </div>
+                            <div className="flex items-center gap-1 text-blue-500 dark:text-blue-200">
+                              <span className="text-[11px]">{isThinkingOpen ? '收起' : '展开'}</span>
+                              {isThinkingOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                            </div>
+                          </button>
+                          {isThinkingOpen && (
+                            <div className={`mx-3 mb-3 rounded-xl px-3 py-2 ${darkMode ? 'bg-black/30 text-gray-100' : 'bg-white text-gray-800'}`}>
+                              <StreamingMarkdown
+                                content={msg.thinking}
+                                isStreaming={false}
+                                enableBlurReveal={false}
+                                blurIntensity="light"
+                              />
+                            </div>
+                          )}
                         </div>
+                      )}
+
+                      {msg.hasImage && (
+                        <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
+                          <div className="bg-black/10 p-2 flex items-center gap-2 text-xs">
+                            <ImageIcon className="w-3 h-3" /> Image attached
+                          </div>
+                        </div>
+                      )}
+                      <StreamingMarkdown
+                        content={msg.content}
+                        isStreaming={msg.isStreaming || false}
+                        enableBlurReveal={enableBlurReveal}
+                        blurIntensity={blurIntensity}
+                      />
+
+                      {msg.model && <div className="text-xs text-gray-400 mt-2">Model: {msg.model}</div>}
+                    </div>
+
+                    {/* Action Buttons - Only show for assistant messages that are not streaming */}
+                    {msg.type === 'assistant' && !msg.isStreaming && (
+                      <div className="flex items-center gap-1 mt-1 ml-2">
+                        <button
+                          onClick={() => copyMessage(msg.content, msg.id || idx)}
+                          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                          title="复制"
+                        >
+                          {copiedMessageId === (msg.id || idx) ? (
+                            <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => regenerateMessage(idx)}
+                          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                          title="重新生成"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                        </button>
+                        <button
+                          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                          title="点赞"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+                          </svg>
+                        </button>
+                        <button
+                          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+                          title="点踩"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+                          </svg>
+                        </button>
                       </div>
                     )}
-                    <StreamingMarkdown
-                      content={msg.content}
-                      isStreaming={msg.isStreaming || false}
-                      enableBlurReveal={enableBlurReveal}
-                      blurIntensity={blurIntensity}
-                    />
-                    {msg.model && <div className="text-xs text-gray-400 mt-2">Model: {msg.model}</div>}
-                  </div>
-
-                  {/* Action Buttons - Only show for assistant messages that are not streaming */}
-                  {msg.type === 'assistant' && !msg.isStreaming && (
-                    <div className="flex items-center gap-1 mt-1 ml-2">
-                      <button
-                        onClick={() => copyMessage(msg.content, msg.id || idx)}
-                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
-                        title="复制"
-                      >
-                        {copiedMessageId === (msg.id || idx) ? (
-                          <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                          </svg>
-                        ) : (
-                          <Copy className="w-4 h-4" />
-                        )}
-                      </button>
-                      <button
-                        onClick={() => regenerateMessage(idx)}
-                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
-                        title="重新生成"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                      </button>
-                      <button
-                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
-                        title="点赞"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
-                        </svg>
-                      </button>
-                      <button
-                        className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
-                        title="点踩"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
-                        </svg>
-                      </button>
-                    </div>
-                  )}
-                </motion.div>
-              ))
+                  </motion.div>
+                );
+              })
               }
               {
                 isLoading && (

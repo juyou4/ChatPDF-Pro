@@ -14,6 +14,40 @@ from utils.middleware import (
 )
 
 
+def extract_reasoning_content(chunk: dict | list | str | None) -> str:
+    """Normalize reasoning content across providers (DeepSeek-R1 / o1)."""
+    if chunk is None:
+        return ""
+
+    # DeepSeek/OpenAI responses often nest reasoning_content under message/delta
+    if isinstance(chunk, dict):
+        candidate = chunk.get("reasoning_content")
+        if candidate is None:
+            return ""
+    else:
+        candidate = chunk
+
+    if isinstance(candidate, str):
+        return candidate
+
+    if isinstance(candidate, dict):
+        text = candidate.get("text") or candidate.get("content") or ""
+        return text if isinstance(text, str) else ""
+
+    if isinstance(candidate, list):
+        parts = []
+        for item in candidate:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    return ""
+
+
 async def call_ai_api(
     messages: List[dict],
     api_key: str,
@@ -148,8 +182,16 @@ async def call_ai_api_stream(
                         continue
                     delta = chunk.get("choices", [{}])[0].get("delta", {}) or chunk.get("choices", [{}])[0].get("message", {})
                     content = delta.get("content") or ""
-                    if content:
-                        yield {"content": content, "done": False, "used_provider": provider, "used_model": model, "fallback_used": False}
+                    reasoning_content = extract_reasoning_content(delta)
+                    if content or reasoning_content:
+                        yield {
+                            "content": content,
+                            "reasoning_content": reasoning_content,
+                            "done": False,
+                            "used_provider": provider,
+                            "used_model": model,
+                            "fallback_used": False
+                        }
                 yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
         return
 
@@ -248,10 +290,19 @@ async def call_ai_api_stream(
     # 其他 provider 回退为一次性响应
     try:
         resp = await call_ai_api(messages, api_key, model, provider, endpoint=endpoint, middlewares=middlewares)
-        answer = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        message = resp.get("choices", [{}])[0].get("message", {}) or {}
+        answer = message.get("content", "")
+        reasoning_text = extract_reasoning_content(message)
         for idx, word in enumerate(answer.split(" ")):
             chunk = word if idx == 0 else f" {word}"
             yield {"content": chunk, "done": False, "used_provider": resp.get("_used_provider", provider), "used_model": resp.get("_used_model", model), "fallback_used": resp.get("_fallback_used", False)}
-        yield {"content": "", "done": True, "used_provider": resp.get("_used_provider", provider), "used_model": resp.get("_used_model", model), "fallback_used": resp.get("_fallback_used", False)}
+        yield {
+            "content": "",
+            "reasoning_content": reasoning_text,
+            "done": True,
+            "used_provider": resp.get("_used_provider", provider),
+            "used_model": resp.get("_used_model", model),
+            "fallback_used": resp.get("_fallback_used", False)
+        }
     except Exception as e:
         yield {"error": str(e), "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}

@@ -1,11 +1,12 @@
 from datetime import datetime
 from typing import Optional, List
+import json
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from services.chat_service import call_ai_api, call_ai_api_stream
+from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
 from services.vector_service import vector_context
 from models.provider_registry import PROVIDER_CONFIG
 from utils.middleware import (
@@ -138,10 +139,13 @@ async def chat_with_pdf(request: ChatRequest):
             endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
             middlewares=middlewares
         )
-        answer = response["choices"][0]["message"]["content"]
+        message = response["choices"][0]["message"]
+        answer = message["content"]
+        reasoning_content = extract_reasoning_content(message)
 
         return {
             "answer": answer,
+            "reasoning_content": reasoning_content,
             "doc_id": request.doc_id,
             "question": request.question,
             "timestamp": datetime.now().isoformat(),
@@ -223,7 +227,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
                     break
-                yield f"data: {json.dumps({'content': chunk.get('content', ''), 'done': chunk.get('done', False), 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
+                yield f"data: {json.dumps({'content': chunk.get('content', ''), 'reasoning_content': chunk.get('reasoning_content', ''), 'done': chunk.get('done', False), 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
                 if chunk.get("done"):
                     yield "data: [DONE]\n\n"
                     break
