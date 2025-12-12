@@ -310,6 +310,10 @@
     padding: 1rem;
     margin: 0.5rem 0;
     border: 1px solid rgba(229, 231, 235, 1);
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 
 .message-content code {
@@ -330,12 +334,20 @@
 
 .message-content {
     overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.message-content>* {
+    max-width: 100%;
+    overflow-x: hidden;
 }
 
 /* Math rendering (KaTeX) */
 .message-content .katex-display {
     display: block;
-    width: 100%;
+    width: auto;
     max-width: 100%;
     box-sizing: border-box;
     overflow-x: auto;
@@ -345,8 +357,11 @@
     text-align: center;
     border-radius: 12px;
     background: rgba(0, 0, 0, 0.03);
-    /* white-space: normal causes layout issues with scrolling */
-    white-space: nowrap;
+    /* white-space: normal allows wrapping if possible, but for math we often need scroll */
+    /* white-space: nowrap can cause expansion, we use overflow-x instead */
+    white-space: normal;
+    overflow-x: auto;
+    max-width: 100%;
 }
 
 .dark .message-content .katex-display {
@@ -362,6 +377,12 @@
 .message-content .katex {
     font-size: 0.98em;
     line-height: 1.5;
+    max-width: 100%;
+}
+
+.message-content .katex .katex-html {
+    max-width: 100%;
+    overflow-x: auto;
 }
 
 .message-content .katex-display::-webkit-scrollbar {
@@ -380,7 +401,7 @@
 /* MathJax rendering */
 .message-content mjx-container {
     display: block;
-    width: 100%;
+    width: auto;
     max-width: 100%;
     overflow-x: auto;
     overflow-y: hidden;

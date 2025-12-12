@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, Zap } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -28,7 +28,6 @@ const PauseIcon = () => (
     <rect x="13" y="6" width="4" height="12" rx="2" />
   </svg>
 );
-
 
 const ChatPDF = () => {
   // Core State
@@ -101,6 +100,7 @@ const ChatPDF = () => {
   const { getProviderById } = useProvider();
   const { getModelById } = useModel();
   const { getDefaultModel } = useDefaults();
+  const chatPaneRef = useRef(null);
 
   // Helper functions to get current provider and model
   const getCurrentProvider = () => {
@@ -575,7 +575,7 @@ const ChatPDF = () => {
       content: '',
       model: chatModel,
       isStreaming: true,
-      thinking: '思考中...'
+      thinking: ''
     }]);
 
     try {
@@ -1521,7 +1521,7 @@ const ChatPDF = () => {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 rounded-[var(--radius-panel)] ${darkMode ? 'bg-gray-800/50' : ''}`}
+              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               {/* PDF Content */}
@@ -1647,11 +1647,11 @@ const ChatPDF = () => {
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] ${darkMode ? 'bg-gray-800/50' : ''}`}
+            className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0" ref={chatPaneRef}>
               {(searchResults.length > 0 || isSearching || searchHistory.length > 0) && (
                 <div className="rounded-3xl border border-black/5 bg-white/70 backdrop-blur-sm p-4 space-y-3 shadow-sm">
                   <div className="flex items-center justify-between">
@@ -1745,39 +1745,50 @@ const ChatPDF = () => {
                     key={messageKey}
                     className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
                   >
-                    <div className={`max-w-[85%] rounded-3xl p-6 shadow-sm ${msg.type === 'user'
-                      ? 'message-bubble-user rounded-tr-none'
-                      : darkMode
-                        ? 'glass-3d-dark text-gray-100 rounded-tl-none'
-                        : 'message-bubble-ai rounded-tl-none'
-                      }`}>
+                    <div className={`${msg.type === 'user'
+                      ? 'max-w-[85%] rounded-2xl px-4 py-3 shadow-sm message-bubble-user rounded-tr-sm text-sm'
+                      : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-100 overflow-hidden'
+                      }`}
+                      style={msg.type !== 'user' ? { contain: 'inline-size' } : undefined}
+                    >
                       {hasThinking && (
-                        <div className={`mt-4 rounded-2xl border ${darkMode ? 'border-blue-900/50 bg-blue-950/30' : 'border-blue-100 bg-blue-50/60'}`}>
+                        <div className="mt-2 mb-2">
                           <button
                             onClick={() => toggleThinkingPanel(thinkingKey)}
-                            className="w-full flex items-center justify-between px-3 py-2 text-xs text-blue-700 dark:text-blue-200"
+                            className={`group flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-all ${isThinkingOpen
+                              ? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                              : 'bg-gray-50 text-gray-500 hover:bg-gray-100 dark:bg-gray-900/50 dark:text-gray-400 dark:hover:bg-gray-800'
+                              }`}
                           >
-                            <div className="flex items-center gap-2 font-semibold">
-                              <Bot className="w-4 h-4" />
-                              <span>思考过程</span>
-                              <span className="text-[11px] text-blue-500/80 dark:text-blue-300/80">Thinking</span>
-                              {msg.isStreaming && <span className="text-[11px] text-blue-500/70">思考中...</span>}
+                            <div className={`p-1 rounded-md ${isThinkingOpen ? 'bg-white shadow-sm dark:bg-gray-700' : 'bg-gray-200 dark:bg-gray-800'}`}>
+                              <Zap className={`w-3 h-3 ${isThinkingOpen ? 'text-amber-500 fill-amber-500' : 'text-gray-400'}`} />
                             </div>
-                            <div className="flex items-center gap-1 text-blue-500 dark:text-blue-200">
-                              <span className="text-[11px]">{isThinkingOpen ? '收起' : '展开'}</span>
-                              {isThinkingOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                            </div>
+                            <span>深度思考过程</span>
+                            <span className="opacity-50">Duration: {((msg.thinking?.length || 0) / 20).toFixed(1)}s</span>
+                            <ChevronDown className={`w-3 h-3 ml-auto transition-transform ${isThinkingOpen ? 'rotate-180' : ''}`} />
                           </button>
-                          {isThinkingOpen && (
-                            <div className={`mx-3 mb-3 rounded-xl px-3 py-2 ${darkMode ? 'bg-black/30 text-gray-100' : 'bg-white text-gray-800'}`}>
-                              <StreamingMarkdown
-                                content={msg.thinking}
-                                isStreaming={false}
-                                enableBlurReveal={false}
-                                blurIntensity="light"
-                              />
-                            </div>
-                          )}
+
+                          <AnimatePresence>
+                            {isThinkingOpen && (
+                              <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: 'auto' }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="overflow-hidden w-full min-w-0"
+                              >
+                                <div className="mt-2 pl-2 border-l-2 border-gray-100 dark:border-gray-800 ml-3 min-w-0">
+                                  <div className={`px-4 py-3 rounded-xl overflow-x-auto w-full max-w-full ${darkMode ? 'bg-gray-800/50 text-gray-300' : 'bg-gray-50/50 text-gray-600'}`}>
+                                    <StreamingMarkdown
+                                      content={msg.thinking}
+                                      isStreaming={false}
+                                      enableBlurReveal={false}
+                                      blurIntensity="light"
+                                    />
+                                  </div>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
                       )}
 
@@ -1788,14 +1799,24 @@ const ChatPDF = () => {
                           </div>
                         </div>
                       )}
+
+                      {/* AI Avatar/Header for Assistant Messages */}
+                      {msg.type === 'assistant' && (
+                        <div className="flex items-center gap-2 mb-2 select-none">
+                          <div className="p-1 rounded-lg bg-blue-600 text-white shadow-sm">
+                            <Bot className="w-4 h-4" />
+                          </div>
+                          <span className="font-bold text-sm text-gray-800 dark:text-gray-100">AI Assistant</span>
+                          {msg.model && <span className="text-xs text-gray-400 border border-gray-200 rounded px-1.5 py-0.5">{msg.model}</span>}
+                        </div>
+                      )}
+
                       <StreamingMarkdown
                         content={msg.content}
                         isStreaming={msg.isStreaming || false}
                         enableBlurReveal={enableBlurReveal}
                         blurIntensity={blurIntensity}
                       />
-
-                      {msg.model && <div className="text-xs text-gray-400 mt-2">Model: {msg.model}</div>}
                     </div>
 
                     {/* Action Buttons - Only show for assistant messages that are not streaming */}

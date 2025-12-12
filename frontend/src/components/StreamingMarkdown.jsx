@@ -108,7 +108,7 @@ const remarkBlurReveal = (options) => {
   };
 };
 
-const MATH_HEURISTIC_REGEX = /(\\(frac|int|sum|prod|sqrt|log|exp|pi|rho|eta|theta|alpha|beta|gamma|delta|lambda|mu|tau|sigma|epsilon|phi|psi|omega|partial)|[∑∏∞≈≠≤≥→←]|[_^][{a-zA-Z0-9]|[A-Za-z]\s*=\s*[A-Za-z0-9])/;
+const MATH_HEURISTIC_REGEX = /(\\(frac|int|sum|prod|sqrt|log|exp|pi|rho|eta|theta|alpha|beta|gamma|delta|lambda|mu|tau|sigma|epsilon|phi|psi|omega|partial|Sigma|Delta|Gamma|Lambda|Omega|Phi|Pi|Psi|Theta|Xi)|[∑∏∞≈≠≤≥→←]|[_^][{a-zA-Z0-9]|[A-Za-z]\s*=\s*[A-Za-z0-9])/;
 
 const normalizeMathText = (expr) => {
   let out = expr || '';
@@ -156,7 +156,20 @@ const processLatexBrackets = (text) => {
 
   const transformed = segments.map((segment, idx) => {
     // Every odd index corresponds to a fence placeholder
-    if (idx % 2 === 1) return fences[(idx - 1) / 2];
+    if (idx % 2 === 1) {
+      const fence = fences[(idx - 1) / 2];
+      // Check if the fence is actually a math block disguised as code
+      // We strip the ``` and check the content
+      const innerMatch = fence.match(/^(```|~~~)(?:[\w-]*\n)?([\s\S]*?)\1$/);
+      if (innerMatch) {
+        const innerContent = innerMatch[2];
+        // Logic: if it has significant math markers and no obvious code keywords, let's treat it as math
+        if (MATH_HEURISTIC_REGEX.test(innerContent) && !innerContent.includes('import ') && !innerContent.includes('function ') && !innerContent.includes('const ')) {
+          return `\n$$\n${normalizeMathText(innerContent.trim())}\n$$\n`;
+        }
+      }
+      return fence;
+    }
 
     // Protect inline code `...`
     const inlineParts = segment.split(/(`[^`]*`)/g);
@@ -240,7 +253,7 @@ const StreamingMarkdown = React.memo(({
   const remarkPlugins = React.useMemo(() => {
     const plugins = [];
     if (MATH_ENGINE !== 'none') {
-      plugins.push(remarkMath);
+      plugins.push([remarkMath, { singleDollarTextMath: ENABLE_SINGLE_DOLLAR }]);
     }
     plugins.push(remarkGfm);
     if (enableBlurReveal && isStreaming) {
@@ -265,7 +278,7 @@ const StreamingMarkdown = React.memo(({
   const intensityClass = enableBlurReveal ? `blur-intensity-${blurIntensity}` : '';
 
   return (
-    <div className={`prose prose-sm max-w-none dark:prose-invert message-content leading-7 ${intensityClass}`}>
+    <div className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${intensityClass}`}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
