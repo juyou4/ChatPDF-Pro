@@ -597,6 +597,7 @@ const ChatPDF = () => {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
+          if (streamingAbortRef.current.cancelled) break;
 
           const chunk = decoder.decode(value);
           const lines = chunk.split('\n');
@@ -608,34 +609,34 @@ const ChatPDF = () => {
 
               try {
                 const parsed = JSON.parse(data);
-                  if (parsed.error) {
-                    throw new Error(parsed.error);
+                if (parsed.error) {
+                  throw new Error(parsed.error);
+                }
+                const chunkContent = parsed.content || '';
+                const chunkThinking = parsed.reasoning_content || '';
+                if (!parsed.done) {
+                  if (chunkContent) {
+                    currentText += chunkContent;
                   }
-                  const chunkContent = parsed.content || '';
-                  const chunkThinking = parsed.reasoning_content || '';
-                  if (!parsed.done) {
-                    if (chunkContent) {
-                      currentText += chunkContent;
-                    }
-                    if (chunkThinking) {
-                      currentThinking += chunkThinking;
-                    }
-                    if (chunkContent || chunkThinking) {
-                      setMessages(prev => prev.map(msg =>
-                        msg.id === tempMsgId
-                          ? { ...msg, content: currentText, thinking: currentThinking }
-                          : msg
-                      ));
-                    }
-                  } else if (chunkThinking) {
+                  if (chunkThinking) {
                     currentThinking += chunkThinking;
+                  }
+                  if (chunkContent || chunkThinking) {
                     setMessages(prev => prev.map(msg =>
                       msg.id === tempMsgId
                         ? { ...msg, content: currentText, thinking: currentThinking }
                         : msg
                     ));
                   }
-                } catch (e) {
+                } else if (chunkThinking) {
+                  currentThinking += chunkThinking;
+                  setMessages(prev => prev.map(msg =>
+                    msg.id === tempMsgId
+                      ? { ...msg, content: currentText, thinking: currentThinking }
+                      : msg
+                  ));
+                }
+              } catch (e) {
                 // Skip invalid JSON
               }
             }
