@@ -35,75 +35,62 @@ function escapeHtml(str) {
  * Remark Plugin: Word-Based Blur Reveal
  * 按词拆分，只对新增的词应用动画
  */
+// Optimization: Only keep the "active" animation window wrapped in spans
+// Older text is flattened to plain text to improve DOM performance
+const ANIMATION_WINDOW = 300; // Characters to keep "active" for animation completion
+
 const remarkBlurReveal = (options) => {
-  const { stableOffset = 0 } = options;
+  // Use Ref to avoid changing plugin options on every render (which forces ReactMarkdown to rebuild)
+  const { offsetRef } = options;
 
   return (tree) => {
+    // Read the latest stable offset from the ref at transform time
+    const stableOffset = offsetRef ? offsetRef.current : (options.stableOffset || 0);
     visit(tree, 'text', (node, index, parent) => {
       if (!node.position) return;
 
       const start = node.position.start.offset;
       const end = node.position.end.offset;
 
-      // Completely stable - no modification needed
-      if (end <= stableOffset) return;
-
-      // Completely new content - animate all words
-      if (start >= stableOffset) {
-        // Split by word boundaries (keep whitespace as separators)
-        const parts = node.value.split(/(\s+)/);
-        let currentOffset = start;
-
-        const nodes = parts.map((part, i) => {
-          // Whitespace - just return as text
-          if (/^\s+$/.test(part)) {
-            return { type: 'text', value: part };
-          }
-
-          // Word - wrap in animated span
-          // Calculate delay relative to the *start of the new content chunk*
-          // This ensures each new "chunk" from the server gets its own mini-sequence
-          const relativeIndex = i / 2; // Roughly every other part is a word
-          const delay = Math.min(relativeIndex * 0.04, 0.4); // 40ms per word
-
-          return {
-            type: 'html',
-            value: `<span class="animate-blur-reveal" style="animation-delay: ${delay.toFixed(2)}s;">${escapeHtml(part)}</span>`
-          };
-        });
-
-        parent.children.splice(index, 1, ...nodes);
-        return index + nodes.length;
+      // 1. Fully Old/Stable Zone: Flatten to plain text to save performance
+      // If the node ends well before the "new" content, we don't need to animate it anymore
+      if (end <= Math.max(0, stableOffset - ANIMATION_WINDOW)) {
+        return;
       }
 
-      // Overlapping: split at stableOffset
-      if (start < stableOffset && end > stableOffset) {
-        const splitPoint = stableOffset - start;
-        const stableText = node.value.slice(0, splitPoint);
-        const newText = node.value.slice(splitPoint);
+      // 2. Active Zone (New content OR Recent content)
+      // We wrap words in spans to allow animation (or let animation finish)
+      // This covers the area from [stableOffset - ANIMATION_WINDOW] to [End of Text]
 
-        const stableNode = { type: 'text', value: stableText };
+      // Split by word boundaries
+      const parts = node.value.split(/(\s+)/);
 
-        // Split new text by words
-        const parts = newText.split(/(\s+)/);
+      const nodes = parts.map((part, i) => {
+        // Preserve whitespace as text nodes
+        if (/^\s+$/.test(part)) {
+          return { type: 'text', value: part };
+        }
 
-        const newNodes = parts.map((part, i) => {
-          if (/^\s+$/.test(part)) {
-            return { type: 'text', value: part };
-          }
+        // Calculate delay.
+        // Crucial: The delay logic must be consistent across renders for the same word.
+        // Since we are processing the whole text node (which grows at the end),
+        // the index 'i' for the same word "Hello" at start remains 0.
+        // So the delay remains stable, preventing animation restarts on re-renders (usually).
+        const relativeIndex = i / 2;
+        const delay = Math.min(relativeIndex * 0.04, 0.4);
 
-          const relativeIndex = i / 2;
-          const delay = Math.min(relativeIndex * 0.04, 0.4);
+        // However, we only strictly *need* the animation class if it's actually new.
+        // But if we remove it too soon, it cuts off.
+        // Strategy: Keep class for everything in this window. 
+        // React's diffing should preserve the DOM node state if delay/key/structure passes.
+        return {
+          type: 'html',
+          value: `<span class="animate-blur-reveal" style="animation-delay: ${delay.toFixed(2)}s;">${escapeHtml(part)}</span>`
+        };
+      });
 
-          return {
-            type: 'html',
-            value: `<span class="animate-blur-reveal" style="animation-delay: ${delay.toFixed(2)}s;">${escapeHtml(part)}</span>`
-          };
-        });
-
-        parent.children.splice(index, 1, stableNode, ...newNodes);
-        return index + 1 + newNodes.length;
-      }
+      parent.children.splice(index, 1, ...nodes);
+      return index + nodes.length;
     });
   };
 };
@@ -224,43 +211,24 @@ const StreamingMarkdown = React.memo(({
   enableBlurReveal,
   blurIntensity = 'medium'
 }) => {
-  const lastProcessedLengthRef = useRef(0);
+  const containerRef = useRef(null);
+  const lastTextLengthRef = useRef(0);
+  const animatedNodesRef = useRef(new WeakSet());
 
   const processedContent = useMemo(() => {
     if (!USE_LATEX_PREPROCESS) return content || '';
     return processLatexBrackets(content || '');
   }, [content]);
 
-  let stableOffset = lastProcessedLengthRef.current;
-  const currentLength = (processedContent || '').length;
-
-  // Reset on content clear (new chat)
-  if (currentLength < stableOffset) {
-    stableOffset = 0;
-    lastProcessedLengthRef.current = 0;
-  }
-
-  // Update ref after render
-  useEffect(() => {
-    if (enableBlurReveal) {
-      lastProcessedLengthRef.current = currentLength;
-    } else {
-      lastProcessedLengthRef.current = 0;
-    }
-  });
-
-  // Build plugins
+  // Build plugins (stable, no dependencies that change during streaming)
   const remarkPlugins = React.useMemo(() => {
     const plugins = [];
     if (MATH_ENGINE !== 'none') {
       plugins.push([remarkMath, { singleDollarTextMath: ENABLE_SINGLE_DOLLAR }]);
     }
     plugins.push(remarkGfm);
-    if (enableBlurReveal && isStreaming) {
-      plugins.push([remarkBlurReveal, { stableOffset }]);
-    }
     return plugins;
-  }, [enableBlurReveal, isStreaming, stableOffset, content?.length]); // Add content.length to force new plugin instance on update
+  }, []);
 
   const rehypePlugins = React.useMemo(() => {
     const list = [
@@ -275,10 +243,75 @@ const StreamingMarkdown = React.memo(({
     return list;
   }, []);
 
-  const intensityClass = enableBlurReveal ? `blur-intensity-${blurIntensity}` : '';
+  // Use MutationObserver to catch genuinely NEW nodes as they're added
+  useEffect(() => {
+    if (!enableBlurReveal || !containerRef.current) return;
+
+    const container = containerRef.current;
+
+    // MutationObserver fires for every DOM change
+    const observer = new MutationObserver((mutations) => {
+      if (!isStreaming) return; // Only animate during streaming
+
+      mutations.forEach((mutation) => {
+        // Handle added nodes
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            // Apply animation to the new element
+            node.classList.add('blur-reveal-animate');
+
+            // Also animate any child elements
+            node.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, span, strong, em, code').forEach(child => {
+              child.classList.add('blur-reveal-animate');
+            });
+          } else if (node.nodeType === Node.TEXT_NODE && node.parentElement) {
+            // For text nodes, animate the parent element if it hasn't been animated recently
+            const parent = node.parentElement;
+            if (!parent.classList.contains('blur-reveal-animate')) {
+              parent.classList.add('blur-reveal-animate');
+            }
+          }
+        });
+
+        // Handle character data changes (text content updates)
+        if (mutation.type === 'characterData' && mutation.target.parentElement) {
+          const parent = mutation.target.parentElement;
+          if (!parent.classList.contains('blur-reveal-animate')) {
+            parent.classList.add('blur-reveal-animate');
+          }
+        }
+      });
+    });
+
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      characterDataOldValue: false
+    });
+
+    return () => observer.disconnect();
+  }, [enableBlurReveal, isStreaming]);
+
+  // Reset on new conversation
+  useEffect(() => {
+    if (!content || content.length === 0) {
+      // Clear any lingering animation classes
+      if (containerRef.current) {
+        containerRef.current.querySelectorAll('.blur-reveal-animate').forEach(el => {
+          el.classList.remove('blur-reveal-animate');
+        });
+      }
+    }
+  }, [content]);
+
+  const streamingClass = isStreaming ? 'streaming-active' : '';
 
   return (
-    <div className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${intensityClass}`}>
+    <div
+      ref={containerRef}
+      className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${streamingClass}`}
+    >
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}

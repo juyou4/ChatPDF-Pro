@@ -470,40 +470,43 @@
     --blur-duration: 0.45s;
 }
 
-/* Streaming Blur Reveal - Container-level animation for streaming text */
-.streaming-blur-reveal {
-    /* 新内容会触发整体的微妙动画 */
+/* Streaming Blur Reveal - CSS-only trailing blur effect */
+/* During streaming, the last element (where new content appears) has a subtle blur */
+/* When streaming stops or new paragraph starts, content becomes clear */
+
+.blur-reveal-animate {
+    animation: blur-reveal-smooth 0.3s ease-out forwards;
 }
 
-.streaming-blur-reveal.streaming-active {
-    animation: streaming-pulse 0.15s ease-out;
-}
-
-@keyframes streaming-pulse {
+@keyframes blur-reveal-smooth {
     0% {
-        opacity: 0.92;
-    }
-
-    100% {
-        opacity: 1;
-    }
-}
-
-/* 流式输出时，最后一个段落元素有特殊效果 */
-.streaming-blur-reveal>div>*:last-child {
-    animation: text-fade-in 0.25s ease-out;
-}
-
-@keyframes text-fade-in {
-    0% {
-        opacity: 0.7;
-        filter: blur(1px);
+        opacity: 0.5;
+        filter: blur(3px);
     }
 
     100% {
         opacity: 1;
         filter: blur(0);
     }
+}
+
+/* Streaming active: Apply blur to the last paragraph/element being written */
+.streaming-active>div>p:last-of-type,
+.streaming-active>div>ul:last-of-type>li:last-child,
+.streaming-active>div>ol:last-of-type>li:last-child,
+.streaming-active>div>*:last-child {
+    filter: blur(1.5px);
+    opacity: 0.85;
+    transition: filter 0.2s ease-out, opacity 0.2s ease-out;
+}
+
+/* When NOT streaming (just rendered or stream ended), clear the blur */
+.message-content:not(.streaming-active)>div>p,
+.message-content:not(.streaming-active)>div>li,
+.message-content:not(.streaming-active)>div>* {
+    filter: blur(0);
+    opacity: 1;
+    transition: filter 0.35s ease-out, opacity 0.35s ease-out;
 }
 
 /* 打字光标效果 */

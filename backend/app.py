@@ -3,6 +3,7 @@ ChatPDF backend - main app entry mounting all routers.
 """
 
 import os
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,14 +17,16 @@ from routes.search_routes import router as search_router
 from routes.chat_routes import router as chat_router
 from routes.summary_routes import router as summary_router
 
-# Directories
-DATA_DIR = "data"
-DOCS_DIR = os.path.join(DATA_DIR, "docs")
-VECTOR_STORE_DIR = os.path.join(DATA_DIR, "vector_stores")
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(DOCS_DIR, exist_ok=True)
-os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
-os.makedirs("uploads", exist_ok=True)
+# Directories (resolve to project root so frontend/backend共用同一份数据)
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+DOCS_DIR = DATA_DIR / "docs"
+VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
+UPLOAD_DIR = BASE_DIR / "uploads"
+DATA_DIR.mkdir(exist_ok=True)
+DOCS_DIR.mkdir(exist_ok=True)
+VECTOR_STORE_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="ChatPDF Pro with Vision API")
 
@@ -39,9 +42,9 @@ app.include_router(summary_router)
 search_router.documents_store = documents_store
 chat_router.documents_store = documents_store
 summary_router.documents_store = documents_store
-search_router.vector_store_dir = VECTOR_STORE_DIR
-chat_router.vector_store_dir = VECTOR_STORE_DIR
-summary_router.vector_store_dir = VECTOR_STORE_DIR
+search_router.vector_store_dir = str(VECTOR_STORE_DIR)
+chat_router.vector_store_dir = str(VECTOR_STORE_DIR)
+summary_router.vector_store_dir = str(VECTOR_STORE_DIR)
 
 # Middleware
 app.add_middleware(
@@ -53,7 +56,7 @@ app.add_middleware(
 )
 
 # Static for PDFs
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/embedding_models")

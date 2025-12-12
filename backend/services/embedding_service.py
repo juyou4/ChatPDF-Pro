@@ -16,6 +16,38 @@ from services.rerank_service import rerank_service
 local_embedding_models = {}
 
 
+def preprocess_text(text: str) -> str:
+    """
+    Lightweight preprocessing before chunking:
+    - 去掉常见版权/噪声行（如 IEEE 授权提示）
+    - 合并多余空行
+    - 修复连字符断行
+    """
+    if not text:
+        return ""
+
+    lines = []
+    noisy_patterns = [
+        "Authorized licensed use limited to",
+        "All rights reserved",
+        "IEEE",
+    ]
+
+    for line in text.splitlines():
+        lstrip = line.strip()
+        if any(pat.lower() in lstrip.lower() for pat in noisy_patterns):
+            continue
+        lines.append(line)
+
+    cleaned = "\n".join(lines)
+    # 修复连字符断行：word-\nword -> wordword
+    cleaned = re.sub(r"(\w)-\n(\w)", r"\1\2", cleaned)
+    # 统一空白
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[str]:
     """Normalize embedding model id to a configured key (supports provider:model or plain id)"""
     if not embedding_model_id:
@@ -87,6 +119,26 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
         return np.array([item.embedding for item in response.data])
 
     return embed_texts
+
+
+def get_chunk_params(embedding_model_id: str, base_chunk_size: int = 1000, base_overlap: int = 200) -> tuple[int, int]:
+    """Return (chunk_size, chunk_overlap) with model-aware clamping."""
+    cfg = EMBEDDING_MODELS.get(embedding_model_id, {})
+    max_ctx = cfg.get("max_tokens")
+
+    chunk_size = base_chunk_size
+    if max_ctx:
+        # 保守取 20% 的上下文长度，并限制在 300-1500 区间
+        chunk_size = min(chunk_size, int(max_ctx * 0.2))
+        chunk_size = max(300, min(chunk_size, 1500))
+
+    # 重叠 10-20%，至少 100，且必须小于 chunk_size
+    chunk_overlap = max(base_overlap, int(chunk_size * 0.2))
+    chunk_overlap = min(chunk_overlap, int(chunk_size * 0.4))  # 避免重叠过大
+    if chunk_overlap >= chunk_size:
+        chunk_overlap = max(50, int(chunk_size * 0.15))
+
+    return chunk_size, chunk_overlap
 
 
 def _distance_to_similarity(distance: float) -> float:
@@ -189,13 +241,16 @@ def build_vector_index(
             else:
                 raise ValueError(f"Embedding model '{embedding_model_id}' 未配置或不受支持，请检查模型选择")
 
+        # 分块策略：按模型最大上下文自适应，默认 1000 / 200（约 20% 重叠），限制在 300-1500
+        chunk_size, chunk_overlap = get_chunk_params(embedding_model_id, base_chunk_size=1000, base_overlap=200)
         from langchain.text_splitter import RecursiveCharacterTextSplitter
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             length_function=len,
         )
-        chunks = text_splitter.split_text(text)
+        preprocessed_text = preprocess_text(text)
+        chunks = text_splitter.split_text(preprocessed_text)
         print(f"Split into {len(chunks)} chunks.")
 
         if not chunks:

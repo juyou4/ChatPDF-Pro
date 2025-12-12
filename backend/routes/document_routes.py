@@ -2,7 +2,9 @@ import io
 import os
 import glob
 import hashlib
+import shutil
 from datetime import datetime
+from pathlib import Path
 
 import PyPDF2
 import pdfplumber
@@ -13,15 +15,26 @@ from models.model_detector import normalize_embedding_model_id
 
 router = APIRouter()
 
-DATA_DIR = "data"
-DOCS_DIR = os.path.join(DATA_DIR, "docs")
-VECTOR_STORE_DIR = os.path.join(DATA_DIR, "vector_stores")
+# Project root (two levels up from routes/) so storage matches app.py
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = BASE_DIR / "data"
+DOCS_DIR = DATA_DIR / "docs"
+VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
+UPLOAD_DIR = BASE_DIR / "uploads"
+
+# Legacy paths from the old layout (stored under backend/)
+LEGACY_BASE_DIR = Path(__file__).resolve().parents[1]
+LEGACY_DATA_DIR = LEGACY_BASE_DIR / "data"
+LEGACY_DOCS_DIR = LEGACY_DATA_DIR / "docs"
+LEGACY_VECTOR_STORE_DIR = LEGACY_DATA_DIR / "vector_stores"
+LEGACY_UPLOAD_DIR = LEGACY_BASE_DIR / "uploads"
+
 documents_store = {}
 
 
 def save_document(doc_id: str, data: dict):
     try:
-        file_path = os.path.join(DOCS_DIR, f"{doc_id}.json")
+        file_path = DOCS_DIR / f"{doc_id}.json"
         with open(file_path, "w", encoding="utf-8") as f:
             import json
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -33,7 +46,7 @@ def save_document(doc_id: str, data: dict):
 def load_documents():
     print("Loading documents from disk...")
     count = 0
-    for file_path in glob.glob(os.path.join(DOCS_DIR, "*.json")):
+    for file_path in glob.glob(str(DOCS_DIR / "*.json")):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 import json
@@ -44,6 +57,25 @@ def load_documents():
         except Exception as e:
             print(f"Error loading document from {file_path}: {e}")
     print(f"Loaded {count} documents.")
+
+
+def migrate_legacy_storage():
+    """Move files from old backend/* paths to project root if needed."""
+    migrations = [
+        (LEGACY_DOCS_DIR, DOCS_DIR, "*.json"),
+        (LEGACY_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.index"),
+        (LEGACY_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.pkl"),
+        (LEGACY_UPLOAD_DIR, UPLOAD_DIR, "*.pdf"),
+    ]
+
+    for src_dir, dest_dir, pattern in migrations:
+        if not src_dir.exists() or src_dir.resolve() == dest_dir.resolve():
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for src_file in src_dir.glob(pattern):
+            dest_file = dest_dir / src_file.name
+            if not dest_file.exists():
+                shutil.copy2(src_file, dest_file)
 
 
 def generate_doc_id(content: str) -> str:
@@ -93,7 +125,7 @@ async def upload_pdf(
         doc_id = generate_doc_id(extracted_data["full_text"])
 
         pdf_filename = f"{doc_id}.pdf"
-        pdf_path = os.path.join("uploads", pdf_filename)
+        pdf_path = UPLOAD_DIR / pdf_filename
         with open(pdf_path, "wb") as f:
             f.write(content)
 
@@ -108,7 +140,7 @@ async def upload_pdf(
 
         save_document(doc_id, documents_store[doc_id])
 
-        create_index(doc_id, extracted_data["full_text"], VECTOR_STORE_DIR, embedding_model, embedding_api_key, embedding_api_host)
+        create_index(doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR), embedding_model, embedding_api_key, embedding_api_host)
 
         return {
             "message": "PDF上传成功",
@@ -141,5 +173,9 @@ async def get_document(doc_id: str):
 
 
 # initialize
-os.makedirs(DOCS_DIR, exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
+DOCS_DIR.mkdir(exist_ok=True)
+VECTOR_STORE_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(exist_ok=True)
+migrate_legacy_storage()
 load_documents()
