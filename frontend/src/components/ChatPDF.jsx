@@ -1277,7 +1277,7 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 soft-panel m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-gray-800/80 border-gray-700' : ''}`}
+        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-gray-900/80 border-white/10 backdrop-blur-3xl backdrop-saturate-150' : 'bg-white/80 border-white/50 backdrop-blur-3xl backdrop-saturate-150 border shadow-xl'}`}
       >
         <div className="w-72 mx-auto flex flex-col h-full items-stretch">
           <div className="px-6 py-8 flex items-center justify-between">
@@ -1318,7 +1318,7 @@ const ChatPDF = () => {
               <div
                 key={idx}
                 onClick={() => loadSession(item)}
-                className={`w-full max-w-[260px] p-3 rounded-xl hover:bg-white/50 cursor-pointer group flex items-center gap-3 transition-colors ${item.id === docId ? 'bg-blue-50' : ''}`}
+                className={`w-full max-w-[260px] p-3 rounded-xl cursor-pointer group flex items-center gap-3 transition-all duration-200 ${item.id === docId ? 'bg-white shadow-md scale-[1.02]' : 'hover:bg-white/40'}`}
               >
                 <MessageSquare className="w-5 h-5 text-blue-500" />
                 <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
