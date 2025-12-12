@@ -584,7 +584,8 @@ const ChatPDF = () => {
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody)
+          body: JSON.stringify(requestBody),
+          signal: abortControllerRef.current.signal
         });
 
         if (!response.ok) throw new Error('Failed to get response');
@@ -597,6 +598,7 @@ const ChatPDF = () => {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
+          if (streamingAbortRef.current.cancelled) break;
           if (streamingAbortRef.current.cancelled) break;
 
           const chunk = decoder.decode(value);
@@ -738,6 +740,9 @@ const ChatPDF = () => {
 
       setScreenshot(null); // Clear screenshot after sending
     } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
       setMessages(prev => [...prev, {
         type: 'error',
         content: '❌ Error: ' + error.message
@@ -1864,24 +1869,10 @@ const ChatPDF = () => {
                 </div>
               )}
 
-              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.22),0_8px_24px_-6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-2 flex items-end gap-2 border border-white/50 ring-1 ring-black/5">
-                <div className="flex-1 flex flex-col min-h-[64px] justify-center pl-6 py-2">
+              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.22),0_8px_24px_-6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 flex items-end gap-2 border border-white/50 ring-1 ring-black/5">
+                <div className="flex-1 flex flex-col min-h-[48px] justify-center pl-6 py-1.5">
                   <div className="flex items-center gap-2 mb-1">
-                    {docInfo && (
-                      <div className="flex items-center gap-1.5 bg-gray-100/50 hover:bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wide border border-transparent hover:border-black/5 transition-all group/badge cursor-default">
-                        <span>1 file</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDocId(null);
-                            setDocInfo(null);
-                          }}
-                          className="p-0.5 rounded-full hover:bg-black/10 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    )}
+
                     <textarea
                       value={inputMessage}
                       onChange={(e) => setInputMessage(e.target.value)}
