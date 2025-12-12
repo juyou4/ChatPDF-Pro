@@ -328,6 +328,96 @@
     line-height: 1.6;
 }
 
+.message-content {
+    overflow-wrap: anywhere;
+}
+
+/* Math rendering (KaTeX) */
+.message-content .katex-display {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px 14px;
+    margin: 12px 0;
+    text-align: center;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.03);
+    /* white-space: normal causes layout issues with scrolling */
+    white-space: nowrap;
+}
+
+.dark .message-content .katex-display {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.message-content .katex-display>.katex {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.message-content .katex {
+    font-size: 0.98em;
+    line-height: 1.5;
+}
+
+.message-content .katex-display::-webkit-scrollbar {
+    height: 6px;
+}
+
+.message-content .katex-display::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 9999px;
+}
+
+.dark .message-content .katex-display::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+/* MathJax rendering */
+.message-content mjx-container {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px 14px;
+    margin: 12px 0;
+    text-align: center;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.03);
+    box-sizing: border-box;
+}
+
+.dark .message-content mjx-container {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.message-content mjx-container[jax="CHTML"][display="true"] {
+    display: block;
+}
+
+.message-content mjx-container .mjx-math {
+    font-size: 0.98em;
+    line-height: 1.5;
+}
+
+.message-content mjx-container::-webkit-scrollbar {
+    height: 6px;
+}
+
+.message-content mjx-container::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 9999px;
+}
+
+.dark .message-content mjx-container::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+}
+
 @keyframes blur-reveal {
     0% {
         filter: blur(var(--blur-distance, 4px));
