@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
 from services.vector_service import vector_context
+from services.glossary_service import glossary_service, build_glossary_prompt
+from services.table_service import protect_markdown_tables, restore_markdown_tables
 from models.provider_registry import PROVIDER_CONFIG
 from utils.middleware import (
     LoggingMiddleware,
@@ -53,6 +55,9 @@ class ChatRequest(BaseModel):
     rerank_api_key: Optional[str] = None
     rerank_endpoint: Optional[str] = None
     doc_store_key: Optional[str] = None
+    # 新增：术语库和表格保护选项
+    enable_glossary: bool = True  # 是否启用术语库
+    protect_tables: bool = True   # 是否保护表格结构
 
 
 class ChatVisionRequest(BaseModel):
@@ -123,6 +128,12 @@ async def chat_with_pdf(request: ChatRequest):
 {context}
 
 请根据文档内容准确回答用户的问题。如果文档中没有相关信息，请明确告知。"""
+
+    # 集成术语库 - 在 system_prompt 中注入术语指令
+    if request.enable_glossary:
+        glossary_instruction = build_glossary_prompt(context)
+        if glossary_instruction:
+            system_prompt += f"\n\n{glossary_instruction}"
 
     messages = [
         {"role": "system", "content": system_prompt},

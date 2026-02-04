@@ -22,6 +22,7 @@ def preprocess_text(text: str) -> str:
     - 去掉常见版权/噪声行（如 IEEE 授权提示）
     - 合并多余空行
     - 修复连字符断行
+    - 过滤图表乱码（NULL字符）
     """
     if not text:
         return ""
@@ -30,14 +31,22 @@ def preprocess_text(text: str) -> str:
     noisy_patterns = [
         "Authorized licensed use limited to",
         "All rights reserved",
-        "IEEE",
     ]
 
     for line in text.splitlines():
         lstrip = line.strip()
         if any(pat.lower() in lstrip.lower() for pat in noisy_patterns):
             continue
-        lines.append(line)
+        
+        # 只过滤包含大量 NULL 字符的行
+        null_count = line.count('\u0000') + line.count('\x00')
+        if len(line) > 5 and null_count / len(line) > 0.3:
+            continue
+        
+        # 移除 NULL 字符
+        cleaned_line = line.replace('\u0000', '').replace('\x00', '')
+        if cleaned_line.strip():
+            lines.append(cleaned_line)
 
     cleaned = "\n".join(lines)
     # 修复连字符断行：word-\nword -> wordword

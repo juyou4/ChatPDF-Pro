@@ -87,6 +87,69 @@ show_progress "检查依赖..."
 # 后端依赖（静默安装）
 pip3 install -q -r backend/requirements.txt 2>&1 | grep -i "error" || true
 
+# ==================== 安装 OCR 依赖 ====================
+show_progress "检查 OCR 依赖..."
+
+# 检查 pdf2image 是否已安装
+if ! python3 -c "import pdf2image" 2>/dev/null; then
+    show_progress "安装 OCR Python 库..."
+    pip3 install -q pdf2image pytesseract pillow 2>/dev/null
+fi
+
+# OCR 工具目录
+OCR_DIR="$(pwd)/ocr_tools"
+
+# 检查并安装 Tesseract
+install_tesseract() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        if command -v brew &> /dev/null; then
+            show_progress "安装 Tesseract (Homebrew)..."
+            brew install tesseract tesseract-lang poppler 2>/dev/null
+            return $?
+        fi
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux
+        if command -v apt-get &> /dev/null; then
+            show_progress "安装 Tesseract (apt)..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng poppler-utils 2>/dev/null
+            return $?
+        elif command -v yum &> /dev/null; then
+            show_progress "安装 Tesseract (yum)..."
+            sudo yum install -y -q tesseract tesseract-langpack-chi_sim poppler-utils 2>/dev/null
+            return $?
+        elif command -v pacman &> /dev/null; then
+            show_progress "安装 Tesseract (pacman)..."
+            sudo pacman -S --noconfirm tesseract tesseract-data-chi_sim tesseract-data-eng poppler 2>/dev/null
+            return $?
+        fi
+    fi
+    return 1
+}
+
+# 检查 Tesseract
+if ! command -v tesseract &> /dev/null; then
+    install_tesseract
+    if [ $? -eq 0 ]; then
+        show_success "Tesseract 安装成功"
+    else
+        echo -e "${YELLOW}  [!] Tesseract 自动安装失败，扫描版PDF将无法识别${NC}"
+        echo -e "${YELLOW}  [!] 请手动安装: brew install tesseract (macOS) 或 apt install tesseract-ocr (Linux)${NC}"
+    fi
+else
+    show_success "Tesseract 已安装"
+fi
+
+# 检查 Poppler
+if ! command -v pdftoppm &> /dev/null; then
+    if [[ "$OSTYPE" == "darwin"* ]] && command -v brew &> /dev/null; then
+        brew install poppler 2>/dev/null
+    fi
+fi
+
+show_success "OCR 依赖检查完成"
+
 # 前端依赖
 cd frontend
 if [ ! -d "node_modules" ]; then

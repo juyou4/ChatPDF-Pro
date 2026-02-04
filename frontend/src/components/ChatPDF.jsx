@@ -535,12 +535,19 @@ const ChatPDF = () => {
 
   const sendMessage = async () => {
     if (!inputMessage.trim() && !screenshot) return;
-    if (!docId || !apiKey) {
-      alert('请先上传文档并配置API Key');
+    
+    // 使用新的凭证系统进行验证
+    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials();
+    
+    if (!docId) {
+      alert('请先上传文档');
       return;
     }
-
-    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials();
+    
+    if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
+      alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
+      return;
+    }
 
     const userMsg = {
       type: 'user',
@@ -782,8 +789,16 @@ const ChatPDF = () => {
   };
 
   const regenerateMessage = async (messageIndex) => {
-    if (!docId || !apiKey) {
-      alert('请先配置API Key');
+    // 使用新的凭证系统进行验证
+    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials();
+    
+    if (!docId) {
+      alert('请先上传文档');
+      return;
+    }
+    
+    if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
+      alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
       return;
     }
 

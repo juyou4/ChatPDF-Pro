@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Key 验证修复测试</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        h1 {
+            color: #667eea;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #764ba2;
+            margin-top: 30px;
+        }
+        .test-section {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        .code {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            margin: 10px 0;
+        }
+        .result {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 6px;
+            background: #e9ecef;
+        }
+        .step {
+            margin: 20px 0;
+            padding: 15px;
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+        }
+        .step-number {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 30px;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 ChatPDF API Key 验证修复测试</h1>
+        
+        <div class="test-section">
+            <strong>修复状态：</strong>
+            <span class="status success">✅ 已修复</span>
+        </div>
+
+        <h2>📋 问题说明</h2>
+        <p>
+            <strong>症状：</strong>配置了 API Key 后仍然提示"请先上传文档并配置API Key"<br>
+            <strong>原因：</strong>验证逻辑使用旧的 localStorage 变量，而不是新的 Provider Context<br>
+            <strong>影响：</strong>无法进行对话，功能完全不可用
+        </p>
+
+        <h2>🔍 测试步骤</h2>
+
+        <div class="step">
+            <span class="step-number">1</span>
+            <strong>检查 Provider Context 配置</strong>
+            <button onclick="checkProviderConfig()">检查配置</button>
+            <div id="provider-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">2</span>
+            <strong>检查旧的 localStorage 配置</strong>
+            <button onclick="checkOldConfig()">检查旧配置</button>
+            <div id="old-config-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">3</span>
+            <strong>模拟 getChatCredentials() 函数</strong>
+            <button onclick="simulateGetCredentials()">模拟获取凭证</button>
+            <div id="credentials-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">4</span>
+            <strong>清除旧配置（可选）</strong>
+            <button onclick="clearOldConfig()">清除旧配置</button>
+            <button onclick="clearAllConfig()">清除所有配置</button>
+            <div id="clear-result" class="result" style="display:none;"></div>
+        </div>
+
+        <h2>🛠️ 修复内容</h2>
+        <div class="code">
+// 修复前（错误）
+if (!docId || !apiKey) {
+  alert('请先上传文档并配置API Key');
+  return;
+}
+
+// 修复后（正确）
+const { providerId, modelId, apiKey: chatApiKey } = getChatCredentials();
+
+if (!docId) {
+  alert('请先上传文档');
+  return;
+}
+
+if (!chatApiKey && providerId !== 'ollama' && providerId !== 'local') {
+  alert('请先配置API Key\\n\\n请点击左下角"设置 & API Key"按钮进行配置');
+  return;
+}
+        </div>
+
+        <h2>📝 使用说明</h2>
+        <ol>
+            <li>刷新 ChatPDF 页面（Ctrl+F5 强制刷新）</li>
+            <li>点击左下角"设置 & API Key"按钮</li>
+            <li>选择 Provider（如 OpenAI、Anthropic 等）</li>
+            <li>输入 API Key 并保存</li>
+            <li>上传 PDF 文档</li>
+            <li>尝试发送消息</li>
+        </ol>
+
+        <div class="test-section">
+            <strong>⚠️ 注意：</strong>如果仍然有问题，请尝试清除浏览器缓存或使用无痕模式测试
+        </div>
+    </div>
+
+    <script>
+        function checkProviderConfig() {
+            const result = document.getElementById('provider-result');
+            result.style.display = 'block';
+            
+            try {
+                const providers = localStorage.getItem('providers');
+                const providersVersion = localStorage.getItem('providersVersion');
+                const defaultModels = localStorage.getItem('defaultModels');
+                
+                if (!providers) {
+                    result.innerHTML = '<span class="status warning">⚠️ 未找到 Provider 配置</span><br>请在设置中配置 API Key';
+                    return;
+                }
+                
+                const providersData = JSON.parse(providers);
+                const defaultsData = defaultModels ? JSON.parse(defaultModels) : {};
+                
+                let html = '<strong>Provider 配置（v' + (providersVersion || '未知') + '）：</strong><br>';
+                html += '<div class="code" style="margin-top:10px;">';
+                
+                providersData.forEach(p => {
+                    const hasKey = p.apiKey && p.apiKey.length > 0;
+                    html += `Provider: ${p.name} (${p.id})<br>`;
+                    html += `  - API Key: ${hasKey ? '✅ 已配置 (' + p.apiKey.substring(0, 10) + '...)' : '❌ 未配置'}<br>`;
+                    html += `  - 启用: ${p.enabled ? '✅' : '❌'}<br>`;
+                    html += `  - API Host: ${p.apiHost || '默认'}<br><br>`;
+                });
+                
+                html += '</div>';
+                
+                if (defaultsData.assistantModel) {
+                    html += '<strong>默认助手模型：</strong>' + defaultsData.assistantModel + '<br>';
+                }
+                
+                result.innerHTML = html;
+            } catch (e) {
+                result.innerHTML = '<span class="status error">❌ 解析配置失败：' + e.message + '</span>';
+            }
+        }
+
+        function checkOldConfig() {
+            const result = document.getElementById('old-config-result');
+            result.style.display = 'block';
+            
+            const oldKeys = ['apiKey', 'apiProvider', 'model', 'embeddingApiKey'];
+            let html = '<strong>旧配置（已废弃）：</strong><br><div class="code" style="margin-top:10px;">';
+            
+            let hasOldConfig = false;
+            oldKeys.forEach(key => {
+                const value = localStorage.getItem(key);
+                if (value) {
+                    hasOldConfig = true;
+                    html += `${key}: ${value.substring(0, 50)}${value.length > 50 ? '...' : ''}<br>`;
+                }
+            });
+            
+            html += '</div>';
+            
+            if (!hasOldConfig) {
+                result.innerHTML = '<span class="status success">✅ 没有旧配置</span>';
+            } else {
+                result.innerHTML = html + '<br><span class="status warning">⚠️ 发现旧配置，建议清除</span>';
+            }
+        }
+
+        function simulateGetCredentials() {
+            const result = document.getElementById('credentials-result');
+            result.style.display = 'block';
+            
+            try {
+                const providers = localStorage.getItem('providers');
+                const defaultModels = localStorage.getItem('defaultModels');
+                
+                if (!providers || !defaultModels) {
+                    result.innerHTML = '<span class="status error">❌ 配置不完整</span>';
+                    return;
+                }
+                
+                const providersData = JSON.parse(providers);
+                const defaultsData = JSON.parse(defaultModels);
+                
+                const assistantModel = defaultsData.assistantModel;
+                if (!assistantModel) {
+                    result.innerHTML = '<span class="status warning">⚠️ 未选择默认助手模型</span>';
+                    return;
+                }
+                
+                const [providerId, modelId] = assistantModel.split(':');
+                const provider = providersData.find(p => p.id === providerId);
+                
+                if (!provider) {
+                    result.innerHTML = '<span class="status error">❌ Provider 不存在：' + providerId + '</span>';
+                    return;
+                }
+                
+                const hasApiKey = provider.apiKey && provider.apiKey.length > 0;
+                const needsApiKey = providerId !== 'ollama' && providerId !== 'local';
+                
+                let html = '<strong>模拟 getChatCredentials() 结果：</strong><br>';
+                html += '<div class="code" style="margin-top:10px;">';
+                html += `providerId: ${providerId}<br>`;
+                html += `modelId: ${modelId}<br>`;
+                html += `apiKey: ${hasApiKey ? '✅ ' + provider.apiKey.substring(0, 10) + '...' : '❌ 未配置'}<br>`;
+                html += '</div>';
+                
+                if (needsApiKey && !hasApiKey) {
+                    html += '<br><span class="status error">❌ 验证失败：需要 API Key</span>';
+                } else {
+                    html += '<br><span class="status success">✅ 验证通过</span>';
+                }
+                
+                result.innerHTML = html;
+            } catch (e) {
+                result.innerHTML = '<span class="status error">❌ 模拟失败：' + e.message + '</span>';
+            }
+        }
+
+        function clearOldConfig() {
+            const result = document.getElementById('clear-result');
+            result.style.display = 'block';
+            
+            const oldKeys = ['apiKey', 'apiProvider', 'model', 'embeddingApiKey', 
+                           'selectedProviderId', 'selectedEmbeddingModelId', 'selectedRerankModelId'];
+            
+            oldKeys.forEach(key => localStorage.removeItem(key));
+            
+            result.innerHTML = '<span class="status success">✅ 已清除旧配置</span><br>请刷新页面';
+        }
+
+        function clearAllConfig() {
+            if (!confirm('确定要清除所有配置吗？这将删除所有 API Key 和设置。')) {
+                return;
+            }
+            
+            const result = document.getElementById('clear-result');
+            result.style.display = 'block';
+            
+            localStorage.clear();
+            result.innerHTML = '<span class="status success">✅ 已清除所有配置</span><br>请刷新页面并重新配置';
+        }
+
+        // 页面加载时自动检查
+        window.onload = function() {
+            console.log('ChatPDF API Key 验证修复测试页面已加载');
+            console.log('修复文件：Chatpdf/frontend/src/components/ChatPDF.jsx');
+            console.log('修复内容：使用 getChatCredentials() 替代直接检查 apiKey 变量');
+        };
+    </script>
+</body>
+</html>

@@ -72,6 +72,70 @@ if errorlevel 1 (
     echo   [!] 后端依赖安装出现警告，尝试继续...
 )
 
+:: ==================== 安装 OCR 依赖 ====================
+echo   [▶] 检查 OCR 依赖...
+
+:: 检查 pdf2image 是否已安装
+python -c "import pdf2image" >nul 2>&1
+if errorlevel 1 (
+    echo   [▶] 安装 OCR Python 库...
+    python -m pip install -q pdf2image pytesseract pillow >nul 2>&1
+)
+
+:: OCR 工具目录
+set "OCR_DIR=%BASE_DIR%ocr_tools"
+
+:: 检查 Tesseract 是否可用（系统PATH或本地目录）
+set "TESSERACT_FOUND=0"
+where tesseract >nul 2>&1 && set "TESSERACT_FOUND=1"
+if exist "%OCR_DIR%\tesseract\tesseract.exe" set "TESSERACT_FOUND=1"
+
+if "%TESSERACT_FOUND%"=="0" (
+    echo   [!] Tesseract-OCR 未安装，扫描版PDF将无法识别
+    echo   [!] 如需OCR功能，请手动安装: https://github.com/UB-Mannheim/tesseract/wiki
+) else (
+    if exist "%OCR_DIR%\tesseract\tesseract.exe" (
+        set "PATH=%OCR_DIR%\tesseract;%PATH%"
+    )
+    echo   [✓] Tesseract 已安装
+)
+
+:: 检查 Poppler 是否可用
+set "POPPLER_FOUND=0"
+where pdftoppm >nul 2>&1 && set "POPPLER_FOUND=1"
+if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" set "POPPLER_FOUND=1"
+
+if "%POPPLER_FOUND%"=="0" (
+    if not exist "%OCR_DIR%" mkdir "%OCR_DIR%"
+    if not exist "%OCR_DIR%\poppler.zip" (
+        echo   [▶] 下载 Poppler...
+        powershell -Command "& {$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri 'https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip' -OutFile '%OCR_DIR%\poppler.zip' -TimeoutSec 30 } catch { Write-Host 'Download failed' }}" >nul 2>&1
+    )
+    if exist "%OCR_DIR%\poppler.zip" (
+        if not exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
+            echo   [▶] 解压 Poppler...
+            powershell -Command "Expand-Archive -Path '%OCR_DIR%\poppler.zip' -DestinationPath '%OCR_DIR%\poppler_temp' -Force" >nul 2>&1
+            if exist "%OCR_DIR%\poppler_temp\poppler-24.02.0-0" (
+                xcopy /E /I /Y "%OCR_DIR%\poppler_temp\poppler-24.02.0-0\*" "%OCR_DIR%\poppler\" >nul 2>&1
+            )
+            rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
+        )
+        if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
+            set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
+            echo   [✓] Poppler 已安装
+        )
+    ) else (
+        echo   [!] Poppler 下载失败，OCR功能可能受限
+    )
+) else (
+    if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
+        set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
+    )
+    echo   [✓] Poppler 已安装
+)
+
+echo   [✓] OCR 依赖检查完成
+
 :: 前端依赖
 if not exist "frontend\node_modules" (
     echo   [▶] 首次运行，安装前端依赖 ^(需要1-2分钟^)...

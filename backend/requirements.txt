@@ -16,6 +16,14 @@ python-dotenv==1.0.1
 # ==================== PDF处理 ====================
 PyPDF2==3.0.1
 pdfplumber==0.11.4
+PyMuPDF==1.24.0  # 更强大的PDF文本提取，支持坐标级操作
+Pillow>=10.0.0   # 图片处理，用于压缩提取的图片
+
+# OCR支持 (可选，用于扫描版PDF)
+pdf2image==1.17.0
+pytesseract==0.3.13
+# paddleocr==2.7.3  # 可选：更好的中文OCR支持，但体积较大
+# paddlepaddle==2.6.1  # paddleocr依赖
 
 # ==================== 向量检索系统 ====================
 langchain==0.3.13
