@@ -149,6 +149,84 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         r'[a-zA-Z0-9._%+-]+@',   # Email
     ]
     
+    def extract_text_from_dict(text_dict: dict) -> str:
+        """
+        从 PyMuPDF 的 dict 格式中提取文本
+        参考 paper-burner-x 的 _extractTextFromPage 实现
+        
+        核心逻辑：
+        1. 遍历所有文本项（字符/单词）
+        2. 根据 Y 坐标变化检测换行
+        3. 根据 X 坐标间距决定是否添加空格
+        """
+        if not text_dict or "blocks" not in text_dict:
+            return ""
+        
+        text_items = []
+        
+        # 遍历所有块
+        for block in text_dict["blocks"]:
+            if block.get("type") != 0:  # 0 = text block
+                continue
+            
+            # 遍历块中的所有行
+            for line in block.get("lines", []):
+                # 遍历行中的所有 span
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    if not text:
+                        continue
+                    
+                    # 获取位置信息
+                    bbox = span.get("bbox", [0, 0, 0, 0])
+                    x0, y0, x1, y1 = bbox
+                    
+                    text_items.append({
+                        "text": text,
+                        "x0": x0,
+                        "y0": y0,
+                        "x1": x1,
+                        "y1": y1,
+                        "width": x1 - x0
+                    })
+        
+        if not text_items:
+            return ""
+        
+        # 按 Y 坐标排序（从上到下），然后按 X 坐标排序（从左到右）
+        text_items.sort(key=lambda item: (round(item["y0"] / 5) * 5, item["x0"]))
+        
+        # 重建文本
+        result = ""
+        last_y = None
+        last_x_end = None
+        
+        for item in text_items:
+            text = item["text"]
+            y = item["y0"]
+            x_start = item["x0"]
+            x_end = item["x1"]
+            
+            # 检测换行（Y 坐标变化超过阈值）
+            if last_y is not None and abs(y - last_y) > 5:
+                result += '\n'
+                last_x_end = None
+            
+            # 检测是否需要添加空格（X 坐标间距）
+            if last_x_end is not None:
+                # 估算空格宽度为字符宽度的 30%
+                space_width = item["width"] * 0.3 if item["width"] > 0 else 3
+                gap = x_start - last_x_end
+                
+                if gap > space_width:
+                    result += ' '
+            
+            result += text
+            last_y = y
+            last_x_end = x_end
+        
+        return result.strip()
+    
     def clean_text(text: str) -> str:
         """保守清理文本，只移除真正的乱码字符"""
         if not text:
@@ -309,7 +387,13 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         }
     
     def extract_with_pymupdf(pdf_bytes: bytes, extract_images: bool = True) -> tuple:
-        """使用 PyMuPDF 进行坐标级文本提取，支持多栏检测和图片提取"""
+        """
+        使用 PyMuPDF 进行字符级文本提取，参考 paper-burner-x 实现
+        核心改进：
+        1. 使用 get_text("dict") 获取字符级坐标
+        2. 按 Y 坐标检测换行，按 X 坐标间距添加空格
+        3. 精确控制文本重建，避免空格丢失
+        """
         try:
             import fitz  # PyMuPDF
         except ImportError:
@@ -337,51 +421,18 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                 page_width = page.rect.width
                 page_height = page.rect.height
                 
-                # 获取文本块，包含坐标信息
-                blocks = page.get_text("blocks")
-                text_blocks = [b for b in blocks if len(b) >= 7 and b[6] == 0]
+                # ==================== 字符级文本提取（参考 paper-burner-x）====================
+                # 使用 get_text("dict") 获取详细的文本结构
+                try:
+                    text_dict = page.get_text("dict")
+                    page_text = extract_text_from_dict(text_dict)
+                except Exception as dict_err:
+                    # 如果 dict 模式失败，回退到简单的 text 模式
+                    print(f"[PDF] Page {page_num + 1} dict extraction failed, fallback to text mode: {dict_err}")
+                    page_text = page.get_text("text")
                 
-                # 计算自适应阈值
-                thresholds = get_adaptive_thresholds(text_blocks)
-                
-                # 检测多栏布局
-                columns = detect_columns(text_blocks, page_width)
-                is_multi_column = len(columns) > 1
-                
-                # 按栏排序
-                sorted_blocks = sort_blocks_by_columns(text_blocks, columns, thresholds)
-                
-                # 提取文本
-                page_lines = []
-                last_y = None
-                current_line = []
-                line_tol = thresholds.get("line_tolerance", 6)
-                
-                for block in sorted_blocks:
-                    text = block[4].strip()
-                    if not text:
-                        continue
-                    
-                    text = clean_text(text)
-                    if not text or is_garbage_line(text):
-                        continue
-                    
-                    y = block[1]
-                    
-                    # 检测是否换行
-                    if last_y is not None and abs(y - last_y) > line_tol:
-                        if current_line:
-                            page_lines.append(' '.join(current_line))
-                            current_line = []
-                    
-                    current_line.append(text)
-                    last_y = y
-                
-                # 添加最后一行
-                if current_line:
-                    page_lines.append(' '.join(current_line))
-                
-                page_text = '\n'.join(page_lines)
+                # 清理文本
+                page_text = clean_text(page_text)
                 
                 # ==================== 图片提取 ====================
                 page_images = []
@@ -454,17 +505,15 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                         print(f"[PDF] Page {page_num + 1} image extraction failed: {img_extract_err}")
                 
                 # 评估页面质量
-                quality = assess_page_quality(page_text, len(text_blocks))
+                quality = assess_page_quality(page_text, 1)  # block_count设为1，因为我们不再使用blocks
                 page_qualities.append(quality)
                 
                 pages.append({
                     "page": page_num + 1,
                     "content": page_text,
                     "quality_score": quality["score"],
-                    "is_multi_column": is_multi_column,
-                    "block_count": len(text_blocks),
                     "image_count": len(page_images),
-                    "source": "pymupdf"
+                    "source": "pymupdf_dict"
                 })
                 full_text_parts.append(page_text)
             
@@ -569,7 +618,7 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
     def heuristic_rebuild(text: str, is_cjk: bool = False) -> str:
         """
         智能段落合并与启发式文本重建
-        参考 paper-burner-x 的 _heuristicRebuild 实现
+        完全参考 paper-burner-x 的 _heuristicRebuild 实现
         """
         if not text:
             return ""
@@ -585,38 +634,38 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         rebuilt = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', save_image_ref, rebuilt)
         
         # 1. 修复被断开的单词（英文连字符换行）
+        # 匹配：字母-空格-换行-小写字母 -> 字母字母
         rebuilt = re.sub(r'([a-zA-Z])-\s*\n\s*([a-z])', r'\1\2', rebuilt)
         
-        # 2. 合并被打断的句子（区分中英文）
-        if is_cjk:
-            # 中文：直接连接，不加空格
-            rebuilt = re.sub(r'([^\n.!?。！？])\n([\u4e00-\u9fff])', r'\1\2', rebuilt)
-        else:
-            # 英文：加空格连接
-            rebuilt = re.sub(r'([^\n.!?。！？])\n([a-z])', r'\1 \2', rebuilt)
+        # 2. 合并被打断的句子
+        # 如果行尾不是句号等结束符，且下一行不是大写/数字/特殊字符开头，则合并
+        rebuilt = re.sub(r'([^\n.!?。！？])\n([a-z\u4e00-\u9fff])', r'\1 \2', rebuilt)
         
         # 3. 修复中文标点符号周围的空格
         rebuilt = re.sub(r'\s+([，。！？；：、）】」』])', r'\1', rebuilt)
         rebuilt = re.sub(r'([（【「『])\s+', r'\1', rebuilt)
         
         # 4. 修复英文标点符号
-        rebuilt = re.sub(r'([,.!?;:])([a-zA-Z])', r'\1 \2', rebuilt)
+        # 标点后应有空格（如果后面是字母），但要排除邮箱、网址、缩写等情况
+        # 不处理 . 因为它可能是邮箱、网址、缩写
+        rebuilt = re.sub(r'([,!?;:])([a-zA-Z])', r'\1 \2', rebuilt)
+        # 移除标点前的多余空格
         rebuilt = re.sub(r'\s+([,.!?;:])', r'\1', rebuilt)
         
         # 5. 规范化空白字符
+        # 多个空格变成一个
         rebuilt = re.sub(r' {2,}', ' ', rebuilt)
+        # 保留段落分隔（最多2个换行）
         rebuilt = re.sub(r'\n{3,}', '\n\n', rebuilt)
         
-        # 6. 保护列表格式
-        rebuilt = re.sub(r'\n(\d+)\.\s*\n', r'\n\1. ', rebuilt)
-        rebuilt = re.sub(r'\n([a-z])\)\s*\n', r'\n\1) ', rebuilt)
-        
-        # 7. 修复括号
+        # 6. 修复常见的格式问题
+        # 修复：数字. 后面应该有空格（列表项）
+        rebuilt = re.sub(r'(\d+)\.\s*([a-zA-Z\u4e00-\u9fff])', r'\1. \2', rebuilt)
+        # 修复：括号内不应有首尾空格
         rebuilt = re.sub(r'\(\s+', '(', rebuilt)
         rebuilt = re.sub(r'\s+\)', ')', rebuilt)
         
-        # ==================== 智能段落合并 ====================
-        # 参考 paper-burner-x 的段落识别逻辑
+        # 7. 智能段落识别（参考 paper-burner-x）
         lines = rebuilt.split('\n')
         paragraphs = []
         current_para = ''
@@ -637,8 +686,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                 re.match(r'^[\-\*\+]\s', line) or  # 无序列表
                 re.match(r'^\d+\.\s', line) or  # 有序列表
                 line.startswith('__IMG_PLACEHOLDER_') or  # 图片占位符
-                (re.search(r'[.!?。！？]\s*$', current_para) and  # 上一段以句号结束
-                 re.match(r'^[A-Z\u4e00-\u9fff]', line))  # 本行首字母大写或中文
+                # 上一段以句号结束且本行首字母大写或中文
+                (re.search(r'[.!?。！？]\s*$', current_para) and re.match(r'^[A-Z\u4e00-\u9fff]', line))
             )
             
             if should_break:
@@ -646,11 +695,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                     paragraphs.append(current_para.strip())
                 current_para = line
             else:
-                # 合并到当前段落
-                if is_cjk:
-                    current_para += line  # 中文不加空格
-                else:
-                    current_para += ' ' + line  # 英文加空格
+                # 合并到当前段落，总是加空格（因为我们已经在字符级提取时处理了空格）
+                current_para += ' ' + line
         
         if current_para:
             paragraphs.append(current_para.strip())

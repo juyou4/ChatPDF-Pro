@@ -102,37 +102,62 @@ if "%TESSERACT_FOUND%"=="0" (
 
 :: 检查 Poppler 是否可用
 set "POPPLER_FOUND=0"
-where pdftoppm >nul 2>&1 && set "POPPLER_FOUND=1"
-if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" set "POPPLER_FOUND=1"
 
-if "%POPPLER_FOUND%"=="0" (
-    if not exist "%OCR_DIR%" mkdir "%OCR_DIR%"
-    if not exist "%OCR_DIR%\poppler.zip" (
-        echo   [▶] 下载 Poppler...
-        powershell -Command "& {$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri 'https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip' -OutFile '%OCR_DIR%\poppler.zip' -TimeoutSec 30 } catch { Write-Host 'Download failed' }}" >nul 2>&1
+:: 先检查系统PATH中是否有 pdftoppm
+where pdftoppm >nul 2>&1
+if !errorlevel! equ 0 (
+    set "POPPLER_FOUND=1"
+    echo   [✓] Poppler 已安装 ^(系统PATH^)
+    goto POPPLER_DONE
+)
+
+:: 检查本地安装目录
+if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
+    set "POPPLER_FOUND=1"
+    set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
+    echo   [✓] Poppler 已安装 ^(本地目录^)
+    goto POPPLER_DONE
+)
+
+:: 如果都没找到，开始下载和安装
+echo   [▶] Poppler 未找到，开始安装...
+if not exist "%OCR_DIR%" mkdir "%OCR_DIR%"
+
+:: 检查是否已有下载的zip文件
+if not exist "%OCR_DIR%\poppler.zip" (
+    echo   [▶] 下载 Poppler...
+    powershell -Command "& {$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri 'https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip' -OutFile '%OCR_DIR%\poppler.zip' -TimeoutSec 30 } catch { Write-Host 'Download failed' }}" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo   [!] Poppler 下载失败，OCR功能可能受限
+        goto POPPLER_DONE
     )
-    if exist "%OCR_DIR%\poppler.zip" (
-        if not exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
-            echo   [▶] 解压 Poppler...
-            powershell -Command "Expand-Archive -Path '%OCR_DIR%\poppler.zip' -DestinationPath '%OCR_DIR%\poppler_temp' -Force" >nul 2>&1
-            if exist "%OCR_DIR%\poppler_temp\poppler-24.02.0-0" (
-                xcopy /E /I /Y "%OCR_DIR%\poppler_temp\poppler-24.02.0-0\*" "%OCR_DIR%\poppler\" >nul 2>&1
-            )
-            rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
-        )
+)
+
+:: 解压 Poppler
+if exist "%OCR_DIR%\poppler.zip" (
+    echo   [▶] 解压 Poppler...
+    powershell -Command "Expand-Archive -Path '%OCR_DIR%\poppler.zip' -DestinationPath '%OCR_DIR%\poppler_temp' -Force" >nul 2>&1
+    
+    if exist "%OCR_DIR%\poppler_temp\poppler-24.02.0-0" (
+        xcopy /E /I /Y "%OCR_DIR%\poppler_temp\poppler-24.02.0-0\*" "%OCR_DIR%\poppler\" >nul 2>&1
+        rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
+        
         if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
             set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
-            echo   [✓] Poppler 已安装
+            set "POPPLER_FOUND=1"
+            echo   [✓] Poppler 安装成功
+        ) else (
+            echo   [!] Poppler 解压失败
         )
     ) else (
-        echo   [!] Poppler 下载失败，OCR功能可能受限
+        echo   [!] Poppler 解压目录结构异常
+        rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
     )
 ) else (
-    if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
-        set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
-    )
-    echo   [✓] Poppler 已安装
+    echo   [!] Poppler zip 文件不存在
 )
+
+:POPPLER_DONE
 
 echo   [✓] OCR 依赖检查完成
 
