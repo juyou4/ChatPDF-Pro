@@ -18,6 +18,7 @@ from routes.chat_routes import router as chat_router
 from routes.summary_routes import router as summary_router
 from routes.glossary_routes import router as glossary_router
 from routes.prompt_pool_routes import router as prompt_pool_router
+from routes.preset_routes import router as preset_router
 
 # Directories (resolve to project root so frontend/backend共用同一份数据)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -41,6 +42,7 @@ app.include_router(chat_router)
 app.include_router(summary_router)
 app.include_router(glossary_router)
 app.include_router(prompt_pool_router)
+app.include_router(preset_router)
 
 # Inject shared stores/paths to routers that need them
 search_router.documents_store = documents_store
@@ -90,6 +92,35 @@ async def get_embedding_models(as_list: bool = False):
     return {"models": items}
 
 
+def _kill_port(port: int):
+    """启动前清理占用指定端口的旧进程"""
+    import subprocess, os, signal, sys
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                f'netstat -ano | findstr :{port} | findstr LISTENING',
+                capture_output=True, text=True, shell=True
+            )
+            for line in result.stdout.strip().splitlines():
+                pid = int(line.strip().split()[-1])
+                if pid != os.getpid():
+                    subprocess.run(f'taskkill /F /PID {pid}', shell=True,
+                                   capture_output=True)
+                    print(f"  已清理旧进程 PID={pid}")
+        else:
+            result = subprocess.run(
+                f'lsof -ti:{port}', capture_output=True, text=True, shell=True
+            )
+            for pid_str in result.stdout.strip().splitlines():
+                pid = int(pid_str)
+                if pid != os.getpid():
+                    os.kill(pid, signal.SIGTERM)
+                    print(f"  已清理旧进程 PID={pid}")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     import uvicorn
+    _kill_port(8000)
     uvicorn.run(app, host="0.0.0.0", port=8000)

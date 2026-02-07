@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -6,9 +6,115 @@ import rehypeKatex from 'rehype-katex';
 import rehypeMathjax from 'rehype-mathjax/browser';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
+import mermaid from 'mermaid';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { visit } from 'unist-util-visit';
+import CitationLink from './CitationLink';
+
+// ============================================================
+// Mermaid 初始化配置 - 使用 strict 安全级别防止 XSS 攻击
+// ============================================================
+mermaid.initialize({
+  startOnLoad: false,
+  // 使用 strict 安全级别，禁止点击事件，防止 XSS 攻击
+  securityLevel: 'strict',
+  theme: 'default',
+});
+
+// Mermaid 渲染计数器，用于生成唯一 ID
+let mermaidIdCounter = 0;
+
+/**
+ * MermaidBlock - Mermaid 代码块渲染子组件
+ *
+ * 功能：
+ * - 接收 mermaid 代码并渲染为 SVG 流程图
+ * - 使用 debounce（400ms）避免流式输出时频繁重渲染导致的抖动
+ * - 渲染失败时降级显示原始代码块
+ * - 显示加载状态
+ */
+const MermaidBlock = React.memo(({ code }) => {
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const containerRef = useRef(null);
+  const timerRef = useRef(null);
+  const idRef = useRef(`mermaid-block-${++mermaidIdCounter}`);
+
+  useEffect(() => {
+    // 清除上一次的 debounce 定时器
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+
+    // 如果代码为空，不渲染
+    if (!code || !code.trim()) {
+      setLoading(false);
+      setError(true);
+      return;
+    }
+
+    setLoading(true);
+
+    // 使用 debounce（400ms）延迟渲染，避免流式输出时频繁触发
+    timerRef.current = setTimeout(async () => {
+      try {
+        // 每次渲染使用唯一 ID，避免 mermaid 缓存冲突
+        const uniqueId = `${idRef.current}-${Date.now()}`;
+        const { svg: renderedSvg } = await mermaid.render(uniqueId, code.trim());
+        setSvg(renderedSvg);
+        setError(false);
+      } catch (err) {
+        console.warn('Mermaid 渲染失败，降级显示原始代码:', err);
+        setSvg('');
+        setError(true);
+      } finally {
+        setLoading(false);
+      }
+    }, 400);
+
+    // 组件卸载时清除定时器
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [code]);
+
+  // 渲染失败时降级显示原始代码块
+  if (error) {
+    return (
+      <pre className="bg-gray-100 dark:bg-gray-800 rounded-lg p-4 overflow-x-auto text-sm">
+        <code className="language-mermaid">{code}</code>
+      </pre>
+    );
+  }
+
+  // 加载中状态
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-6 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-sm">
+          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span>正在渲染流程图...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // 成功渲染 SVG
+  return (
+    <div
+      ref={containerRef}
+      className="mermaid-container my-4 flex justify-center overflow-x-auto bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-700"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+});
 
 /**
  * StreamingMarkdown - 支持实时Markdown渲染和Blur Reveal效果的组件
@@ -145,6 +251,14 @@ const processLatexBrackets = (text) => {
     // Every odd index corresponds to a fence placeholder
     if (idx % 2 === 1) {
       const fence = fences[(idx - 1) / 2];
+
+      // 检测是否为 mermaid 代码块，如果是则保留原样不做数学转换
+      const langMatch = fence.match(/^(```|~~~)([\w-]*)\n/);
+      const fenceLang = langMatch ? langMatch[2].toLowerCase() : '';
+      if (fenceLang === 'mermaid') {
+        return fence;
+      }
+
       // Check if the fence is actually a math block disguised as code
       // We strip the ``` and check the content
       const innerMatch = fence.match(/^(```|~~~)(?:[\w-]*\n)?([\s\S]*?)\1$/);
@@ -205,20 +319,63 @@ const processLatexBrackets = (text) => {
   return transformed.join('');
 };
 
+// ============================================================
+// 引文引用预处理 - 将 [n] 模式替换为 <cite> 标签
+// ============================================================
+
+/**
+ * 预处理 Markdown 内容中的引文引用标记
+ * 将 [1]、[2] 等引用编号替换为 <cite data-ref="n">[n]</cite> HTML 标签，
+ * 以便 ReactMarkdown 通过自定义组件渲染为可点击链接。
+ *
+ * 注意：只处理独立的 [n] 模式（n 为 1-99 的数字），
+ * 避免误匹配 Markdown 链接 [text](url) 和图片 ![alt](url)。
+ *
+ * @param {string} text - 原始 Markdown 文本
+ * @param {Array} citations - 引文列表，用于验证引用编号是否有效
+ * @returns {string} 处理后的文本
+ */
+const processCitationRefs = (text, citations) => {
+  if (!text || !citations || citations.length === 0) return text;
+
+  // 构建有效引用编号集合
+  const validRefs = new Set(citations.map(c => c.ref));
+
+  // 匹配 [n] 模式，但排除 Markdown 链接语法 [text](url) 和图片 ![alt](url)
+  // 使用负向前瞻排除后面紧跟 ( 的情况（即 Markdown 链接）
+  // 使用负向后顾排除前面紧跟 ! 的情况（即 Markdown 图片）
+  return text.replace(/(?<!!)\[(\d{1,2})\](?!\()/g, (match, refStr) => {
+    const ref = parseInt(refStr, 10);
+    if (validRefs.has(ref)) {
+      return `<cite data-ref="${ref}">[${ref}]</cite>`;
+    }
+    return match;
+  });
+};
+
 const StreamingMarkdown = React.memo(({
   content,
   isStreaming,
   enableBlurReveal,
-  blurIntensity = 'medium'
+  blurIntensity = 'medium',
+  citations = null,
+  onCitationClick = null
 }) => {
   const containerRef = useRef(null);
   const lastTextLengthRef = useRef(0);
   const animatedNodesRef = useRef(new WeakSet());
 
   const processedContent = useMemo(() => {
-    if (!USE_LATEX_PREPROCESS) return content || '';
-    return processLatexBrackets(content || '');
-  }, [content]);
+    let text = content || '';
+    if (USE_LATEX_PREPROCESS) {
+      text = processLatexBrackets(text);
+    }
+    // 引文引用预处理：将 [n] 替换为 <cite> 标签
+    if (citations && citations.length > 0) {
+      text = processCitationRefs(text, citations);
+    }
+    return text;
+  }, [content, citations]);
 
   // Build plugins (stable, no dependencies that change during streaming)
   const remarkPlugins = React.useMemo(() => {
@@ -307,6 +464,86 @@ const StreamingMarkdown = React.memo(({
 
   const streamingClass = isStreaming ? 'streaming-active' : '';
 
+  // 构建引文映射表，用于快速查找引用编号对应的引文数据
+  const citationMap = useMemo(() => {
+    if (!citations || citations.length === 0) return null;
+    const map = {};
+    citations.forEach(c => {
+      map[c.ref] = c;
+    });
+    return map;
+  }, [citations]);
+
+  // 引文点击处理回调
+  const handleCitationClick = useCallback((citation) => {
+    if (onCitationClick) {
+      onCitationClick(citation);
+    }
+  }, [onCitationClick]);
+
+  // 自定义代码块渲染组件，用于检测 mermaid 代码块和引文 cite 标签
+  const markdownComponents = useMemo(() => ({
+    // 自定义 cite 标签渲染 - 将引文引用渲染为可点击链接
+    cite({ node, children, ...props }) {
+      const refStr = props['data-ref'];
+      if (refStr && citationMap) {
+        const ref = parseInt(refStr, 10);
+        const citation = citationMap[ref];
+        if (citation) {
+          return (
+            <CitationLink
+              refNumber={ref}
+              citation={citation}
+              onClick={handleCitationClick}
+            />
+          );
+        }
+      }
+      // 无匹配引文时渲染为普通 cite 标签
+      return <cite {...props}>{children}</cite>;
+    },
+    code({ node, inline, className, children, ...props }) {
+      // 检测 ```mermaid 代码块
+      const match = /language-(\w+)/.exec(className || '');
+      const language = match ? match[1] : '';
+
+      if (!inline && language === 'mermaid') {
+        // 提取 mermaid 代码内容并渲染为 SVG
+        const mermaidCode = String(children).replace(/\n$/, '');
+        return <MermaidBlock code={mermaidCode} />;
+      }
+
+      // 非 mermaid 代码块使用默认渲染
+      return (
+        <code className={className} {...props}>
+          {children}
+        </code>
+      );
+    },
+    // 自定义 pre 标签渲染，避免 mermaid 块被包裹在 pre 中
+    pre({ node, children, ...props }) {
+      // 检查子元素是否为 MermaidBlock（通过检测 code 子元素的 language-mermaid 类名）
+      const childArray = React.Children.toArray(children);
+      const hasMermaid = childArray.some(child => {
+        if (React.isValidElement(child) && child.type === MermaidBlock) {
+          return true;
+        }
+        // 检查 code 元素的 className 是否包含 mermaid
+        if (React.isValidElement(child) && child.props?.className?.includes('language-mermaid')) {
+          return true;
+        }
+        return false;
+      });
+
+      // 如果包含 mermaid 块，直接渲染子元素（不包裹 pre）
+      if (hasMermaid) {
+        return <>{children}</>;
+      }
+
+      return <pre {...props}>{children}</pre>;
+    }
+  }), [citationMap, handleCitationClick]);
+
   return (
     <div
       ref={containerRef}
@@ -316,6 +553,7 @@ const StreamingMarkdown = React.memo(({
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         remarkRehypeOptions={{ allowDangerousHtml: true }}
+        components={markdownComponents}
       >
         {processedContent}
       </ReactMarkdown>
@@ -327,7 +565,9 @@ const StreamingMarkdown = React.memo(({
   return (
     prevProps.content === nextProps.content &&
     prevProps.isStreaming === nextProps.isStreaming &&
-    prevProps.enableBlurReveal === nextProps.enableBlurReveal
+    prevProps.enableBlurReveal === nextProps.enableBlurReveal &&
+    prevProps.citations === nextProps.citations &&
+    prevProps.onCitationClick === nextProps.onCitationClick
   );
 });
 

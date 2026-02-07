@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\models\model_detector.py
+# hypothesis_version: 6.151.5
+
+['alibaba', 'anthropic', 'claude', 'doubao', 'gemini', 'glm', 'gpt', 'kimi', 'minimax', 'moonshot', 'openai', 'qwen', 'text-embedding', 'zhipu']

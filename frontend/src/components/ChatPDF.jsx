@@ -12,6 +12,7 @@ import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
 import EmbeddingSettings from './EmbeddingSettings';
 import GlobalSettings from './GlobalSettings';
+import PresetQuestions from './PresetQuestions';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -173,6 +174,8 @@ const ChatPDF = () => {
   const headerContentRef = useRef(null);
   const abortControllerRef = useRef(null);
   const streamingAbortRef = useRef({ cancelled: false });
+  // 用于在 SSE 流式响应中暂存 retrieval_meta.citations
+  const streamCitationsRef = useRef(null);
 
   const [headerHeight, setHeaderHeight] = useState(null);
   const API_BASE_URL = ''; // Relative path due to proxy
@@ -573,6 +576,8 @@ const ChatPDF = () => {
     if (abortControllerRef.current) abortControllerRef.current.abort();
     abortControllerRef.current = new AbortController();
     streamingAbortRef.current.cancelled = false;
+    // 重置流式引文暂存
+    streamCitationsRef.current = null;
 
     const tempMsgId = Date.now();
     setStreamingMessageId(tempMsgId);
@@ -637,27 +642,35 @@ const ChatPDF = () => {
                         : msg
                     ));
                   }
-                } else if (chunkThinking) {
-                  currentThinking += chunkThinking;
-                  setMessages(prev => prev.map(msg =>
-                    msg.id === tempMsgId
-                      ? { ...msg, content: currentText, thinking: currentThinking }
-                      : msg
-                  ));
+                } else {
+                  // done=true 的最后一个 chunk，提取 retrieval_meta 中的 citations
+                  if (parsed.retrieval_meta && parsed.retrieval_meta.citations) {
+                    streamCitationsRef.current = parsed.retrieval_meta.citations;
+                  }
+                  if (chunkThinking) {
+                    currentThinking += chunkThinking;
+                    setMessages(prev => prev.map(msg =>
+                      msg.id === tempMsgId
+                        ? { ...msg, content: currentText, thinking: currentThinking }
+                        : msg
+                    ));
+                  }
                 }
               } catch (e) {
-                // Skip invalid JSON
+                // 跳过无效 JSON
               }
             }
           }
         }
 
-        // Mark streaming complete and finalize thinking text (clear if none)
+        // 标记流式传输完成，保存思考文本和引文数据
+        const streamCitations = streamCitationsRef.current;
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, isStreaming: false, thinking: currentThinking || '' }
+            ? { ...msg, isStreaming: false, thinking: currentThinking || '', citations: streamCitations || null }
             : msg
         ));
+        streamCitationsRef.current = null;
         setStreamingMessageId(null);
       } else {
         // Fallback to regular fetch for non-streaming or vision requests
@@ -674,6 +687,8 @@ const ChatPDF = () => {
         const data = await response.json();
         const fullAnswer = data.answer;
         const reasoningContent = data.reasoning_content || '';
+        // 从非流式响应中提取引文数据
+        const responseCitations = data.retrieval_meta?.citations || null;
         setLastCallInfo({
           provider: data.used_provider,
           model: data.used_model,
@@ -682,7 +697,7 @@ const ChatPDF = () => {
 
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, thinking: reasoningContent || '' }
+            ? { ...msg, thinking: reasoningContent || '', citations: responseCitations }
             : msg
         ));
 
@@ -1114,6 +1129,42 @@ const ChatPDF = () => {
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
+
+  // 预设问题自动发送标记
+  const pendingSendRef = useRef(false);
+
+  // ==================== 引文点击跳转处理 ====================
+  /**
+   * 处理引文引用点击事件
+   * 根据 citation 中的 page_range 跳转 PDF 阅读器到对应页码
+   * @param {object} citation - 引文数据，包含 ref、group_id、page_range
+   */
+  const handleCitationClick = (citation) => {
+    if (!citation || !citation.page_range) return;
+    const targetPage = citation.page_range[0]; // 跳转到页码范围的起始页
+    if (typeof targetPage === 'number' && targetPage > 0) {
+      setCurrentPage(targetPage);
+    }
+  };
+
+  // 处理预设问题选择：填入输入框并标记待发送
+  const handlePresetSelect = (query) => {
+    setInputMessage(query);
+    pendingSendRef.current = true;
+  };
+
+  // 当 inputMessage 更新且有待发送标记时，自动触发发送
+  useEffect(() => {
+    if (pendingSendRef.current && inputMessage.trim()) {
+      pendingSendRef.current = false;
+      sendMessage();
+    }
+  }, [inputMessage]);
+
+  // 判断是否显示预设问题：文档已加载且没有用户/助手消息
+  const showPresetQuestions = docId && messages.filter(
+    msg => msg.type === 'user' || msg.type === 'assistant'
+  ).length === 0;
 
   // ==================== 历史记录管理 ====================
   const loadHistory = () => {
@@ -1747,6 +1798,14 @@ const ChatPDF = () => {
                 </div>
               )}
 
+              {/* 预设问题栏：文档已加载且无对话消息时显示 */}
+              {showPresetQuestions && (
+                <PresetQuestions
+                  onSelect={handlePresetSelect}
+                  disabled={isLoading}
+                />
+              )}
+
               {messages.map((msg, idx) => {
                 const messageKey = msg.id ?? idx;
                 const thinkingKey = String(messageKey);
@@ -1831,6 +1890,8 @@ const ChatPDF = () => {
                         isStreaming={msg.isStreaming || false}
                         enableBlurReveal={enableBlurReveal}
                         blurIntensity={blurIntensity}
+                        citations={msg.citations || null}
+                        onCitationClick={handleCitationClick}
                       />
                     </div>
 

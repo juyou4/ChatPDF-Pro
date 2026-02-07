@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\semantic_group_service.py
+# hypothesis_version: 6.151.5
+
+[0.3, 60.0, 200, 1000, 2000, 2500, 5000, 6000, 8000, 'Authorization', 'Content-Type', 'LLM 返回空关键词结果', 'LLM 返回空摘要，降级为文本截断', 'SemanticGroup', '[,，、\\n]+', '[^a-zA-Z]', '^.*\\|.*\\|', '^[-•]\\s*', '^\\d+[\\.\\)、]\\s*', '^\\s*#{1,6}\\s+\\S', '^\\s*```', 'application/json', 'char_count', 'choices', 'chunk_indices', 'config', 'content', 'created_at', 'digest', 'doc_hash', 'doc_id', 'endpoint', 'failed', 'full_text', 'gpt-4o-mini', 'group_id', 'groups', 'keywords', 'llm_meta', 'max_chars', 'max_tokens', 'message', 'messages', 'min_chars', 'model', 'ok', 'openai', 'page_range', 'prompt_version', 'r', 'role', 'schema_version', 'summary', 'summary_status', 'target_chars', 'temperature', 'user', 'utf-8', 'v1', 'w']

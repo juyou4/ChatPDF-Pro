@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\providers\anthropic_provider.py
+# hypothesis_version: 6.151.5
+
+[120.0, 200, 4000, '2023-06-01', 'Content-Type', 'anthropic-version', 'application/json', 'choices', 'content', 'max_tokens', 'message', 'messages', 'model', 'role', 'stream', 'system', 'text', 'x-api-key']

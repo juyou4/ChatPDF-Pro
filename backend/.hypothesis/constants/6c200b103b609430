@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\providers\gemini_provider.py
+# hypothesis_version: 6.151.5
+
+[0.7, 120.0, 200, 4000, ',', 'Content-Type', 'application/json', 'candidates', 'choices', 'content', 'contents', 'data', 'generationConfig', 'image/png', 'image_url', 'inline_data', 'maxOutputTokens', 'message', 'mime_type', 'model', 'parts', 'role', 'stream', 'system', 'temperature', 'text', 'type', 'url', 'user']

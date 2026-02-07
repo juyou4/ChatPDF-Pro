@@ -10,6 +10,9 @@ from services.chat_service import call_ai_api, call_ai_api_stream, extract_reaso
 from services.vector_service import vector_context
 from services.glossary_service import glossary_service, build_glossary_prompt
 from services.table_service import protect_markdown_tables, restore_markdown_tables
+from services.query_analyzer import get_retrieval_strategy
+from services.preset_service import get_generation_prompt
+from services.context_builder import ContextBuilder
 from models.provider_registry import PROVIDER_CONFIG
 from utils.middleware import (
     LoggingMiddleware,
@@ -22,6 +25,9 @@ from utils.middleware import (
 from config import settings
 
 router = APIRouter()
+
+# 上下文构建器实例，用于生成引文指示提示词
+_context_builder = ContextBuilder()
 
 
 def build_chat_middlewares():
@@ -47,7 +53,7 @@ class ChatRequest(BaseModel):
     selected_text: Optional[str] = None
     enable_vector_search: bool = True
     image_base64: Optional[str] = None
-    top_k: int = 5
+    top_k: int = 10  # 增加到10，获取更多上下文
     candidate_k: int = 20
     use_rerank: bool = False
     reranker_model: Optional[str] = None
@@ -89,18 +95,27 @@ async def chat_with_pdf(request: ChatRequest):
     doc = store[request.doc_id]
 
     context = ""
+    retrieval_meta = {}
     if request.selected_text:
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
     elif request.enable_vector_search:
         _validate_rerank_request(request)
-        relevant_text = await vector_context(
+        
+        # 智能分析查询类型，动态调整top_k
+        strategy = get_retrieval_strategy(request.question)
+        dynamic_top_k = strategy['top_k']
+        
+        print(f"[Chat] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
+        
+        # vector_context 返回包含 context 和 retrieval_meta 的字典
+        context_result = await vector_context(
             request.doc_id,
             request.question,
             vector_store_dir=router.vector_store_dir,
             pages=doc.get("data", {}).get("pages", []),
             api_key=request.api_key,
-            top_k=request.top_k,
-            candidate_k=max(request.candidate_k, request.top_k),
+            top_k=dynamic_top_k,  # 使用动态计算的top_k
+            candidate_k=max(request.candidate_k, dynamic_top_k),
             use_rerank=request.use_rerank,
             reranker_model=request.reranker_model,
             rerank_provider=request.rerank_provider,
@@ -112,6 +127,8 @@ async def chat_with_pdf(request: ChatRequest):
                 ErrorCaptureMiddleware()
             ]
         )
+        relevant_text = context_result.get("context", "")
+        retrieval_meta = context_result.get("retrieval_meta", {})
         if relevant_text:
             context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
         else:
@@ -119,21 +136,38 @@ async def chat_with_pdf(request: ChatRequest):
     else:
         context = doc["data"]["full_text"][:8000]
 
-    system_prompt = f"""你是专业的文档分析助手。用户上传了一份PDF文档。
-
-文档名称：{doc["filename"]}
+    system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
 文档内容：
 {context}
 
-请根据文档内容准确回答用户的问题。如果文档中没有相关信息，请明确告知。"""
+回答规则：
+1. 基于文档内容准确回答，简洁清晰，学术准确。
+2. 不要声明你是否具备外部工具/联网等能力，不要输出与回答无关的免责声明。
+3. 优先依据文档内容回答；若文档信息不足，请基于常识给出概览性解答并明确不确定之处。
+4. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容，不要仅概括描述。
+   - 例如用户问"有什么公式"时，应直接展示公式的完整表达式。
+   - 对于数学公式，优先使用LaTeX格式展示（$公式$）。
+5. 不要说"根据您提供的有限片段"、"基于片段"等暗示信息不足的措辞，直接回答问题。"""
 
     # 集成术语库 - 在 system_prompt 中注入术语指令
     if request.enable_glossary:
         glossary_instruction = build_glossary_prompt(context)
         if glossary_instruction:
             system_prompt += f"\n\n{glossary_instruction}"
+
+    # 检测生成类查询（思维导图/流程图），注入对应系统提示词
+    generation_prompt = get_generation_prompt(request.question)
+    if generation_prompt:
+        system_prompt += f"\n\n{generation_prompt}"
+
+    # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
+    citations = retrieval_meta.get("citations", [])
+    if citations:
+        citation_prompt = _context_builder.build_citation_prompt(citations)
+        if citation_prompt:
+            system_prompt += f"\n\n{citation_prompt}"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -162,7 +196,8 @@ async def chat_with_pdf(request: ChatRequest):
             "timestamp": datetime.now().isoformat(),
             "used_provider": response.get("_used_provider"),
             "used_model": response.get("_used_model"),
-            "fallback_used": response.get("_fallback_used", False)
+            "fallback_used": response.get("_fallback_used", False),
+            "retrieval_meta": retrieval_meta
         }
 
     except Exception as e:
@@ -180,18 +215,27 @@ async def chat_with_pdf_stream(request: ChatRequest):
     doc = store[request.doc_id]
 
     context = ""
+    retrieval_meta = {}
     if request.selected_text:
         context = f"用户选中的文本：\n{request.selected_text}\n\n"
     elif request.enable_vector_search:
         _validate_rerank_request(request)
-        relevant_text = await vector_context(
+        
+        # 智能分析查询类型，动态调整top_k
+        strategy = get_retrieval_strategy(request.question)
+        dynamic_top_k = strategy['top_k']
+        
+        print(f"[Chat Stream] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
+        
+        # vector_context 返回包含 context 和 retrieval_meta 的字典
+        context_result = await vector_context(
             request.doc_id,
             request.question,
             vector_store_dir=router.vector_store_dir,
             pages=doc.get("data", {}).get("pages", []),
             api_key=request.api_key,
-            top_k=request.top_k,
-            candidate_k=max(request.candidate_k, request.top_k),
+            top_k=dynamic_top_k,  # 使用动态计算的top_k
+            candidate_k=max(request.candidate_k, dynamic_top_k),
             use_rerank=request.use_rerank,
             reranker_model=request.reranker_model,
             rerank_provider=request.rerank_provider,
@@ -202,6 +246,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
             ]
         )
+        relevant_text = context_result.get("context", "")
+        retrieval_meta = context_result.get("retrieval_meta", {})
         if relevant_text:
             context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
         else:
@@ -209,15 +255,32 @@ async def chat_with_pdf_stream(request: ChatRequest):
     else:
         context = doc["data"]["full_text"][:8000]
 
-    system_prompt = f"""你是专业的文档分析助手。用户上传了一份PDF文档。
-
-文档名称：{doc["filename"]}
+    system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
 文档内容：
 {context}
 
-请根据文档内容准确回答用户的问题。如果文档中没有相关信息，请明确告知。"""
+回答规则：
+1. 基于文档内容准确回答，简洁清晰，学术准确。
+2. 不要声明你是否具备外部工具/联网等能力，不要输出与回答无关的免责声明。
+3. 优先依据文档内容回答；若文档信息不足，请基于常识给出概览性解答并明确不确定之处。
+4. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容，不要仅概括描述。
+   - 例如用户问"有什么公式"时，应直接展示公式的完整表达式。
+   - 对于数学公式，优先使用LaTeX格式展示（$公式$）。
+5. 不要说"根据您提供的有限片段"、"基于片段"等暗示信息不足的措辞，直接回答问题。"""
+
+    # 检测生成类查询（思维导图/流程图），注入对应系统提示词
+    generation_prompt = get_generation_prompt(request.question)
+    if generation_prompt:
+        system_prompt += f"\n\n{generation_prompt}"
+
+    # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
+    citations = retrieval_meta.get("citations", [])
+    if citations:
+        citation_prompt = _context_builder.build_citation_prompt(citations)
+        if citation_prompt:
+            system_prompt += f"\n\n{citation_prompt}"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -238,7 +301,18 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
                     break
-                yield f"data: {json.dumps({'content': chunk.get('content', ''), 'reasoning_content': chunk.get('reasoning_content', ''), 'done': chunk.get('done', False), 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
+                chunk_data = {
+                    'content': chunk.get('content', ''),
+                    'reasoning_content': chunk.get('reasoning_content', ''),
+                    'done': chunk.get('done', False),
+                    'used_provider': chunk.get('used_provider'),
+                    'used_model': chunk.get('used_model'),
+                    'fallback_used': chunk.get('fallback_used'),
+                }
+                # 在最后一个 chunk 中附带 retrieval_meta（含 citations）
+                if chunk.get("done"):
+                    chunk_data['retrieval_meta'] = retrieval_meta
+                yield f"data: {json.dumps(chunk_data)}\n\n"
                 if chunk.get("done"):
                     yield "data: [DONE]\n\n"
                     break

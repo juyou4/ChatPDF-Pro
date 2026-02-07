@@ -180,12 +180,14 @@ echo   [✓] 依赖检查完成
 :: ==================== 启动服务 ====================
 echo   [▶] 启动后端服务...
 
-:: 启动后端（后台运行）
-start "" /B python backend/app.py >nul 2>&1
+:: 启动后端（后台运行，先切到 backend 目录确保模块导入正确）
+pushd backend
+start "" /B python app.py >backend_startup.log 2>&1
+popd
 
-:: 等待后端启动（最多20秒）
+:: 等待后端启动（最多30秒）
 set "wait_ok=0"
-for /l %%i in (1,1,20) do (
+for /l %%i in (1,1,30) do (
     netstat -ano | findstr :8000 | findstr LISTENING >nul 2>&1
     if not errorlevel 1 (
         set "wait_ok=1"
@@ -195,7 +197,11 @@ for /l %%i in (1,1,20) do (
 )
 :BACK_OK
 
-if "%wait_ok%"=="0" goto BACKFAIL
+if "%wait_ok%"=="0" (
+    echo   [✗] 后端启动失败，错误日志:
+    if exist "backend\backend_startup.log" type "backend\backend_startup.log"
+    goto BACKFAIL
+)
 echo   [✓] 后端服务启动成功
 
 echo   [▶] 启动前端服务...

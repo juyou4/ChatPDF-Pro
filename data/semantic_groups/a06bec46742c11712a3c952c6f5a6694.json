@@ -1,0 +1,460 @@
+{
+  "schema_version": 1,
+  "doc_id": "a06bec46742c11712a3c952c6f5a6694",
+  "doc_hash": "",
+  "created_at": "2026-02-06T17:44:02.876187+00:00",
+  "config": {
+    "target_chars": 5000,
+    "min_chars": 2500,
+    "max_chars": 6000
+  },
+  "groups": [
+    {
+      "group_id": "group-0",
+      "chunk_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "char_count": 2975,
+      "summary": "Invisible Triggers, Visible Threats! Road-Style Adversarial Creation Attack for ",
+      "digest": "Invisible Triggers, Visible Threats! Road-Style Adversarial Creation Attack for Visual 3D Detection in Autonomous Driving Jian Wang, Lijun He, Yixing Yong, Haixia Bi, Fan Li* School of Information and Communications Engineering, Xi’an Jiaotong University wj851329121@stu.xjtu.edu.cn, lijunhe@mail.xjtu.edu.cn, yongyx@stu.xjtu.edu.cn, haixia.bi@mail.xjtu.edu.cn, lifan@mail.xjtu.edu.cn arXiv:2511.08015v1 [cs.CV] 11 Nov 2025 Abstract Modern autonomous driving (AD) systems leverage 3D object detection to perceive foreground objects in 3D environments for subsequent prediction and planning. Visual 3D detection based on RGB cameras provides a cost-effective solution compared to the LiDAR paradigm. While achieving promising detection accuracy, current deep neural networkbased models remain highly susceptible to adversarial examples. The underlying safety concerns motivate us to investigate realistic adversarial attacks in AD scenarios. Previous work has demonstrated the feasibility of placing\ns",
+      "full_text": "Invisible Triggers, Visible Threats! Road-Style Adversarial Creation Attack for Visual 3D Detection in Autonomous Driving Jian Wang, Lijun He, Yixing Yong, Haixia Bi, Fan Li* School of Information and Communications Engineering, Xi’an Jiaotong University wj851329121@stu.xjtu.edu.cn, lijunhe@mail.xjtu.edu.cn, yongyx@stu.xjtu.edu.cn, haixia.bi@mail.xjtu.edu.cn, lifan@mail.xjtu.edu.cn arXiv:2511.08015v1 [cs.CV] 11 Nov 2025 Abstract Modern autonomous driving (AD) systems leverage 3D object detection to perceive foreground objects in 3D environments for subsequent prediction and planning. Visual 3D detection based on RGB cameras provides a cost-effective solution compared to the LiDAR paradigm. While achieving promising detection accuracy, current deep neural networkbased models remain highly susceptible to adversarial examples. The underlying safety concerns motivate us to investigate realistic adversarial attacks in AD scenarios. Previous work has demonstrated the feasibility of placing\nsusceptible to adversarial examples. The underlying safety concerns motivate us to investigate realistic adversarial attacks in AD scenarios. Previous work has demonstrated the feasibility of placing adversarial posters on the road surface to induce hallucinations in the detector. However, the unnatural appearance of the posters makes them easily noticeable by humans, and their ﬁxed content can be readily targeted and defended. To address these limitations, we propose the AdvRoad to generate diverse road-style adversarial posters. The adversaries have naturalistic appearances resembling the road surface while compromising the detector to perceive non-existent objects at the attack locations. We employ a two-stage approach, termed Road-Style Adversary Generation and Scenario-Associated Adaptation, to maximize the attack effectiveness on the inputFigure 1: Illustration of the adversarial FP attacks on the scene while ensuring the natural appearance of the poster, alroad. The 3D\nAdaptation, to maximize the attack effectiveness on the inputFigure 1: Illustration of the adversarial FP attacks on the scene while ensuring the natural appearance of the poster, alroad. The 3D detection system will perceive a ghost ob-lowing the attack to be carried out stealthily without drawing ject near the poster. Compared with previous work (left), ourhuman attention. Extensive experiments show that AdvRoad generalizes well to different detectors, scenes, and spooﬁngposter (right) is harder to attract human attention, making it locations. Moreover, physical attacks further demonstrate themore likely to pose a real threat. practical threats in real-world environments.\nCode — https://github.com/WangJian981002/AdvRoadet al. 2023; Wang et al. 2023b). Recent studies have revealed that carefully designed inputs, such as additive perturbations (Zhang et al. 2024, 2021; Goodfellow, Shlens, and SzegedyIntroduction 2014; Athalye et al. 2018) and local patches (Guesmi et al.",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-1",
+      "chunk_indices": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "char_count": 5444,
+      "summary": "Victim Model Attack Way Consequence Malicious laser signal injection FN (Cao et ",
+      "digest": "Victim Model Attack Way Consequence Malicious laser signal injection FN (Cao et al. 2023; Jin et al. 2023; Hau et al. 2021) LiDAR-based Malicious laser signal injection FP (Jin et al. 2023; Sun et al. 2020; Cao et al. 2019a; Wang et al. 2023a) 3D adversarial mesh (Tu et al. 2020; Cao et al. 2019b) FN Adversarial camouﬂage (Li, Qing, and Chen 2023) FN Adversarial patch Camera-based FN (Zhu et al. 2023; Wang, Li, and He 2025; Cheng et al. 2023; Xie et al. 2023) Adversarial poster (Wang et al. 2025) FP Table 1: The summarization of physical adversarial attacks targeting 3D object detection in AD. 2023; Tu et al. 2020; Zhang, Hou, and Yuan 2024; Wang, First, we use drones to take aerial photos of ground scenes Li, and He 2025) focus on FN attacks — for example, at-and construct a road image collection for training the style taching adversarial patches to vehicles to make them invis-discriminator. Then, we gradually update the generator by itible to detectors, which may result in a\nimage co",
+      "full_text": "Victim Model Attack Way Consequence Malicious laser signal injection FN (Cao et al. 2023; Jin et al. 2023; Hau et al. 2021) LiDAR-based Malicious laser signal injection FP (Jin et al. 2023; Sun et al. 2020; Cao et al. 2019a; Wang et al. 2023a) 3D adversarial mesh (Tu et al. 2020; Cao et al. 2019b) FN Adversarial camouﬂage (Li, Qing, and Chen 2023) FN Adversarial patch Camera-based FN (Zhu et al. 2023; Wang, Li, and He 2025; Cheng et al. 2023; Xie et al. 2023) Adversarial poster (Wang et al. 2025) FP Table 1: The summarization of physical adversarial attacks targeting 3D object detection in AD. 2023; Tu et al. 2020; Zhang, Hou, and Yuan 2024; Wang, First, we use drones to take aerial photos of ground scenes Li, and He 2025) focus on FN attacks — for example, at-and construct a road image collection for training the style taching adversarial patches to vehicles to make them invis-discriminator. Then, we gradually update the generator by itible to detectors, which may result in a\nimage collection for training the style taching adversarial patches to vehicles to make them invis-discriminator. Then, we gradually update the generator by itible to detectors, which may result in a rear-end collision.eratively rendering the mapped poster onto the scene image However, implementing FN attacks typically requires phys-and backpropagating the gradients based on the adversarical access to the target object, limiting their practical ap-ial objective and style discriminator. The ﬁrst stage ensures plication. FP attacks, on the other hand, aim to make detec-that the generated posters are similar to the source collectors ”see” imaginary obstacles, potentially triggering suddention images while being able to compromise the detector. In braking or dangerous lane changes by autonomous vehicles.the second stage, we derive a local-optimal poster tailored Despite posing similar safety risks as FN attacks, FP attacksto a speciﬁc input, aiming to enhance its deceptive effectivefor\nvehicles.the second stage, we derive a local-optimal poster tailored Despite posing similar safety risks as FN attacks, FP attacksto a speciﬁc input, aiming to enhance its deceptive effectivefor visual 3D detection remain poorly studied in the currentness within the given scenario. Concretely, we initialize a attack literature. poster from the generator trained in the ﬁrst stage, randomly Recently, Wang et al. (Wang et al. 2025) pioneered physi-sample and place it at various locations in the current scene, cal FP attack targeting visual 3D detectors by placing a care-and then backpropagate the gradients to the latent space to fully optimized poster on the road, thereby inducing the de-optimize the noise vector toward a locally optimal solution. tector to perceive a ghost object near the poster (as shownNote that in this stage, the generator is frozen. Therefore, in Fig. 1 left). Since the poster is 2D and lacks thickness, the found adversary not only has naturalistic road styles but\nposter (as shownNote that in this stage, the generator is frozen. Therefore, in Fig. 1 left). Since the poster is 2D and lacks thickness, the found adversary not only has naturalistic road styles but it is ﬂexible to print and launch the attack. Moreover, thealso achieves the strongest attack effectiveness in the current generated poster has strong generalization ability, allowing scene. it to be effective in various scenarios. They learn the poster In short, our contributions are: by proposing an image-3D applying algorithm that can dif-• We present a naturalistic FP attack pipeline for inducing ferentiably render the 3D space poster onto the image, andthe ghost object on the road. The crafted posters can sigdirectly optimizing the poster’s pixel values. However, theniﬁcantly evade human perception while compromising following weaknesses remain: ❶The content of the posterthe 3D models, thereby increasing the practical threat to signiﬁcantly differs from the road surface, making it\nperception while compromising following weaknesses remain: ❶The content of the posterthe 3D models, thereby increasing the practical threat to signiﬁcantly differs from the road surface, making it easily the AD system. noticed by humans. Directly optimizing poster pixels cannot• We introduce Road-Style Adversary Generation and constrain the learned content, which often has patterns withScenario-Associated Adaptation to maximize the attack ❷non-naturalistic appearances.Each training session cancapability of the adversarial poster. Moreover, all adveronly generate one poster, making it easy to be targeted andsaries are effective across various scenes and at certain defended. They generate a single adversarial poster that is observation distances (e.g., ≤10m). effective across all scene images. Despite achieving a high • Extensive experiments in both the digital and physical attack success rate, the single poster can be easily exploited worlds demonstrate the effectiveness of our\nimages. Despite achieving a high • Extensive experiments in both the digital and physical attack success rate, the single poster can be easily exploited worlds demonstrate the effectiveness of our approach and defended against (e.g., by ﬁne-tuning the model with with improved stealthiness. In addition, our posters are data containing this adversary). harder to defend against using existing defense tech- In response to limitations ❶and ❷, we propose a novel niques.",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-2",
+      "chunk_indices": [
+        10
+      ],
+      "char_count": 964,
+      "summary": "FP attack pipeline that generates diverse road-style adversarial posters. All po",
+      "digest": "FP attack pipeline that generates diverse road-style adversarial posters. All posters have patterns similar to the back- Related Workground road surface, making them harder to attract human attention, allowing the attack to proceed silently. Our frame-3D object detection is the most crucial perception task in work employs a two-stage approach, Road-Style Adversarymodular autonomous driving systems, which identiﬁes and Generation and Scenario-Associated Adaptation, to gener-locates surrounding trafﬁc participants like vehicles and ate diverse naturalistic adversaries. In the ﬁrst stage, we uti-pedestrians in 3D space. Errors in detection results gradlize GAN-based techniques to train an adversarial genera-ually accumulate, thereby affecting subsequent predictions tor that maps latent noise vectors to road-style adversaries. and planning.\nUpdate generator G, Stage 1 Update discriminator D, Stage 1 Road realImage Collection fake…\nGenerator Discriminator",
+      "full_text": "FP attack pipeline that generates diverse road-style adversarial posters. All posters have patterns similar to the back- Related Workground road surface, making them harder to attract human attention, allowing the attack to proceed silently. Our frame-3D object detection is the most crucial perception task in work employs a two-stage approach, Road-Style Adversarymodular autonomous driving systems, which identiﬁes and Generation and Scenario-Associated Adaptation, to gener-locates surrounding trafﬁc participants like vehicles and ate diverse naturalistic adversaries. In the ﬁrst stage, we uti-pedestrians in 3D space. Errors in detection results gradlize GAN-based techniques to train an adversarial genera-ually accumulate, thereby affecting subsequent predictions tor that maps latent noise vectors to road-style adversaries. and planning.\nUpdate generator G, Stage 1 Update discriminator D, Stage 1 Road realImage Collection fake…\nGenerator Discriminator",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-3",
+      "chunk_indices": [
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "char_count": 4611,
+      "summary": "3D position sampling Image-3D 3D Detector Road Image Collection Scene image Rend",
+      "digest": "3D position sampling Image-3D 3D Detector Road Image Collection Scene image Rendering Update noise n (), Stage2 Figure 2: The AdvRoad framework. Stage 1 trains an adversarial generator that outputs universal road-style posters; Stage 2 updates the poster (the latent vector) to enhance the attack capability for the given scene. ∗Recent research efforts have developed various physical the response yunder the adversarial input: attack methods targeting LiDAR-based and camera-based ∗maxlog p(y |R(x, δ, t)) (1) detection algorithms. We provide a summary of these works δ in terms of physical attack ways and attack consequences where p is the probability function; δ is the adversary to be in Table 1. For LiDAR-based approaches, attackers must al-optimized, which can either be an explicit representation of ter the captured LiDAR point clouds. This can be achievedthe poster (e.g., a pixel array P ∈ [0, 255]3×H×W) or an by strategically emitting laser pulses toward the target Li-implicit\nof ter ",
+      "full_text": "3D position sampling Image-3D 3D Detector Road Image Collection Scene image Rendering Update noise n (), Stage2 Figure 2: The AdvRoad framework. Stage 1 trains an adversarial generator that outputs universal road-style posters; Stage 2 updates the poster (the latent vector) to enhance the attack capability for the given scene. ∗Recent research efforts have developed various physical the response yunder the adversarial input: attack methods targeting LiDAR-based and camera-based ∗maxlog p(y |R(x, δ, t)) (1) detection algorithms. We provide a summary of these works δ in terms of physical attack ways and attack consequences where p is the probability function; δ is the adversary to be in Table 1. For LiDAR-based approaches, attackers must al-optimized, which can either be an explicit representation of ter the captured LiDAR point clouds. This can be achievedthe poster (e.g., a pixel array P ∈ [0, 255]3×H×W) or an by strategically emitting laser pulses toward the target Li-implicit\nof ter the captured LiDAR point clouds. This can be achievedthe poster (e.g., a pixel array P ∈ [0, 255]3×H×W) or an by strategically emitting laser pulses toward the target Li-implicit representation (e.g., a generator G: n ∈ Rd → DAR sensor (Cao et al. 2019a; Jin et al. 2023; Cao et al. 3×H×W P ∈ [0, 255], n ∼N(0, 1)). 2023) or placing 3D adversarial objects in the environment Continuous Attack Goals. When driving, the observa- (Tu et al. 2020; Cao et al. 2019b). However, altering LiDARtion of the scene changes continuously, such as varying disdata typically requires complex equipment like laser diodes, tances and viewing angles. The practical threat posed by photodiodes, or industrial-grade 3D printers. This limits thea road-surface poster is substantially reduced if its effecattack’s ﬂexibility in dynamically changing AD scenarios.tiveness is conﬁned to a speciﬁc scenario or location. Be- For camera-based approaches, attackers can utilize more af-cause the AD system is likely to\nﬂexibility in dynamically changing AD scenarios.tiveness is conﬁned to a speciﬁc scenario or location. Be- For camera-based approaches, attackers can utilize more af-cause the AD system is likely to classify targets appearing fordable adversarial patches to perturb the captured images, in merely one or two frames as sensor noise. Consequently, leading to various detection errors. Extending Wang et al.’sthese posters must exhibit universality to remain effective framework (Wang et al. 2025) of using road surface postersacross varying scenarios and viewing distances. to create fake 3D objects, we further study how to hide theseTo this end, we leverage the Expectation of Transformapatterns from human drivers. The spooﬁng capability to de-tion (EoT) (Athalye et al. 2018) across all training samples tectors and stealthiness to humans make the attack more dan-and a wide range of spooﬁng locations to enhance the physgerous in real driving scenarios. ical robustness and generality of the\nsamples tectors and stealthiness to humans make the attack more dan-and a wide range of spooﬁng locations to enhance the physgerous in real driving scenarios. ical robustness and generality of the attack. Formally, the optimization objective becomes: XX Problem Deﬁnition ∗δ = arg max log p(y |R(x, δ, t)) (2) x∈X t∈T We investigate adversarial FP attacks against visual 3D ob- where X comprises all possible image inputs and T is the ject detection models by placing the learned poster on theset of position transformation parameters. road surface. Speciﬁcally, attackers apply the adversarial poster to a benign image x by ﬁrstly sampling the poster Proposed AdvRoad Framework location in 3D space and then rendering the poster onto the Road-Style Adversary Generationimage. This results in an adversarial input R(x, δ, t), where R(·) is the rendering function that applies the adversary δFig. 2 presents the framework of our road-style creation atto the input x according to the sampled\nin an adversarial input R(x, δ, t), where R(·) is the rendering function that applies the adversary δFig. 2 presents the framework of our road-style creation atto the input x according to the sampled transformation pa-tack. The ﬁrst stage aims to learn an adversarial generator rameter t. Our goal is to induce the 3D detector, denoted asthat outputs diverse road-style posters while containing crit- ∗Fθ, to produce a desired response yat the poster position, ical foreground features, enabling them to induce FP predicwhich is formally deﬁned by maximizing the likelihood oftions in the detector. We employ a standard GAN pipeline to",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-4",
+      "chunk_indices": [
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22
+      ],
+      "char_count": 5786,
+      "summary": "integrate road surface style and spooﬁng information to the versarial loss L and",
+      "digest": "integrate road surface style and spooﬁng information to the versarial loss L and update vector n. This process is for-obj generator. mulated as: Road Image Collection. We utilize a DJI drone to capn0 = n ture aerial photography of trafﬁc scenes, obtaining a series of (5)∗raw images containing diverse road surfaces. We then crop ni+1 = ni − α · ∇n J(Fθ(R(x, G(ni), t)), y) i authentic road patches from the collected aerial images, with We repeat this process until reach the maximum iteration each patch dimension approximating vehicle size (2m×4m). number. To preserve realism, we ensure that the updated The built collection comprises over 2,000 road surface imnoise n+1 falls into the hypersphere of radius η centered ages covering various road patterns and styles (as shown in i at initial noise n in each iteration. The ﬁnal poster exhibits Fig. 2 left). This collection serves as the real reference for 0 strongest deceptive capability in the current scene while betraining the style\nnoise n ",
+      "full_text": "integrate road surface style and spooﬁng information to the versarial loss L and update vector n. This process is for-obj generator. mulated as: Road Image Collection. We utilize a DJI drone to capn0 = n ture aerial photography of trafﬁc scenes, obtaining a series of (5)∗raw images containing diverse road surfaces. We then crop ni+1 = ni − α · ∇n J(Fθ(R(x, G(ni), t)), y) i authentic road patches from the collected aerial images, with We repeat this process until reach the maximum iteration each patch dimension approximating vehicle size (2m×4m). number. To preserve realism, we ensure that the updated The built collection comprises over 2,000 road surface imnoise n+1 falls into the hypersphere of radius η centered ages covering various road patterns and styles (as shown in i at initial noise n in each iteration. The ﬁnal poster exhibits Fig. 2 left). This collection serves as the real reference for 0 strongest deceptive capability in the current scene while betraining the style\nnoise n in each iteration. The ﬁnal poster exhibits Fig. 2 left). This collection serves as the real reference for 0 strongest deceptive capability in the current scene while betraining the style discriminator, while the synthetic countering authentic. parts are generated by the generator. The inclusion of authentic imagery facilitates learning the realistic road patterns Image-3D Rendering from the generator, thereby enhancing the visual indistinguishability of adversarial outputs to human drivers.Conventional 2D patch rendering (Thys, Van Ranst, and Adversarial Objective. The adversarial generator G is Goedem´e 2019; Lee and Kolter 2019; Hu et al. 2021) solely trained on the whole detection dataset X. Given a frame ofperforms scaling and rotating the patch according to the obinput image x ∈ X, we ﬁrst sample the poster locationsjects’ 2D bounding boxes. Although convenient, the physin the 3D space then render the poster G(n), n ∈ Rd toical size of the patch and its position in 3D\nx ∈ X, we ﬁrst sample the poster locationsjects’ 2D bounding boxes. Although convenient, the physin the 3D space then render the poster G(n), n ∈ Rd toical size of the patch and its position in 3D space are not the x through differentiable Image-3D rendering (discussedconsidered, which are critical for realistic physical attacks later). Then, we prepare the adversarial label y∗for the in-on 3D detectors. Following (Wang et al. 2025; Zhu et al. put R(x, δ, t). We mask out the regions of real objects on2023), we brieﬂy introduce how to render the poster from the 3D road surface onto the image.the input image using ground truth (GT) bounding box annotations, and replace the GT labels with spooﬁng bound-First, we sample the 3D spatial positions of posters to ing boxes introduced by the posters. This approach pro-place them on the road surface. Within a sector spanning vides dual advantages: First, masking surrounding objects ±∆ relative to the vehicle’s heading direction and a dis-θ\nThis approach pro-place them on the road surface. Within a sector spanning vides dual advantages: First, masking surrounding objects ±∆ relative to the vehicle’s heading direction and a dis-θ prevents the gradient being vanishing by averaging. Second, tance range of d to d meters, we randomly samplemin max we can reuse the detector’s native loss function to directlyplacement locations while avoiding overlapping with existcalculate the adversarial loss. Formally, the adversarial lossing scene objects. Second, we project the four poster coris: ner points onto the image plane using the camera’s intrin- L = J(F (R(x, G(n), t)), y∗) (3)sic and extrinsic matrices, thereby determining the adversar-obj θ ial region in the image (the quadrangle region deﬁned by where J(·) is the original loss function for detector F. Theθprojected corner points). Third, for each pixel within this other training objective comes from style discriminator D. region, we inversely calculate its 3D coordinates aided\nfor detector F. Theθprojected corner points). Third, for each pixel within this other training objective comes from style discriminator D. region, we inversely calculate its 3D coordinates aided by We freeze the D and maximize the discriminator’s conﬁ- road height information (approximated from the bottom face dence in classifying the generator’s outputs as real. The ﬁnal height of the nearest scene object to the poster). Finally, training objective for the generator is: each pixel’s RGB value is calculated via bilinear interpolation based on its 3D position relative to the poster. For moreL = L + λ · L (4)G cls obj details refer to supplementary-A.\nWe alternately train the generator and the discriminator, gradually injecting spooﬁng and style information into the Experiment generated posters.\nExperimental Setup Scenario-Associated Adaptation Victim Model. The vision-based BEV space 3D detec- After the ﬁrst stage training, the posters output by the gen-tor BEVDet (Huang et al. 2021), BEVDet4D (Huang and erator both resemble the road surface and maintain a certainHuang 2022), and BEVFormer (Li et al. 2024) are selected as victim models for the attack, considering their repre-degree of deception. They can serve as a universal trap to trigger FP predictions in the 3D detector. However, the gen-sentativeness and the fact that BEV space inherently superated posters rely on sampling noise from the latent space—ports most downstream perception tasks for AD (Hu et al. a process that involves inherent randomness and may lead2023). For each detector, the ResNet50 (He et al. 2016) and to unstable attack effects. Therefore, we further introduceSwinTransformer-Tiny (Liu et al. 2021) are used as image Scenario-Associated Adaptation to enhance the attack capa-backbone respectively. bility",
+      "keywords": [],
+      "page_range": [
+        4,
+        4
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-5",
+      "chunk_indices": [
+        23
+      ],
+      "char_count": 999,
+      "summary": "attack effects. Therefore, we further introduceSwinTransformer-Tiny (Liu et al. ",
+      "digest": "attack effects. Therefore, we further introduceSwinTransformer-Tiny (Liu et al. 2021) are used as image Scenario-Associated Adaptation to enhance the attack capa-backbone respectively. bility of the posters in speciﬁc scenarios. Dataset. For the digital attack, we use nuScenes dataset Speciﬁcally, given the input scenario x, we ﬁrst randomly(Caesar et al. 2020) to train the adversary and perform the initialize the noise vector n from the Gaussian distributionattack. nuScenes is a large-scale, multi-modal dataset specif- N(0, 1) and fed n into the frozen generator to get the spoof-ically designed for AD and 3D object detection. The training ing poster. Then, we randomly sample the poster locations inand validation set contains 28,130 and 6,019 frames respecthe current scene and perform rendering. Finally, we back-tively, with each frame including image data from six campropagate the gradient to the latent space based on the ad- eras and 360◦3D object annotations. We train all detectors",
+      "full_text": "attack effects. Therefore, we further introduceSwinTransformer-Tiny (Liu et al. 2021) are used as image Scenario-Associated Adaptation to enhance the attack capa-backbone respectively. bility of the posters in speciﬁc scenarios. Dataset. For the digital attack, we use nuScenes dataset Speciﬁcally, given the input scenario x, we ﬁrst randomly(Caesar et al. 2020) to train the adversary and perform the initialize the noise vector n from the Gaussian distributionattack. nuScenes is a large-scale, multi-modal dataset specif- N(0, 1) and fed n into the frozen generator to get the spoof-ically designed for AD and 3D object detection. The training ing poster. Then, we randomly sample the poster locations inand validation set contains 28,130 and 6,019 frames respecthe current scene and perform rendering. Finally, we back-tively, with each frame including image data from six campropagate the gradient to the latent space based on the ad- eras and 360◦3D object annotations. We train all detectors",
+      "keywords": [],
+      "page_range": [
+        4,
+        4
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-6",
+      "chunk_indices": [
+        24,
+        25,
+        26,
+        27,
+        28,
+        29
+      ],
+      "char_count": 5693,
+      "summary": "ASR (%, ↑)Model Attack LPIPS ↓ 2.0m 1.5m 1.0m 0.5m Benign - 1.5 0.3 0.1 0 BEVDet",
+      "digest": "ASR (%, ↑)Model Attack LPIPS ↓ 2.0m 1.5m 1.0m 0.5m Benign - 1.5 0.3 0.1 0 BEVDet Random 0.2136 8.0 4.9 2.9 0.8 -R50 Real picture 0.2066 30.4 22.8 15.7 6.3 AdvRoad 0.1472 62.6 55.6 42.7 23.3 Benign - 1.2 0.2 0 0 BEVDet Random 0.2138 1.7 0.7 0.4 0.1 (a) AdvRoad -SwinT Real picture 0.2066 25.7 19.0 12.1 4.9 AdvRoad 0.1337 60.2 56.3 47.6 28.8 Benign - 1.2 0.1 0 0 (b) AdvPoster (c) Real Picture BEVDet4D Random 0.2137 3.4 1.9 1.2 0.3 -R50 Real picture 0.2066 45.1 38.1 29.0 14.9 Figure 3: Visualizations of attack results in the digital do- AdvRoad 0.1331 49.1 42.9 32.7 17.7 main. We place the spooﬁng poster on the road surface to Benign - 1.2 0.3 0 0launch the attack. (1) AdvRoad, our road-style naturalistic BEVDet4D Random 0.2136 1.4 0.3 0 0 adversarial poster; (2) AdvPoster (Wang et al. 2025), gener- -SwinT Real picture 0.2066 23.4 19.3 13.7 7.3 ated by directly optimizing the pixel values; (3) Real Picture, AdvRoad 0.1370 39.1 35.1 27.8 15.7 use images of real vehicles as posters.\nBenign -",
+      "full_text": "ASR (%, ↑)Model Attack LPIPS ↓ 2.0m 1.5m 1.0m 0.5m Benign - 1.5 0.3 0.1 0 BEVDet Random 0.2136 8.0 4.9 2.9 0.8 -R50 Real picture 0.2066 30.4 22.8 15.7 6.3 AdvRoad 0.1472 62.6 55.6 42.7 23.3 Benign - 1.2 0.2 0 0 BEVDet Random 0.2138 1.7 0.7 0.4 0.1 (a) AdvRoad -SwinT Real picture 0.2066 25.7 19.0 12.1 4.9 AdvRoad 0.1337 60.2 56.3 47.6 28.8 Benign - 1.2 0.1 0 0 (b) AdvPoster (c) Real Picture BEVDet4D Random 0.2137 3.4 1.9 1.2 0.3 -R50 Real picture 0.2066 45.1 38.1 29.0 14.9 Figure 3: Visualizations of attack results in the digital do- AdvRoad 0.1331 49.1 42.9 32.7 17.7 main. We place the spooﬁng poster on the road surface to Benign - 1.2 0.3 0 0launch the attack. (1) AdvRoad, our road-style naturalistic BEVDet4D Random 0.2136 1.4 0.3 0 0 adversarial poster; (2) AdvPoster (Wang et al. 2025), gener- -SwinT Real picture 0.2066 23.4 19.3 13.7 7.3 ated by directly optimizing the pixel values; (3) Real Picture, AdvRoad 0.1370 39.1 35.1 27.8 15.7 use images of real vehicles as posters.\nBenign - 1.4 0.3 0 0 BEVFormer Random 0.1304 1.4 0.3 0 0 on the training set following their ofﬁcial settings and de- -R50 Real picture 0.1260 6.3 3.5 1.8 0.7 AdvRoad 0.0822 44.5 32.7 20.7 8.2 tection performances are given in supplementary-B.1. The conﬁdence scores for the detected objects are over 0.1 for Benign - 1.5 0.3 0 0 all models following (Wang et al. 2025; Tu et al. 2020). BEVFormer Random 0.1306 1.5 0.5 0.1 0 Evaluation Metric. The attack success rate (ASR) is used -SwinT Real picture 0.1260 20.9 16.6 10.4 4.3 to evaluate the creation attack, which measures the propor- AdvRoad 0.0818 37.3 30.6 21.0 8.9 tion of successfully detected fake objects among all spooﬁng Table 2: Digital attack results of adversarial creation attack attempts. We consider a fake object is successfully detected in the nuScenes dataset. when the minimum distance between the detector’s predictions and the center of the poster is less than d. Multi-thr ple center distance thresholds, {2.0m, 1.5m, 1.0m,\nin the nuScenes dataset. when the minimum distance between the detector’s predictions and the center of the poster is less than d. Multi-thr ple center distance thresholds, {2.0m, 1.5m, 1.0m, 0.5m}, attack locations (with a ﬁxed random seed) considering theare adopted for comprehensive evaluation. Unlike using the miscalculation cases, where the detection results for the realIoU as an indicator, precise alignment of the detected bounding box with the y∗in terms of size and orientation is lessobjects are incorrectly counted to spoofed ones. Random: critical. Since the AD system may lead to dangerous con-randomly initialize a poster for the attack. Real picture: use sequences as long as a fake obstacle is perceived near theimages of real vehicles as posters for the attack (Fig. 3(c)). poster. Table 2 shows the digital attack results in nuScenes Moreover, we use the Learned Perceptual Image Patchdataset. We achieve good attack performance across six dif- Similarity (LPIPS) score (Zhang\nTable 2 shows the digital attack results in nuScenes Moreover, we use the Learned Perceptual Image Patchdataset. We achieve good attack performance across six dif- Similarity (LPIPS) score (Zhang et al. 2018) to assess the en-ferent 3D detectors, successfully inducing FP predictions vironmental consistency of the attack, which measures per-near the poster locations (see Fig. 3(a) for the visualizaceptual similarity between benign and attacked images.tion results). This holds regardless of whether the target Implementation Details. We set the category of themodel uses a CNN-based or Transformer-based backbone, spooﬁng object to the most common vehicle, with thea geometry-based or network-based PV-to-BEV transforposter’s physical size being 2m × 4m. For spooﬁng loca-mation, or an anchor point-based or query-based detection tions, we aim to induce FP predictions either in front ofhead. For AD systems, such an error rate (exceeding 40%) or behind the self-vehicle. Therefore, the posters\nor query-based detection tions, we aim to induce FP predictions either in front ofhead. For AD systems, such an error rate (exceeding 40%) or behind the self-vehicle. Therefore, the posters are placedis catastrophic. A suddenly appearing object within 10 meat a distance of 7 to 10 meters from the self-vehicle withters in front of the ego-vehicle can trigger emergency brak- ◦∆θ = 5. Within this range, the AD system’s misjudgmenting or lane-changing decisions, potentially leading to severe leaves little time for the driver to react. We sample 1,000 val-safety incidents. Moreover, since our posters resemble the idation frames and place posters at two locations per frame, road surface, drivers have limited time to react and effecyielding 2,000 attacks for ASR computation. See the supple- tively intervene. mentary materials for more training details. Since we avoid overlapping with scene objects when sampling attack locations, miscalculation cases are nearly neg- Main Result ligible, e.g.,\nintervene. mentary materials for more training details. Since we avoid overlapping with scene objects when sampling attack locations, miscalculation cases are nearly neg- Main Result ligible, e.g., the ASR for Benign consistently < 1.5% un- We verify the effectiveness of our road-style adversarial der CD. Moreover, we observe an interesting result that2.0m poster (AdvRoad) in comparison with Benign, Random, andtaking a real vehicle image as the spooﬁng poster may also Real picture. Speciﬁcally, Benign: original scene without thelead to FP errors. Speciﬁcally, Real picture can achieve an adversarial pattern, however, we still sample and record the ASR of up to 45.1% under CD2 0 for BEVDet4D-R50.. m",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-7",
+      "chunk_indices": [
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36
+      ],
+      "char_count": 5553,
+      "summary": "BEVDet BEVFormer 91.0 82.6 Stage ASR (%, ↑) AdvPoster, w/o Def. 80 AdvPoster, w/",
+      "digest": "BEVDet BEVFormer 91.0 82.6 Stage ASR (%, ↑) AdvPoster, w/o Def. 80 AdvPoster, w/o Def. 1th 2nd 20m 15m 10m 05mAdvPoster, w/ Def. 83.4 AdvPoster, w/ Def. 73.3....80 AdvRoad, w/o Def. AdvRoad, w/o Def.\nAttack Success Rate (%) AdvRoad, w/ Def. Attack Success Rate (%) AdvRoad, w/ Def.64.8 62.6 60 57.0 AdvRoad@1 ✓ 23.4 19.2 13.1 6.8 60 55.6 AdvRoad@2 ✓ 26.7 21.9 16.3 7.344.5 42.7 40 AdvRoad ✓ ✓ 62.6 55.6 42.7 23.340 33.2 29.7 32.7 AdvRoad∗ ✓ ✓ 23.3 21.9 20.7 67.0 60.5 48.6 27.2 20 20 18.7 10.9 13.2 12.2 7.0 8.25.5 8.5 0.1 0.2 0.3 1.6 0 0.1 0.5 1.8Table 3: Ablations for Road-Style Adversary Generation and0 0 0.5m 1.0m 1.5m 2.0m 0.5m 1.0m 1.5m 2.0mScenario-Associated Adaptation. The results (ASR-%) areCenter Distance Center Distance AdvRoad AdvPoster given on BEVDet-R50. AdvRoad AdvPoster 0.0822 0.1104LPIPS 0.1472 0.1929 LPIPS (a) (b) ASR (%, ↑) Physical Size LPIPS ↓Figure 4: Comparison with AdvPoster w/ (dash line) and 2.0m 1.5m 1.0m 0.5m w/o (solid line) defense. All victim models use ResNe",
+      "full_text": "BEVDet BEVFormer 91.0 82.6 Stage ASR (%, ↑) AdvPoster, w/o Def. 80 AdvPoster, w/o Def. 1th 2nd 20m 15m 10m 05mAdvPoster, w/ Def. 83.4 AdvPoster, w/ Def. 73.3....80 AdvRoad, w/o Def. AdvRoad, w/o Def.\nAttack Success Rate (%) AdvRoad, w/ Def. Attack Success Rate (%) AdvRoad, w/ Def.64.8 62.6 60 57.0 AdvRoad@1 ✓ 23.4 19.2 13.1 6.8 60 55.6 AdvRoad@2 ✓ 26.7 21.9 16.3 7.344.5 42.7 40 AdvRoad ✓ ✓ 62.6 55.6 42.7 23.340 33.2 29.7 32.7 AdvRoad∗ ✓ ✓ 23.3 21.9 20.7 67.0 60.5 48.6 27.2 20 20 18.7 10.9 13.2 12.2 7.0 8.25.5 8.5 0.1 0.2 0.3 1.6 0 0.1 0.5 1.8Table 3: Ablations for Road-Style Adversary Generation and0 0 0.5m 1.0m 1.5m 2.0m 0.5m 1.0m 1.5m 2.0mScenario-Associated Adaptation. The results (ASR-%) areCenter Distance Center Distance AdvRoad AdvPoster given on BEVDet-R50. AdvRoad AdvPoster 0.0822 0.1104LPIPS 0.1472 0.1929 LPIPS (a) (b) ASR (%, ↑) Physical Size LPIPS ↓Figure 4: Comparison with AdvPoster w/ (dash line) and 2.0m 1.5m 1.0m 0.5m w/o (solid line) defense. All victim models use ResNet50 1.5m × 3.0m 0.1123 31.3 26.5 19.9 10.4as image backbone. 2.0m × 3.0m 0.1292 49.4 42.1 32.5 17.7 2.0m × 3.5m 0.1384 56.6 50.4 38.6 21.2 2.0m × 4.0m 0.1472 62.6 55.6 42.7 23.3Although the picture\n1.5m × 3.0m 0.1123 31.3 26.5 19.9 10.4as image backbone. 2.0m × 3.0m 0.1292 49.4 42.1 32.5 17.7 2.0m × 3.5m 0.1384 56.6 50.4 38.6 21.2 2.0m × 4.0m 0.1472 62.6 55.6 42.7 23.3Although the picture poster is 2D and lacks thickness, it can 2.0m × 4.5m 0.1555 66.1 58.1 44.0 23.5still provide intrinsic foreground visual cues that the detector 2.0m × 5.0m 0.1633 67.6 59.3 45.0 23.1captures and recognizes. However, similar to a real object, a ‘ﬂat’ vehicle is also likely to attract the driver’s attention and Table 4: Ablations for the physical size of road posters. Thehas higher LPIPS scores compared with AdvRoad. results are given on BEVDet-R50. Comparison with Current Work We compare our attack with AdvPoster (Wang et al. 2025) tors. It is easy for the models to ﬁlter out these adversarialin terms of attack performance, naturality, and defense difﬁ- patterns inside the image. However, AdvRoad still achievesculty, which explicitly learns the adversary by directly opti- ∼20% ASR under CD,\nterms of attack performance, naturality, and defense difﬁ- patterns inside the image. However, AdvRoad still achievesculty, which explicitly learns the adversary by directly opti- ∼20% ASR under CD, which demonstrates the strongmizing the pixel values of the poster. 2.0m Attack Performance. The results are given in Fig. 4resilience of our attack when facing the defense. This is because AdvRoad can generate a large number of diverse ad-with aligned experimental settings (e.g., poster’s physical versaries, and these posters exhibit textures similar to thesize, attack distances). The solid lines represent the origroad surface, thus further increasing the difﬁculty of defense.inal attack performance without defense. As shown, Ad- More defense results are given in supplementary-B.3. vPoster achieves superior attack performance compared to our method, attaining ASR of 91% and 82.6% under Ablation CD on BEVDet and BEVFormer respectively. This2.0m demonstrates the effectiveness of directly\nachieves superior attack performance compared to our method, attaining ASR of 91% and 82.6% under Ablation CD on BEVDet and BEVFormer respectively. This2.0m demonstrates the effectiveness of directly optimizing the ex-Two Stage Approach. We conduct an ablation study to valplicit representation of adversaries. idate the effectiveness of each component in the AdvRoad.\nNaturality. AdvPoster optimizes a single deceptiveThe results are shown in Table 3. We ﬁrst brieﬂy introposter across entire input scenes. While demonstrating highduce the ablation settings. AdvRoad@1 directly uses the attack efﬁcacy, the learned patterns exhibit uncontrollableoutputs from Stage 1 for the attack; AdvRoad@2 follows and often abstract characteristics. As shown in Fig. 3(b), the typical GAN paradigm by ﬁrst training a road poster AdvPoster appears visually distinct from road surfaces and generator without the supervision of the adversarial objecis very attention-grabbing. In contrast, our AdvRoad injects tive L. Then, we freeze the generator using Scenario-obj style information into the generator through implicit ad-Associated Adaptation to search the latent vector to perform versarial representations, producing natural-looking posters the attack; AdvRoad∗extends the update iteration to 50 in that blend seamlessly into road textures and achieving aStage 2. AdvRoad@1\nversarial representations, producing natural-looking posters the attack; AdvRoad∗extends the update iteration to 50 in that blend seamlessly into road textures and achieving aStage 2. AdvRoad@1 achieves 23.4% ASR after the Stage lower LPIPS score. This enables stealthy attacks while am-1 training. This reﬂects the attack performance when ranplifying practical security threats. More quantitative visualdomly selecting a poster from the generator and placing it comparisons are provided in supplementary-B.2. within the 7–10m range. Additionally, even with a naturally Defense Difﬁculty. For AdvPoster, single training gener-trained generator without injecting adversarial information, searching the latent space can still discover deceptive con-ates only one unique adversarial example with salient discriminative features, it is more likely to be targeted and de-tent, achieving an ASR of 26.7%. Combining the Road-Style fended by the AD system. Therefore, we employ adversar-Adversary Generation",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-8",
+      "chunk_indices": [
+        37
+      ],
+      "char_count": 773,
+      "summary": "discriminative features, it is more likely to be targeted and de-tent, achieving",
+      "digest": "discriminative features, it is more likely to be targeted and de-tent, achieving an ASR of 26.7%. Combining the Road-Style fended by the AD system. Therefore, we employ adversar-Adversary Generation and Scenario-Associated Adaptation, ial augmentation as the defense. Speciﬁcally, we incorporateAdvRoad boosts the ASR to 62.6%, which highlights the the learned posters into the training set and ﬁne-tune the de-effectiveness of our two-stage attack pipeline. Also, increasing the update iterations in Stage 2 can further improve thetector for extra 2 epochs. The attack results after defense are shown in Fig. 4 (dash lines). We observe that AdvPoster ASR. only achieves less than 2% ASR against the defended detec- Physical Size. Theoretically, the more pixels an attacker",
+      "full_text": "discriminative features, it is more likely to be targeted and de-tent, achieving an ASR of 26.7%. Combining the Road-Style fended by the AD system. Therefore, we employ adversar-Adversary Generation and Scenario-Associated Adaptation, ial augmentation as the defense. Speciﬁcally, we incorporateAdvRoad boosts the ASR to 62.6%, which highlights the the learned posters into the training set and ﬁne-tune the de-effectiveness of our two-stage attack pipeline. Also, increasing the update iterations in Stage 2 can further improve thetector for extra 2 epochs. The attack results after defense are shown in Fig. 4 (dash lines). We observe that AdvPoster ASR. only achieves less than 2% ASR against the defended detec- Physical Size. Theoretically, the more pixels an attacker",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-9",
+      "chunk_indices": [
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "char_count": 5099,
+      "summary": "40.6 41.1 CD=2.0m40 CD=1.5m 35 35.4 33.7 CD=1.0m Attack Success Rate (%) 33.3 CD",
+      "digest": "40.6 41.1 CD=2.0m40 CD=1.5m 35 35.4 33.7 CD=1.0m Attack Success Rate (%) 33.3 CD=0.5m31.3 31.3 30.530 28.1 25 24.0 25.3 19.820 16.5 17.7 16.717.7 17.7 15 13.5 10 8.3 6.2 5 5.2 4.15.2 3.1 7m 8m 9m 10m 11m 12m Spoof Distance (meter) Figure 5: Attack results on the KITTI dataset. The ASRs (%) at different spooﬁng distances are given.\nFigure 6: Physical attack environment and results. can manipulate in an image, the stronger attack capability becomes. However, since posters placed on road surfaces Condition ASR undergo perspective projection when captured by cameras, Sunlit area 49.4%(170/344)increasing the physical size of posters yields diminishing Shaded area 28.3%(78/276)marginal returns in pixel gains for the adversarial region. On the other hand, since AdvRoad performs an instance-level Poster wrinkled 40.2%(103/256) attack that aims to induce a ghost vehicle near the poster cen- Partial occlusion 43.8%(92/210) ter, excessively large posters would actually hinder models Indoor 19.5%(",
+      "full_text": "40.6 41.1 CD=2.0m40 CD=1.5m 35 35.4 33.7 CD=1.0m Attack Success Rate (%) 33.3 CD=0.5m31.3 31.3 30.530 28.1 25 24.0 25.3 19.820 16.5 17.7 16.717.7 17.7 15 13.5 10 8.3 6.2 5 5.2 4.15.2 3.1 7m 8m 9m 10m 11m 12m Spoof Distance (meter) Figure 5: Attack results on the KITTI dataset. The ASRs (%) at different spooﬁng distances are given.\nFigure 6: Physical attack environment and results. can manipulate in an image, the stronger attack capability becomes. However, since posters placed on road surfaces Condition ASR undergo perspective projection when captured by cameras, Sunlit area 49.4%(170/344)increasing the physical size of posters yields diminishing Shaded area 28.3%(78/276)marginal returns in pixel gains for the adversarial region. On the other hand, since AdvRoad performs an instance-level Poster wrinkled 40.2%(103/256) attack that aims to induce a ghost vehicle near the poster cen- Partial occlusion 43.8%(92/210) ter, excessively large posters would actually hinder models Indoor 19.5%(57/292) from achieving precise localization. Our most lenient evaluation metric (Center distance ≤ 2m) exactly matches theTable 5: Quantitative attack results under different condiedge position of a 4m-long poster. As shown in Table 4, tions. increasing the physical size can improve the ASR. However, when the poster length exceeds\nattack results under different condiedge position of a 4m-long poster. As shown in Table 4, tions. increasing the physical size can improve the ASR. However, when the poster length exceeds 4m, the incremental gains become limited. Speciﬁcally, a 5m-long poster showsthe custom 3D detector. Then, we train the generator, select a decrease in ASR under the strict evaluation criterion ofa spooﬁng poster, and print it for the attack.\nCD0 5. However, all the posters have textures similar toFig. 6(b-d) illustrates some physical attack results. It can. m the road surface, making them difﬁcult for humans to detect.be seen that the poster can successfully induce the detector to generate false predictions at its location. Despite Attack to Broader Dataset some color deviations in the printing process (we use cost- To verify the generalization ability of AdvRoad across dif-effective banner fabric for printing), the poster remains efferent datasets, we further conduct attack experiments onfective. This is because, during training, we apply random KITTI scenes (Geiger, Lenz, and Urtasun 2012). We usebrightness and contrast adjustments, as well as inject random noise, to enhance the robustness of posters. The quantitativeBEVDet as the victim model and the ASRs at different results under different physical conditions are given in Ta-spooﬁng distances are shown in Fig. 5. We observe that the poster achieves the strongest\nas the victim model and the ASRs at different results under different physical conditions are given in Ta-spooﬁng distances are shown in Fig. 5. We observe that the poster achieves the strongest attack effectiveness at dis-ble 5. In addition, the texture similar to the road surface can tances between 9 and 10 meters. When the distance is toofurther reduce the attention from human drivers. Consider short, the poster may not be fully captured by the camera, using fabrics with better color ﬁdelity, such as canvas, to reduce the color difference with the background road surface, while at longer distances, the adversarial region in the image thereby making the attack more covert. Further analysis ofbecomes limited, leading to a decline in attack performance.\nFurther discussions on AdvRoad—such as its transfer-the physical attacks is provided in the supplementary-B.5. ability and the trade-off between diversity and attack effectiveness—can be found in the supplementary-B.4. Conclusion This paper introduces AdvRoad, a naturalistic FP attack Physical Attack Experiment pipeline for visual 3D object detection in AD. AdvRoad To assess the practicality of our AdvRoad, we conduct at-leverages Road-Style Adversary Generation and Scenariotack experiments in physical-world environments. Since vi-Associated Adaptation to perform stealthy adversarial atsual 3D detectors are typically camera-dependent (e.g., thetacks for human drivers, inducing ‘ghost’ objects for the PV2BEV transformation is related to the camera’s intrinsicperception system and potentially causing real-world threats parameters), physical experiments ﬁrst require training asuch as emergency braking. Extensive experiments on both 3D detector adapted to the custom scene and camera.\ncausing real-world threats parameters), physical experiments ﬁrst require training asuch as emergency braking. Extensive experiments on both 3D detector adapted to the custom scene and camera. There-digital and physical domains demonstrate the effectiveness fore, we built a physical detection platform with a front-viewof AdvRoad. Compared with previous work, our attack is RGB camera and a 16-line LiDAR (Fig. 6(a)). The LiDARharder to detect and defend against, highlighting signiﬁcant sensor is only used to annotate the scene objects for trainingsecurity risks to AD systems.",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-10",
+      "chunk_indices": [
+        45,
+        46,
+        47
+      ],
+      "char_count": 2147,
+      "summary": "Acknowledgments Guesmi, A.; Ding, R.; Hanif, M. A.; Alouani, I.; and Shaﬁque, M.",
+      "digest": "Acknowledgments Guesmi, A.; Ding, R.; Hanif, M. A.; Alouani, I.; and Shaﬁque, M. 2024. Dap: A dynamic adversarial patch forThis work was supported in part by the National Natural Science Foundation of China under Grant 62531012, in partevading person detectors. In Proceedings of the IEEE/CVF by the National Key Research and Development ProgramConference on Computer Vision and Pattern Recognition, 24595–24604. of China under Grant 2022YFA1003800, the Key Research and Development Program of Shaanxi Province under GrantGulino, C.; Fu, J.; Luo, W.; Tucker, G.; Bronstein, E.; Lu, 2025CY-YBXM-040, and in part by the XJTU ResearchY.; Harb, J.; Pan, X.; Wang, Y.; Chen, X.; et al. 2023. Way- Fund for Al Science under Grant 2025YXYC004. max: An accelerated, data-driven simulator for large-scale autonomous driving research. Advances in Neural Information Processing Systems, 36: 7730–7742. References Han, S.; Lin, C.; Shen, C.; Wang, Q.; and Guan, X. 2023. Interpreting adversarial examples in\nauto",
+      "full_text": "Acknowledgments Guesmi, A.; Ding, R.; Hanif, M. A.; Alouani, I.; and Shaﬁque, M. 2024. Dap: A dynamic adversarial patch forThis work was supported in part by the National Natural Science Foundation of China under Grant 62531012, in partevading person detectors. In Proceedings of the IEEE/CVF by the National Key Research and Development ProgramConference on Computer Vision and Pattern Recognition, 24595–24604. of China under Grant 2022YFA1003800, the Key Research and Development Program of Shaanxi Province under GrantGulino, C.; Fu, J.; Luo, W.; Tucker, G.; Bronstein, E.; Lu, 2025CY-YBXM-040, and in part by the XJTU ResearchY.; Harb, J.; Pan, X.; Wang, Y.; Chen, X.; et al. 2023. Way- Fund for Al Science under Grant 2025YXYC004. max: An accelerated, data-driven simulator for large-scale autonomous driving research. Advances in Neural Information Processing Systems, 36: 7730–7742. References Han, S.; Lin, C.; Shen, C.; Wang, Q.; and Guan, X. 2023. Interpreting adversarial examples in\nautonomous driving research. Advances in Neural Information Processing Systems, 36: 7730–7742. References Han, S.; Lin, C.; Shen, C.; Wang, Q.; and Guan, X. 2023. Interpreting adversarial examples in deep learning: A review.\nAbdelfattah, M.; Yuan, K.; Wang, Z. J.; and Ward, R. 2021. ACM Computing Surveys, 55(14s): 1–38. Adversarial attacks on camera-lidar models for 3d car detec- Hau, Z.; Co, K. T.; Demetriou, S.; and Lupu, E. C. 2021. tion. In IEEE/RSJ International Conference on Intelligent Object removal attacks on lidar-based 3d object detectors.Robots and Systems, 2189–2194. IEEE. arXiv preprint arXiv:2102.03722. Athalye, A.; Engstrom, L.; Ilyas, A.; and Kwok, K. 2018. He, K.; Zhang, X.; Ren, S.; and Sun, J. 2016. Deep residualSynthesizing robust adversarial examples. In International learning for image recognition. In Proceedings of the IEEEConference on Machine Learning, 284–293. PMLR.\nConference on Computer Vision and Pattern Recognition, Caesar, H.; Bankiti, V.; Lang, A. H.; Vora, S.; Liong, V. E.; 770–778. Xu, Q.; Krishnan, A.; Pan, Y.; Baldan, G.; and Beijbom, O.\nHu, C.; Shi, W.; Yao, W.; Jiang, T.; Tian, L.; Chen, X.; and",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-11",
+      "chunk_indices": [
+        48,
+        49,
+        50,
+        51,
+        52
+      ],
+      "char_count": 4108,
+      "summary": "2020. nuscenes: A multimodal dataset for autonomous driv- Li, W. 2024. Adversari",
+      "digest": "2020. nuscenes: A multimodal dataset for autonomous driv- Li, W. 2024. Adversarial infrared curves: An attack on ining. In Proceedings of the IEEE/CVF Conference on Comfrared pedestrian detectors in the physical world.Neural puter Vision and Pattern Recognition, 11621–11631. Networks, 178: 106459. Cao, Y.; Bhupathiraju, S. H.; Naghavi, P.; Sugawara, T.; Hu, C.; Shi, W.; Yao, W.; Jiang, T.; Tian, L.; and Li, W. 2025. Mao, Z. M.; and Rampazzi, S. 2023. You can’t see me: Two-stage optimized uniﬁed adversarial patch for attacking Physical removal attacks on {lidar-based} autonomous ve-visible-infrared cross-modal detectors in the physical world. hicles driving frameworks. In USENIX Security Symposium, Applied Soft Computing, 112818. 2993–3010. Hu, Y.; Yang, J.; Chen, L.; Li, K.; Sima, C.; Zhu, X.; Chai, Cao, Y.; Xiao, C.; Cyr, B.; Zhou, Y.; Park, W.; Rampazzi, S.; Du, S.; Lin, T.; Wang, W.; et al. 2023. Planning-oriented S.; Chen, Q. A.; Fu, K.; and Mao, Z. M. 2019a. Adversar- autonomous\nX",
+      "full_text": "2020. nuscenes: A multimodal dataset for autonomous driv- Li, W. 2024. Adversarial infrared curves: An attack on ining. In Proceedings of the IEEE/CVF Conference on Comfrared pedestrian detectors in the physical world.Neural puter Vision and Pattern Recognition, 11621–11631. Networks, 178: 106459. Cao, Y.; Bhupathiraju, S. H.; Naghavi, P.; Sugawara, T.; Hu, C.; Shi, W.; Yao, W.; Jiang, T.; Tian, L.; and Li, W. 2025. Mao, Z. M.; and Rampazzi, S. 2023. You can’t see me: Two-stage optimized uniﬁed adversarial patch for attacking Physical removal attacks on {lidar-based} autonomous ve-visible-infrared cross-modal detectors in the physical world. hicles driving frameworks. In USENIX Security Symposium, Applied Soft Computing, 112818. 2993–3010. Hu, Y.; Yang, J.; Chen, L.; Li, K.; Sima, C.; Zhu, X.; Chai, Cao, Y.; Xiao, C.; Cyr, B.; Zhou, Y.; Park, W.; Rampazzi, S.; Du, S.; Lin, T.; Wang, W.; et al. 2023. Planning-oriented S.; Chen, Q. A.; Fu, K.; and Mao, Z. M. 2019a. Adversar- autonomous\nX.; Chai, Cao, Y.; Xiao, C.; Cyr, B.; Zhou, Y.; Park, W.; Rampazzi, S.; Du, S.; Lin, T.; Wang, W.; et al. 2023. Planning-oriented S.; Chen, Q. A.; Fu, K.; and Mao, Z. M. 2019a. Adversar- autonomous driving. In Proceedings of the IEEE/CVF ial sensor attack on lidar-based perception in autonomousConference on Computer Vision and Pattern Recognition, driving. In Proceedings of the ACM SIGSAC Conference on 17853–17862. Computer and Communications Security, 2267–2281. Hu, Y.-C.-T.; Kung, B.-H.; Tan, D. S.; Chen, J.-C.; Hua, K.- Cao, Y.; Xiao, C.; Yang, D.; Fang, J.; Yang, R.; Liu, L.; and Cheng, W.-H. 2021. Naturalistic physical adversarial M.; and Li, B. 2019b.Adversarial objects againstpatch for object detectors. In Proceedings of the IEEE/CVF lidar-based autonomous driving systems.arXiv preprintInternational Conference on Computer Vision, 7848–7857. arXiv:1907.05418. Huang, J.; and Huang, G. 2022. Bevdet4d: Exploit temporal Chen, L.; Wu, P.; Chitta, K.; Jaeger, B.; Geiger, A.; and Li,\nConference on Computer Vision, 7848–7857. arXiv:1907.05418. Huang, J.; and Huang, G. 2022. Bevdet4d: Exploit temporal Chen, L.; Wu, P.; Chitta, K.; Jaeger, B.; Geiger, A.; and Li, cues in multi-camera 3d object detection.arXiv preprint H. 2024. End-to-end autonomous driving: Challenges and arXiv:2203.17054. frontiers. IEEE Transactions on Pattern Analysis and Ma-Huang, J.; Huang, G.; Zhu, Z.; Ye, Y.; and Du, D. 2021. chine Intelligence. Bevdet: High-performance multi-camera 3d object detection Chen, X.; Ma, H.; Wan, J.; Li, B.; and Xia, T. 2017. Multi- in bird-eye-view. arXiv preprint arXiv:2112.11790. view 3d object detection network for autonomous driving.Jin, Z.; Ji, X.; Cheng, Y.; Yang, B.; Yan, C.; and Xu, W.\nIn Proceedings of the IEEE Conference on Computer Vision2023. Pla-lidar: Physical laser attacks against lidar-based 3d and Pattern Recognition, 1907–1915. object detection in autonomous vehicle. In IEEE Symposium Cheng, Z.; Choi, H.; Liang, J.; Feng, S.; Tao, G.; Liu, D.; on Security and Privacy, 1822–1839. IEEE.\nZuzak, M.; and Zhang, X. 2023. Fusion is not enough: Sin-Lee, M.; and Kolter, Z. 2019. On physical advergle modal attacks on fusion models for 3D object detection.sarial patches for object detection. arXiv preprint arXiv preprint arXiv:2304.14614. arXiv:1906.11897. Geiger, A.; Lenz, P.; and Urtasun, R. 2012. Are we readyLi, L.; Qing, L.; and Chen, Y.-C. 2023. Adv3d: Generating for autonomous driving? the kitti vision benchmark suite. In3d adversarial examples in driving scenarios with nerf.\nIEEE Conference on Computer Vision and Pattern Recogni-Li, Z.; Wang, W.; Li, H.; Xie, E.; Sima, C.; Lu, T.; Yu, Q.; tion, 3354–3361. IEEE. and Dai, J. 2024. Bevformer: learning bird’s-eye-view rep- Goodfellow, I. J.; Shlens, J.; and Szegedy, C. 2014. Explain-resentation from lidar-camera via spatiotemporal transforming and harnessing adversarial examples.arXiv preprint ers. IEEE Transactions on Pattern Analysis and Machine arXiv:1412.6572. Intelligence.\nLin, C.; Ji, X.; Yang, Y.; Li, Q.; Zhao, Z.; Peng, Z.; Wang, Zhang, J.; Lou, Y.; Wang, J.; Wu, K.; Lu, K.; and Jia, X.",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-12",
+      "chunk_indices": [
+        53,
+        54
+      ],
+      "char_count": 1886,
+      "summary": "R.; Fang, L.; and Shen, C. 2024. Hard Adversarial Example 2021. Evaluating adver",
+      "digest": "R.; Fang, L.; and Shen, C. 2024. Hard Adversarial Example 2021. Evaluating adversarial attacks on driving safety in Mining for Improving Robust Fairness. IEEE Transactionsvision-based autonomous vehicles. IEEE Internet of Things on Information Forensics and Security. Journal, 9(5): 3443–3456. Liu, Z.; Lin, Y.; Cao, Y.; Hu, H.; Wei, Y.; Zhang, Z.; Lin, Zhang, R.; Isola, P.; Efros, A. A.; Shechtman, E.; and Wang, S.; and Guo, B. 2021. Swin transformer: Hierarchical vi-O. 2018. The unreasonable effectiveness of deep features as sion transformer using shifted windows. In Proceedings ofa perceptual metric. In Proceedings of the IEEE Conference the IEEE/CVF International Conference on Computer Vi-on Computer Vision and Pattern Recognition, 586–595. sion, 10012–10022. Zhang, T.; Wang, L.; Zhang, X.; Zhang, Y.; Jia, B.; Liang, Ma, Y.; Wang, T.; Bai, X.; Yang, H.; Hou, Y.; Wang, Y.; S.; Hu, S.; Fu, Q.; Liu, A.; and Liu, X. 2024. Visual Adver- Qiao, Y.; Yang, R.; and Zhu, X. 2024.\nL.; Zhang, X.;",
+      "full_text": "R.; Fang, L.; and Shen, C. 2024. Hard Adversarial Example 2021. Evaluating adversarial attacks on driving safety in Mining for Improving Robust Fairness. IEEE Transactionsvision-based autonomous vehicles. IEEE Internet of Things on Information Forensics and Security. Journal, 9(5): 3443–3456. Liu, Z.; Lin, Y.; Cao, Y.; Hu, H.; Wei, Y.; Zhang, Z.; Lin, Zhang, R.; Isola, P.; Efros, A. A.; Shechtman, E.; and Wang, S.; and Guo, B. 2021. Swin transformer: Hierarchical vi-O. 2018. The unreasonable effectiveness of deep features as sion transformer using shifted windows. In Proceedings ofa perceptual metric. In Proceedings of the IEEE Conference the IEEE/CVF International Conference on Computer Vi-on Computer Vision and Pattern Recognition, 586–595. sion, 10012–10022. Zhang, T.; Wang, L.; Zhang, X.; Zhang, Y.; Jia, B.; Liang, Ma, Y.; Wang, T.; Bai, X.; Yang, H.; Hou, Y.; Wang, Y.; S.; Hu, S.; Fu, Q.; Liu, A.; and Liu, X. 2024. Visual Adver- Qiao, Y.; Yang, R.; and Zhu, X. 2024.\nL.; Zhang, X.; Zhang, Y.; Jia, B.; Liang, Ma, Y.; Wang, T.; Bai, X.; Yang, H.; Hou, Y.; Wang, Y.; S.; Hu, S.; Fu, Q.; Liu, A.; and Liu, X. 2024. Visual Adver- Qiao, Y.; Yang, R.; and Zhu, X. 2024. Vision-centric bevsarial Attack on Vision-Language Models for Autonomous perception: A survey. IEEE Transactions on Pattern Analy- Driving. arXiv preprint arXiv:2411.18275. sis and Machine Intelligence. Zhang, Y.; Hou, J.; and Yuan, Y. 2024. A comprehensive Mao, J.; Shi, S.; Wang, X.; and Li, H. 2023. 3D object detec-study of the robustness for lidar-based 3d object detectors against adversarial attacks. International Journal of Com-tion for autonomous driving: A comprehensive survey. International Journal of Computer Vision, 131(8): 1909–1963. puter Vision, 132(5): 1592–1624. Zhu, Z.; Zhang, Y.; Chen, H.; Dong, Y.; Zhao, S.; Ding, Sato, T.; Shen, J.; Wang, N.; Jia, Y.; Lin, X.; and Chen, Q. A.",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-13",
+      "chunk_indices": [
+        55,
+        56,
+        57
+      ],
+      "char_count": 2479,
+      "summary": "2021. Dirty road can attack: Security of deep learning basedW.; Zhong, J.; and Z",
+      "digest": "2021. Dirty road can attack: Security of deep learning basedW.; Zhong, J.; and Zheng, S. 2023. Understanding the roautomated lane centering under Physical-World attack. Inbustness of 3D object detection with bird’s-eye-view rep- USENIX security symposium, 3309–3326. resentations in autonomous driving. In Proceedings of the IEEE/CVF Conference on Computer Vision and PatternSun, J.; Cao, Y.; Chen, Q. A.; and Mao, Z. M. 2020. To- Recognition, 21600–21610. wards robust LiDAR-based perception in autonomous driving: General black-box adversarial sensor attack and countermeasures. In USENIX Security Symposium, 877–894. Thys, S.; Van Ranst, W.; and Goedem´e, T. 2019. Fooling automated surveillance cameras: adversarial patches to attack person detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, 0–0. Tu, J.; Ren, M.; Manivasagam, S.; Liang, M.; Yang, B.; Du, R.; Cheng, F.; and Urtasun, R. 2020. Physically realizable adversarial examples for\n",
+      "full_text": "2021. Dirty road can attack: Security of deep learning basedW.; Zhong, J.; and Zheng, S. 2023. Understanding the roautomated lane centering under Physical-World attack. Inbustness of 3D object detection with bird’s-eye-view rep- USENIX security symposium, 3309–3326. resentations in autonomous driving. In Proceedings of the IEEE/CVF Conference on Computer Vision and PatternSun, J.; Cao, Y.; Chen, Q. A.; and Mao, Z. M. 2020. To- Recognition, 21600–21610. wards robust LiDAR-based perception in autonomous driving: General black-box adversarial sensor attack and countermeasures. In USENIX Security Symposium, 877–894. Thys, S.; Van Ranst, W.; and Goedem´e, T. 2019. Fooling automated surveillance cameras: adversarial patches to attack person detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, 0–0. Tu, J.; Ren, M.; Manivasagam, S.; Liang, M.; Yang, B.; Du, R.; Cheng, F.; and Urtasun, R. 2020. Physically realizable adversarial examples for\nComputer Vision and Pattern Recognition Workshops, 0–0. Tu, J.; Ren, M.; Manivasagam, S.; Liang, M.; Yang, B.; Du, R.; Cheng, F.; and Urtasun, R. 2020. Physically realizable adversarial examples for lidar object detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 13716–13725. Wang, J.; Li, F.; and He, L. 2025. A Uniﬁed Framework for Adversarial Patch Attacks against Visual 3D Object Detection in Autonomous Driving. IEEE Transactions on Circuits and Systems for Video Technology.\nWang, J.; Li, F.; Lv, S.; He, L.; and Shen, C. 2025. Physically Realizable Adversarial Creating Attack against Visionbased BEV Space 3D Object Detection. IEEE Transactions on Image Processing.\nWang, J.; Li, F.; Zhang, X.; and Sun, H. 2023a. Adversarial obstacle generation against lidar-based 3d object detection.\nIEEE Transactions on Multimedia, 26: 2686–2699. Wang, Z.; Yang, H.; Feng, Y.; Sun, P.; Guo, H.; Zhang, Z.; and Ren, K. 2023b. Towards transferable targeted adversarial examples. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 20534–20543. Xie, S.; Li, Z.; Wang, Z.; and Xie, C. 2023. On the adversarial robustness of camera-based 3d object detection. arXiv preprint arXiv:2301.10766. Yang, B.; Zhang, H.; Wang, J.; Yang, Y.; Lin, C.; Shen, C.; and Zhao, Z. 2025. Adversarial Example Soups: Improving Transferability and Stealthiness for Free. IEEE Transactions on Information Forensics and Security.",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-14",
+      "chunk_indices": [
+        58
+      ],
+      "char_count": 810,
+      "summary": "Supplementary Materials for Invisible Triggers, Visible Threats! Road-Style Adve",
+      "digest": "Supplementary Materials for Invisible Triggers, Visible Threats! Road-Style Adversarial Creation Attack for Visual 3D Detection in Autonomous Driving Jian Wang, Lijun He, Yixing Yong, Haixia Bi, Fan Li* School of Information and Communications Engineering, Xi’an Jiaotong University wj851329121@stu.xjtu.edu.cn, lijunhe@mail.xjtu.edu.cn, yongyx@stu.xjtu.edu.cn, haixia.bi@mail.xjtu.edu.cn, lifan@mail.xjtu.edu.cn A. Details of Image-3D Rendering In this section, we present the details of the Image-3D rendering algorithm that differentiably render the 3D space poster onto the image. In general, the core of the algorithm Adversarial poster Place on 3D lies in ﬁnding the relative position of each pixel in the adver- road surface sarial image region on the predeﬁned poster, enabling perpixel interpolation.",
+      "full_text": "Supplementary Materials for Invisible Triggers, Visible Threats! Road-Style Adversarial Creation Attack for Visual 3D Detection in Autonomous Driving Jian Wang, Lijun He, Yixing Yong, Haixia Bi, Fan Li* School of Information and Communications Engineering, Xi’an Jiaotong University wj851329121@stu.xjtu.edu.cn, lijunhe@mail.xjtu.edu.cn, yongyx@stu.xjtu.edu.cn, haixia.bi@mail.xjtu.edu.cn, lifan@mail.xjtu.edu.cn A. Details of Image-3D Rendering In this section, we present the details of the Image-3D rendering algorithm that differentiably render the 3D space poster onto the image. In general, the core of the algorithm Adversarial poster Place on 3D lies in ﬁnding the relative position of each pixel in the adver- road surface sarial image region on the predeﬁned poster, enabling perpixel interpolation.",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-15",
+      "chunk_indices": [
+        59
+      ],
+      "char_count": 826,
+      "summary": "Speciﬁcally, we ﬁrst calculate the projection matrix 4×4 M3 → ∈ Raccording to th",
+      "digest": "Speciﬁcally, we ﬁrst calculate the projection matrix 4×4 M3 → ∈ Raccording to the camera’s intrinsic and Poster on Project the poster to Image D img according to camera extrinsic, extrinsic parameters. M3 → can project points from the captured Image D img intrinsic, and road height prior 3D LiDAR coordinate system to the image plane. Then, given four poster corners {p3d ∈ R3|i = 1, 2, 3, 4} in Figure 1: Illustration of Image-3D rendering. i 3D coordinate system, we get four projected corner points {pimg ∈ R2|i = 1, 2, 3, 4} in image plane: i Model BackboneInput Resolution mAP NDS ResNet50 256 × 704 31 7 39 4 [u, v, d, 1]T = M3 → [x, y, z, 1]T BEVDet.. i i i D img i i i Swin-Tiny 256 × 704 33 4 41 8(1).. pimg= (u /d, v /d) BEVDet4D ResNet50 256 × 704 34 6 48 0 i i i i i.. (8 Frames) Swin-Tiny 256 × 704 36 3 48 9..",
+      "full_text": "Speciﬁcally, we ﬁrst calculate the projection matrix 4×4 M3 → ∈ Raccording to the camera’s intrinsic and Poster on Project the poster to Image D img according to camera extrinsic, extrinsic parameters. M3 → can project points from the captured Image D img intrinsic, and road height prior 3D LiDAR coordinate system to the image plane. Then, given four poster corners {p3d ∈ R3|i = 1, 2, 3, 4} in Figure 1: Illustration of Image-3D rendering. i 3D coordinate system, we get four projected corner points {pimg ∈ R2|i = 1, 2, 3, 4} in image plane: i Model BackboneInput Resolution mAP NDS ResNet50 256 × 704 31 7 39 4 [u, v, d, 1]T = M3 → [x, y, z, 1]T BEVDet.. i i i D img i i i Swin-Tiny 256 × 704 33 4 41 8(1).. pimg= (u /d, v /d) BEVDet4D ResNet50 256 × 704 34 6 48 0 i i i i i.. (8 Frames) Swin-Tiny 256 × 704 36 3 48 9..",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-16",
+      "chunk_indices": [
+        60,
+        61,
+        62,
+        63,
+        64
+      ],
+      "char_count": 4222,
+      "summary": "B.4 Discussion Transferability. We evaluate the transferability of AdvRoad acros",
+      "digest": "B.4 Discussion Transferability. We evaluate the transferability of AdvRoad across different detectors through the black-box settings, where attackers have no access to the details of the target model. Since the latent vector search in Stage 2 requires interaction between the adversary input and the model, we only use posters generated in Stage 1 for the attack. Speciﬁ- cally, we ﬁrst use the generator trained on the source model to randomly generate 500 posters, then select the 10 most effective ones (with the highest conﬁdence) to attack the target models. This process does not require any information about the target models.\nTarget Models BEVDet4D-SwinTBEVFormer-SwinT BEVDet-SwinTBEVDet4D-R50BEVFormer-R50 BEVDet-R50 45 BEVDet-R50 32.1 8.5 22.4 17.6 13.4 8.0 40 BEVDet-SwinT 10.8 42.6 10.5 25.5 9.5 9.1 35 30Source Models BEVDet4D-R50 12.8 9.0 25.1 8.7 6.4 2.9 25 BEVDet4D-SwinT 9.2 11.5 12.3 45.2 5.9 7.7 20 Figure 2: Quantitative visual comparison in terms of the 15 LPIPS (↓) with other",
+      "full_text": "B.4 Discussion Transferability. We evaluate the transferability of AdvRoad across different detectors through the black-box settings, where attackers have no access to the details of the target model. Since the latent vector search in Stage 2 requires interaction between the adversary input and the model, we only use posters generated in Stage 1 for the attack. Speciﬁ- cally, we ﬁrst use the generator trained on the source model to randomly generate 500 posters, then select the 10 most effective ones (with the highest conﬁdence) to attack the target models. This process does not require any information about the target models.\nTarget Models BEVDet4D-SwinTBEVFormer-SwinT BEVDet-SwinTBEVDet4D-R50BEVFormer-R50 BEVDet-R50 45 BEVDet-R50 32.1 8.5 22.4 17.6 13.4 8.0 40 BEVDet-SwinT 10.8 42.6 10.5 25.5 9.5 9.1 35 30Source Models BEVDet4D-R50 12.8 9.0 25.1 8.7 6.4 2.9 25 BEVDet4D-SwinT 9.2 11.5 12.3 45.2 5.9 7.7 20 Figure 2: Quantitative visual comparison in terms of the 15 LPIPS (↓) with other attack posters. BEVFormer-R50 5.3 2.4 13.9 3.5 41.2 8.7 10 BEVFormer-SwinT 5.5 2.5 7.3 3.3 14.6 21.8 5ASR (%, ↑) Attack 2.0m 1.5m 1.0m 0.5m Figure 3: Transfer results across six detectors. The ASR (%) AdvPoster 19.7% 14.6% 10.4% 3.9% under CD2 0 are given.. m AdvRoad 32.4% 25.5% 14.8% 7.1% The transfer results are provided in Fig. 3. We make the Table 2: Attack results after applying adversarial segmenta-following observations. First, detectors that adopt the same tion as defense. PV2BEV transformation exhibit better transferability. For example, the four models within the BEVDet series achieve a minimum ASR of 8.5%, while\nFirst, detectors that adopt the same tion as defense. PV2BEV transformation exhibit better transferability. For example, the four models within the BEVDet series achieve a minimum ASR of 8.5%, while the posters generated on B.2 Visualization of Different Attack PostersBEVFormer showed a lower limit on BEVDet. Such as a minimum of 2.4%, which almost fails in this case. SinceWe provide more visual comparisons with other attack the BEVDet series requires explicit per-pixel depth estima-posters in Fig. 2. The LPIPS score (↓) evaluates the perceptual similarity by utilizing neural networks to comparetion for feature projection, whereas BEVFormer does not, this may lead to differences in the semantic focus of themulti-layer features between benign and attacked images. learned posters. Second, detectors with the same backboneThe results show that AdvRoad exhibits the best concealexhibit better transferability. For example, posters learned onment and environmental consistency.\nBEVDet-SwinT achieve 25.5% ASR on BEVDet4D-SwinT, compared with 10.5% on BEVDet4D-R50. These results B.3 Adversarial Segmentation as Defense may provide insights for designing more transferable adver- We train a lightweight adversarial segmentation network to sarial attacks. predict the poster areas in the image. During evaluation, Diversity and Effectiveness. To explore the upper bound the poster region in the input image is ﬁrst segmented andof the attack capability of the implicit representation of the masked out before performing detection. The resulting ASRadversarial poster, we supervise the generator using only on BEVDet-R50 after applying this defense is shown in Ta- L, without considering gradients from L. The resultsobj cls ble 2. Although AdvRoad has a lower ASR than AdvPosterare given in Table 3. It can be observed that AdvRoad† without defense, it shows stronger resistance to the ﬁne-achieves a signiﬁcant improvement in ASR compared to the tuned detector and adversarial\ngiven in Table 3. It can be observed that AdvRoad† without defense, it shows stronger resistance to the ﬁne-achieves a signiﬁcant improvement in ASR compared to the tuned detector and adversarial segmentation. This robust-AdvRoad, at the cost of natural appearance. Some of the ness comes from: 1) its similarity to the road background, poster output from the generator is visualized in Fig. 4. We and 2) diverse poster content. ﬁnd that no matter what the latent vector input is, the genASR (%, ↑) Model Attack DiversityNatural-looking LPIPS ↓ 20m 15m 10m 05m.... 91 0 83 4 64 8 33 2AdvPoster × × 0.1929....",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    },
+    {
+      "group_id": "group-17",
+      "chunk_indices": [
+        65,
+        66,
+        67,
+        68
+      ],
+      "char_count": 2903,
+      "summary": "BEVDet-R50 AdvRoad ✓ ✓ 0.1472 62.6 55.6 42.7 23.3 AdvRoad† × × 0.2100 80.3 69.4 ",
+      "digest": "BEVDet-R50 AdvRoad ✓ ✓ 0.1472 62.6 55.6 42.7 23.3 AdvRoad† × × 0.2100 80.3 69.4 49.4 22.1 AdvPoster 91 8 84 7× × 0.1737.. 66.5 38.3 ✓ ✓ 01337BEVDet-SwinT AdvRoad. 60.2 56.3 47.6 28.8 69 2 41 9AdvRoad† × × 0.2172 86.7 81.5..\nAdvPoster × × 0.1758 86.9 78.6 58.7 30.8 BEVDet4D-R50 AdvRoad ✓ ✓ 0.1331 49.1 42.9 32.7 17.7 AdvRoad† × × 0.2223 79.0 71.8 55.6 29.6 92 7 87 9 73 4 40 8AdvPoster × × 0.1748.... ✓ ✓ 01370BEVDet4D-SwinT AdvRoad. 39.1 35.1 27.8 15.7 AdvRoad† × × 0.1966 86.8 80.5 64.9 36.6 AdvPoster × × 0.1104 82.6 73.3 57.0 29.7 BEVFormer-R50 AdvRoad ✓ ✓ 0.0822 44.5 32.7 20.7 8.2 AdvRoad† × × 0.1082 70.1 58.0 41.2 19.8 83 9 74 8 58 0 31 0AdvPoster × × 0.1026....\nBEVFormer-SwinT AdvRoad ✓ ✓ 0.0818 37.3 30.6 21.0 8.9 AdvRoad† × × 0.1196 74.9 65.4 48.5 24.3 Table 3: Digital attack results of different creation posters in the nuScenes dataset. † denotes training the generator under the supervision of adversarial objective L only.obj B.5 Further Analysis of the Physical Attack In practice, ",
+      "full_text": "BEVDet-R50 AdvRoad ✓ ✓ 0.1472 62.6 55.6 42.7 23.3 AdvRoad† × × 0.2100 80.3 69.4 49.4 22.1 AdvPoster 91 8 84 7× × 0.1737.. 66.5 38.3 ✓ ✓ 01337BEVDet-SwinT AdvRoad. 60.2 56.3 47.6 28.8 69 2 41 9AdvRoad† × × 0.2172 86.7 81.5..\nAdvPoster × × 0.1758 86.9 78.6 58.7 30.8 BEVDet4D-R50 AdvRoad ✓ ✓ 0.1331 49.1 42.9 32.7 17.7 AdvRoad† × × 0.2223 79.0 71.8 55.6 29.6 92 7 87 9 73 4 40 8AdvPoster × × 0.1748.... ✓ ✓ 01370BEVDet4D-SwinT AdvRoad. 39.1 35.1 27.8 15.7 AdvRoad† × × 0.1966 86.8 80.5 64.9 36.6 AdvPoster × × 0.1104 82.6 73.3 57.0 29.7 BEVFormer-R50 AdvRoad ✓ ✓ 0.0822 44.5 32.7 20.7 8.2 AdvRoad† × × 0.1082 70.1 58.0 41.2 19.8 83 9 74 8 58 0 31 0AdvPoster × × 0.1026....\nBEVFormer-SwinT AdvRoad ✓ ✓ 0.0818 37.3 30.6 21.0 8.9 AdvRoad† × × 0.1196 74.9 65.4 48.5 24.3 Table 3: Digital attack results of different creation posters in the nuScenes dataset. † denotes training the generator under the supervision of adversarial objective L only.obj B.5 Further Analysis of the Physical Attack In practice, our physical experiments yield the following in- (a) BEVDet-R50 sights: 1. Factors affecting overall color—such as lighting, print color deviation, and reﬂectivity—are key to attack success. Due to AdvRoad’s similarity to road surfaces, its de- (b) BEVDet-SwinT ceptive patterns require high color ﬁdelity. In contrast, Adv- Poster’s vivid patterns show greater robustness to such factors. 2. Local distortions (e.g., wrinkles, occlusions) usually (c) BEVDet4D-R50 cause only positional shifts in detection results and do not invalidate the attack. This suggests that the adversarial information is distributed across the whole poster and is insensitive to local damage.\nonly positional shifts in detection results and do not invalidate the attack. This suggests that the adversarial information is distributed across the whole poster and is insensitive to local damage. 3. Although we didn’t test under rain(d) BEVDet4D-SwinT or night conditions, we suspect both methods would perform poorly, as much information would be lost after image capture. For example, 3D detectors already struggle to detect (e) BEVFormer-R50 real vehicles at night. A potential solution is to use projectors to display the poster, which we plan to explore in future work. (f) BEVFormer-SwinT Figure 4: Visualization of the posters for AdvRoad†. The posters from the same model (randomly generating 6 samples for each model) share similar content and have unnatural patterns. erator outputs similar content and loses the diversity. Moreover, the explicit representation of the adversary, AdvPoster, demonstrates stronger attack capability and higher optimization efﬁciency. Similarly, at the\ncontent and loses the diversity. Moreover, the explicit representation of the adversary, AdvPoster, demonstrates stronger attack capability and higher optimization efﬁciency. Similarly, at the cost of diversity and visual naturalness.",
+      "keywords": [],
+      "page_range": [
+        12,
+        12
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-06T17:44:02.873187+00:00"
+      }
+    }
+  ]
+}

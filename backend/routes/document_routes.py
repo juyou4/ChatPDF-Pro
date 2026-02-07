@@ -123,9 +123,9 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
     BATCH_SLEEP = 0.3  # 批间休息时间(秒)
     
     # 图片过滤配置
-    MIN_IMAGE_SIZE = 30  # 最小图片尺寸(px)，小于此值视为装饰图标
-    MAX_ASPECT_RATIO = 20  # 最大宽高比，超过视为线条/分隔符
-    MIN_ASPECT_RATIO = 0.05  # 最小宽高比
+    MIN_IMAGE_SIZE = 50  # 提高到50px，过滤更多小图标
+    MAX_ASPECT_RATIO = 10  # 降低到10，过滤长条形图片
+    MIN_ASPECT_RATIO = 0.1  # 提高到0.1
     MAX_IMAGE_DIMENSION = 800  # 图片最大尺寸，超过会压缩
     IMAGE_QUALITY = 75  # JPEG压缩质量
     
@@ -492,8 +492,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                                         "page": page_num + 1
                                     })
                                     
-                                    # 在文本中添加图片引用
-                                    page_text += f"\n\n![图片{len(all_images) + len(page_images)}](images/{img_id}.{img_ext})\n"
+                                    # 不在文本中插入图片引用，避免干扰RAG检索
+                                    # 图片信息已经单独存储在 all_images 数组中
                                     
                             except Exception as img_err:
                                 # 单个图片提取失败不影响整体
@@ -873,7 +873,7 @@ async def upload_pdf(
 
         save_document(doc_id, documents_store[doc_id])
 
-        create_index(doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR), embedding_model, embedding_api_key, embedding_api_host)
+        create_index(doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR), embedding_model, embedding_api_key, embedding_api_host, pages=extracted_data.get("pages"))
 
         response = {
             "message": "PDF上传成功",

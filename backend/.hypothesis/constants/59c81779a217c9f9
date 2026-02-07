@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\chat_service.py
+# hypothesis_version: 6.151.5
+
+[0.0, 0.7, 120.0, 200, 4000, '2023-06-01', 'Authorization', 'Content-Type', 'POST', '[DONE]', '_fallback_target', '_fallback_used', '_retry_cfg', '_timeout', '_used_model', '_used_provider', 'anthropic-version', 'api_key', 'application/json', 'candidates', 'choices', 'content', 'contents', 'data: ', 'delay', 'delta', 'done', 'endpoint', 'error', 'fallback_used', 'generationConfig', 'ignore', 'maxOutputTokens', 'max_tokens', 'message', 'messages', 'model', 'parts', 'provider', 'reasoning_content', 'retries', 'role', 'stream', 'system', 'temperature', 'text', 'type', 'used_model', 'used_provider', 'user', 'utf-8', 'x-api-key']

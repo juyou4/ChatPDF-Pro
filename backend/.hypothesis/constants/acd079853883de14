@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\rerank_api_service.py
+# hypothesis_version: 6.151.5
+
+[0.0, 30.0, 'Authorization', 'Content-Type', 'application/json', 'documents', 'index', 'model', 'query', 'relevance_score', 'results', 'score', 'text']

@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\semantic_group_service.py
+# hypothesis_version: 6.151.5
+
+[2500, 5000, 6000, 'SemanticGroup', 'char_count', 'chunk_indices', 'config', 'created_at', 'digest', 'doc_hash', 'doc_id', 'full_text', 'group_id', 'groups', 'keywords', 'llm_meta', 'max_chars', 'min_chars', 'ok', 'page_range', 'r', 'schema_version', 'summary', 'summary_status', 'target_chars', 'utf-8', 'w', '将在任务 5.1 中实现', '将在任务 5.2 中实现', '将在任务 5.3 中实现']

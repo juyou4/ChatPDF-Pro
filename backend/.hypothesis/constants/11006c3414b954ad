@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\granularity_selector.py
+# hypothesis_version: 6.151.5
+
+[8000, 'analytical', 'digest', 'extraction', 'full', 'granularity', 'group', 'overview', 'specific', 'summary', 'tokens']

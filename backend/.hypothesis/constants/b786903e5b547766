@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\config.py
+# hypothesis_version: 6.151.5
+
+[0.3, 0.5, 30.0, 120.0, '.env', 'CHATPDF_CHAT_DEGRADE', 'CHATPDF_CHAT_LOGGING', 'CHATPDF_CHAT_TIMEOUT', 'logs/errors.log', '搜索暂不可用，请稍后重试', '服务繁忙，请稍后重试']

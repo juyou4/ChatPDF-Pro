@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\embedding_service.py
+# hypothesis_version: 6.151.5
+
+[0.0, 0.15, 0.25, 0.3, 0.5, 1.0, 50.0, 100, 200, 404, 1000, 1200, 2500, '\x00', '\n\n...\n\n', '(\\w)-\\n(\\w)', '/', '/embeddings', '/v1', '/v1/', ':', 'All rights reserved', '[ \\t]+', '[\\s,;，。；、]+', '\\1\\2', '\\n{3,}', 'base_url', 'chunk', 'chunk_indices', 'chunks', 'content', 'data', 'digest_texts', 'distance', 'embedding_model', 'end', 'float32', 'granularity', 'group', 'group_id', 'group_ids', 'group_rank', 'groups', 'groups_disabled', 'highlights', 'hybrid', 'index', 'index_missing', 'local', 'local-minilm', 'max_tokens', 'model_name', 'page', 'provider', 'r', 'rank', 'rb', 'reranked', 'rrf', 'rrf_score', 'score', 'semantic_groups', 'similarity', 'similarity_percent', 'snippet', 'source', 'start', 'text', 'tokens', 'unknown', 'utf-8', 'wb', '向量索引未找到,请重新上传PDF']

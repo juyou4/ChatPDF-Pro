@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\glossary_service.py
+# hypothesis_version: 6.151.5
+
+['TrieNode', '[A-Za-z0-9_]', '_', 'case_sensitive', 'category', 'data', 'description', 'enabled', 'entries', 'entry_count', 'general', 'glossary', 'id', 'index.json', 'max_terms_in_prompt', 'name', 'notes', 'r', 'sets', 'term', 'translation', 'utf-8', 'w', 'whole_word', '中文']

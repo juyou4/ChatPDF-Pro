@@ -24,10 +24,10 @@ def validate_embedding_model(embedding_model: str) -> str:
     raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置或不受支持")
 
 
-def create_index(doc_id: str, full_text: str, vector_store_dir: str, embedding_model: str, api_key: Optional[str], api_host: Optional[str]):
+def create_index(doc_id: str, full_text: str, vector_store_dir: str, embedding_model: str, api_key: Optional[str], api_host: Optional[str], pages: Optional[list] = None):
     """Wrapper to build vector index with validation"""
     embedding_model = validate_embedding_model(embedding_model)
-    build_vector_index(doc_id, full_text, vector_store_dir, embedding_model, api_key, api_host)
+    build_vector_index(doc_id, full_text, vector_store_dir, embedding_model, api_key, api_host, pages=pages)
 
 
 async def vector_search(
@@ -100,8 +100,15 @@ async def vector_context(
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
     middlewares: Optional[List[BaseMiddleware]] = None
-) -> str:
-    """Wrapper to get relevant context with middleware hooks"""
+) -> dict:
+    """获取相关上下文的包装函数，支持中间件钩子
+
+    返回包含 context 和 retrieval_meta 的字典。
+    get_relevant_context 现在返回 (context_string, retrieval_meta) 元组。
+
+    Returns:
+        包含 "context" 和 "retrieval_meta" 键的字典
+    """
     payload = {
         "doc_id": doc_id,
         "query": query,
@@ -120,7 +127,7 @@ async def vector_context(
     payload = await apply_middlewares_before(payload, middlewares or [])
 
     try:
-        ctx = get_relevant_context(
+        ctx, retrieval_meta = get_relevant_context(
             doc_id,
             query,
             vector_store_dir=vector_store_dir,
@@ -134,9 +141,12 @@ async def vector_context(
             rerank_api_key=rerank_api_key,
             rerank_endpoint=rerank_endpoint
         )
-        wrapped = {"context": ctx}
+        wrapped = {"context": ctx, "retrieval_meta": retrieval_meta}
     except Exception as e:
-        wrapped = {"context": "", "error": str(e)}
+        wrapped = {"context": "", "retrieval_meta": {}, "error": str(e)}
 
     wrapped = await apply_middlewares_after(wrapped, middlewares or [])
-    return wrapped.get("context", ctx if 'ctx' in locals() else "")
+    return {
+        "context": wrapped.get("context", ""),
+        "retrieval_meta": wrapped.get("retrieval_meta", {}),
+    }

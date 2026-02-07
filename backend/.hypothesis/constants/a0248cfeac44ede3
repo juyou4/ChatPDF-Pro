@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\advanced_search.py
+# hypothesis_version: 6.151.5
+
+[0.5, 1.0, 200, 500, 'AND', 'NOT', 'OR', '\\b(AND|OR|NOT)\\b', 'context_snippet', 'end', 'inf', 'match_offset', 'match_text', 'operator', 'score', 'start', 'term', 'type', 'value']

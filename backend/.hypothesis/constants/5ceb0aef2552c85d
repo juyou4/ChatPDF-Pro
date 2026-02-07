@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\routes\chat_routes.py
+# hypothesis_version: 6.151.5
+
+[400, 404, 500, 8000, '/chat', '/chat/stream', '_fallback_used', '_used_model', '_used_provider', 'answer', 'choices', 'citations', 'cohere', 'content', 'context', 'data', 'data: [DONE]\n\n', 'doc_id', 'documents_store', 'done', 'endpoint', 'error', 'fallback_used', 'full_text', 'jina', 'message', 'pages', 'question', 'reasoning_content', 'rerank_api_key', 'rerank_provider', 'retrieval_meta', 'role', 'system', 'text/event-stream', 'timestamp', 'top_k', 'use_rerank', 'used_model', 'used_provider', 'user', '文档存储未初始化', '文档未找到']
