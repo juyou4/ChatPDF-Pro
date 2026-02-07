@@ -1,5 +1,25 @@
 # Paper-Burner-X 深度学习：RAG架构设计哲学
 
+## 许可证与归属声明
+
+本文档引用了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 项目的代码片段，
+仅用于学习和技术分析目的。Paper Burner X 采用 **AGPL-3.0** 许可证，版权归 Feather-2 及贡献者所有。
+
+本文档中引用的代码片段受 AGPL-3.0 许可证保护，仅作为技术参考展示。
+ChatPDF 项目的实现代码均为独立编写的 Python 代码，未复制或翻译 Paper Burner X 的源代码。
+
+ChatPDF 借鉴了 Paper Burner X 的以下设计概念（概念和算法思想不受版权保护）：
+- 语义意群（Semantic Groups）架构
+- 三层粒度体系（summary/digest/full）
+- 智能粒度选择与混合粒度检索
+- Token 预算管理策略
+
+> 原始项目：https://github.com/Feather-2/paper-burner-x
+> 许可证：AGPL-3.0 (https://www.gnu.org/licenses/agpl-3.0.html)
+> 版权：Copyright (C) 2024-2025 Feather-2 and contributors
+
+---
+
 ## 核心问题分析
 
 我们遇到的三个问题，paper-burner-x是如何从根本上避免的？
