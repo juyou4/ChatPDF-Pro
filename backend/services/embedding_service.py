@@ -1083,9 +1083,17 @@ def _build_context_with_groups(
 
     # 步骤 3：使用 GranularitySelector 分配混合粒度
     selector = GranularitySelector()
+
+    # 先获取查询类型对应的最大意群数限制
+    selection_info = selector.select(query=query, groups=groups, max_tokens=config.max_token_budget)
+    max_groups = selection_info.max_groups
+
+    # 截断排序后的意群列表，避免引入过多低相关性意群
+    ranked_groups_limited = ranked_groups[:max_groups]
+
     mixed_selections = selector.select_mixed(
         query=query,
-        ranked_groups=ranked_groups,
+        ranked_groups=ranked_groups_limited,
         max_tokens=config.max_token_budget,
     )
 
@@ -1104,8 +1112,7 @@ def _build_context_with_groups(
     token_used = sum(item.get("tokens", 0) for item in fitted_selections)
 
     # 步骤 7：使用 RetrievalLogger 记录检索追踪
-    # 获取查询类型（从 GranularitySelector 的 select 方法获取）
-    selection_info = selector.select(query=query, groups=groups, max_tokens=config.max_token_budget)
+    # 查询类型已在步骤 3 中获取（selection_info）
 
     retrieval_logger = RetrievalLogger()
     trace = RetrievalTrace(
@@ -1150,6 +1157,7 @@ def _rank_groups_by_results(
 
     将搜索结果中的 chunk 文本映射回对应的语义意群，
     按 chunk 在搜索结果中的排名对意群进行排序（去重，保留最高排名）。
+    过滤掉相关性分数过低的结果，避免引入不相关的意群。
 
     Args:
         groups: 语义意群列表
@@ -1165,11 +1173,15 @@ def _rank_groups_by_results(
     # 每个意群的 full_text 是其所有 chunk 的拼接，
     # 需要检查搜索结果中的 chunk 是否属于某个意群
     group_scores = {}  # group_id -> 最佳排名（越小越好）
+    group_similarity = {}  # group_id -> 最佳相似度分数
 
     for rank, result in enumerate(results):
         chunk_text = result.get("chunk", "")
         if not chunk_text:
             continue
+
+        # 获取该 chunk 的相似度分数
+        similarity = result.get("similarity", 0.0)
 
         # 查找该 chunk 属于哪个意群
         for group in groups:
@@ -1177,10 +1189,34 @@ def _rank_groups_by_results(
             if chunk_text in group.full_text:
                 if group.group_id not in group_scores:
                     group_scores[group.group_id] = rank
+                    group_similarity[group.group_id] = similarity
                 else:
                     # 保留最高排名（最小的 rank 值）
-                    group_scores[group.group_id] = min(group_scores[group.group_id], rank)
+                    if rank < group_scores[group.group_id]:
+                        group_scores[group.group_id] = rank
+                    # 保留最高相似度
+                    group_similarity[group.group_id] = max(
+                        group_similarity[group.group_id], similarity
+                    )
                 break  # 一个 chunk 只属于一个意群
+
+    # 过滤掉相关性过低的意群
+    # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 40% 的意群
+    if group_similarity:
+        best_similarity = max(group_similarity.values())
+        if best_similarity > 0.5:
+            threshold = best_similarity * 0.4
+            filtered_ids = {
+                gid for gid, sim in group_similarity.items()
+                if sim >= threshold
+            }
+            removed = set(group_scores.keys()) - filtered_ids
+            if removed:
+                logger.info(
+                    f"相关性过滤：移除 {len(removed)} 个低相关意群 "
+                    f"(阈值={threshold:.3f}, 最佳={best_similarity:.3f})"
+                )
+            group_scores = {gid: r for gid, r in group_scores.items() if gid in filtered_ids}
 
     # 按排名排序意群
     sorted_group_ids = sorted(group_scores.keys(), key=lambda gid: group_scores[gid])

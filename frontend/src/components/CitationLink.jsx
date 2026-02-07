@@ -28,7 +28,7 @@ const CitationLink = React.memo(({ refNumber, citation, onClick }) => {
   // 构建 tooltip 提示文本
   const pageRange = citation.page_range;
   const tooltipText = pageRange
-    ? `跳转到第 ${pageRange[0]}${pageRange[1] !== pageRange[0] ? `-${pageRange[1]}` : ''} 页`
+    ? `点击跳转并高亮：第 ${pageRange[0]}${pageRange[1] !== pageRange[0] ? `-${pageRange[1]}` : ''} 页`
     : `引用 [${refNumber}]`;
 
   return (

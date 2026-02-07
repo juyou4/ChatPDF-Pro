@@ -283,9 +283,11 @@ const ChatPDF = () => {
   }, [availableModels, apiProvider]);
 
   // Auto-hide highlight overlay after a short delay
+  // 高亮自动消失：引文高亮 4 秒，搜索高亮 2.5 秒
   useEffect(() => {
     if (!activeHighlight) return;
-    const timer = setTimeout(() => setActiveHighlight(null), 2500);
+    const duration = activeHighlight.source === 'citation' ? 4000 : 2500;
+    const timer = setTimeout(() => setActiveHighlight(null), duration);
     return () => clearTimeout(timer);
   }, [activeHighlight]);
 
@@ -1143,7 +1145,19 @@ const ChatPDF = () => {
     if (!citation || !citation.page_range) return;
     const targetPage = citation.page_range[0]; // 跳转到页码范围的起始页
     if (typeof targetPage === 'number' && targetPage > 0) {
+      // 先清除旧高亮，确保即使同页也能重新触发
+      setActiveHighlight(null);
       setCurrentPage(targetPage);
+      // 延迟设置高亮，等待 PDFViewer 完成页面切换和文本层渲染
+      if (citation.highlight_text) {
+        setTimeout(() => {
+          setActiveHighlight({
+            page: targetPage,
+            text: citation.highlight_text,
+            source: 'citation'
+          });
+        }, 400);
+      }
     }
   };
 

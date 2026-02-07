@@ -1,0 +1,668 @@
+{
+  "schema_version": 1,
+  "doc_id": "adfcece0baaf7af2d1fded4302e1b993",
+  "doc_hash": "",
+  "created_at": "2026-02-07T08:51:58.334090+00:00",
+  "config": {
+    "target_chars": 5000,
+    "min_chars": 2500,
+    "max_chars": 6000
+  },
+  "groups": [
+    {
+      "group_id": "group-0",
+      "chunk_indices": [
+        0,
+        1,
+        2
+      ],
+      "char_count": 2197,
+      "summary": "InstanceAssemble: Layout-Aware Image Generation via Instance Assembling Attentio",
+      "digest": "InstanceAssemble: Layout-Aware Image Generation via Instance Assembling Attention Qiang Xiang1,2, Shuang Sun2, Binglei Li1,3, Dejia Song2, Huaxia Li2, Yibo Chen2, Xu Tang2, Yao Hu2, Junping Zhang1∗ Shanghai Key Laboratory of Intelligent Information Processing,1 College of Computer Science and Artificial Intelligence, Fudan University arXiv:2509.16691v2 [cs.CV] 28 Oct 2025 2Xiaohongshu Inc. 3Shanghai Innovation Institute {qxiang24, blli24}@m.fudan.edu.cn, jpzhang@fudan.edu.cn, {sunshuang1, dejiasong, lihuaxia, zhaohaibo, tangshen, xiahou}@xiaohongshu.com Figure 1: Layout-aware image generation result by InstanceAssemble. We show image generation result under precise layout control, ranging from simple to intricate, sparse to dense layouts.\nAbstract Diffusion models have demonstrated remarkable capabilities in generating highquality images. Recent advancements in Layout-to-Image (L2I) generation have leveraged positional conditions and textual descriptions to facilitate precise and contr",
+      "full_text": "InstanceAssemble: Layout-Aware Image Generation via Instance Assembling Attention Qiang Xiang1,2, Shuang Sun2, Binglei Li1,3, Dejia Song2, Huaxia Li2, Yibo Chen2, Xu Tang2, Yao Hu2, Junping Zhang1∗ Shanghai Key Laboratory of Intelligent Information Processing,1 College of Computer Science and Artificial Intelligence, Fudan University arXiv:2509.16691v2 [cs.CV] 28 Oct 2025 2Xiaohongshu Inc. 3Shanghai Innovation Institute {qxiang24, blli24}@m.fudan.edu.cn, jpzhang@fudan.edu.cn, {sunshuang1, dejiasong, lihuaxia, zhaohaibo, tangshen, xiahou}@xiaohongshu.com Figure 1: Layout-aware image generation result by InstanceAssemble. We show image generation result under precise layout control, ranging from simple to intricate, sparse to dense layouts.\nAbstract Diffusion models have demonstrated remarkable capabilities in generating highquality images. Recent advancements in Layout-to-Image (L2I) generation have leveraged positional conditions and textual descriptions to facilitate precise and controllable image synthesis. Despite overall progress, current L2I methods still exhibit suboptimal performance. Therefore, we propose InstanceAssemble, a novel architecture that incorporates layout conditions via instance-assembling attention, enabling position control with bounding boxes (bbox) and multimodal content control including texts and additional visual content. Our method achieves flexible adaption to existing DiT-based T2I models through light-weighted LoRA modules.\nAdditionally, we propose a Layout-to-Image benchmark, Denselayout, a comprehensive benchmark for layout-to-image generation, containing 5k images with 90k instances in total. We further introduce Layout Grounding Score (LGS), an interpretable evaluation metric to more precisely assess the accuracy of L2I generation.\nExperiments demonstrate that our InstanceAssemble method achieves state-of-theart performance under complex layout conditions, while exhibiting strong compatibility with diverse style LoRA modules. The code and pretrained models are publicly available at https://github.com/FireRedTeam/InstanceAssemble. ∗Corresponding author. 39th Conference on Neural Information Processing Systems (NeurIPS 2025).",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-1",
+      "chunk_indices": [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "char_count": 4476,
+      "summary": "1Introduction Diffusion models [22] have revolutionized image generation task, w",
+      "digest": "1Introduction Diffusion models [22] have revolutionized image generation task, with architectures like Diffusion Transformer (DiT) [40] offering superior quality over traditional UNet-based frameworks. Recent implementations such as Stable Diffusion 3/3.5 [15, 49] and Flux.1 [4] further enhance text-to-image alignment, paving the way for advancements in layout-controlled generation. Layout-to-Image (L2I) generation is a task that focuses on creating images under layout conditions, allowing users to define spatial positions and semantic content of each instance explicitly. This task faces several significant challenges: (i) ensuring precise layout alignment while maintaining high image quality, (ii) preserving object positions and semantic attributes accurately during the iterative denoising process of diffusion models, and (iii) supporting various types of reference conditions, such as texts, images and structure information. These challenges highlight the complexity of achieving\nproce",
+      "full_text": "1Introduction Diffusion models [22] have revolutionized image generation task, with architectures like Diffusion Transformer (DiT) [40] offering superior quality over traditional UNet-based frameworks. Recent implementations such as Stable Diffusion 3/3.5 [15, 49] and Flux.1 [4] further enhance text-to-image alignment, paving the way for advancements in layout-controlled generation. Layout-to-Image (L2I) generation is a task that focuses on creating images under layout conditions, allowing users to define spatial positions and semantic content of each instance explicitly. This task faces several significant challenges: (i) ensuring precise layout alignment while maintaining high image quality, (ii) preserving object positions and semantic attributes accurately during the iterative denoising process of diffusion models, and (iii) supporting various types of reference conditions, such as texts, images and structure information. These challenges highlight the complexity of achieving\nprocess of diffusion models, and (iii) supporting various types of reference conditions, such as texts, images and structure information. These challenges highlight the complexity of achieving robust and flexible layout-controlled image generation.\nExisting L2I methods can be broadly categorized into training-free and training-based approaches, both possessing distinct advantages and limitations. Training-free methods [55, 7, 13, 8, 5, 27] rely on heuristic techniques without modifying the base model. However, these methods often exhibit degraded performance in complex layouts, demonstrate high sensitivity to hyperparameter tuning, and suffer from slow inference speed, which make them less practical for real-world applications.\nIn contrast, training-based methods [63, 53, 64, 29, 61] involve training specific layout modules to improve layout alignment, which introduces a significant amount of extra parameters and increases training complexity and resource requirements. Additionally, existing L2I evaluation metrics exhibit inaccuracies, such as false acceptance and localization errors. These identified shortcomings necessitate algorithm innovation for effective and efficient layout-controlled image generation.\nInstanceAssembleTherefore, we propose, a novel framework that systematically tackles these issues through innovative design and efficient implementation. Our approach introduces a cascaded InstanceAssemble structure, which employs a multimodal interaction paradigm to process global prompts and instance-wise layout conditions sequentially. By leveraging the Assemble-MMDiT architecture, we apply an independent attention mechanism to the semantic content of each instance, thus enabling effective handling of dense and complex layouts. Furthermore, we adopt LoRA [23] for lightweight adaptation, adding only 71M parameters to SD3-Medium (2B) and 102M to Flux.1 (11.8B). Our method enables position control with bounding boxes and multimodal content control including texts and additional visual content. This lightweight design preserves the capabilities of the base model while enhancing flexibility and efficiency. We also introduce a novel metric called Layout Grounding Score (LGS) to ensure\nThis lightweight design preserves the capabilities of the base model while enhancing flexibility and efficiency. We also introduce a novel metric called Layout Grounding Score (LGS) to ensure accurate evaluation for L2I generation, alongside a test DenseLayoutdataset. This metric provides a consistent benchmark for assessing layout alignment.\nOur method achieves state-of-the-art performance across benchmarks and demonstrates robust layout alignment under a wide variety of scenarios, ranging from simple to intricate, sparse to dense layouts.\nNotably, despite being trained on sparse layouts (≤ instances), our approach maintains robust10 generalization capability on dense layouts (instances), confirming the effectiveness of our≥ 10 proposed InstanceAssemble. The main contributions are listed below.\n1. We propose a cascaded InstanceAssemble structure that processes global text prompts and layout conditions sequentially, enabling robust handling of complex layouts through an independent attention mechanism.\n2. By leveraging LoRA [23], we achieve efficient adaptation with minimal extra parameters (3.46% on SD3-Medium and 0.84% on Flux.1), supporting position control with multimodal content control while preserving capabilities of base model.",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-2",
+      "chunk_indices": [
+        9
+      ],
+      "char_count": 597,
+      "summary": "3. We propose a new test dataset DenseLayout and a novel metric Layout Grounding",
+      "digest": "3. We propose a new test dataset DenseLayout and a novel metric Layout Grounding Score (LGS) for Layout-to-Image evaluation. Experimental results demonstrate that our approach achieves state-of-the-art performance and robust capability under complex and dense layout conditions. 2Related Work Text-to-Image Generation Text-to-image synthesis [47, 45, 42, 40, 30, 17, 6, 1, 44, 3] has witnessed rapid progress with the development of diffusion models. Initial works [44, 3, 47, 45] utilize UNet [46] as the denoising architecture, leveraging cross-attention mechanisms to inject text-conditioning 2",
+      "full_text": "3. We propose a new test dataset DenseLayout and a novel metric Layout Grounding Score (LGS) for Layout-to-Image evaluation. Experimental results demonstrate that our approach achieves state-of-the-art performance and robust capability under complex and dense layout conditions. 2Related Work Text-to-Image Generation Text-to-image synthesis [47, 45, 42, 40, 30, 17, 6, 1, 44, 3] has witnessed rapid progress with the development of diffusion models. Initial works [44, 3, 47, 45] utilize UNet [46] as the denoising architecture, leveraging cross-attention mechanisms to inject text-conditioning 2",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-3",
+      "chunk_indices": [
+        10
+      ],
+      "char_count": 993,
+      "summary": "Global Prompt 1. Global Prompt – Image 2. Instances - ImageGlobal Prompt Global ",
+      "digest": "Global Prompt 1. Global Prompt – Image 2. Instances - ImageGlobal Prompt Global Prompt “a historical monument located in Encoder a square. The monument is a statue Text of a knight, riding on a horse.” Image MMDiT Image Image DecoderVAE Noise Visual Instance Content Layout Instances Assemble- InstancesEncoder Encoder MMDiT VAE 1 2 3 4 1 2 3 4xN Textual Instance Content “A tall, pointed white structure Assemble-MMDiT with horizontal bands and a latentspherical finial at the peak.” EncoderText MLP“A majestic, weathered bronze statue of a horse with ornate AdaLayerNorm LayerNorm&FF details and a rider at top.” Image 1 &Concat.QKV Proj. 1 Assemble“Bronze equestrian statue, historical figures depicted.” Spatial Layout Attn Fourier 2 &Concat.QKV Proj. 2Pointed roof DenseSample 4 AdaLayerNorm 4 4 LayerNorm&FF 4Instances 3 3 3 3 horse 2 2 2 2 1 1 1 1Assemble-Attn Historical monument Legend Concatenation Element-wise Addition Frozen Trainable(LoRA) Figure 2: The proposed InstanceAssemble",
+      "full_text": "Global Prompt 1. Global Prompt – Image 2. Instances - ImageGlobal Prompt Global Prompt “a historical monument located in Encoder a square. The monument is a statue Text of a knight, riding on a horse.” Image MMDiT Image Image DecoderVAE Noise Visual Instance Content Layout Instances Assemble- InstancesEncoder Encoder MMDiT VAE 1 2 3 4 1 2 3 4xN Textual Instance Content “A tall, pointed white structure Assemble-MMDiT with horizontal bands and a latentspherical finial at the peak.” EncoderText MLP“A majestic, weathered bronze statue of a horse with ornate AdaLayerNorm LayerNorm&FF details and a rider at top.” Image 1 &Concat.QKV Proj. 1 Assemble“Bronze equestrian statue, historical figures depicted.” Spatial Layout Attn Fourier 2 &Concat.QKV Proj. 2Pointed roof DenseSample 4 AdaLayerNorm 4 4 LayerNorm&FF 4Instances 3 3 3 3 horse 2 2 2 2 1 1 1 1Assemble-Attn Historical monument Legend Concatenation Element-wise Addition Frozen Trainable(LoRA) Figure 2: The proposed InstanceAssemble",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-4",
+      "chunk_indices": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
+      "char_count": 3617,
+      "summary": "4 4 LayerNorm&FF 4Instances 3 3 3 3 horse 2 2 2 2 1 1 1 1Assemble-Attn Historica",
+      "digest": "4 4 LayerNorm&FF 4Instances 3 3 3 3 horse 2 2 2 2 1 1 1 1Assemble-Attn Historical monument Legend Concatenation Element-wise Addition Frozen Trainable(LoRA) Figure 2: The proposed InstanceAssemble pipeline. Various layout conditions are processed by the Layout Encoder to obtain instance tokens, which guide the image generation via Assemble-MMDiT.\nIn Assemble-MMDiT, the instance tokens interact with image tokens through the Assembling-Attn. signals. Recently, researches [6, 15, 49, 4, 34] have used the Multimodal Diffusion Transformer (MMDiT) architecture, marking a significant improvement.\nLayout-to-Image Generation Layout-to-Image generation enables image generation under layout conditions, which is defined as spatial positions with textual descriptions. Existing approaches can be broadly categorized into training-free and training-based paradigms.\nTraining-free methods leverage pretrained text-to-image diffusion models without additional training. A common strategy involves gradient-",
+      "full_text": "4 4 LayerNorm&FF 4Instances 3 3 3 3 horse 2 2 2 2 1 1 1 1Assemble-Attn Historical monument Legend Concatenation Element-wise Addition Frozen Trainable(LoRA) Figure 2: The proposed InstanceAssemble pipeline. Various layout conditions are processed by the Layout Encoder to obtain instance tokens, which guide the image generation via Assemble-MMDiT.\nIn Assemble-MMDiT, the instance tokens interact with image tokens through the Assembling-Attn. signals. Recently, researches [6, 15, 49, 4, 34] have used the Multimodal Diffusion Transformer (MMDiT) architecture, marking a significant improvement.\nLayout-to-Image Generation Layout-to-Image generation enables image generation under layout conditions, which is defined as spatial positions with textual descriptions. Existing approaches can be broadly categorized into training-free and training-based paradigms.\nTraining-free methods leverage pretrained text-to-image diffusion models without additional training. A common strategy involves gradient-based guidance during denoising to align with layout conditions [55, 12, 41, 13, 18, 50]. Also, there are methods that directly manipulate latents through well-defined replacing or merging operations [8, 48, 2] or enforce layout alignment via spatially constrained attention masks [5, 20]. GrounDiT [27] exploits semantic sharing in DiT: a cropped noisy patch and the full image become semantic clones when denoised together, enabling layout-to-image generation by jointly denoising instance regions with their corresponding image context. Other approaches generate each instance separately and employ inpainting techniques to compose the final image [37]. However, these methods demonstrate decent performance primarily on simple and sparse layouts, while their accuracy decreases in more complex layouts. Some methods require hyperparameter tuning specific to\nthese methods demonstrate decent performance primarily on simple and sparse layouts, while their accuracy decreases in more complex layouts. Some methods require hyperparameter tuning specific to different layout conditions, reducing their adaptability. Furthermore, additional gradient computations or latent manipulations result in slow inference speed, thus limiting their applicability in real-world scenarios.\nTraining-based methods explicitly incorporate layout conditioning through architectural modifications. Most approaches inject spatial constraints via cross-attention [63, 57, 36, 25, 59, 16, 54] or self-attention [10, 53, 28]. Some works propose dedicated layout encoding modules [9, 64, 65, 58, 62] or adopt a two-stage pipeline that generates images after predicting a depth map with layout conditions [14, 66]. Other works leverage autoregressive image generation models [19]. These methods suffer high computational costs due to excessive parameters. 3 Method Preliminaries Recent state-of-the-art text-to-image models such as SD3 [15] and Flux [4] adopt the Multimodal Diffusion Transformer (MMDiT) as the backbone for generation. Unlike traditional UNet-based cross-attention approaches, MMDiTs treat image and text modalities in a symmetric manner, which leads to stronger prompt alignment and controllability. These models are trained under the flow matching framework [33], which formulates\ntreat image and text modalities in a symmetric manner, which leads to stronger prompt alignment and controllability. These models are trained under the flow matching framework [33], which formulates generation as learning a continuous velocity field that transports noise to data. Given a clean latent and Gaussian noise ∼N, an x ϵ (0, I) 3",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-5",
+      "chunk_indices": [
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "char_count": 3375,
+      "summary": "interpolated latent is defined as z = (1 − t)x + tϵ, t ∈ [0, 1]. (1) t The train",
+      "digest": "interpolated latent is defined as z = (1 − t)x + tϵ, t ∈ [0, 1]. (1) t The training objective minimizes the squared error between the predicted velocity and the target velocity (ϵ − x): h i L = E ∥v (z, t, y) − (ϵ − x)∥2, (2)FM ϵ∼N (0, I), x, t θ t 2 where is implemented with an MMDiT backbone. vθ Problem Definition Layout-to-Image generation aims to synthesize images with precise control through a global prompt p and instance-wise layout conditions L. The layout conditions comprise N instances {l }N, where each instance l is defined by its spatial position b and content c: i i=1 i i i L = {l,..., l }, where l = (c, b). (3) 1 N i i i In our framework, spatial positions are represented as bounding boxes, while instance content can be specified through multiple modalities: textual instance content and additional visual instance content, including reference images, depth maps and edge maps.\nWe propose InstanceAssemble, a framework with a Layout Encoder to encode the layout conditions and ",
+      "full_text": "interpolated latent is defined as z = (1 − t)x + tϵ, t ∈ [0, 1]. (1) t The training objective minimizes the squared error between the predicted velocity and the target velocity (ϵ − x): h i L = E ∥v (z, t, y) − (ϵ − x)∥2, (2)FM ϵ∼N (0, I), x, t θ t 2 where is implemented with an MMDiT backbone. vθ Problem Definition Layout-to-Image generation aims to synthesize images with precise control through a global prompt p and instance-wise layout conditions L. The layout conditions comprise N instances {l }N, where each instance l is defined by its spatial position b and content c: i i=1 i i i L = {l,..., l }, where l = (c, b). (3) 1 N i i i In our framework, spatial positions are represented as bounding boxes, while instance content can be specified through multiple modalities: textual instance content and additional visual instance content, including reference images, depth maps and edge maps.\nWe propose InstanceAssemble, a framework with a Layout Encoder to encode the layout conditions and Assemble-MMDiT to effectively integrate the encoded layout conditions with image features. 3.1Layout Encoder We use a Layout Encoder (Fig. 2 left-bottom panel) to encode each instance l, and the tokens are i denoted as L l l which represents the layout information of each instance. Given the h = [h 1,..., h N ] spatial position of the instance (bounding box), we first enhance the spatial representation through DenseSample. Given a bounding box b = (x, y, w, h) ∈ [0, 1]4with top-left coordinates (x, y) i 1 1 1 1 and size (w, h), we generate K2uniformly spaced points:\nw h P = x + k · K, y + k · k, k ∈{0,..., K − 1} (4) i 1 x 1 y K x y Then, following GLIGEN[28], we compute the textual instance tokens as: hi = MLP ([τ (c), Fourier(P)]), (5) l i i where τ represents the text encoder, Fourier(·) denotes Fourier embedding [51], [·, ·] denotes concatenation along the feature dimension, and MLP is a multi-layer perception.\nAdditionally, we can use additional visual instance content to better improve performance. Given the visual instance content, we first extract features using the VAE encoder of the base model, then project them to the unified instance token space through a MLP: hi = MLP (VAE(c)). (6) l i 3.2Assemble-MMDiT We observe that applying attention between all image tokens and instance tokens results in suboptimal performance under complex layout conditions (e.g., overlapping, tiny objects). To address this, we introduce Assemble-MMDiT (Fig. 2, right-bottom panel), which enhances the location of each instance while maintaining compositional coherence with other instances. Our method processes each instance independently through attention modules with its associated image tokens, followed by weighted feature assembling.\nFormally, given image tokens h ∈ RC×W ×H(where C denotes the latent channel size and [W, H] l the latent size) and instance tokens h ∈ RC×N, we apply AdaLayerNorm [56], followed by our proposed Assembling-Attn, as shown in Fig. 2 (right-bottom panel). We crop the image tokens hz by the bbox b of each instance and get hz = hz[b ] ∈ RC×w×h. Then, we project the cropped image i l i tokens z and their corresponding instance tokensi into queries, keys, and h l (Qzli, Qli) (Kzli, Kli)li i values (V z, V l), and then apply attention: li i z′ l′ = Attention z l z l z l (7)hl, h i [Q li, Q i ], [K li, K i ], [V li, V i ]. i 4",
+      "keywords": [],
+      "page_range": [
+        4,
+        4
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-6",
+      "chunk_indices": [
+        22,
+        23,
+        24,
+        25,
+        26
+      ],
+      "char_count": 4170,
+      "summary": "where [·, ·] denotes concatenation along the token dimension. The updated tokens",
+      "digest": "where [·, ·] denotes concatenation along the token dimension. The updated tokens are assembled across instances. Let M ∈ NW ×Hrepresent the instance density map, calculating the counts of instances. The assembled image tokens z′and instance tokens l′are computed as: h h XN ′ ′ 1 ′hz: hz [:, i, j] = hz [:, i, j], where i ∈ [0, W −1], j ∈ [0, H −1]lM [i, j] k (8) k=1 l′ l′ l′h: h [:, k] = h k.\nAs illustrated in Fig. 3, the top row demonstrates that our assembling mechanism ensures instance tokens attend only to relevant image regions, where unrelated regions are Instances left in black. The middle row reveals that the mechanism w/ layout effectively guides global prompt tokens to focus on their Global prompt correct spatial positions. In contrast, generation without explicit layout control (bottom row) results in localization errors (\"British Shorthair\" in wrong location) or semantic w/o layout inconsistencies (\"dog\" missing).\nFurthermore, to preserve the generation capability of the Bri",
+      "full_text": "where [·, ·] denotes concatenation along the token dimension. The updated tokens are assembled across instances. Let M ∈ NW ×Hrepresent the instance density map, calculating the counts of instances. The assembled image tokens z′and instance tokens l′are computed as: h h XN ′ ′ 1 ′hz: hz [:, i, j] = hz [:, i, j], where i ∈ [0, W −1], j ∈ [0, H −1]lM [i, j] k (8) k=1 l′ l′ l′h: h [:, k] = h k.\nAs illustrated in Fig. 3, the top row demonstrates that our assembling mechanism ensures instance tokens attend only to relevant image regions, where unrelated regions are Instances left in black. The middle row reveals that the mechanism w/ layout effectively guides global prompt tokens to focus on their Global prompt correct spatial positions. In contrast, generation without explicit layout control (bottom row) results in localization errors (\"British Shorthair\" in wrong location) or semantic w/o layout inconsistencies (\"dog\" missing).\nFurthermore, to preserve the generation capability of the British ShorthairAmerican robinMaltipoo dog water Figure 3: (Top) instance-image attention original model and mitigate conditional conflicts betweenmap w/ layout. (Middle) global promptglobal prompt and layout conditions, we employ a cas-image attention map w/ layout. (Bottom) caded mechanism as shown in Fig. 2 (right-above panel).global prompt-image attention map w/o In our design, the global text prompt and image latents layout. are passed through original MMDiT first, then the image tokens along with instance tokens are processed by our Assemble-MMDiT module. The first step captures global context and ensures generation quality, while the second step ensures instance layout alignment. Besides, we train Assemble-MMDiT with LoRA, significantly reducing both the training cost and inference costs.\nSAMbox detectdetect condition:‘Tower’ ‘Rally Car’condition: detect condition:‘Window’ ‘Black sholder bag’condition: detect (a) Rally Car? (b) Black shoulder bag? (c) Window? (d) Tower?\nCropVQA: Yes –> 1 CropVQA: No –> 0 SAMIoU: 0.77 BinaryIoU: 1 DetectIoU: 0.60 DetectIoU: 0.54 DetectIoU: 0.00 DetectIoU: 0.81 Figure 4: Failure cases of other metrics. (a) false acceptance in CropVQA,(b) false rejection in CropVQA, (c) localization error in SAMIoU, and (d) discontinuous in BinaryIoU. 3.3Benchmark: DenseLayout and Layout Grounding Score The Layout-to-Image task aims to generate images that align precisely with provided layouts, evaluating both spatial accuracy and semantic consistency (e.g., color, texture, and shape, if provided).\nThe existing metrics (AP/AR) for object detection [10, 28, 55, 53] are suboptimal. They assume a fixed category set and rely on inappropriate precision/recall for binary layout outcomes. VLM-based cropped VQA methods [61] suffer false acceptance (Fig. 4 (a)) and false rejection (Fig. 4 (b)). While spatial-only metrics like SAMIoU [11] ignore appearance consistency(Fig. 4 (c)), GroundingDINObased [35] binary IoU thresholds [64, 54] fail to capture continuous layout precision(Fig. 4 (d)). Thus, we propose Layout Grounding Score (LGS), which integrates both spatial accuracy and semantic accuracy:\n1. Spatial Accuracy (DetectIoU): we detect all instances via an off-the-shelf detector [35], compute the IoU against condition bbox, and report the global mean IoU across all instances for equal weighting.\nSemantic Accuracy2.: for instances with IoU>0.5, we crop the predicted region and assess the semantic accuracy by its attribute consistency (color, texture, shape) via VLM-based VQA [60].\nSemantic Accuracy2.: for instances with IoU>0.5, we crop the predicted region and assess the semantic accuracy by its attribute consistency (color, texture, shape) via VLM-based VQA [60].\nLGS supports open-set evaluation, uses DetectIoU to evaluate spatial accuracy and decouples the spatial and semantic check to avoid CropVQA [61] failures (shown in Fig. 4). Furthermore, we 5\nTable 1: Quantitative comparison between our SD3-based InstanceAssemble and other L2I methods on LayoutSAM-Eval. ⋆The CropVQA score is proposed in Creatilayout [61] and the score of InstanceDiff, MIGC and CreatiLayout is borrowed from CreatiLayout [61].",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-7",
+      "chunk_indices": [
+        27,
+        28,
+        29
+      ],
+      "char_count": 2284,
+      "summary": "CropVQA⋆ Layout Grounding Score Global QualityLayoutSAM-Eval spatial↑color↑ text",
+      "digest": "CropVQA⋆ Layout Grounding Score Global QualityLayoutSAM-Eval spatial↑color↑ texture↑shape↑mIoU↑color↑ texture↑shape↑VQA↑ Pick↑ CLIP↑ Real Images(Upper Bound) 98.95 98.45 98.90 98.80 88.85 88.07 88.71 88.62 InstanceDiff (SD1.5) 87.99 69.16 72.78 71.08 78.16 63.14 66.82 65.86 86.42 21.16 11.73 MIGC (SD1.4) 85.66 66.97 71.24 69.06 62.87 50.70 52.99 51.77 88.97 20.69 12.56 HICO (realisticVisionV51) 90.92 69.82 73.25 71.69 70.68 53.16 55.71 54.61 86.53 21.77 9.47 CreatiLayout (SD3-M) 92.67 74.45 77.21 75.93 45.82 38.44 39.68 39.24 92.74 21.71 13.82 InstanceAssemble(ours) (SD3-M) 94.97 77.53 80.72 80.11 78.88 63.89 66.27 65.86 93.12 21.79 12.76 Table 2: Quantitative comparison between our InstanceAssemble and other L2I methods on DenseLayout.\nLayout Grounding Score Global QualityDenseLayout mIoU↑color↑ texture↑shape↑VQA↑ Pick↑ CLIP↑ Real Images(Upper Bound) 92.35 76.52 80.78 79.78 InstanceDiff (SD1.5) 47.31 29.48 33.36 32.43 88.79 20.87 11.73 MIGC (SD1.4) 34.39 22.10 23.99 23.45 91.18 20.74 ",
+      "full_text": "CropVQA⋆ Layout Grounding Score Global QualityLayoutSAM-Eval spatial↑color↑ texture↑shape↑mIoU↑color↑ texture↑shape↑VQA↑ Pick↑ CLIP↑ Real Images(Upper Bound) 98.95 98.45 98.90 98.80 88.85 88.07 88.71 88.62 InstanceDiff (SD1.5) 87.99 69.16 72.78 71.08 78.16 63.14 66.82 65.86 86.42 21.16 11.73 MIGC (SD1.4) 85.66 66.97 71.24 69.06 62.87 50.70 52.99 51.77 88.97 20.69 12.56 HICO (realisticVisionV51) 90.92 69.82 73.25 71.69 70.68 53.16 55.71 54.61 86.53 21.77 9.47 CreatiLayout (SD3-M) 92.67 74.45 77.21 75.93 45.82 38.44 39.68 39.24 92.74 21.71 13.82 InstanceAssemble(ours) (SD3-M) 94.97 77.53 80.72 80.11 78.88 63.89 66.27 65.86 93.12 21.79 12.76 Table 2: Quantitative comparison between our InstanceAssemble and other L2I methods on DenseLayout.\nLayout Grounding Score Global QualityDenseLayout mIoU↑color↑ texture↑shape↑VQA↑ Pick↑ CLIP↑ Real Images(Upper Bound) 92.35 76.52 80.78 79.78 InstanceDiff (SD1.5) 47.31 29.48 33.36 32.43 88.79 20.87 11.73 MIGC (SD1.4) 34.39 22.10 23.99 23.45 91.18 20.74 12.81 HICO (realisticVisionV51) 22.42 10.52 11.69 11.46 74.42 20.51 8.16 CreatiLayout (SD3-Medium) 15.54 11.69 12.34 12.17 93.42 21.88 12.89 InstanceAssemble(ours) (SD3-Medium) 52.07 33.77 36.21 35.81 93.54 21.68 12.58 Regional-Flux (Flux.1-Dev) 14.06 11.34 11.91 11.84 92.94 22.67 10.66 RAG (Flux.1-Dev) 17.23 14.22 14.62 14.55 92.16 22.28 11.01 InstanceAssemble(ours) (Flux.1-Dev) 43.42 27.60 29.50 29.14 93.36 21.98 11.38 InstanceAssemble(ours) (Flux.1-Schnell) 45.33 27.73 30.06 29.62 93.52 21.72 10.78 introduce DenseLayout, a dense evaluation dataset for L2I, which consists of 5k images with 90k instances (18.1 per image). The images in DenseLayout are generated by Flux.1-Dev, tagged by RAM++ [24], detected by GroundingDINO [35],\ndataset for L2I, which consists of 5k images with 90k instances (18.1 per image). The images in DenseLayout are generated by Flux.1-Dev, tagged by RAM++ [24], detected by GroundingDINO [35], recaptioned by Qwen2.5-VL [43], and filtered to retain those with ≥15 instances, thus providing dense layout conditions. 3.4Training and Inference During training, we freeze the parameters of the base model and only update the proposed Layout Encoder and Assemble-MMDiT module. We denote the adding parameters by θ′. The training objective is given by h",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-8",
+      "chunk_indices": [
+        30
+      ],
+      "char_count": 481,
+      "summary": "i 2L = E \nv z, t, p, L − (ϵ − x), (9) ϵ∼N (0, I), x, t, p, L {θ,θ′} t 2 where z ",
+      "digest": "i 2L = E \nv z, t, p, L − (ϵ − x), (9) ϵ∼N (0, I), x, t, p, L {θ,θ′} t 2 where z = (1 − t)x + tϵ. During inference, layout-conditioned denoising is applied during the first t 30% of diffusion steps, as the layout primarily forms in early stages [28, 64]. 4Experiments 4.1Experimental Setup Implementation Details The textual-only InstanceAssemble is trained on SD3-Medium [15] and Flux.1-Dev [4] and the version with additional visual instance content is only trained on SD3-Medium.",
+      "full_text": "i 2L = E \nv z, t, p, L − (ϵ − x), (9) ϵ∼N (0, I), x, t, p, L {θ,θ′} t 2 where z = (1 − t)x + tϵ. During inference, layout-conditioned denoising is applied during the first t 30% of diffusion steps, as the layout primarily forms in early stages [28, 64]. 4Experiments 4.1Experimental Setup Implementation Details The textual-only InstanceAssemble is trained on SD3-Medium [15] and Flux.1-Dev [4] and the version with additional visual instance content is only trained on SD3-Medium.",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-9",
+      "chunk_indices": [
+        31
+      ],
+      "char_count": 854,
+      "summary": "We freeze the pretrained MMDiT backbone and only adapt the Layout Encoder and Lo",
+      "digest": "We freeze the pretrained MMDiT backbone and only adapt the Layout Encoder and LoRA modules of Assemble-MMDiT. Assemble-MMDiT is initialized from pretrained weights, and LoRA with rank=4 is applied. In the SD3-based model all Assemble-MMDiT blocks are adapted, while in the Flux-based model we adapt eight blocks (seven double-blocks and one single block) due to resource constraints. During inference, the LoRA-based Assemble-MMDiT is activated for the first 30% of denoising steps, while the global prompt–image phase uses the frozen backbone. This design yields 71M (SD3-M) and 102M (Flux.1-Dev) additional parameters for the textual-only setting; the variant with additional visual instance content (SD3-M) introduces 85M parameters. All models are trained on LayoutSAM [61] at 1024×1024 with Prodigy, for 380K iterations (batch size 2) on SD3-M and 6",
+      "full_text": "We freeze the pretrained MMDiT backbone and only adapt the Layout Encoder and LoRA modules of Assemble-MMDiT. Assemble-MMDiT is initialized from pretrained weights, and LoRA with rank=4 is applied. In the SD3-based model all Assemble-MMDiT blocks are adapted, while in the Flux-based model we adapt eight blocks (seven double-blocks and one single block) due to resource constraints. During inference, the LoRA-based Assemble-MMDiT is activated for the first 30% of denoising steps, while the global prompt–image phase uses the frozen backbone. This design yields 71M (SD3-M) and 102M (Flux.1-Dev) additional parameters for the textual-only setting; the variant with additional visual instance content (SD3-M) introduces 85M parameters. All models are trained on LayoutSAM [61] at 1024×1024 with Prodigy, for 380K iterations (batch size 2) on SD3-M and 6",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-10",
+      "chunk_indices": [
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38
+      ],
+      "char_count": 4454,
+      "summary": "Table 4: Parameter addition and time efficiency under sparse and dense layout co",
+      "digest": "Table 4: Parameter addition and time efficiency under sparse and dense layout conditions. We evaluated on 10% of the LayoutSAM-Eval and DenseLayout datasets at 1024×1024 resolution. ⋆are optimized for 512×512 resolution, so their results are reported at this scale.\nParameter AdditionTime Efficiency(s) (relative runtime increase(%)) (relative parameter addition(%)) Sparse Layout Dense Layout InstanceDiff⋆(SD1.5) 369M (43%) 14.37 (+771%) 44.81 (+2754%) MIGC(SD1.4) 57M (6.64%)14.41 (+25.4%) 21.58 (+87.5%) HICO⋆(realisticVisionV51) 361M(33.9%) 4.11 (+92.9%) 9.93 (+320%) CreatiLayout(SD3-M) 1.2B (64.0%) 4.37 (+14.4%) 4.42 (+14.8%) Regional-Flux(Flux.1-Dev) - 15.29 (+113%) 37.47 (+418%) RAG(Flux.1-Dev) - 15.69 (+119%) 21.14 (+192%) InstanceAssemble(ours)(SD3-M) 71M (3.46%) 7.19 (+88.2%) 13.38 (+248%) InstanceAssemble(ours)(Flux.1-Dev) 102M (0.84%) 8.21 (+14.3%) 10.28 (+41.9%) InstanceAssemble(ours)(Flux.1-Schnell) 102M (0.84%) 1.41 (+8.46%) 1.70 (+28.8%) 300K iterations (batch size 1) on Flu",
+      "full_text": "Table 4: Parameter addition and time efficiency under sparse and dense layout conditions. We evaluated on 10% of the LayoutSAM-Eval and DenseLayout datasets at 1024×1024 resolution. ⋆are optimized for 512×512 resolution, so their results are reported at this scale.\nParameter AdditionTime Efficiency(s) (relative runtime increase(%)) (relative parameter addition(%)) Sparse Layout Dense Layout InstanceDiff⋆(SD1.5) 369M (43%) 14.37 (+771%) 44.81 (+2754%) MIGC(SD1.4) 57M (6.64%)14.41 (+25.4%) 21.58 (+87.5%) HICO⋆(realisticVisionV51) 361M(33.9%) 4.11 (+92.9%) 9.93 (+320%) CreatiLayout(SD3-M) 1.2B (64.0%) 4.37 (+14.4%) 4.42 (+14.8%) Regional-Flux(Flux.1-Dev) - 15.29 (+113%) 37.47 (+418%) RAG(Flux.1-Dev) - 15.69 (+119%) 21.14 (+192%) InstanceAssemble(ours)(SD3-M) 71M (3.46%) 7.19 (+88.2%) 13.38 (+248%) InstanceAssemble(ours)(Flux.1-Dev) 102M (0.84%) 8.21 (+14.3%) 10.28 (+41.9%) InstanceAssemble(ours)(Flux.1-Schnell) 102M (0.84%) 1.41 (+8.46%) 1.70 (+28.8%) 300K iterations (batch size 1) on Flux.1-Dev, using 8×H800 GPUs (7 days for SD3-M; 5 days for Flux.1-Dev).\nEvaluation Dataset We use LayoutSAM-Eval [61] to evaluate performance on fine-grained open-set sparse L2I dataset, containing 5k images and 19k instances in total (3.8 instances per image). To assess performance on fine-grained open-set dense L2I evaluation dataset, we use the proposed DenseLayout, which consists of 5k images and 90k instances in total (18.1 instances per image).\nFollowing conventional practice, we also evaluate on coarse-grained close-set L2I evaluation dataset COCO [31]. We combine COCO-Stuff and COCO-Instance annotations to create our COCO-Layout evaluation dataset, containing 5k images and 57k instances in total (11.5 instances per image).\nEvaluation Metric We evaluate the accuracy of L2I generation using our proposed LGS metric along with CropVQA proposed by CreatiLayout [61], measuring spatial and semantic accuracy. We also employ multiple established metrics to measure overall image quality and global prompt alignment, including VQA Score [32], PickScore [26] and CLIPScore [21]. 4.2Evaluation on L2I with Textual-Only Content Fine-Grained Open-Set Sparse L2I Generation Tab. 1 presents the quantitative results of Instance- Assemble on LayoutSAM-Eval [61], reporting results using our proposed LGS, CropVQA [61] and global quality metrics. Our proposed InstanceAssemble not only achieves SOTA in spatial and semantic accuracy of each instance, but also demonstrates superior global quality.\nFine-Grained Open-Set Dense L2I Generation Tab. 2 presents results on DenseLay-Table 3: Comparison between our SD3-based out. With the same SD3-Medium backbone, InstanceAssemble and other L2I methods on InstanceAssemble significantly outperformsCOCO-Layout. Since COCO don\"t have detailed CreatiLayout (mIoU: 52.07 vs. 15.54) whiledescription for each instance, we cannot evaluate the maintaining comparable global quality. Onattribute accuracy and only report the spatial accu- Flux.1, it also yields large gains over Regional-racy - mIoU.\nFlux and RAG (e.g., mIoU: 43.42 vs. 17.23 for RAG), showing that our cascaded Assemble- LGS Global QualityCOCO-LayoutAttn design generalizes well across backbones. mIoU↑VQA↑ Pick↑ CLIP↑ Compared to earlier UNet-based approachesReal Images(Upper Bound) 49.14 such as InstanceDiff and MIGC, our method InstanceDiff (SD1.5) 30.39 75.77 20.75 24.41 achieves higher spatial and semantic accuracy MIGC (SD1.4) 27.36 70.32 20.20 23.58 (mIoU: 52.07 vs. 47.31) without sacrificing re-HICO (realisticVisionV51) 18.88 50.61 20.38 20.72 CreatiLayout (SD3-M) 7.12 87.79 21.22 25.59alism. Overall, InstanceAssemble establishesInstanceAssemble(ours) (SD3-M) 27.85 89.06 21.58 25.68 consistent improvements in layout alignment while ensuring high image quality under challenging dense layouts.\nCoarse-Grained Closed-Set L2I Generation Tab. 3 presents the quantitative result of Instance- Assemble on COCO-Layout. Our proposed InstanceAssemble surpasses previous methods in overall image quality but lags slightly behind InstanceDiff [53] in layout precision. We attribute this gap to: 7\nLayout InstanceDiff MIGC HICO CreatiLayoutRegional-Flux RAG Ours Figure 5: Qualitative comparison of InstanceAssemble with other methods. (i) InstanceDiff’s fine-grained COCO training data with per-entity attribute annotations, and (ii) its entity-wise generation strategy, which improves precision at significant computational cost (Tab. 4).",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-11",
+      "chunk_indices": [
+        39,
+        40,
+        41
+      ],
+      "char_count": 2399,
+      "summary": "Qualitative Comparison The comparative results in Fig. 5 demonstrate that our pr",
+      "digest": "Qualitative Comparison The comparative results in Fig. 5 demonstrate that our proposed InstanceAssemble method textachieves superior spatial precision and instance-caption texture text+image46.1 text+depthalignment compared to baseline methods. For example, 43.7 color text+edge 34.6in the third row, both InstanceDiff [53] and MIGC [64] gen- 32.8 erate more than one shoes; HICO [9] fails to generate the shape 23.0 21.945.8specified NewBalance shoe; Regional-Flux [5] does not ad- 34.4 11.5 10.922.9 here to the layout conditions; and the shoe generated by 11.5 35.6 46.0 56.425.2 mIoU RAG [8] is not properly fused with the background. In con- 84.9 10.7trast, our method generates the correct instance, accurately 87.9 20.0 90.8 11.7placed and seamlessly integrated with the scene. VQA 93.7 20.7 12.7 Time Efficiency and Parameter Addition We compare 21.4 13.7CLIP time efficiency and parameter addition with other L2I meth- Pick 22.1 ods, as shown in Tab. 4. Our method achieves SOTA performance\n",
+      "full_text": "Qualitative Comparison The comparative results in Fig. 5 demonstrate that our proposed InstanceAssemble method textachieves superior spatial precision and instance-caption texture text+image46.1 text+depthalignment compared to baseline methods. For example, 43.7 color text+edge 34.6in the third row, both InstanceDiff [53] and MIGC [64] gen- 32.8 erate more than one shoes; HICO [9] fails to generate the shape 23.0 21.945.8specified NewBalance shoe; Regional-Flux [5] does not ad- 34.4 11.5 10.922.9 here to the layout conditions; and the shoe generated by 11.5 35.6 46.0 56.425.2 mIoU RAG [8] is not properly fused with the background. In con- 84.9 10.7trast, our method generates the correct instance, accurately 87.9 20.0 90.8 11.7placed and seamlessly integrated with the scene. VQA 93.7 20.7 12.7 Time Efficiency and Parameter Addition We compare 21.4 13.7CLIP time efficiency and parameter addition with other L2I meth- Pick 22.1 ods, as shown in Tab. 4. Our method achieves SOTA performance\nTime Efficiency and Parameter Addition We compare 21.4 13.7CLIP time efficiency and parameter addition with other L2I meth- Pick 22.1 ods, as shown in Tab. 4. Our method achieves SOTA performance on layout alignment with acceptable time efficiencyFigure 6: Quantitative results of Inand minimal parameter addition. stanceAssemble with additional visual instance content. 4.3Evaluation on L2I with Additional Visual Content We evaluate three additional visual instance content: image, depth, and edge (see Fig. 6). Unsurprisingly, using image as additional instance content yields the best performance, as it provides rich visual information.\nAlthough depth and edge capture texture and shape features, their performance remains inferior compared to image instance content. Nevertheless, visual modalities outperform textual-only instance 8\nTable 5: Ablation study on our proposed components on DenseLayout. \"Assemble\" refers to the presence of the Assemble-Attn module (architectural design). \"Cascaded\" indicates the interaction order: (✔) means global prompt–image interaction followed by instance–image interaction (cascaded structure), while (✘) means both are applied in parallel. \"LoRA\" specifies the training strategy for the Assemble-MMDiT module: (✔) indicates training with LoRA, while (✘) indicates full fine-tuning. \"DenseSample\" denotes whether the DenseSample spatial encoding is used.",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-12",
+      "chunk_indices": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "char_count": 2703,
+      "summary": "Layout Grounding ScoreAssemble Cascaded LoRA DenseSample mIoU↑color↑ texture↑sha",
+      "digest": "Layout Grounding ScoreAssemble Cascaded LoRA DenseSample mIoU↑color↑ texture↑shape↑VQA↑ ✘ ✘ ✘ ✘ 11.69 9.16 9.68 9.56 93.75 ✔ ✘ ✘ ✘ 43.98 24.19 26.95 26.75 84.57 ✔ ✔ ✘ ✘ 45.96 29.61 31.50 31.09 92.71 51.28 32.68 34.94 34.58 93.33✔ ✔ ✔ ✘ ✔ ✔ ✔ ✔ 52.07 33.77 36.21 35.81 93.54 content. Qualitative comparisons (Fig. 7) further demonstrate that visual instance content leads to superior texture and shape alignment compared to text.\nLayout Text+Image Text+Depth Text+Edge Text Figure 7: Qualitative results of InstanceAssemble with additional visual instance content. 4.4Ablation Study We evaluated the contribution of each proposed component on SD3-M based InstanceAssemble base modelin Tab. 5. The (SD3-Medium without additional modules) yields a very low Layout Grounding Score, indicating poor layout and content control when instance information is not explicitly modeled. The introduction of Assemble-Attn module elevates spatial accuracy (mIoU to 43.98) and boosts semantic metrics (color/texture/",
+      "full_text": "Layout Grounding ScoreAssemble Cascaded LoRA DenseSample mIoU↑color↑ texture↑shape↑VQA↑ ✘ ✘ ✘ ✘ 11.69 9.16 9.68 9.56 93.75 ✔ ✘ ✘ ✘ 43.98 24.19 26.95 26.75 84.57 ✔ ✔ ✘ ✘ 45.96 29.61 31.50 31.09 92.71 51.28 32.68 34.94 34.58 93.33✔ ✔ ✔ ✘ ✔ ✔ ✔ ✔ 52.07 33.77 36.21 35.81 93.54 content. Qualitative comparisons (Fig. 7) further demonstrate that visual instance content leads to superior texture and shape alignment compared to text.\nLayout Text+Image Text+Depth Text+Edge Text Figure 7: Qualitative results of InstanceAssemble with additional visual instance content. 4.4Ablation Study We evaluated the contribution of each proposed component on SD3-M based InstanceAssemble base modelin Tab. 5. The (SD3-Medium without additional modules) yields a very low Layout Grounding Score, indicating poor layout and content control when instance information is not explicitly modeled. The introduction of Assemble-Attn module elevates spatial accuracy (mIoU to 43.98) and boosts semantic metrics (color/texture/shape to 24.19/26.95/26.75). The cascaded design (✔: prompt–image followed by instance–image; ✘: parallel) resolves global quality degradation while maintaining layout alignment. Using LoRA to train Assemble-MMDiT improves performance for two reasons: (1) it retains the base model’s capabilities compared to the fully fine-tuned version, and (2) it enables effective layout control with far fewer trainable parameters by\nperformance for two reasons: (1) it retains the base model’s capabilities compared to the fully fine-tuned version, and (2) it enables effective layout control with far fewer trainable parameters by introducing only lightweight low-rank matrices on attention projections. Finally, DenseSample further enhances spatial accuracy, instance semantic accuracy and image quality. Together, these refinements progressively collectively optimize layout to image modeling without compromising generation ability. 4.5Applications We demonstrate that InstanceAssemble is versatile and applicable to various tasks. It seamlessly integrates with domain-specific LoRA modules for multi-domain style transfer while maintaining layout consistency, as shown in Fig. 8. Our proposed InstanceAssemble can cooperate with distilled models such as Flux.1-Schnell [4], as illustrated in Tab. 2, achieving geometric layout control and detailed synthesis. Our approach demonstrates both style adaptability and computational\ndistilled models such as Flux.1-Schnell [4], as illustrated in Tab. 2, achieving geometric layout control and detailed synthesis. Our approach demonstrates both style adaptability and computational efficiency, making it well-suited for controllable generative design applications. 9",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-13",
+      "chunk_indices": [
+        46,
+        47,
+        48
+      ],
+      "char_count": 2159,
+      "summary": "CUte3D Oil painting Ghibli Figure 8: The adaption of Cute3D [52]/ Oil Painting [",
+      "digest": "CUte3D Oil painting Ghibli Figure 8: The adaption of Cute3D [52]/ Oil Painting [39]/ Ghibli [38] LoRA with our methods.\nThe proposed InstanceAssemble successfully adapts diverse style lora and maintaining superior layout alignment. 5Conclusion We present InstanceAssemble, a novel approach for Layout-to-Image generation. Our method achieves state-of-the-art layout alignment while maintaining high-quality generation capabilities of DiT-based architectures. We validate InstanceAssemble across textual instance content and additional visual instance content, demonstrating its versatility and robustness. Our layout control scheme also successfully adapts diverse style LoRAs while maintaining superior layout alignment, demonstrating cross-domain generalization capability. Futhermore, we introduce Layout Grounding Score metric and a DenseLayout evaluation dataset to validate performance under complex layout conditions.\nLimitations and Future Work While our work advances controllable generation",
+      "full_text": "CUte3D Oil painting Ghibli Figure 8: The adaption of Cute3D [52]/ Oil Painting [39]/ Ghibli [38] LoRA with our methods.\nThe proposed InstanceAssemble successfully adapts diverse style lora and maintaining superior layout alignment. 5Conclusion We present InstanceAssemble, a novel approach for Layout-to-Image generation. Our method achieves state-of-the-art layout alignment while maintaining high-quality generation capabilities of DiT-based architectures. We validate InstanceAssemble across textual instance content and additional visual instance content, demonstrating its versatility and robustness. Our layout control scheme also successfully adapts diverse style LoRAs while maintaining superior layout alignment, demonstrating cross-domain generalization capability. Futhermore, we introduce Layout Grounding Score metric and a DenseLayout evaluation dataset to validate performance under complex layout conditions.\nLimitations and Future Work While our work advances controllable generation by unifying precise layout control with the expressive power of diffusion models, several limitations remain. First, our design currently requires sequential Assemble-MMDiT calls, which may incur inefficiency; exploring parallelization strategies is an important direction. Second, although our approach is effective under a wide range of layouts, image fidelity can degrade in extremely dense or highly complex cases.\nBroader Impacts InstanceAssemble expands the frontier of structured visual synthesis by providing fine-grained layout control and high-quality multimodal generation. However, its powerful generative capabilities may also introduce risks. In particular, malicious use could enable the creation of misleading or deceptive layouts, exacerbating the spread of disinformation. The model may also raise privacy concerns if applied to sensitive data, and like many generative systems, it inherits and may amplify societal biases present in training corpora. We encourage responsible deployment and continued investigation into safeguards that mitigate these risks while enabling beneficial applications in design, education, and accessibility. 10",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-14",
+      "chunk_indices": [
+        49,
+        50,
+        51,
+        52,
+        53
+      ],
+      "char_count": 3718,
+      "summary": "Acknowledgments and Disclosure of Funding This research was supported by the Nat",
+      "digest": "Acknowledgments and Disclosure of Funding This research was supported by the National Natural Science Foundation of China (NSFC 62576103, 62176059). The computations were conducted using the CFFF platform at Fudan University. Part of this work was carried out during an internship at Xiaohongshu.\nReferences [1] F. Bao, S. Nie, K. Xue, Y. Cao, C. Li, H. Su, and J. Zhu. All are Worth Words: A ViT Backbone for Diffusion Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22669–22679. IEEE, 2023. [2] O. Bar-Tal, L. Yariv, Y. Lipman, and T. Dekel. MultiDiffusion: Fusing Diffusion Paths for Controlled Image Generation. In Proceedings of the International Conference on Machine Learning, volume 202 of Proceedings of Machine Learning Research, pages 1737–1752. PMLR, 2023. [3] J. Betker, G. Goh, L. Jing, T. Brooks, J. Wang, L. Li, L. Ouyang, J. Zhuang, J. Lee, Y. Guo, et al. Improving image generation with better captions, 2023. [4] Black Forest Lab",
+      "full_text": "Acknowledgments and Disclosure of Funding This research was supported by the National Natural Science Foundation of China (NSFC 62576103, 62176059). The computations were conducted using the CFFF platform at Fudan University. Part of this work was carried out during an internship at Xiaohongshu.\nReferences [1] F. Bao, S. Nie, K. Xue, Y. Cao, C. Li, H. Su, and J. Zhu. All are Worth Words: A ViT Backbone for Diffusion Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22669–22679. IEEE, 2023. [2] O. Bar-Tal, L. Yariv, Y. Lipman, and T. Dekel. MultiDiffusion: Fusing Diffusion Paths for Controlled Image Generation. In Proceedings of the International Conference on Machine Learning, volume 202 of Proceedings of Machine Learning Research, pages 1737–1752. PMLR, 2023. [3] J. Betker, G. Goh, L. Jing, T. Brooks, J. Wang, L. Li, L. Ouyang, J. Zhuang, J. Lee, Y. Guo, et al. Improving image generation with better captions, 2023. [4] Black Forest Labs. Flux. https://github.com/black-forest-labs/flux, 2024. [5] A. Chen, J. Xu, W. Zheng, G. Dai, Y. Wang, R. Zhang, H. Wang, and S. Zhang. Training-free Regional Prompting for Diffusion Transformers, 2024. URL https://arxiv.org/abs/2411. 02395. [6] J. Chen, J. Yu, C. Ge, L. Yao, E. Xie, Z. Wang,\nY. Wang, R. Zhang, H. Wang, and S. Zhang. Training-free Regional Prompting for Diffusion Transformers, 2024. URL https://arxiv.org/abs/2411. 02395. [6] J. Chen, J. Yu, C. Ge, L. Yao, E. Xie, Z. Wang, J. T. Kwok, P. Luo, H. Lu, and Z. Li. PixArt- α: Fast Training of Diffusion Transformer for Photorealistic Text-to-Image Synthesis. In Proceedings of the International Conference on Learning Representations. OpenReview.net, 2024. [7] M. Chen, I. Laina, and A. Vedaldi. Training-Free Layout Control with Cross-Attention Guidance.\nIn Winter Conference on Applications of Computer Vision, pages 5331–5341. IEEE, 2024. [8] Z. Chen, Y. Li, H. Wang, Z. Chen, Z. Jiang, J. Li, Q. Wang, J. Yang, and Y. Tai. Region- Aware Text-to-Image Generation via Hard Binding and Soft Refinement, 2024. URL https: //arxiv.org/abs/2411.06558. [9] B. Cheng, Y. Ma, L. Wu, S. Liu, A. Ma, X. Wu, D. Leng, and Y. Yin. HiCo: Hierarchical Controllable Diffusion Model for Layout-to-image Generation. In Advances in Neural Information Processing Systems, 2024. [10] J. Cheng, X. Liang, X. Shi, T. He, T. Xiao, and M. Li. LayoutDiffuse: Adapting Foundational Diffusion Models for Layout-to-Image Generation, 2023. URL https://arxiv.org/abs/ 2302.08908. [11] J. Cheng, Z. Zhao, T. He, T. Xiao, Z. Zhang, and Y. Zhou. Rethinking The Training And Evaluation of Rich-Context Layout-to-Image Generation. In Advances in Neural Information Processing Systems, 2024. [12] G. Couairon, M. Careil, M. Cord, S. Lathuilière, and J. Verbeek. Zero-shot spatial layout\nof Rich-Context Layout-to-Image Generation. In Advances in Neural Information Processing Systems, 2024. [12] G. Couairon, M. Careil, M. Cord, S. Lathuilière, and J. Verbeek. Zero-shot spatial layout conditioning for text-to-image diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 2174–2183. IEEE, 2023. [13] O. Dahary, O. Patashnik, K. Aberman, and D. Cohen-Or. Be Yourself: Bounded Attention for Multi-subject Text-to-Image Generation. In Proceedings of the European Conference on Computer Vision, volume 15072 of Lecture Notes in Computer Science, pages 432–448. Springer, 2024. [14] dewei Zhou, J. Xie, Z. Yang, and Y. Yang. 3DIS: Depth-Driven Decoupled Image Synthesis for Universal Multi-Instance Generation. In Proceedings of the International Conference on Learning Representations, 2025. URL https://openreview.net/forum? id=MagmwodCAB. 11",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-15",
+      "chunk_indices": [
+        54,
+        55,
+        56,
+        57,
+        58
+      ],
+      "char_count": 4642,
+      "summary": "[15] P. Esser, S. Kulal, A. Blattmann, R. Entezari, J. Müller, H. Saini, Y. Levi",
+      "digest": "[15] P. Esser, S. Kulal, A. Blattmann, R. Entezari, J. Müller, H. Saini, Y. Levi, D. Lorenz, A. Sauer, F. Boesel, D. Podell, T. Dockhorn, Z. English, and R. Rombach. Scaling Rectified Flow Transformers for High-Resolution Image Synthesis. In Proceedings of the International Conference on Machine Learning. OpenReview.net, 2024. [16] Y. Feng, B. Gong, D. Chen, Y. Shen, Y. Liu, and J. Zhou. Ranni: Taming Text-to-Image Diffusion for Accurate Instruction Following. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4744–4753. IEEE, 2024. [17] P. Gao, L. Zhuo, D. Liu, R. Du, X. Luo, L. Qiu, Y. Zhang, C. Lin, R. Huang, S. Geng, R. Zhang, J. Xi, W. Shao, Z. Jiang, T. Yang, W. Ye, H. Tong, J. He, Y. Qiao, and H. Li. Lumina-T2X: Transforming Text into Any Modality, Resolution, and Duration via Flow-based Large Diffusion Transformers, 2024. URL. https://arxiv.org/abs/2405.05945 [18] B. Gong, S. Huang, Y. Feng, S. Zhang, Y. Li, and Y. Liu. Check, Locate,\nRe",
+      "full_text": "[15] P. Esser, S. Kulal, A. Blattmann, R. Entezari, J. Müller, H. Saini, Y. Levi, D. Lorenz, A. Sauer, F. Boesel, D. Podell, T. Dockhorn, Z. English, and R. Rombach. Scaling Rectified Flow Transformers for High-Resolution Image Synthesis. In Proceedings of the International Conference on Machine Learning. OpenReview.net, 2024. [16] Y. Feng, B. Gong, D. Chen, Y. Shen, Y. Liu, and J. Zhou. Ranni: Taming Text-to-Image Diffusion for Accurate Instruction Following. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4744–4753. IEEE, 2024. [17] P. Gao, L. Zhuo, D. Liu, R. Du, X. Luo, L. Qiu, Y. Zhang, C. Lin, R. Huang, S. Geng, R. Zhang, J. Xi, W. Shao, Z. Jiang, T. Yang, W. Ye, H. Tong, J. He, Y. Qiao, and H. Li. Lumina-T2X: Transforming Text into Any Modality, Resolution, and Duration via Flow-based Large Diffusion Transformers, 2024. URL. https://arxiv.org/abs/2405.05945 [18] B. Gong, S. Huang, Y. Feng, S. Zhang, Y. Li, and Y. Liu. Check, Locate,\nResolution, and Duration via Flow-based Large Diffusion Transformers, 2024. URL. https://arxiv.org/abs/2405.05945 [18] B. Gong, S. Huang, Y. Feng, S. Zhang, Y. Li, and Y. Liu. Check, Locate, Rectify: A Training- Free Layout Calibration System for Text- to- Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6624–6634. IEEE, 2024. [19] R. He, B. Cheng, Y. Ma, Q. Jia, S. Liu, A. Ma, X. Wu, L. Wu, D. Leng, and Y. Yin. PlanGen: Towards Unified Layout Planning and Image Generation in Auto-Regressive Vision Language Models, 2025. URL https://arxiv.org/abs/2503.10127. [20] Y. He, R. Salakhutdinov, and J. Z. Kolter. Localized text-to-image generation for free via cross attention control, 2023. URL. https://arxiv.org/abs/2306.14636 [21] J. Hessel, A. Holtzman, M. Forbes, R. L. Bras, and Y. Choi. CLIPScore: A Reference-free Evaluation Metric for Image Captioning. In Proceedings of the Empirical Methods in Natural Language Processing,\nJ. Hessel, A. Holtzman, M. Forbes, R. L. Bras, and Y. Choi. CLIPScore: A Reference-free Evaluation Metric for Image Captioning. In Proceedings of the Empirical Methods in Natural Language Processing, pages 7514–7528. Association for Computational Linguistics, 2021. [22] J. Ho, A. Jain, and P. Abbeel. Denoising Diffusion Probabilistic Models. In NeurIPS, 2020. [23] E. J. Hu, Y. Shen, P. Wallis, Z. Allen-Zhu, Y. Li, S. Wang, L. Wang, and W. Chen. LoRA: Low- Rank Adaptation of Large Language Models. In Proceedings of the International Conference on Learning Representations. OpenReview.net, 2022. [24] X. Huang, Y.-J. Huang, Y. Zhang, W. Tian, R. Feng, Y. Zhang, Y. Xie, Y. Li, and L. Zhang.\nOpen-Set Image Tagging with Multi-Grained Text Supervision, 2023. URL https://arxiv..org/abs/2310.15200 [25] C. Jia, M. Luo, Z. Dang, G. Dai, X. Chang, M. Wang, and J. Wang. SSMG: Spatial-Semantic Map Guided Diffusion Model for Free-Form Layout-to-Image Generation. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 2480–2488. AAAI Press, 2024. [26] Y. Kirstain, A. Polyak, U. Singer, S. Matiana, J. Penna, and O. Levy. Pick-a-Pic: An Open Dataset of User Preferences for Text-to-Image Generation. In Advances in Neural Information Processing Systems, 2023. [27] Y. Lee, T. Yoon, and M. Sung. GrounDiT: Grounding Diffusion Transformers via Noisy Patch Transplantation. In Advances in Neural Information Processing Systems, 2024. [28] Y. Li, H. Liu, Q. Wu, F. Mu, J. Yang, J. Gao, C. Li, and Y. J. Lee. GLIGEN: Open-Set Grounded Text-to-Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22511–22521. IEEE, 2023. [29]\nC. Li, and Y. J. Lee. GLIGEN: Open-Set Grounded Text-to-Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22511–22521. IEEE, 2023. [29] Y. Li, M. Keuper, D. Zhang, and A. Khoreva. Adversarial Supervision Makes Layout-to- Image Diffusion Models Thrive. In Proceedings of the International Conference on Learning Representations. OpenReview.net, 2024. [30] Z. Li, J. Zhang, Q. Lin, J. Xiong, Y. Long, X. Deng, Y. Zhang, X. Liu, M. Huang, Z. Xiao, D. Chen, J. He, J. Li, W. Li, C. Zhang, R. Quan, J. Lu, J. Huang, X. Yuan, X. Zheng, Y. Li, J. Zhang, C. Zhang, M. Chen, J. Liu, Z. Fang, W. Wang, J. Xue, Y. Tao, J. Zhu, K. Liu, S. Lin, Y. Sun, Y. Li, D. Wang, M. Chen, Z. Hu, X. Xiao, Y. Chen, Y. Liu, W. Liu, D. Wang, Y. Yang, J. Jiang, and Q. Lu. Hunyuan-DiT: A Powerful Multi-Resolution Diffusion Transformer with Fine-Grained Chinese Understanding, 2024. URL https://arxiv.org/abs/2405.08748. 12",
+      "keywords": [],
+      "page_range": [
+        12,
+        12
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-16",
+      "chunk_indices": [
+        59,
+        60,
+        61
+      ],
+      "char_count": 2548,
+      "summary": "[31] T. Lin, M. Maire, S. J. Belongie, J. Hays, P. Perona, D. Ramanan, P. Dollár",
+      "digest": "[31] T. Lin, M. Maire, S. J. Belongie, J. Hays, P. Perona, D. Ramanan, P. Dollár, and C. L. Zitnick.\nMicrosoft COCO: Common Objects in Context. In Proceedings of the European Conference on Computer Vision, volume 8693 of Lecture Notes in Computer Science, pages 740–755. Springer, 2014. [32] Z. Lin, D. Pathak, B. Li, J. Li, X. Xia, G. Neubig, P. Zhang, and D. Ramanan. Evaluating Text-to-Visual Generation with Image-to-Text Generation. In Proceedings of the European Conference on Computer Vision, volume 15067 of Lecture Notes in Computer Science, pages 366–384. Springer, 2024. [33] Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le. Flow matching for generative modeling. In Proceedings of the International Conference on Learning Representations.\nOpenReview.net, 2023. [34] B. Liu, E. Akhgari, A. Visheratin, A. Kamko, L. Xu, S. Shrirao, C. Lambert, J. Souza, S. Doshi, and D. Li. Playground v3: Improving Text-to-Image Alignment with Deep-Fusion Large Language Models, 2024. URL. htt",
+      "full_text": "[31] T. Lin, M. Maire, S. J. Belongie, J. Hays, P. Perona, D. Ramanan, P. Dollár, and C. L. Zitnick.\nMicrosoft COCO: Common Objects in Context. In Proceedings of the European Conference on Computer Vision, volume 8693 of Lecture Notes in Computer Science, pages 740–755. Springer, 2014. [32] Z. Lin, D. Pathak, B. Li, J. Li, X. Xia, G. Neubig, P. Zhang, and D. Ramanan. Evaluating Text-to-Visual Generation with Image-to-Text Generation. In Proceedings of the European Conference on Computer Vision, volume 15067 of Lecture Notes in Computer Science, pages 366–384. Springer, 2024. [33] Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le. Flow matching for generative modeling. In Proceedings of the International Conference on Learning Representations.\nOpenReview.net, 2023. [34] B. Liu, E. Akhgari, A. Visheratin, A. Kamko, L. Xu, S. Shrirao, C. Lambert, J. Souza, S. Doshi, and D. Li. Playground v3: Improving Text-to-Image Alignment with Deep-Fusion Large Language Models, 2024. URL. https://arxiv.org/abs/2409.10695 [35] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang, Q. Jiang, C. Li, J. Yang, H. Su, J. Zhu, and L. Zhang. Grounding DINO: Marrying DINO with Grounded Pre-training for Open-Set Object Detection. In Proceedings of the European Conference on Computer Vision, volume 15105 of Lecture Notes in Computer Science, pages 38–55. Springer, 2024. [36] Z. Lv, Y. Wei, W. Zuo, and K. K. Wong. PLACE: Adaptive Layout-Semantic Fusion for Semantic Image Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9264–9274. IEEE, 2024. [37] M. Ohanyan, H. Manukyan, Z. Wang, S. Navasardyan, and H. Shi. Zero-Painter: Training-Free Layout Control for Text-to-Image Synthesis. In Proceedings of the\npages 9264–9274. IEEE, 2024. [37] M. Ohanyan, H. Manukyan, Z. Wang, S. Navasardyan, and H. Shi. Zero-Painter: Training-Free Layout Control for Text-to-Image Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8764–8774. IEEE, 2024. [38] openfree. flux-chatgpt-ghibli-lora.https://huggingface.co/openfree/ flux-chatgpt-ghibli-lora, 2025. [39] PatrickStarrrr.FLUX - Oil painting.https://civitai.com/models/1455014/ chatgpt-4o-renderer? modelVersionId=1697982, 2024. [40] W. Peebles and S. Xie. Scalable Diffusion Models with Transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 4172–4182. IEEE, 2023. [41] Q. Phung, S. Ge, and J. Huang. Grounded Text-to-Image Synthesis with Attention Refocusing.",
+      "keywords": [],
+      "page_range": [
+        13,
+        13
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-17",
+      "chunk_indices": [
+        62,
+        63
+      ],
+      "char_count": 1354,
+      "summary": "In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recogni",
+      "digest": "In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7932–7942. IEEE, 2024. [42] D. Podell, Z. English, K. Lacey, A. Blattmann, T. Dockhorn, J. Müller, J. Penna, and R. Rombach. SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis. In Proceedings of the International Conference on Learning Representations. OpenReview.net, 2024. [43] Qwen Team. Qwen2.5-VL, January 2025. URL https://qwenlm.github.io/blog/qwen2. 5-vl/. [44] A. Ramesh, P. Dhariwal, A. Nichol, C. Chu, and M. Chen. Hierarchical Text-Conditional Image Generation with CLIP Latents, 2022. URL. https://arxiv.org/abs/2204.06125 [45] R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer. High-Resolution Image Synthesis with Latent Diffusion Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10674–10685. IEEE, 2022. [46] O. Ronneberger, P. Fischer, and T. Brox. U-Net: Convolutional Networks for Biomedical Image\nof th",
+      "full_text": "In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7932–7942. IEEE, 2024. [42] D. Podell, Z. English, K. Lacey, A. Blattmann, T. Dockhorn, J. Müller, J. Penna, and R. Rombach. SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis. In Proceedings of the International Conference on Learning Representations. OpenReview.net, 2024. [43] Qwen Team. Qwen2.5-VL, January 2025. URL https://qwenlm.github.io/blog/qwen2. 5-vl/. [44] A. Ramesh, P. Dhariwal, A. Nichol, C. Chu, and M. Chen. Hierarchical Text-Conditional Image Generation with CLIP Latents, 2022. URL. https://arxiv.org/abs/2204.06125 [45] R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer. High-Resolution Image Synthesis with Latent Diffusion Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10674–10685. IEEE, 2022. [46] O. Ronneberger, P. Fischer, and T. Brox. U-Net: Convolutional Networks for Biomedical Image\nof the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10674–10685. IEEE, 2022. [46] O. Ronneberger, P. Fischer, and T. Brox. U-Net: Convolutional Networks for Biomedical Image Segmentation. In Medical Image Computing and Computer-Assisted Intervention, volume 9351 of Lecture Notes in Computer Science, pages 234–241. Springer, 2015. 13",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-18",
+      "chunk_indices": [
+        64,
+        65,
+        66,
+        67,
+        68
+      ],
+      "char_count": 3966,
+      "summary": "[47] C. Saharia, W. Chan, S. Saxena, L. Li, J. Whang, E. L. Denton, S. K. S. Gha",
+      "digest": "[47] C. Saharia, W. Chan, S. Saxena, L. Li, J. Whang, E. L. Denton, S. K. S. Ghasemipour, R. G.\nLopes, B. K. Ayan, T. Salimans, J. Ho, D. J. Fleet, and M. Norouzi. Photorealistic Text-to-Image Diffusion Models with Deep Language Understanding. In Advances in Neural Information Processing Systems, 2022. [48] T. Shirakawa and S. Uchida. NoiseCollage: A Layout-Aware Text-to-Image Diffusion Model Based on Noise Cropping and Merging. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8921–8930. IEEE, 2024. [49] stability.ai. Stable Diffusion 3.5. https://stability.ai/news/ introducing-stable-diffusion-3-5, Nov 2024. [50] A. Taghipour, M. Ghahremani, M. Bennamoun, A. M. Rekavandi, H. Laga, and F. Boussaid.\nBox It to Bind It: Unified Layout Control and Attribute Binding in T2I Diffusion Models, 2024. URL https://arxiv.org/abs/2402.17910. [51] M. Tancik, P. P. Srinivasan, B. Mildenhall, S. Fridovich-Keil, N. Raghavan, U. Singhal, R. Ramamoorthi, J. T. B",
+      "full_text": "[47] C. Saharia, W. Chan, S. Saxena, L. Li, J. Whang, E. L. Denton, S. K. S. Ghasemipour, R. G.\nLopes, B. K. Ayan, T. Salimans, J. Ho, D. J. Fleet, and M. Norouzi. Photorealistic Text-to-Image Diffusion Models with Deep Language Understanding. In Advances in Neural Information Processing Systems, 2022. [48] T. Shirakawa and S. Uchida. NoiseCollage: A Layout-Aware Text-to-Image Diffusion Model Based on Noise Cropping and Merging. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8921–8930. IEEE, 2024. [49] stability.ai. Stable Diffusion 3.5. https://stability.ai/news/ introducing-stable-diffusion-3-5, Nov 2024. [50] A. Taghipour, M. Ghahremani, M. Bennamoun, A. M. Rekavandi, H. Laga, and F. Boussaid.\nBox It to Bind It: Unified Layout Control and Attribute Binding in T2I Diffusion Models, 2024. URL https://arxiv.org/abs/2402.17910. [51] M. Tancik, P. P. Srinivasan, B. Mildenhall, S. Fridovich-Keil, N. Raghavan, U. Singhal, R. Ramamoorthi, J. T. Barron, and R. Ng. Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains. In Advances in Neural Information Processing Systems, 2020. [52] vjleoliu. ChatGPT-4oRenderer.https://civitai.com/models/1455014/ chatgpt-4o-renderer? modelVersionId=1697982, 2025. [53] X. Wang, T. Darrell, S. S. Rambhatla, R. Girdhar, and I. Misra. InstanceDiffusion: Instance- Level Control for Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6232–6242. IEEE, 2024. [54] Y. Wu, X. Zhou, B. Ma, X. Su, K. Ma, and X. Wang. IFAdapter: Instance Feature Control for Grounded Text-to-Image Generation, 2024. URL https://arxiv.org/abs/2409.08240. [55] J. Xie, Y. Li, Y. Huang, H. Liu,\nX. Zhou, B. Ma, X. Su, K. Ma, and X. Wang. IFAdapter: Instance Feature Control for Grounded Text-to-Image Generation, 2024. URL https://arxiv.org/abs/2409.08240. [55] J. Xie, Y. Li, Y. Huang, H. Liu, W. Zhang, Y. Zheng, and M. Z. Shou. BoxDiff: Text-to-Image Synthesis with Training-Free Box-Constrained Diffusion. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 7418–7427. IEEE, 2023. [56] J. Xu, X. Sun, Z. Zhang, G. Zhao, and J. Lin. Understanding and Improving Layer Normalization.\nIn Advances in Neural Information Processing Systems, pages 4383–4393, 2019. [57] H. Xue, Z. Huang, Q. Sun, L. Song, and W. Zhang. Freestyle Layout-to-Image Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 14256–14266. IEEE, 2023. [58] B. Yang, Y. Luo, Z. Chen, G. Wang, X. Liang, and L. Lin. LAW-Diffusion: Complex Scene Generation by Diffusion with Layouts. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 22612–22622. IEEE, 2023. [59] Z. Yang, J. Wang, Z. Gan, L. Li, K. Lin, C. Wu, N. Duan, Z. Liu, C. Liu, M. Zeng, and L. Wang. ReCo: Region-Controlled Text-to-Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 14246–14255. IEEE, 2023. [60] Y. Yao, T. Yu, A. Zhang, C. Wang, J. Cui, H. Zhu, T. Cai, H. Li, W. Zhao, Z. He, Q. Chen, H. Zhou, Z. Zou, H. Zhang, S. Hu, Z. Zheng, J. Zhou, J. Cai, X. Han, G. Zeng, D. Li, Z. Liu, and M. Sun. MiniCPM-V:\nT. Yu, A. Zhang, C. Wang, J. Cui, H. Zhu, T. Cai, H. Li, W. Zhao, Z. He, Q. Chen, H. Zhou, Z. Zou, H. Zhang, S. Hu, Z. Zheng, J. Zhou, J. Cai, X. Han, G. Zeng, D. Li, Z. Liu, and M. Sun. MiniCPM-V: A GPT-4V Level MLLM on Your Phone, 2024. URL.https://arxiv.org/abs/2408.01800 [61] H. Zhang, D. Hong, Y. Wang, J. Shao, X. Wu, Z. Wu, and Y.-G. Jiang. CreatiLayout: Siamese Multimodal Diffusion Transformer for Creative Layout-to-Image Generation, 2025. URL https://arxiv.org/abs/2412.03859. [62] L. Zhang, A. Rao, and M. Agrawala. Adding conditional control to text-to-image diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 3813–3824. IEEE, 2023. 14",
+      "keywords": [],
+      "page_range": [
+        14,
+        14
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-19",
+      "chunk_indices": [
+        69
+      ],
+      "char_count": 871,
+      "summary": "[63] G. Zheng, X. Zhou, X. Li, Z. Qi, Y. Shan, and X. Li. LayoutDiffusion: Contr",
+      "digest": "[63] G. Zheng, X. Zhou, X. Li, Z. Qi, Y. Shan, and X. Li. LayoutDiffusion: Controllable Diffusion Model for Layout-to-Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22490–22499. IEEE, 2023. [64] D. Zhou, Y. Li, F. Ma, X. Zhang, and Y. Yang. MIGC: Multi-Instance Generation Controller for Text-to-Image Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6818–6828. IEEE, 2024. [65] D. Zhou, Y. Li, F. Ma, Z. Yang, and Y. Yang. MIGC++: Advanced Multi-Instance Generation Controller for Image Synthesis. IEEE Transactions on Pattern Analysis and Machine Intelligence, 47(3):1714–1728, 2025. [66] D. Zhou, J. Xie, Z. Yang, and Y. Yang. 3DIS-FLUX: simple and efficient multi-instance generation with DiT rendering, 2025. URL https://arxiv.org/abs/2501.05131. 15",
+      "full_text": "[63] G. Zheng, X. Zhou, X. Li, Z. Qi, Y. Shan, and X. Li. LayoutDiffusion: Controllable Diffusion Model for Layout-to-Image Generation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22490–22499. IEEE, 2023. [64] D. Zhou, Y. Li, F. Ma, X. Zhang, and Y. Yang. MIGC: Multi-Instance Generation Controller for Text-to-Image Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6818–6828. IEEE, 2024. [65] D. Zhou, Y. Li, F. Ma, Z. Yang, and Y. Yang. MIGC++: Advanced Multi-Instance Generation Controller for Image Synthesis. IEEE Transactions on Pattern Analysis and Machine Intelligence, 47(3):1714–1728, 2025. [66] D. Zhou, J. Xie, Z. Yang, and Y. Yang. 3DIS-FLUX: simple and efficient multi-instance generation with DiT rendering, 2025. URL https://arxiv.org/abs/2501.05131. 15",
+      "keywords": [],
+      "page_range": [
+        15,
+        15
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-20",
+      "chunk_indices": [
+        70,
+        71,
+        72
+      ],
+      "char_count": 2585,
+      "summary": "Supplementary Material AEarly-Stage Layout Control in Assemble-MMDiT We apply th",
+      "digest": "Supplementary Material AEarly-Stage Layout Control in Assemble-MMDiT We apply the Assemble-MMDiT layout control module exclusively during the initial 30% of the denoising trajectory and deactivate it for the remaining 70%. This two-stage strategy provides robust low-frequency structural guidance in the early stages to facilitate layout alignment, while allowing subsequent unconstrained refinement of high-frequency details during later denoising phases.\nAblation on Control Ratio Time (s) 0.9 10 0.8 0.7 8 0.6 Time (s)Score 60.5 0.4 Selected: 0.3 mIoU (LGS) 4 Color (LGS)0.3 Texture (LGS) Shape (LGS) 0.2 VQA 0.0 0.2 0.4 0.6 0.8 1.0 Control Ratio Figure 9: Impact of the proportion of diffusion steps incorporating layout conditioning on generation quality.\nAs illustrated in Figure 9, restricting layout control to less than 30% of the diffusion process results in insufficient layout alignment with the target bounding boxes. In contrast, extending control beyond this optimal threshold leads to",
+      "full_text": "Supplementary Material AEarly-Stage Layout Control in Assemble-MMDiT We apply the Assemble-MMDiT layout control module exclusively during the initial 30% of the denoising trajectory and deactivate it for the remaining 70%. This two-stage strategy provides robust low-frequency structural guidance in the early stages to facilitate layout alignment, while allowing subsequent unconstrained refinement of high-frequency details during later denoising phases.\nAblation on Control Ratio Time (s) 0.9 10 0.8 0.7 8 0.6 Time (s)Score 60.5 0.4 Selected: 0.3 mIoU (LGS) 4 Color (LGS)0.3 Texture (LGS) Shape (LGS) 0.2 VQA 0.0 0.2 0.4 0.6 0.8 1.0 Control Ratio Figure 9: Impact of the proportion of diffusion steps incorporating layout conditioning on generation quality.\nAs illustrated in Figure 9, restricting layout control to less than 30% of the diffusion process results in insufficient layout alignment with the target bounding boxes. In contrast, extending control beyond this optimal threshold leads to a decline in output quality. Furthermore, increasing the proportion of layout-guided steps results in significant additional computational cost.\nBAdditional Ablation Studies B.1Effect of Bbox Encoding and DenseSample To clarify the role of bounding box encoding and DenseSample, we further ablated the SD3-M based InstanceAssemble model on DenseLayout. Bounding box embeddings guide correct object placement, while DenseSample provides additional improvements in spatial accuracy and instancelevel semantics. The results in Table 6 demonstrate that both components contribute to the overall performance.\nTable 6: Ablation on bounding box encoding and DenseSample.\nTable 6: Ablation on bounding box encoding and DenseSample.\nSetting mIoU color texture shape VQA↑ ↑ ↑ ↑ ↑ w/o bbox encoding, w/o DenseSample 51.22 32.15 34.04 33.53 93.30 w/ bbox encoding, w/o DenseSample 51.28 32.68 34.94 34.58 93.33 w/ bbox encoding, w/ DenseSample 52.07 33.77 36.21 35.81 93.54 B.2Comparison with Attention Mask-based Region Injection We also compare our Assemble-Attn design with attention mask-based region injection. While both can be viewed as region-wise attention mechanisms, attention masks operate globally and may cause 16\nsemantic leakage in overlapping regions. Our method instead applies instance-wise self-attention on cropped latent regions and then fuses the updated features via the Assemble step, which is more effective in dense layouts. As shown in Table 7, our design achieves superior instance attribute consistency and a higher VQA score compared to the attention mask baseline.",
+      "keywords": [],
+      "page_range": [
+        16,
+        16
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-21",
+      "chunk_indices": [
+        73,
+        74
+      ],
+      "char_count": 1690,
+      "summary": "Table 7: Comparison between attention mask-based injection and our Assemble-Attn",
+      "digest": "Table 7: Comparison between attention mask-based injection and our Assemble-Attn.\nMethod spatial↑ color↑ texture↑ shape↑ VQA↑ SD3-Medium (base model) 77.49 60.28 62.55 60.38 93.30 Attention mask (SD3-M) 94.11 74.28 77.58 76.54 91.53 InstanceAssemble (ours, SD3-M) 94.97 77.53 80.72 80.11 93.12 CUnderlying data for radar-chart visualizations In Sections 4.3, we utilized a radar chart to depict each quantitative variable along equi-angular axes, providing an intuitive comparison. This visualization highlights the multifaceted superiority of our method. Here, we present the corresponding raw evaluation results in tabular form. Specifically, Tab. 8 corresponds to Fig. 6, thus ensuring a clear mapping between each radar-chart subfigure and its underlying data.\nTable 8: Quantitative results of additional visual content on DenseLayout.\nTable 8: Quantitative results of additional visual content on DenseLayout.\nLayout Grounding Score Global QualityDenseLayout mIoU↑color↑ texture↑shape↑VQA↑ Pick↑",
+      "full_text": "Table 7: Comparison between attention mask-based injection and our Assemble-Attn.\nMethod spatial↑ color↑ texture↑ shape↑ VQA↑ SD3-Medium (base model) 77.49 60.28 62.55 60.38 93.30 Attention mask (SD3-M) 94.11 74.28 77.58 76.54 91.53 InstanceAssemble (ours, SD3-M) 94.97 77.53 80.72 80.11 93.12 CUnderlying data for radar-chart visualizations In Sections 4.3, we utilized a radar chart to depict each quantitative variable along equi-angular axes, providing an intuitive comparison. This visualization highlights the multifaceted superiority of our method. Here, we present the corresponding raw evaluation results in tabular form. Specifically, Tab. 8 corresponds to Fig. 6, thus ensuring a clear mapping between each radar-chart subfigure and its underlying data.\nTable 8: Quantitative results of additional visual content on DenseLayout.\nTable 8: Quantitative results of additional visual content on DenseLayout.\nLayout Grounding Score Global QualityDenseLayout mIoU↑color↑ texture↑shape↑VQA↑ Pick↑ CLIP↑ Real Images(Upper Bound) 92.35 76.52 80.78 79.78 text 43.72 26.57 28.56 28.39 93.37 21.63 12.45 text+image 55.29 42.15 44.50 44.24 91.66 22.05 12.95 text+depth 49.64 28.25 31.82 31.62 92.83 21.28 13.25 text+edge 50.73 29.45 33.92 33.84 90.13 21.26 13.55 DMore Details on DenseLayout Evaluation Dataset D.1Construction Pipeline of DenseLayout Dataset The DenseLayout dataset is constructed through a multi-stage pipeline designed to extract highdensity and semantically-rich layout information from synthetic images. The pipeline includes following steps:\n1. Image Generation using Flux.1-Dev [4] A diverse set of synthetic images is generated using Flux.1-Dev, a text-to-image model.",
+      "keywords": [],
+      "page_range": [
+        17,
+        17
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-22",
+      "chunk_indices": [
+        75
+      ],
+      "char_count": 674,
+      "summary": "1. Image Generation using Flux.1-Dev [4] A diverse set of synthetic images is ge",
+      "digest": "1. Image Generation using Flux.1-Dev [4] A diverse set of synthetic images is generated using Flux.1-Dev, a text-to-image model.\nThe input prompts are generic textual descriptions, sampled from the LayoutSAM dataset, which is based on SA-1B. The images are resized to maintain the same aspect ratio as the original SA-1B images, with the longer edge set to 1024 pixels. This step provides a visually complex base for extracting layout structures.\n2. Multi-label Tagging using RAM++ [24] The generated images are tagged using RAM++, the next-generation model of RAM, which supports open-set recognition. These tags offer high-level semantic guidance for subsequent grounding.",
+      "full_text": "1. Image Generation using Flux.1-Dev [4] A diverse set of synthetic images is generated using Flux.1-Dev, a text-to-image model.\nThe input prompts are generic textual descriptions, sampled from the LayoutSAM dataset, which is based on SA-1B. The images are resized to maintain the same aspect ratio as the original SA-1B images, with the longer edge set to 1024 pixels. This step provides a visually complex base for extracting layout structures.\n2. Multi-label Tagging using RAM++ [24] The generated images are tagged using RAM++, the next-generation model of RAM, which supports open-set recognition. These tags offer high-level semantic guidance for subsequent grounding.",
+      "keywords": [],
+      "page_range": [
+        17,
+        17
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-23",
+      "chunk_indices": [
+        76
+      ],
+      "char_count": 755,
+      "summary": "3. Object Detection via GroundingDINO [35] Using the image and its predicted tag",
+      "digest": "3. Object Detection via GroundingDINO [35] Using the image and its predicted tags as input, GroundingDINO performs open-set object detection. It outputs bounding boxes and class labels for all detected entities. The detection is configured with a box_threshold of 0.35 and a text_threshold of 0.25. Each detected bounding box is treated as an instance bounding box, and the corresponding predicted label is recorded as the instance description.\n4. Detailed Captioning with Qwen2.5-VL [43] Each bounding box region is cropped from the original image and fed into Qwen2.5-VL 17\ndetailedto generate a fine-grained caption. These region-level captions are stored as the description for each instance, enriching the semantic information beyond category labels.",
+      "full_text": "3. Object Detection via GroundingDINO [35] Using the image and its predicted tags as input, GroundingDINO performs open-set object detection. It outputs bounding boxes and class labels for all detected entities. The detection is configured with a box_threshold of 0.35 and a text_threshold of 0.25. Each detected bounding box is treated as an instance bounding box, and the corresponding predicted label is recorded as the instance description.\n4. Detailed Captioning with Qwen2.5-VL [43] Each bounding box region is cropped from the original image and fed into Qwen2.5-VL 17\ndetailedto generate a fine-grained caption. These region-level captions are stored as the description for each instance, enriching the semantic information beyond category labels.",
+      "keywords": [],
+      "page_range": [
+        17,
+        17
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-24",
+      "chunk_indices": [
+        77,
+        78,
+        79
+      ],
+      "char_count": 1900,
+      "summary": "detailedto generate a fine-grained caption. These region-level captions are stor",
+      "digest": "detailedto generate a fine-grained caption. These region-level captions are stored as the description for each instance, enriching the semantic information beyond category labels.\n5. Density Filtering To ensure high layout complexity, only images with 15 or more detected instances (as output by GroundingDINO) are retained. This results in a dense layout distribution suitable for layout-conditioned generation tasks. The distribution of instance count is shown in Fig. 10. 5,000 images 90,339 instancesFinally, the DenseLayout dataset contains and, with an average of 18.1 instances per image.\nDenseLayout: Instance Count Distribution Median: 17.0Mean: 18.1 1200 Std: 3.7 1000 Image Count 800 600 400 200 0 15 20 25 30 35 40 45 50Number of Instances per Image Figure 10: Instance count distribution per image in DenseLayout.\nAnnotation Format.The annotation for each image consists of: •: the original prompt used for image generation. global_caption •: metadata of the image, including height and ",
+      "full_text": "detailedto generate a fine-grained caption. These region-level captions are stored as the description for each instance, enriching the semantic information beyond category labels.\n5. Density Filtering To ensure high layout complexity, only images with 15 or more detected instances (as output by GroundingDINO) are retained. This results in a dense layout distribution suitable for layout-conditioned generation tasks. The distribution of instance count is shown in Fig. 10. 5,000 images 90,339 instancesFinally, the DenseLayout dataset contains and, with an average of 18.1 instances per image.\nDenseLayout: Instance Count Distribution Median: 17.0Mean: 18.1 1200 Std: 3.7 1000 Image Count 800 600 400 200 0 15 20 25 30 35 40 45 50Number of Instances per Image Figure 10: Instance count distribution per image in DenseLayout.\nAnnotation Format.The annotation for each image consists of: •: the original prompt used for image generation. global_caption •: metadata of the image, including height and width. image_info •: a list of instances, each with: instance_info – bbox: the bounding box of the instance, formatting as. [x1, y1, x2, y2] – description: the category label predicted by GroundingDINO. –: a fine-grained caption generated by Qwen2.5-VL for the detail_description cropped region.\nD.2Samples of DenseLayout Dataset \" instance_info \": [ { \"bbox \": [129,489,283,642], \" description \": \"nightstand\", \" detail_description \": \"Thenightstandis dark brown, compact, with a drawer.\" }, { \"bbox \": [306,170,430,339], \" description \": \"pictureframe\", \" detail_description \": \"Brownwoodenframecontaining a watercolorpaintingof greenleaves on a white background.\" }, { \"bbox \": [603,170,727,340], \" description \": \"pictureframe\", \" detail_description \": \"A simplebrownwoodenframeholds a botanicalprint withdetailedleaves andstems.\" },... ] Figure 11: A sample of DenseLayout and its annotation. 18",
+      "keywords": [],
+      "page_range": [
+        18,
+        18
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-25",
+      "chunk_indices": [
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86
+      ],
+      "char_count": 5813,
+      "summary": "This is a photo showcasing a traditional Chinese-style pavilion and This is a ph",
+      "digest": "This is a photo showcasing a traditional Chinese-style pavilion and This is a photo depicting a traditional Asian floating market scene. In This is a photo showcasing a Chinese-style building and a statue. The boats on the river. The pavilion is located on the right side of the the picture, two women are sitting in their respective boats, each building is brightly colored, with a red roof and a yellow door, and the picture, with a beautifully decorated roof and a golden plaque hanging wearing a traditional conical hat, and dressed in brightly colored statue is located in front of the building, standing on a pedestal. The in the middle. In front of the pavilion is a row of wooden boats, each with a red flag hanging on it, and people are gathered on the boat dock. traditional clothing. The woman on the left is wearing a blue top and a dark skirt, while the woman on the right is wearing a yellow top and a surrounding environment is a spacious square, with several pedestrians walking\nThe w",
+      "full_text": "This is a photo showcasing a traditional Chinese-style pavilion and This is a photo depicting a traditional Asian floating market scene. In This is a photo showcasing a Chinese-style building and a statue. The boats on the river. The pavilion is located on the right side of the the picture, two women are sitting in their respective boats, each building is brightly colored, with a red roof and a yellow door, and the picture, with a beautifully decorated roof and a golden plaque hanging wearing a traditional conical hat, and dressed in brightly colored statue is located in front of the building, standing on a pedestal. The in the middle. In front of the pavilion is a row of wooden boats, each with a red flag hanging on it, and people are gathered on the boat dock. traditional clothing. The woman on the left is wearing a blue top and a dark skirt, while the woman on the right is wearing a yellow top and a surrounding environment is a spacious square, with several pedestrians walking\nThe woman on the left is wearing a blue top and a dark skirt, while the woman on the right is wearing a yellow top and a surrounding environment is a spacious square, with several pedestrians walking around the building. The background is a clear blue sky and lush The river is calm, and the sky is clear, with a few clouds leisurely light-colored skirt. Their boats are filled with a variety of goods, trees.drifting by. including fresh flowers, fruits, and other food items. The boats are adorned with bright colored cloths, adding a festive atmosphere to the scene. The entire scene is captured under natural light, presenting a tranquil and vibrant market atmosphere.\nThis is a photo showcasing a modern interior design style, with the This is a realistic-style photograph depicting a city street scene after This is a photograph showcasing a famous archway in a city. The archway focus on a spacious and bright room. The room is furnished with wooden a flood. In the photo, vehicles and pedestrians are struggling to is a reddish-brown structure, adorned with golden decorations and furniture, including a long wooden table and a matching wooden bench. On the table, there are some books and a laptop, while on the bench, there navigate through the flooded streets. A yellow tricycle is parked in the middle of the street, surrounded by vehicles covered with blue sculptures, and its design is very intricate. The archway is located on a wide street, with pedestrians and cyclists weaving through the road. is a black desk lamp. The room's lighting comes from several minimalist waterproof cloth. Pedestrians are using umbrellas to shield themselves The sky is\nand cyclists weaving through the road. is a black desk lamp. The room's lighting comes from several minimalist waterproof cloth. Pedestrians are using umbrellas to shield themselves The sky is clear, with a few clouds scattered in the blue sky. The chandeliers and a large window, through which you can see the green from the rain, some are pushing bicycles, while others are walking. The buildings in the background have a Mediterranean style, with the domes plants outside. The floor is covered with a red carpet, and there are several decorations on the floor, including a red vase and a decorative buildings on both sides of the street are submerged in water, and the wires and poles above the street are also submerged, adding to the of some buildings visible in the distance. sculpture. The entire scene is illuminated by natural light, creating a severity of the flooding. The entire scene is shrouded in a gloomy warm and comfortable atmosphere. atmosphere, with no sunlight piercing through\nscene is illuminated by natural light, creating a severity of the flooding. The entire scene is shrouded in a gloomy warm and comfortable atmosphere. atmosphere, with no sunlight piercing through the clouds.\nThis is a photo showcasing a rural landscape, with a grassland in the foreground, its surface presenting a vivid green and yellow color. On This is a photo showcasing the interior of a church, with the focus on a magnificent sculpture located in the center of the altar. The sculpture This is a photo showcasing a modern urban square. The square is spacious, with a modern-style building in the center, its exterior composed of the grassland, there are several wooden buildings, including a larger barn and a smaller house, both with traditional wooden structures and depicts a figure in a long robe, holding a cross, with a solemn glass and metal structures. The square is paved with grey slabs, with roofs. In front of the buildings, there is a row of wooden fences, with expression. The sculpture is surrounded by exquisite statues and several sets of stairs and benches for people to rest. The square is a few cars parked in front of the fence. In the background, the hills decorative elements,\nis surrounded by exquisite statues and several sets of stairs and benches for people to rest. The square is a few cars parked in front of the fence. In the background, the hills decorative elements, including a statue of a figure holding a cross and a figure in a helmet. The altar is decorated with complex geometric surrounded by several buildings of different architectural styles, including red brick buildings and modern glass curtain walls. There are are covered with dense trees, and the sky is filled with white clouds, presenting a tranquil and peaceful rural atmosphere. patterns and floral designs, and the walls are adorned with colorful a few pedestrians on the square, some are walking, some are sitting on stained glass windows, through which the light from outside shines in, benches, enjoying the sunshine. The sky is clear, with a few white adding a warm and sacred atmosphere to the interior. clouds scattered in the blue sky.",
+      "keywords": [],
+      "page_range": [
+        19,
+        19
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    },
+    {
+      "group_id": "group-26",
+      "chunk_indices": [
+        87
+      ],
+      "char_count": 886,
+      "summary": "Figure 12: Representative samples from DenseLayout dataset demonstrating: (a) Hi",
+      "digest": "Figure 12: Representative samples from DenseLayout dataset demonstrating: (a) High-density scene with ≥15 instances, (b) Complex instance relationships with precise attribute specifications. 19\nEMore results with textual-only content E.1InstanceAssemble based on SD3-Medium x Figure 13: More results of InstanceAssemble based on SD3-Medium with textual-only content.\nE.2InstanceAssemble based on Flux.1-Dev Figure 14: More results of InstanceAssemble based on Flux.1-Dev with textual-only content.\nE.3InstanceAssemble based on Flux.1-Schnell Figure 15: More results of InstanceAssemble based on Flux.1-Schnell with textual-only content. 20\nFMore results with additional visual content F.1Additional Image Figure 16: More results with additional image.\nF.2Additional Depth Figure 17: More results with additional depth.\nF.3Additional Edge Figure 18: More results with additional edge. 21",
+      "full_text": "Figure 12: Representative samples from DenseLayout dataset demonstrating: (a) High-density scene with ≥15 instances, (b) Complex instance relationships with precise attribute specifications. 19\nEMore results with textual-only content E.1InstanceAssemble based on SD3-Medium x Figure 13: More results of InstanceAssemble based on SD3-Medium with textual-only content.\nE.2InstanceAssemble based on Flux.1-Dev Figure 14: More results of InstanceAssemble based on Flux.1-Dev with textual-only content.\nE.3InstanceAssemble based on Flux.1-Schnell Figure 15: More results of InstanceAssemble based on Flux.1-Schnell with textual-only content. 20\nFMore results with additional visual content F.1Additional Image Figure 16: More results with additional image.\nF.2Additional Depth Figure 17: More results with additional depth.\nF.3Additional Edge Figure 18: More results with additional edge. 21",
+      "keywords": [],
+      "page_range": [
+        19,
+        19
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:51:58.330092+00:00"
+      }
+    }
+  ]
+}

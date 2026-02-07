@@ -114,11 +114,14 @@ class ContextBuilder:
 
             context_parts.append("\n".join(parts))
 
-            # 构建引文映射
+            # 构建引文映射（包含高亮文本片段，用于前端定位高亮）
+            # 取文本前 100 字符作为高亮锚点文本（更短的片段匹配率更高）
+            highlight_text = text[:100].strip() if text else ""
             citations.append({
                 "ref": ref_num,
                 "group_id": group_id,
                 "page_range": [page_start, page_end],
+                "highlight_text": highlight_text,
             })
 
         # 用双换行分隔各意群的上下文块
@@ -171,7 +174,9 @@ class ContextBuilder:
             "注意：\n"
             "- 每段引用的内容都应标注来源编号\n"
             "- 可以同时引用多个来源，如 [1][2]\n"
-            "- 如果信息来自你的通用知识而非上下文，则无需标注编号"
+            "- 如果信息来自你的通用知识而非上下文，则无需标注编号\n"
+            "- 只引用与问题直接相关的来源，不要为了引用而引用不相关的内容\n"
+            "- 如果某个来源与问题无关，请不要引用它"
         )
 
         logger.info(f"引文指示提示词生成完成: {len(citations)} 个引用来源")

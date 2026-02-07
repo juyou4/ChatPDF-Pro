@@ -1,0 +1,498 @@
+{
+  "schema_version": 1,
+  "doc_id": "ebe975c3cc451af57211efcb89c90fd6",
+  "doc_hash": "",
+  "created_at": "2026-02-07T08:35:12.814664+00:00",
+  "config": {
+    "target_chars": 5000,
+    "min_chars": 2500,
+    "max_chars": 6000
+  },
+  "groups": [
+    {
+      "group_id": "group-0",
+      "chunk_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "char_count": 4301,
+      "summary": "This CVPR paper is the Open Access version, provided by the Computer Vision Foun",
+      "digest": "This CVPR paper is the Open Access version, provided by the Computer Vision Foundation.\nExcept for this watermark, it is identical to the accepted version; the final published version of the proceedings is available on IEEE Xplore.\nInstaGen: Enhancing Object Detection by Training on Synthetic Dataset Chengjian Feng1Yujie Zhong1 Zequn Jie1,† Weidi Xie2,† Lin Ma1 Meituan Inc. CMIC, Shanghai Jiao Tong University 1 2 https://fcjian.github.io/InstaGen Figure 1. (a) The synthetic images generated from Stable Diffusion and our proposed InstaGen, which can serve as a dataset synthesizer for sourcing photo-realistic images and instance bounding boxes at scale. (b) On open-vocabulary detection, training on synthetic images demonstrates significant improvement over CLIP-based methods on novel categories. (c) Training on the synthetic images generated from InstaGen also enhances the detection performance in close-set scenario, particularly in data-sparse circumstances.\nAbstract age datasets, such ",
+      "full_text": "This CVPR paper is the Open Access version, provided by the Computer Vision Foundation.\nExcept for this watermark, it is identical to the accepted version; the final published version of the proceedings is available on IEEE Xplore.\nInstaGen: Enhancing Object Detection by Training on Synthetic Dataset Chengjian Feng1Yujie Zhong1 Zequn Jie1,† Weidi Xie2,† Lin Ma1 Meituan Inc. CMIC, Shanghai Jiao Tong University 1 2 https://fcjian.github.io/InstaGen Figure 1. (a) The synthetic images generated from Stable Diffusion and our proposed InstaGen, which can serve as a dataset synthesizer for sourcing photo-realistic images and instance bounding boxes at scale. (b) On open-vocabulary detection, training on synthetic images demonstrates significant improvement over CLIP-based methods on novel categories. (c) Training on the synthetic images generated from InstaGen also enhances the detection performance in close-set scenario, particularly in data-sparse circumstances.\nAbstract age datasets, such as MS-COCO [20] and Object365 [30], where objects are exhaustively annotated with bounding In this paper, we present a novel paradigm to enhanceboxes and corresponding category labels. However, the prothe ability of object detector, e.g., expanding categoriescedure for collecting images and annotations is often laboor improving detection performance, by training on syn-rious and time-consuming, limiting the datasets’ scalability. thetic dataset generated from diffusion models. Specifically, In the recent literature, text-to-image diffusion models we integrate an instance-level grounding head into a pre-have demonstrated remarkable success in generating hightrained, generative diffusion model, to augment it with the quality images [28, 29], that unlocks the possibility of trainability of localising instances in the generated images. Theing vision systems with synthetic images. In general, exgrounding head is trained to align the text embedding ofisting\npossibility of trainability of localising instances in the generated images. Theing vision systems with synthetic images. In general, exgrounding head is trained to align the text embedding ofisting text-to-image diffusion models are capable of syncategory names with the regional visual feature of the dif-thesizing images based on some free-form text prompt, as fusion model, using supervision from an off-the-shelf objectshown in the first row of Figure 1a. Despite being photodetector, and a novel self-training scheme on (novel) cat-realistic, such synthesized images can not support training egories not covered by the detector. We conduct thoroughsophisticated systems, that normally requires the inclusion experiments to show that, this enhanced version of diffusionof instance-level annotations, e.g., bounding boxes for obmodel, termed as InstaGen, can serve as a data synthe-ject detection in our case. In this paper, we investigate a sizer, to enhance object detectors by training on its\ne.g., bounding boxes for obmodel, termed as InstaGen, can serve as a data synthe-ject detection in our case. In this paper, we investigate a sizer, to enhance object detectors by training on its gen- novel paradigm of dataset synthesis for training object deerated samples, demonstrating superior performance over tector, i.e., augmenting the text-to-image diffusion model to existing state-of-the-art methods in open-vocabulary (+4.5generate instance-level bounding boxes along with images.\nAP) and data-sparse (+1.2 ∼ 5.2 AP) scenarios.\nTo begin with, we build an image synthesizer by finetuning the diffusion model on existing detection dataset.\n1. Introduction This is driven by the observation that off-the-shelf diffusion models often generate images with only one or two ob-Object detection has been extensively studied in the field jects on simplistic background, training detectors on suchof computer vision, focusing on the localization and cateimages may thus lead to reduced robustness in complexgorization of objects within images [3, 5, 12, 26, 27]. The common practise is to train the detectors on large-scale im-real-world scenarios. Specifically, we exploit the existing detection dataset, and subsequently fine-tune the diffusion model with the image-caption pairs, constructed by taking†: corresponding author. 14121",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-1",
+      "chunk_indices": [
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "char_count": 4988,
+      "summary": "random image crops, and composing the category name oftion (OVD) has been widely",
+      "digest": "random image crops, and composing the category name oftion (OVD) has been widely researched, for example, OVRthe objects in the crop. As illustrated in the second row of CNN [37] introduces the concept of OVD and pre-trains a the Figure 1a, once finetuned, the image synthesizer nowvision-language model with image-caption pairs. The subenables to produce images with multiple objects and intri-sequent works make use of the robust multi-modal reprecate contexts, thereby providing a more accurate simulationsentation of CLIP [24], and transfer its knowledge to object of real-world detection scenarios. detectors through knowledge distillation [9, 36], exploiting To generate bounding boxes for objects within synthetic extra data [5, 41] and text prompt tuning [2, 5]. In this paper, images, we propose an instance grounding module that es-we propose to expand the ability of object detectors, e.g., tablishes the correlation between the regional visual fea-expanding categories or improving\nwe pro",
+      "full_text": "random image crops, and composing the category name oftion (OVD) has been widely researched, for example, OVRthe objects in the crop. As illustrated in the second row of CNN [37] introduces the concept of OVD and pre-trains a the Figure 1a, once finetuned, the image synthesizer nowvision-language model with image-caption pairs. The subenables to produce images with multiple objects and intri-sequent works make use of the robust multi-modal reprecate contexts, thereby providing a more accurate simulationsentation of CLIP [24], and transfer its knowledge to object of real-world detection scenarios. detectors through knowledge distillation [9, 36], exploiting To generate bounding boxes for objects within synthetic extra data [5, 41] and text prompt tuning [2, 5]. In this paper, images, we propose an instance grounding module that es-we propose to expand the ability of object detectors, e.g., tablishes the correlation between the regional visual fea-expanding categories or improving\nwe propose an instance grounding module that es-we propose to expand the ability of object detectors, e.g., tablishes the correlation between the regional visual fea-expanding categories or improving detection performance, tures from diffusion model and the text embedding of cat-by training on synthetic dataset. egory names, and infers the coordinates for the objects’Generative Models. Image generation has been considbounding boxes. Specifically, we adopt a two-step trainingered as a task of interest in computer vision for decades. In strategies, firstly, we train the grounding module on syn-the recent literature, significant progress has been made, for thetic images, with the supervision from an off-the-shelfexample, the generative adversarial networks (GANs) [8], object detector, which has been trained on a set of base cat-variational autoencoders (VAEs) [15], flow-based modegories; secondly, we utilize the trained grounding head to els [14], and autoregressive models (ARMs) [32].\nhas been trained on a set of base cat-variational autoencoders (VAEs) [15], flow-based modegories; secondly, we utilize the trained grounding head to els [14], and autoregressive models (ARMs) [32]. More generate pseudo labels for a larger set of categories, includ-recently, there has been a growing research interest in diffuing those not seen in existing detection dataset, and self-sion probabilistic models (DPMs), which have shown great train the grounding module.Once finished training, thepromise in generating high-quality images across diverse grounding module will be able to identify the objects of ar-datasets. For examples, GLIDE [23] utilizes a pre-trained bitrary category and their bounding boxes in the syntheticlanguage model and a cascaded diffusion structure for textimage, by simply providing the name in free-form language.to-image generation. DALL-E 2 [25] is trained to gener- To summarize, we explore a novel approach to enhanceate images by inverting the CLIP image space,\nproviding the name in free-form language.to-image generation. DALL-E 2 [25] is trained to gener- To summarize, we explore a novel approach to enhanceate images by inverting the CLIP image space, while Imaobject detection capabilities, such as expanding detectable gen [29] explores the advantages of using pre-trained lancategories and improving overall detection performance, guage models. Stable Diffusion [28] proposes the diffusion by training on synthetic dataset generated from diffusionprocess in VAE latent spaces rather than pixel spaces, effecmodel. We make the following contribution: (i) We developtively reducing resource consumption. In general, the rapid an image synthesizer by fine-tuning the diffusion model, development of generative models opens the possibility for with image-caption pairs derived from existing object de-training large models with synthetic dataset. tection datasets, our synthesizer can generate images with multiple objects and complex contexts, offering a\npairs derived from existing object de-training large models with synthetic dataset. tection datasets, our synthesizer can generate images with multiple objects and complex contexts, offering a more re-3. Methodology alistic simulation for real-world detection scenarios. (ii) We introduce a data synthesis framework for detection, termedIn this section, we present details for constructing a dataset as InstaGen.This is achieved through a novel ground- synthesizer, that enables to generate photo-realistic images ing module that enables to generate labels and boundingwith bounding boxes for each object instance, and train an boxes for objects in synthetic images. (iii) We train standardobject detector on the combined real and synthetic datasets. object detectors on the combination of real and synthetic dataset, and demonstrate superior performance over exist-3.1. Problem Formulation ing state-of-the-art detectors across various benchmarks, in- Given a detection dataset of real images with",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-2",
+      "chunk_indices": [
+        10
+      ],
+      "char_count": 641,
+      "summary": "synthetic dataset, and demonstrate superior performance over exist-3.1. Problem ",
+      "digest": "synthetic dataset, and demonstrate superior performance over exist-3.1. Problem Formulation ing state-of-the-art detectors across various benchmarks, in- Given a detection dataset of real images with manual ancluding open-vocabulary detection (increasing Average Prenotations, i.e., D = {(x, B, Y),..., (x, B, Y)}, cision [AP] by +4.5), data-sparse detection (enhancing AP real 1 1 1 N N N where B = {b,..., b |b ∈ R2×2} denotes the set of by +1.2 to +5.2), and cross-dataset transfer (boosting AP by i 1 m j box coordinates for the annotated instances in one image, +0.5 to +1.1). and C refers to the categories Yi = {y1,..., ym|yj ∈R base}",
+      "full_text": "synthetic dataset, and demonstrate superior performance over exist-3.1. Problem Formulation ing state-of-the-art detectors across various benchmarks, in- Given a detection dataset of real images with manual ancluding open-vocabulary detection (increasing Average Prenotations, i.e., D = {(x, B, Y),..., (x, B, Y)}, cision [AP] by +4.5), data-sparse detection (enhancing AP real 1 1 1 N N N where B = {b,..., b |b ∈ R2×2} denotes the set of by +1.2 to +5.2), and cross-dataset transfer (boosting AP by i 1 m j box coordinates for the annotated instances in one image, +0.5 to +1.1). and C refers to the categories Yi = {y1,..., ym|yj ∈R base}",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-3",
+      "chunk_indices": [
+        11,
+        12
+      ],
+      "char_count": 1252,
+      "summary": "2. Related Work of the instances. Our goal is thus to exploit the given real dat",
+      "digest": "2. Related Work of the instances. Our goal is thus to exploit the given real dataset (D), to steer a generative diffusion model intoreal dataset synthesizer, that enables to augment the existing de-Object Detection.Object detection aims to simultaneously predict the category and corresponding bounding box tection dataset, i.e., D = D +D. As a result, detec-final real syn for the objects in the images.Generally, object detec-tors trained on the combined dataset demonstrate enhanced tors [3, 4, 6, 26, 27] are trained on a substantial amount of ability, i.e., extending the detection categories or improving training data with bounding box annotations and can onlythe detection performance. recognize a predetermined set of categories present in theIn the following sections, we first describe the procedure training data.In the recent literature, to further expand for constructing an image synthesizer, that can generate imthe ability of object detector, open-vocabulary object detec-ages\nthe pr",
+      "full_text": "2. Related Work of the instances. Our goal is thus to exploit the given real dataset (D), to steer a generative diffusion model intoreal dataset synthesizer, that enables to augment the existing de-Object Detection.Object detection aims to simultaneously predict the category and corresponding bounding box tection dataset, i.e., D = D +D. As a result, detec-final real syn for the objects in the images.Generally, object detec-tors trained on the combined dataset demonstrate enhanced tors [3, 4, 6, 26, 27] are trained on a substantial amount of ability, i.e., extending the detection categories or improving training data with bounding box annotations and can onlythe detection performance. recognize a predetermined set of categories present in theIn the following sections, we first describe the procedure training data.In the recent literature, to further expand for constructing an image synthesizer, that can generate imthe ability of object detector, open-vocabulary object detec-ages\nthe procedure training data.In the recent literature, to further expand for constructing an image synthesizer, that can generate imthe ability of object detector, open-vocabulary object detec-ages suitable for training object detector (Section 3.2). To 14122",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-4",
+      "chunk_indices": [
+        13,
+        14
+      ],
+      "char_count": 1129,
+      "summary": "(a) Fine-tuning diffusion model on detection dataset.(b) Supervised training and",
+      "digest": "(a) Fine-tuning diffusion model on detection dataset.(b) Supervised training and self-training for grounding head (i.e. student).\nFigure 2. Illustration of the process for finetuning diffusion model and training the grounding head: (a) stable diffusion model is fine-tuned on the detection dataset on base categories. (b) The grounding head is trained on synthetic images, with supervised learning on base categories and self-training on novel categories. simultaneously generate the images and object boundingtains multiple objects of the same category, we only use this boxes, we propose a novel instance-level grounding mod-category name once in the text prompt. ule, which aligns the text embedding of category name with Fine-tuning loss. We use the sampled image crop and conthe regional visual features from image synthesizer, and in-structed text prompt to fine-tune SDM with a squared error fers the coordinates for the objects in synthetic images. Toloss on the predicted noise term as follo",
+      "full_text": "(a) Fine-tuning diffusion model on detection dataset.(b) Supervised training and self-training for grounding head (i.e. student).\nFigure 2. Illustration of the process for finetuning diffusion model and training the grounding head: (a) stable diffusion model is fine-tuned on the detection dataset on base categories. (b) The grounding head is trained on synthetic images, with supervised learning on base categories and self-training on novel categories. simultaneously generate the images and object boundingtains multiple objects of the same category, we only use this boxes, we propose a novel instance-level grounding mod-category name once in the text prompt. ule, which aligns the text embedding of category name with Fine-tuning loss. We use the sampled image crop and conthe regional visual features from image synthesizer, and in-structed text prompt to fine-tune SDM with a squared error fers the coordinates for the objects in synthetic images. Toloss on the predicted noise term as follows: further improve the alignment towards objects of arbitrary e { { -tu n e } = \\m athbb E}_{z, \\epsilon \\sim \\mathcal {N}(0,1),",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-5",
+      "chunk_indices": [
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "char_count": 4283,
+      "summary": "in synthetic images. Toloss on the predicted noise term as follows: further impr",
+      "digest": "in synthetic images. Toloss on the predicted noise term as follows: further improve the alignment towards objects of arbitrary e { { -tu n e } = \\m athbb E}_{z, \\epsilon \\sim \\mathcal {N}(0,1), t, y} \\Big [||\\epsilon - \\epsilon _{\\theta }(z^{t}, t, y)||_{2}^{2} \\Big ], (1) category, we adopt self-training to tune the grounding mod- \\mathcal L}_{\\ text {fin } ule on object categories not existing in D (Section 3.3).real where denotes a latent vector mapped from the input im- InstaGen zAs a result, the proposed model, termed as, can age with VAE, t denotes the denoising step, uniformly samautomatically generate images along with bounding boxes pled from, refers to the length of the diffusion for object instances, and construct synthetic dataset () {1,..., T} T Dsyn Markov chain, and ϵ refers to the estimated noise from at scale, leading to improved ability when training detectors θ SDM with parameters θ being updated. We have experion it (Section 3.4). mentally verified the necessity of\n",
+      "full_text": "in synthetic images. Toloss on the predicted noise term as follows: further improve the alignment towards objects of arbitrary e { { -tu n e } = \\m athbb E}_{z, \\epsilon \\sim \\mathcal {N}(0,1), t, y} \\Big [||\\epsilon - \\epsilon _{\\theta }(z^{t}, t, y)||_{2}^{2} \\Big ], (1) category, we adopt self-training to tune the grounding mod- \\mathcal L}_{\\ text {fin } ule on object categories not existing in D (Section 3.3).real where denotes a latent vector mapped from the input im- InstaGen zAs a result, the proposed model, termed as, can age with VAE, t denotes the denoising step, uniformly samautomatically generate images along with bounding boxes pled from, refers to the length of the diffusion for object instances, and construct synthetic dataset () {1,..., T} T Dsyn Markov chain, and ϵ refers to the estimated noise from at scale, leading to improved ability when training detectors θ SDM with parameters θ being updated. We have experion it (Section 3.4). mentally verified the necessity of\nto the estimated noise from at scale, leading to improved ability when training detectors θ SDM with parameters θ being updated. We have experion it (Section 3.4). mentally verified the necessity of this fine-tuning step, as 3.2. Image Synthesizer for Object Detection shown in Table 4. 3.3. Dataset Synthesizer for Object DetectionHere, we build our image synthesizer based on an off-theshelf stable diffusion model (SDM [28]). Despite of its im- In this section, we present details for steering the image pressive ability in generating photo-realistic images, it ofsynthesizer into dataset synthesizer for object detection, ten outputs images with only one or two objects on simwhich enables to simultaneously generate images and obplistic background with the text prompts, for example, ‘a ject bounding boxes. Specifically, we propose an instancephotograph of a [category1 name] and a [category2 name]’, level grounding module that aligns the text embedding of as demonstrated in Figure 4b. As a\nboxes. Specifically, we propose an instancephotograph of a [category1 name] and a [category2 name]’, level grounding module that aligns the text embedding of as demonstrated in Figure 4b. As a result, object detecobject category, with the regional visual feature of the tors trained on such images may exhibit reduced robustness diffusion model, and infers the coordinates for bounding when dealing with complex real-world scenarios. To bridge boxes, effectively augmenting the image synthesizer with such domain gap, we propose to construct the image syninstance grounding, as shown in Figure 3. To further imthesizer by fine-tuning the SDM with an existing real-world prove the alignment in large visual diversity, we propose a detection dataset (D).real self-training scheme that enables the grounding module to Fine-tuning procedure. To fine-tune the stable diffusiongeneralise towards arbitrary categories, including those not model (SDM), one approach is to na¨ıvely use the sampleexist in\nmodule to Fine-tuning procedure. To fine-tune the stable diffusiongeneralise towards arbitrary categories, including those not model (SDM), one approach is to na¨ıvely use the sampleexist in real detection dataset (D). As a result, our datarealfrom detection dataset, for example, randomly pick an im- synthesizer, termed as InstaGen, can be used to construct age and construct the text prompt with all categories in thesynthetic dataset for training object detectors. image. However, as the image often contains multiple ob- 3.3.1Instance Grounding on Base Categoriesjects, such approach renders significant difficulty for finetuning the SDM, especially for small or occluded objects.To localise the object instances in synthetic images, we in- We adopt a mild strategy by taking random crops from thetroduce an open-vocabulary grounding module, that aims images, and construct the text prompt with categories in theto simultaneously generate image (x) and the correspondimage crops, as shown in\nthetroduce an open-vocabulary grounding module, that aims images, and construct the text prompt with categories in theto simultaneously generate image (x) and the correspondimage crops, as shown in Figure 2a. If an image crop con-ing instance-level bounding boxes () based on a set ofB 14123",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-6",
+      "chunk_indices": [
+        20,
+        21,
+        22,
+        23,
+        24
+      ],
+      "char_count": 4880,
+      "summary": "Figure 3. Illustration of the dataset generation process in InstaGen. The data g",
+      "digest": "Figure 3. Illustration of the dataset generation process in InstaGen. The data generation process consists of two steps: (i) Image collection: given a text prompt, SDM generates images with the objects described in the text prompt; (ii) Annotation generation: the instance-level grounding head aligns the category embedding with the visual feature region of SDM, generating the corresponding object bounding-boxes. categories (Y), i.e., {x, B, Y} = Φ (ϵ, Y), wherefeatures. Finally, we apply the dot product between eachInstaGen denotes the sampled noise. query and the text features, followed by a Sigmoid functionϵ ∼N(0, I) to predict the classification score ˆs for each category. Addi- To this end, we propose an instance grounding head, as tionally, the object queries are passed through a Multi-Layer shown in Figure 3, it takes the intermediate representation Perceptron (MLP) to predict the object bounding boxes ˆ, asbfrom image synthesizer and the text embedding of category shown in\nMulti-",
+      "full_text": "Figure 3. Illustration of the dataset generation process in InstaGen. The data generation process consists of two steps: (i) Image collection: given a text prompt, SDM generates images with the objects described in the text prompt; (ii) Annotation generation: the instance-level grounding head aligns the category embedding with the visual feature region of SDM, generating the corresponding object bounding-boxes. categories (Y), i.e., {x, B, Y} = Φ (ϵ, Y), wherefeatures. Finally, we apply the dot product between eachInstaGen denotes the sampled noise. query and the text features, followed by a Sigmoid functionϵ ∼N(0, I) to predict the classification score ˆs for each category. Addi- To this end, we propose an instance grounding head, as tionally, the object queries are passed through a Multi-Layer shown in Figure 3, it takes the intermediate representation Perceptron (MLP) to predict the object bounding boxes ˆ, asbfrom image synthesizer and the text embedding of category shown in\nMulti-Layer shown in Figure 3, it takes the intermediate representation Perceptron (MLP) to predict the object bounding boxes ˆ, asbfrom image synthesizer and the text embedding of category shown in Figure 3. We train the grounding head by alignas inputs, then predicts the corresponding object bounding ing the category embedding with the regional visual feaboxes, i.e.,, where {Bi, Yi} = Φg-head(Fi, Φt-enc(g(Yi))) tures from diffusion model, as detailed below. Once trained, F = {f 1,..., f n } refers to the multi-scale dense features i i i the grounding head is open-vocabulary, i.e., given any catfrom the image synthesizer at time step, · denotes t = 1 g()egories (even beyond the training categories), the grounda template that decorates each of the visual categories in the ing head can generate the corresponding bounding-boxes text prompt, e.g., ‘a photograph of [category1 name] and for the object instances. [category2 name]’, denotes the text encoder. Φt-enc(·) Inspired by\ncan generate the corresponding bounding-boxes text prompt, e.g., ‘a photograph of [category1 name] and for the object instances. [category2 name]’, denotes the text encoder. Φt-enc(·) Inspired by GroundingDINO [22], our grounding headTraining triplets of base categories. Following [18], we mainly contains four components: (i) a channel-apply an automatic pipeline to construct thevisual feature,Φg-head(·) { compression layer, implemented with a 3×3 convolution, bounding-box, text prompt} triplets, with an object detecfor reducing the dimensionality of the visual features; (ii) ator trained on base categories from a given dataset (D).real feature enhancer, consisting of six feature enhancer layers, In specific, assuming there exists a set of base categories to fuse the visual and text features. Each layer employs a de- {c1,..., cN }, e.g., the classes in MS-COCO [20]. We base base formable self-attention to enhance image features, a vanillafirst select a random number of base categories\nEach layer employs a de- {c1,..., cN }, e.g., the classes in MS-COCO [20]. We base base formable self-attention to enhance image features, a vanillafirst select a random number of base categories to construct self-attention for text feature enhancers, an image-to-text a text prompt, e.g., ‘a photograph of [base category1] and cross-attention and a text-to-image cross-attention for fea-[base category2]’, and generate both the visual features and ture fusion; (iii) a language-guided query selection module images with our image synthesizer. Then we take an offfor query initialization. This module predicts top-N anchorthe-shelf object detector, for example, pre-trained Mask Rboxes based on the similarity between text features and im- CNN [12], to run the inference procedure on the synthetic age features. Following DINO [38], it adopts a mixed queryimages, and infer the bounding boxes of the selected cateselection where the positional queries are initialized withgories. To acquire the\nage features. Following DINO [38], it adopts a mixed queryimages, and infer the bounding boxes of the selected cateselection where the positional queries are initialized withgories. To acquire the confident bounding-boxes for trainthe anchor boxes and the content queries remain learnable; ing, we use a score threshold to filter out the bounding- α (iv) a cross-modality decoder for classification and box re-boxes with low confidence (an ablation study on the sefinement. It comprises six decoder layers, with each layerlection of the score threshold has been conducted in Secutilizing a self-attention mechanism for query interaction, tion 4.5). As a result, an infinite number of training triplets an image cross-attention layer for combining image fea-for the given base categories can be constructed by repeattures, and a text cross-attention layer for combining texting the above operation. 14124",
+      "keywords": [],
+      "page_range": [
+        4,
+        4
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-7",
+      "chunk_indices": [
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "char_count": 5260,
+      "summary": "(a) Stable Diffusion + Grounding head w/ Super-(b) Stable Diffusion + Grounding ",
+      "digest": "(a) Stable Diffusion + Grounding head w/ Super-(b) Stable Diffusion + Grounding head w/(c) Stable Diffusion w/ Fine-tuning + Grounding vised training Self-training. Supervised- and. head w/ Supervised- and Self-training.\nFigure 4. Visualization of the synthetic images and bounding-boxes generated from different models. The bounding-boxes with green denote the objects from base categories, while the ones with red denote the objects from novel categories.\nTraining loss. We use the constructed training triplets tofilter out those with low confidence, and use the remaintrain the grounding head: ing training triplets F ˆ novel to train the student, i.e., (i, bi, y)i grounding head. le n { (2) \\la b q: base-gro und i a hcal L}_ {\\text {base}} = \\sum \\limits _{i=1}^N[\\mathcal {L}_{\\text {cls}}(\\hat {s}_{i}, c_{i}) + \\mathds {1}_{\\{c_i\\neq \\varnothing \\}} \\mathcal {L}_{\\text {box}}(\\hat {b}_i, b_{i})], \\vspace {-3pt} Training loss. Now, we can also train the grounding headg} \\m t on the mined ",
+      "full_text": "(a) Stable Diffusion + Grounding head w/ Super-(b) Stable Diffusion + Grounding head w/(c) Stable Diffusion w/ Fine-tuning + Grounding vised training Self-training. Supervised- and. head w/ Supervised- and Self-training.\nFigure 4. Visualization of the synthetic images and bounding-boxes generated from different models. The bounding-boxes with green denote the objects from base categories, while the ones with red denote the objects from novel categories.\nTraining loss. We use the constructed training triplets tofilter out those with low confidence, and use the remaintrain the grounding head: ing training triplets F ˆ novel to train the student, i.e., (i, bi, y)i grounding head. le n { (2) \\la b q: base-gro und i a hcal L}_ {\\text {base}} = \\sum \\limits _{i=1}^N[\\mathcal {L}_{\\text {cls}}(\\hat {s}_{i}, c_{i}) + \\mathds {1}_{\\{c_i\\neq \\varnothing \\}} \\mathcal {L}_{\\text {box}}(\\hat {b}_i, b_{i})], \\vspace {-3pt} Training loss. Now, we can also train the grounding headg} \\m t on the mined triplets of novel categories (that are unseen in {e the existing real dataset) with the training loss definedwhere theth prediction (, ˆ) from the object queries Lnovel i sˆi bi N similar to Eq. 2. Thus, the total training loss for training theis assigned to a ground-truth (c, b) or ∅(no object) with i i grounding head can be:.bipartite matching. L and L denote the classification Lgrounding = Lbase + Lnovelcls box loss (e.g. Focal loss) and box\nto a ground-truth (c, b) or ∅(no object) with i i grounding head can be:.bipartite matching. L and L denote the classification Lgrounding = Lbase + Lnovelcls box loss (e.g. Focal loss) and box regression loss (e.g. L1 loss 3.4. Training Detector with Synthetic Dataset and GIoU loss), respectively.\nIn this section, we augment the real dataset (D), with syn-real 3.3.2Instance Grounding on Novel Categories thetic dataset (D), and train popular object detectors, forsyn example, Faster R-CNN [27] with the standard training loss: Till here, we have obtained a diffusion model with openvocabulary grounding, which has been only trained with \\m a thca l { L }_{\\ tex t {de t}} = \\m athcal {L}_{\\text {rpn\\_cls}} + \\mathcal {L}_{\\text {rpn\\_box}} + \\mathcal {L}_{\\text {det\\_cls}} + \\mathcal {L}_{\\text {det\\_box}}, (3) base categories. In this section, we propose to further leverwhere, are the classification and box regres-age the synthetic training triplets from a wider range of Lrpn cls Lrpn box sion losses of region proposal network, and L, Lcategories to enhance the alignment for novel/unseen cat- det cls det box are the classification and box regression losses of the detec-egories. Specifically, as shown in Figure 2b, we describe a framework that generates the training triplets for\ncat- det cls det box are the classification and box regression losses of the detec-egories. Specifically, as shown in Figure 2b, we describe a framework that generates the training triplets for novel cat-tion head. Generally speaking, the synthetic dataset enables to improve the detector’s ability from two aspects: (i) ex-egories using the grounded diffusion model, and then selfpanding the original data with more categories, (ii) improvetrain the grounding head. the detection performance by increasing data diversity.\nTraining triplets of novel categories. We design the text prompts of novel categories, e.g., ‘a photograph of [novelExpanding detection categories. The grounding head is designed to be open-vocabulary, that enables to generate ob-category1] and [novel category2]’, and pass them through our proposed image synthesizer, to generate the visual fea-ject bounding boxes for novel categories, even though it is trained with a specific set of base categories. This featuretures.To acquire the corresponding bounding-boxes for enables InstaGen to construct a detection dataset for anynovel categories, we propose a self-training scheme that takes the above grounding head as the student, and apply a category. Figure 4 demonstrates several synthetic images and object bounding boxes for novel categories, i.e., the ob-mean teacher (an exponential moving average (EMA) of the student model) to create pseudo labels for update. In con-ject with red bounding box. We evaluate the effectiveness of training on\nthe ob-mean teacher (an exponential moving average (EMA) of the student model) to create pseudo labels for update. In con-ject with red bounding box. We evaluate the effectiveness of training on synthetic dataset through experiments on open-trast to the widely adopted self-training scheme that takes vocabulary detection benchmark. For more details, pleasethe image as input, the student and teacher in our case only take the visual features as input, thus cannot apply data aug- refer to Figure 1b and Section 4.2. mentation as for images. Instead, we insert dropout moduleIncreasing data diversity.The base diffusion model is within each feature enhancer layer and decoder layer in thetrained on a large corpus of image-caption pairs, that enstudent. During training, we run inference (without dropoutables to generate diverse images. Taking advantage of such module) with teacher model on the visual features to pro- capabilities, InstaGen is capable of generating dataset with duce bounding",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-8",
+      "chunk_indices": [
+        32
+      ],
+      "char_count": 303,
+      "summary": "dropoutables to generate diverse images. Taking advantage of such module) with t",
+      "digest": "dropoutables to generate diverse images. Taking advantage of such module) with teacher model on the visual features to pro- capabilities, InstaGen is capable of generating dataset with duce bounding boxes, and then use a score threshold todiverse images and box annotations, which can expand the β 14125",
+      "full_text": "dropoutables to generate diverse images. Taking advantage of such module) with teacher model on the visual features to pro- capabilities, InstaGen is capable of generating dataset with duce bounding boxes, and then use a score threshold todiverse images and box annotations, which can expand the β 14125",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-9",
+      "chunk_indices": [
+        33,
+        34,
+        35,
+        36,
+        37,
+        38
+      ],
+      "char_count": 5834,
+      "summary": "Method Supervision Detector Backbone AP50box AP50box AP50box all base novel Deti",
+      "digest": "Method Supervision Detector Backbone AP50box AP50box AP50box all base novel Detic [41] CLIP Faster R-CNN R50 45.0 47.1 27.8 PromptDet [5] CLIP Faster R-CNN R50 - 50.6 26.6 BARON [34] CLIP Faster R-CNN R50 53.5 60.4 34.0 OADP [33] CLIP Faster R-CNN R50 47.2 53.3 30.0 ViLD [9] CLIP Mask R-CNN R50 51.3 59.5 27.6 F-VLM [16] CLIP Mask R-CNN R50 39.6 - 28.0 RO-ViT [13] CLIP Mask R-CNN ViT-B [1] 41.5 - 30.2 VLDet [19] CLIP CenterNet2 [40] R50 45.8 50.6 32.0 CxORA [35] CLIP DAB-DETR [21] R50 35.4 35.5 35.1 DK-DETR [17] CLIP Deformable DETR [42] R50 - 61.1 32.3 EdaDet [31] CLIP Deformable DETR [42] R50 52.5 57.7 37.8 InstaGen Stable Diffusion Faster R-CNN R50 52.3 55.8 42.3 Table 1. Results on open-vocabulary COCO benchmark. AP50box is the main metric for evaluation. Our detector, trained on syntheticnovel dataset from InstaGen, significantly outperforms state-of-the-art CLIP-based approaches on novel categories. original dataset, i.e., increase the data diversity and improveInstance grounding\n",
+      "full_text": "Method Supervision Detector Backbone AP50box AP50box AP50box all base novel Detic [41] CLIP Faster R-CNN R50 45.0 47.1 27.8 PromptDet [5] CLIP Faster R-CNN R50 - 50.6 26.6 BARON [34] CLIP Faster R-CNN R50 53.5 60.4 34.0 OADP [33] CLIP Faster R-CNN R50 47.2 53.3 30.0 ViLD [9] CLIP Mask R-CNN R50 51.3 59.5 27.6 F-VLM [16] CLIP Mask R-CNN R50 39.6 - 28.0 RO-ViT [13] CLIP Mask R-CNN ViT-B [1] 41.5 - 30.2 VLDet [19] CLIP CenterNet2 [40] R50 45.8 50.6 32.0 CxORA [35] CLIP DAB-DETR [21] R50 35.4 35.5 35.1 DK-DETR [17] CLIP Deformable DETR [42] R50 - 61.1 32.3 EdaDet [31] CLIP Deformable DETR [42] R50 52.5 57.7 37.8 InstaGen Stable Diffusion Faster R-CNN R50 52.3 55.8 42.3 Table 1. Results on open-vocabulary COCO benchmark. AP50box is the main metric for evaluation. Our detector, trained on syntheticnovel dataset from InstaGen, significantly outperforms state-of-the-art CLIP-based approaches on novel categories. original dataset, i.e., increase the data diversity and improveInstance grounding\ndataset from InstaGen, significantly outperforms state-of-the-art CLIP-based approaches on novel categories. original dataset, i.e., increase the data diversity and improveInstance grounding module. We start by constructing the detection performance, particularly in data-sparse scenar-training triplets using base categories i.e., the categories ios. We conducted experiments with varying proportionspresent in the existing dataset. The text prompt for each of COCO [20] images as available real data, and show thetriplet is constructed by randomly selecting one or two cateffectiveness of training on synthetic dataset when the num-egories. The regional visual features are taken from the imber of real-world images is limited. We refer the readers for age synthesizer time step, and the oracle ground-truth t = 1 more details in Section 4.3, and results in Figure 1c.bounding boxes are obtained using a Mask R-CNN model trained on base categories, as explained in Section 3.3.1.4. Experiment\nground-truth t = 1 more details in Section 4.3, and results in Figure 1c.bounding boxes are obtained using a Mask R-CNN model trained on base categories, as explained in Section 3.3.1.4. Experiment Subsequently, we train the instance grounding module In this section, we use the proposed InstaGen to constructwith these training triplets for 6 epochs, with a batch size of 32. In the 6th epoch, we transfer the weights from thesynthetic dataset for training object detectors, i.e., generating images with the corresponding bounding boxes. Specif-student model to the teacher model, and proceed to train the ically, we present the implementation details in Section 4.1. student for an additional 6 epochs. During this training, the student receives supervised training on the base categoriesTo evaluate the effectiveness of the synthetic dataset for training object detector, we consider three protocols: open-and engages in self-training on novel categories, and the teacher model is updated using\nthe effectiveness of the synthetic dataset for training object detector, we consider three protocols: open-and engages in self-training on novel categories, and the teacher model is updated using exponential moving averagevocabulary object detection (Section 4.2), data-sparse ob- (EMA) with a momentum of 0.999. The initial learning rateject detection (Section 4.3) and cross-dataset object detection (Section 4.4). Lastly, we conduct ablation studies onis set to 1e-4 and is subsequently reduced by a factor of 10 at the 11th epoch, and the score thresholds and are setthe effectiveness of the proposed components and the selec- α β tion of hyper-parameters (Section 4.5). to 0.8 and 0.4, respectively. 4.1. Implementation details Training object detector on combined dataset. In our experiment, we train an object detector (Faster R-CNN [27]) Network architecture. We build image synthesizer from with ResNet-50 [11] as backbone, on a combination of the the pre-trained Stable Diffusion v1.4\nwe train an object detector (Faster R-CNN [27]) Network architecture. We build image synthesizer from with ResNet-50 [11] as backbone, on a combination of the the pre-trained Stable Diffusion v1.4 [28], and use the CLIPexisting real dataset and the synthetic dataset. Specifically, text encoder [24] to get text embedding for the categoryfor synthetic dataset, we randomly select one or two catname. The channel compression layer maps the dimensionegories at each iteration, construct the text prompts, and of visual features to 256, which is implemented with a 3×3feed them as input to generates images along with the corconvolution. For simplicity, the feature enhancer, language-responding bounding boxes with of 0.4. Following the β guided query selection module and cross-modality decoderstandard implementation [27], the detector is trained for 12 are designed to the same structure as the ones in [22]. The epochs (1× learning schedule) unless specified. The initial number of the object\nimplementation [27], the detector is trained for 12 are designed to the same structure as the ones in [22]. The epochs (1× learning schedule) unless specified. The initial number of the object queries is set to 900. learning rate is set to 0.01 and then reduced by a factor of Constructing image synthesizer. In our experiments, we10 at the 8th and the 11th epochs. first fine-tune the stable diffusion model on a real detection4.2. Open-vocabulary object detection dataset, e.g., the images of base categories. During training, the text encoder of CLIP is kept frozen, while the remainingExperimental setup. Following the previous works [5, 39], components are trained for 6 epochs with a batch size of 16we conduct experiments on the open-vocabulary COCO and a learning rate of 1e-4. benchmark, where 48 classes are treated as base categories, 14126",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-10",
+      "chunk_indices": [
+        39,
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "char_count": 5506,
+      "summary": "InstaGen 10% 25% 50% 75% 100% Method Supervision Detector Extra DataObject365 LV",
+      "digest": "InstaGen 10% 25% 50% 75% 100% Method Supervision Detector Extra DataObject365 LVIS ✗ 23.3 29.5 34.1 36.1 37.5 Gao et al. [7] CLIP CenterNet2 ✓ 6.9 8.0 ✓ 28.5 32.6 35.8 37.3 38.5 VL-PLM [39] CLIP Mask R-CNN ✓ 10.9 22.2 InstaGen Stable DiffusionFaster R-CNN 11.4 23.3✗ Table 2. Results on data-sparse object detection. We employ Faster R-CNN with theTable 3. Results on generalizing COCO-base to Object365 and LVIS. All detectors utilize ResNet-50 backbone as the default objectthe ResNet-50 backbone. The evaluation protocol follows [7] and reports AP50. Extra detector and evaluate its performance usingdata refers to an additional dataset that encompasses objects from the categories within the the AP metric on MS COCO benchmark.target dataset. In both experiments, the extra data consists of all the images from COCO, Please refer to the text for more details.which has covered the majority of categories in Object365 and LVIS.\nG-head ST FT AP50box AP50box AP50boxCNN in conjunction with the corre",
+      "full_text": "InstaGen 10% 25% 50% 75% 100% Method Supervision Detector Extra DataObject365 LVIS ✗ 23.3 29.5 34.1 36.1 37.5 Gao et al. [7] CLIP CenterNet2 ✓ 6.9 8.0 ✓ 28.5 32.6 35.8 37.3 38.5 VL-PLM [39] CLIP Mask R-CNN ✓ 10.9 22.2 InstaGen Stable DiffusionFaster R-CNN 11.4 23.3✗ Table 2. Results on data-sparse object detection. We employ Faster R-CNN with theTable 3. Results on generalizing COCO-base to Object365 and LVIS. All detectors utilize ResNet-50 backbone as the default objectthe ResNet-50 backbone. The evaluation protocol follows [7] and reports AP50. Extra detector and evaluate its performance usingdata refers to an additional dataset that encompasses objects from the categories within the the AP metric on MS COCO benchmark.target dataset. In both experiments, the extra data consists of all the images from COCO, Please refer to the text for more details.which has covered the majority of categories in Object365 and LVIS.\nG-head ST FT AP50box AP50box AP50boxCNN in conjunction with the corresponding COCO subset. all base novelThe performance is measured by Average Precision [20]. ✓ 50.6 55.3 37.1 51.1 55.0 40.3 Comparison to baseline. As shown in Table 2, the Faster✓ ✓ ✓ ✓ ✓ 52.3 55.8 42.3R-CNN trained with synthetic images achieves consistent improvement across various real training data budgets. No-Table 4. The effectiveness of the proposed components. G-head, ST and FT refer to the grounding head, self-training the groundingtably, as the availability of real data becomes sparse, synthetic dataset plays even more important role for perfor-head and fine-tuning SDM, respectively. mance improvement, for instance, it improves the detector by +5.2 AP (23.3→28.5 AP) when only 10% real COCO and 17 classes as the novel categories. More results for training subset is available.\nLVIS can be found in the supplementary material. To train the grounding head, we employ 1250 synthetic images 4.4. Cross-dataset object detectionper category per training epoch. While for training the object detector, we use 3000 synthetic images per category, Experimental setup.In this section, we assess the efalong with the original real dataset for base categories. The fectiveness of synthetic data on a more challenging task, object detector is trained with input size of 800 × 800 and namely cross-dataset object detection. Following [39], we scale jitter. The performance is measured by COCO Averevaluate the COCO-trained model on two unseen datasets: age Precision at an Intersection over Union of 0.5 (AP50).\nObject365 [30] and LVIS [10]. Specifically, we consider Comparison to SOTA. As shown in Table 1, we eval-the 48 classes in the open-vocabulary COCO benchmark uate the performance by comparing with existing CLIP-as the source dataset, while Object365 (with 365 classes) based open-vocabulary object detectors. It is clear that ourand LVIS (with 1203 classes) serve as the target dataset. detector trained on synthetic dataset from InstaGen out-When training the instance grounding module, we acquire performs existing state-of-the-art approaches significantly,1250 synthetic images for base categories from the source i.e., around +5AP improvement over the second best. Indataset, and 100 synthetic images for the category from the essence, through the utilization of our proposed open-target dataset at each training iteration. In the case of trainvocabulary grounding head, InstaGen is able to generateing the object detector, we employ 500 synthetic images per detection data for novel categories,\nat each training iteration. In the case of trainvocabulary grounding head, InstaGen is able to generateing the object detector, we employ 500 synthetic images per detection data for novel categories, enabling the detector tocategory from the target dataset for each training iteration. attain exceptional performance. To the best of our knowl-The detector is trained with input size of 1024 × 1024 and edge, this is the first work that applies generative diffusion scale jitter [39]. model for dataset synthesis, to tackle open-vocabulary ob- Comparison to SOTA. The results presented in Table 3 ject detection, and showcase its superiority in this task. demonstrate that the proposed InstaGen achieves superior performance in generalization from COCO-base to Ob-4.3. Data-sparse object detection ject365 and LVIS, when compared to CLIP-based methods Experimental setup. Here, we evaluate the effectiveness such as [7, 39]. It is worth noting that CLIP-based methods of synthetic dataset in\nject365 and LVIS, when compared to CLIP-based methods Experimental setup. Here, we evaluate the effectiveness such as [7, 39]. It is worth noting that CLIP-based methods of synthetic dataset in data-spare scenario, by varying therequire the generation of pseudo-labels for the categories amount of real data. We randomly select subsets compris-from the target dataset on COCO images, and subsequently ing 10%, 25%, 50%, 75% and 100% of the COCO trainingtrain the detector using these images. These methods necesset, this covers all COCO categories. These subsets are usedsitate a dataset that includes objects belonging to the cateto fine-tune stable diffusion model for constructing imagegories of the target dataset. In contrast, InstaGen possesses synthesizer, and train a Mask R-CNN for generating oraclethe ability to generate images featuring objects of any catground-truth bounding boxes in synthetic images. We em-egory without the need for additional datasets, thereby enploy 1250 synthetic",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-11",
+      "chunk_indices": [
+        45
+      ],
+      "char_count": 293,
+      "summary": "oraclethe ability to generate images featuring objects of any catground-truth bo",
+      "digest": "oraclethe ability to generate images featuring objects of any catground-truth bounding boxes in synthetic images. We em-egory without the need for additional datasets, thereby enploy 1250 synthetic images per category to train a Faster R-hancing its versatility across various scenarios. 14127",
+      "full_text": "oraclethe ability to generate images featuring objects of any catground-truth bounding boxes in synthetic images. We em-egory without the need for additional datasets, thereby enploy 1250 synthetic images per category to train a Faster R-hancing its versatility across various scenarios. 14127",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-12",
+      "chunk_indices": [
+        46,
+        47,
+        48,
+        49,
+        50,
+        51
+      ],
+      "char_count": 5539,
+      "summary": "#Images AP50box AP50box AP50box α AP50box AP50box AP50box β AP50box AP50box AP50",
+      "digest": "#Images AP50box AP50box AP50box α AP50box AP50box AP50box β AP50box AP50box AP50box all base novel all base novel all base novel 1000 51.6 55.9 39.7 0.7 51.3 55.1 40.6 0.3 46.4 53.3 26.9 2000 51.7 55.4 41.1 0.8 52.3 55.8 42.3 0.4 52.3 55.8 42.3 3000 52.3 55.8 42.3 0.9 51.8 55.6 41.1 0.5 51.2 55.4 39.2 Table 5. Number of generated images. Table 6. α for bounding-box filtration. Table 7. β for bounding-box filtration. 4.5. Ablation study Score thresholds for bounding box filtration. We compare the performance with different score thresholds α and To understand the effectiveness of the proposed compo- β for filtering bounding boxes on base categories and novel nents, we perform thorough ablation studies on the open-categories, respectively. From the experiment results in Tavocabulary COCO benchmark [20], investigating the ef- ble 6, we observe that the performance is not sensitive to the fect of fine-tuning stable diffusion model, training instance value of α, and α = 0.8 yields the best\n",
+      "full_text": "#Images AP50box AP50box AP50box α AP50box AP50box AP50box β AP50box AP50box AP50box all base novel all base novel all base novel 1000 51.6 55.9 39.7 0.7 51.3 55.1 40.6 0.3 46.4 53.3 26.9 2000 51.7 55.4 41.1 0.8 52.3 55.8 42.3 0.4 52.3 55.8 42.3 3000 52.3 55.8 42.3 0.9 51.8 55.6 41.1 0.5 51.2 55.4 39.2 Table 5. Number of generated images. Table 6. α for bounding-box filtration. Table 7. β for bounding-box filtration. 4.5. Ablation study Score thresholds for bounding box filtration. We compare the performance with different score thresholds α and To understand the effectiveness of the proposed compo- β for filtering bounding boxes on base categories and novel nents, we perform thorough ablation studies on the open-categories, respectively. From the experiment results in Tavocabulary COCO benchmark [20], investigating the ef- ble 6, we observe that the performance is not sensitive to the fect of fine-tuning stable diffusion model, training instance value of α, and α = 0.8 yields the best\n[20], investigating the ef- ble 6, we observe that the performance is not sensitive to the fect of fine-tuning stable diffusion model, training instance value of α, and α = 0.8 yields the best performance. The grounding module, self-training on novel categories. Addi-experimental results using different β are presented in Tationally, we investigate other hyper-parameters by compar- ble 7. With a low score threshold (), there are stillα = 0.3 ing the effectiveness of synthetic images and different scorenumerous inaccurate bounding boxes remaining, resulting thresholds for base and novel categories. in an AP of 26.9 for novel categories. by increasing to β Fine-tuning diffusion model.We assess the effective-0.4, numerous inaccurate bounding boxes are filtered out, ness of fine-tuning stable diffusion model, and its impactresulting in optimal performance. Hence, we set α = 0.8 and in our experiments.for synthesizing images for training object detector. Fig- β = 0.4 ure 4c illustrates\ndiffusion model, and its impactresulting in optimal performance. Hence, we set α = 0.8 and in our experiments.for synthesizing images for training object detector. Fig- β = 0.4 ure 4c illustrates that InstaGen is capable of generating images with more intricate contexts, featuring multiple ob- 5. Limitation jects, small objects, and occluded objects. Subsequently, we Using synthetic or artificially generated data in training AIemployed these generated images to train Faster R-CNN for algorithms is a burgeoning practice with significant poten-object detection. The results are presented in Table 4, showtial. It can address data scarcity, privacy, and bias issues.ing that image synthesizer from fine-tuning stable diffusion However, there remains two limitations for training objectmodel delivers improvement detection performance by 2.0 detectors with synthetic data, (i) synthetic datasets com-AP (from 40.3 to 42.3 AP). monly focus on clean, isolated object instances, which lim- Instance\nimprovement detection performance by 2.0 detectors with synthetic data, (i) synthetic datasets com-AP (from 40.3 to 42.3 AP). monly focus on clean, isolated object instances, which lim- Instance grounding module. To demonstrate the effective-its the exposure of the detector to the complexities and conness of the grounding head in open-vocabulary scenario, wetextual diversity of real-world scenes, such as occlusions, exclusively train it on base categories. Visualization exam-clutter, varied environmental factors, deformation, thereples of the generated images are presented in Figure 4a.fore, models trained on synthetic data struggle to adapt to These examples demonstrate that the trained groundingreal-world conditions, affecting their overall robustness and head is also capable of predicting bounding boxes for in-accuracy, (ii) existing diffusion-based generative model also stances from novel categories. Leveraging these generatedsuffers from long-tail issue, that means the generative\nbounding boxes for in-accuracy, (ii) existing diffusion-based generative model also stances from novel categories. Leveraging these generatedsuffers from long-tail issue, that means the generative model images to train the object detector leads to a 37.1 AP onstruggles to generate images for objects of rare categories, novel categories, surpassing or rivaling all existing state-of-resulting in imbalanced class representation during training the-art methods, as shown in Table 1 and Table 4. and reduced detector performance for less common objects.\nSelf-training scheme. We evaluate the performance after self-training the grounding head with novel categories. As 6. Conclusion shown in Table 4, training Faster R-CNN with the generated This paper proposes a dataset synthesis pipeline, termed images of novel categories, leads to a noticeable enhanceas InstaGen, that enables to generate images with obment in detection performance, increasing from 37.1 to 40.3 ject bounding boxes for arbitrary categories, acting as a AP. Qualitatively, it also demonstrates enhanced recall for annotation-free approach for constructing large-scale synnovel objects after self-training, as shown in Figure 4b. thetic dataset to train object detector. We have conducted Number of synthetic images. We investigate the perfor-thorough experiments to show the effectiveness of trainmance variation while increasing the number of the gener-ing on synthetic data, on improving detection performance, ated images per category for detector training. As shown inor",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-13",
+      "chunk_indices": [
+        52
+      ],
+      "char_count": 735,
+      "summary": "effectiveness of trainmance variation while increasing the number of the gener-i",
+      "digest": "effectiveness of trainmance variation while increasing the number of the gener-ing on synthetic data, on improving detection performance, ated images per category for detector training. As shown inor expanding the number of detection categories. Signif- Table 5, when increasing the number of generated imagesicant improvements have been shown in various detection from 1000 to 3000, the detector’s performance tends to bescenarios, including open-vocabulary (+4.5 AP) and dataincreasing monotonically, from 39.7 to 42.3 AP on novel sparse (+1.2 ∼ 5.2 AP) detection. categories, showing the scalability of the proposed training Acknowledgement. WX is supported by National Key R&D Promechanism. gram of China (No. 2022ZD0161400). 14128",
+      "full_text": "effectiveness of trainmance variation while increasing the number of the gener-ing on synthetic data, on improving detection performance, ated images per category for detector training. As shown inor expanding the number of detection categories. Signif- Table 5, when increasing the number of generated imagesicant improvements have been shown in various detection from 1000 to 3000, the detector’s performance tends to bescenarios, including open-vocabulary (+4.5 AP) and dataincreasing monotonically, from 39.7 to 42.3 AP on novel sparse (+1.2 ∼ 5.2 AP) detection. categories, showing the scalability of the proposed training Acknowledgement. WX is supported by National Key R&D Promechanism. gram of China (No. 2022ZD0161400). 14128",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-14",
+      "chunk_indices": [
+        53,
+        54
+      ],
+      "char_count": 1675,
+      "summary": "References [17] Liangqi Li, Jiaxu Miao, Dahu Shi, Wenming Tan, Ye Ren, Yi Yang, ",
+      "digest": "References [17] Liangqi Li, Jiaxu Miao, Dahu Shi, Wenming Tan, Ye Ren, Yi Yang, and Shiliang Pu. Distilling detr with visual-linguistic [1] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, knowledge for open-vocabulary object detection. In ICCV, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, pages 6501–6510, 2023. 6 Mostafa Dehghani, Matthias Minderer, Georg Heigold, Syl- [18] Ziyi Li, Qinye Zhou, Xiaoyun Zhang, Ya Zhang, Yanfeng vain Gelly, et al. An image is worth 16x16 words: Trans- Wang, and Weidi Xie. Open-vocabulary object segmentation formers for image recognition at scale.arXiv preprint with diffusion models. In CVPR, pages 7667–7676, 2023. 4 arXiv:2010.11929, 2020. 6 [19] Chuang Lin, Peize Sun, Yi Jiang, Ping Luo, Lizhen Qu, Gho- [2] Yu Du, Fangyun Wei, Zihe Zhang, Miaojing Shi, Yue Gao, lamreza Haffari, Zehuan Yuan, and Jianfei Cai.Learning and Guoqi Li. Learning to prompt for open-vocabulary obobject-language alignments for open-vocabulary object deject detection\n",
+      "full_text": "References [17] Liangqi Li, Jiaxu Miao, Dahu Shi, Wenming Tan, Ye Ren, Yi Yang, and Shiliang Pu. Distilling detr with visual-linguistic [1] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, knowledge for open-vocabulary object detection. In ICCV, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, pages 6501–6510, 2023. 6 Mostafa Dehghani, Matthias Minderer, Georg Heigold, Syl- [18] Ziyi Li, Qinye Zhou, Xiaoyun Zhang, Ya Zhang, Yanfeng vain Gelly, et al. An image is worth 16x16 words: Trans- Wang, and Weidi Xie. Open-vocabulary object segmentation formers for image recognition at scale.arXiv preprint with diffusion models. In CVPR, pages 7667–7676, 2023. 4 arXiv:2010.11929, 2020. 6 [19] Chuang Lin, Peize Sun, Yi Jiang, Ping Luo, Lizhen Qu, Gho- [2] Yu Du, Fangyun Wei, Zihe Zhang, Miaojing Shi, Yue Gao, lamreza Haffari, Zehuan Yuan, and Jianfei Cai.Learning and Guoqi Li. Learning to prompt for open-vocabulary obobject-language alignments for open-vocabulary object deject detection\nShi, Yue Gao, lamreza Haffari, Zehuan Yuan, and Jianfei Cai.Learning and Guoqi Li. Learning to prompt for open-vocabulary obobject-language alignments for open-vocabulary object deject detection with vision-language model. In CVPR, pages tection. 2022. 6 14084–14093, 2022. 2 [20] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, [3] Chengjian Feng, Yujie Zhong, Yu Gao, Matthew R Scott, Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence and Weilin Huang. Tood: Task-aligned one-stage object de-Zitnick. Microsoft coco: Common objects in context. In tection. In ICCV, pages 3490–3499. IEEE Computer Society, ECCV, pages 740–755. Springer, 2014. 1, 4, 6, 7, 8",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-15",
+      "chunk_indices": [
+        55,
+        56,
+        57
+      ],
+      "char_count": 2690,
+      "summary": "2021. 1, 2 [21] Shilong Liu, Feng Li, Hao Zhang, Xiao Yang, Xianbiao Qi, [4] Che",
+      "digest": "2021. 1, 2 [21] Shilong Liu, Feng Li, Hao Zhang, Xiao Yang, Xianbiao Qi, [4] Chengjian Feng, Yujie Zhong, and Weilin Huang. Exploring Hang Su, Jun Zhu, and Lei Zhang.Dab-detr: Dynamic classification equilibrium in long-tailed object detection. Inanchor boxes are better queries for detr.arXiv preprint ICCV, pages 3417–3426, 2021. 2 arXiv:2201.12329, 2022. 6 [5] Chengjian Feng, Yujie Zhong, Zequn Jie, Xiangxiang Chu,[22] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Haibing Ren, Xiaolin Wei, Weidi Xie, and Lin Ma. Prompt-Zhang, Jie Yang, Chunyuan Li, Jianwei Yang, Hang Su, Jun det: Towards open-vocabulary detection using uncurated im-Zhu, et al. Grounding dino: Marrying dino with grounded ages. In ECCV, pages 701–717. Springer, 2022. 1, 2, 6 pre-training for open-set object detection.arXiv preprint [6] Chengjian Feng, Zequn Jie, Yujie Zhong, Xiangxiang Chu, arXiv:2303.05499, 2023. 4, 6 and Lin Ma. Aedet: Azimuth-invariant multi-view 3d object[23] Alex Nichol, Prafulla Dhariwal,\npr",
+      "full_text": "2021. 1, 2 [21] Shilong Liu, Feng Li, Hao Zhang, Xiao Yang, Xianbiao Qi, [4] Chengjian Feng, Yujie Zhong, and Weilin Huang. Exploring Hang Su, Jun Zhu, and Lei Zhang.Dab-detr: Dynamic classification equilibrium in long-tailed object detection. Inanchor boxes are better queries for detr.arXiv preprint ICCV, pages 3417–3426, 2021. 2 arXiv:2201.12329, 2022. 6 [5] Chengjian Feng, Yujie Zhong, Zequn Jie, Xiangxiang Chu,[22] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Haibing Ren, Xiaolin Wei, Weidi Xie, and Lin Ma. Prompt-Zhang, Jie Yang, Chunyuan Li, Jianwei Yang, Hang Su, Jun det: Towards open-vocabulary detection using uncurated im-Zhu, et al. Grounding dino: Marrying dino with grounded ages. In ECCV, pages 701–717. Springer, 2022. 1, 2, 6 pre-training for open-set object detection.arXiv preprint [6] Chengjian Feng, Zequn Jie, Yujie Zhong, Xiangxiang Chu, arXiv:2303.05499, 2023. 4, 6 and Lin Ma. Aedet: Azimuth-invariant multi-view 3d object[23] Alex Nichol, Prafulla Dhariwal,\npreprint [6] Chengjian Feng, Zequn Jie, Yujie Zhong, Xiangxiang Chu, arXiv:2303.05499, 2023. 4, 6 and Lin Ma. Aedet: Azimuth-invariant multi-view 3d object[23] Alex Nichol, Prafulla Dhariwal, Aditya Ramesh, Pranav detection. In CVPR, pages 21580–21588, 2023. 2 Shyam, Pamela Mishkin, Bob McGrew, Ilya Sutskever, and [7] Mingfei Gao, Chen Xing, Juan Carlos Niebles, Junnan Li, Mark Chen. Glide: Towards photorealistic image generation Ran Xu, Wenhao Liu, and Caiming Xiong. Open vocabularyand editing with text-guided diffusion models. arXiv preprint object detection with pseudo bounding-box labels. In ECCV, arXiv:2112.10741, 2021. 2 pages 266–282. Springer, 2022. 7 [24] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya [8] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, BingRamesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, andAmanda Askell, Pamela Mishkin, Jack Clark, et al. Learn- Yoshua Bengio. Generative adversarial networks.\nSandhini Agarwal, Girish Sastry, Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, andAmanda Askell, Pamela Mishkin, Jack Clark, et al. Learn- Yoshua Bengio. Generative adversarial networks. Commu-ing transferable visual models from natural language supernications of the ACM, 63(11):139–144, 2020. 2 vision. pages 8748–8763. PMLR, 2021. 2, 6 [9] Xiuye Gu, Tsung-Yi Lin, Weicheng Kuo, and Yin Cui.[25] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu, Open-vocabulary object detection via vision and languageand Mark Chen. Hierarchical text-conditional image generknowledge distillation.arXiv preprint arXiv:2104.13921, ation with clip latents. arXiv preprint arXiv:2204.06125, 1",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-16",
+      "chunk_indices": [
+        58,
+        59,
+        60
+      ],
+      "char_count": 2169,
+      "summary": "2021. 2, 6 (2):3, 2022. 2 [10] Agrim Gupta, Piotr Dollar, and Ross Girshick.Lvis",
+      "digest": "2021. 2, 6 (2):3, 2022. 2 [10] Agrim Gupta, Piotr Dollar, and Ross Girshick.Lvis: A[26] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali dataset for large vocabulary instance segmentation. In CVPR, Farhadi. You only look once: Unified, real-time object depages 5356–5364, 2019. 7 tection. In CVPR, pages 779–788, 2016. 1, 2 [11] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.[27] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.\nDeep residual learning for image recognition. In CVPR, Faster r-cnn: Towards real-time object detection with region pages 770–778, 2016. 6 proposal networks. Advances in neural information process- [12] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir- ing systems, 28, 2015. 1, 2, 5, 6 shick. Mask r-cnn. In ICCV, pages 2961–2969, 2017. 1,[28] Robin Rombach, Andreas Blattmann, Dominik Lorenz, 4 Patrick Esser, and Bj¨orn Ommer. High-resolution image syn- [13] Dahun Kim, Anelia Angelova, and Weicheng Kuo. Region- thesis with latent diffusi",
+      "full_text": "2021. 2, 6 (2):3, 2022. 2 [10] Agrim Gupta, Piotr Dollar, and Ross Girshick.Lvis: A[26] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali dataset for large vocabulary instance segmentation. In CVPR, Farhadi. You only look once: Unified, real-time object depages 5356–5364, 2019. 7 tection. In CVPR, pages 779–788, 2016. 1, 2 [11] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.[27] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.\nDeep residual learning for image recognition. In CVPR, Faster r-cnn: Towards real-time object detection with region pages 770–778, 2016. 6 proposal networks. Advances in neural information process- [12] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir- ing systems, 28, 2015. 1, 2, 5, 6 shick. Mask r-cnn. In ICCV, pages 2961–2969, 2017. 1,[28] Robin Rombach, Andreas Blattmann, Dominik Lorenz, 4 Patrick Esser, and Bj¨orn Ommer. High-resolution image syn- [13] Dahun Kim, Anelia Angelova, and Weicheng Kuo. Region- thesis with latent diffusion models. In CVPR, pages 10684– aware pretraining for open-vocabulary object detection with 10695, 2022. 1, 2, 3, 6 vision transformers. In CVPR, pages 11144–11154, 2023. 6[29] Chitwan Saharia, William Chan, Saurabh Saxena, Lala [14] Durk P Kingma and Prafulla Dhariwal. Glow: GenerativeLi, Jay Whang, Emily L Denton, Kamyar Ghasemipour, flow with invertible 1x1 convolutions. NeurIPS, 31, 2018. 2Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim\nand Prafulla Dhariwal. Glow: GenerativeLi, Jay Whang, Emily L Denton, Kamyar Ghasemipour, flow with invertible 1x1 convolutions. NeurIPS, 31, 2018. 2Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim Salimans, [15] Diederik P Kingma and Max Welling. Auto-encoding varia-et al. Photorealistic text-to-image diffusion models with deep tional bayes. arXiv preprint arXiv:1312.6114, 2013. 2 language understanding. NeurIPS, 35:36479–36494, 2022. [16] Weicheng Kuo, Yin Cui, Xiuye Gu, AJ Piergiovanni, and 1, 2 Anelia Angelova. F-vlm: Open-vocabulary object detection[30] Shuai Shao, Zeming Li, Tianyuan Zhang, Chao Peng, Gang upon frozen vision and language models. 2022. 6 Yu, Xiangyu Zhang, Jing Li, and Jian Sun.Objects365: 14129",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-17",
+      "chunk_indices": [
+        61
+      ],
+      "char_count": 767,
+      "summary": "A large-scale, high-quality dataset for object detection. In ICCV, pages 8430–84",
+      "digest": "A large-scale, high-quality dataset for object detection. In ICCV, pages 8430–8439, 2019. 1, 7 [31] Cheng Shi and Sibei Yang. Edadet: Open-vocabulary object detection using early dense alignment. In ICCV, pages 15724–15734, 2023. 6 [32] Aaron Van den Oord, Nal Kalchbrenner, Lasse Espeholt, Oriol Vinyals, Alex Graves, et al. Conditional image generation with pixelcnn decoders. NeurIPS, 29, 2016. 2 [33] Luting Wang, Yi Liu, Penghui Du, Zihan Ding, Yue Liao, Qiaosong Qi, Biaolong Chen, and Si Liu. Object-aware distillation pyramid for open-vocabulary object detection. In CVPR, pages 11186–11196, 2023. 6 [34] Size Wu, Wenwei Zhang, Sheng Jin, Wentao Liu, and Chen Change Loy.Aligning bag of regions for openvocabulary object detection. In CVPR, pages 15254–15264,",
+      "full_text": "A large-scale, high-quality dataset for object detection. In ICCV, pages 8430–8439, 2019. 1, 7 [31] Cheng Shi and Sibei Yang. Edadet: Open-vocabulary object detection using early dense alignment. In ICCV, pages 15724–15734, 2023. 6 [32] Aaron Van den Oord, Nal Kalchbrenner, Lasse Espeholt, Oriol Vinyals, Alex Graves, et al. Conditional image generation with pixelcnn decoders. NeurIPS, 29, 2016. 2 [33] Luting Wang, Yi Liu, Penghui Du, Zihan Ding, Yue Liao, Qiaosong Qi, Biaolong Chen, and Si Liu. Object-aware distillation pyramid for open-vocabulary object detection. In CVPR, pages 11186–11196, 2023. 6 [34] Size Wu, Wenwei Zhang, Sheng Jin, Wentao Liu, and Chen Change Loy.Aligning bag of regions for openvocabulary object detection. In CVPR, pages 15254–15264,",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-18",
+      "chunk_indices": [
+        62,
+        63
+      ],
+      "char_count": 1316,
+      "summary": "2023. 6 [35] Xiaoshi Wu, Feng Zhu, Rui Zhao, and Hongsheng Li. Cora: Adapting cl",
+      "digest": "2023. 6 [35] Xiaoshi Wu, Feng Zhu, Rui Zhao, and Hongsheng Li. Cora: Adapting clip for open-vocabulary detection with region prompting and anchor pre-matching. In CVPR, pages 7031– 7040, 2023. 6 [36] Johnathan Xie and Shuai Zheng. Zsd-yolo: Zero-shot yolo detection using vision-language knowledge distillation. arXiv preprint arXiv:2109.12066, 2(3):4, 2021. 2 [37] Alireza Zareian, Kevin Dela Rosa, Derek Hao Hu, and Shih- Fu Chang. Open-vocabulary object detection using captions.\nIn CVPR, pages 14393–14402, 2021. 2 [38] Hao Zhang, Feng Li, Shilong Liu, Lei Zhang, Hang Su, Jun Zhu, Lionel M Ni, and Heung-Yeung Shum.Dino: Detr with improved denoising anchor boxes for end-to-end object detection. arXiv preprint arXiv:2203.03605, 2022. 4 [39] Shiyu Zhao, Zhixing Zhang, Samuel Schulter, Long Zhao, BG Vijay Kumar, Anastasis Stathopoulos, Manmohan Chandraker, and Dimitris N Metaxas. Exploiting unlabeled data with vision and language models for object detection. In ECCV, pages 159–175. Springer,",
+      "full_text": "2023. 6 [35] Xiaoshi Wu, Feng Zhu, Rui Zhao, and Hongsheng Li. Cora: Adapting clip for open-vocabulary detection with region prompting and anchor pre-matching. In CVPR, pages 7031– 7040, 2023. 6 [36] Johnathan Xie and Shuai Zheng. Zsd-yolo: Zero-shot yolo detection using vision-language knowledge distillation. arXiv preprint arXiv:2109.12066, 2(3):4, 2021. 2 [37] Alireza Zareian, Kevin Dela Rosa, Derek Hao Hu, and Shih- Fu Chang. Open-vocabulary object detection using captions.\nIn CVPR, pages 14393–14402, 2021. 2 [38] Hao Zhang, Feng Li, Shilong Liu, Lei Zhang, Hang Su, Jun Zhu, Lionel M Ni, and Heung-Yeung Shum.Dino: Detr with improved denoising anchor boxes for end-to-end object detection. arXiv preprint arXiv:2203.03605, 2022. 4 [39] Shiyu Zhao, Zhixing Zhang, Samuel Schulter, Long Zhao, BG Vijay Kumar, Anastasis Stathopoulos, Manmohan Chandraker, and Dimitris N Metaxas. Exploiting unlabeled data with vision and language models for object detection. In ECCV, pages 159–175. Springer, 2022. 6, 7 [40] Xingyi Zhou, Vladlen Koltun, and Philipp Kr¨ahenb¨uhl.\nProbabilistictwo-stagedetection. arXiv preprint arXiv:2103.07461, 2021. 6 [41] Xingyi Zhou, Rohit Girdhar, Armand Joulin, Philipp Kr¨ahenb¨uhl, and Ishan Misra.Detecting twenty-thousand classes using image-level supervision. In ECCV, pages 350–",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    },
+    {
+      "group_id": "group-19",
+      "chunk_indices": [
+        64
+      ],
+      "char_count": 222,
+      "summary": "368. Springer, 2022. 2, 6 [42] Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang",
+      "digest": "368. Springer, 2022. 2, 6 [42] Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang Wang, and Jifeng Dai. Deformable detr: Deformable transformers for end-to-end object detection.arXiv preprint arXiv:2010.04159, 2020. 6 14130",
+      "full_text": "368. Springer, 2022. 2, 6 [42] Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang Wang, and Jifeng Dai. Deformable detr: Deformable transformers for end-to-end object detection.arXiv preprint arXiv:2010.04159, 2020. 6 14130",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:35:12.811665+00:00"
+      }
+    }
+  ]
+}

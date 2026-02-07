@@ -1,0 +1,459 @@
+{
+  "schema_version": 1,
+  "doc_id": "db7715aa0d7a006bb5d848ddd34a3ddb",
+  "doc_hash": "",
+  "created_at": "2026-02-07T08:42:28.834908+00:00",
+  "config": {
+    "target_chars": 5000,
+    "min_chars": 2500,
+    "max_chars": 6000
+  },
+  "groups": [
+    {
+      "group_id": "group-0",
+      "chunk_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "char_count": 4936,
+      "summary": "Align-to-Distill: Trainable Attention Alignment for Knowledge Distillation in Ne",
+      "digest": "Align-to-Distill: Trainable Attention Alignment for Knowledge Distillation in Neural Machine Translation Heegon Jin, Seonil Son, Jemin Park, Youngseok Kim, Hyungjong Noh, Yeonsoo Lee NC Research, AI Tech Center Seongnam, South Korea {heegon, deftson, hbk5844, kys159, nohhj0209, yeonsoo}@ncsoft.com Abstract One of the possible solutions is to reduce the model size using knowledge distillation (KD) The advent of scalable deep models and large (Hinton et al., 2015).KD facilitates the transdatasets has improved the performance of NeuarXiv:2403.01479v3 [cs.CL] 25 Mar 2024 fer of knowledge from a high-performing, large-ral Machine Translation (NMT). Knowledge Distillation (KD) enhances efficiency by trans-parameter teacher model to a more moderately ferring knowledge from a teacher model to asized student model. This process alleviates deploymore compact student model. However, KDment challenges by generating a distilled model approaches to Transformer architecture oftenthat is both\nto asize",
+      "full_text": "Align-to-Distill: Trainable Attention Alignment for Knowledge Distillation in Neural Machine Translation Heegon Jin, Seonil Son, Jemin Park, Youngseok Kim, Hyungjong Noh, Yeonsoo Lee NC Research, AI Tech Center Seongnam, South Korea {heegon, deftson, hbk5844, kys159, nohhj0209, yeonsoo}@ncsoft.com Abstract One of the possible solutions is to reduce the model size using knowledge distillation (KD) The advent of scalable deep models and large (Hinton et al., 2015).KD facilitates the transdatasets has improved the performance of NeuarXiv:2403.01479v3 [cs.CL] 25 Mar 2024 fer of knowledge from a high-performing, large-ral Machine Translation (NMT). Knowledge Distillation (KD) enhances efficiency by trans-parameter teacher model to a more moderately ferring knowledge from a teacher model to asized student model. This process alleviates deploymore compact student model. However, KDment challenges by generating a distilled model approaches to Transformer architecture oftenthat is both\nto asized student model. This process alleviates deploymore compact student model. However, KDment challenges by generating a distilled model approaches to Transformer architecture oftenthat is both lightweight and efficient, ensuring rerely on heuristics, particularly when decidingduced inference times and lower computational which teacher layers to distill from. In this paresource requirements. Furthermore, with the guidper, we introduce the “Align-to-Distill” (A2D) ance of the teacher model, the student model canstrategy, designed to address the feature mappotentially achieve performance levels closer toping problem by adaptively aligning student attention heads with their teacher counterpartsthose of the teacher model compared to training it during training. The Attention Alignment Mod-without the teacher’s assistance. ule (AAM) in A2D performs a dense head-by- KD, initially proposed by Bucila et al.; Ba and head comparison between student and teacher Caruana; Hinton et al.,\nMod-without the teacher’s assistance. ule (AAM) in A2D performs a dense head-by- KD, initially proposed by Bucila et al.; Ba and head comparison between student and teacher Caruana; Hinton et al., involves transferring knowlattention heads across layers, turning the comedge to the student model using responses from the binatorial mapping heuristics into a learning network’s last layer. Among its variants, Sequenceproblem. Our experiments show the efficacy of level KD (Kim and Rush, 2016) and SelectiveA2D, demonstrating gains of up to +3.61 and +0.63 BLEU points for WMT-2022 De→Dsb KD (Wang et al., 2021) leverage the final outand WMT-2014 En→De, respectively, com-put and soft labels from teacher’s responses, repared to Transformer baselines. 1 spectively. These strategies can be categorized as response-based KD (Gou et al., 2021). Meanwhile,1Introduction not only the final layer outputs are used, but inter- Transformer-based encoder-decoder models havemediate features from the teacher\nas response-based KD (Gou et al., 2021). Meanwhile,1Introduction not only the final layer outputs are used, but inter- Transformer-based encoder-decoder models havemediate features from the teacher model’s layer are achieved remarkable success in various natural lan-also used as a medium for a more effective and comguage processing tasks (Vaswani et al., 2017; De-prehensive distillation of knowledge (Romero et al., vlin et al., 2019; Liu et al., 2019; Lewis et al., 2020), 2015; Zagoruyko and Komodakis, 2017; Sun et al., including Neural Machine Translation (NMT) 2019; Jiao et al., 2020; Sun et al., 2020). These (Sutskever et al., 2014; Bahdanau et al., 2015; Sen-approaches belong to the category of feature-based nrich et al., 2016; Vaswani et al., 2017). How- KD (Gou et al., 2021). Most feature-based KD ever, the autoregressive decoding process oftenin Transformers has concentrated on compressing imposes a significant computational burden, es-encoder-based models (Sanh et al., 2019;\nfeature-based KD ever, the autoregressive decoding process oftenin Transformers has concentrated on compressing imposes a significant computational burden, es-encoder-based models (Sanh et al., 2019; Sun et al., pecially as the number of layers and parameters 2019; Jiao et al., 2020; Wang et al., 2020; Sun et al., escalates with increasing model complexity. This 2020; Passban et al., 2021), including pre-trained presents substantial challenges when deploying themodels like BERT (Devlin et al., 2019). On the Transformer-based models for real-time applica-other hand, some studies (Wu et al., 2020; Shleifer tions (Gu et al., 2017) and online services (Zhou and Rush, 2020) have applied feature-based KD et al., 2022). to the decoder for generative tasks. However, they found it less effective compared to response-based1The code and data are available at https://github.com/ ncsoft/Align-to-Distill. KD for decoder distillation (Kim and Rush, 2016;",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-1",
+      "chunk_indices": [
+        5,
+        6,
+        7
+      ],
+      "char_count": 2984,
+      "summary": "Kasai et al., 2020; Wang et al., 2021). Our contribution is three-folded as foll",
+      "digest": "Kasai et al., 2020; Wang et al., 2021). Our contribution is three-folded as follows: While extending KD to features across the lay- • We introduce “Align-to-Distill” (A2D), a ers does enrich knowledge transfer, it prompts an novel attention-based distillation method that open question: ‘From which teacher layer should can be effectively applied to the decoder of the student layer learn and from which should it the transformer. not?’. Instead of resolving this issue through trainable methods, several studies (Sun et al., 2019; • A2D overcomes the limitations imposed by Jiao et al., 2020; Wu et al., 2020; Passban et al., feature-mapping heuristics of previous distil- 2021) have circumvented the issue using heuristiclation approaches by introducing a learnable approaches. Those approaches require a heuristicalignment between attention heads across difskip or combination of teacher layers to align with ferent layers. the student layer. However, as the number of layers • A2D enables\nrequire",
+      "full_text": "Kasai et al., 2020; Wang et al., 2021). Our contribution is three-folded as follows: While extending KD to features across the lay- • We introduce “Align-to-Distill” (A2D), a ers does enrich knowledge transfer, it prompts an novel attention-based distillation method that open question: ‘From which teacher layer should can be effectively applied to the decoder of the student layer learn and from which should it the transformer. not?’. Instead of resolving this issue through trainable methods, several studies (Sun et al., 2019; • A2D overcomes the limitations imposed by Jiao et al., 2020; Wu et al., 2020; Passban et al., feature-mapping heuristics of previous distil- 2021) have circumvented the issue using heuristiclation approaches by introducing a learnable approaches. Those approaches require a heuristicalignment between attention heads across difskip or combination of teacher layers to align with ferent layers. the student layer. However, as the number of layers • A2D enables\nrequire a heuristicalignment between attention heads across difskip or combination of teacher layers to align with ferent layers. the student layer. However, as the number of layers • A2D enables fine-grained attention knowl-increases, the complexity of heuristically selecting edge transfer from teacher to student, therebyfeatures grows, necessitating an exhaustive search for the optimal combination strategy. For example, outperforming state-of-the-art KD strategies in both high-resource and low-resource trans-Combinatorial KD (Wu et al., 2020) demonstrated lation tasks.that its peak performance relies on language-pairspecific feature mapping. 2Preliminaries In this paper, we introduce a novel KD strategy, 2.1Multi-Head AttentionAlign-to-Distill (A2D), that addresses the feature mapping problem using a trainable Attention Align-Multi-head Attention (MHA) is a core compoment Module (AAM). Unlike earlier KD methodsnent of the Transformer architecture introduced by that relied on\nproblem using a trainable Attention Align-Multi-head Attention (MHA) is a core compoment Module (AAM). Unlike earlier KD methodsnent of the Transformer architecture introduced by that relied on combinatorial feature mapping heuris-Vaswani et al.. We use L×d to denote the in- X ∈R tics, A2D provides an end-to-end trainable solution.put to the Transformer layer, which is a sequence of The adaptive alignment of features removes the ne-embeddings fed into MHA, where L is the length cessity for a data-dependent mapping strategy. Fur-of the text input and is the dimension of model d thermore, AAM aligns the student attention map embedding. in each head with those of the teacher, resultingIn the Transformer layer, the input sequence X in more effective distillation compared to layer-is mapped to three unique vector embeddings: the wise feature mapping. AAM enables each attention query (), the key (), and the value (). EachQ K V head in the student model to be compared withof these embeddings",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-2",
+      "chunk_indices": [
+        8
+      ],
+      "char_count": 999,
+      "summary": "three unique vector embeddings: the wise feature mapping. AAM enables each atten",
+      "digest": "three unique vector embeddings: the wise feature mapping. AAM enables each attention query (), the key (), and the value (). EachQ K V head in the student model to be compared withof these embeddings is associated with its own every head in the teacher model across differentprojection weight, denoted by W, W, and Wq k v layers, by employing pointwise convolution with respectively. only a few additional parameters. As a result, there is no longer a need for head or layer parity between Q = XW, K = XW, V = XW (1) q k v the student and teacher models. Note that these projection weights () areWq|k|vNotably, our experimental results and analysisunique for each attention head and layer. The show that due to its fine-grained attention transfer shape of W is Rd×dhead, which results in in a head-wise manner, A2D is effectively appli- q|k|v ×. Head dimensionQ, K, V ∈RL dhead d cable to the decoder of the Transformer, an area head is divided by the number of attention heads in a d where previous",
+      "full_text": "three unique vector embeddings: the wise feature mapping. AAM enables each attention query (), the key (), and the value (). EachQ K V head in the student model to be compared withof these embeddings is associated with its own every head in the teacher model across differentprojection weight, denoted by W, W, and Wq k v layers, by employing pointwise convolution with respectively. only a few additional parameters. As a result, there is no longer a need for head or layer parity between Q = XW, K = XW, V = XW (1) q k v the student and teacher models. Note that these projection weights () areWq|k|vNotably, our experimental results and analysisunique for each attention head and layer. The show that due to its fine-grained attention transfer shape of W is Rd×dhead, which results in in a head-wise manner, A2D is effectively appli- q|k|v ×. Head dimensionQ, K, V ∈RL dhead d cable to the decoder of the Transformer, an area head is divided by the number of attention heads in a d where previous",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-3",
+      "chunk_indices": [
+        9,
+        10
+      ],
+      "char_count": 1348,
+      "summary": "manner, A2D is effectively appli- q|k|v ×. Head dimensionQ, K, V ∈RL dhead d cab",
+      "digest": "manner, A2D is effectively appli- q|k|v ×. Head dimensionQ, K, V ∈RL dhead d cable to the decoder of the Transformer, an area head is divided by the number of attention heads in a d where previous feature-based KD approaches have layer. typically struggled. By compressing the decoder Scaled dot-product attention, attn(X), that each with A2D, we could reduce the cost of autoregres- MHA head computes is defined as follows: sive inference while preserving its performance. pOur comprehensive studies on both high-resource attn(X) = s QK⊤/ d V = HV ∈RL×dheadhead and low-resource NMT tasks show that our method (2) consistently outperforms state-of-the-art baselines, where s(·) denotes a softmax function. The attenspanning both feature-based and response-basedtion output denoted by attn(X) is concatenated KD methods. In particular, even with a smaller over to form MHA of shape L×d. d Rhead model size than the teacher, students trained withAttention map denoted by above, is the scaled H A2D\nKD ",
+      "full_text": "manner, A2D is effectively appli- q|k|v ×. Head dimensionQ, K, V ∈RL dhead d cable to the decoder of the Transformer, an area head is divided by the number of attention heads in a d where previous feature-based KD approaches have layer. typically struggled. By compressing the decoder Scaled dot-product attention, attn(X), that each with A2D, we could reduce the cost of autoregres- MHA head computes is defined as follows: sive inference while preserving its performance. pOur comprehensive studies on both high-resource attn(X) = s QK⊤/ d V = HV ∈RL×dheadhead and low-resource NMT tasks show that our method (2) consistently outperforms state-of-the-art baselines, where s(·) denotes a softmax function. The attenspanning both feature-based and response-basedtion output denoted by attn(X) is concatenated KD methods. In particular, even with a smaller over to form MHA of shape L×d. d Rhead model size than the teacher, students trained withAttention map denoted by above, is the scaled H A2D\nKD methods. In particular, even with a smaller over to form MHA of shape L×d. d Rhead model size than the teacher, students trained withAttention map denoted by above, is the scaled H A2D can match or even surpass teacher perfor-dot-product of the query-key for each head, repp mance in low-resource settings. resented as s(QK⊤/ d) ∈RL×L. To make head",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-4",
+      "chunk_indices": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
+      "char_count": 4922,
+      "summary": "clearer notion of distinct heads and layers, through-teacher for KD, an aligning",
+      "digest": "clearer notion of distinct heads and layers, through-teacher for KD, an aligning strategy has been exout the paper the attention map will appear as: plored to handle different architectural settings between the teacher and student. Since the teacher model generally has more layers than the student p H = s Q K⊤ / d ∈RL×L (3)model, Patient KD (Sun et al., 2019) proposed skip-(m, n) (m, n) (m, n) head ping every other layer or using only the last conwhere m and n serve as indices for head and layersecutive layers of the teacher model so that the inside the whole Transformer architecture. Thus, number of matching layers becomes equal. Likerepresents as attention map-th head inH m wise, TinyBERT (Jiao et al., 2020) formulated a(m, n) -th Transformer layer. Similarly,, n Q(m, n) K(m, n)layer-mapping function that selects hint layers to and V refer to the query, key, and value of thematch the student layers at a similar depth level.(m, n) same head. Meanwhile, MiniLM (Wang et al., 2020)\nfunct",
+      "full_text": "clearer notion of distinct heads and layers, through-teacher for KD, an aligning strategy has been exout the paper the attention map will appear as: plored to handle different architectural settings between the teacher and student. Since the teacher model generally has more layers than the student p H = s Q K⊤ / d ∈RL×L (3)model, Patient KD (Sun et al., 2019) proposed skip-(m, n) (m, n) (m, n) head ping every other layer or using only the last conwhere m and n serve as indices for head and layersecutive layers of the teacher model so that the inside the whole Transformer architecture. Thus, number of matching layers becomes equal. Likerepresents as attention map-th head inH m wise, TinyBERT (Jiao et al., 2020) formulated a(m, n) -th Transformer layer. Similarly,, n Q(m, n) K(m, n)layer-mapping function that selects hint layers to and V refer to the query, key, and value of thematch the student layers at a similar depth level.(m, n) same head. Meanwhile, MiniLM (Wang et al., 2020)\nfunction that selects hint layers to and V refer to the query, key, and value of thematch the student layers at a similar depth level.(m, n) same head. Meanwhile, MiniLM (Wang et al., 2020) circumvented the aligning issue by distilling only the last 2.2Knowledge Distillation layer. However, it constrained the number of heads The idea of knowledge distillation from a largerto be equivalent between teacher and student netneural network to a smaller network was proposed works. in (Hinton et al., 2015). In the paper, the output To address the issue of skipped teacher layers, distribution of the larger teacher network is used as CKD (Wu et al., 2020) proposed layer fusion, a a soft target for training the student network. method that projects several teacher layers into one X fused layer. The fusion is then matched with the L = − pTlog(pS) (4) KD corresponding student layer, enabling distillation x∈X from all teacher layers. Although CKD benefits from the representations contained in more\nfusion is then matched with the L = − pTlog(pS) (4) KD corresponding student layer, enabling distillation x∈X from all teacher layers. Although CKD benefits from the representations contained in more teacherwhere T and S denote the output distributions of p p layers, the mapping between fused teacher layersthe teacher and student. The core idea of training and student layers is set heuristically, before train-the student to imitate the teacher extends further from comparing the output distribution to any valu-ing. As a result, its optimal combination varies due to the training dataset, and the number of cases forable intermediate features. In general, the followmapping becomes intractable when the number ofing loss function provides an abstraction. layers increases. Additionally, performance degra- X dation was reported when the method was applied L = D(fT (x), fS(x)) (5) to the decoder part of the Transformer, regardless of x∈X the combination setting. This led to CKD being ap-\ndegra- X dation was reported when the method was applied L = D(fT (x), fS(x)) (5) to the decoder part of the Transformer, regardless of x∈X the combination setting. This led to CKD being ap- Equation (5) compares the features of the teacherplied solely to the encoder side of the Transformer. and student models (fT (x), fS(x)) for a given in-While ALP-KD (Passban et al., 2021) made the put x from a dataset X with a measure of dissimilar-mapping partially adaptive with an attention mechity (D). There are a number of widely used choicesanism, it still requires dividing student layers into for features to distill knowledge from, such as hid-buckets, which involves heuristics, and the result is den states (Sun et al., 2019; Passban et al., 2021) ordependent on how the buckets are grouped. Both attention maps (Jiao et al., 2020; Wu et al., 2020).CKD and ALP-KD are layer-wise fusion distilla- A common choice for is Kullback-Leibler Diver-tion methods and do not consider more detailed D gence\nattention maps (Jiao et al., 2020; Wu et al., 2020).CKD and ALP-KD are layer-wise fusion distilla- A common choice for is Kullback-Leibler Diver-tion methods and do not consider more detailed D gence (Joyce, 2011) or mean-squared error. As themappings which can be found in attention heads. student network learns to imitate the features from the teacher with Equation (5), the teacher model’s knowledge, represented by the feature fT (x), is 4Methodology transferred to the student. This transfer of knowledge helps the student model converge to a better optimum that it could not reach on its own.\nIn this section, we provide a detailed overview of the architecture and training of the Attention Align-3Related Works ment Module (AAM), the core component of our In the field of feature-based KD studies, whichAlign-to-Distill (A2D) approach. Figure 1 illusincorporate intermediate representations of thetrates the overall framework.",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-5",
+      "chunk_indices": [
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "char_count": 4228,
+      "summary": "Figure 1: Attention Transfer with A2D. The Attention Alignment Module (AAM), imp",
+      "digest": "Figure 1: Attention Transfer with A2D. The Attention Alignment Module (AAM), implemented as a pointwise convolution layer, produces intermediate attention maps from a collection of student attention maps. The number of intermediate maps matches the total attention maps of the teacher model, encompassing all layers and heads. These intermediate maps are then directly compared to the teacher’s attention maps using KL-Divergence, without any form of reduction. 4.1Attention Map as a Knowledge types of attention. During the attention knowledge transfer, each type of attention map is comparedThe attention mechanism is a vital component in between teacher and student, respectively.Transformer models, capturing the context and relationships between words in a sentence. Attention 4.2Attention Alignment Module alignment ensures that the student model, despite potential differences in network structure compared 4.2.1Module Architecture to the teacher model, focuses on the same word re- The\nAlignm",
+      "full_text": "Figure 1: Attention Transfer with A2D. The Attention Alignment Module (AAM), implemented as a pointwise convolution layer, produces intermediate attention maps from a collection of student attention maps. The number of intermediate maps matches the total attention maps of the teacher model, encompassing all layers and heads. These intermediate maps are then directly compared to the teacher’s attention maps using KL-Divergence, without any form of reduction. 4.1Attention Map as a Knowledge types of attention. During the attention knowledge transfer, each type of attention map is comparedThe attention mechanism is a vital component in between teacher and student, respectively.Transformer models, capturing the context and relationships between words in a sentence. Attention 4.2Attention Alignment Module alignment ensures that the student model, despite potential differences in network structure compared 4.2.1Module Architecture to the teacher model, focuses on the same word re- The\nAlignment Module alignment ensures that the student model, despite potential differences in network structure compared 4.2.1Module Architecture to the teacher model, focuses on the same word re- The student and teacher models share the same L lationships and contextual nuances as the teacher. src and during distillation, leading to attention LtgtThis process allows the student model to gain inmaps of the same shape for both models, regardsights beyond mere output mimicry; it learns the unless of model differences. However, the number derlying relationships that the teacher model uses of attention maps in these models differs since the for prediction, effectively transferring knowledge teacher model has more layers and more heads in from the teacher model to the student. each layer compared to the student model. This A2D compares the attention maps in Equadiscrepancy in numbers makes it infeasible to make tion (3) from the teacher and student for knowledge a straightforward one-to-one\nto the student model. This A2D compares the attention maps in Equadiscrepancy in numbers makes it infeasible to make tion (3) from the teacher and student for knowledge a straightforward one-to-one mapping of attention distillation. As depicted previously the shape of maps between teacher and student models. To rethe attention map is determined by the length of solve this, we devise an Attention Alignment Modthe input (i.e. H ∈RL×L), not by the model (m, n) ule (AAM) that generates intermediate attention hyperparameters. This eases the comparison bemaps, bridging the gap between the two groups of tween knowledge features between the teacher and attention maps. student models on a different scale.\nAAM performs pointwise convolution (1 × 1In the encoder-decoder model, there exist three Conv. as in Figure 1) on the student attention maps. distinct attention that computes relation within, This operation creates an equal number of intermeand in between the encoder and decoder input sediate attention maps to the teacher maps. Each inquences: self-attention within the encoder and determediate map results from a weighted sum of all coder, and cross-attention from encoder to decoder. student attention maps. Consequently, a one-to-one The A2D method incorporates all three types of comparison between the teacher maps and the inattention maps for effective knowledge distillation: termediate maps simulates transferring knowledge with a fully-connected mapping between teacher Henc−self∈RL ×L, (6)src src (m, n) and student attention maps. dec−self∈RL ×L (7)H tgt tgt, Two desirable attributes of pointwise convolu-(m, n) dec−cross∈RL ×L (8)tion take major roles in effective attention knowl-H\n(6)src src (m, n) and student attention maps. dec−self∈RL ×L (7)H tgt tgt, Two desirable attributes of pointwise convolu-(m, n) dec−cross∈RL ×L (8)tion take major roles in effective attention knowl-H src tgt (m, n) edge transfer: (1) convolution operation preserves Note that and are the lengths of the sourcesequential information in each attention map, while Lsrc Ltgt and target sentences for machine translation, which(2) allowing fully-connected weighted mapping bemake the shape of attention maps among threetween the groups.",
+      "keywords": [],
+      "page_range": [
+        4,
+        4
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-6",
+      "chunk_indices": [
+        22,
+        23,
+        24,
+        25,
+        26
+      ],
+      "char_count": 3627,
+      "summary": "We can represent the intermediate attention maps, HI, from student attention map",
+      "digest": "We can represent the intermediate attention maps, HI, from student attention maps, HS c (m, n) + 1with the learnable parameters of AAM: L = Lenc−self Ldec−self + Ldec−cross (11)att att 2 att att XM XN enc−self, dec−self, and dec−crossabove corre-L L L HI = w HS +b, (c ∈ 1,..., C) att att att c (m, n), c (m, n) c spond to the loss in Equation (10) estimates from m=1 n=1 (9)three different types of attention maps in Equation (6), (7), (8). To balance the loss scale betweenHere, w and b represent the weight and bias (m, n), c c the encoder and decoder, we divide the sum ofof AAM, respectively. These parameters generate the-th intermediate attention map (), losses for the decoder by 2. To sum up, the atten- c c ∈ 1,..., C where C denotes the total number of teacher’s at-tion transfer loss L incorporates three types of att attention mechanism in the encoder-decoder modeltention heads. The variables M and N denote the number of student attention heads within a single(i.e. self-attention of\nt",
+      "full_text": "We can represent the intermediate attention maps, HI, from student attention maps, HS c (m, n) + 1with the learnable parameters of AAM: L = Lenc−self Ldec−self + Ldec−cross (11)att att 2 att att XM XN enc−self, dec−self, and dec−crossabove corre-L L L HI = w HS +b, (c ∈ 1,..., C) att att att c (m, n), c (m, n) c spond to the loss in Equation (10) estimates from m=1 n=1 (9)three different types of attention maps in Equation (6), (7), (8). To balance the loss scale betweenHere, w and b represent the weight and bias (m, n), c c the encoder and decoder, we divide the sum ofof AAM, respectively. These parameters generate the-th intermediate attention map (), losses for the decoder by 2. To sum up, the atten- c c ∈ 1,..., C where C denotes the total number of teacher’s at-tion transfer loss L incorporates three types of att attention mechanism in the encoder-decoder modeltention heads. The variables M and N denote the number of student attention heads within a single(i.e. self-attention of\nthree types of att attention mechanism in the encoder-decoder modeltention heads. The variables M and N denote the number of student attention heads within a single(i.e. self-attention of each encoder and decoder, layer, and the maximum layer depth of the studentand cross attention) with balancing for the encoder and decoder-side losses.respectively.\nSince is orthogonal to the loss from knowl-In summary, AAM is a pointwise convolution Latt layer that generates intermediate attention mapsedge distillation by Hinton et al. (L), it can C KD from a total of M ∗ N student attention maps.be used jointly to give additional supervision.\nThroughout the paper, we denote the distillationThe convolution operation of AAM ensures that a one-to-one comparison of intermediate maps toapproach with only L as vanilla KD. To form a KD teacher attention maps functions similarly to afinal loss for A2D, we add the cross-entropy loss fully-connected comparison between student and L of student model for translation task as fol- CE lows: teacher attention maps. The trained weights of AAM () after the distillation can be used to (12)w L = LCE + λLatt + µLKD(m, n), c analyze the alignment between student and teacher The student model and the AAM are collaboraattention heads (discussed further in the Analysis tively optimized through an end-to-end approach, section; see Figure 2). as described in Equation (12). Given that HI is dif- Finally, the AAM only adds a small number of c ferentiable with respect to w, the L from Equaextra parameters and operations when determining c att tion (10) actively modifies and the student’s pa- wmap\nthe AAM only adds a small number of c ferentiable with respect to w, the L from Equaextra parameters and operations when determining c att tion (10) actively modifies and the student’s pa- wmap discrepancy, compared to the student model. c rameters to minimize the KL-Divergence between These are estimated as for parameters M ∗N ∗ C the teacher’s attention maps and the intermediate and C ∗L2for operations. After training, the AAM attention maps. At the same time, both L and can be discarded, as it serves no function during CE indirectly affect the adjustment of, since inference. LKD wc HSis related to the student model’s predictions. 4.2.2Module Training The hyperparameters λ and µ serve as modulating factors to balance the weights of and. InAAM generates intermediate attention maps (de- L Latt KD line with Dynamic KD (Li et al., 2021), we mod-noted as HI) that have the same number as the c teacher attention maps, referred to as T. Weulate the value of λ during training to adjust the",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-7",
+      "chunk_indices": [
+        27,
+        28
+      ],
+      "char_count": 1410,
+      "summary": "L Latt KD line with Dynamic KD (Li et al., 2021), we mod-noted as HI) that have ",
+      "digest": "L Latt KD line with Dynamic KD (Li et al., 2021), we mod-noted as HI) that have the same number as the c teacher attention maps, referred to as T. Weulate the value of λ during training to adjust the Hc minimize the KL-Divergence between the attentionsupervision derived from L and L. att KD distributions of the intermediate attention maps and 4.3Comparison with Previous Methodsthe teacher attention maps as: Previous works have also utilized attention distri- CX butions as knowledge features (Jiao et al., 2020; T I (10)Latt = DKL(H ||H).c c Wang et al., 2020). However, their approaches treat c=1 attention heads within the same layer as a singular This equation represents the attention transfer lossunit for distillation. Considering that the attention function, L, which quantifies the difference be-map from each head captures distinct information att tween the teacher’s attention maps and the interme-across the layer (Voita et al., 2019; Gong et al., diate attention maps. To break down\nb",
+      "full_text": "L Latt KD line with Dynamic KD (Li et al., 2021), we mod-noted as HI) that have the same number as the c teacher attention maps, referred to as T. Weulate the value of λ during training to adjust the Hc minimize the KL-Divergence between the attentionsupervision derived from L and L. att KD distributions of the intermediate attention maps and 4.3Comparison with Previous Methodsthe teacher attention maps as: Previous works have also utilized attention distri- CX butions as knowledge features (Jiao et al., 2020; T I (10)Latt = DKL(H ||H).c c Wang et al., 2020). However, their approaches treat c=1 attention heads within the same layer as a singular This equation represents the attention transfer lossunit for distillation. Considering that the attention function, L, which quantifies the difference be-map from each head captures distinct information att tween the teacher’s attention maps and the interme-across the layer (Voita et al., 2019; Gong et al., diate attention maps. To break down\nbe-map from each head captures distinct information att tween the teacher’s attention maps and the interme-across the layer (Voita et al., 2019; Gong et al., diate attention maps. To break down further, L 2021), establishing a rigid mapping between stuatt incorporates three different terms according to thedent and teacher layers imposes a potential loss of types of attention maps. knowledge from the teacher.",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-8",
+      "chunk_indices": [
+        29,
+        30,
+        31,
+        32,
+        33
+      ],
+      "char_count": 3857,
+      "summary": "Models De →En De →Dsb En →Zh Teacher (6-layer) 36.79 38.68 23.97 ±0.51 ±2.02 ±0.",
+      "digest": "Models De →En De →Dsb En →Zh Teacher (6-layer) 36.79 38.68 23.97 ±0.51 ±2.02 ±0.34 Student (3-layer) No KD 36.24 35.88 23.20 ±0.50 ±1.97 ±0.31 Vanilla KD (Hinton et al., 2015) 37.00 35.25 24.47 ±0.50 ±1.96 ±0.34 Sequence KD (Kim and Rush, 2016) 36.61 ±0.51 33.41 ±1.76 24.67 ±0.35 Selective KD (Wang et al., 2021) 37.30 35.94 22.66 ±0.50 ±1.95 ±0.32 TinyBERT (Jiao et al., 2020) 37.24 38.01 24.31 ±0.52 ±1.80 ±0.34 MiniLM (Wang et al., 2020) 36.93 36.43 24.32 ±0.50 ±1.97 ±0.33 ALP-KD (Passban et al., 2021) 37.13 37.07 24.36 ±0.51 ±2.05 ±0.33 A2D (4 heads) 37.17 38.61 24.61 ±0.49 ±1.96 ±0.32 A2D (8 heads) 37.75 39.49 24.32 ±0.51 ±2.06 ±0.33 Student (2-layer) No KD 35.56 35.89 23.69 ±0.51 ±1.88 ±0.33 CKD-sc (Wu et al., 2020) 35.73 32.90 22.55 ±0.49 ±1.85 ±0.33 CKD-cc (Wu et al., 2020) 35.46 ±0.48 31.28 ±1.74 22.86 ±0.31 A2D (4 heads) 36.68 37.06 23.64 ±0.51 ±1.94 ±0.34 Table 1: BLEU scores of various KD approaches across language pairs. ‘No KD’ denotes student models trained exclusively\n±0.4",
+      "full_text": "Models De →En De →Dsb En →Zh Teacher (6-layer) 36.79 38.68 23.97 ±0.51 ±2.02 ±0.34 Student (3-layer) No KD 36.24 35.88 23.20 ±0.50 ±1.97 ±0.31 Vanilla KD (Hinton et al., 2015) 37.00 35.25 24.47 ±0.50 ±1.96 ±0.34 Sequence KD (Kim and Rush, 2016) 36.61 ±0.51 33.41 ±1.76 24.67 ±0.35 Selective KD (Wang et al., 2021) 37.30 35.94 22.66 ±0.50 ±1.95 ±0.32 TinyBERT (Jiao et al., 2020) 37.24 38.01 24.31 ±0.52 ±1.80 ±0.34 MiniLM (Wang et al., 2020) 36.93 36.43 24.32 ±0.50 ±1.97 ±0.33 ALP-KD (Passban et al., 2021) 37.13 37.07 24.36 ±0.51 ±2.05 ±0.33 A2D (4 heads) 37.17 38.61 24.61 ±0.49 ±1.96 ±0.32 A2D (8 heads) 37.75 39.49 24.32 ±0.51 ±2.06 ±0.33 Student (2-layer) No KD 35.56 35.89 23.69 ±0.51 ±1.88 ±0.33 CKD-sc (Wu et al., 2020) 35.73 32.90 22.55 ±0.49 ±1.85 ±0.33 CKD-cc (Wu et al., 2020) 35.46 ±0.48 31.28 ±1.74 22.86 ±0.31 A2D (4 heads) 36.68 37.06 23.64 ±0.51 ±1.94 ±0.34 Table 1: BLEU scores of various KD approaches across language pairs. ‘No KD’ denotes student models trained exclusively\n±0.48 31.28 ±1.74 22.86 ±0.31 A2D (4 heads) 36.68 37.06 23.64 ±0.51 ±1.94 ±0.34 Table 1: BLEU scores of various KD approaches across language pairs. ‘No KD’ denotes student models trained exclusively with the cross-entropy loss. Each baseline model incorporates 4 attention heads per layer. For a direct comparison with CKD, we train our students with A2D across 2 layers. The highest scores among student models are highlighted in bold, while the second highest are underlined.\nTeacher No KD PKD CKD-rc CKD-oc A2D A2D (w/o L) KD 27.70 25.74 23.38 24.14 23.97 26.37 25.97 ±0.65 ±0.61 ±0.64 ±0.61 Table 2: BLEU scores for WMT-2014 En −→De. ‘PKD’ and ‘CKD’ refer to Patient KD (Sun et al., 2019) and Combinatorial KD (Wu et al., 2020), respectively. Underlined results are imported from CKD (Wu et al., 2020). Our reproduced teacher and No KD student model, used for A2D training on EnDe, yielded slightly better BLEU −→ scores than those reported in the CKD paper, which are 27.03 and 24.31 respectively. Nevertheless, the trend of their model underperforming compared to No KD remains consistent.\nIn contrast, A2D facilitates a flexible align- et al., 2016) for IWSLT-2014 dataset and Sentenment between each individual attention head of the cepiece (Kudo and Richardson, 2018) for the othteacher and student models, eliminating the needers. To prove the effectiveness of our method on for pre-defined mapping combinations (Wu et al., high-resource scenarios, we evaluate NMT mod- 2020) or bucket divisions (Passban et al., 2021).els on the WMT-2014 English −→German (En −→ Additionally, A2D is not bound by architecturalDe) datasets. we use newstest2013 datasets as constraints, such as matching the number of headsa validation set and newstest2014 as the test set. or layers, or embedding dimensions, between theData preparation for WMT-2014 En−→De follows teacher and student models. (Vaswani et al., 2017) to ensure a fair comparison of baselines in Table 2. 5Experiments 5.2Distillation Settings5.1Datasets We use the public IWSLT and WMT datasets toFor every experiment, the teacher and\net al., 2017) to ensure a fair comparison of baselines in Table 2. 5Experiments 5.2Distillation Settings5.1Datasets We use the public IWSLT and WMT datasets toFor every experiment, the teacher and student are evaluate our method on translation. The datasetstrained and evaluated with the same datasets. of low-resource scenario include the IWSLT-2014Low-resource translation Teacher models are 6- German English (DeEn), IWSLT-2017 En-layer Transformers (Vaswani et al., 2017) with 4 −→ −→ glish −→Chinese (En −→Zh), WMT-2022 Germanattention heads, hidden dimensions, and the feed- −→Lower Sorbian (De −→Dsb) translation. Tok-forward dimension of 512, and 1024 for each. Unenization is done with Subword-NMT (Sennrichless specified otherwise, student models are 3-layer",
+      "keywords": [],
+      "page_range": [
+        6,
+        6
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-9",
+      "chunk_indices": [
+        34
+      ],
+      "char_count": 998,
+      "summary": "Transformers with the same hyperparameters aswith only 4 heads. We also present ",
+      "digest": "Transformers with the same hyperparameters aswith only 4 heads. We also present the results of the teacher, except for the number of layers. For astudents with 8 heads in section 6. Doubling the fair comparison with CKD (Wu et al., 2020) whichnumber of attention heads from 4 to 8 does not alter reported results with 2-layer student networks, wethe overall parameter count in the ’A2D (8heads)’ additionally test our approach for 2-layer Trans-model. This is achieved by proportionally reducing former students. To show that A2D does not re-the dimension per head (d = d /n) head model head quire the same number of attention heads betweenwhile keeping the feature dimension (d) conmodel student and teacher, we also present the results withstant, thus ensuring a fair comparison. student models having 8 attention heads. For loss In the De →En and De →Dsb language pairs, scaling, in Equation (11), λ and µ are initially setstudents trained with A2D yield higher BLEU to 1, and we set exponential",
+      "full_text": "Transformers with the same hyperparameters aswith only 4 heads. We also present the results of the teacher, except for the number of layers. For astudents with 8 heads in section 6. Doubling the fair comparison with CKD (Wu et al., 2020) whichnumber of attention heads from 4 to 8 does not alter reported results with 2-layer student networks, wethe overall parameter count in the ’A2D (8heads)’ additionally test our approach for 2-layer Trans-model. This is achieved by proportionally reducing former students. To show that A2D does not re-the dimension per head (d = d /n) head model head quire the same number of attention heads betweenwhile keeping the feature dimension (d) conmodel student and teacher, we also present the results withstant, thus ensuring a fair comparison. student models having 8 attention heads. For loss In the De →En and De →Dsb language pairs, scaling, in Equation (11), λ and µ are initially setstudents trained with A2D yield higher BLEU to 1, and we set exponential",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-10",
+      "chunk_indices": [
+        35,
+        36,
+        37,
+        38,
+        39
+      ],
+      "char_count": 4185,
+      "summary": "8 attention heads. For loss In the De →En and De →Dsb language pairs, scaling, i",
+      "digest": "8 attention heads. For loss In the De →En and De →Dsb language pairs, scaling, in Equation (11), λ and µ are initially setstudents trained with A2D yield higher BLEU to 1, and we set exponential decay on at a rate ofscores than those trained with other KD meth- λ 0.9 over epochs. ods. For the En →Zh language pair, A2D yields High-resource translation To properly scale thesuperior results compared to other feature-based model to the high-resource data, we enlarge theKD baselines and is on par with Sequence-level teacher model and student model to 12-layer andKD. In all language pair settings, students trained 4-layer, respectively. The other hyperparameter set-with A2D surpass the performance of their teachtings such as attention heads and hidden dimensioners despite having only half the number of transare set identically with (Vaswani et al., 2017). Toformer layers. Remarkably, the effectiveness of adjust to the increased number of attention maps, our method was most evident in the De\n",
+      "full_text": "8 attention heads. For loss In the De →En and De →Dsb language pairs, scaling, in Equation (11), λ and µ are initially setstudents trained with A2D yield higher BLEU to 1, and we set exponential decay on at a rate ofscores than those trained with other KD meth- λ 0.9 over epochs. ods. For the En →Zh language pair, A2D yields High-resource translation To properly scale thesuperior results compared to other feature-based model to the high-resource data, we enlarge theKD baselines and is on par with Sequence-level teacher model and student model to 12-layer andKD. In all language pair settings, students trained 4-layer, respectively. The other hyperparameter set-with A2D surpass the performance of their teachtings such as attention heads and hidden dimensioners despite having only half the number of transare set identically with (Vaswani et al., 2017). Toformer layers. Remarkably, the effectiveness of adjust to the increased number of attention maps, our method was most evident in the De\nof transare set identically with (Vaswani et al., 2017). Toformer layers. Remarkably, the effectiveness of adjust to the increased number of attention maps, our method was most evident in the De −→Dsb We used λ of L as 0.1. dataset, which had the least amount of training data att at 39K samples. These results indicate that training 5.3Baselines with A2D allows students to achieve better gener- Selective KD (Wang et al., 2021) is a variant ofalization, particularly with low-resource training vanilla KD (Hinton et al., 2015) which selectively data. chooses words to distill based on entropy. ForTo compare with CKD, we trained 2-layer stuselective KD, we use a “word rate\" of 0.5. Fordents using A2D. While the score of CKD varies TinyBERT (Jiao et al., 2020), every other layeron its mapping option, our model consistently outof the teacher model is correspondingly mappedperforms CKD regardless of the dataset or their to a layer in the student model. MiniLM is orig-mapping option. Moreover,\nour model consistently outof the teacher model is correspondingly mappedperforms CKD regardless of the dataset or their to a layer in the student model. MiniLM is orig-mapping option. Moreover, a 2-layer student in inally proposed for knowledge distillation in the De −→En achieves results comparable to its 6-layer pre-training stage, so we augment the MiniLM ob-teacher. The results not only validate the robustness jective with and for a fair comparison.of A2D but also show that our learned alignment L LCE KD For ALP-KD (Passban et al., 2021), we train theof attention heads is more effective for knowledge student with an attention mask spanned over alltransfer than the heuristic mapping of CKD. teacher layers. For Combinatorial KD (Wu et al., In low-resource settings, a student model could 2020) (CKD), ‘-sc’, ‘-cc’, ‘-rc’, and ‘-oc’ refer tooutperform the teacher under the guidance of the its different layer mapping configurations.teacher model. This is due to the enhanced\nmodel could 2020) (CKD), ‘-sc’, ‘-cc’, ‘-rc’, and ‘-oc’ refer tooutperform the teacher under the guidance of the its different layer mapping configurations.teacher model. This is due to the enhanced generalization provided by the regularization effect of 5.4Results on Low-resource datasets distillation, as discussed in (Mobahi et al., 2020; Low-resource datasets present a unique challenge Yuan et al., 2020). The teacher model, often being for NMT models, emphasizing the importance oflarger and more complex, captures rich feature repeffective knowledge distillation. Table 1 summa-resentations (such as attention maps) of the data. rizes all the results for low-resource NMT. ModelsThrough distillation, the student model learns these are compared with BLEU scores computed usingrepresentations, which might be more generalizsacreBLEU (Post, 2018), with a confidence intervalable than those learned from the relatively small of 95%, and the number of bootstrap resamples isamount of raw data\nwhich might be more generalizsacreBLEU (Post, 2018), with a confidence intervalable than those learned from the relatively small of 95%, and the number of bootstrap resamples isamount of raw data alone.",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-11",
+      "chunk_indices": [
+        40
+      ],
+      "char_count": 533,
+      "summary": "1000. Previous KD methods, such as TinyBERT 5.5Results on High-resource dataseta",
+      "digest": "1000. Previous KD methods, such as TinyBERT 5.5Results on High-resource datasetand MiniLM, impose a constraint that the number of heads in the student must match that of theTo assess the versatility of our method, we extended teacher. In contrast, A2D does not have this limita-our experiments to the high-resource dataset. Tation regarding the number of attention heads, allow- ble 2 describes our results with different baselines. ing us to train students with 8 heads using teachersFrom our observations, traditional KD techniques",
+      "full_text": "1000. Previous KD methods, such as TinyBERT 5.5Results on High-resource datasetand MiniLM, impose a constraint that the number of heads in the student must match that of theTo assess the versatility of our method, we extended teacher. In contrast, A2D does not have this limita-our experiments to the high-resource dataset. Tation regarding the number of attention heads, allow- ble 2 describes our results with different baselines. ing us to train students with 8 heads using teachersFrom our observations, traditional KD techniques",
+      "keywords": [],
+      "page_range": [
+        7,
+        7
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-12",
+      "chunk_indices": [
+        41,
+        42,
+        43,
+        44,
+        45
+      ],
+      "char_count": 4451,
+      "summary": "A2D No KD BLEU Lnhead ∆ att 2 36.33 35.79 0.54 0.036 4 37.17 36.24 0.93 0.024 37",
+      "digest": "A2D No KD BLEU Lnhead ∆ att 2 36.33 35.79 0.54 0.036 4 37.17 36.24 0.93 0.024 37.75 36.258 1.5 0.016 16 37.19 35.78 1.41 0.013 Table 3: BLEU score and our attention distillation loss () at convergence over a different number of headsLatt (n) in A2D and No KD. ∆BLEU indicates BLEU head score difference between A2D and No KD.Figure 2: Attention head connection weights in the trained AAM. Axes indicate attention head numbers in the student (3 layers of 8 heads) and teacher (6 layers of like Patient KD and Combinatorial KD did not en-4 heads) models. The dashed grid shows layer boundhance the performance of the student models foraries. Darker colors signify stronger connections. Best high-resource data. Surprisingly, they even un-viewed in color. derperform compared to a student model trained without any KD techniques.\nHead-wise A2DHowever, a noticeable distinction arises when DatasetsLayer-wise A2D (Default)training the student model with the A2D approach, De En 37.01 37.75 demonstrating ",
+      "full_text": "A2D No KD BLEU Lnhead ∆ att 2 36.33 35.79 0.54 0.036 4 37.17 36.24 0.93 0.024 37.75 36.258 1.5 0.016 16 37.19 35.78 1.41 0.013 Table 3: BLEU score and our attention distillation loss () at convergence over a different number of headsLatt (n) in A2D and No KD. ∆BLEU indicates BLEU head score difference between A2D and No KD.Figure 2: Attention head connection weights in the trained AAM. Axes indicate attention head numbers in the student (3 layers of 8 heads) and teacher (6 layers of like Patient KD and Combinatorial KD did not en-4 heads) models. The dashed grid shows layer boundhance the performance of the student models foraries. Darker colors signify stronger connections. Best high-resource data. Surprisingly, they even un-viewed in color. derperform compared to a student model trained without any KD techniques.\nHead-wise A2DHowever, a noticeable distinction arises when DatasetsLayer-wise A2D (Default)training the student model with the A2D approach, De En 37.01 37.75 demonstrating a performance level similar to that −→ ±0.49 ±0.49 De −→Dsb 36.70 39.49 of its teacher, even when modeled with only one- ±1.96 ±2.06 En Zh 24.07 24.32 −→ ±0.34 ±0.33third number of the transformer layers compared to its teacher. This performance gain remains evenTable 4: Comparison of our original A2D (head-wise without integrating our method with vanilla KD, distillation) with its layer-wise counterpart. underscoring its effectiveness. 6Analysis and Discussion number of heads might degrade the performance 6.1Effect of Fine-grained Alignmentby reducing the expressiveness of each student’s attention head. We hypothesize that the choice We focus on two attributes of A2D that enable fineof n = 16 was overly complex for a model grained alignment: (1) dense, head-wise distillation head with specifications and reduced\nthat the choice We focus on two attributes of A2D that enable fineof n = 16 was overly complex for a model grained alignment: (1) dense, head-wise distillation head with specifications and reduced the d = 512(2) the use of an attention map as a feature. Our model capacity of each head. This led to the model’s ophypothesis is that the detailed head-wise attention timal performance in BLEU with n = 8, but alignment is what gives A2D-trained students an head recorded a dip in performance when escalated to edge in performance. In Table 3, we present how. our attention transfer loss and performance gap nhead = 16 between students trained with A2D and students In Figure 2, we present the connectivity between trained without KD vary with different numbers ofattention maps learned by AAM (pointwise conattention heads at the point of convergence. Notevolution layer) with heatmap. It shows that heads that varying the number of heads in the studentfrom students associate not only within but\nconattention heads at the point of convergence. Notevolution layer) with heatmap. It shows that heads that varying the number of heads in the studentfrom students associate not only within but across model does not change the total number of parame-the layers to form intermediate maps (HI) that are ters. Our observation suggests that as we reduce thepurposed to emulate the teacher maps (HT). This, BLEU becomes more pronounced, whichsuggests that transferring knowledge using entireL ∆att indicates the effectiveness of our method. Thislayers as units may not be the most effective apinverse correlation between L and ∆BLEU asproach for knowledge transfer. To justify the claim, att the number of heads increases could be attributedwe also carried out evaluations on the layer-wise to our attention alignment module (AAM), whichvariant of A2D, as demonstrated in Table 4. Layergenerates intermediate attention maps from orig-wise A2D, which uses per-layer averaged maps as inal student maps. AAM\nalignment module (AAM), whichvariant of A2D, as demonstrated in Table 4. Layergenerates intermediate attention maps from orig-wise A2D, which uses per-layer averaged maps as inal student maps. AAM draws all the studenta knowledge feature, underperforms the original attention maps (S) to mimic each teacher maphead-wise A2D by a significant margin on everyH (T) via pointwise convolution operation; approx-language pair. This observation reinforces our hy-Hc imating HTfrom an increased number of HS ispothesis emphasizing the impact of our head-wise more feasible. However, employing an excessivecomparison approach in distillation.",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-13",
+      "chunk_indices": [
+        46,
+        47,
+        48,
+        49,
+        50,
+        51
+      ],
+      "char_count": 4743,
+      "summary": "Datasets A2D (All)A2D (Enc-Self)A2D (Dec-All)A2D (Dec-Self)A2D (Dec-Cross) De −→",
+      "digest": "Datasets A2D (All)A2D (Enc-Self)A2D (Dec-All)A2D (Dec-Self)A2D (Dec-Cross) De −→En 37.75 37.39 37.21 37.16 37.25 ±0.51 ±0.50 ±0.51 ±0.49 ±0.51 De −→Dsb 39.49 ±2.06 36.80 ±2.01 37.81 ±1.95 36.81 ±2.13 37.66 ±1.97 En Zh 24.32 24.77 24.75 24.67 24.64 −→ ±0.33 ±0.32 ±0.35 ±0.33 ±0.35 Table 5: Ablation studies by applying A2D on different parts of Transformer. Dec-All setting indicates that both self-attention and cross-attention maps are used for A2D. For Dec-Self and Dec-Cross settings, we increased the weight of Ldec−selfand Ldec−crossfrom 1/2 to 1 respectively to match the loss scale on the Dec-All setting. att att Model #Params CoLAMNLI-(m/mm) SST-2 QNLI MRPC QQP RTE STS-B Avg (Mcc) (Acc) (Acc) (Acc) (F1) (Acc) (Acc) (Spear) BERT 110M 58.7 84.5/84.5 91.7 91.3 89.0 91.1 67.9 89.5 82.9base BERT 66M 51.2 81.7/82.6 91.0 89.3 89.2 90.4 66.1 88.3 80.96 89.4PD 66M - 82.5/83.4 91.1 89.4 90.7 66.7 - - PKD 66M 45.5 81.3/- 91.3 88.4 85.7 88.4 66.5 86.2 79.2 92.3TinyBERT 66M 53.8 83.1/83.4 89.9\nBE",
+      "full_text": "Datasets A2D (All)A2D (Enc-Self)A2D (Dec-All)A2D (Dec-Self)A2D (Dec-Cross) De −→En 37.75 37.39 37.21 37.16 37.25 ±0.51 ±0.50 ±0.51 ±0.49 ±0.51 De −→Dsb 39.49 ±2.06 36.80 ±2.01 37.81 ±1.95 36.81 ±2.13 37.66 ±1.97 En Zh 24.32 24.77 24.75 24.67 24.64 −→ ±0.33 ±0.32 ±0.35 ±0.33 ±0.35 Table 5: Ablation studies by applying A2D on different parts of Transformer. Dec-All setting indicates that both self-attention and cross-attention maps are used for A2D. For Dec-Self and Dec-Cross settings, we increased the weight of Ldec−selfand Ldec−crossfrom 1/2 to 1 respectively to match the loss scale on the Dec-All setting. att att Model #Params CoLAMNLI-(m/mm) SST-2 QNLI MRPC QQP RTE STS-B Avg (Mcc) (Acc) (Acc) (Acc) (F1) (Acc) (Acc) (Spear) BERT 110M 58.7 84.5/84.5 91.7 91.3 89.0 91.1 67.9 89.5 82.9base BERT 66M 51.2 81.7/82.6 91.0 89.3 89.2 90.4 66.1 88.3 80.96 89.4PD 66M - 82.5/83.4 91.1 89.4 90.7 66.7 - - PKD 66M 45.5 81.3/- 91.3 88.4 85.7 88.4 66.5 86.2 79.2 92.3TinyBERT 66M 53.8 83.1/83.4 89.9\nBERT 66M 51.2 81.7/82.6 91.0 89.3 89.2 90.4 66.1 88.3 80.96 89.4PD 66M - 82.5/83.4 91.1 89.4 90.7 66.7 - - PKD 66M 45.5 81.3/- 91.3 88.4 85.7 88.4 66.5 86.2 79.2 92.3TinyBERT 66M 53.8 83.1/83.4 89.9 88.8 90.5 66.9 88.3 81.7 A2D 58.8 83.2/83.5 90.3 90.9 67.5 88.7 82.566M 91.7 89.2 Table 6: Evaluation results on the dev set of GLUE Benchmark. We use BERT and BERT as teacher and base 6 student model, respectively. Both BERT, a 6-layer smaller variant of BERT, and ‘PD’, a distilled model, are 6 released by Turc et al.. The results of baselines are imported from Park et al.. 6.2Decoder Distillation earlier KD studies.\nWhile previous feature-based KD methods focused 6.3Effectiveness on Different Tasks on distilling encoder-only models (Jiao et al., 2020; Wang et al., 2020; Passban et al., 2021) and did notIn this study, we assessed our method using NMT to demonstrate its potential beyond tasks solely as-discover effective KD settings for the decoder in sociated with encoders. Additionally, we presentNMT tasks (Wu et al., 2020), A2D distills both the performance metrics for the A2D method whenencoder and decoder. applied to encoder-only models on natural lan- Our claim regarding the effectiveness of our guage understanding benchmarks given that most method on the decoder is supported by the ablaof the KD in natural language processing research tion studies presented in Table 5. Generally, aphas focused on the encoder-only models and tasks. plying A2D to both the encoder and decoder to- Specifically, we applied our method to BERT (Degether yielded the best results. In the En −→Zh vlin et al., 2019)\non the encoder-only models and tasks. plying A2D to both the encoder and decoder to- Specifically, we applied our method to BERT (Degether yielded the best results. In the En −→Zh vlin et al., 2019) distillation, benchmarked on the direction, there is a slight performance degradation GLUE (Wang et al., 2018) dataset. The comparawhen using integrated encoder and decoder distiltive results with baselines are presented in Table 6. lation compared to using encoder-only or decoder- For training, we used fine-tuned teacher models only distillation. Nevertheless, our model trained for each GLUE task and then applied A2D to the with decoder-only distillation outperforms the one corresponding student model. We experimented with distillation on both the encoder and decoder, with the hyperparameter of Equation (12), select- λdemonstrating its effectiveness on the decoder. ing from the values {0.01, 0.02, 0.05, 0.1}. For To investigate why A2D is effective on the de-all other configurations, we\nof Equation (12), select- λdemonstrating its effectiveness on the decoder. ing from the values {0.01, 0.02, 0.05, 0.1}. For To investigate why A2D is effective on the de-all other configurations, we followed BERT’s setcoder, we examine the AAM of the decoder, astings. Notably, our method demonstrated superior described in Figure 2. From the heatmap, we ob-performance over encoder-oriented baselines, even serve that the connection between heads tends to bewithout dedicated task-specific hyperparameter tunsparse at the encoder level, with most values near 0. ing.\nConversely, in the decoder, the connection between heads is more evenly distributed, with values shift- 7Conclusion ing away from 0 and closer to 0.2. Based on this observation, we believe that our soft, fine-grainedIn this paper, we introduce Align-to-Distill, a novel connections between teacher-student features ledapproach to knowledge distillation that enables to more successful KD for decoder tasks, as com-a detailed alignment of attention heads between pared to the strict on/off connections proposed inteacher and student models. We propose a strategy",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-14",
+      "chunk_indices": [
+        52,
+        53,
+        54,
+        55
+      ],
+      "char_count": 2788,
+      "summary": "to overcome the need for heuristic feature map-Jianping Gou, Baosheng Yu, Stephe",
+      "digest": "to overcome the need for heuristic feature map-Jianping Gou, Baosheng Yu, Stephen J. Maybank, and ping in a learnable manner. Our approach showsDacheng Tao. 2021. Knowledge distillation: A survey. Int. J. Comput. Vis., 129(6):1789–1819. promising results in decoder distillation, effectively compressing models while preserving translationJiatao Gu, Graham Neubig, Kyunghyun Cho, and Vicquality. tor O.K. Li. 2017. Learning to translate in real-time with neural machine translation. In Proceedings of 8Limitations and Future work the 15th Conference of the European Chapter of the Association for Computational Linguistics: Volume 1, Long Papers, pages 1053–1062. Association for Although A2D is architecturally flexible withoutComputational Linguistics. constraints on hidden size or number of attention Geoffrey E. Hinton, Oriol Vinyals, and Jeffrey Dean.heads, the teacher and student models must share the same vocabulary. This requirement potentially2015. Distilling the knowledge in a neural\nGe",
+      "full_text": "to overcome the need for heuristic feature map-Jianping Gou, Baosheng Yu, Stephen J. Maybank, and ping in a learnable manner. Our approach showsDacheng Tao. 2021. Knowledge distillation: A survey. Int. J. Comput. Vis., 129(6):1789–1819. promising results in decoder distillation, effectively compressing models while preserving translationJiatao Gu, Graham Neubig, Kyunghyun Cho, and Vicquality. tor O.K. Li. 2017. Learning to translate in real-time with neural machine translation. In Proceedings of 8Limitations and Future work the 15th Conference of the European Chapter of the Association for Computational Linguistics: Volume 1, Long Papers, pages 1053–1062. Association for Although A2D is architecturally flexible withoutComputational Linguistics. constraints on hidden size or number of attention Geoffrey E. Hinton, Oriol Vinyals, and Jeffrey Dean.heads, the teacher and student models must share the same vocabulary. This requirement potentially2015. Distilling the knowledge in a neural\nGeoffrey E. Hinton, Oriol Vinyals, and Jeffrey Dean.heads, the teacher and student models must share the same vocabulary. This requirement potentially2015. Distilling the knowledge in a neural network.\nCoRR, abs/1503.02531. restricts its broader applicability. Also, while our work demonstrates A2D’s effectiveness on the de-Xiaoqi Jiao, Yichun Yin, Lifeng Shang, Xin Jiang, Xiao Chen, Linlin Li, Fang Wang, and Qun Liu. 2020. coder module in Table 5, we have not yet tested Tinybert: Distilling BERT for natural language un-A2D on decoder-only models. The scope of this derstanding. In Findings of the Association for Compaper primarily focuses on encoder-decoder-basedputational Linguistics: (EMNLP), pages 4163–4174. translation models. In future work, we plan to extend A2D’s application to decoder-only models.James M Joyce. 2011. Kullback-leibler divergence.\nIn International encyclopedia of statistical science, Moreover, the concept of A2D may encompass a pages 720–722. Springer. broader range of architectures in future work, as the Jungo Kasai, Nikolaos Pappas, Hao Peng, James Cross, idea of adaptively aligning features is not restricted to using attention as a feature. and Noah A. Smith. 2020. Deep encoder, shallow decoder: Reevaluating non-autoregressive machine translation. In International Conference on Learning Representations.\nReferences Yoon Kim and Alexander M. Rush. 2016. Sequence- Jimmy Ba and Rich Caruana. 2014. Do deep nets reallylevel knowledge distillation. In Proceedings of the need to be deep? In Advances in Neural Information2016 Conference on Empirical Methods in Natural Processing Systems: Annual Conference on Neural Language Processing, pages 1317–1327. Association Information Processing Systems, (NIPS), pages 2654–for Computational Linguistics.",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-15",
+      "chunk_indices": [
+        56,
+        57,
+        58
+      ],
+      "char_count": 2480,
+      "summary": "2662. Taku Kudo and John Richardson. 2018. Sentencepiece: Dzmitry Bahdanau, Kyun",
+      "digest": "2662. Taku Kudo and John Richardson. 2018. Sentencepiece: Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Ben-A simple and language independent subword tokgio. 2015. Neural machine translation by jointlyenizer and detokenizer for neural text processing. In learning to align and translate. In International Con-Proceedings of the Conference on Empirical Methods ference on Learning Representations, (ICLR) Confer-in Natural Language Processing, (EMNLP), pages 66–71. ence Track Proceedings.\nMike Lewis, Yinhan Liu, Naman Goyal, MarjanCristianBucila, RichCaruana, andAlexandru Ghazvininejad, Abdelrahman Mohamed, Omer Levy, Niculescu-Mizil. 2006. Model compression. In Pro- Veselin Stoyanov, and Luke Zettlemoyer. 2020. ceedings of International Conference on Knowledge BART: denoising sequence-to-sequence pre-trainingDiscovery and Data Mining, (SIGKDD), pages 535– for natural language generation, translation, and com-541. prehension. In Proceedings of the 58th Annual Meeting of the Association for Co",
+      "full_text": "2662. Taku Kudo and John Richardson. 2018. Sentencepiece: Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Ben-A simple and language independent subword tokgio. 2015. Neural machine translation by jointlyenizer and detokenizer for neural text processing. In learning to align and translate. In International Con-Proceedings of the Conference on Empirical Methods ference on Learning Representations, (ICLR) Confer-in Natural Language Processing, (EMNLP), pages 66–71. ence Track Proceedings.\nMike Lewis, Yinhan Liu, Naman Goyal, MarjanCristianBucila, RichCaruana, andAlexandru Ghazvininejad, Abdelrahman Mohamed, Omer Levy, Niculescu-Mizil. 2006. Model compression. In Pro- Veselin Stoyanov, and Luke Zettlemoyer. 2020. ceedings of International Conference on Knowledge BART: denoising sequence-to-sequence pre-trainingDiscovery and Data Mining, (SIGKDD), pages 535– for natural language generation, translation, and com-541. prehension. In Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics, Jacob Devlin, Ming-Wei Chang, Kenton Lee, and (ACL), pages 7871–7880. Kristina Toutanova. 2019. BERT: pre-training of deep bidirectional transformers for language under-Lei Li, Yankai Lin, Shuhuai Ren, Peng Li, Jie Zhou, standing. In Proceedings of the Conference of theand Xu Sun. 2021. Dynamic knowledge distillation North American Chapter of the Association for Com-for pre-trained language models. In Proceedings putational Linguistics: Human Language\nof theand Xu Sun. 2021. Dynamic knowledge distillation North American Chapter of the Association for Com-for pre-trained language models. In Proceedings putational Linguistics: Human Language Technolo-of the Conference on Empirical Methods in Natural gies, (NAACL-HLT), pages 4171–4186. Language Processing, EMNLP, pages 379–389. Hongyu Gong, Yun Tang, Juan Pino, and Xian Li. 2021. Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Man- Pay better attention to attention: Head selection indar Joshi, Danqi Chen, Omer Levy, Mike Lewis, multilingual and multi-domain sequence modeling.Luke Zettlemoyer, and Veselin Stoyanov. 2019. Advances in Neural Information Processing Systems, Roberta: A robustly optimized BERT pretraining 34:2668–2681. approach. CoRR, abs/1907.11692. Hossein Mobahi, Mehrdad Farajtabar, and Peter L.Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Bartlett. 2020. Self-distillation amplifies regular-Toutanova. 2019. Well-read students learn better: ization in hilbert space.",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-16",
+      "chunk_indices": [
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65
+      ],
+      "char_count": 4461,
+      "summary": "and Peter L.Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Bartlett. 2020.",
+      "digest": "and Peter L.Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Bartlett. 2020. Self-distillation amplifies regular-Toutanova. 2019. Well-read students learn better: ization in hilbert space. In Advances in Neural In-On the importance of pre-training compact models. formation Processing Systems 33: Annual Confer-arXiv: Computation and Language. ence on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual.Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Geondo Park, Gyeongman Kim, and Eunho Yang. 2021. Kaiser, and Illia Polosukhin. 2017. Attention is all Distilling linguistic context for language model com- you need. In Advances in Neural Information Propression. In Proceedings of the 2021 Conferencecessing Systems: Annual Conference on Neural Inon Empirical Methods in Natural Language Process-formation Processing Systems, (NIPS), pages 5998– ing, pages 364–378. Association for Computational 6008.\nSystems:",
+      "full_text": "and Peter L.Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Bartlett. 2020. Self-distillation amplifies regular-Toutanova. 2019. Well-read students learn better: ization in hilbert space. In Advances in Neural In-On the importance of pre-training compact models. formation Processing Systems 33: Annual Confer-arXiv: Computation and Language. ence on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual.Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Geondo Park, Gyeongman Kim, and Eunho Yang. 2021. Kaiser, and Illia Polosukhin. 2017. Attention is all Distilling linguistic context for language model com- you need. In Advances in Neural Information Propression. In Proceedings of the 2021 Conferencecessing Systems: Annual Conference on Neural Inon Empirical Methods in Natural Language Process-formation Processing Systems, (NIPS), pages 5998– ing, pages 364–378. Association for Computational 6008.\nSystems: Annual Conference on Neural Inon Empirical Methods in Natural Language Process-formation Processing Systems, (NIPS), pages 5998– ing, pages 364–378. Association for Computational 6008. Linguistics.\nElena Voita, David Talbot, Fedor Moiseev, Rico Sen- Peyman Passban, Yimeng Wu, Mehdi Rezagholizadeh, nrich, and Ivan Titov. 2019. Analyzing multi-head and Qun Liu. 2021. ALP-KD: attention-based layerself-attention: Specialized heads do the heavy liftprojection for knowledge distillation. In Conferenceing, the rest can be pruned. In Proceedings of the on Innovative Applications of Artificial Intelligence,57th Annual Meeting of the Association for Compu- (IAAI), The Symposium on Educational Advances in tational Linguistics, pages 5797–5808. Association Artificial Intelligence, (EAAI), pages 13657–13665. for Computational Linguistics.\nMatt Post. 2018. A call for clarity in reporting BLEUAlex Wang, Amanpreet Singh, Julian Michael, Felix scores. In Proceedings of the Third Conference onHill, Omer Levy, and Samuel Bowman. 2018. GLUE: Machine Translation: Research Papers, pages 186–A multi-task benchmark and analysis platform for nat191. Association for Computational Linguistics. ural language understanding. In Proceedings of the 2018 EMNLP Workshop BlackboxNLP: Analyzing Adriana Romero, Nicolas Ballas, Samira Ebrahimi Ka-and Interpreting Neural Networks for NLP, pages hou, Antoine Chassang, Carlo Gatta, and Yoshua353–355. Association for Computational Linguistics.\nBengio. 2015. Fitnets: Hints for thin deep nets. In International Conference on Learning Representa-Fusheng Wang, Jianhao Yan, Fandong Meng, and Jie tions, (ICLR). Zhou. 2021. Selective knowledge distillation for neural machine translation. In Proceedings of the Victor Sanh, Lysandre Debut, Julien Chaumond, and Annual Meeting of the Association for Computational Thomas Wolf. 2019. Distilbert, a distilled version Linguistics and the International Joint Conference on of BERT: smaller, faster, cheaper and lighter. CoRR, Natural Language Processing, (ACL/IJCNLP), pages abs/1910.01108. 6456–6466. Rico Sennrich, Barry Haddow, and Alexandra Birch.\nWenhui Wang, Furu Wei, Li Dong, Hangbo Bao, Nan2016. Neural machine translation of rare words with subword units. In Proceedings of the Annual Meet-Yang, and Ming Zhou. 2020. Minilm: Deep selfattention distillation for task-agnostic compressioning of the Association for Computational Linguistics, of pre-trained transformers. In Advances in Neu-(ACL). ral Information Processing Systems: Annual Conference on Neural Information Processing Systems, Sam Shleifer and Alexander M. Rush. 2020. Pre-trained (NeurIPS).summarization distillation. CoRR, abs/2010.13002. Siqi Sun, Yu Cheng, Zhe Gan, and Jingjing Liu. 2019. Yimeng Wu, Peyman Passban, Mehdi Rezagholizadeh, Patient knowledge distillation for BERT model com-and Qun Liu. 2020. Why skip if you can combine: pression. In Proceedings of the Conference on Em-A simple knowledge distillation technique for intermediate layers. In Proceedings of the Conference onpirical Methods in Natural Language Processing and Empirical Methods in Natural\nConference on Em-A simple knowledge distillation technique for intermediate layers. In Proceedings of the Conference onpirical Methods in Natural Language Processing and Empirical Methods in Natural Language Processing, the International Joint Conference on Natural Language Processing, (EMNLP-IJCNLP), pages 4322– (EMNLP), pages 1016–1021.",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    },
+    {
+      "group_id": "group-17",
+      "chunk_indices": [
+        66,
+        67
+      ],
+      "char_count": 1408,
+      "summary": "4331. Li Yuan, Francis E. H. Tay, Guilin Li, Tao Wang, and Zhiqing Sun, Hongkun ",
+      "digest": "4331. Li Yuan, Francis E. H. Tay, Guilin Li, Tao Wang, and Zhiqing Sun, Hongkun Yu, Xiaodan Song, Renjie Liu, Jiashi Feng. 2020. Revisiting knowledge distilla- Yiming Yang, and Denny Zhou. 2020. Mobilebert: tion via label smoothing regularization. In 2020 a compact task-agnostic BERT for resource-limitedIEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, devices. In Proceedings of the Annual Meeting of the Association for Computational Linguistics, (ACL), June 13-19, 2020, pages 3902–3910. Computer Vipages 2158–2170. sion Foundation / IEEE.\nIlya Sutskever, Oriol Vinyals, and Quoc V. Le. 2014. Se-Sergey Zagoruyko and Nikos Komodakis. 2017. Paying quence to sequence learning with neural networks. Inmore attention to attention: Improving the perfor- Advances in Neural Information Processing Systems: mance of convolutional neural networks via attention Annual Conference on Neural Information Process- transfer. In International Conference on Learning",
+      "full_text": "4331. Li Yuan, Francis E. H. Tay, Guilin Li, Tao Wang, and Zhiqing Sun, Hongkun Yu, Xiaodan Song, Renjie Liu, Jiashi Feng. 2020. Revisiting knowledge distilla- Yiming Yang, and Denny Zhou. 2020. Mobilebert: tion via label smoothing regularization. In 2020 a compact task-agnostic BERT for resource-limitedIEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, devices. In Proceedings of the Annual Meeting of the Association for Computational Linguistics, (ACL), June 13-19, 2020, pages 3902–3910. Computer Vipages 2158–2170. sion Foundation / IEEE.\nIlya Sutskever, Oriol Vinyals, and Quoc V. Le. 2014. Se-Sergey Zagoruyko and Nikos Komodakis. 2017. Paying quence to sequence learning with neural networks. Inmore attention to attention: Improving the perfor- Advances in Neural Information Processing Systems: mance of convolutional neural networks via attention Annual Conference on Neural Information Process- transfer. In International Conference on Learning ing Systems, (NIPS), pages 3104–3112. Representations, (ICLR).\nJiawei Zhou, Jason Eisner, Michael Newman, Emmanouil Antonios Platanios, and Sam Thomson.\n2022. Online semantic parsing for latency reduction in task-oriented dialogue. In Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), pages 1554–1576. Association for Computational Linguistics.",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-07T08:42:28.829403+00:00"
+      }
+    }
+  ]
+}

@@ -70,14 +70,28 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
     const zoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
 
     const [highlightRect, setHighlightRect] = useState(null);
+    // 支持多个高亮矩形，避免跨越空白区域的巨大单一矩形
+    const [highlightRects, setHighlightRects] = useState([]);
     const pageRef = useRef(null);
 
     useEffect(() => {
         let isMounted = true;
         let retryTimer = null;
+        let retryCount = 0;
+        const MAX_RETRIES = 15; // 最多重试 15 次（约 1.5 秒）
 
-        if (!highlightInfo || highlightInfo.page !== pageNumber || !highlightInfo.text) {
+        if (!highlightInfo || !highlightInfo.text) {
             setHighlightRect(null);
+            setHighlightRects([]);
+            return;
+        }
+
+        // 使用 prop page 作为目标页码（而非内部 pageNumber 状态），避免竞态条件
+        const targetPage = highlightInfo.page;
+        if (targetPage !== pageNumber) {
+            // 页面还没切换到位，等下一次 pageNumber 更新后再匹配
+            setHighlightRect(null);
+            setHighlightRects([]);
             return;
         }
 
@@ -85,12 +99,21 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
             if (!isMounted) return;
 
             const pageElement = pageRef.current;
-            if (!pageElement) return;
+            if (!pageElement) {
+                if (retryCount < MAX_RETRIES) {
+                    retryCount++;
+                    retryTimer = setTimeout(findHighlight, 100);
+                }
+                return;
+            }
 
             const textLayer = pageElement.querySelector('.react-pdf__Page__textContent');
             if (!textLayer || textLayer.children.length === 0) {
-                // Retry if text layer is not ready
-                retryTimer = setTimeout(findHighlight, 100);
+                // 文本层尚未渲染完成，重试
+                if (retryCount < MAX_RETRIES) {
+                    retryCount++;
+                    retryTimer = setTimeout(findHighlight, 100);
+                }
                 return;
             }
 
@@ -98,51 +121,62 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                 const spans = Array.from(textLayer.querySelectorAll('span'));
                 let fullText = '';
 
-                // Build full text
+                // 构建完整文本
                 spans.forEach(span => {
                     fullText += span.textContent;
                 });
 
-                if (!fullText) return;
+                if (!fullText) {
+                    console.log('⚠️ 高亮匹配：页面文本为空');
+                    return;
+                }
 
-                // Normalize strings for comparison (remove all whitespace)
+                // 去除空白后的标准化字符串用于比较
                 const searchStr = String(highlightInfo.text).replace(/\s+/g, '').toLowerCase();
                 const pageStr = fullText.replace(/\s+/g, '').toLowerCase();
 
-                // Strategy 1: Exact match
+                console.log(`🔍 高亮匹配：搜索文本长度=${searchStr.length}, 页面文本长度=${pageStr.length}`);
+
+                // 策略 1: 完全匹配
                 let startIndex = pageStr.indexOf(searchStr);
                 let endIndex = -1;
 
                 if (startIndex !== -1) {
                     endIndex = startIndex + searchStr.length;
+                    console.log('✅ 高亮匹配：完全匹配成功');
                 } else {
-                    // Strategy 2: Multi-anchor matching with flexible sizes
+                    // 策略 2: 多锚点匹配（灵活大小）
                     const anchorSize = Math.min(12, Math.floor(searchStr.length * 0.15));
+                    if (anchorSize < 4) {
+                        console.log('⚠️ 高亮匹配：搜索文本太短，无法使用锚点匹配');
+                        return;
+                    }
                     const startAnchor = searchStr.substring(0, anchorSize);
                     const endAnchor = searchStr.substring(searchStr.length - anchorSize);
 
                     const startAnchorIndex = pageStr.indexOf(startAnchor);
 
                     if (startAnchorIndex !== -1) {
-                        // Try to find end anchor
+                        // 尝试找到结尾锚点
                         const endAnchorIndex = pageStr.indexOf(endAnchor, startAnchorIndex + anchorSize);
 
                         if (endAnchorIndex !== -1 && endAnchorIndex > startAnchorIndex) {
-                            // Both anchors found
+                            // 两个锚点都找到了
                             startIndex = startAnchorIndex;
                             endIndex = endAnchorIndex + endAnchor.length;
+                            console.log('✅ 高亮匹配：双锚点匹配成功');
                         } else {
-                            // Try middle anchor as fallback
+                            // 尝试中间锚点作为后备
                             const midPoint = Math.floor(searchStr.length / 2);
                             const midAnchor = searchStr.substring(midPoint, midPoint + anchorSize);
                             const midAnchorIndex = pageStr.indexOf(midAnchor, startAnchorIndex);
 
                             if (midAnchorIndex !== -1) {
-                                // Use start to estimated end based on original length
                                 startIndex = startAnchorIndex;
                                 endIndex = Math.min(startIndex + Math.floor(searchStr.length * 1.3), pageStr.length);
+                                console.log('✅ 高亮匹配：中间锚点匹配成功');
                             } else {
-                                // Last resort: character-by-character match from start
+                                // 最后手段：从起始锚点逐字符匹配
                                 startIndex = startAnchorIndex;
                                 let matchLen = anchorSize;
                                 while (matchLen < searchStr.length && startIndex + matchLen < pageStr.length) {
@@ -153,14 +187,33 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                                     }
                                 }
                                 endIndex = startIndex + matchLen;
+                                console.log(`✅ 高亮匹配：逐字符匹配 ${matchLen} 个字符`);
                             }
+                        }
+                    } else {
+                        // 策略 3: 滑动窗口子串匹配 — 取搜索文本中间一段尝试匹配
+                        const windowSize = Math.min(20, Math.floor(searchStr.length * 0.3));
+                        if (windowSize >= 6) {
+                            const midStart = Math.floor((searchStr.length - windowSize) / 2);
+                            const midSlice = searchStr.substring(midStart, midStart + windowSize);
+                            const midSliceIndex = pageStr.indexOf(midSlice);
+                            if (midSliceIndex !== -1) {
+                                // 从中间片段向两侧扩展
+                                startIndex = Math.max(0, midSliceIndex - midStart);
+                                endIndex = Math.min(startIndex + searchStr.length, pageStr.length);
+                                console.log('✅ 高亮匹配：中间子串滑动窗口匹配成功');
+                            } else {
+                                console.log('⚠️ 高亮匹配：所有策略均未匹配到文本');
+                            }
+                        } else {
+                            console.log('⚠️ 高亮匹配：所有策略均未匹配到文本');
                         }
                     }
                 }
 
                 if (startIndex === -1 || endIndex === -1) return;
 
-                // Map string indices to DOM nodes
+                // 将字符串索引映射到 DOM 节点
                 let startNode = null;
                 let startOffset = 0;
                 let endNode = null;
@@ -223,23 +276,72 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
 
                     if (rects.length > 0) {
                         const pageRect = pageElement.getBoundingClientRect();
-
-                        // Calculate union rect with padding
                         const padding = 4;
-                        const unionRect = {
-                            top: Math.min(...rects.map(r => r.top)) - pageRect.top - padding,
-                            left: Math.min(...rects.map(r => r.left)) - pageRect.left - padding,
-                            right: Math.max(...rects.map(r => r.right)) - pageRect.left + padding,
-                            bottom: Math.max(...rects.map(r => r.bottom)) - pageRect.top + padding
-                        };
+
+                        // 过滤掉零尺寸的矩形
+                        const validRects = rects.filter(r => r.width > 1 && r.height > 1);
+                        if (validRects.length === 0) return;
+
+                        // 按行分组：将垂直位置接近的矩形归为同一行
+                        const lineGroups = [];
+                        for (const rect of validRects) {
+                            let added = false;
+                            for (const group of lineGroups) {
+                                // 如果矩形的垂直中心与组内矩形接近（差距小于行高的一半），归为同一行
+                                const groupMidY = (group[0].top + group[0].bottom) / 2;
+                                const rectMidY = (rect.top + rect.bottom) / 2;
+                                const lineHeight = group[0].bottom - group[0].top;
+                                if (Math.abs(rectMidY - groupMidY) < lineHeight * 0.6) {
+                                    group.push(rect);
+                                    added = true;
+                                    break;
+                                }
+                            }
+                            if (!added) {
+                                lineGroups.push([rect]);
+                            }
+                        }
+
+                        // 按垂直位置排序行组
+                        lineGroups.sort((a, b) => a[0].top - b[0].top);
+
+                        // 将连续的行组合并为紧凑的高亮块（行间距超过 1.5 倍行高则分割）
+                        const highlightBlocks = [];
+                        let currentBlock = [lineGroups[0]];
+
+                        for (let i = 1; i < lineGroups.length; i++) {
+                            const prevGroup = currentBlock[currentBlock.length - 1];
+                            const currGroup = lineGroups[i];
+                            const prevBottom = Math.max(...prevGroup.map(r => r.bottom));
+                            const currTop = Math.min(...currGroup.map(r => r.top));
+                            const avgLineHeight = prevGroup[0].bottom - prevGroup[0].top;
+                            const gap = currTop - prevBottom;
+
+                            if (gap > avgLineHeight * 1.5) {
+                                // 间距过大，开始新的高亮块
+                                highlightBlocks.push(currentBlock);
+                                currentBlock = [currGroup];
+                            } else {
+                                currentBlock.push(currGroup);
+                            }
+                        }
+                        highlightBlocks.push(currentBlock);
+
+                        // 为每个高亮块计算边界矩形
+                        const resultRects = highlightBlocks.map(block => {
+                            const allRects = block.flat();
+                            return {
+                                top: Math.min(...allRects.map(r => r.top)) - pageRect.top - padding,
+                                left: Math.min(...allRects.map(r => r.left)) - pageRect.left - padding,
+                                width: (Math.max(...allRects.map(r => r.right)) - Math.min(...allRects.map(r => r.left))) + padding * 2,
+                                height: (Math.max(...allRects.map(r => r.bottom)) - Math.min(...allRects.map(r => r.top))) + padding * 2
+                            };
+                        });
 
                         if (isMounted) {
-                            setHighlightRect({
-                                top: unionRect.top,
-                                left: unionRect.left,
-                                width: unionRect.right - unionRect.left,
-                                height: unionRect.bottom - unionRect.top
-                            });
+                            // 兼容旧的单矩形模式（取第一个块）
+                            setHighlightRect(resultRects[0] || null);
+                            setHighlightRects(resultRects);
                         }
                     }
                 }
@@ -313,18 +415,19 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                                 renderTextLayer={true}
                                 renderAnnotationLayer={true}
                             />
-                            {/* Bounding Box Highlight with Spring Animation */}
+                            {/* 多矩形高亮，避免跨越空白区域的巨大单一框 */}
                             <AnimatePresence>
-                                {highlightRect && (
+                                {highlightRects.length > 0 && highlightRects.map((rect, idx) => (
                                     <motion.div
+                                        key={`highlight-${idx}`}
                                         initial={{ opacity: 0, scale: 0.9 }}
                                         animate={{
                                             opacity: 1,
                                             scale: 1,
-                                            top: highlightRect.top,
-                                            left: highlightRect.left,
-                                            width: highlightRect.width,
-                                            height: highlightRect.height
+                                            top: rect.top,
+                                            left: rect.left,
+                                            width: rect.width,
+                                            height: rect.height
                                         }}
                                         exit={{ opacity: 0, scale: 0.9 }}
                                         transition={{
@@ -333,16 +436,27 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                                             damping: 30,
                                             mass: 1
                                         }}
-                                        className="absolute border-2 border-blue-500 bg-blue-500/20 rounded-lg pointer-events-none z-10"
+                                        className={`absolute border-2 rounded-lg pointer-events-none z-10 ${
+                                            highlightInfo?.source === 'citation'
+                                                ? 'border-amber-500 bg-amber-500/20'
+                                                : 'border-blue-500 bg-blue-500/20'
+                                        }`}
                                         style={{
-                                            boxShadow: '0 0 0 2px rgba(59, 130, 246, 0.1), 0 4px 6px -1px rgba(59, 130, 246, 0.1)'
+                                            boxShadow: highlightInfo?.source === 'citation'
+                                                ? '0 0 0 2px rgba(245, 158, 11, 0.15), 0 4px 12px -1px rgba(245, 158, 11, 0.2)'
+                                                : '0 0 0 2px rgba(59, 130, 246, 0.1), 0 4px 6px -1px rgba(59, 130, 246, 0.1)'
                                         }}
                                     >
-                                        <div className="absolute -top-3 -right-3 bg-blue-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm">
-                                            匹配
-                                        </div>
+                                        {/* 只在第一个矩形上显示标签 */}
+                                        {idx === 0 && (
+                                            <div className={`absolute -top-3 -right-3 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm ${
+                                                highlightInfo?.source === 'citation' ? 'bg-amber-500' : 'bg-blue-500'
+                                            }`}>
+                                                {highlightInfo?.source === 'citation' ? '📎 引用' : '匹配'}
+                                            </div>
+                                        )}
                                     </motion.div>
-                                )}
+                                ))}
                             </AnimatePresence>
                         </div>
                     </Document>
