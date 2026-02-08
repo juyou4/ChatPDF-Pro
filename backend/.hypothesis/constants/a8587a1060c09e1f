@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\models\model_registry.py
-# hypothesis_version: 6.151.5
-
-[128, 256, 384, 512, 1024, 1536, 2048, 3072, 4096, 8191, 8192, '$0.007/M tokens', '$0.02/M tokens', '$0.13/M tokens', '/embeddings', 'BAAI/bge-m3', 'Best for Chinese', 'Best overall quality', 'Best value', 'ChatGLM embedding', 'Free (Limited)', 'Free (Local)', 'Free/Limited', 'Kimi embedding', 'Local: Multilingual', 'MiniMax embedding', 'MiniMax: embo-01', 'Moonshot: v1-8k', 'Paid', 'Pro/BAAI/bge-m3', 'SiliconFlow: BGE-M3', 'Zhipu: embedding-3', 'all-MiniLM-L6-v2', 'base_url', 'description', 'dimension', 'embedding-3', 'embedding_endpoint', 'embo-01', 'local', 'local-minilm', 'local-multilingual', 'max_tokens', 'model_name', 'moonshot-v1-8k', 'name', 'openai', 'price', 'provider', 'text-embedding-v3']

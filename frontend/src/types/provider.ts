@@ -57,4 +57,5 @@ export interface ProviderTestResult {
   message?: string
   availableModels?: number
   error?: string
+  latency?: number  // 延迟毫秒数，连接测试成功时返回
 }

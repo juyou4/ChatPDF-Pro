@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, Zap } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Zap } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -11,8 +11,10 @@ import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
 import EmbeddingSettings from './EmbeddingSettings';
+import OCRSettingsPanel, { loadOCRSettings } from './OCRSettingsPanel';
 import GlobalSettings from './GlobalSettings';
 import PresetQuestions from './PresetQuestions';
+import ModelQuickSwitch from './ModelQuickSwitch';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -45,6 +47,7 @@ const ChatPDF = () => {
   // UI State
   const [showSettings, setShowSettings] = useState(false);
   const [showEmbeddingSettings, setShowEmbeddingSettings] = useState(false);
+  const [showOCRSettings, setShowOCRSettings] = useState(false);
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(true);
@@ -130,8 +133,20 @@ const ChatPDF = () => {
   };
 
   const getChatCredentials = () => {
+    const chatKey = getDefaultModel('assistantModel');
     const { providerId, modelId } = getCurrentChatModel();
     const provider = getProviderById(providerId);
+
+    // 新架构路径：DefaultsContext 有 assistantModel 值时，优先使用 Provider 的 apiKey
+    if (chatKey) {
+      return {
+        providerId,
+        modelId,
+        apiKey: provider?.apiKey || '',
+      };
+    }
+
+    // 旧架构回退路径：使用全局 apiKey
     return {
       providerId,
       modelId,
@@ -443,21 +458,36 @@ const ChatPDF = () => {
     const formData = new FormData();
     formData.append('file', file);
 
-    // Use new embedding context
+    // 使用新的三层架构获取 embedding 模型和 Provider 信息
     const provider = getCurrentProvider();
     const model = getCurrentEmbeddingModel();
 
-    if (model) {
-      formData.append('embedding_model', model.id);
-      console.log('🔵 Using embedding model:', model.id);
+    if (model && provider) {
+      // 传递 composite key（provider.id:model.id），后端 Resolver 可正确解析
+      const compositeKey = `${provider.id}:${model.id}`;
+      formData.append('embedding_model', compositeKey);
+      console.log('🔵 Using embedding model (composite key):', compositeKey);
 
-      if (provider && provider.type !== 'local') {
-        formData.append('embedding_api_key', provider.apiKey || apiKey);
+      if (provider.id !== 'local') {
+        // 非本地 Provider 需要验证 API Key 是否已配置
+        if (!provider.apiKey) {
+          alert(`请先为 ${provider.name} 配置 API Key`);
+          setIsUploading(false);
+          return;
+        }
+        formData.append('embedding_api_key', provider.apiKey);
         formData.append('embedding_api_host', provider.apiHost);
       }
     } else {
+      // 回退到本地默认模型
       formData.append('embedding_model', 'local:all-MiniLM-L6-v2');
     }
+
+    // 从 localStorage 读取 OCR 模式设置，默认为 "auto"
+    const ocrSettings = loadOCRSettings()
+    formData.append('enable_ocr', ocrSettings.mode || 'auto')
+    // 传递用户选择的 OCR 后端引擎（如 mistral、tesseract 等）
+    formData.append('ocr_backend', ocrSettings.backend || 'auto')
 
     try {
       console.log('🔵 Uploading file:', file.name);
@@ -516,9 +546,18 @@ const ChatPDF = () => {
       setUploadProgress(100);
       setDocInfo(fullDocData);
 
+      // 构建上传成功消息，包含 OCR 处理结果摘要
+      let uploadMsg = `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`
+      if (data.ocr_used) {
+        uploadMsg += `\n🔍 已使用 OCR（${data.ocr_backend || '自动'}）处理部分页面。`
+      }
+      if (data.ocr_warning) {
+        uploadMsg += `\n⚠️ ${data.ocr_warning}`
+      }
+
       setMessages([{
         type: 'system',
-        content: `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`
+        content: uploadMsg
       }]);
 
     } catch (error) {
@@ -950,10 +989,15 @@ const ChatPDF = () => {
 
     const { providerId: rerankProvider, modelId: rerankModelId, apiKey: rerankApiKey } = getRerankCredentials();
 
+    // 搜索超时控制：45 秒后自动取消请求
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           doc_id: docId,
           query,
@@ -990,11 +1034,18 @@ const ChatPDF = () => {
         alert('未找到匹配结果');
       }
     } catch (error) {
-      console.error('Failed to search document:', error);
-      alert(`搜索失败：${error.message}`);
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        console.error('搜索请求超时（45秒）');
+        alert('搜索超时，请稍后重试。如果使用了重排序功能，可以尝试关闭后再搜索。');
+      } else {
+        console.error('Failed to search document:', error);
+        alert(`搜索失败：${error.message}`);
+      }
       setSearchResults([]);
       setActiveHighlight(null);
     } finally {
+      clearTimeout(timeoutId);
       setIsSearching(false);
     }
   };
@@ -2000,6 +2051,8 @@ const ChatPDF = () => {
                   </div>
 
                   <div className="flex items-center gap-4 text-gray-400 mt-2">
+                    {/* 模型快速切换器 */}
+                    <ModelQuickSwitch />
                     <button className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
                       <SlidersHorizontal className="w-5 h-5" />
                     </button>
@@ -2317,6 +2370,20 @@ const ChatPDF = () => {
                   </button>
                 </div>
 
+                {/* OCR 设置入口 */}
+                <div className="pt-4 border-t border-gray-100">
+                  <button
+                    onClick={() => {
+                      setShowSettings(false);
+                      setShowOCRSettings(true);
+                    }}
+                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                  >
+                    <ScanText className="w-4 h-4" />
+                    OCR 设置（文字识别）
+                  </button>
+                </div>
+
                 {/* 工具栏设置 */}
                 <div className="pt-4 border-t border-gray-100 space-y-3">
                   <h3 className="text-sm font-semibold text-gray-800">划词工具栏</h3>
@@ -2445,6 +2512,12 @@ const ChatPDF = () => {
       <GlobalSettings
         isOpen={showGlobalSettings}
         onClose={() => setShowGlobalSettings(false)}
+      />
+
+      {/* OCR 设置面板 */}
+      <OCRSettingsPanel
+        isOpen={showOCRSettings}
+        onClose={() => setShowOCRSettings(false)}
       />
     </div >
   );

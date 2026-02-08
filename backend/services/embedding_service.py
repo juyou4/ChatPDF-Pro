@@ -10,7 +10,9 @@ import numpy as np
 from fastapi import HTTPException
 from sentence_transformers import SentenceTransformer
 
+from models.api_key_selector import select_api_key
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
+from models.model_id_resolver import resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
 from services.rerank_service import rerank_service
 
@@ -62,59 +64,124 @@ def preprocess_text(text: str) -> str:
 
 
 def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[str]:
-    """Normalize embedding model id to a configured key (supports provider:model or plain id)"""
+    """归一化 embedding 模型 ID，返回 Model_Registry 中的键名
+
+    使用 Model_ID_Resolver 统一解析前端传入的模型 ID，
+    支持 composite key（provider:modelId）和 plain key 两种格式。
+
+    Args:
+        embedding_model_id: 前端传入的模型 ID
+
+    Returns:
+        Model_Registry 中的键名，解析失败时返回 None 并记录警告日志（包含可用模型列表）
+    """
     if not embedding_model_id:
         return None
 
-    if embedding_model_id in EMBEDDING_MODELS:
-        return embedding_model_id
+    # 使用 Model_ID_Resolver 统一解析
+    registry_key, config = resolve_model_id(embedding_model_id)
+    if registry_key is not None:
+        return registry_key
 
-    if ":" in embedding_model_id:
-        provider_part, model_part = embedding_model_id.split(":", 1)
-        if model_part in EMBEDDING_MODELS:
-            return model_part
-        combined_key = f"{provider_part}:{model_part}"
-        if combined_key in EMBEDDING_MODELS:
-            return combined_key
-
+    # 解析失败，记录警告日志并返回 None
+    available_models = get_available_model_ids()
+    logger.warning(
+        f"无法解析模型 ID '{embedding_model_id}'，"
+        f"可用模型列表: {available_models}"
+    )
     return None
 
 
 def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
-    """Get embedding function for the specified model"""
-    normalized_id = normalize_embedding_model_id(embedding_model_id)
-    if normalized_id:
-        embedding_model_id = normalized_id
-    else:
-        print(f"Warning: embedding model '{embedding_model_id}' not in configuration, attempting inference")
+    """获取指定模型的 embedding 函数
 
-    if not is_embedding_model(embedding_model_id):
-        if is_rerank_model(embedding_model_id):
-            raise ValueError(f"Model {embedding_model_id} is a rerank model, not an embedding model")
-        print(f"Warning: {embedding_model_id} doesn't match embedding model patterns, attempting to use anyway")
+    优先使用 Model_ID_Resolver 解析模型 ID 并获取完整配置；
+    如果 Resolver 无法解析（未注册模型），则回退到 model_detector 推断 provider 和 base_url，
+    输出警告日志并尝试继续。
 
-    config = EMBEDDING_MODELS.get(embedding_model_id)
+    Args:
+        embedding_model_id: 模型 ID，支持 composite key（provider:modelId）或 plain key
+        api_key: API 密钥（非本地模型必需）
+        base_url: 自定义 API 基础 URL（可选，优先于注册表中的 base_url）
 
-    if config:
+    Returns:
+        embedding 函数，接受文本列表并返回向量数组
+
+    Raises:
+        ValueError: 当模型是 rerank 模型而非 embedding 模型时
+        ValueError: 当非本地模型缺少 API Key 时
+    """
+    # 使用 Model_ID_Resolver 统一解析模型 ID
+    registry_key, config = resolve_model_id(embedding_model_id)
+
+    if registry_key is not None:
+        # Resolver 解析成功，使用注册表中的配置
+        embedding_model_id = registry_key
         provider = config["provider"]
         model_name = config.get("model_name", embedding_model_id)
         api_base = base_url or config.get("base_url")
     else:
-        provider = get_model_provider(embedding_model_id)
-        model_name = embedding_model_id
-        api_base = base_url or "https://api.openai.com/v1"
-        if not api_base.endswith('/embeddings') and not api_base.endswith('/v1'):
-            api_base = api_base.rstrip('/') + '/v1'
+        # Resolver 解析失败，尝试从 composite key 中提取 provider 信息
+        logger.warning(
+            f"模型 '{embedding_model_id}' 未在注册表中找到，"
+            f"尝试从 composite key 推断 provider 和 base_url"
+        )
+        config = None
 
+        if ":" in embedding_model_id:
+            # composite key 格式：provider:modelId
+            provider_part, model_part = embedding_model_id.split(":", 1)
+            embedding_model_id = model_part  # 实际调用 API 时用 modelId 部分
+            model_name = model_part
+
+            # 根据 provider 推断 base_url
+            from models.model_id_resolver import PROVIDER_ALIAS_MAP, PROVIDER_BASE_URL_HINTS
+            provider_aliases = PROVIDER_ALIAS_MAP.get(provider_part, [provider_part])
+            provider = provider_aliases[0] if provider_aliases else "openai"
+
+            # 使用 provider 对应的默认 base_url
+            PROVIDER_DEFAULT_BASE_URLS = {
+                "silicon": "https://api.siliconflow.cn/v1",
+                "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "moonshot": "https://api.moonshot.cn/v1",
+                "deepseek": "https://api.deepseek.com/v1",
+                "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+                "minimax": "https://api.minimax.chat/v1",
+                "openai": "https://api.openai.com/v1",
+            }
+            api_base = base_url or PROVIDER_DEFAULT_BASE_URLS.get(provider_part, "https://api.openai.com/v1")
+            logger.info(
+                f"从 composite key 推断: provider={provider_part}, "
+                f"model={model_part}, base_url={api_base}"
+            )
+        else:
+            # plain key，使用 model_detector 推断
+            provider = get_model_provider(embedding_model_id)
+            model_name = embedding_model_id
+            api_base = base_url or "https://api.openai.com/v1"
+            if not api_base.endswith('/embeddings') and not api_base.endswith('/v1'):
+                api_base = api_base.rstrip('/') + '/v1'
+
+    # 验证模型类型
+    if not is_embedding_model(embedding_model_id):
+        if is_rerank_model(embedding_model_id):
+            raise ValueError(f"模型 {embedding_model_id} 是 rerank 模型，不是 embedding 模型")
+        logger.warning(
+            f"模型 '{embedding_model_id}' 不匹配 embedding 模型模式，尝试继续使用"
+        )
+
+    # 本地模型：使用 SentenceTransformer
     if provider == "local":
         if model_name not in local_embedding_models:
-            print(f"Loading local embedding model: {model_name}")
+            logger.info(f"加载本地 embedding 模型: {model_name}")
             local_embedding_models[model_name] = SentenceTransformer(model_name)
         model = local_embedding_models[model_name]
         return lambda texts: model.encode(texts)
 
-    if not api_key:
-        raise ValueError(f"API key required for {embedding_model_id}")
+    # 远程模型：从 Key 池中随机选择一个有效 Key
+    actual_key = select_api_key(api_key) if api_key else None
+    if not actual_key:
+        raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
     from openai import OpenAI
 
@@ -122,7 +189,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     if not api_base.endswith('/v1') and not api_base.endswith('/v1/'):
         api_base = api_base.rstrip('/') + '/v1'
 
-    client = OpenAI(api_key=api_key, base_url=api_base)
+    client = OpenAI(api_key=actual_key, base_url=api_base)
 
     def embed_texts(texts):
         response = client.embeddings.create(
@@ -166,20 +233,38 @@ def _distance_to_similarity(distance: float) -> float:
 
 
 def _extract_snippet_and_highlights(text: str, query: str, window: int = 100) -> Tuple[str, List[dict]]:
+    """从文本中提取包含查询关键词的片段和高亮位置
+
+    匹配策略（按优先级）：
+    1. 完整短语匹配：尝试匹配整个查询字符串
+    2. 单词级匹配：将查询拆分为单词逐个匹配
+    """
     if not text:
         return "", []
 
     normalized_text = " ".join(text.split())
     lower_text = normalized_text.lower()
-    terms = [t for t in re.split(r"[\s,;，。；、]+", query.lower()) if t]
+    query_lower = query.lower().strip()
 
     matches = []
-    for term in terms:
-        start = lower_text.find(term)
-        while start != -1:
-            end = start + len(term)
-            matches.append((start, end, normalized_text[start:end]))
-            start = lower_text.find(term, end)
+
+    # 策略 1：完整短语匹配
+    phrase_start = lower_text.find(query_lower)
+    while phrase_start != -1:
+        phrase_end = phrase_start + len(query_lower)
+        matches.append((phrase_start, phrase_end, normalized_text[phrase_start:phrase_end]))
+        phrase_start = lower_text.find(query_lower, phrase_end)
+
+    # 策略 2：如果完整短语未匹配，回退到单词级匹配
+    if not matches:
+        terms = [t for t in re.split(r"[\s,;，。；、]+", query_lower) if t]
+        for term in terms:
+            start = lower_text.find(term)
+            while start != -1:
+                end = start + len(term)
+                matches.append((start, end, normalized_text[start:end]))
+                start = lower_text.find(term, end)
+
     matches.sort(key=lambda x: x[0])
 
     if matches:
@@ -226,15 +311,30 @@ def _apply_rerank(
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None
 ) -> List[dict]:
+    """对候选结果应用重排序
+
+    注意：此函数为同步调用，在 async 上下文中应通过
+    asyncio.to_thread() 调用以避免阻塞事件循环。
+    """
     model_name = reranker_model or "BAAI/bge-reranker-base"
-    return rerank_service.rerank(
-        query,
-        candidates,
-        model_name=model_name,
-        provider=rerank_provider or "local",
-        api_key=rerank_api_key,
-        endpoint=rerank_endpoint
-    )
+    provider = (rerank_provider or "local").lower()
+    logger.info(f"[Rerank] 开始重排序: provider={provider}, model={model_name}, 候选数={len(candidates)}")
+
+    try:
+        result = rerank_service.rerank(
+            query,
+            candidates,
+            model_name=model_name,
+            provider=provider,
+            api_key=rerank_api_key,
+            endpoint=rerank_endpoint
+        )
+        logger.info(f"[Rerank] 重排序完成，返回 {len(result)} 条结果")
+        return result
+    except Exception as e:
+        logger.error(f"[Rerank] 重排序失败: {e}", exc_info=True)
+        # 回退到相似度排序，不静默吞掉错误
+        return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
 
 
 def build_vector_index(
@@ -248,15 +348,16 @@ def build_vector_index(
 ):
     try:
         print(f"Building vector index for {doc_id}...")
-        if embedding_model_id not in EMBEDDING_MODELS:
-            if ":" in embedding_model_id:
-                _, model_part = embedding_model_id.split(":", 1)
-                if model_part in EMBEDDING_MODELS:
-                    embedding_model_id = model_part
-                else:
-                    raise ValueError(f"Embedding model '{embedding_model_id}' 未配置或不受支持，请检查模型选择")
-            else:
-                raise ValueError(f"Embedding model '{embedding_model_id}' 未配置或不受支持，请检查模型选择")
+        # 使用 Model_ID_Resolver 统一解析模型 ID
+        registry_key, config = resolve_model_id(embedding_model_id)
+        if registry_key is not None:
+            embedding_model_id = registry_key
+        else:
+            available_models = get_available_model_ids()
+            raise ValueError(
+                f"Embedding 模型 '{embedding_model_id}' 未配置或不受支持，"
+                f"可用模型列表: {available_models}"
+            )
 
         # 分块策略：按模型最大上下文自适应，默认 1200 / 200（约 15-20% 重叠），限制在 1000-2500
         chunk_size, chunk_overlap = get_chunk_params(embedding_model_id, base_chunk_size=1200, base_overlap=200)
@@ -708,6 +809,106 @@ def _rrf_merge_chunk_and_group(
     return results
 
 
+def _is_table_fragment(text: str) -> bool:
+    """检测文本是否为表格/数据碎片
+
+    表格碎片特征：
+    - 大量孤立的数字（被空格分隔的短数字序列）
+    - 缺少完整句子（没有句号结尾的长句）
+    - 高比例的数字 token vs 文字 token
+    """
+    if not text or len(text) < 20:
+        return False
+
+    # 按空格拆分为 token
+    tokens = text.split()
+    if len(tokens) < 3:
+        return False
+
+    # 统计数字 token（纯数字或小数）和文字 token
+    num_tokens = 0
+    for t in tokens:
+        cleaned = t.strip('(),%↑↓·-')
+        if not cleaned:
+            continue
+        # 纯数字、小数、百分比、带单位的数字（如 2.0m, 1.5m）
+        if re.match(r'^-?\d+\.?\d*[a-zA-Z]?$', cleaned):
+            num_tokens += 1
+
+    num_ratio = num_tokens / len(tokens) if tokens else 0
+
+    # 检查是否有完整句子（至少一个 10+ 字符的句子以句号结尾）
+    sentences = re.split(r'[.!?。！？]', text)
+    has_real_sentence = any(len(s.strip()) > 30 for s in sentences)
+
+    # 数字 token 占比 > 35% 且没有完整句子 → 表格碎片
+    if num_ratio > 0.35 and not has_real_sentence:
+        return True
+
+    # 数字 token 占比 > 50% → 几乎肯定是表格
+    if num_ratio > 0.5:
+        return True
+
+    return False
+
+
+def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.5) -> List[dict]:
+    """对包含完整查询短语的 chunk 进行相似度加权提升
+
+    向量检索是语义匹配，可能把只包含部分关键词的碎片排在前面。
+    此函数检查每个 chunk 是否包含完整的查询短语（忽略大小写），
+    如果包含则提升其 similarity 和 similarity_percent。
+
+    同时对"表格碎片"进行降权。
+
+    Args:
+        results: 搜索结果列表
+        query: 用户查询文本
+        boost_factor: 提升倍数（默认 1.5）
+
+    Returns:
+        重新排序后的结果列表
+    """
+    if not results or not query or len(query.strip()) < 2:
+        return results
+
+    query_lower = query.lower().strip()
+    # 将查询拆分为单词，用于计算覆盖率
+    query_terms = [t for t in re.split(r"[\s,;，。；、]+", query_lower) if len(t) > 1]
+
+    for item in results:
+        chunk_text = item.get("chunk", "")
+        chunk_lower = chunk_text.lower()
+        if not chunk_lower:
+            continue
+
+        # 检测表格碎片：降权到 0.5x
+        if _is_table_fragment(chunk_text):
+            item["similarity"] = item.get("similarity", 0) * 0.5
+            item["similarity_percent"] = round(item.get("similarity_percent", 0) * 0.5, 2)
+            item["table_fragment"] = True
+            continue
+
+        # 完整短语匹配：最大提升
+        if query_lower in chunk_lower:
+            item["similarity"] = min(item.get("similarity", 0) * boost_factor, 1.0)
+            item["similarity_percent"] = min(round(item.get("similarity_percent", 0) * boost_factor, 2), 99.99)
+            item["phrase_match"] = True
+            continue
+
+        # 部分词覆盖率加权：覆盖越多提升越大
+        if query_terms:
+            matched = sum(1 for t in query_terms if t in chunk_lower)
+            coverage = matched / len(query_terms)
+            if coverage >= 0.8:
+                factor = 1.0 + (boost_factor - 1.0) * coverage * 0.5
+                item["similarity"] = min(item.get("similarity", 0) * factor, 1.0)
+                item["similarity_percent"] = min(round(item.get("similarity_percent", 0) * factor, 2), 99.99)
+
+    # 按调整后的 similarity 重新排序
+    return sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)
+
+
 def search_document_chunks(
     doc_id: str,
     query: str,
@@ -747,6 +948,7 @@ def search_document_chunks(
     D, I = index.search(np.array(query_vector).astype('float32'), search_k)
 
     vector_results = []
+    vector_chunk_set = set()  # 记录向量搜索已返回的 chunk
     for dist, idx in zip(D[0], I[0]):
         if idx < len(chunks):
             chunk_text = chunks[idx]
@@ -764,6 +966,40 @@ def search_document_chunks(
                 "highlights": highlights,
                 "reranked": False
             })
+            vector_chunk_set.add(chunk_text)
+
+    # --- 精确短语注入 ---
+    # 如果查询包含多个词（短语），扫描所有 chunk 找到包含完整短语的，
+    # 注入到结果中（如果向量搜索没返回它们）
+    query_lower = query.lower().strip()
+    if len(query_lower) > 3 and " " in query_lower:
+        phrase_injected = 0
+        for chunk_text in chunks:
+            if chunk_text in vector_chunk_set:
+                continue
+            if query_lower in chunk_text.lower():
+                page_num = _find_page_for_chunk(chunk_text, pages)
+                snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
+                vector_results.append({
+                    "chunk": chunk_text,
+                    "page": page_num,
+                    "score": 0.0,
+                    "similarity": 0.95,  # 精确短语匹配给高分
+                    "similarity_percent": 95.0,
+                    "snippet": snippet,
+                    "highlights": highlights,
+                    "reranked": False,
+                    "phrase_match": True,
+                })
+                vector_chunk_set.add(chunk_text)
+                phrase_injected += 1
+                if phrase_injected >= 3:  # 最多注入 3 个
+                    break
+        if phrase_injected > 0:
+            logger.info(f"[精确短语注入] 查询 '{query}' 注入了 {phrase_injected} 个包含完整短语的 chunk")
+
+    # --- 短语匹配加权 + 表格碎片降权 ---
+    vector_results = _phrase_boost(vector_results, query)
 
     # --- BM25混合检索 ---
     if use_hybrid and not use_rerank:
@@ -815,6 +1051,8 @@ def search_document_chunks(
             rerank_api_key,
             rerank_endpoint
         )
+        # rerank 后也做短语加权和表格碎片降权
+        results = _phrase_boost(results, query, boost_factor=1.2)
     else:
         results = sorted(vector_results, key=lambda x: x.get("similarity", 0), reverse=True)
 

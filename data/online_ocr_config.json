@@ -1,0 +1,11 @@
+{
+  "mineru": {
+    "worker_url": "https://pb-ocr-proxy.wangzhuo0107.workers.dev",
+    "auth_key": "",
+    "token_mode": "frontend",
+    "token": "eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiI5ODQwMDY2NiIsInJvbCI6IlJPTEVfUkVHSVNURVIiLCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc3MDQ1ODQxNiwiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIsInBob25lIjoiIiwib3BlbklkIjpudWxsLCJ1dWlkIjoiZjBhOTI2OTctOTgyZC00ZjdjLTljZTMtMzNiNDhlY2U0YTZiIiwiZW1haWwiOiIiLCJleHAiOjE3NzE2NjgwMTZ9.2QF65CwU_IwSbyHF2Ch9GbWX64sFoyf-slg1ZkiKxgQNxn_-Q1w_s7wPSGLctVJnjPINV8jgnf8c2ChPt3gpbg",
+    "enable_ocr": true,
+    "enable_formula": true,
+    "enable_table": true
+  }
+}

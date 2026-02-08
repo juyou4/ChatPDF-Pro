@@ -2,6 +2,7 @@ import io
 import os
 import glob
 import hashlib
+import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -9,16 +10,28 @@ from typing import Optional
 
 import PyPDF2
 import pdfplumber
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 
 from services.vector_service import create_index
 from services.ocr_service import (
     is_ocr_available,
     detect_pdf_quality,
     ocr_pdf,
-    get_ocr_service
+    get_ocr_service,
+    _ocr_registry,
+    _find_poppler,
+    _save_online_ocr_config,
+    _load_online_ocr_config,
+    _mask_api_key,
+    MistralAdapter,
+    MinerUAdapter,
+    Doc2XAdapter,
+    WorkerOCRAdapter,
 )
 from models.model_detector import normalize_embedding_model_id
+from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -89,9 +102,17 @@ def generate_doc_id(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()
 
 
-def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_ocr: str = "auto", extract_images: bool = True):
+def extract_text_from_pdf(
+    pdf_file,
+    pdf_bytes: Optional[bytes] = None,
+    enable_ocr: str = "auto",
+    extract_images: bool = True,
+    ocr_dpi: int = 200,
+    ocr_language: str = "chi_sim+eng",
+    ocr_quality_threshold: int = 60,
+):
     """
-    Extract text and images from PDF with optional OCR fallback
+    从 PDF 中提取文本和图片，支持可选的 OCR 回退
     参考 paper-burner-x 实现，支持多栏检测、图片提取、分批处理、智能段落合并
     
     Features:
@@ -105,13 +126,16 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
     - P2: 元数据保留 - page, block_id, bbox, source, quality_score
     
     Args:
-        pdf_file: File-like object for pdfplumber
-        pdf_bytes: Raw PDF bytes (needed for OCR)
-        enable_ocr: "auto" (detect and use if needed), "always", or "never"
-        extract_images: Whether to extract images from PDF
+        pdf_file: pdfplumber 使用的文件对象
+        pdf_bytes: PDF 原始字节（OCR 需要）
+        enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）
+        extract_images: 是否从 PDF 中提取图片
+        ocr_dpi: OCR 图像转换分辨率（DPI），默认 200
+        ocr_language: OCR 语言设置（Tesseract 语言代码），默认 "chi_sim+eng"
+        ocr_quality_threshold: 页面质量阈值（0-100），低于此值触发 OCR，默认 60
     
     Returns:
-        dict with full_text, pages, total_pages, images, and ocr metadata
+        包含 full_text、pages、total_pages、images 和 OCR 元数据的字典
     """
     import re
     import base64
@@ -348,8 +372,14 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         
         return [block for block, _ in sorted_blocks]
     
-    def assess_page_quality(page_text: str, block_count: int) -> dict:
-        """评估单页提取质量"""
+    def assess_page_quality(page_text: str, block_count: int, quality_threshold: int = 60) -> dict:
+        """评估单页提取质量
+        
+        Args:
+            page_text: 页面文本内容
+            block_count: 文本块数量
+            quality_threshold: 质量阈值（0-100），低于此值判定为需要 OCR
+        """
         if not page_text:
             return {"score": 0, "needs_ocr": True, "reason": "empty_page"}
         
@@ -375,8 +405,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         
         score = max(0, min(100, score))
         
-        needs_ocr = score < 60
-        reason = "good" if score >= 80 else ("acceptable" if score >= 60 else "poor_quality")
+        needs_ocr = score < quality_threshold
+        reason = "good" if score >= 80 else ("acceptable" if score >= quality_threshold else "poor_quality")
         
         return {
             "score": round(score, 1),
@@ -504,8 +534,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                     except Exception as img_extract_err:
                         print(f"[PDF] Page {page_num + 1} image extraction failed: {img_extract_err}")
                 
-                # 评估页面质量
-                quality = assess_page_quality(page_text, 1)  # block_count设为1，因为我们不再使用blocks
+                # 评估页面质量（使用传入的质量阈值）
+                quality = assess_page_quality(page_text, 1, ocr_quality_threshold)  # block_count设为1，因为我们不再使用blocks
                 page_qualities.append(quality)
                 
                 pages.append({
@@ -597,8 +627,8 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
                     
                     page_text = '\n'.join(page_lines)
                     
-                    # 评估质量
-                    quality = assess_page_quality(page_text, len(set(c.get('block', 0) for c in chars)))
+                    # 评估质量（使用传入的质量阈值）
+                    quality = assess_page_quality(page_text, len(set(c.get('block', 0) for c in chars)), ocr_quality_threshold)
                     page_qualities.append(quality)
                     
                     pages.append({
@@ -765,59 +795,155 @@ def extract_text_from_pdf(pdf_file, pdf_bytes: Optional[bytes] = None, enable_oc
         "pages_needing_ocr": pages_needing_ocr
     }
     
-    # Check if OCR is needed
+    # 检查是否需要 OCR
     if enable_ocr == "never":
         return result
     
-    # 逐页OCR决策
-    if not pages_needing_ocr and enable_ocr != "always":
-        print(f"[PDF] All pages quality OK (avg: {avg_quality:.1f})")
+    # 逐页 OCR 决策：enable_ocr 为 "always" 时对所有页面执行 OCR
+    if enable_ocr == "always":
+        # "always" 模式：对所有页面执行 OCR
+        ocr_target_pages = list(range(total_pages))
+    else:
+        # "auto" 模式：仅对质量差的页面执行 OCR
+        ocr_target_pages = pages_needing_ocr
+
+    if not ocr_target_pages:
+        print(f"[PDF] 所有页面质量合格 (平均: {avg_quality:.1f})，无需 OCR")
         return result
     
-    # Check OCR availability
-    ocr_status = is_ocr_available()
-    if not ocr_status["any"]:
-        print(f"[PDF] OCR needed for {len(pages_needing_ocr)} pages but no OCR backend available")
-        result["ocr_error"] = "OCR未安装，请安装 pytesseract 或 paddleocr"
+    # 通过注册表获取 OCR 适配器
+    adapter = _ocr_registry.get_adapter(settings.ocr_backend)
+    if adapter is None:
+        print(f"[PDF] 需要对 {len(ocr_target_pages)} 页执行 OCR，但无可用 OCR 后端")
+        result["ocr_error"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
+        result["ocr_warning"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
         return result
     
     if pdf_bytes is None:
-        print("[PDF] OCR needed but pdf_bytes not provided")
-        result["ocr_error"] = "无法执行OCR：缺少PDF原始数据"
+        print("[PDF] 需要 OCR 但未提供 pdf_bytes")
+        result["ocr_error"] = "无法执行 OCR：缺少 PDF 原始数据"
+        result["ocr_warning"] = "无法执行 OCR：缺少 PDF 原始数据"
         return result
     
-    # 执行逐页OCR
-    print(f"[PDF] Starting per-page OCR for {len(pages_needing_ocr)} pages")
+    # 使用适配器系统执行逐页 OCR
+    print(f"[PDF] 开始逐页 OCR，共 {len(ocr_target_pages)} 页，后端: {adapter.name}")
     try:
-        ocr_result = ocr_pdf(pdf_bytes, backend="auto", dpi=200)
-        ocr_pages = ocr_result.get("pages", [])
+        # 调用适配器的 ocr_pages()，仅传入需要 OCR 的页码列表
+        ocr_result = adapter.ocr_pages(
+            pdf_bytes=pdf_bytes,
+            page_numbers=ocr_target_pages,
+            dpi=ocr_dpi
+        )
         
-        # 只替换质量差的页面
+        # 构建页码到 OCR 结果的映射（page_number 从 1 开始，pages_needing_ocr 从 0 开始）
+        ocr_page_map = {}
+        for page_ocr in ocr_result.pages:
+            if page_ocr.success:
+                # page_number 从 1 开始，转换为从 0 开始的索引
+                ocr_page_map[page_ocr.page_number - 1] = page_ocr.text
+        
+        # 合并 OCR 结果到原始提取文本
         merged_text_parts = []
         for i, page in enumerate(pages):
-            if i in pages_needing_ocr and i < len(ocr_pages):
-                ocr_content = ocr_pages[i].get("content", "")
+            if i in ocr_page_map:
+                ocr_content = ocr_page_map[i]
                 orig_content = page.get("content", "")
                 
-                # 只有OCR结果更好时才替换
+                # 只有 OCR 结果更好时才替换（OCR 文本长度 >= 原始文本的 80%）
                 if len(ocr_content) > len(orig_content) * 0.8:
                     page["content"] = heuristic_rebuild(ocr_content, is_cjk)
                     page["source"] = "ocr"
-                    page["ocr_backend"] = ocr_result.get("ocr_backend")
+                    page["ocr_backend"] = ocr_result.backend
                     result["ocr_used"] = True
             
             merged_text_parts.append(page["content"])
         
+        # 更新结果中的 OCR 元数据
         if result["ocr_used"]:
             result["full_text"] = "\n\n".join(merged_text_parts)
-            result["ocr_backend"] = ocr_result.get("ocr_backend")
-            result["ocr_pages"] = pages_needing_ocr
+            result["ocr_backend"] = ocr_result.backend
+            result["ocr_pages"] = ocr_target_pages
         
-        print(f"[PDF] OCR complete. Used: {result['ocr_used']}, Pages: {pages_needing_ocr}")
+        # 处理部分页面 OCR 失败的警告信息
+        if ocr_result.failed_pages:
+            failed_info = ", ".join(str(p) for p in ocr_result.failed_pages)
+            warning_msg = f"部分页面 OCR 失败（页码: {failed_info}）"
+            result["ocr_warning"] = warning_msg
+            print(f"[PDF] OCR 警告: {warning_msg}")
+        
+        # 所有目标页面均失败时，附带全部失败警告
+        if len(ocr_result.failed_pages) == len(ocr_target_pages):
+            result["ocr_warning"] = "所有需要 OCR 的页面均处理失败，已保留原始提取文本"
+            result["ocr_used"] = False
+            print("[PDF] OCR 全部失败，保留原始文本")
+        
+        print(f"[PDF] OCR 完成。已使用: {result['ocr_used']}，目标页面: {ocr_target_pages}，后端: {ocr_result.backend}")
         
     except Exception as e:
-        print(f"[PDF] OCR failed: {e}")
-        result["ocr_error"] = str(e)
+        # 在线 OCR 失败时，尝试回退到本地 OCR 引擎
+        if adapter.name in _ocr_registry._ONLINE_ADAPTERS:
+            logger.warning(f"在线 OCR ({adapter.name}) 失败，尝试回退到本地引擎: {e}")
+            print(f"[PDF] 在线 OCR ({adapter.name}) 失败，尝试回退到本地引擎: {e}")
+            local_adapter = _ocr_registry.get_local_adapter(exclude=[adapter.name])
+            if local_adapter is not None:
+                try:
+                    print(f"[PDF] 回退到本地 OCR 引擎: {local_adapter.name}")
+                    logger.info(f"回退到本地 OCR 引擎: {local_adapter.name}")
+                    ocr_result = local_adapter.ocr_pages(
+                        pdf_bytes=pdf_bytes,
+                        page_numbers=ocr_target_pages,
+                        dpi=ocr_dpi
+                    )
+
+                    # 构建页码到 OCR 结果的映射
+                    ocr_page_map = {}
+                    for page_ocr in ocr_result.pages:
+                        if page_ocr.success:
+                            ocr_page_map[page_ocr.page_number - 1] = page_ocr.text
+
+                    # 合并 OCR 结果到原始提取文本
+                    merged_text_parts = []
+                    for i, page in enumerate(pages):
+                        if i in ocr_page_map:
+                            ocr_content = ocr_page_map[i]
+                            orig_content = page.get("content", "")
+                            if len(ocr_content) > len(orig_content) * 0.8:
+                                page["content"] = heuristic_rebuild(ocr_content, is_cjk)
+                                page["source"] = "ocr"
+                                page["ocr_backend"] = ocr_result.backend
+                                result["ocr_used"] = True
+                        merged_text_parts.append(page["content"])
+
+                    if result["ocr_used"]:
+                        result["full_text"] = "\n\n".join(merged_text_parts)
+                        result["ocr_backend"] = ocr_result.backend
+                        result["ocr_pages"] = ocr_target_pages
+
+                    result["ocr_warning"] = (
+                        f"在线 OCR ({adapter.name}) 失败，已回退到本地引擎 ({local_adapter.name})"
+                    )
+                    logger.info(
+                        f"在线 OCR 回退成功: {adapter.name} -> {local_adapter.name}"
+                    )
+                    print(f"[PDF] 在线 OCR 回退成功: {adapter.name} -> {local_adapter.name}")
+                except Exception as fallback_err:
+                    logger.error(f"本地 OCR 回退也失败: {fallback_err}")
+                    print(f"[PDF] 本地 OCR 回退也失败: {fallback_err}")
+                    result["ocr_error"] = str(e)
+                    result["ocr_warning"] = (
+                        f"在线 OCR ({adapter.name}) 和本地 OCR 回退均失败: {str(e)}"
+                    )
+            else:
+                logger.warning("在线 OCR 失败且无可用的本地 OCR 引擎用于回退")
+                print("[PDF] 在线 OCR 失败且无可用的本地 OCR 引擎用于回退")
+                result["ocr_error"] = str(e)
+                result["ocr_warning"] = (
+                    f"在线 OCR ({adapter.name}) 失败且无可用的本地 OCR 引擎: {str(e)}"
+                )
+        else:
+            print(f"[PDF] OCR 失败: {e}")
+            result["ocr_error"] = str(e)
+            result["ocr_warning"] = f"OCR 处理异常: {str(e)}"
     
     return result
 
@@ -828,17 +954,18 @@ async def upload_pdf(
     embedding_model: str = "local-minilm",
     embedding_api_key: Optional[str] = None,
     embedding_api_host: Optional[str] = None,
-    enable_ocr: str = "auto"
+    enable_ocr: Optional[str] = None
 ):
     """
-    Upload and process a PDF file
+    上传并处理 PDF 文件
     
     Args:
-        file: PDF file to upload
-        embedding_model: Model for text embedding
-        embedding_api_key: API key for cloud embedding models
-        embedding_api_host: Custom API host
-        enable_ocr: OCR mode - "auto" (detect), "always", or "never"
+        file: 要上传的 PDF 文件
+        embedding_model: 文本嵌入模型
+        embedding_api_key: 云端嵌入模型的 API 密钥
+        embedding_api_host: 自定义 API 地址
+        enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
+                    缺失时使用后端配置中的 ocr_default_mode 默认值。
     """
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
@@ -852,8 +979,18 @@ async def upload_pdf(
             raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置或格式不正确（建议使用 provider:model 格式）")
         embedding_model = normalized_model
 
-        # Extract text with OCR support
-        extracted_data = extract_text_from_pdf(pdf_file, pdf_bytes=content, enable_ocr=enable_ocr)
+        # 当 enable_ocr 参数缺失时，回退到配置中的默认值
+        ocr_mode = enable_ocr if enable_ocr is not None else settings.ocr_default_mode
+
+        # 使用配置中的 OCR 参数提取文本
+        extracted_data = extract_text_from_pdf(
+            pdf_file,
+            pdf_bytes=content,
+            enable_ocr=ocr_mode,
+            ocr_dpi=settings.ocr_dpi,
+            ocr_language=settings.ocr_language,
+            ocr_quality_threshold=settings.ocr_quality_threshold,
+        )
 
         doc_id = generate_doc_id(extracted_data["full_text"])
 
@@ -921,22 +1058,499 @@ async def get_document(doc_id: str):
     }
 
 
-@router.get("/ocr/status")
+@router.get("/api/ocr/status")
 async def get_ocr_status():
-    """Check OCR availability and supported backends"""
+    """
+    检查 OCR 可用性、后端状态和当前配置
+
+    返回包含 OCR 后端可用性、Poppler 状态、当前配置和安装指引的完整状态信息。
+    """
     status = is_ocr_available()
+
+    # 使用 OCRRegistry 获取后端可用性
+    available_backends = _ocr_registry.list_available()
+    backends = {
+        "tesseract": available_backends.get("tesseract", False),
+        "paddleocr": available_backends.get("paddleocr", False),
+        "mistral": available_backends.get("mistral", False),  # 在线 OCR
+        "mineru": available_backends.get("mineru", False),  # MinerU Worker OCR
+        "doc2x": available_backends.get("doc2x", False),  # Doc2X Worker OCR
+    }
+
+    # 检测 Poppler 可用性
+    poppler_path = _find_poppler()
+    poppler_available = poppler_path is not None
+
+    # 确定推荐后端（在线优先：mistral > mineru > doc2x > paddleocr > tesseract）
+    recommended = None
+    if backends.get("mistral"):
+        recommended = "mistral"
+    elif backends.get("mineru"):
+        recommended = "mineru"
+    elif backends.get("doc2x"):
+        recommended = "doc2x"
+    elif backends.get("paddleocr"):
+        recommended = "paddleocr"
+    elif backends.get("tesseract"):
+        recommended = "tesseract"
+
+    # 构建在线 OCR 服务状态信息
+    online_services = {}
+    for provider in _SUPPORTED_ONLINE_OCR_PROVIDERS:
+        provider_config = _load_online_ocr_config(provider)
+        if provider in ("mineru", "doc2x"):
+            # Worker 代理模式：通过 worker_url 和 token 判断配置状态
+            worker_url = provider_config.get("worker_url", "")
+            token = provider_config.get("token", "")
+            token_mode = provider_config.get("token_mode", "frontend")
+            # 配置完成条件：worker_url 非空且（worker 模式或 frontend 模式有 token）
+            configured = bool(worker_url) and (token_mode == "worker" or bool(token))
+            adapter = _ocr_registry.get_adapter(provider)
+            available = adapter.is_available() if adapter else False
+            online_services[provider] = {
+                "configured": configured,
+                "available": available,
+            }
+        else:
+            # Mistral 等直接 API 调用模式
+            api_key = provider_config.get("api_key", "")
+            base_url = provider_config.get("base_url", "")
+            adapter = _ocr_registry.get_adapter(provider)
+            available = adapter.is_available() if adapter else False
+            online_services[provider] = {
+                "configured": bool(api_key),
+                "available": available,
+            }
+
+    # 从 AppSettings 读取当前 OCR 配置
+    config = {
+        "default_mode": settings.ocr_default_mode,
+        "dpi": settings.ocr_dpi,
+        "language": settings.ocr_language,
+        "quality_threshold": settings.ocr_quality_threshold,
+    }
+
+    # 安装指引
+    install_instructions = {
+        "tesseract": "pip install pytesseract pdf2image && 安装 Tesseract-OCR",
+        "paddleocr": "pip install paddleocr pdf2image",
+    }
+
+    # 当 Poppler 不可用时，在安装指引中标注 Poppler 缺失及其影响
+    if not poppler_available:
+        install_instructions["poppler"] = (
+            "Poppler 未安装，PDF 转图像功能不可用，OCR 将无法正常工作。\n"
+            "安装方式:\n"
+            "  - Windows: 下载 https://github.com/oschwartz10612/poppler-windows/releases 并解压到 ocr_tools/poppler/\n"
+            "  - macOS: brew install poppler\n"
+            "  - Linux: sudo apt-get install poppler-utils"
+        )
+
     return {
         "available": status["any"],
-        "backends": {
-            "tesseract": status["tesseract"],
-            "paddleocr": status["paddleocr"]
-        },
-        "recommended": "paddleocr" if status["paddleocr"] else ("tesseract" if status["tesseract"] else None),
-        "install_instructions": {
-            "tesseract": "pip install pytesseract pdf2image && 安装 Tesseract-OCR",
-            "paddleocr": "pip install paddleocr pdf2image"
-        }
+        "backends": backends,
+        "poppler_available": poppler_available,
+        "recommended": recommended,
+        "config": config,
+        "online_services": online_services,
+        "install_instructions": install_instructions,
     }
+
+
+# 支持的在线 OCR 提供商列表
+_SUPPORTED_ONLINE_OCR_PROVIDERS = {"mistral", "mineru", "doc2x"}
+
+
+@router.post("/api/ocr/online-config")
+async def save_online_ocr_config(request: Request):
+    """
+    保存在线 OCR 服务配置
+
+    支持 Mistral（API Key + Base URL）和 MinerU/Doc2X（Worker 代理模式）。
+    持久化到本地配置文件，并重新注册对应的在线 OCR 适配器。
+
+    请求体（Mistral）:
+        {
+            "provider": "mistral",
+            "api_key": "sk-xxx...",
+            "base_url": "https://api.mistral.ai"  // 可选
+        }
+
+    请求体（MinerU）:
+        {
+            "provider": "mineru",
+            "worker_url": "https://your-worker.workers.dev",
+            "auth_key": "your-auth-secret",  // 可选
+            "token_mode": "frontend",  // "frontend" 或 "worker"
+            "token": "your-mineru-token",  // token_mode 为 frontend 时必填
+            "enable_ocr": true,  // 可选，默认 true
+            "enable_formula": true,  // 可选，默认 true
+            "enable_table": true  // 可选，默认 true
+        }
+
+    请求体（Doc2X）:
+        {
+            "provider": "doc2x",
+            "worker_url": "https://your-worker.workers.dev",
+            "auth_key": "your-auth-secret",  // 可选
+            "token_mode": "frontend",  // "frontend" 或 "worker"
+            "token": "your-doc2x-token"  // token_mode 为 frontend 时必填
+        }
+
+    响应:
+        {"success": true, "message": "配置已保存"}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体格式错误，需要 JSON")
+
+    provider = body.get("provider", "").strip()
+
+    # 校验 provider 参数
+    if not provider:
+        raise HTTPException(status_code=400, detail="缺少 provider 参数")
+    if provider not in _SUPPORTED_ONLINE_OCR_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 provider: {provider}，当前支持: {', '.join(sorted(_SUPPORTED_ONLINE_OCR_PROVIDERS))}",
+        )
+
+    # 根据 provider 类型构建配置字典
+    if provider in ("mineru", "doc2x"):
+        # Worker 代理模式配置
+        worker_url = body.get("worker_url", "").strip()
+        auth_key = body.get("auth_key", "").strip()
+        token_mode = body.get("token_mode", "frontend").strip()
+        token = body.get("token", "").strip()
+
+        # 校验 worker_url 参数
+        if not worker_url:
+            raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
+
+        # 校验 token_mode 参数
+        if token_mode not in ("frontend", "worker"):
+            raise HTTPException(status_code=400, detail="token_mode 必须为 'frontend' 或 'worker'")
+
+        config: dict = {
+            "worker_url": worker_url,
+            "auth_key": auth_key,
+            "token_mode": token_mode,
+            "token": token,
+        }
+
+        # MinerU 特有选项
+        if provider == "mineru":
+            config["enable_ocr"] = body.get("enable_ocr", True)
+            config["enable_formula"] = body.get("enable_formula", True)
+            config["enable_table"] = body.get("enable_table", True)
+    else:
+        # Mistral 等直接 API 调用模式
+        api_key = body.get("api_key", "").strip()
+        base_url = body.get("base_url", "").strip()
+
+        # 校验 api_key 参数
+        if not api_key:
+            raise HTTPException(status_code=400, detail="缺少 api_key 参数")
+
+        config = {"api_key": api_key}
+        if base_url:
+            config["base_url"] = base_url
+
+    # 持久化配置到本地文件
+    try:
+        _save_online_ocr_config(provider, config)
+    except Exception as e:
+        logger.error(f"保存在线 OCR 配置失败: {e}")
+        raise HTTPException(status_code=500, detail=f"配置保存失败: {str(e)}")
+
+    # 重新注册对应的在线 OCR 适配器
+    try:
+        if provider == "mistral":
+            # 重新加载完整配置（合并默认值）
+            full_config = _load_online_ocr_config("mistral")
+            # 从注册表中移除旧的 mistral 适配器（如果存在）
+            _ocr_registry._adapters.pop("mistral", None)
+            # 创建新的 MistralAdapter 实例并注册
+            new_adapter = MistralAdapter(
+                api_key=full_config.get("api_key", ""),
+                base_url=full_config.get("base_url", "https://api.mistral.ai"),
+            )
+            _ocr_registry.register(new_adapter)
+            logger.info(f"MistralAdapter 已重新注册，可用: {new_adapter.is_available()}")
+        elif provider == "mineru":
+            # 重新加载完整配置
+            full_config = _load_online_ocr_config("mineru")
+            # 从注册表中移除旧的 mineru 适配器（如果存在）
+            _ocr_registry._adapters.pop("mineru", None)
+            # 创建新的 MinerUAdapter 实例并注册
+            new_adapter = MinerUAdapter(
+                worker_url=full_config.get("worker_url", ""),
+                auth_key=full_config.get("auth_key", ""),
+                token=full_config.get("token", ""),
+                token_mode=full_config.get("token_mode", "frontend"),
+                enable_ocr=full_config.get("enable_ocr", True),
+                enable_formula=full_config.get("enable_formula", True),
+                enable_table=full_config.get("enable_table", True),
+            )
+            _ocr_registry.register(new_adapter)
+            logger.info(f"MinerUAdapter 已重新注册，可用: {new_adapter.is_available()}")
+        elif provider == "doc2x":
+            # 重新加载完整配置
+            full_config = _load_online_ocr_config("doc2x")
+            # 从注册表中移除旧的 doc2x 适配器（如果存在）
+            _ocr_registry._adapters.pop("doc2x", None)
+            # 创建新的 Doc2XAdapter 实例并注册
+            new_adapter = Doc2XAdapter(
+                worker_url=full_config.get("worker_url", ""),
+                auth_key=full_config.get("auth_key", ""),
+                token=full_config.get("token", ""),
+                token_mode=full_config.get("token_mode", "frontend"),
+            )
+            _ocr_registry.register(new_adapter)
+            logger.info(f"Doc2XAdapter 已重新注册，可用: {new_adapter.is_available()}")
+    except Exception as e:
+        # 适配器注册失败不影响配置保存结果，仅记录警告
+        logger.warning(f"重新注册在线 OCR 适配器失败: {e}")
+
+    return {"success": True, "message": "配置已保存"}
+
+
+@router.get("/api/ocr/online-config")
+async def get_online_ocr_config():
+    """
+    获取在线 OCR 服务配置（敏感信息脱敏显示）
+
+    返回各在线 OCR 提供商的配置状态，包括：
+    - Mistral: API Key 是否已配置、脱敏后的 API Key 预览和 Base URL
+    - MinerU/Doc2X: Worker URL、Auth Key/Token 配置状态和脱敏预览、Token Mode 及 MinerU 特有选项
+
+    响应:
+        {
+            "mistral": {
+                "api_key_configured": true,
+                "api_key_preview": "sk-x...xxxx",
+                "base_url": "https://api.mistral.ai"
+            },
+            "mineru": {
+                "worker_url": "https://your-worker.workers.dev",
+                "auth_key_configured": true,
+                "auth_key_preview": "your...cret",
+                "token_mode": "frontend",
+                "token_configured": true,
+                "token_preview": "your...oken",
+                "enable_ocr": true,
+                "enable_formula": true,
+                "enable_table": true
+            },
+            "doc2x": {
+                "worker_url": "",
+                "auth_key_configured": false,
+                "auth_key_preview": "",
+                "token_mode": "frontend",
+                "token_configured": false,
+                "token_preview": ""
+            }
+        }
+    """
+    result = {}
+
+    for provider in _SUPPORTED_ONLINE_OCR_PROVIDERS:
+        config = _load_online_ocr_config(provider)
+
+        if provider in ("mineru", "doc2x"):
+            # Worker 代理模式：返回 worker_url、auth_key/token 脱敏信息
+            worker_url = config.get("worker_url", "")
+            auth_key = config.get("auth_key", "")
+            token_mode = config.get("token_mode", "frontend")
+            token = config.get("token", "")
+
+            provider_result = {
+                "worker_url": worker_url,
+                "auth_key_configured": bool(auth_key),
+                "auth_key_preview": _mask_api_key(auth_key),
+                "token_mode": token_mode,
+                "token_configured": bool(token),
+                "token_preview": _mask_api_key(token),
+            }
+
+            # MinerU 特有选项
+            if provider == "mineru":
+                provider_result["enable_ocr"] = config.get("enable_ocr", True)
+                provider_result["enable_formula"] = config.get("enable_formula", True)
+                provider_result["enable_table"] = config.get("enable_table", True)
+
+            result[provider] = provider_result
+        else:
+            # Mistral 等直接 API 调用模式
+            api_key = config.get("api_key", "")
+            base_url = config.get("base_url", "")
+
+            result[provider] = {
+                "api_key_configured": bool(api_key),
+                "api_key_preview": _mask_api_key(api_key),
+                "base_url": base_url,
+            }
+
+    return result
+
+
+@router.post("/api/ocr/validate-key")
+async def validate_ocr_key(request: Request):
+    """
+    验证在线 OCR 服务的 API Key / Worker 连接有效性
+
+    - Mistral: 调用 GET /v1/files 接口验证 API Key
+    - MinerU: 向 Worker URL 发送 GET 请求测试可达性和认证
+    - Doc2X: 向 Worker URL 发送 GET 请求测试可达性和认证
+
+    请求体（Mistral）:
+        {
+            "provider": "mistral",
+            "api_key": "sk-xxx..."
+        }
+
+    请求体（MinerU/Doc2X）:
+        {
+            "provider": "mineru",
+            "worker_url": "https://your-worker.workers.dev",
+            "auth_key": "your-auth-secret"  // 可选
+        }
+
+    响应:
+        {"valid": true, "message": "验证成功"}
+        {"valid": false, "message": "验证失败原因"}
+    """
+    import httpx
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体格式错误，需要 JSON")
+
+    provider = body.get("provider", "").strip()
+
+    # 校验 provider 参数
+    if not provider:
+        raise HTTPException(status_code=400, detail="缺少 provider 参数")
+    if provider not in _SUPPORTED_ONLINE_OCR_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 provider: {provider}，当前支持: {', '.join(sorted(_SUPPORTED_ONLINE_OCR_PROVIDERS))}",
+        )
+
+    # 根据 provider 执行验证
+    if provider == "mistral":
+        api_key = body.get("api_key", "").strip()
+
+        # 校验 api_key 参数
+        if not api_key:
+            raise HTTPException(status_code=400, detail="缺少 api_key 参数")
+
+        # 加载当前配置获取 base_url（如果用户已配置过自定义 base_url）
+        current_config = _load_online_ocr_config("mistral")
+        base_url = (current_config.get("base_url", "") or "https://api.mistral.ai").rstrip("/")
+
+        try:
+            # 调用 Mistral API 的文件列表接口验证 Key 有效性
+            with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+                resp = client.get(
+                    f"{base_url}/v1/files",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+
+            if resp.status_code == 200:
+                logger.info("Mistral API Key 验证成功")
+                return {"valid": True, "message": "API Key 验证成功"}
+            elif resp.status_code in (401, 403):
+                logger.warning(f"Mistral API Key 验证失败: HTTP {resp.status_code}")
+                return {"valid": False, "message": "API Key 无效或已过期"}
+            else:
+                # 其他 HTTP 错误也视为验证失败
+                logger.warning(f"Mistral API Key 验证异常: HTTP {resp.status_code}")
+                return {"valid": False, "message": f"验证失败，服务返回 HTTP {resp.status_code}"}
+
+        except httpx.TimeoutException:
+            logger.warning("Mistral API Key 验证超时")
+            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+        except httpx.ConnectError:
+            logger.warning("Mistral API Key 验证连接失败")
+            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+        except httpx.RequestError as e:
+            logger.warning(f"Mistral API Key 验证网络错误: {e}")
+            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+
+    elif provider in ("mineru", "doc2x"):
+        # Worker 代理模式验证：测试 Worker 可达性和认证有效性
+        worker_url = body.get("worker_url", "").strip()
+        auth_key = body.get("auth_key", "").strip()
+        token = body.get("token", "").strip()
+        token_mode = body.get("token_mode", "frontend").strip()
+
+        # 校验 worker_url 参数
+        if not worker_url:
+            raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
+
+        # 构建请求头（包含 Auth Key 和 Token）
+        headers = {}
+        if auth_key:
+            headers["X-Auth-Key"] = auth_key
+
+        # 前端透传模式下，将 Token 加入请求头
+        if token_mode == "frontend" and token:
+            if provider == "mineru":
+                headers["X-MinerU-Key"] = token
+            else:
+                headers["X-Doc2X-Key"] = token
+
+        # 根据 provider 构建测试 URL
+        # MinerU: GET {worker_url}/mineru/result/test-ping（预期 404 但 Worker 可达）
+        # Doc2X: GET {worker_url}/doc2x/status/test-ping（预期 404 但 Worker 可达）
+        worker_url_clean = worker_url.rstrip("/")
+        if provider == "mineru":
+            test_url = f"{worker_url_clean}/mineru/result/test-ping"
+        else:
+            test_url = f"{worker_url_clean}/doc2x/status/test-ping"
+
+        provider_label = "MinerU" if provider == "mineru" else "Doc2X"
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+                resp = client.get(test_url, headers=headers)
+
+            # Worker 可达：200、404、500 都表示 Worker 正常运行
+            # 404 是预期的，因为 test-ping 不是真实的 batch_id/uid
+            # 500 也可能是 Worker 将请求转发给了上游 API，上游返回错误（如 batch_id 不存在）
+            if resp.status_code in (200, 404, 500):
+                logger.info(f"{provider_label} Worker 验证成功 (HTTP {resp.status_code})")
+                return {"valid": True, "message": f"{provider_label} Worker 可达且 Token 有效"}
+            elif resp.status_code in (401, 403):
+                logger.warning(f"{provider_label} Worker 认证失败: HTTP {resp.status_code}")
+                # 尝试从响应体获取更具体的错误信息
+                try:
+                    error_body = resp.json()
+                    error_msg = error_body.get("error", "")
+                except Exception:
+                    error_msg = ""
+                if "token" in error_msg.lower():
+                    return {"valid": False, "message": f"Token 无效或缺失，请检查 Token 是否正确"}
+                return {"valid": False, "message": f"认证失败，请检查 Auth Key 或 Token 是否正确"}
+            else:
+                logger.warning(f"{provider_label} Worker 验证异常: HTTP {resp.status_code}")
+                return {"valid": False, "message": f"验证失败，Worker 返回 HTTP {resp.status_code}"}
+
+        except httpx.TimeoutException:
+            logger.warning(f"{provider_label} Worker 验证超时")
+            return {"valid": False, "message": "连接超时，请检查 Worker URL 是否正确"}
+        except httpx.ConnectError:
+            logger.warning(f"{provider_label} Worker 连接失败")
+            return {"valid": False, "message": "连接失败，请检查 Worker URL 是否正确"}
+        except httpx.RequestError as e:
+            logger.warning(f"{provider_label} Worker 验证网络错误: {e}")
+            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+
+    # 不应到达此处，但作为安全兜底
+    return {"valid": False, "message": f"暂不支持 {provider} 的验证"}
 
 
 # initialize

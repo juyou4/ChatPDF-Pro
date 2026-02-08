@@ -53,3 +53,72 @@ def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[
     if not embedding_model_id:
         return None
     return embedding_model_id
+
+
+# 预定义标签集合
+PREDEFINED_TAGS = {
+    "vision", "embedding", "rerank", "free", "reasoning",
+    "function_calling", "web_search", "chinese_optimized"
+}
+
+
+def get_model_type_with_capabilities(
+    model_id: str,
+    capabilities: list[dict] | None = None
+) -> str:
+    """带 capabilities 优先级的模型类型检测
+
+    优先级：
+    1. capabilities 中 isUserSelected=true 的条目（用户手动指定）
+    2. capabilities 中 isUserSelected=false 排除该类型（用户明确禁用）
+    3. 正则检测（rerank 优先于 embedding）
+    4. 默认返回 "chat"
+    """
+    # 检查用户覆盖：isUserSelected=true 的条目优先级最高
+    if capabilities:
+        for cap in capabilities:
+            if cap.get("isUserSelected") is True:
+                return cap["type"]
+
+    # 收集用户禁用的类型：isUserSelected=false 排除该类型
+    disabled_types = set()
+    if capabilities:
+        for cap in capabilities:
+            if cap.get("isUserSelected") is False:
+                disabled_types.add(cap["type"])
+
+    # 正则检测（rerank 优先于 embedding，避免 "retrieval" 关键字误分类）
+    if "rerank" not in disabled_types and is_rerank_model(model_id):
+        return "rerank"
+    if "embedding" not in disabled_types and is_embedding_model(model_id):
+        return "embedding"
+
+    return "chat"
+
+
+def infer_model_tags(model_id: str) -> list[str]:
+    """根据模型 ID 推断标签
+
+    基于模型 ID 中的关键字匹配，自动推断模型能力标签。
+    输出始终为 PREDEFINED_TAGS 的子集。
+    """
+    tags = []
+    lower_id = model_id.lower()
+
+    # 免费模型标签
+    if "free" in lower_id:
+        tags.append("free")
+
+    # 视觉能力标签
+    if "vision" in lower_id or "vl" in lower_id:
+        tags.append("vision")
+
+    # 中文优化标签
+    if any(k in lower_id for k in ["chinese", "zh", "multilingual"]):
+        tags.append("chinese_optimized")
+
+    # 推理能力标签
+    if "reasoning" in lower_id or "think" in lower_id:
+        tags.append("reasoning")
+
+    return tags

@@ -1,0 +1,23 @@
+{
+  "filename": "test.pdf",
+  "upload_time": "2026-02-08T21:42:31.223078",
+  "data": {
+    "full_text": "测试文本内容",
+    "total_pages": 1,
+    "pages": [
+      {
+        "page": 1,
+        "content": "测试文本内容"
+      }
+    ],
+    "images": [],
+    "image_count": 0,
+    "ocr_used": false,
+    "ocr_backend": null,
+    "extraction_quality": "good",
+    "extraction_method": "pymupdf",
+    "avg_quality_score": 90.0,
+    "pages_needing_ocr": []
+  },
+  "pdf_url": "/uploads/3d91ba7fb2b1d11964e420bf22270cd2.pdf"
+}

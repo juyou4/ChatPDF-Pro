@@ -9,6 +9,15 @@
 export type ModelType = 'chat' | 'embedding' | 'rerank' | 'image'
 
 /**
+ * 模型能力声明
+ * 借鉴 Cherry Studio 的 ModelCapability 模式，支持用户覆盖自动检测结果
+ */
+export interface ModelCapability {
+  type: ModelType               // 能力类型
+  isUserSelected?: boolean      // true=用户启用, false=用户禁用, undefined=使用默认检测
+}
+
+/**
  * 模型元数据
  */
 export interface ModelMetadata {
@@ -39,6 +48,8 @@ export interface Model {
   type: ModelType             // 模型类型
 
   metadata: ModelMetadata     // 模型元数据
+  capabilities?: ModelCapability[]  // 模型能力声明列表（支持用户覆盖自动检测）
+  tags?: string[]                   // 模型标签（如 free、vision、reasoning 等）
 
   // 状态标识
   isSystem: boolean           // 是否系统预设

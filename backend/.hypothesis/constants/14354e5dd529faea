@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\providers\grok_provider.py
-# hypothesis_version: 6.151.5
-
-[0.7, 120.0, 200, 4000, 'Authorization', 'Content-Type', 'application/json', 'max_tokens', 'messages', 'model', 'stream', 'temperature']

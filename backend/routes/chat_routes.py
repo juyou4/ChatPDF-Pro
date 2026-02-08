@@ -80,7 +80,8 @@ def _validate_rerank_request(req):
     provider = getattr(req, "rerank_provider", None)
     api_key = getattr(req, "rerank_api_key", None)
     use_rerank = getattr(req, "use_rerank", False)
-    if use_rerank and provider and provider.lower() in {"cohere", "jina"} and not api_key:
+    cloud_providers = {"cohere", "jina", "silicon", "aliyun", "openai", "moonshot", "deepseek", "zhipu", "minimax"}
+    if use_rerank and provider and provider.lower() in cloud_providers and not api_key:
         raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
 
 

@@ -53,7 +53,9 @@ class SearchRequest(BaseModel):
 
     def validate_rerank(self):
         provider = (self.rerank_provider or "").lower()
-        if self.use_rerank and provider in {"cohere", "jina"} and not self.rerank_api_key:
+        # 所有非本地的 rerank provider 都需要 api_key
+        cloud_providers = {"cohere", "jina", "silicon", "aliyun", "openai", "moonshot", "deepseek", "zhipu", "minimax"}
+        if self.use_rerank and provider in cloud_providers and not self.rerank_api_key:
             raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
 
 

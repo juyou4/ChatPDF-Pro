@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { SYSTEM_MODELS } from '../config/systemModels'
-import type { Model, ModelType, UserModelCollection } from '../types/model'
+import type { Model, ModelType, ModelCapability, UserModelCollection } from '../types/model'
 import {
     fetchModelsFromProvider,
     filterModels,
@@ -21,6 +21,7 @@ interface ModelContextType {
     // 模型操作
     addModelToCollection: (model: Model) => void
     removeModelFromCollection: (modelId: string, providerId: string) => void
+    updateModelInCollection: (modelId: string, providerId: string, updates: Partial<Model>) => void
     isModelInCollection: (modelId: string, providerId: string) => boolean
 
     // 模型获取
@@ -41,6 +42,31 @@ const STORAGE_KEY = 'userModels'
 const VERSION_KEY = 'userModelsVersion'
 const LAST_SYNC_KEY = 'modelsLastSync'
 
+/**
+ * 版本迁移：从旧版本数据中保留用户手动添加的模型（isUserAdded 为 true），
+ * 仅清除系统预设模型的缓存。
+ *
+ * @param oldData - localStorage 中的旧版本 JSON 字符串
+ * @returns 迁移后的用户模型数组，解析失败时返回 null（回退到空数组）
+ */
+export function migrateUserModels(oldData: string): Model[] | null {
+    try {
+        const parsed = JSON.parse(oldData)
+        if (!Array.isArray(parsed)) return null
+
+        // 仅保留用户手动添加的模型
+        const userModels = parsed.filter(
+            (m: any) => m && typeof m === 'object' && m.isUserAdded === true
+        ) as Model[]
+
+        if (userModels.length === 0) return null
+
+        return userModels
+    } catch {
+        return null
+    }
+}
+
 export function ModelProvider({ children }: { children: ReactNode }) {
     const [systemModels] = useState<Model[]>(SYSTEM_MODELS)
 
@@ -48,9 +74,20 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         const savedVersion = localStorage.getItem(VERSION_KEY)
         const saved = localStorage.getItem(STORAGE_KEY)
 
-        // 版本不匹配时清除旧数据
+        // 版本不匹配时尝试迁移用户模型
         if (saved && savedVersion !== CONFIG_VERSION) {
             console.log('🔄 Upgrading user model collection to version', CONFIG_VERSION)
+
+            // 尝试从旧数据迁移用户手动添加的模型
+            const migrated = migrateUserModels(saved)
+            if (migrated) {
+                console.log('✅ 成功迁移用户模型，保留', migrated.length, '个用户添加的模型')
+                localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
+                localStorage.removeItem(LAST_SYNC_KEY)
+                return migrated
+            }
+            console.warn('⚠️ 用户模型迁移失败或无用户模型，使用空集合')
+
             localStorage.removeItem(STORAGE_KEY)
             localStorage.removeItem(LAST_SYNC_KEY)
         }
@@ -88,6 +125,10 @@ export function ModelProvider({ children }: { children: ReactNode }) {
 
     /**
      * 添加模型到用户collection
+     * 确保 capabilities 和 tags 字段被正确持久化：
+     * - 如果模型已包含 capabilities，直接保留
+     * - 如果模型未包含 capabilities，根据 type 自动生成默认的 capability（isUserSelected=true 表示用户手动添加）
+     * - tags 字段直接透传保留
      */
     const addModelToCollection = (model: Model) => {
         setUserCollection(prev => {
@@ -100,8 +141,37 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 return prev
             }
 
-            return [...prev, { ...model, isUserAdded: true }]
+            // 确保 capabilities 字段存在：若缺失则根据 type 自动生成
+            const capabilities: ModelCapability[] = model.capabilities && model.capabilities.length > 0
+                ? model.capabilities
+                : [{ type: model.type, isUserSelected: true }]
+
+            // 确保 tags 字段存在：若缺失则默认为空数组
+            const tags: string[] = model.tags || []
+
+            return [...prev, {
+                ...model,
+                capabilities,
+                tags,
+                isUserAdded: true
+            }]
         })
+    }
+
+    /**
+     * 更新用户collection中已有模型的信息
+     * 支持更新 capabilities、tags 等字段并持久化到 localStorage
+     * 满足需求 2.4：用户编辑已有模型的类型时，更新 capabilities 数组中对应条目的 isUserSelected 标志
+     */
+    const updateModelInCollection = (modelId: string, providerId: string, updates: Partial<Model>) => {
+        setUserCollection(prev =>
+            prev.map(m => {
+                if (m.id === modelId && m.providerId === providerId) {
+                    return { ...m, ...updates }
+                }
+                return m
+            })
+        )
     }
 
     /**
@@ -187,6 +257,7 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 systemModels,
                 addModelToCollection,
                 removeModelFromCollection,
+                updateModelInCollection,
                 isModelInCollection,
                 getModelsByType,
                 getModelsByProvider,

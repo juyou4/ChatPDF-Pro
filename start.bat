@@ -11,7 +11,7 @@ cls
 echo.
 echo   ╔═══════════════════════════════════════╗
 echo   ║                                       ║
-echo   ║     ChatPDF Pro v2.0.2                ║
+echo   ║     ChatPDF Pro v3.0               ║
 echo   ║     智能文档助手                      ║
 echo   ║                                       ║
 echo   ╚═══════════════════════════════════════╝
@@ -197,8 +197,8 @@ for /l %%i in (1,1,30) do (
 )
 :BACK_OK
 
-if "%wait_ok%"=="0" (
-    echo   [✗] 后端启动失败，错误日志:
+if "!wait_ok!"=="0" (
+    echo   [✗] 后端启动超时，错误日志:
     if exist "backend\backend_startup.log" type "backend\backend_startup.log"
     goto BACKFAIL
 )

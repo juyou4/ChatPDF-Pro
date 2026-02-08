@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\models\provider_registry.py
-# hypothesis_version: 6.151.5
-
-['Aliyun DashScope', 'Anthropic', 'DeepSeek', 'Doubao', 'Google Gemini', 'MiniMax', 'Moonshot', 'Ollama (local)', 'OpenAI', 'Qwen', 'SiliconFlow', 'Zhipu', 'aliyun', 'anthropic', 'deepseek', 'doubao', 'endpoint', 'gemini', 'grok', 'minimax', 'moonshot', 'name', 'ollama', 'openai', 'qwen', 'silicon', 'type', 'xAI Grok', 'zhipu']

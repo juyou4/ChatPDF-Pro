@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\services\retrieval_logger.py
-# hypothesis_version: 6.151.5
-
-[0.0, ', ', 'RRF topK: %s', 'citations', 'detail', 'fallback', 'granularities', 'granularity', 'query_type', 'token_used', 'type', '原始查询: %s', '无', '粒度分配: %s']

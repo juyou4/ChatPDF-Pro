@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\providers\ollama_provider.py
-# hypothesis_version: 6.151.5
-
-[120.0, 200, 503, 'choices', 'content', 'message', 'messages', 'model', 'stream']

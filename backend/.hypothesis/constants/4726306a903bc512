@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\services\rag_config.py
-# hypothesis_version: 6.151.5
-
-[1500, 2500, 5000, 6000, 8000, 'digest']

@@ -30,21 +30,78 @@ const OLD_KEYS = [
     'selectedRerankModelId'
 ]
 
+/**
+ * 版本迁移：从旧版本数据中提取用户配置的 apiKey 和 apiHost，
+ * 合并到新版本的系统 Provider 中，而非直接清除所有数据。
+ *
+ * @param oldData - localStorage 中的旧版本 JSON 字符串
+ * @returns 迁移后的 Provider 数组，解析失败时返回 null（回退到默认配置）
+ */
+export function migrateProviders(oldData: string): Provider[] | null {
+    try {
+        const parsed = JSON.parse(oldData)
+        if (!Array.isArray(parsed)) return null
+
+        // 从旧数据中提取用户配置的 apiKey 和 apiHost
+        const userConfigs = new Map<string, { apiKey: string; apiHost: string }>()
+        for (const p of parsed) {
+            if (p && typeof p === 'object' && p.id && p.apiKey) {
+                userConfigs.set(p.id, {
+                    apiKey: p.apiKey,
+                    apiHost: p.apiHost || '',
+                })
+            }
+        }
+
+        if (userConfigs.size === 0) return null
+
+        // 将用户配置合并到新版本的系统 Provider 中
+        const newProviders = SYSTEM_PROVIDERS.map(sp => {
+            const userConfig = userConfigs.get(sp.id)
+            if (userConfig) {
+                return {
+                    ...sp,
+                    apiKey: userConfig.apiKey,
+                    apiHost: userConfig.apiHost || sp.apiHost,
+                    enabled: true,
+                }
+            }
+            return sp
+        })
+
+        return newProviders
+    } catch {
+        return null
+    }
+}
+
 export function ProviderProvider({ children }: { children: ReactNode }) {
     const [providers, setProviders] = useState<Provider[]>(() => {
         const savedVersion = localStorage.getItem(VERSION_KEY)
         const saved = localStorage.getItem(STORAGE_KEY)
 
-        // 版本不匹配时清理旧数据并升级
+        // 版本不匹配时尝试迁移旧数据
         if (savedVersion !== CONFIG_VERSION) {
             console.log('🔄 Upgrading to version', CONFIG_VERSION)
+
+            // 尝试从旧数据迁移用户配置
+            if (saved) {
+                const migrated = migrateProviders(saved)
+                if (migrated) {
+                    console.log('✅ 成功从旧版本迁移 Provider 配置')
+                    localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
+                    // 清除旧架构的键名
+                    OLD_KEYS.forEach(key => localStorage.removeItem(key))
+                    return migrated
+                }
+                console.warn('⚠️ 旧版本数据迁移失败，使用默认配置')
+            }
 
             // 清除旧版本数据
             localStorage.removeItem(STORAGE_KEY)
 
             // 清除旧架构的键名
             OLD_KEYS.forEach(key => localStorage.removeItem(key))
-            console.log('🧹 Cleaned up old configuration keys')
         }
 
         // 版本匹配时使用保存的配置
@@ -140,7 +197,8 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
             return {
                 success: true,
                 message: '连接成功',
-                availableModels: result.availableModels
+                availableModels: result.availableModels,
+                latency: result.latency  // 传递后端返回的延迟毫秒数（可选字段）
             }
         } catch (error) {
             return {

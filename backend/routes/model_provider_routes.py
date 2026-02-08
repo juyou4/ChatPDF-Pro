@@ -13,6 +13,8 @@ from models.dynamic_store import (
     load_dynamic_models,
     save_dynamic_models,
 )
+from models.model_detector import infer_model_tags
+from models.api_key_selector import select_api_key
 
 
 router = APIRouter()
@@ -20,9 +22,108 @@ router = APIRouter()
 
 @router.get("/models")
 async def get_models():
-    """获取可用模型/Provider列表（含静态+动态）"""
-    merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
-    return merged
+    """获取可用模型/Provider列表（含静态+动态），按 provider 分组
+
+    返回结构：
+    {
+        "provider_id": {
+            "name": "Provider名称",
+            "endpoint": "...",
+            "type": "openai",
+            "models": {
+                "model_id": "模型显示名称",
+                ...
+            }
+        },
+        ...
+    }
+
+    前端通过 availableModels[apiProvider]?.models 访问。
+    """
+    from models.model_registry import EMBEDDING_MODELS
+    from urllib.parse import urlparse
+
+    merged_providers = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+    merged_models = {**EMBEDDING_MODELS, **load_dynamic_models()}
+
+    # 从前端 systemModels.ts 同步的 chat 模型列表
+    # 这些模型不在 EMBEDDING_MODELS 中，但前端需要通过 /models API 获取
+    CHAT_MODELS = {
+        "openai": {
+            "gpt-4o": "GPT-4o",
+            "gpt-4o-mini": "GPT-4o mini",
+        },
+        "deepseek": {
+            "deepseek-chat": "DeepSeek Chat",
+            "deepseek-reasoner": "DeepSeek Reasoner",
+        },
+        "moonshot": {
+            "moonshot-v1-8k": "Moonshot v1 8K",
+            "moonshot-v1-32k": "Moonshot v1 32K",
+        },
+        "zhipu": {
+            "glm-4-air": "GLM-4-Air",
+            "glm-4": "GLM-4",
+        },
+        "minimax": {
+            "abab6.5s-chat": "abab6.5s-chat",
+        },
+        "silicon": {
+            "Qwen/Qwen-2.5-7B-Instruct": "Qwen 2.5 7B (SiliconFlow)",
+            "deepseek-ai/DeepSeek-V3": "DeepSeek V3 (SiliconFlow)",
+        },
+    }
+
+    def _extract_domain(url: str) -> str:
+        """从 URL 中提取域名，用于匹配 provider"""
+        if not url:
+            return ""
+        parsed = urlparse(url)
+        return parsed.netloc or ""
+
+    # 预计算每个 provider 的域名，用于通过 base_url 区分同 type 的不同服务商
+    provider_domains = {}
+    for pid, pconfig in merged_providers.items():
+        endpoint = pconfig.get("endpoint", "")
+        provider_domains[pid] = _extract_domain(endpoint)
+
+    result = {}
+    for provider_id, provider_config in merged_providers.items():
+        # 收集该 provider 下的 embedding/rerank 模型
+        provider_models = {}
+        provider_domain = provider_domains.get(provider_id, "")
+        provider_type = provider_config.get("type", provider_id)
+
+        for model_id, model_config in merged_models.items():
+            model_provider_type = model_config.get("provider", "")
+
+            # 本地模型只归属于 local provider
+            if model_provider_type == "local":
+                if provider_id == "local":
+                    provider_models[model_id] = model_config.get("name", model_id)
+                continue
+
+            # 非本地模型：先匹配 provider type，再通过 base_url 域名区分
+            if model_provider_type != provider_type:
+                continue
+
+            model_base_url = model_config.get("base_url", "")
+            model_domain = _extract_domain(model_base_url)
+
+            # 通过域名匹配区分同 type 的不同服务商
+            if provider_domain and model_domain and provider_domain == model_domain:
+                provider_models[model_id] = model_config.get("name", model_id)
+
+        # 合并 chat 模型
+        chat_models = CHAT_MODELS.get(provider_id, {})
+        provider_models.update(chat_models)
+
+        result[provider_id] = {
+            **provider_config,
+            "models": provider_models,
+        }
+
+    return result
 
 
 @router.get("/rerank/providers")
@@ -70,8 +171,12 @@ def _normalize_api_host(provider_id: str, api_host: str | None) -> str:
 
 
 async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: List[str]):
+    # 从 API Key 池中随机选择一个有效 Key（支持逗号分隔的多 Key 轮换）
+    actual_key = select_api_key(api_key) if api_key else None
+    if not actual_key:
+        return None, "API Key 池为空，无法发送请求"
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {actual_key}",
         "Content-Type": "application/json"
     }
     last_error = None
@@ -94,13 +199,18 @@ async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: Li
 
 @router.post("/api/providers/test")
 async def test_provider_connection(request: ProviderTestRequest):
-    """测试Provider连接"""
+    """测试Provider连接，成功时返回延迟毫秒数"""
+    from time import time
+    start_time = time()
     try:
         if request.providerId == 'local':
+            # 本地模型无需网络请求，但仍记录延迟
+            latency = int((time() - start_time) * 1000)
             return {
                 "success": True,
                 "message": "本地模型无需连接测试",
-                "availableModels": 2
+                "availableModels": 2,
+                "latency": latency
             }
 
         endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
@@ -108,23 +218,31 @@ async def test_provider_connection(request: ProviderTestRequest):
 
         if data is not None:
             model_count = len(data.get('data', [])) if isinstance(data.get('data'), list) else 0
+            latency = int((time() - start_time) * 1000)
             return {
                 "success": True,
                 "message": "连接成功",
-                "availableModels": model_count
+                "availableModels": model_count,
+                "latency": latency
             }
 
+        # 虽然未获取到模型列表，但连接本身成功
+        latency = int((time() - start_time) * 1000)
         return {
             "success": True,
             "message": f"连接成功（无法获取模型列表: {last_error or '无响应'})",
-            "availableModels": 0
+            "availableModels": 0,
+            "latency": latency
         }
 
     except httpx.ConnectError:
+        # 失败时不返回 latency
         return {"success": False, "message": "无法连接到API服务器，请检查网络或API地址"}
     except httpx.TimeoutException:
+        # 失败时不返回 latency
         return {"success": False, "message": "连接超时，请稍后重试"}
     except Exception as e:
+        # 失败时不返回 latency
         return {"success": False, "message": f"测试失败：{str(e)}"}
 
 
@@ -192,11 +310,16 @@ async def fetch_provider_models(request: ModelFetchRequest):
             for item in data['data']:
                 model_id = item.get('id', '')
                 model_type = _detect_model_type(model_id)
+                # 推断模型标签（如 free、vision、reasoning 等）
+                tags = infer_model_tags(model_id)
                 model = {
                     "id": model_id,
                     "name": model_id,
                     "providerId": request.providerId,
                     "type": model_type,
+                    # 模型能力声明，默认由正则检测推断，isUserSelected=False 表示非用户手动指定
+                    "capabilities": [{"type": model_type, "isUserSelected": False}],
+                    "tags": tags,
                     "metadata": _infer_model_metadata(model_id, model_type),
                     "isSystem": False,
                     "isUserAdded": False
@@ -350,6 +473,8 @@ class ModelUpsertRequest(BaseModel):
     providerId: str
     type: str = "embedding"  # embedding | rerank | chat
     metadata: dict | None = None
+    capabilities: list[dict] | None = None  # 模型能力声明列表，每个元素包含 type 和 isUserSelected 字段
+    tags: list[str] | None = None  # 模型标签列表（如 free、vision、reasoning 等）
 
 
 @router.get("/api/models/custom")
@@ -360,12 +485,18 @@ async def list_custom_models():
 @router.post("/api/models/custom")
 async def upsert_custom_model(req: ModelUpsertRequest):
     models = load_dynamic_models()
-    models[req.modelId] = {
+    model_data = {
         "name": req.name,
         "provider": req.providerId,
         "type": req.type,
         **(req.metadata or {})
     }
+    # 持久化 capabilities 和 tags 字段到动态存储
+    if req.capabilities is not None:
+        model_data["capabilities"] = req.capabilities
+    if req.tags is not None:
+        model_data["tags"] = req.tags
+    models[req.modelId] = model_data
     save_dynamic_models(models)
     return {"success": True, "models": models}
 

@@ -3,7 +3,7 @@
  * 负责从provider API获取模型列表，并解析为统一的Model格式
  */
 
-import type { Model, ModelType, FetchModelsResponse } from '../types/model'
+import type { Model, ModelType, ModelCapability, FetchModelsResponse } from '../types/model'
 import type { Provider } from '../types/provider'
 
 /**
@@ -93,6 +93,28 @@ export function detectModelType(modelId: string): ModelType {
 
     // 默认为chat模型
     return 'chat'
+}
+
+/**
+ * 带 capabilities 优先级的模型类型检测
+ *
+ * 优先级逻辑：
+ * 1. 优先检查 capabilities 中 isUserSelected=true 的条目（用户覆盖）
+ * 2. 若无用户覆盖，回退到基于正则的 detectModelType 检测
+ *
+ * 与后端 get_model_type_with_capabilities 保持一致的优先级策略
+ */
+export function detectModelTypeWithCapabilities(
+    modelId: string,
+    capabilities?: ModelCapability[]
+): ModelType {
+    // 优先检查用户覆盖（isUserSelected=true 的条目）
+    if (capabilities) {
+        const userSelected = capabilities.find(c => c.isUserSelected === true)
+        if (userSelected) return userSelected.type
+    }
+    // 回退到正则检测
+    return detectModelType(modelId)
 }
 
 /**

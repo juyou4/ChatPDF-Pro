@@ -79,15 +79,16 @@ EMBEDDING_MODELS = {
         "price": "Paid",
         "description": "High performance BGE-M3"
     },
-    # Moonshot
-    "moonshot-v1-8k": {
-        "name": "Moonshot: v1-8k",
+    # Moonshot（moonshot-v1-8k 是 chat 模型，已移除；替换为正确的 embedding 模型）
+    "moonshot-embedding-v1": {
+        "name": "Moonshot: moonshot-embedding-v1",
         "provider": "openai",
         "base_url": "https://api.moonshot.cn/v1",
+        "embedding_endpoint": "/embeddings",
         "dimension": 1024,
         "max_tokens": 8192,
         "price": "Paid",
-        "description": "Kimi embedding"
+        "description": "Moonshot AI 嵌入模型"
     },
     # Zhipu
     "embedding-3": {
@@ -109,7 +110,18 @@ EMBEDDING_MODELS = {
         "price": "Free/Limited",
         "description": "Hosted Qwen3 embedding (SiliconFlow)"
     },
-    # MiniMax
+    # SiliconFlow - Qwen Embedding 8B（前端 systemModels.ts 中定义的模型）
+    "Qwen/Qwen-Embedding-8B": {
+        "name": "SiliconFlow: Qwen-Embedding-8B",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "embedding_endpoint": "/embeddings",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "阿里通义千问嵌入模型（硅基流动托管）"
+    },
+    # MiniMax（保留 embo-01 以兼容旧数据）
     "embo-01": {
         "name": "MiniMax: embo-01",
         "provider": "openai",
@@ -117,7 +129,29 @@ EMBEDDING_MODELS = {
         "dimension": 1536,
         "max_tokens": 4096,
         "price": "Paid",
-        "description": "MiniMax embedding"
+        "description": "MiniMax embedding (旧版模型 ID，保留兼容)"
+    },
+    # MiniMax - 与前端 systemModels.ts 同步的模型 ID
+    "minimax-embedding-v2": {
+        "name": "MiniMax: minimax-embedding-v2",
+        "provider": "openai",
+        "base_url": "https://api.minimax.chat/v1",
+        "embedding_endpoint": "/embeddings",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "MiniMax 嵌入模型"
+    },
+    # DeepSeek - 与前端 systemModels.ts 同步
+    "deepseek-embedding-v1": {
+        "name": "DeepSeek: deepseek-embedding-v1",
+        "provider": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "embedding_endpoint": "/embeddings",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "DeepSeek 嵌入模型"
     }
 }
 

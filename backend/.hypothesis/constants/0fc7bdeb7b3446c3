@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\services\table_service.py
-# hypothesis_version: 6.151.5
-
-[' --- |', ' |', ' | ', '*', '-', 'TABLE', 'Table', '[^', '^', '^\\s*\\|.*\\|\\s*$', '^\\s*\\|[\\s\\-:]+\\|\\s*$', '__', '__TABLE_PLACEHOLDER_', '|', '| ', '表']

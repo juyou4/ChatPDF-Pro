@@ -21,6 +21,34 @@ import { useDefaults } from '../contexts/DefaultsContext'
 import ProviderAvatar from './ProviderAvatar'
 
 /**
+ * 模型标签选项列表
+ * 用于新增模型表单中的多选标签组件
+ */
+const TAG_OPTIONS = [
+  { value: 'free', label: '免费' },
+  { value: 'vision', label: '视觉' },
+  { value: 'chinese_optimized', label: '中文优化' },
+  { value: 'reasoning', label: '推理' },
+  { value: 'function_calling', label: '函数调用' },
+  { value: 'web_search', label: '网络搜索' },
+]
+
+/**
+ * 标签值到中文显示名称的映射
+ * 用于模型列表中标签徽章的渲染
+ */
+const TAG_LABELS = {
+  free: '免费',
+  vision: '视觉',
+  chinese_optimized: '中文优化',
+  reasoning: '推理',
+  function_calling: '函数调用',
+  web_search: '网络搜索',
+  embedding: 'Embedding',
+  rerank: 'Rerank',
+}
+
+/**
  * “模型服务管理”面板
  * 对齐 cherry-studio 的三栏结构：左侧 Provider 列表，中间连接配置，右侧模型清单。
  */
@@ -56,6 +84,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     name: '',
     type: 'chat'
   })
+  // 新增模型表单的标签选择状态
+  const [newModelTags, setNewModelTags] = useState([])
   const [customProviderFormOpen, setCustomProviderFormOpen] = useState(false)
   const [customProviderForm, setCustomProviderForm] = useState({
     id: '',
@@ -136,11 +166,17 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
       name: addModelForm.name.trim() || addModelForm.id.trim(),
       providerId: activeProvider.id,
       type: addModelForm.type,
+      // 构建 capabilities 对象，标记为用户手动选择的类型
+      capabilities: [{ type: addModelForm.type, isUserSelected: true }],
+      // 用户选择的标签列表
+      tags: newModelTags,
       metadata: {},
       isSystem: false,
       isUserAdded: true
     })
     setAddModelForm({ id: '', name: '', type: 'chat' })
+    // 重置标签选择
+    setNewModelTags([])
   }
 
   const buildDefaultKey = (type, modelId) => `${activeProvider?.id || ''}:${modelId}`
@@ -238,7 +274,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
       <div className="flex items-center gap-4 overflow-hidden">
         <ProviderAvatar providerId={getIconProviderId(model)} size={36} className="flex-shrink-0 shadow-sm" />
         <div className="min-w-0 flex flex-col gap-0.5">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="text-sm font-bold text-gray-900 truncate" title={model.name || model.id}>
               {model.name || model.id}
             </div>
@@ -247,6 +283,12 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                 {model.metadata.dimension}维
               </span>
             )}
+            {/* 模型标签徽章 */}
+            {model.tags?.map(tag => (
+              <span key={tag} className="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-gray-50 text-gray-600 border border-gray-100">
+                {TAG_LABELS[tag] || tag}
+              </span>
+            ))}
           </div>
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className="truncate max-w-[200px]" title={model.id}>{model.id}</span>
@@ -471,7 +513,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           <input
                             value={activeProvider?.apiKey || ''}
                             onChange={e => handleProviderUpdate('apiKey', e.target.value)}
-                            placeholder="sk-..."
+                            placeholder="sk-... （多个 Key 用逗号分隔）"
                             type="password"
                             className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                           />
@@ -510,9 +552,13 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       </button>
                     </div>
 
+                    {/* 连接测试结果显示，成功时附带延迟信息 */}
                     {testResult && (
                       <div className={`rounded-xl p-3 text-sm border ${testResult.success ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
-                        {testResult.success ? '连接成功' : '连接失败'} {testResult.message || testResult.error || ''}
+                        {testResult.success
+                          ? `连接成功${testResult.latency ? ` (${testResult.latency}ms)` : ''}`
+                          : '连接失败'
+                        } {testResult.message || testResult.error || ''}
                       </div>
                     )}
                     {fetchError && (
@@ -550,6 +596,37 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           value={addModelForm.name}
                           onChange={e => setAddModelForm({ ...addModelForm, name: e.target.value })}
                         />
+                        {/* 标签多选组件 */}
+                        <div className="col-span-2">
+                          <label className="text-xs text-gray-600 mb-1 block">标签（可选）</label>
+                          <div className="flex flex-wrap gap-2">
+                            {TAG_OPTIONS.map(tag => (
+                              <label
+                                key={tag.value}
+                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs cursor-pointer transition-colors ${
+                                  newModelTags.includes(tag.value)
+                                    ? 'border-blue-300 bg-blue-50 text-blue-700'
+                                    : 'border-gray-200 bg-white text-gray-600 hover:border-blue-200'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="sr-only"
+                                  checked={newModelTags.includes(tag.value)}
+                                  onChange={e => {
+                                    if (e.target.checked) {
+                                      setNewModelTags([...newModelTags, tag.value])
+                                    } else {
+                                      setNewModelTags(newModelTags.filter(t => t !== tag.value))
+                                    }
+                                  }}
+                                />
+                                {newModelTags.includes(tag.value) && <Check className="w-3 h-3" />}
+                                {tag.label}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
                         <button
                           onClick={handleAddModel}
                           className="col-span-2 soft-button soft-button-primary rounded-lg py-2 text-sm flex items-center justify-center gap-2"

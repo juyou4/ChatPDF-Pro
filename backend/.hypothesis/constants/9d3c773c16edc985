@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\services\rerank_service.py
-# hypothesis_version: 6.151.5
-
-[30.0, 'chunk', 'cohere', 'jina', 'local', 'rerank_score', 'reranked', 'similarity']
