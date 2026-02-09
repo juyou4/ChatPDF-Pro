@@ -191,22 +191,22 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         {/* 分割线 */}
                         <div className="border-t border-gray-200"></div>
 
-                        {/* 缩放设置 */}
+                        {/* 字体大小设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
                                 <ZoomIn className="w-5 h-5 text-purple-600" />
-                                <h3 className="text-lg font-semibold">全局缩放</h3>
+                                <h3 className="text-lg font-semibold">字体大小</h3>
                             </div>
 
-                            {/* 当前缩放显示 */}
+                            {/* 当前字体大小显示 */}
                             <div className="text-center">
                                 <div className="text-4xl font-bold text-blue-600">
-                                    {Math.round(globalScale * 100)}%
+                                    {Math.round(16 * globalScale)}px
                                 </div>
-                                <div className="text-sm text-gray-500 mt-1">当前缩放比例</div>
+                                <div className="text-sm text-gray-500 mt-1">当前基准字体大小</div>
                             </div>
 
-                            {/* 缩放滑块 */}
+                            {/* 字体大小滑块 */}
                             <div className="space-y-2">
                                 <input
                                     type="range"
@@ -221,13 +221,13 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     }}
                                 />
                                 <div className="flex justify-between text-xs text-gray-500">
-                                    <span>50%</span>
-                                    <span>100%</span>
-                                    <span>200%</span>
+                                    <span>8px</span>
+                                    <span>16px</span>
+                                    <span>32px</span>
                                 </div>
                             </div>
 
-                            {/* 快捷缩放按钮 */}
+                            {/* 快捷字体大小按钮 */}
                             <div className="grid grid-cols-4 gap-2">
                                 {scalePresets.map((preset) => (
                                     <button
@@ -238,7 +238,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             : 'soft-card text-gray-600 hover:text-gray-900'
                                             }`}
                                     >
-                                        {preset.label}
+                                        {Math.round(16 * preset.value)}px
                                     </button>
                                 ))}
                             </div>

@@ -87,9 +87,23 @@ export const GlobalSettingsProvider = ({ children }) => {
         applyFont();
     }, [fontFamily, customFont]);
 
-    // 应用缩放到 CSS
+    // 应用字体大小到 html 根元素
     useEffect(() => {
+        // globalScale 作为字体缩放因子，1.0 = 16px 基准
+        const baseFontSize = 16;
+        const fontSize = Math.round(baseFontSize * globalScale);
+        document.documentElement.style.fontSize = `${fontSize}px`;
         document.documentElement.style.setProperty('--global-scale', globalScale.toString());
+
+        // 清除之前可能残留的 #root transform 和 body zoom
+        const root = document.getElementById('root');
+        if (root) {
+            root.style.transform = '';
+            root.style.transformOrigin = '';
+            root.style.width = '';
+            root.style.height = '';
+        }
+        document.body.style.zoom = '';
     }, [globalScale]);
 
     // 加载 Google Font

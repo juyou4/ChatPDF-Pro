@@ -71,11 +71,7 @@
     font-family: var(--global-font-family);
 }
 
-@supports not (zoom: 1) {
-    body {
-        transform: scale(var(--global-scale));
-    }
-}
+/* 页面缩放由 JS 控制 document.body.style.zoom，此处不设置 */
 
 /* --- Component Classes --- */
 .soft-card {

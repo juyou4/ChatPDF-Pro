@@ -1,0 +1,418 @@
+{
+  "schema_version": 1,
+  "doc_id": "ba0aa0f9eeec08b951c68072f846cc97",
+  "doc_hash": "",
+  "created_at": "2026-02-08T17:35:50.715984+00:00",
+  "config": {
+    "target_chars": 5000,
+    "min_chars": 2500,
+    "max_chars": 6000
+  },
+  "groups": [
+    {
+      "group_id": "group-0",
+      "chunk_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "char_count": 5342,
+      "summary": "538 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Physically Realizable A",
+      "digest": "538 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Physically Realizable Adversarial Creating Attack Against Vision-Based BEV Space 3D Object Detection Jian Wang, Fan Li, Senior Member, IEEE, Song Lv, Lijun He, Member, IEEE, and Chao Shen, Senior Member, IEEE Abstract— Vision-based 3D object detection, a cost-effective I. INTRODUCTION alternative to LiDAR-based solutions, plays a crucial role in mod- Vern autonomous driving systems. Meanwhile, deep models haveISION-BASED 3D object detection [1], [25], [26] has been proven susceptible to adversarial examples, and attackingwidespread applications in fields such as autonomous detection models can lead to serious driving consequences. Most driving and robotics, which utilizes multiple cameras coveringprevious adversarial attacks targeted 2D detectors by placing a 360◦field of view to perceive and locate the foregroundthe patch in a specific region within the object’s bounding box in the image, allowing it to evade detection. However,",
+      "full_text": "538 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Physically Realizable Adversarial Creating Attack Against Vision-Based BEV Space 3D Object Detection Jian Wang, Fan Li, Senior Member, IEEE, Song Lv, Lijun He, Member, IEEE, and Chao Shen, Senior Member, IEEE Abstract— Vision-based 3D object detection, a cost-effective I. INTRODUCTION alternative to LiDAR-based solutions, plays a crucial role in mod- Vern autonomous driving systems. Meanwhile, deep models haveISION-BASED 3D object detection [1], [25], [26] has been proven susceptible to adversarial examples, and attackingwidespread applications in fields such as autonomous detection models can lead to serious driving consequences. Most driving and robotics, which utilizes multiple cameras coveringprevious adversarial attacks targeted 2D detectors by placing a 360◦field of view to perceive and locate the foregroundthe patch in a specific region within the object’s bounding box in the image, allowing it to evade detection. However,\n2D detectors by placing a 360◦field of view to perceive and locate the foregroundthe patch in a specific region within the object’s bounding box in the image, allowing it to evade detection. However, objects in the environment and benefits from low deployment attacking 3D detector is more difficult because the adversarycosts. Recently, 3D perception tasks [2], [3], [4] conducted may be observed from different viewpoints and distances, andin Bird’s Eye View (BEV) space [5], [6], [7] have attracted there is a lack of effective methods to differentiably render the tremendous attention, thanks to the holistic representation,3D space poster onto the image. In this paper, we propose rich semantic, precise localization, and naturally support mosta novel attack setting where a carefully crafted adversarial poster (looks like meaningless graffiti) is learned and pasteddownstream tasks. The vision-based BEV detectors typically on the road surface, inducing the vision-based 3D detectors\nadversarial poster (looks like meaningless graffiti) is learned and pasteddownstream tasks. The vision-based BEV detectors typically on the road surface, inducing the vision-based 3D detectors totransform the image features to the unified BEV space through perceive a non-existent object. We show that even a single 2Ddepth estimation or transformers and perform the detection poster is sufficient to deceive the 3D detector with the desired process upon these BEV feature maps. Despite the great suc-attack effect, and the poster is universal, which is effective cess that has been made, DNN-based models are found to beacross various scenes, viewpoints, and distances. To generate the poster, an image-3D applying algorithm is devised to establishvulnerable to the carefully crafted adversarial examples [10], the pixel-wise mapping relationship between the image area [11], [12], which can manipulate the model to produce any and the 3D space poster so that the poster can be optimized desired\nexamples [10], the pixel-wise mapping relationship between the image area [11], [12], which can manipulate the model to produce any and the 3D space poster so that the poster can be optimized desired outputs [8], [9]. For the 3D detection task, creatingthrough standard backpropagation. Moreover, a ground-truth fake targets and hiding real objects correspond to two typesmasked optimization strategy is presented to effectively learn the of errors that the detector may produce, namely false positivesposter without interference from scene objects. Extensive results including real-world experiments validate the effectiveness of our(FP) and false negatives (FN). FN attacks can cause the adversarial attack. The transferability and defense strategy areperception system to fail to perceive real objects, such as a also investigated to comprehensively understand the proposed car driving on the lane, leading the autonomous vehicle toattack. continue moving and ultimately resulting in a collision.\nsuch as a also investigated to comprehensively understand the proposed car driving on the lane, leading the autonomous vehicle toattack. continue moving and ultimately resulting in a collision. In con- Index Terms— Physical adversarial attack, visual 3D detection, trast, FP predictions can mistakenly identify non-existent universal patch, adversarial robustness. objects, triggering unnecessary or inappropriate actions—such as sudden braking or evasive maneuvers—that may endanger Received 10 June 2024; revised 3 December 2024 and 27 December 2024; accepted 29 December 2024. Date of publication 10 January 2025; date ofthe passengers’ safety. The underlying vulnerabilities, in concurrent version 17 January 2025. This work was supported in part by thejunction with the safety and reliability concerns, motivate us to National Science and Technology Major Project under Grant 2022ZD0115803, investigate the realistic adversarial attacks on widely deployed in part by the Natural Science Basic\nconcerns, motivate us to National Science and Technology Major Project under Grant 2022ZD0115803, investigate the realistic adversarial attacks on widely deployed in part by the Natural Science Basic Research Plan in Shaanxi Province of China under Grant 2023-JC-JQ-51, in part by the Fundamental Research3D detection models in autonomous driving systems.",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-1",
+      "chunk_indices": [
+        6
+      ],
+      "char_count": 812,
+      "summary": "See https://www.ieee.org/publications/rights/index.html for more information.\nWA",
+      "digest": "See https://www.ieee.org/publications/rights/index.html for more information.\nWANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 539 applied to 3D detection scenarios faces the following issues, thereby limiting their physical feasibility. Firstly, physical perspective transformation—image data are captured from a perspective view, and the image region covered by a real patch in 3D space can appear at various distances, angles, and viewpoints, where the patch region cannot be simulated simply through a linear transformation and pasted on images. Secondly, lacking the depth information in 3D space—attackers cannot determine the spoofing location of the patch in 3D space given only the image inputs, making it difficult to reproduce in the physical world.",
+      "full_text": "See https://www.ieee.org/publications/rights/index.html for more information.\nWANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 539 applied to 3D detection scenarios faces the following issues, thereby limiting their physical feasibility. Firstly, physical perspective transformation—image data are captured from a perspective view, and the image region covered by a real patch in 3D space can appear at various distances, angles, and viewpoints, where the patch region cannot be simulated simply through a linear transformation and pasted on images. Secondly, lacking the depth information in 3D space—attackers cannot determine the spoofing location of the patch in 3D space given only the image inputs, making it difficult to reproduce in the physical world.",
+      "keywords": [],
+      "page_range": [
+        1,
+        1
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-2",
+      "chunk_indices": [
+        7
+      ],
+      "char_count": 828,
+      "summary": "To perform the physically realizable adversarial attack against visual 3D detect",
+      "digest": "To perform the physically realizable adversarial attack against visual 3D detectors, Zhu et al. [18] propose a 3D consistent patch by pasting it to the side of a target vehicle, allowing it to evade the detection process from 3D detectors.\nHowever, their attack only considers learning an adversarial patch for a few continuous frames or overlaps with multiple cameras. So, the learned patch is not universal and hard to generalize to other scenarios. To mitigate this problem, Li et al. [19] propose Adv3D upon NeRF techniques to learn an Fig. 1. Our proposed adversarial poster attack. By pasting the learned poster adversarial vehicle with camouflage texture, so that the craftedon the road surface, the detectors will perceive a ‘ghost’ object at the poster location. vehicle together with surrounding targets can be hidden.",
+      "full_text": "To perform the physically realizable adversarial attack against visual 3D detectors, Zhu et al. [18] propose a 3D consistent patch by pasting it to the side of a target vehicle, allowing it to evade the detection process from 3D detectors.\nHowever, their attack only considers learning an adversarial patch for a few continuous frames or overlaps with multiple cameras. So, the learned patch is not universal and hard to generalize to other scenarios. To mitigate this problem, Li et al. [19] propose Adv3D upon NeRF techniques to learn an Fig. 1. Our proposed adversarial poster attack. By pasting the learned poster adversarial vehicle with camouflage texture, so that the craftedon the road surface, the detectors will perceive a ‘ghost’ object at the poster location. vehicle together with surrounding targets can be hidden.",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-3",
+      "chunk_indices": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "char_count": 5217,
+      "summary": "540 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 how to use image featur",
+      "digest": "540 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 how to use image features to construct BEV features in 3Dobject on top of a vehicle so that the entire host vehicle can space. According to the view transformation process, currentbe hidden. The following works demonstrate the feasibility advanced works can be divided into depth-based methodsof attacking the LiDAR-camera fusion-based detection system and network-based methods. Depth-based methods explicitlyusing a 3D-printed object [41] or simply attacking the camera estimate a depth distribution and a context feature for each modality [42]. The works above cause FN predictions from image feature pixel and then lift 2D features to the 3D spacethe detector so that the real objects can be hidden. Another according to the camera’s intrinsic and extrinsic parameters.set of works achieves the goal of creating fake objects [43] Finally, the BEV feature for each position is aggregated fromand hiding real ones [44] by strategically\nintri",
+      "full_text": "540 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 how to use image features to construct BEV features in 3Dobject on top of a vehicle so that the entire host vehicle can space. According to the view transformation process, currentbe hidden. The following works demonstrate the feasibility advanced works can be divided into depth-based methodsof attacking the LiDAR-camera fusion-based detection system and network-based methods. Depth-based methods explicitlyusing a 3D-printed object [41] or simply attacking the camera estimate a depth distribution and a context feature for each modality [42]. The works above cause FN predictions from image feature pixel and then lift 2D features to the 3D spacethe detector so that the real objects can be hidden. Another according to the camera’s intrinsic and extrinsic parameters.set of works achieves the goal of creating fake objects [43] Finally, the BEV feature for each position is aggregated fromand hiding real ones [44] by strategically\nintrinsic and extrinsic parameters.set of works achieves the goal of creating fake objects [43] Finally, the BEV feature for each position is aggregated fromand hiding real ones [44] by strategically injecting fake laser those lifted features falling into the same BEV grid. Thispoints into the target LiDAR sensor [45]. Although these paradigm was first proposed by LSS [20], and BEVDet [21] isattacks have shown promising results, they all require complex the first to apply it to the 3D detection task. BEVDet4D [22]implementation conditions such as 3D printing of adversarial and BEVDepth [23] further boost this pipeline by introducingobjects or sophisticated electro-optical emission and control temporal cues and explicit depth supervision. The network-modules. In this work, we propose a more accessible and based methods utilize a top-down strategy by first constructingfeasible attack method against vision-based 3D detectors by the predefined BEV queries and then searching each BEVsimply\naccessible and based methods utilize a top-down strategy by first constructingfeasible attack method against vision-based 3D detectors by the predefined BEV queries and then searching each BEVsimply printing and pasting the learned poster on the road context from the multi-view image features by transformersurface thus leading to significant detection errors. architectures [57], [58]. Among them, Tesla first leverages cross-attention between BEV queries and image features III. METHODto perform view transformation. BEVFormer [24] further aggregates the history BEV information and uses deformableIn this section, we introduce the attack pipeline for learning attention to reduce the computational budgets.the adversarial poster, which can be pasted on the road surface and induces 3D detectors to perceive a non-existent object such as a car. Moreover, the learned poster content, appearingB. Physical Adversarial Attack on 2D Image as seemingly meaningless graffiti to the human eyes, can The\nto perceive a non-existent object such as a car. Moreover, the learned poster content, appearingB. Physical Adversarial Attack on 2D Image as seemingly meaningless graffiti to the human eyes, can The adversarial attacks on 2D images have been well effectively mislead the deep models. Generally, we argue the studied and more and more works are devoted to designing crafted poster to be (1) universal—the poster is effective across physical space attacks. A popular topic is to use adversarial different road scenes, which is scene-agnostic; (2) robust to patches to mislead a well-trained person detector to make viewing conditions—the poster can withstand observations false negative prediction results, which can be realized by from different views and distances; (3) transferable—the printed cardboard [27], [28], cloak [30], [31], and portable learned poster exhibits a certain degree of transferability across monitor [29]. To induce model failure in traffic road scenarios, different models\n[27], [28], cloak [30], [31], and portable learned poster exhibits a certain degree of transferability across monitor [29]. To induce model failure in traffic road scenarios, different models and parameter initialization. many efforts have been made to mislead road sign classifiers In the training phase, we learn the poster on the training by physical perturbations [32], adversarial natural styles [33], scenes following Expectation of Transformation (EOT) [51], or simply use a laser beam [35]. Sato et al. [34] propose [52], where we iteratively render the poster to each frame and dirty road patches to effectively attack the automated lane update the content. Therefore, the method section is organized centering systems. A series of works [46], [47], [48], [49], [50] to answer: where to place the poster? how to differentiably are proposed to learn adversarial camouflage applying on 3D render the poster onto the image? and how to optimize it object surfaces so that the target object can\nthe poster? how to differentiably are proposed to learn adversarial camouflage applying on 3D render the poster onto the image? and how to optimize it object surfaces so that the target object can evade detection. effectively?",
+      "keywords": [],
+      "page_range": [
+        3,
+        3
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-4",
+      "chunk_indices": [
+        14
+      ],
+      "char_count": 906,
+      "summary": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE",
+      "digest": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 541 Fig. 2. The attack pipeline of our adversarial poster. We predefine a randomly initialized poster with a fixed physical size and digital resolution. The poster is placed on the road surface without overlapping with scene objects. Then we project the poster corners to the image plane and find the corresponding image poster area. By establishing the correspondence between each pixel in the image poster area with the 3D space poster, we can apply the poster to the image while backpropagating the gradients.\nB. Sampling the Poster Position in 3D Space We place the poster in the 3D space satisfying (1) the poster must be placed on the road surface to ensure reproducibility in the physical scenario. (2) the expected bounding box of the poster does not overlap with existing 3D objects in the scene.",
+      "full_text": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 541 Fig. 2. The attack pipeline of our adversarial poster. We predefine a randomly initialized poster with a fixed physical size and digital resolution. The poster is placed on the road surface without overlapping with scene objects. Then we project the poster corners to the image plane and find the corresponding image poster area. By establishing the correspondence between each pixel in the image poster area with the 3D space poster, we can apply the poster to the image while backpropagating the gradients.\nB. Sampling the Poster Position in 3D Space We place the poster in the 3D space satisfying (1) the poster must be placed on the road surface to ensure reproducibility in the physical scenario. (2) the expected bounding box of the poster does not overlap with existing 3D objects in the scene.",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-5",
+      "chunk_indices": [
+        15,
+        16,
+        17,
+        18
+      ],
+      "char_count": 2867,
+      "summary": "542 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Given the camera intrin",
+      "digest": "542 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Given the camera intrinsic and extrinsic parameters, we getAlgorithm 1 Pseudocode Diagram of Training the Adversarial 4 4 Posterthe projection matrix ML2C ∈ R ×and then project the 3D corner p = (x, y, z) to the image points ˜p ∈ R2: i i i i i T T[u, v, z, 1] = M × [x, y, z, 1]L2C i i i p˜ = [u/z, v/z] (4)i According to the Eq. 4, we get four postercorners { ˜p, ˜p, ˜p, ˜p } in image plane. The image pixels falling into1 2 3 4 the quadrangle region defined by { ˜p ˜p ˜p ˜p } constitute1, 2, 3, 4 the image poster area.\nFor each pixel in the image poster area, we need to find its position in the 3D space for (1) applying the poster onto the image according to the pixel-wise mapping relationship, and (2) propagating the gradients from the image to the poster to update its content. Specifically, for an image pixel ˜pi = (u, v) inside the poster area, there is a ray passing throughi i the camera center, and every point on this ray is ",
+      "full_text": "542 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Given the camera intrinsic and extrinsic parameters, we getAlgorithm 1 Pseudocode Diagram of Training the Adversarial 4 4 Posterthe projection matrix ML2C ∈ R ×and then project the 3D corner p = (x, y, z) to the image points ˜p ∈ R2: i i i i i T T[u, v, z, 1] = M × [x, y, z, 1]L2C i i i p˜ = [u/z, v/z] (4)i According to the Eq. 4, we get four postercorners { ˜p, ˜p, ˜p, ˜p } in image plane. The image pixels falling into1 2 3 4 the quadrangle region defined by { ˜p ˜p ˜p ˜p } constitute1, 2, 3, 4 the image poster area.\nFor each pixel in the image poster area, we need to find its position in the 3D space for (1) applying the poster onto the image according to the pixel-wise mapping relationship, and (2) propagating the gradients from the image to the poster to update its content. Specifically, for an image pixel ˜pi = (u, v) inside the poster area, there is a ray passing throughi i the camera center, and every point on this ray is mapped to p˜ due to the lack of depth information. However, we havei the prior that the transformed 3D point lies on the poster, which means its Z−coordinate values are equal to the poster height. With this information, we can calculate the accurate 3D position of each pixel in the image poster area. Formally, let pi = (xi, yi, zi) be the transformed 3D point and ci be the depth for the image pixel ˜p satisfying: i −1 T TM × [u c, v c, c, 1] = [x, y, z, 1]L2C i i i i i i i i z = z p (5)i By jointly solving the Eq. 5, we can obtain the coordinates of p and the pixel color\nfor the image pixel ˜p satisfying: i −1 T TM × [u c, v c, c, 1] = [x, y, z, 1]L2C i i i i i i i i z = z p (5)i By jointly solving the Eq. 5, we can obtain the coordinates of p and the pixel color for ˜p can be interpolated across thei i neighbor values around p on the poster. Notably, the entirei process of applying the poster to the image is differentiable, allowing us to optimize the content of the poster through standard backpropagation and the detailed optimization strategy will be discussed in the next section.\nBased on that, we propose a ground-truth masked opti- D. Effective Optimization for the 3D Space Postermization strategy to directly optimize the poster to avoid Generally, the optimization goal consists of the adversarialinterference from existing scene objects. Specifically, we mask part and total variation of the poster. The adversarial loss isout the image areas of all scene objects according to the annoused to mislead the model to output corresponding detection tations B, ensuring that the training images only contain thegt results at the poster location, while the total variation lossspoofed objects introduced by our poster. Thus the adversarial makes sure that the generated poster has a smooth colorloss becomes: transition and prevents noisy content.",
+      "keywords": [],
+      "page_range": [
+        5,
+        5
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-6",
+      "chunk_indices": [
+        19
+      ],
+      "char_count": 998,
+      "summary": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE",
+      "digest": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 545 TABLE IV THE ATTACK SUCCESS RATES (%) WHEN ATTACKING KITTI DATASET in each frame is much smaller than the ground truth objects, the adversarial part we aim for may be overwhelmed by the irrelevant foreground loss, leading to indirect and inefficient Fig. 5. We show four types of attacked scenes on a single frame. The attackoptimization of the poster. By eliminating the side effects ofpatterns and corresponding spoofing bounding boxes are presented. scene objects on the optimization objective, the GTMO further boosts the ASRs by up to 20%. We also visualize some of the learned poster has more abstract content, resembling casualthe learned posters w/ and w/o masking GT as shown in doodles (visualization results are shown in Fig. 4), so it is hard Fig. 6(a), (j), (c), and (k). It is interesting to find that the posters generated by the masking strategy exhibit more vividfor the human",
+      "full_text": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 545 TABLE IV THE ATTACK SUCCESS RATES (%) WHEN ATTACKING KITTI DATASET in each frame is much smaller than the ground truth objects, the adversarial part we aim for may be overwhelmed by the irrelevant foreground loss, leading to indirect and inefficient Fig. 5. We show four types of attacked scenes on a single frame. The attackoptimization of the poster. By eliminating the side effects ofpatterns and corresponding spoofing bounding boxes are presented. scene objects on the optimization objective, the GTMO further boosts the ASRs by up to 20%. We also visualize some of the learned poster has more abstract content, resembling casualthe learned posters w/ and w/o masking GT as shown in doodles (visualization results are shown in Fig. 4), so it is hard Fig. 6(a), (j), (c), and (k). It is interesting to find that the posters generated by the masking strategy exhibit more vividfor the human",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-7",
+      "chunk_indices": [
+        20,
+        21,
+        22,
+        23,
+        24
+      ],
+      "char_count": 3671,
+      "summary": "(visualization results are shown in Fig. 4), so it is hard Fig. 6(a), (j), (c), ",
+      "digest": "(visualization results are shown in Fig. 4), so it is hard Fig. 6(a), (j), (c), and (k). It is interesting to find that the posters generated by the masking strategy exhibit more vividfor the human eyes to recognize it as a foreground object. and discriminative patterns. 2) Physical Size: We fix the pixel density (0 5cm ×0 5cm) C. Transferability.. and train the poster with different physical sizes on BEVDet.\nWe investigate whether the learned posters transfer toThe results are shown in Fig. 7(c). We observe that the physical different detectors, backbone networks, and parameter initial-size of the poster is the primary factor influencing the ASR. ization. We further train three posters learned on the retrainedA larger poster exhibits more pixel area in the image and thus BEVFormer, BEVDet, and BEVDet4D with different randomhas stronger attack capabilities. However, larger posters are seeds, which we denote as BF-Res50-R, BD-Res50-R, andmore noticeable to humans and may be challenging ",
+      "full_text": "(visualization results are shown in Fig. 4), so it is hard Fig. 6(a), (j), (c), and (k). It is interesting to find that the posters generated by the masking strategy exhibit more vividfor the human eyes to recognize it as a foreground object. and discriminative patterns. 2) Physical Size: We fix the pixel density (0 5cm ×0 5cm) C. Transferability.. and train the poster with different physical sizes on BEVDet.\nWe investigate whether the learned posters transfer toThe results are shown in Fig. 7(c). We observe that the physical different detectors, backbone networks, and parameter initial-size of the poster is the primary factor influencing the ASR. ization. We further train three posters learned on the retrainedA larger poster exhibits more pixel area in the image and thus BEVFormer, BEVDet, and BEVDet4D with different randomhas stronger attack capabilities. However, larger posters are seeds, which we denote as BF-Res50-R, BD-Res50-R, andmore noticeable to humans and may be challenging to print, 4D-Res50-R respectively. The transfer results on a total of nineso, attackers need to make a trade-off between the physical models are presented in Table III and all posters are visualizedsize and attack capability. in Fig. 6. The poster is learned from the corresponding source3) Digital Resolution: We further fix the physical size as model and the attacks are performed on the target model. 2m×3m\ncapability. in Fig. 6. The poster is learned from the corresponding source3) Digital Resolution: We further fix the physical size as model and the attacks are performed on the target model. 2m×3m and learn the poster with different digital resolutions. “BF”, “BD”, and “4D” denote the BEVFormer, BEVDet, andAs shown in Fig. 7(d), the ASR is less sensitive to the pixel BEVDet4D respectively. density, and even a poster with only 100×150 pixels exhibits Firstly, we observe that all posters can effectively deceivenearly the same adversarial performance with larger resolution the target detectors even attacking models that they haveones. However, when the poster resolution is set too high, not been trained on, demonstrating a certain transferability.the ASR drops significantly. We interpret this as insufficient This enables attackers to perform practical black-box attackstraining on high-resolution posters within the same training without access to the target model information. Secondly,\nas insufficient This enables attackers to perform practical black-box attackstraining on high-resolution posters within the same training without access to the target model information. Secondly, epoch. we empirically find that the posters learned from BEVFormer exhibit stronger transferability. We speculate that this isE. Discussion because BEVFormer constructs BEV features using a query- 1) Attacking KITTI Dataset: The KITTI dataset [60] onlybased approach, where each BEV query focuses more on the annotates 3D objects in front of the self-vehicle, specificallyoverall semantics of the image poster region during the querythose captured by the front-view camera. We train the BEVDeting process. As a result, the learned poster exhibits smoother on the train split (3712 samples) and further learn the adversar-details and more compact overall semantic information for the detector. ial poster. The attack results on validation split (3769 samples) are given in Table IV. Our attack algorithm\nthe adversar-details and more compact overall semantic information for the detector. ial poster. The attack results on validation split (3769 samples) are given in Table IV. Our attack algorithm can successfully extend to the KITTI dataset, achieving 641% ASR under.",
+      "keywords": [],
+      "page_range": [
+        8,
+        8
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-8",
+      "chunk_indices": [
+        25
+      ],
+      "char_count": 197,
+      "summary": "546 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 6. Visualization o",
+      "digest": "546 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 6. Visualization of the learned posters.\nFig. 7. Ablation experiments for optimization strategy, physical size, and digital resolution.",
+      "full_text": "546 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 6. Visualization of the learned posters.\nFig. 7. Ablation experiments for optimization strategy, physical size, and digital resolution.",
+      "keywords": [],
+      "page_range": [
+        9,
+        9
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-9",
+      "chunk_indices": [
+        26
+      ],
+      "char_count": 997,
+      "summary": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE",
+      "digest": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 547 TABLE VI PHYSICAL ATTACKS UNDER DIFFERENT DISTANCES OF THE POSTER B. Physical Attack Result We place the poster in the following two typical scenarios: 1) Parking spaces on the side of the road, and 2) Directly in front of the ego-vehicle. The attack results are shown in Fig. 10. Compared to the digital space attack, the physicalFig. 9. Attacks at the overlapping region between multiple cameras. attack may face more complex factors, such as lighting conditions, sensor noise, printing color differences, poster wrinkles, the non-road background. During testing, however, the attackand so on. However, our poster can effectively induce the detector to output false predictions in the physical world.positions are not restricted to these regions, for example, the attack can be carried out in other cameras or the overlappingSuch attacks could potentially cause autonomous vehicles to brake",
+      "full_text": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 547 TABLE VI PHYSICAL ATTACKS UNDER DIFFERENT DISTANCES OF THE POSTER B. Physical Attack Result We place the poster in the following two typical scenarios: 1) Parking spaces on the side of the road, and 2) Directly in front of the ego-vehicle. The attack results are shown in Fig. 10. Compared to the digital space attack, the physicalFig. 9. Attacks at the overlapping region between multiple cameras. attack may face more complex factors, such as lighting conditions, sensor noise, printing color differences, poster wrinkles, the non-road background. During testing, however, the attackand so on. However, our poster can effectively induce the detector to output false predictions in the physical world.positions are not restricted to these regions, for example, the attack can be carried out in other cameras or the overlappingSuch attacks could potentially cause autonomous vehicles to brake",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-10",
+      "chunk_indices": [
+        27,
+        28
+      ],
+      "char_count": 1860,
+      "summary": "world.positions are not restricted to these regions, for example, the attack can",
+      "digest": "world.positions are not restricted to these regions, for example, the attack can be carried out in other cameras or the overlappingSuch attacks could potentially cause autonomous vehicles to brake suddenly, posing a safety risk to passengers. Moreover, region between multiple cameras. Some visualization results are shown in Fig. 9. When rendering, we consider the posterwe evaluate the poster attack under 1) indoor scenes, and is captured by a specific camera when four projected corner2) large area distortion. Fig. 12(a) shows that the poster can still keep attack efficacy in indoor environments, where therepoints have positive depth values, and at least one projected corner falls into the image area. Therefore, when the poster isare significant background differences compared to outdoor scenes. This also reflects the insensitivity of the learnedcaptured by multiple cameras, we can still render it onto each image and perform effective attacks. In fact, when the poster isposter to the\nsc",
+      "full_text": "world.positions are not restricted to these regions, for example, the attack can be carried out in other cameras or the overlappingSuch attacks could potentially cause autonomous vehicles to brake suddenly, posing a safety risk to passengers. Moreover, region between multiple cameras. Some visualization results are shown in Fig. 9. When rendering, we consider the posterwe evaluate the poster attack under 1) indoor scenes, and is captured by a specific camera when four projected corner2) large area distortion. Fig. 12(a) shows that the poster can still keep attack efficacy in indoor environments, where therepoints have positive depth values, and at least one projected corner falls into the image area. Therefore, when the poster isare significant background differences compared to outdoor scenes. This also reflects the insensitivity of the learnedcaptured by multiple cameras, we can still render it onto each image and perform effective attacks. In fact, when the poster isposter to the\nscenes. This also reflects the insensitivity of the learnedcaptured by multiple cameras, we can still render it onto each image and perform effective attacks. In fact, when the poster isposter to the attack scenarios and demonstrates its universal fully captured by a camera and we obtain four corner positionscharacteristic. In the real world, the poster may experience varying degrees of occlusion or distortion. We simulate largein the image, the subsequent applying process is equivalent to using a perspective transformation to render the poster ontoarea distortion in the physical world and demonstrate the robustness of our poster in Fig. 12(b). The generality andthe image. robustness are achieved by optimizing the poster across the entire dataset and sampling positions (expectation over scene V. PHYSICAL WORLD ATTACK distribution and transformation).",
+      "keywords": [],
+      "page_range": [
+        10,
+        10
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-11",
+      "chunk_indices": [
+        29,
+        30,
+        31
+      ],
+      "char_count": 1550,
+      "summary": "548 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 10. Poster attacks",
+      "digest": "548 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 10. Poster attacks in the physical-world.\nTABLE VII ATTACK SUCCESS RATES (%) BEFORE AND AFTER APPLYING ADVERSARIAL AUGMENTATION AS DEFENSE and detectable by the model. These features are usually localmodel making an incorrect prediction. Take a classification and low-level semantic, thus difficult to recognize by humans.model as an example: attackers can optimize a patch such However, the reason why these visual contents can be adoptedthat any image attacked by it can be misclassified into a by detectors is that deep models have not yet learned general, fixed incorrect category [15]. Such a patch must contain high-level visual semantics from the natural data. the critical class features [54], [55], enabling it to dominate Consider constructing a universal patch P that is effectivethe model’s focus regardless of the original input. Interestacross different images: ingly, these patches often consist of abstract, unrecognizable",
+      "full_text": "548 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 Fig. 10. Poster attacks in the physical-world.\nTABLE VII ATTACK SUCCESS RATES (%) BEFORE AND AFTER APPLYING ADVERSARIAL AUGMENTATION AS DEFENSE and detectable by the model. These features are usually localmodel making an incorrect prediction. Take a classification and low-level semantic, thus difficult to recognize by humans.model as an example: attackers can optimize a patch such However, the reason why these visual contents can be adoptedthat any image attacked by it can be misclassified into a by detectors is that deep models have not yet learned general, fixed incorrect category [15]. Such a patch must contain high-level visual semantics from the natural data. the critical class features [54], [55], enabling it to dominate Consider constructing a universal patch P that is effectivethe model’s focus regardless of the original input. Interestacross different images: ingly, these patches often consist of abstract, unrecognizable patterns to humans, which reveals that the model has notarg minEx∼D J (F (A(x, P)), yad) (9)2 v P\nInterestacross different images: ingly, these patches often consist of abstract, unrecognizable patterns to humans, which reveals that the model has notarg minEx∼D J (F (A(x, P)), yad) (9)2 v P learned the general visual representation from the natural data, During the optimization, each step updates the patch alonginstead, its decisions can be manipulated by these adversarial the gradient direction which maximizes the probability of the patterns.",
+      "keywords": [],
+      "page_range": [
+        11,
+        11
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-12",
+      "chunk_indices": [
+        32
+      ],
+      "char_count": 637,
+      "summary": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE",
+      "digest": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 549 TABLE VIII ATTACK SUCCESS RATES (%) ON THE DEFENDED MODEL In conclusion, 1) Why does the creating attack work?\nThe poster can provide the necessary object features from the perspective view; 2) Why are the posters difficult for humans to recognize? Deep models have not yet learned high-level visual semantics, making these local and low-level visual contents sufficient for the model; 3) Why does it still work when the poster is deformed or even incomplete?\nThe object information contained in the poster is potentially redundant.",
+      "full_text": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 549 TABLE VIII ATTACK SUCCESS RATES (%) ON THE DEFENDED MODEL In conclusion, 1) Why does the creating attack work?\nThe poster can provide the necessary object features from the perspective view; 2) Why are the posters difficult for humans to recognize? Deep models have not yet learned high-level visual semantics, making these local and low-level visual contents sufficient for the model; 3) Why does it still work when the poster is deformed or even incomplete?\nThe object information contained in the poster is potentially redundant.",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-13",
+      "chunk_indices": [
+        33,
+        34
+      ],
+      "char_count": 1845,
+      "summary": "VI. DEFENSE Fig. 11. The built 3D data acquisition system.We investigate the def",
+      "digest": "VI. DEFENSE Fig. 11. The built 3D data acquisition system.We investigate the defense method by finetuning the detector with the adversarial poster for another 2 epochs (with CBGS [63]). From Table VII we observe that introducing adversarial augmentation can significantly defend against poster attacks, not only the seen poster during training but also the unseen posters learned from other detectors. Specifically, the ASRs of the models after adversarial augmentation are consistently reduced to about 1% at I OU, which is even0.1 much lower than the attack effect of using real vehicle photos as posters. This greatly improves the adversarial robustness of the model. We analyze the defense capability of the unseen posters can be attributed to the strong transferability of posters between different models. From Fig. 6(a)-(i), we can see that there are many similar features among different posters, such as numerous bright spots under the overall black background.\nMoreover, we re-train an adve",
+      "full_text": "VI. DEFENSE Fig. 11. The built 3D data acquisition system.We investigate the defense method by finetuning the detector with the adversarial poster for another 2 epochs (with CBGS [63]). From Table VII we observe that introducing adversarial augmentation can significantly defend against poster attacks, not only the seen poster during training but also the unseen posters learned from other detectors. Specifically, the ASRs of the models after adversarial augmentation are consistently reduced to about 1% at I OU, which is even0.1 much lower than the attack effect of using real vehicle photos as posters. This greatly improves the adversarial robustness of the model. We analyze the defense capability of the unseen posters can be attributed to the strong transferability of posters between different models. From Fig. 6(a)-(i), we can see that there are many similar features among different posters, such as numerous bright spots under the overall black background.\nMoreover, we re-train an adversarial poster on the defended Fig. 12. Attack results in indoor scene and poster distortion. We crumple the poster to test against physical deformations that are not easily simulated.model (after adversarial augmentation) and present the results in Table VIII. The poster learned from the defended model can still spoof the fake object, but the ASR does drop.\nWe show a re-trained poster in Fig. 6(l), it exhibits sharper color changes locally and shows significant differences in overall style compared to the previous posters. This indicates that the poster can still learn useful deceptive content targeting weaknesses in the detection model. We consider that future Fig. 13. Visualization of the poster at different distances.works could apply the bi-level loop of adversarial training to further enhance the model’s adversarial robustness.",
+      "keywords": [],
+      "page_range": [
+        12,
+        12
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-14",
+      "chunk_indices": [
+        35,
+        36,
+        37,
+        38,
+        39
+      ],
+      "char_count": 3480,
+      "summary": "550 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 poster and place it on ",
+      "digest": "550 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 poster and place it on the road surface to ‘create’ a non-[18] Z. Zhu et al., “Understanding the robustness of 3D object detection existent object at the desired location. The poster is generatedwith bird’s-eye-view representations in autonomous driving,” in Proc.\nIEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2023, by the proposed image-3D applying algorithm and GT-masked pp. 21600–21610. optimization strategy. Extensive experiments demonstrate the[19] L. Li, Q. Lian, and Y.-C. Chen, “Adv3D: Generating 3D adversarial effectiveness of 3D-PA and show that it can successfully makeexamples for 3D object detection in driving scenarios with NeRF,” 2023, real-world threats in the physical attack setting. We further arXiv:2309.01351. [20] J. Philion and S. Fidler, “Lift, splat, shoot: Encoding images from arbishow that introducing adversaries for training is an effectivetrary camera rigs by implicitly unprojecting to 3D,” in",
+      "full_text": "550 IEEE TRANSACTIONS ON IMAGE PROCESSING, VOL. 34, 2025 poster and place it on the road surface to ‘create’ a non-[18] Z. Zhu et al., “Understanding the robustness of 3D object detection existent object at the desired location. The poster is generatedwith bird’s-eye-view representations in autonomous driving,” in Proc.\nIEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2023, by the proposed image-3D applying algorithm and GT-masked pp. 21600–21610. optimization strategy. Extensive experiments demonstrate the[19] L. Li, Q. Lian, and Y.-C. Chen, “Adv3D: Generating 3D adversarial effectiveness of 3D-PA and show that it can successfully makeexamples for 3D object detection in driving scenarios with NeRF,” 2023, real-world threats in the physical attack setting. We further arXiv:2309.01351. [20] J. Philion and S. Fidler, “Lift, splat, shoot: Encoding images from arbishow that introducing adversaries for training is an effectivetrary camera rigs by implicitly unprojecting to 3D,” in Proc. Eur. Conf. defense method and can improve the adversarial robustness Comput. Vis., Cham, Switzerland. Springer, Aug. 2020, pp. 194–210. of the model. Our future works will focus on: 1) improving[21] J. Huang, G. Huang, Z. Zhu, Y. Ye, and D. Du, “BEVDet: Highperformance multi-camera 3D object detection in\nAug. 2020, pp. 194–210. of the model. Our future works will focus on: 1) improving[21] J. Huang, G. Huang, Z. Zhu, Y. Ye, and D. Du, “BEVDet: Highperformance multi-camera 3D object detection in bird-eye-view,” 2021, the stealthiness and naturalness of adversarial posters, makarXiv:2112.11790. ing them harder to detect by humans; (2) further extending[22] J. Huang and G. Huang, “BEVDet4D: Exploit temporal cues in multiadversarial posters to the hiding attack (FN), achieving a morecamera 3D object detection,” 2022, arXiv:2203.17054. complete attack pipeline. We hope this work could promote[23] Y. Li et al., “BEVDepth: Acquisition of reliable depth for multi-view 3D object detection,” in Proc. AAAI Conf. Artif. Intell., Jun. 2023, vol. 37, robust 3D perception and provide valuable insights for safety- no. 2, pp. 1477–1485. critical applications like self-driving. [24] Z. Li et al., “Bevformer: Learning bird’s-eye-view representation from multi-camera images via spatiotemporal\ninsights for safety- no. 2, pp. 1477–1485. critical applications like self-driving. [24] Z. Li et al., “Bevformer: Learning bird’s-eye-view representation from multi-camera images via spatiotemporal transformers,” in Proc. 17th Eur.\nR Conf. Comput. Vis. (ECCV), 2022, pp. 1–18. EFERENCES [25] W. Bao, B. Xu, and Z. Chen, “MonoFENet: Monocular 3D object [1] J. Mao, S. Shi, X. Wang, and H. Li, “3D object detection for autonomousdetection with feature enhancement networks,” IEEE Trans. Image driving: A comprehensive survey,” Int. J. Comput. Vis., vol. 131, no. 8, Process., vol. 29, pp. 2753–2765, 2020. pp. 1909–1963, Aug. 2023. [26] C. Huang, T. He, H. Ren, W. Wang, B. Lin, and D. Cai, “OBMO: One [2] Y. Hu et al., “Planning-oriented autonomous driving,” in Proc.bounding box multiple objects for monocular 3D object detection,” IEEE IEEE/CVF Conf.Comput. Vis. PatternRecognit., Jun. 2023, Trans. Image Process., vol. 32, pp. 6570–6581, 2023. pp. 17853–17862. [27] S. Thys, W. V. Ranst, and T. Goedemé, “Fooling automated surveillance [3] Q. Song, Q. Hu, C. Zhang, Y. Chen, and R. Huang, “Divide and conquer: cameras: Adversarial patches to attack person detection,” in Proc.",
+      "keywords": [],
+      "page_range": [
+        13,
+        13
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-15",
+      "chunk_indices": [
+        40
+      ],
+      "char_count": 996,
+      "summary": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE",
+      "digest": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 551 [42] Z. Cheng et al., “Fusion is not enough: Single modal attacks on fusion Jian Wang received the B.S. degree in information models for 3D object detection,” 2023, arXiv:2304.14614. engineering from Xi’an Jiaotong University, Xi’an, [43] J. Wang, F. Li, X. Zhang, and H. Sun, “Adversarial obstacle generation China, in 2020, where he is currently pursuing the against LiDAR-based 3D object detection,” IEEE Trans. Multimedia, Ph.D. degree with the School of Information and vol. 26, pp. 2686–2699, 2024. Communications Engineering. His research interests [44] Z. Jin, X. Ji, Y. Cheng, B. Yang, C. Yan, and W. Xu, “PLA- include adversarial attack, 3D perception, and trustworthy AI.LiDAR: Physical laser attacks against LiDAR-based 3D object detection in autonomous vehicle,” in Proc. IEEE Symp. Secur. Privacy (SP), May 2023, pp. 1822–1839. [45] Y. Cao et al., “Adversarial sensor attack on",
+      "full_text": "WANG et al.: PHYSICALLY REALIZABLE ADVERSARIAL CREATING ATTACK AGAINST BEV SPACE 3D OBJECT DETECTION 551 [42] Z. Cheng et al., “Fusion is not enough: Single modal attacks on fusion Jian Wang received the B.S. degree in information models for 3D object detection,” 2023, arXiv:2304.14614. engineering from Xi’an Jiaotong University, Xi’an, [43] J. Wang, F. Li, X. Zhang, and H. Sun, “Adversarial obstacle generation China, in 2020, where he is currently pursuing the against LiDAR-based 3D object detection,” IEEE Trans. Multimedia, Ph.D. degree with the School of Information and vol. 26, pp. 2686–2699, 2024. Communications Engineering. His research interests [44] Z. Jin, X. Ji, Y. Cheng, B. Yang, C. Yan, and W. Xu, “PLA- include adversarial attack, 3D perception, and trustworthy AI.LiDAR: Physical laser attacks against LiDAR-based 3D object detection in autonomous vehicle,” in Proc. IEEE Symp. Secur. Privacy (SP), May 2023, pp. 1822–1839. [45] Y. Cao et al., “Adversarial sensor attack on",
+      "keywords": [],
+      "page_range": [
+        2,
+        2
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    },
+    {
+      "group_id": "group-16",
+      "chunk_indices": [
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+      ],
+      "char_count": 4818,
+      "summary": "laser attacks against LiDAR-based 3D object detection in autonomous vehicle,” in",
+      "digest": "laser attacks against LiDAR-based 3D object detection in autonomous vehicle,” in Proc. IEEE Symp. Secur. Privacy (SP), May 2023, pp. 1822–1839. [45] Y. Cao et al., “Adversarial sensor attack on LiDAR-based perception in autonomous driving,” in Proc. ACM SIGSAC Conf. Comput. Commun.\nSecur., Nov. 2019, pp. 2267–2281. [46] N. Suryanto et al., “DTA: Physical camouflage attacks using differentiable transformation network,” in Proc. IEEE/CVF Conf. Comput. Vis.\nPattern Recognit. (CVPR), Jun. 2022, pp. 15305–15314. Fan Li (Senior Member, IEEE) received the B.S. [47] N. Suryanto et al., “ACTIVE: Towards highly transferable 3D physical and Ph.D. degrees from the School of Information and Communications Engineering, Xi’ancamouflage for universal and robust vehicle evasion,” in Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV), Oct. 2023, pp. 4305–4314. Jiaotong University, Xi’an, China, in 2003 and 2010, [48] D. Wang et al., “FCA: Learning a 3D full-coverage vehicle camouflage respectively. From 2017",
+      "full_text": "laser attacks against LiDAR-based 3D object detection in autonomous vehicle,” in Proc. IEEE Symp. Secur. Privacy (SP), May 2023, pp. 1822–1839. [45] Y. Cao et al., “Adversarial sensor attack on LiDAR-based perception in autonomous driving,” in Proc. ACM SIGSAC Conf. Comput. Commun.\nSecur., Nov. 2019, pp. 2267–2281. [46] N. Suryanto et al., “DTA: Physical camouflage attacks using differentiable transformation network,” in Proc. IEEE/CVF Conf. Comput. Vis.\nPattern Recognit. (CVPR), Jun. 2022, pp. 15305–15314. Fan Li (Senior Member, IEEE) received the B.S. [47] N. Suryanto et al., “ACTIVE: Towards highly transferable 3D physical and Ph.D. degrees from the School of Information and Communications Engineering, Xi’ancamouflage for universal and robust vehicle evasion,” in Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV), Oct. 2023, pp. 4305–4314. Jiaotong University, Xi’an, China, in 2003 and 2010, [48] D. Wang et al., “FCA: Learning a 3D full-coverage vehicle camouflage respectively. From 2017 to 2018, he was a Visitfor multi-view physical adversarial attack,” in Proc. AAAI Conf. Artif. ing Scholar with the Department of Electrical and Intell., vol. 36, 2022, pp. 2414–2422. Computer Engineering, University of California at San Diego, San Diego. He is currently a Professor[49] J. Wang, A. Liu, Z. Yin, S. Liu, S. Tang, and X. Liu, “Dual attention with the School of Information and Communicationssuppression attack: Generate adversarial\nDiego. He is currently a Professor[49] J. Wang, A. Liu, Z. Yin, S. Liu, S. Tang, and X. Liu, “Dual attention with the School of Information and Communicationssuppression attack: Generate adversarial camouflage in physical world,” Engineering, Xi’an Jiaotong University. His researchin Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2021, pp. 8565–8574. interests include multimedia signal processing. [50] Y. Zhang, H. Foroosh, P. David, and B. Gong, “CAMOU: Learning physical vehicle camouflages to adversarially attack detectors in the wild,” in Proc. Int. Conf. Learn. Represent., Sep. 2018, pp. 1–20. Song Lv received the B.S. degree in information[51] A. Athalye, L. Engstrom, A. Ilyas, and K. Kwok, “Synthesizing engineering from Xi’an Jiaotong University, Xi’an, robust adversarial examples,” in Proc. Int. Conf. Mach. Learn., 2018, pp. 284–293. China, in 2022, where he is currently pursuing the M.S. degree with the School of Information and[52] M. Lee and Z. Kolter, “On\nexamples,” in Proc. Int. Conf. Mach. Learn., 2018, pp. 284–293. China, in 2022, where he is currently pursuing the M.S. degree with the School of Information and[52] M. Lee and Z. Kolter, “On physical adversarial patches for object Communications Engineering. His research inter-detection,” 2019, arXiv:1906.11897. ests include 3D point cloud processing and object[53] M. Sharif, S. Bhagavatula, L. Bauer, and M. K. Reiter, “Accessorize detection.to a crime: Real and stealthy attacks on state-of-the-art face recognition,” in Proc. ACM SIGSAC Conf. Comput. Commun. Secur., 2016, pp. 1528–1540. [54] A. Ilyas, S. Santurkar, D. Tsipras, L. Engstrom, B. Tran, and A. Ma¸dry, “Adversarial examples are not bugs, they are features,” in Proc. Adv.\nNeural Inf. Process. Syst., 2019, pp. 1–12. [55] S. Kumano, H. Kera, and T. Yamasaki, “Theoretical understanding of learning from adversarial perturbations,” 2024, arXiv:2402.10470. Lijun He (Member, IEEE) received the B.S. and[56] T. Liang et al., “BEVFusion: A simple and robust LiDAR-camera fusion Ph.D. degrees from the School of Information andframework,” in Proc. Adv. Neural Inf. Process. Syst., vol. 35, Dec. 2022, Communications Engineering, Xi’an Jiaotong Uni-pp. 10421–10434. versity, Xi’an, China, in 2008 and 2016, respectively. [57] N. Carion, F. Massa, G. Synnaeve, N. Usunier, A. Kirillov, and She is currently a Professor with the School of Infor- S. Zagoruyko, “End-to-end object detection with transformers,” in Proc. mation and Communications Engineering, Xi’an Eur. Conf. Comput. Vis., 2020, pp. 213–229. Jiaotong University. Her research interests include [58] X. Zhu, W. Su, L. Lu, B. Li, X. Wang, and J. Dai, “Deformable video communication and transmission, video anal-\nVis., 2020, pp. 213–229. Jiaotong University. Her research interests include [58] X. Zhu, W. Su, L. Lu, B. Li, X. Wang, and J. Dai, “Deformable video communication and transmission, video anal- DETR: Deformable transformers for end-to-end object detection,” 2020, ysis, processing, and compression techniques. arXiv:2010.04159. [59] H. Caesar et al., “nuScenes: A multimodal dataset for autonomous driving,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2020, pp. 11621–11631. [60] A. Geiger, P. Lenz, and R. Urtasun, “Are we ready for autonomous driving? The KITTI vision benchmark suite,” in Proc. IEEE Conf.",
+      "keywords": [],
+      "page_range": [
+        14,
+        14
+      ],
+      "summary_status": "failed",
+      "llm_meta": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.3,
+        "prompt_version": "v1",
+        "created_at": "2026-02-08T17:35:50.712986+00:00"
+      }
+    }
+  ]
+}
