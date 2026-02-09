@@ -64,6 +64,8 @@ class ChatRequest(BaseModel):
     # 新增：术语库和表格保护选项
     enable_glossary: bool = True  # 是否启用术语库
     protect_tables: bool = True   # 是否保护表格结构
+    # 深度思考模式
+    enable_thinking: bool = False  # 是否开启深度思考
 
 
 class ChatVisionRequest(BaseModel):
@@ -297,7 +299,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 request.model,
                 request.api_provider,
                 endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
-                middlewares=middlewares
+                middlewares=middlewares,
+                enable_thinking=request.enable_thinking
             ):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"

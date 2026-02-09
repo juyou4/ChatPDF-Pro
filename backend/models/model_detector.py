@@ -117,8 +117,32 @@ def infer_model_tags(model_id: str) -> list[str]:
     if any(k in lower_id for k in ["chinese", "zh", "multilingual"]):
         tags.append("chinese_optimized")
 
-    # 推理能力标签
-    if "reasoning" in lower_id or "think" in lower_id:
+    # 推理能力标签 — 覆盖各家思考模型
+    # DeepSeek: deepseek-reasoner, *-thinking
+    # 智谱: glm-4.5/4.6/4.7 系列（均支持 thinking 参数）
+    # Moonshot/Kimi: kimi-k2-thinking 等 thinking 变体
+    # MiniMax: minimax-m2, m2.1（原生支持 reasoning_split）
+    # OpenAI: o1, o3, o4, gpt-4.5, gpt-5 系列（reasoning_effort）
+    # Anthropic: claude-*-thinking
+    if any(k in lower_id for k in ["reasoning", "think", "reasoner"]):
+        tags.append("reasoning")
+    elif re.search(r'\b(o1|o3|o4)\b', lower_id):
+        # OpenAI o 系列推理模型
+        tags.append("reasoning")
+    elif re.search(r'gpt-4\.5', lower_id):
+        # OpenAI GPT-4.5 系列支持 reasoning_effort
+        tags.append("reasoning")
+    elif re.search(r'gpt-5', lower_id):
+        # OpenAI GPT-5 系列（gpt-5, gpt-5-mini, gpt-5-nano）
+        tags.append("reasoning")
+    elif re.search(r'glm-4\.[5-9]', lower_id):
+        # 智谱 GLM-4.5+ 系列支持思考模式
+        tags.append("reasoning")
+    elif re.search(r'minimax-m2', lower_id):
+        # MiniMax M2 系列原生支持思考
+        tags.append("reasoning")
+    elif "deepseek-r" in lower_id:
+        # DeepSeek-R1 等推理模型
         tags.append("reasoning")
 
     return tags

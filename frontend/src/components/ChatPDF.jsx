@@ -99,6 +99,8 @@ const ChatPDF = () => {
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [thinkingExpanded, setThinkingExpanded] = useState({});
+  // 深度思考模式开关（由 ModelQuickSwitch 控制）
+  const [enableThinking, setEnableThinking] = useState(false);
 
   // New three-layer context
   const { getProviderById } = useProvider();
@@ -610,7 +612,8 @@ const ChatPDF = () => {
       model: chatModel,
       api_provider: chatProvider,
       selected_text: selectedText || null,
-      image_base64: screenshot ? screenshot.split(',')[1] : null
+      image_base64: screenshot ? screenshot.split(',')[1] : null,
+      enable_thinking: enableThinking
     };
 
     // Add placeholder message for streaming effect
@@ -2052,7 +2055,7 @@ const ChatPDF = () => {
 
                   <div className="flex items-center gap-4 text-gray-400 mt-2">
                     {/* 模型快速切换器 */}
-                    <ModelQuickSwitch />
+                    <ModelQuickSwitch onThinkingChange={setEnableThinking} />
                     <button className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
                       <SlidersHorizontal className="w-5 h-5" />
                     </button>

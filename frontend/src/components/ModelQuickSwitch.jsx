@@ -20,7 +20,7 @@ import { filterChatModels, groupModelsByProvider, formatModelKey, filterModelsBy
  *
  * 无 Props，所有数据通过 Context Hooks 获取。
  */
-export default function ModelQuickSwitch() {
+export default function ModelQuickSwitch({ onThinkingChange }) {
   // ========== Context Hooks ==========
   const { getDefaultModel, setDefaultModel } = useDefaults()
   const { getModelsByType, getModelById } = useModel()
@@ -57,6 +57,44 @@ export default function ModelQuickSwitch() {
   const currentModel = (currentModelId && currentProviderId)
     ? getModelById(currentModelId, currentProviderId)
     : null
+
+  // ========== 深度思考相关 ==========
+  // 深度思考开关状态
+  const [deepThinkingEnabled, setDeepThinkingEnabled] = useState(false)
+
+  // 判断当前模型是否支持深度思考
+  // 条件：
+  // 1. 模型本身带 reasoning 标签
+  // 2. 同 provider 下有 reasoning 标签的模型
+  // 3. provider 本身已知支持思考模式（如 DeepSeek、智谱等，即使模型列表中没有 reasoning 标签）
+  const THINKING_CAPABLE_PROVIDERS = new Set([
+    'deepseek',  // deepseek-chat 支持 thinking 参数
+    'zhipu',     // GLM-4.5+ 支持 thinking 参数
+    'openai',    // GPT-5/o3/o4 支持 reasoning_effort
+    'minimax',   // M2 系列支持 reasoning_split
+    'moonshot',  // kimi-k2-thinking 等自动输出
+  ])
+
+  const supportsThinking = useMemo(() => {
+    if (!currentProviderId) return false
+    // 当前模型本身就是 reasoning 模型
+    if (currentModel?.tags?.includes('reasoning')) return true
+    // provider 已知支持思考模式
+    if (THINKING_CAPABLE_PROVIDERS.has(currentProviderId)) return true
+    // 同 provider 下有 reasoning 模型，说明该 provider 的 API 支持 thinking 参数
+    const chatModels = getModelsByType('chat')
+    return chatModels.some(
+      m => m.providerId === currentProviderId && m.tags?.includes('reasoning')
+    )
+  }, [currentProviderId, currentModel, getModelsByType])
+
+  // 切换模型时，如果新模型不支持思考，自动关闭
+  useEffect(() => {
+    if (!supportsThinking && deepThinkingEnabled) {
+      setDeepThinkingEnabled(false)
+      onThinkingChange?.(false)
+    }
+  }, [supportsThinking, deepThinkingEnabled, onThinkingChange])
 
   // ========== 折叠分组状态 ==========
   // 展开的 Provider 集合，初始化时仅展开当前选中模型所在的 Provider
@@ -135,6 +173,7 @@ export default function ModelQuickSwitch() {
 
   // ========== 渲染 ==========
   return (
+    <div className="flex items-center gap-1">
     <div ref={dropdownRef} className="relative">
       {/* 触发按钮 - 显示当前模型信息和展开指示器 */}
       <button
@@ -157,12 +196,12 @@ export default function ModelQuickSwitch() {
       <AnimatePresence>
         {isOpen && (
           <motion.div
-            initial={{ opacity: 0, y: 8, scaleY: 0.95 }}
-            animate={{ opacity: 1, y: 0, scaleY: 1 }}
-            exit={{ opacity: 0, y: 8, scaleY: 0.95 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            transition={{ type: 'spring', damping: 20, stiffness: 300 }}
             style={{ transformOrigin: 'bottom' }}
-            className="absolute bottom-full mb-2 left-0 min-w-[240px] rounded-xl shadow-xl border border-white/20 backdrop-blur-md bg-white/80 p-1.5 text-xs z-50"
+            className="absolute bottom-full mb-2 left-0 min-w-[240px] rounded-xl shadow-lg border border-gray-100 bg-white p-1.5 text-xs z-50"
           >
             {/* 搜索输入框 */}
             <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-gray-100">
@@ -199,8 +238,16 @@ export default function ModelQuickSwitch() {
                       <span className="text-gray-400 text-[10px]">{models.length}</span>
                     </button>
                     {/* 该 Provider 下的模型列表 — 搜索时强制展开，否则根据折叠状态 */}
+                    <AnimatePresence initial={false}>
                     {(isSearching || expandedProviders.has(provider.id)) && (
-                      models.map(model => {
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+                        style={{ overflow: 'hidden' }}
+                      >
+                      {models.map(model => {
                         // 判断是否为当前选中的模型
                         const isSelected = currentProviderId === provider.id && currentModelId === model.id
                         return (
@@ -221,8 +268,10 @@ export default function ModelQuickSwitch() {
                             )}
                           </button>
                         )
-                      })
+                      })}
+                      </motion.div>
                     )}
+                    </AnimatePresence>
                   </div>
                 ))
               )}
@@ -230,6 +279,35 @@ export default function ModelQuickSwitch() {
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+
+    {/* 深度思考按钮 — 胶囊药丸风格，仅当 provider 支持思考模式时显示 */}
+    {supportsThinking && (
+      <button
+        onClick={() => {
+          const next = !deepThinkingEnabled
+          setDeepThinkingEnabled(next)
+          onThinkingChange?.(next)
+        }}
+        title={deepThinkingEnabled ? '关闭深度思考' : '开启深度思考'}
+        className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-full border transition-all ${
+          deepThinkingEnabled
+            ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-sm'
+            : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
+        }`}
+      >
+        {/* 原子图标 — 模拟图片中的样式 */}
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          {/* 三条椭圆轨道 */}
+          <ellipse cx="12" cy="12" rx="10" ry="4" />
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
+          {/* 中心圆点 */}
+          <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        </svg>
+        <span>DeepThink</span>
+      </button>
+    )}
     </div>
   )
 }

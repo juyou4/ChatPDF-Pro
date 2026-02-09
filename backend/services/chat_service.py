@@ -3,7 +3,7 @@ import asyncio
 import httpx
 
 from providers.factory import ProviderFactory
-from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI
+from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT
 from models.provider_registry import PROVIDER_CONFIG
 from utils.middleware import (
     BaseMiddleware,
@@ -131,6 +131,7 @@ async def call_ai_api_stream(
     provider: str,
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
+    enable_thinking: bool = False,
 ):
     """流式调用（OpenAI 兼容走真正流式，其他回退为单次响应拆分）"""
     payload = {
@@ -160,6 +161,20 @@ async def call_ai_api_stream(
             "temperature": 0.7,
             "max_tokens": 4000
         }
+        # 深度思考模式：根据 provider 使用不同参数
+        if enable_thinking:
+            if provider.lower() in OPENAI_NATIVE:
+                # OpenAI 原生 API（GPT-5/o3/o4 系列）：使用 reasoning_effort 参数
+                body["reasoning_effort"] = "high"
+            elif provider.lower() in MINIMAX:
+                # MiniMax：使用 reasoning_split 分离思考内容
+                body["reasoning_split"] = True
+            elif provider.lower() not in MOONSHOT:
+                # DeepSeek / 智谱 / 通用 OpenAI 兼容：使用 thinking 参数
+                # Moonshot/Kimi 的思考模型自动输出，无需额外参数
+                body["thinking"] = {"type": "enabled"}
+            # 思考模式下不支持 temperature，移除避免报错
+            body.pop("temperature", None)
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
@@ -183,6 +198,11 @@ async def call_ai_api_stream(
                     delta = chunk.get("choices", [{}])[0].get("delta", {}) or chunk.get("choices", [{}])[0].get("message", {})
                     content = delta.get("content") or ""
                     reasoning_content = extract_reasoning_content(delta)
+                    # MiniMax 的思考内容在 reasoning_details 字段中
+                    if not reasoning_content:
+                        reasoning_details = delta.get("reasoning_details") or chunk.get("choices", [{}])[0].get("reasoning_details")
+                        if reasoning_details:
+                            reasoning_content = extract_reasoning_content(reasoning_details)
                     if content or reasoning_content:
                         yield {
                             "content": content,
@@ -209,6 +229,9 @@ async def call_ai_api_stream(
             "max_tokens": 4000,
             "stream": True
         }
+        # 深度思考模式：Anthropic extended thinking
+        if enable_thinking:
+            body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
                 if resp.status_code != 200:
@@ -257,6 +280,9 @@ async def call_ai_api_stream(
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4000},
             "stream": True,
         }
+        # 深度思考模式：Gemini thinkingConfig
+        if enable_thinking:
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 8192}
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", endpoint, json=payload) as resp:
