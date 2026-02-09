@@ -109,8 +109,30 @@ def infer_model_tags(model_id: str) -> list[str]:
     if "free" in lower_id:
         tags.append("free")
 
-    # 视觉能力标签
+    # 视觉能力标签 — 增强版
+    # 优先级：关键字匹配 → 系列匹配
     if "vision" in lower_id or "vl" in lower_id:
+        tags.append("vision")
+    elif re.search(r'^gpt-(4o|4-turbo|4\.1|5)', lower_id):
+        # OpenAI GPT-4o、GPT-4 Turbo、GPT-4.1、GPT-5 系列均支持视觉
+        tags.append("vision")
+    elif re.search(r'^claude-(3|sonnet-4|opus-4|haiku-4)', lower_id):
+        # Anthropic Claude 3+ 系列（含 claude-3-*、claude-sonnet-4、claude-opus-4、claude-haiku-4）
+        tags.append("vision")
+    elif re.search(r'^gemini-(2|[3-9])', lower_id):
+        # Google Gemini 2+ 系列均支持视觉
+        tags.append("vision")
+    elif re.search(r'^(qwen-vl|qwen-max)', lower_id):
+        # 阿里云 Qwen-VL 和 Qwen-Max 系列
+        tags.append("vision")
+    elif re.search(r'^(grok-vision|grok-4)', lower_id):
+        # xAI Grok 视觉模型和 Grok-4 系列
+        tags.append("vision")
+    elif re.search(r'^abab6\.5', lower_id):
+        # MiniMax abab6.5 系列支持视觉
+        tags.append("vision")
+    elif re.search(r'^doubao-1\.5-pro', lower_id):
+        # 字节跳动豆包 doubao-1.5-pro 系列支持视觉
         tags.append("vision")
 
     # 中文优化标签

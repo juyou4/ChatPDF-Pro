@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, forwardRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import SelectionOverlay from './SelectionOverlay';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -9,7 +10,7 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 // Configure worker - 直接指定版本以确保匹配
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange }) => {
+const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -407,13 +408,19 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
                             </div>
                         }
                     >
-                        <div className="relative">
+                        <div ref={ref} className="relative">
                             <Page
                                 inputRef={pageRef}
                                 pageNumber={pageNumber}
                                 scale={scale}
                                 renderTextLayer={true}
                                 renderAnnotationLayer={true}
+                            />
+                            {/* 框选遮罩层，覆盖在 PDF 页面上方 */}
+                            <SelectionOverlay
+                                active={isSelecting}
+                                onCapture={onAreaSelected}
+                                onCancel={onSelectionCancel}
                             />
                             {/* 多矩形高亮，避免跨越空白区域的巨大单一框 */}
                             <AnimatePresence>
@@ -464,6 +471,8 @@ const PDFViewer = ({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPag
             </div>
         </div>
     );
-};
+});
+
+PDFViewer.displayName = 'PDFViewer';
 
 export default PDFViewer;

@@ -1,7 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Camera, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Zap } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Zap, Scan } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
+import { supportsVision } from '../utils/visionDetectorUtils';
+import { captureArea, clampSelectionToPage, SCREENSHOT_ACTIONS } from '../utils/screenshotUtils';
+import ScreenshotPreview from './ScreenshotPreview';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
@@ -182,6 +185,17 @@ const ChatPDF = () => {
     const modelObj = getModelById(modelId, providerId);
     return `${provider?.name || providerId} - ${modelObj?.name || modelId}`;
   };
+
+  // ========== 当前聊天模型对象（含 tags），用于 supportsVision 判断 ==========
+  const currentChatModelObj = useMemo(() => {
+    const chatKey = getDefaultModel('assistantModel');
+    if (!chatKey || !chatKey.includes(':')) return null;
+    const [providerId, modelId] = chatKey.split(':');
+    return getModelById(modelId, providerId);
+  }, [getDefaultModel, getModelById]);
+
+  // 当前模型是否支持视觉能力
+  const isVisionCapable = useMemo(() => supportsVision(currentChatModelObj), [currentChatModelObj]);
 
   // Refs
   const fileInputRef = useRef(null);
@@ -635,8 +649,8 @@ const ChatPDF = () => {
     }]);
 
     try {
-      // Use SSE streaming if开启并且无截图（vision）
-      if (streamSpeed !== 'off' && !screenshot) {
+      // 使用 SSE 流式传输（截图也支持流式，后端已处理多模态消息）
+      if (streamSpeed !== 'off') {
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -717,9 +731,8 @@ const ChatPDF = () => {
         streamCitationsRef.current = null;
         setStreamingMessageId(null);
       } else {
-        // Fallback to regular fetch for non-streaming or vision requests
-        const endpoint = screenshot ? '/chat/vision' : '/chat';
-        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        // 非流式回退：统一使用 /chat 端点（后端已支持 image_base64 多模态）
+        const response = await fetch(`${API_BASE_URL}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: abortControllerRef.current.signal,
@@ -1346,19 +1359,111 @@ const ChatPDF = () => {
     setScreenshot(null);
   };
 
-  const captureFullPage = async () => {
-    if (!pdfContainerRef.current) return;
-    setIsLoading(true);
+  /**
+   * 处理区域框选完成回调
+   * 将选区裁剪到页面范围内，调用 captureArea 生成截图
+   */
+  const handleAreaSelected = async (rect) => {
+    // 获取 PDF 页面容器的尺寸，用于裁剪选区
+    const container = pdfContainerRef.current;
+    if (!container) {
+      setIsSelectingArea(false);
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    // 将选区裁剪到页面范围内
+    const clampedRect = clampSelectionToPage(rect, containerRect.width, containerRect.height);
+
     try {
-      const canvas = await html2canvas(pdfContainerRef.current, { scale: 2, useCORS: true });
-      setScreenshot(canvas.toDataURL('image/png'));
-      alert('📸 整页截图成功！');
+      const result = await captureArea(pdfContainerRef, clampedRect);
+      if (result) {
+        setScreenshot(result);
+      } else {
+        alert('截图生成失败，请重试');
+      }
     } catch (e) {
-      console.error(e);
+      console.error('截图生成异常:', e);
+      alert('截图生成失败，请重试');
     } finally {
-      setIsLoading(false);
+      // 退出框选模式
+      setIsSelectingArea(false);
     }
   };
+
+  /**
+   * 处理取消框选回调（Escape 键）
+   */
+  const handleSelectionCancel = () => {
+    setIsSelectingArea(false);
+  };
+
+  // ==================== 截图快捷操作分发 ====================
+
+  /**
+   * 处理截图预览中的快捷操作
+   *
+   * - ask: 保留截图作为附件，不自动发送，用户可输入问题后手动发送
+   * - explain/table/formula/ocr/translate: 设置预设提示词 + 截图后自动发送
+   * - copy: 将截图写入系统剪贴板（Clipboard API）
+   *
+   * @param {string} actionKey - 操作类型 key
+   */
+  const handleScreenshotAction = async (actionKey) => {
+    const action = SCREENSHOT_ACTIONS[actionKey]
+    if (!action) return
+
+    // 复制操作：将截图写入剪贴板
+    if (actionKey === 'copy') {
+      try {
+        // 将 base64 data URL 转换为 Blob
+        const response = await fetch(screenshot)
+        const blob = await response.blob()
+        const clipboardItem = new ClipboardItem({ 'image/png': blob })
+        await navigator.clipboard.write([clipboardItem])
+        // 可选：提示用户复制成功（不清除截图）
+      } catch (e) {
+        console.error('复制截图到剪贴板失败:', e)
+        alert('复制失败，浏览器不支持此功能')
+      }
+      return
+    }
+
+    // 提问操作：保留截图，不自动发送，聚焦输入框
+    if (actionKey === 'ask') {
+      // 截图已在 state 中，用户可以输入问题后手动发送
+      setTimeout(() => {
+        document.querySelector('textarea')?.focus()
+      }, 100)
+      return
+    }
+
+    // 自动发送操作：设置预设提示词后触发发送
+    if (action.autoSend && action.prompt) {
+      setInputMessage(action.prompt)
+      // 使用 pendingSendRef 标记待发送，与预设问题相同的机制
+      pendingSendRef.current = true
+    }
+  }
+
+  /**
+   * 处理截图预览关闭
+   */
+  const handleScreenshotClose = () => {
+    setScreenshot(null)
+  }
+
+  // ==================== 模型切换时清除不兼容的截图 ====================
+
+  /**
+   * 当聊天模型切换时，如果新模型不支持视觉能力，
+   * 自动清除已有的截图数据并隐藏预览区域。
+   */
+  useEffect(() => {
+    if (screenshot && !isVisionCapable) {
+      setScreenshot(null)
+    }
+  }, [isVisionCapable])
 
   // Render Components
   return (
@@ -1662,10 +1767,14 @@ const ChatPDF = () => {
               <div className="flex-1 overflow-hidden">
                 {docInfo?.pdf_url ? (
                   <PDFViewer
+                    ref={pdfContainerRef}
                     pdfUrl={docInfo.pdf_url}
                     page={currentPage}
                     onPageChange={setCurrentPage}
                     highlightInfo={activeHighlight}
+                    isSelecting={isSelectingArea}
+                    onAreaSelected={handleAreaSelected}
+                    onSelectionCancel={handleSelectionCancel}
                     onTextSelect={(text) => {
                       if (text) {
                         setSelectedText(text);
@@ -1699,11 +1808,7 @@ const ChatPDF = () => {
                         <span className="text-sm font-medium w-12 text-center">{Math.round(pdfScale * 100)}%</span>
                         <button onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomIn className="w-5 h-5" /></button>
                       </div>
-                      {enableScreenshot && (
-                        <div className="flex items-center gap-2">
-                          <button onClick={captureFullPage} className="p-1.5 hover:bg-purple-100 text-purple-600 rounded-lg" title="Screenshot"><Camera className="w-5 h-5" /></button>
-                        </div>
-                      )}
+                      {/* 旧的整页截图按钮已移除，使用 Chat_Toolbar 中的区域截图按钮替代 */}
                     </div>
                     <div ref={pdfContainerRef} className="h-full overflow-auto bg-gray-50/50">
                       <div className="min-h-full flex items-start justify-center p-8" style={{ zoom: pdfScale }}>
@@ -2026,13 +2131,12 @@ const ChatPDF = () => {
 
             {/* Input Area - Clean Card Style */}
             <div className="p-6 pt-0 bg-transparent">
-              {screenshot && (
-                <div className="mb-3 inline-flex items-center gap-2 bg-purple-50 text-purple-700 px-4 py-1.5 rounded-full text-xs font-medium border border-purple-100 shadow-sm ml-4">
-                  <ImageIcon className="w-3 h-3" />
-                  Screenshot ready
-                  <button onClick={() => setScreenshot(null)} className="hover:text-purple-900 ml-1"><X className="w-3 h-3" /></button>
-                </div>
-              )}
+              {/* 截图预览与快捷操作面板 */}
+              <ScreenshotPreview
+                screenshotData={screenshot}
+                onAction={handleScreenshotAction}
+                onClose={handleScreenshotClose}
+              />
 
               <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.22),0_8px_24px_-6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 flex items-end gap-2 border border-white/50 ring-1 ring-black/5">
                 <div className="flex-1 flex flex-col min-h-[48px] justify-center pl-6 py-1.5">
@@ -2065,6 +2169,23 @@ const ChatPDF = () => {
                     >
                       <Paperclip className="w-5 h-5" />
                     </button>
+                    {/* 截图按钮 — 仅当模型支持视觉能力时显示 */}
+                    {isVisionCapable && (
+                      <button
+                        onClick={() => setIsSelectingArea(true)}
+                        disabled={!docId}
+                        className={`transition-colors p-1 rounded-md ${
+                          docId
+                            ? isSelectingArea
+                              ? 'text-purple-600 bg-purple-50 hover:bg-purple-100'
+                              : 'hover:text-gray-600 hover:bg-gray-50'
+                            : 'text-gray-300 cursor-not-allowed'
+                        }`}
+                        title={!docId ? '请先上传文档' : isSelectingArea ? '框选模式已开启' : '区域截图'}
+                      >
+                        <Scan className="w-5 h-5" />
+                      </button>
+                    )}
                   </div>
                 </div>
 

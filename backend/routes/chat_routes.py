@@ -99,47 +99,67 @@ async def chat_with_pdf(request: ChatRequest):
 
     context = ""
     retrieval_meta = {}
-    if request.selected_text:
-        context = f"用户选中的文本：\n{request.selected_text}\n\n"
-    elif request.enable_vector_search:
-        _validate_rerank_request(request)
-        
-        # 智能分析查询类型，动态调整top_k
-        strategy = get_retrieval_strategy(request.question)
-        dynamic_top_k = strategy['top_k']
-        
-        print(f"[Chat] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
-        
-        # vector_context 返回包含 context 和 retrieval_meta 的字典
-        context_result = await vector_context(
-            request.doc_id,
-            request.question,
-            vector_store_dir=router.vector_store_dir,
-            pages=doc.get("data", {}).get("pages", []),
-            api_key=request.api_key,
-            top_k=dynamic_top_k,  # 使用动态计算的top_k
-            candidate_k=max(request.candidate_k, dynamic_top_k),
-            use_rerank=request.use_rerank,
-            reranker_model=request.reranker_model,
-            rerank_provider=request.rerank_provider,
-            rerank_api_key=request.rerank_api_key,
-            rerank_endpoint=request.rerank_endpoint,
-            middlewares=[
-                *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
-                RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay),
-                ErrorCaptureMiddleware()
-            ]
-        )
-        relevant_text = context_result.get("context", "")
-        retrieval_meta = context_result.get("retrieval_meta", {})
-        if relevant_text:
-            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+
+    # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片
+    if request.image_base64:
+        print(f"[Chat] 📸 截图模式：跳过向量检索，使用 vision 专用 prompt (model={request.model}, provider={request.api_provider})")
+        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+用户从文档中截取了一张图片并发送给你。请仔细分析用户发送的图片内容并回答问题。
+
+回答规则：
+1. 以用户发送的图片为核心依据进行回答，不要参考其他内容。
+2. 如果图片包含图表，请分析数据趋势和关键信息。
+3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
+4. 如果图片包含表格，请转换为 Markdown 格式。
+5. 简洁清晰，学术准确。"""
+
+        user_content = [
+            {"type": "text", "text": request.question or "请分析这张图片"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"}}
+        ]
+    else:
+        # 非截图模式：正常的文本检索流程
+        if request.selected_text:
+            context = f"用户选中的文本：\n{request.selected_text}\n\n"
+        elif request.enable_vector_search:
+            _validate_rerank_request(request)
+            
+            # 智能分析查询类型，动态调整top_k
+            strategy = get_retrieval_strategy(request.question)
+            dynamic_top_k = strategy['top_k']
+            
+            print(f"[Chat] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
+            
+            # vector_context 返回包含 context 和 retrieval_meta 的字典
+            context_result = await vector_context(
+                request.doc_id,
+                request.question,
+                vector_store_dir=router.vector_store_dir,
+                pages=doc.get("data", {}).get("pages", []),
+                api_key=request.api_key,
+                top_k=dynamic_top_k,  # 使用动态计算的top_k
+                candidate_k=max(request.candidate_k, dynamic_top_k),
+                use_rerank=request.use_rerank,
+                reranker_model=request.reranker_model,
+                rerank_provider=request.rerank_provider,
+                rerank_api_key=request.rerank_api_key,
+                rerank_endpoint=request.rerank_endpoint,
+                middlewares=[
+                    *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
+                    RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay),
+                    ErrorCaptureMiddleware()
+                ]
+            )
+            relevant_text = context_result.get("context", "")
+            retrieval_meta = context_result.get("retrieval_meta", {})
+            if relevant_text:
+                context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+            else:
+                context = doc["data"]["full_text"][:8000]
         else:
             context = doc["data"]["full_text"][:8000]
-    else:
-        context = doc["data"]["full_text"][:8000]
 
-    system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
 文档内容：
@@ -154,27 +174,29 @@ async def chat_with_pdf(request: ChatRequest):
    - 对于数学公式，优先使用LaTeX格式展示（$公式$）。
 5. 不要说"根据您提供的有限片段"、"基于片段"等暗示信息不足的措辞，直接回答问题。"""
 
-    # 集成术语库 - 在 system_prompt 中注入术语指令
-    if request.enable_glossary:
-        glossary_instruction = build_glossary_prompt(context)
-        if glossary_instruction:
-            system_prompt += f"\n\n{glossary_instruction}"
+        # 集成术语库 - 在 system_prompt 中注入术语指令
+        if request.enable_glossary:
+            glossary_instruction = build_glossary_prompt(context)
+            if glossary_instruction:
+                system_prompt += f"\n\n{glossary_instruction}"
 
-    # 检测生成类查询（思维导图/流程图），注入对应系统提示词
-    generation_prompt = get_generation_prompt(request.question)
-    if generation_prompt:
-        system_prompt += f"\n\n{generation_prompt}"
+        # 检测生成类查询（思维导图/流程图），注入对应系统提示词
+        generation_prompt = get_generation_prompt(request.question)
+        if generation_prompt:
+            system_prompt += f"\n\n{generation_prompt}"
 
-    # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
-    citations = retrieval_meta.get("citations", [])
-    if citations:
-        citation_prompt = _context_builder.build_citation_prompt(citations)
-        if citation_prompt:
-            system_prompt += f"\n\n{citation_prompt}"
+        # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
+        citations = retrieval_meta.get("citations", [])
+        if citations:
+            citation_prompt = _context_builder.build_citation_prompt(citations)
+            if citation_prompt:
+                system_prompt += f"\n\n{citation_prompt}"
+
+        user_content = request.question
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": request.question}
+        {"role": "user", "content": user_content}
     ]
 
     middlewares = build_chat_middlewares()
@@ -219,46 +241,66 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
     context = ""
     retrieval_meta = {}
-    if request.selected_text:
-        context = f"用户选中的文本：\n{request.selected_text}\n\n"
-    elif request.enable_vector_search:
-        _validate_rerank_request(request)
-        
-        # 智能分析查询类型，动态调整top_k
-        strategy = get_retrieval_strategy(request.question)
-        dynamic_top_k = strategy['top_k']
-        
-        print(f"[Chat Stream] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
-        
-        # vector_context 返回包含 context 和 retrieval_meta 的字典
-        context_result = await vector_context(
-            request.doc_id,
-            request.question,
-            vector_store_dir=router.vector_store_dir,
-            pages=doc.get("data", {}).get("pages", []),
-            api_key=request.api_key,
-            top_k=dynamic_top_k,  # 使用动态计算的top_k
-            candidate_k=max(request.candidate_k, dynamic_top_k),
-            use_rerank=request.use_rerank,
-            reranker_model=request.reranker_model,
-            rerank_provider=request.rerank_provider,
-            rerank_api_key=request.rerank_api_key,
-            rerank_endpoint=request.rerank_endpoint,
-            middlewares=[
-                *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
-                RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
-            ]
-        )
-        relevant_text = context_result.get("context", "")
-        retrieval_meta = context_result.get("retrieval_meta", {})
-        if relevant_text:
-            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+
+    # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片
+    if request.image_base64:
+        print(f"[Chat Stream] 📸 截图模式：跳过向量检索，使用 vision 专用 prompt (model={request.model}, provider={request.api_provider})")
+        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+用户从文档中截取了一张图片并发送给你。请仔细分析用户发送的图片内容并回答问题。
+
+回答规则：
+1. 以用户发送的图片为核心依据进行回答，不要参考其他内容。
+2. 如果图片包含图表，请分析数据趋势和关键信息。
+3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
+4. 如果图片包含表格，请转换为 Markdown 格式。
+5. 简洁清晰，学术准确。"""
+
+        user_content = [
+            {"type": "text", "text": request.question or "请分析这张图片"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"}}
+        ]
+    else:
+        # 非截图模式：正常的文本检索流程
+        if request.selected_text:
+            context = f"用户选中的文本：\n{request.selected_text}\n\n"
+        elif request.enable_vector_search:
+            _validate_rerank_request(request)
+            
+            # 智能分析查询类型，动态调整top_k
+            strategy = get_retrieval_strategy(request.question)
+            dynamic_top_k = strategy['top_k']
+            
+            print(f"[Chat Stream] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
+            
+            # vector_context 返回包含 context 和 retrieval_meta 的字典
+            context_result = await vector_context(
+                request.doc_id,
+                request.question,
+                vector_store_dir=router.vector_store_dir,
+                pages=doc.get("data", {}).get("pages", []),
+                api_key=request.api_key,
+                top_k=dynamic_top_k,  # 使用动态计算的top_k
+                candidate_k=max(request.candidate_k, dynamic_top_k),
+                use_rerank=request.use_rerank,
+                reranker_model=request.reranker_model,
+                rerank_provider=request.rerank_provider,
+                rerank_api_key=request.rerank_api_key,
+                rerank_endpoint=request.rerank_endpoint,
+                middlewares=[
+                    *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
+                    RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
+                ]
+            )
+            relevant_text = context_result.get("context", "")
+            retrieval_meta = context_result.get("retrieval_meta", {})
+            if relevant_text:
+                context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+            else:
+                context = doc["data"]["full_text"][:8000]
         else:
             context = doc["data"]["full_text"][:8000]
-    else:
-        context = doc["data"]["full_text"][:8000]
 
-    system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
 文档内容：
@@ -273,21 +315,23 @@ async def chat_with_pdf_stream(request: ChatRequest):
    - 对于数学公式，优先使用LaTeX格式展示（$公式$）。
 5. 不要说"根据您提供的有限片段"、"基于片段"等暗示信息不足的措辞，直接回答问题。"""
 
-    # 检测生成类查询（思维导图/流程图），注入对应系统提示词
-    generation_prompt = get_generation_prompt(request.question)
-    if generation_prompt:
-        system_prompt += f"\n\n{generation_prompt}"
+        # 检测生成类查询（思维导图/流程图），注入对应系统提示词
+        generation_prompt = get_generation_prompt(request.question)
+        if generation_prompt:
+            system_prompt += f"\n\n{generation_prompt}"
 
-    # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
-    citations = retrieval_meta.get("citations", [])
-    if citations:
-        citation_prompt = _context_builder.build_citation_prompt(citations)
-        if citation_prompt:
-            system_prompt += f"\n\n{citation_prompt}"
+        # 引文追踪：如果 retrieval_meta 中包含 citations，追加引文指示提示词
+        citations = retrieval_meta.get("citations", [])
+        if citations:
+            citation_prompt = _context_builder.build_citation_prompt(citations)
+            if citation_prompt:
+                system_prompt += f"\n\n{citation_prompt}"
+
+        user_content = request.question
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": request.question}
+        {"role": "user", "content": user_content}
     ]
 
     async def event_generator():
