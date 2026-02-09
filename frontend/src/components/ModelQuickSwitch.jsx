@@ -296,13 +296,11 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
             : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
         }`}
       >
-        {/* 原子图标 — 模拟图片中的样式 */}
+        {/* 原子图标 */}
         <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          {/* 三条椭圆轨道 */}
           <ellipse cx="12" cy="12" rx="10" ry="4" />
           <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
           <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
-          {/* 中心圆点 */}
           <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
         </svg>
         <span>DeepThink</span>

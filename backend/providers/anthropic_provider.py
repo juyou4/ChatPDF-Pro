@@ -8,7 +8,7 @@ from .base import BaseProvider
 class AnthropicProvider(BaseProvider):
     """Anthropic Claude Provider"""
 
-    async def chat(self, messages: List[dict], api_key: str, model: str, timeout: Optional[float] = None, stream: bool = False) -> dict:
+    async def chat(self, messages: List[dict], api_key: str, model: str, timeout: Optional[float] = None, stream: bool = False, max_tokens: int = 8192, temperature: float = 0.7, top_p: float = 1.0) -> dict:
         system_message = ""
         user_messages = []
 
@@ -28,7 +28,7 @@ class AnthropicProvider(BaseProvider):
                 },
                 json={
                     "model": model,
-                    "max_tokens": 4000,
+                    "max_tokens": max_tokens,
                     "system": system_message,
                     "messages": user_messages,
                     "stream": stream

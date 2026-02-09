@@ -56,6 +56,9 @@ async def call_ai_api(
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
     stream: bool = False,
+    max_tokens: int = 8192,
+    temperature: float = 0.7,
+    top_p: float = 1.0,
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
     payload = {
@@ -91,6 +94,9 @@ async def call_ai_api(
                 payload["model"],
                 timeout=timeout,
                 stream=stream,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
             )
             # 如果上游返回错误结构，同样走重试逻辑
             if isinstance(response, dict) and response.get("error"):
@@ -132,6 +138,9 @@ async def call_ai_api_stream(
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
     enable_thinking: bool = False,
+    max_tokens: int = 8192,
+    temperature: float = 0.7,
+    top_p: float = 1.0,
 ):
     """流式调用（OpenAI 兼容走真正流式，其他回退为单次响应拆分）"""
     payload = {
@@ -158,8 +167,9 @@ async def call_ai_api_stream(
             "model": model,
             "messages": messages,
             "stream": True,
-            "temperature": 0.7,
-            "max_tokens": 4000
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": top_p
         }
         # 深度思考模式：根据 provider 使用不同参数
         if enable_thinking:
@@ -226,7 +236,7 @@ async def call_ai_api_stream(
             "model": model,
             "messages": [m for m in messages if m.get("role") != "system"],
             "system": next((m["content"] for m in messages if m.get("role") == "system"), ""),
-            "max_tokens": 4000,
+            "max_tokens": max_tokens,
             "stream": True
         }
         # 深度思考模式：Anthropic extended thinking
@@ -277,7 +287,7 @@ async def call_ai_api_stream(
 
         payload = {
             "contents": contents,
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4000},
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
             "stream": True,
         }
         # 深度思考模式：Gemini thinkingConfig

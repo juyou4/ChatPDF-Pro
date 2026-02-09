@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Zap, Scan } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
@@ -16,6 +16,8 @@ import { useDefaults } from '../contexts/DefaultsContext';
 import EmbeddingSettings from './EmbeddingSettings';
 import OCRSettingsPanel, { loadOCRSettings } from './OCRSettingsPanel';
 import GlobalSettings from './GlobalSettings';
+import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
+import ChatSettings from './ChatSettings';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 
@@ -52,6 +54,7 @@ const ChatPDF = () => {
   const [showEmbeddingSettings, setShowEmbeddingSettings] = useState(false);
   const [showOCRSettings, setShowOCRSettings] = useState(false);
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+  const [showChatSettings, setShowChatSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
@@ -109,6 +112,7 @@ const ChatPDF = () => {
   const { getProviderById } = useProvider();
   const { getModelById } = useModel();
   const { getDefaultModel } = useDefaults();
+  const { maxTokens, temperature, topP, contextCount, streamOutput } = useGlobalSettings();
   const chatPaneRef = useRef(null);
 
   // Helper functions to get current provider and model
@@ -627,7 +631,11 @@ const ChatPDF = () => {
       api_provider: chatProvider,
       selected_text: selectedText || null,
       image_base64: screenshot ? screenshot.split(',')[1] : null,
-      enable_thinking: enableThinking
+      enable_thinking: enableThinking,
+      max_tokens: maxTokens,
+      temperature: temperature,
+      top_p: topP,
+      stream_output: streamOutput
     };
 
     // Add placeholder message for streaming effect
@@ -650,7 +658,7 @@ const ChatPDF = () => {
 
     try {
       // 使用 SSE 流式传输（截图也支持流式，后端已处理多模态消息）
-      if (streamSpeed !== 'off') {
+      if (streamSpeed !== 'off' && streamOutput) {
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2008,7 +2016,13 @@ const ChatPDF = () => {
                               }`}
                           >
                             <div className={`p-1 rounded-md ${isThinkingOpen ? 'bg-white shadow-sm dark:bg-gray-700' : 'bg-gray-200 dark:bg-gray-800'}`}>
-                              <Zap className={`w-3 h-3 ${isThinkingOpen ? 'text-amber-500 fill-amber-500' : 'text-gray-400'}`} />
+                              {/* 原子图标 */}
+                              <svg className={`w-3 h-3 ${isThinkingOpen ? 'text-amber-500' : 'text-gray-400'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                <ellipse cx="12" cy="12" rx="10" ry="4" />
+                                <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
+                                <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
+                                <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                              </svg>
                             </div>
                             <span>深度思考过程</span>
                             <span className="opacity-50">Duration: {((msg.thinking?.length || 0) / 20).toFixed(1)}s</span>
@@ -2494,6 +2508,20 @@ const ChatPDF = () => {
                   </button>
                 </div>
 
+                {/* 对话设置入口 */}
+                <div className="pt-4 border-t border-gray-100">
+                  <button
+                    onClick={() => {
+                      setShowSettings(false);
+                      setShowChatSettings(true);
+                    }}
+                    className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                  >
+                    <SlidersHorizontal className="w-4 h-4" />
+                    对话设置（温度、Token、流式）
+                  </button>
+                </div>
+
                 {/* OCR 设置入口 */}
                 <div className="pt-4 border-t border-gray-100">
                   <button
@@ -2636,6 +2664,12 @@ const ChatPDF = () => {
       <GlobalSettings
         isOpen={showGlobalSettings}
         onClose={() => setShowGlobalSettings(false)}
+      />
+
+      {/* 对话设置面板 */}
+      <ChatSettings
+        isOpen={showChatSettings}
+        onClose={() => setShowChatSettings(false)}
       />
 
       {/* OCR 设置面板 */}

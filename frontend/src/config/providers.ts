@@ -157,6 +157,25 @@ export const SYSTEM_PROVIDERS: Provider[] = [
             chatEndpoint: '/chat/completions',
             embeddingEndpoint: '/embeddings'
         }
+    },
+    {
+        id: 'doubao',
+        name: '字节跳动 (豆包)',
+        logo: getProviderLogo('doubao'),
+        apiKey: '',
+        apiHost: 'https://ark.cn-beijing.volces.com/api/v3',
+        enabled: false,
+        isSystem: true,
+        capabilities: {
+            chat: true,
+            embedding: true,
+            rerank: false
+        },
+        apiConfig: {
+            fetchModelsEndpoint: '/models',
+            chatEndpoint: '/chat/completions',
+            embeddingEndpoint: '/embeddings'
+        }
     }
 ]
 

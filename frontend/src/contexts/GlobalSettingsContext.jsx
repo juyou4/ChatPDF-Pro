@@ -19,12 +19,23 @@ const DEFAULT_SETTINGS = {
     fontFamily: 'inter',
     customFont: '',
     globalScale: 1.0,
+    // 对话参数
+    maxTokens: 8192,
+    temperature: 0.7,
+    topP: 1.0,
+    contextCount: 5,
+    streamOutput: true,
 };
 
 export const GlobalSettingsProvider = ({ children }) => {
     const [fontFamily, setFontFamily] = useState(DEFAULT_SETTINGS.fontFamily);
     const [customFont, setCustomFont] = useState(DEFAULT_SETTINGS.customFont);
     const [globalScale, setGlobalScale] = useState(DEFAULT_SETTINGS.globalScale);
+    const [maxTokens, setMaxTokens] = useState(DEFAULT_SETTINGS.maxTokens);
+    const [temperature, setTemperature] = useState(DEFAULT_SETTINGS.temperature);
+    const [topP, setTopP] = useState(DEFAULT_SETTINGS.topP);
+    const [contextCount, setContextCount] = useState(DEFAULT_SETTINGS.contextCount);
+    const [streamOutput, setStreamOutput] = useState(DEFAULT_SETTINGS.streamOutput);
 
     // 从 localStorage 加载设置
     useEffect(() => {
@@ -36,6 +47,11 @@ export const GlobalSettingsProvider = ({ children }) => {
                     setFontFamily(settings.fontFamily || DEFAULT_SETTINGS.fontFamily);
                     setCustomFont(settings.customFont || DEFAULT_SETTINGS.customFont);
                     setGlobalScale(settings.globalScale || DEFAULT_SETTINGS.globalScale);
+                    if (settings.maxTokens !== undefined) setMaxTokens(settings.maxTokens);
+                    if (settings.temperature !== undefined) setTemperature(settings.temperature);
+                    if (settings.topP !== undefined) setTopP(settings.topP);
+                    if (settings.contextCount !== undefined) setContextCount(settings.contextCount);
+                    if (settings.streamOutput !== undefined) setStreamOutput(settings.streamOutput);
                 }
             } catch (error) {
                 console.error('Failed to load global settings:', error);
@@ -52,6 +68,11 @@ export const GlobalSettingsProvider = ({ children }) => {
                     fontFamily,
                     customFont,
                     globalScale,
+                    maxTokens,
+                    temperature,
+                    topP,
+                    contextCount,
+                    streamOutput,
                 };
                 localStorage.setItem('globalSettings', JSON.stringify(settings));
             } catch (error) {
@@ -59,7 +80,7 @@ export const GlobalSettingsProvider = ({ children }) => {
             }
         };
         saveSettings();
-    }, [fontFamily, customFont, globalScale]);
+    }, [fontFamily, customFont, globalScale, maxTokens, temperature, topP, contextCount, streamOutput]);
 
     // 应用字体到 CSS
     useEffect(() => {
@@ -138,6 +159,11 @@ export const GlobalSettingsProvider = ({ children }) => {
         setFontFamily(DEFAULT_SETTINGS.fontFamily);
         setCustomFont(DEFAULT_SETTINGS.customFont);
         setGlobalScale(DEFAULT_SETTINGS.globalScale);
+        setMaxTokens(DEFAULT_SETTINGS.maxTokens);
+        setTemperature(DEFAULT_SETTINGS.temperature);
+        setTopP(DEFAULT_SETTINGS.topP);
+        setContextCount(DEFAULT_SETTINGS.contextCount);
+        setStreamOutput(DEFAULT_SETTINGS.streamOutput);
     };
 
     // 导出设置
@@ -146,6 +172,11 @@ export const GlobalSettingsProvider = ({ children }) => {
             fontFamily,
             customFont,
             globalScale,
+            maxTokens,
+            temperature,
+            topP,
+            contextCount,
+            streamOutput,
             exportedAt: new Date().toISOString(),
         };
         return JSON.stringify(settings, null, 2);
@@ -158,6 +189,11 @@ export const GlobalSettingsProvider = ({ children }) => {
             if (settings.fontFamily !== undefined) setFontFamily(settings.fontFamily);
             if (settings.customFont !== undefined) setCustomFont(settings.customFont);
             if (settings.globalScale !== undefined) setGlobalScale(settings.globalScale);
+            if (settings.maxTokens !== undefined) setMaxTokens(settings.maxTokens);
+            if (settings.temperature !== undefined) setTemperature(settings.temperature);
+            if (settings.topP !== undefined) setTopP(settings.topP);
+            if (settings.contextCount !== undefined) setContextCount(settings.contextCount);
+            if (settings.streamOutput !== undefined) setStreamOutput(settings.streamOutput);
             return true;
         } catch (error) {
             console.error('Failed to import settings:', error);
@@ -179,11 +215,21 @@ export const GlobalSettingsProvider = ({ children }) => {
         fontFamily,
         customFont,
         globalScale,
+        maxTokens,
+        temperature,
+        topP,
+        contextCount,
+        streamOutput,
 
         // 设置方法
         setFontFamily,
         setCustomFont,
         setGlobalScale,
+        setMaxTokens,
+        setTemperature,
+        setTopP,
+        setContextCount,
+        setStreamOutput,
 
         // 工具方法
         resetSettings,

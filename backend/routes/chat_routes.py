@@ -66,6 +66,11 @@ class ChatRequest(BaseModel):
     protect_tables: bool = True   # 是否保护表格结构
     # 深度思考模式
     enable_thinking: bool = False  # 是否开启深度思考
+    # 模型参数（前端可调）
+    max_tokens: int = 8192  # 最大输出 token 数
+    temperature: float = 0.7  # 温度参数
+    top_p: float = 1.0  # 核采样参数
+    stream_output: bool = True  # 是否流式输出
 
 
 class ChatVisionRequest(BaseModel):
@@ -207,7 +212,10 @@ async def chat_with_pdf(request: ChatRequest):
             request.model,
             request.api_provider,
             endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
-            middlewares=middlewares
+            middlewares=middlewares,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p
         )
         message = response["choices"][0]["message"]
         answer = message["content"]
@@ -250,7 +258,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
 回答规则：
 1. 以用户发送的图片为核心依据进行回答，不要参考其他内容。
-2. 如果图片包含图表，请分析数据趋势和关键信息。
+2. 如果图片包含图表，请分析数据和关键信息。
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 简洁清晰，学术准确。"""
@@ -344,7 +352,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 request.api_provider,
                 endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
                 middlewares=middlewares,
-                enable_thinking=request.enable_thinking
+                enable_thinking=request.enable_thinking,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p
             ):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
