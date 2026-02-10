@@ -2691,19 +2691,19 @@ const ChatPDF = () => {
 
       <GlobalSettings
         isOpen={showGlobalSettings}
-        onClose={() => setShowGlobalSettings(false)}
+        onClose={() => { setShowGlobalSettings(false); setShowSettings(true); }}
       />
 
       {/* 对话设置面板 */}
       <ChatSettings
         isOpen={showChatSettings}
-        onClose={() => setShowChatSettings(false)}
+        onClose={() => { setShowChatSettings(false); setShowSettings(true); }}
       />
 
       {/* OCR 设置面板 */}
       <OCRSettingsPanel
         isOpen={showOCRSettings}
-        onClose={() => setShowOCRSettings(false)}
+        onClose={() => { setShowOCRSettings(false); setShowSettings(true); }}
       />
     </div >
   );

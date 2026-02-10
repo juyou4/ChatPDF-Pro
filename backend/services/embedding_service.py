@@ -1116,7 +1116,7 @@ def _rrf_merge_chunk_and_group(
                             "reranked": False,
                         }
 
-    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的
+    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 2 个（从 1 提升到 2，减少过度去重）
     if chunk_group_map:
         # 构建反向映射：chunk_index -> group_id（基于 group_chunk_map）
         chunk_idx_to_group = {}
@@ -1126,9 +1126,9 @@ def _rrf_merge_chunk_and_group(
                     if 0 <= idx < len(chunks):
                         chunk_idx_to_group[chunks[idx]] = gid
 
-        # 按 group_id 分组，每组只保留 RRF 分数最高的 chunk
-        # group_id -> (best_chunk_text, best_rrf_score)
-        group_best = {}
+        # 按 group_id 分组，每组只保留 RRF 分数最高的 2 个 chunk
+        # group_id -> [(chunk_text, rrf_score), ...]
+        group_chunks = {}
         chunks_to_remove = set()
 
         for chunk_text, rrf_score in rrf_scores.items():
@@ -1137,17 +1137,19 @@ def _rrf_merge_chunk_and_group(
                 # 不属于任何意群的 chunk，保留
                 continue
 
-            if gid not in group_best:
-                group_best[gid] = (chunk_text, rrf_score)
+            if gid not in group_chunks:
+                group_chunks[gid] = [(chunk_text, rrf_score)]
             else:
-                existing_text, existing_score = group_best[gid]
-                if rrf_score > existing_score:
-                    # 新的 chunk 分数更高，移除旧的
-                    chunks_to_remove.add(existing_text)
-                    group_best[gid] = (chunk_text, rrf_score)
-                else:
-                    # 旧的分数更高，移除新的
-                    chunks_to_remove.add(chunk_text)
+                group_chunks[gid].append((chunk_text, rrf_score))
+
+        # 每组保留 top-2
+        for gid, chunk_list in group_chunks.items():
+            if len(chunk_list) <= 2:
+                continue
+            # 按 RRF 分数降序排列，移除第 3 个及之后的
+            chunk_list.sort(key=lambda x: x[1], reverse=True)
+            for chunk_text, _ in chunk_list[2:]:
+                chunks_to_remove.add(chunk_text)
 
         # 移除被去重的 chunk
         for ct in chunks_to_remove:
@@ -1201,8 +1203,8 @@ def _is_table_fragment(text: str) -> bool:
     sentences = re.split(r'[.!?。！？]', text)
     has_real_sentence = any(len(s.strip()) > 30 for s in sentences)
 
-    # 数字 token 占比 > 35% 且没有完整句子 → 表格碎片
-    if num_ratio > 0.35 and not has_real_sentence:
+    # 数字 token 占比 > 25% 且没有完整句子 → 表格碎片（从 35% 降至 25%，减少误判）
+    if num_ratio > 0.25 and not has_real_sentence:
         return True
 
     # 数字 token 占比 > 50% → 几乎肯定是表格
@@ -1212,7 +1214,7 @@ def _is_table_fragment(text: str) -> bool:
     return False
 
 
-def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.5) -> List[dict]:
+def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) -> List[dict]:
     """对包含完整查询短语的 chunk 进行相似度加权提升
 
     向量检索是语义匹配，可能把只包含部分关键词的碎片排在前面。
@@ -1295,6 +1297,19 @@ def search_document_chunks(
             query = rewritten_query
     except Exception as e:
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
+
+    # 查询类型分析 + 动态 candidate_k（提升召回率）
+    from services.query_analyzer import analyze_query_type
+    query_type = analyze_query_type(query)
+    # 根据查询类型动态调整 candidate_k
+    dynamic_candidate_k_map = {
+        'extraction': 50,   # 提取性问题需要更大候选池
+        'overview': 30,     # 概览性问题需要较大候选池
+        'analytical': 25,   # 分析性问题适中
+        'specific': 20,     # 具体性问题标准候选池
+    }
+    candidate_k = max(candidate_k, dynamic_candidate_k_map.get(query_type, 20))
+    logger.info(f"[{doc_id}] 查询类型: {query_type}, 动态 candidate_k: {candidate_k}")
 
     # 检索耗时记录（需求 10.1）
     timings = {}
@@ -1380,7 +1395,7 @@ def search_document_chunks(
                 })
                 vector_chunk_set.add(chunk_text)
                 phrase_injected += 1
-                if phrase_injected >= 3:  # 最多注入 3 个
+                if phrase_injected >= 5:  # 最多注入 5 个（从 3 提升到 5，提高召回率）
                     break
         if phrase_injected > 0:
             logger.info(f"[精确短语注入] 查询 '{query}' 注入了 {phrase_injected} 个包含完整短语的 chunk")
@@ -1406,7 +1421,7 @@ def search_document_chunks(
             for item in bm25_results:
                 item['page'] = _find_page_for_chunk(item['chunk'], pages)
 
-            results = hybrid_search_merge(vector_results, bm25_results, top_k=top_k)
+            results = hybrid_search_merge(vector_results, bm25_results, top_k=top_k, query_type=query_type)
             # 补充snippet/highlights（BM25结果可能缺少）
             for item in results:
                 if 'snippet' not in item or not item.get('snippet'):
@@ -1549,11 +1564,11 @@ def _merge_with_group_search(
             # 意群索引不存在，回退到仅分块级别检索（需求 6.3）
             return chunk_results
 
-        # 在意群级别索引中搜索
+        # 在意群级别索引中搜索（search_k 设为 top_k * 2，提高召回率）
         group_results = _search_group_index(
             group_index_data=group_index_data,
             query_vector=query_vector,
-            search_k=top_k,
+            search_k=top_k * 2,
         )
 
         if not group_results:
@@ -1957,11 +1972,11 @@ def _rank_groups_by_results(
                 )
 
     # 过滤掉相关性过低的意群
-    # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 40% 的意群
+    # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 30% 的意群（从 40% 降至 30%，减少过度过滤）
     if group_similarity:
         best_similarity = max(group_similarity.values())
         if best_similarity > 0.5:
-            threshold = best_similarity * 0.4
+            threshold = best_similarity * 0.3
             filtered_ids = {
                 gid for gid, sim in group_similarity.items()
                 if sim >= threshold

@@ -35,4 +35,4 @@ class RAGConfig:
     reserve_for_answer: int = 1500            # 预留给回答和系统提示词的 Token 数
     default_granularity: str = "digest"       # 默认粒度
     relevance_threshold: float = 0.3          # 检索质量阈值（需求 8.2）
-    small_doc_chunk_threshold: int = 20       # 小文档分块数阈值，低于此值跳过意群检索（需求 10.3）
+    small_doc_chunk_threshold: int = 10       # 小文档分块数阈值，低于此值跳过意群检索（需求 10.3，从 20 降至 10 以提升召回率）

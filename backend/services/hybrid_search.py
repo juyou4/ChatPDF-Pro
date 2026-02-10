@@ -65,7 +65,8 @@ def hybrid_search_merge(
     vector_results: List[dict],
     bm25_results: List[dict],
     top_k: int = 10,
-    alpha: float = 0.5
+    alpha: float = 0.5,
+    query_type: Optional[str] = None,
 ) -> List[dict]:
     """
     混合检索：融合向量检索和BM25检索结果
@@ -75,10 +76,23 @@ def hybrid_search_merge(
         bm25_results: BM25检索结果
         top_k: 返回结果数量
         alpha: 向量检索权重（0-1），默认0.5表示平等权重
+        query_type: 查询类型（可选），用于动态调整 alpha 权重
         
     Returns:
         融合后的结果列表
     """
+    # 根据查询类型动态调整 alpha（向量权重）
+    if query_type is not None:
+        if query_type == 'extraction':
+            # 提取性问题：BM25 关键词匹配更重要
+            alpha = 0.35
+        elif query_type == 'overview':
+            # 概览性问题：向量语义匹配更重要
+            alpha = 0.65
+        elif query_type == 'analytical':
+            # 分析性问题：略偏向向量
+            alpha = 0.55
+        # specific 保持默认 0.5
     if not bm25_results:
         return vector_results[:top_k]
     if not vector_results:
