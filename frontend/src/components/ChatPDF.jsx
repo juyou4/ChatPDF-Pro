@@ -37,6 +37,30 @@ const PauseIcon = () => (
   </svg>
 );
 
+/**
+ * 构建对话历史
+ * 根据 contextCount 截取最近 N 轮对话，过滤系统消息和含图片的消息
+ * @param {Array} messages - 消息列表
+ * @param {number} contextCount - 上下文轮数
+ * @returns {Array} 对话历史 [{role: 'user'|'assistant', content: '...'}]
+ */
+const buildChatHistory = (messages, contextCount) => {
+  if (!contextCount || contextCount <= 0) return [];
+
+  // 过滤出有效的对话消息（排除 system 和含图片的消息）
+  const validMessages = messages.filter(msg =>
+    (msg.type === 'user' || msg.type === 'assistant') && !msg.hasImage
+  );
+
+  // 取最近 contextCount * 2 条（每轮包含 user + assistant）
+  const recentMessages = validMessages.slice(-(contextCount * 2));
+
+  return recentMessages.map(msg => ({
+    role: msg.type === 'user' ? 'user' : 'assistant',
+    content: msg.content
+  }));
+};
+
 const ChatPDF = () => {
   // Core State
   const [docId, setDocId] = useState(null);
@@ -623,6 +647,9 @@ const ChatPDF = () => {
     setInputMessage('');
     setIsLoading(true);
 
+    // 构建对话历史（使用当前 messages 状态，不包含刚添加的 userMsg，因为 setMessages 是异步的）
+    const chatHistory = buildChatHistory(messages, contextCount);
+
     const requestBody = {
       doc_id: docId,
       question: userMsg.content,
@@ -635,7 +662,8 @@ const ChatPDF = () => {
       max_tokens: maxTokens,
       temperature: temperature,
       top_p: topP,
-      stream_output: streamOutput
+      stream_output: streamOutput,
+      chat_history: chatHistory.length > 0 ? chatHistory : null
     };
 
     // Add placeholder message for streaming effect

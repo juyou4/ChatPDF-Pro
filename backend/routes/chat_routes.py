@@ -71,6 +71,8 @@ class ChatRequest(BaseModel):
     temperature: float = 0.7  # 温度参数
     top_p: float = 1.0  # 核采样参数
     stream_output: bool = True  # 是否流式输出
+    # 多轮对话历史（需求 3.2）
+    chat_history: Optional[List[dict]] = None  # [{"role": "user"|"assistant", "content": "..."}]
 
 
 class ChatVisionRequest(BaseModel):
@@ -201,8 +203,13 @@ async def chat_with_pdf(request: ChatRequest):
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content}
     ]
+    # 插入多轮对话历史（需求 3.2：位于 system prompt 之后、当前用户消息之前）
+    if request.chat_history:
+        for hist_msg in request.chat_history:
+            if isinstance(hist_msg, dict) and hist_msg.get("role") in ("user", "assistant") and hist_msg.get("content"):
+                messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
+    messages.append({"role": "user", "content": user_content})
 
     middlewares = build_chat_middlewares()
     try:
@@ -339,8 +346,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content}
     ]
+    # 插入多轮对话历史（需求 3.2：位于 system prompt 之后、当前用户消息之前）
+    if request.chat_history:
+        for hist_msg in request.chat_history:
+            if isinstance(hist_msg, dict) and hist_msg.get("role") in ("user", "assistant") and hist_msg.get("content"):
+                messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
+    messages.append({"role": "user", "content": user_content})
 
     async def event_generator():
         try:

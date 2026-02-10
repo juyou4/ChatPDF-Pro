@@ -6,9 +6,11 @@ Token 预算管理器模块
 对语义意群进行粒度降级调整。
 
 Token 估算策略：
-- 中文字符（CJK Unicode 范围）：1.5 字符/token
-- 英文/ASCII 字符：4 字符/token
-- 混合文本按字符类型加权计算
+- 优先使用 tiktoken 库进行精确 Token 估算
+- tiktoken 不可用时回退到字符比例估算：
+  - 中文字符（CJK Unicode 范围）：1.5 字符/token
+  - 英文/ASCII 字符：4 字符/token
+  - 混合文本按字符类型加权计算
 """
 
 import logging
@@ -16,6 +18,35 @@ import math
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# tiktoken 初始化：尝试导入并缓存编码器实例
+# 如果 tiktoken 不可用（未安装或加载失败），则回退到字符比例估算
+# ============================================================
+_tiktoken_encoding = None
+_tiktoken_available = False
+
+
+def _init_tiktoken():
+    """初始化 tiktoken 编码器
+
+    尝试导入 tiktoken 库并缓存 gpt-4o 模型的编码器实例。
+    如果导入或初始化失败（未安装、版本不兼容等），
+    标记为不可用，后续将回退到字符比例估算。
+    """
+    global _tiktoken_encoding, _tiktoken_available
+    try:
+        import tiktoken
+        _tiktoken_encoding = tiktoken.encoding_for_model("gpt-4o")
+        _tiktoken_available = True
+        logger.info("tiktoken 初始化成功，将使用精确 Token 估算")
+    except Exception as e:
+        _tiktoken_available = False
+        logger.info(f"tiktoken 不可用（{e}），将使用字符比例估算")
+
+
+# 模块加载时执行初始化
+_init_tiktoken()
 
 # 粒度降级顺序：full → digest → summary
 GRANULARITY_LEVELS = ["full", "digest", "summary"]
@@ -87,7 +118,29 @@ class TokenBudgetManager:
         return self.max_tokens - self.reserve_for_answer
 
     def estimate_tokens(self, text: str) -> int:
-        """语言感知的 Token 估算
+        """Token 估算（优先使用 tiktoken 精确估算）
+
+        优先使用 tiktoken 库进行精确 Token 计数。
+        如果 tiktoken 不可用，则回退到基于字符比例的估算方法。
+
+        Args:
+            text: 待估算的文本
+
+        Returns:
+            估算的 Token 数
+        """
+        if not text:
+            return 0
+
+        # 优先使用 tiktoken 进行精确估算
+        if _tiktoken_available and _tiktoken_encoding:
+            return len(_tiktoken_encoding.encode(text))
+
+        # tiktoken 不可用时回退到字符比例估算
+        return self._estimate_by_char_ratio(text)
+
+    def _estimate_by_char_ratio(self, text: str) -> int:
+        """基于字符比例的 Token 估算（回退方案）
 
         根据字符类型分别计算 Token 数：
         - 中文字符（CJK Unicode 范围）：1.5 字符/token → 每个字符贡献 1/1.5 个 token

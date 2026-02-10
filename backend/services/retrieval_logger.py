@@ -43,6 +43,8 @@ class RetrievalTrace:
         fallback_detail: 降级详情描述
         citations: 引文映射列表，
             每项格式: {"ref": int, "group_id": str, "page_range": [int, int]}
+        timing: 各阶段耗时字典（毫秒），
+            可能包含: vector_search_ms, bm25_search_ms, rerank_ms, total_ms 等
     """
 
     query: str
@@ -58,6 +60,7 @@ class RetrievalTrace:
     fallback_type: Optional[str] = None
     fallback_detail: Optional[str] = None
     citations: List[dict] = field(default_factory=list)
+    timing: dict = field(default_factory=dict)  # 各阶段耗时（毫秒）（需求 10.2）
 
 
 class RetrievalLogger:
@@ -129,6 +132,10 @@ class RetrievalLogger:
                 trace.fallback_detail or "无",
             )
 
+        # 耗时信息（需求 10.2）
+        if trace.timing:
+            logger.info("检索耗时: %s", trace.timing)
+
         # 记录原始查询（DEBUG 级别，避免日志过大）
         logger.debug("原始查询: %s", trace.query)
 
@@ -174,4 +181,5 @@ class RetrievalLogger:
             "token_used": trace.token_used,
             "fallback": fallback,
             "citations": trace.citations,
+            "timing": trace.timing,
         }

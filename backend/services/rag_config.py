@@ -23,6 +23,8 @@ class RAGConfig:
         max_token_budget: 最大 Token 预算，控制发送给 LLM 的上下文总量
         reserve_for_answer: 预留给回答和系统提示词的 Token 数
         default_granularity: 默认粒度级别，可选 "summary"、"digest" 或 "full"
+        relevance_threshold: 检索质量阈值，所有结果相似度低于此值时附加低质量提示
+        small_doc_chunk_threshold: 小文档分块数阈值，低于此值时跳过意群级别检索以加速响应
     """
 
     enable_semantic_groups: bool = True       # 是否启用意群功能
@@ -32,3 +34,5 @@ class RAGConfig:
     max_token_budget: int = 8000              # 最大 Token 预算
     reserve_for_answer: int = 1500            # 预留给回答和系统提示词的 Token 数
     default_granularity: str = "digest"       # 默认粒度
+    relevance_threshold: float = 0.3          # 检索质量阈值（需求 8.2）
+    small_doc_chunk_threshold: int = 20       # 小文档分块数阈值，低于此值跳过意群检索（需求 10.3）

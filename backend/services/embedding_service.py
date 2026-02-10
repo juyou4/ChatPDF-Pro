@@ -3,6 +3,9 @@ import logging
 import os
 import pickle
 import re
+import threading
+import time
+from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 import faiss
@@ -20,6 +23,59 @@ logger = logging.getLogger(__name__)
 
 # Lazy-loaded caches
 local_embedding_models = {}
+
+
+class QueryVectorCache:
+    """查询向量 LRU 缓存
+    
+    使用 OrderedDict 实现 LRU 淘汰策略，缓存键为 (embedding_model_id, query_text) 元组，
+    确保不同模型的查询向量不会混淆。
+    """
+
+    def __init__(self, max_size: int = 256):
+        self._cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, model_id: str, query: str) -> Optional[np.ndarray]:
+        """获取缓存的查询向量
+        
+        如果缓存命中，将该条目移到末尾（标记为最近使用）。
+        
+        Args:
+            model_id: embedding 模型 ID
+            query: 查询文本
+            
+        Returns:
+            缓存的查询向量，未命中时返回 None
+        """
+        key = (model_id, query)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def put(self, model_id: str, query: str, vector: np.ndarray) -> None:
+        """存入查询向量
+        
+        如果缓存已满，淘汰最久未使用的条目（LRU 策略）。
+        
+        Args:
+            model_id: embedding 模型 ID
+            query: 查询文本
+            vector: 查询向量
+        """
+        key = (model_id, query)
+        self._cache[key] = vector
+        self._cache.move_to_end(key)
+        if len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
+
+
+# 全局查询向量缓存实例（默认容量 256）
+_query_vector_cache = QueryVectorCache()
+
+# 记录正在生成意群的文档 ID，防止重复提交（需求 6.1）
+_group_generation_in_progress: set[str] = set()
 
 
 def preprocess_text(text: str) -> str:
@@ -337,6 +393,259 @@ def _apply_rerank(
         return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
 
 
+def structure_aware_split(
+    text: str,
+    chunk_size: int = 1200,
+    chunk_overlap: int = 200,
+) -> list[str]:
+    """结构感知分块
+
+    优先级：
+    1. 识别受保护区域（表格、LaTeX 公式块），标记为不可切分
+    2. 按段落边界（双换行）切分文本
+    3. 合并连续段落到 chunk_size 以内
+    4. 受保护区域保持完整，超过 chunk_size 时单独成块
+    5. 检测失败时回退到 RecursiveCharacterTextSplitter
+
+    Args:
+        text: 待分块的文本
+        chunk_size: 最大分块字符数（默认 1200）
+        chunk_overlap: 分块重叠字符数（默认 200）
+
+    Returns:
+        分块后的文本列表
+    """
+    if not text or not text.strip():
+        return []
+
+    try:
+        # 步骤 1：识别受保护区域（表格和公式块）
+        protected_regions = _find_protected_regions(text)
+
+        # 步骤 2：按段落边界切分，同时保护受保护区域
+        segments = _split_by_paragraphs_with_protection(text, protected_regions)
+
+        if not segments:
+            raise ValueError("段落切分结果为空")
+
+        # 步骤 3：合并段落为分块，尊重 chunk_size 限制
+        chunks = _merge_segments_into_chunks(segments, chunk_size, chunk_overlap)
+
+        if not chunks:
+            raise ValueError("合并分块结果为空")
+
+        return chunks
+
+    except Exception as e:
+        # 检测失败时回退到 RecursiveCharacterTextSplitter
+        logger.warning(f"结构感知分块失败，回退到 RecursiveCharacterTextSplitter: {e}")
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+        )
+        return text_splitter.split_text(text)
+
+
+def _find_protected_regions(text: str) -> list[tuple[int, int]]:
+    """识别文本中的受保护区域（表格和公式块）
+
+    受保护区域类型：
+    - 表格：连续的以 | 开头且包含 | 分隔符的行
+    - 显示公式：$$...$$ 或 \\[...\\] 包裹的区域
+
+    Args:
+        text: 原始文本
+
+    Returns:
+        受保护区域的 (start, end) 位置列表，按 start 排序
+    """
+    regions = []
+
+    # 检测表格区域：连续的 markdown 表格行（以 | 开头或包含 | 分隔符）
+    table_pattern = re.compile(
+        r'(?:^[ \t]*\|.+\|[ \t]*$\n?){2,}',
+        re.MULTILINE
+    )
+    for m in table_pattern.finditer(text):
+        regions.append((m.start(), m.end()))
+
+    # 检测显示公式：$$...$$ 块（跨行）
+    display_math_pattern = re.compile(r'\$\$[\s\S]+?\$\$')
+    for m in display_math_pattern.finditer(text):
+        regions.append((m.start(), m.end()))
+
+    # 检测显示公式：\[...\] 块（跨行）
+    bracket_math_pattern = re.compile(r'\\\[[\s\S]+?\\\]')
+    for m in bracket_math_pattern.finditer(text):
+        regions.append((m.start(), m.end()))
+
+    # 按起始位置排序并合并重叠区域
+    regions.sort(key=lambda r: r[0])
+    merged = []
+    for start, end in regions:
+        if merged and start <= merged[-1][1]:
+            # 与上一个区域重叠，合并
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def _split_by_paragraphs_with_protection(
+    text: str,
+    protected_regions: list[tuple[int, int]],
+) -> list[dict]:
+    """按段落边界切分文本，同时保护受保护区域不被切割
+
+    将文本分为两类段：
+    - 普通段落：可以被进一步合并或切分
+    - 受保护段：表格或公式块，必须保持完整
+
+    Args:
+        text: 原始文本
+        protected_regions: 受保护区域的 (start, end) 列表
+
+    Returns:
+        段列表，每个元素为 {"text": str, "protected": bool}
+    """
+    if not protected_regions:
+        # 没有受保护区域，直接按段落边界切分
+        paragraphs = re.split(r'\n\n+', text)
+        return [{"text": p.strip(), "protected": False}
+                for p in paragraphs if p.strip()]
+
+    segments = []
+    pos = 0
+
+    for region_start, region_end in protected_regions:
+        # 处理受保护区域之前的普通文本
+        if pos < region_start:
+            normal_text = text[pos:region_start]
+            paragraphs = re.split(r'\n\n+', normal_text)
+            for p in paragraphs:
+                stripped = p.strip()
+                if stripped:
+                    segments.append({"text": stripped, "protected": False})
+
+        # 添加受保护区域
+        protected_text = text[region_start:region_end].strip()
+        if protected_text:
+            segments.append({"text": protected_text, "protected": True})
+
+        pos = region_end
+
+    # 处理最后一个受保护区域之后的普通文本
+    if pos < len(text):
+        remaining_text = text[pos:]
+        paragraphs = re.split(r'\n\n+', remaining_text)
+        for p in paragraphs:
+            stripped = p.strip()
+            if stripped:
+                segments.append({"text": stripped, "protected": False})
+
+    return segments
+
+
+def _merge_segments_into_chunks(
+    segments: list[dict],
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[str]:
+    """将段合并为分块，尊重 chunk_size 限制和受保护区域完整性
+
+    合并策略：
+    - 连续的普通段落合并到 chunk_size 以内
+    - 受保护段独立或与相邻普通段落合并（不超过 chunk_size）
+    - 受保护段本身超过 chunk_size 时单独成块
+    - 通过重叠实现分块间的上下文连续性
+
+    Args:
+        segments: 段列表（来自 _split_by_paragraphs_with_protection）
+        chunk_size: 最大分块字符数
+        chunk_overlap: 分块重叠字符数
+
+    Returns:
+        分块后的文本列表
+    """
+    chunks = []
+    current_parts = []  # 当前分块中的文本片段
+    current_len = 0
+
+    for seg in segments:
+        seg_text = seg["text"]
+        seg_len = len(seg_text)
+        is_protected = seg["protected"]
+
+        if is_protected:
+            if seg_len > chunk_size:
+                # 受保护区域超过 chunk_size：先提交当前缓冲区，再将受保护区域单独成块
+                if current_parts:
+                    chunks.append("\n\n".join(current_parts))
+                    current_parts = []
+                    current_len = 0
+                chunks.append(seg_text)
+            elif current_len + seg_len + 2 > chunk_size:
+                # 加入受保护区域会超过 chunk_size：先提交当前缓冲区
+                if current_parts:
+                    chunks.append("\n\n".join(current_parts))
+                    current_parts = []
+                    current_len = 0
+                current_parts.append(seg_text)
+                current_len = seg_len
+            else:
+                # 受保护区域可以合并到当前分块
+                current_parts.append(seg_text)
+                current_len += seg_len + (2 if current_parts else 0)
+        else:
+            # 普通段落
+            if current_len + seg_len + 2 > chunk_size and current_parts:
+                # 当前分块已满，提交并开始新分块
+                chunks.append("\n\n".join(current_parts))
+
+                # 实现重叠：从当前分块末尾取 overlap 部分作为新分块的开头
+                overlap_parts = _get_overlap_parts(current_parts, chunk_overlap)
+                current_parts = overlap_parts
+                current_len = sum(len(p) for p in current_parts) + max(0, (len(current_parts) - 1) * 2)
+
+            current_parts.append(seg_text)
+            current_len += seg_len + (2 if len(current_parts) > 1 else 0)
+
+    # 提交最后一个分块
+    if current_parts:
+        chunks.append("\n\n".join(current_parts))
+
+    return [c for c in chunks if c.strip()]
+
+
+def _get_overlap_parts(parts: list[str], overlap_size: int) -> list[str]:
+    """从分块末尾提取重叠部分
+
+    从 parts 列表的末尾向前取，直到累计字符数达到 overlap_size。
+
+    Args:
+        parts: 当前分块的文本片段列表
+        overlap_size: 目标重叠字符数
+
+    Returns:
+        用于重叠的文本片段列表
+    """
+    if not parts or overlap_size <= 0:
+        return []
+
+    overlap_parts = []
+    total = 0
+    for p in reversed(parts):
+        if total + len(p) > overlap_size and overlap_parts:
+            break
+        overlap_parts.insert(0, p)
+        total += len(p)
+
+    return overlap_parts
+
+
 def build_vector_index(
     doc_id: str,
     text: str,
@@ -361,14 +670,25 @@ def build_vector_index(
 
         # 分块策略：按模型最大上下文自适应，默认 1200 / 200（约 15-20% 重叠），限制在 1000-2500
         chunk_size, chunk_overlap = get_chunk_params(embedding_model_id, base_chunk_size=1200, base_overlap=200)
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-        )
         preprocessed_text = preprocess_text(text)
-        chunks = text_splitter.split_text(preprocessed_text)
+
+        # 优先使用结构感知分块，保护表格和公式完整性（需求 4.1, 4.2, 4.3, 4.4）
+        try:
+            chunks = structure_aware_split(preprocessed_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            if chunks:
+                print(f"使用结构感知分块，生成 {len(chunks)} 个分块")
+            else:
+                raise ValueError("结构感知分块返回空结果")
+        except Exception as e:
+            # 回退到 RecursiveCharacterTextSplitter（需求 4.4 安全降级）
+            logger.warning(f"结构感知分块失败，回退到 RecursiveCharacterTextSplitter: {e}")
+            from langchain.text_splitter import RecursiveCharacterTextSplitter
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                length_function=len,
+            )
+            chunks = text_splitter.split_text(preprocessed_text)
         print(f"Split into {len(chunks)} chunks.")
 
         if not chunks:
@@ -391,8 +711,8 @@ def build_vector_index(
 
         print(f"Vector index saved to {index_path}")
 
-        # ---- 语义意群生成与意群级别向量索引构建 ----
-        _build_semantic_group_index(
+        # ---- 语义意群异步生成与意群级别向量索引构建（需求 6.1）----
+        _build_semantic_group_index_async(
             doc_id=doc_id,
             chunks=chunks,
             pages=pages,
@@ -403,6 +723,46 @@ def build_vector_index(
     except Exception as e:
         print(f"Error building vector index for {doc_id}: {e}")
         raise
+
+
+def _build_semantic_group_index_async(
+    doc_id: str,
+    chunks: list[str],
+    pages: list[dict],
+    embed_fn,
+    api_key: str = None,
+):
+    """异步启动意群生成任务（需求 6.1, 6.4）
+
+    使用 threading.Thread 在后台执行意群生成，不阻塞文档上传流程。
+    通过 _group_generation_in_progress 集合防止同一文档重复提交。
+    任务失败时自动从集合中移除 doc_id，并在日志中记录失败原因。
+
+    Args:
+        doc_id: 文档唯一标识
+        chunks: 文本分块列表
+        pages: 文档页面数据列表
+        embed_fn: 嵌入函数
+        api_key: LLM API 密钥（用于意群摘要生成）
+    """
+    if doc_id in _group_generation_in_progress:
+        logger.info(f"[{doc_id}] 意群生成任务已在进行中，跳过")
+        return
+
+    _group_generation_in_progress.add(doc_id)
+
+    def _task():
+        try:
+            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key)
+        except Exception as e:
+            # 任务失败时记录日志（需求 6.4），不影响主流程
+            logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
+        finally:
+            _group_generation_in_progress.discard(doc_id)
+
+    thread = threading.Thread(target=_task, daemon=True)
+    thread.start()
+    logger.info(f"[{doc_id}] 意群生成后台任务已启动")
 
 
 def _build_semantic_group_index(
@@ -922,8 +1282,24 @@ def search_document_chunks(
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
-    use_hybrid: bool = True
+    use_hybrid: bool = True,
+    selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
 ) -> List[dict]:
+    # 查询改写（需求 1.1, 1.5）
+    try:
+        from services.query_rewriter import QueryRewriter
+        _rewriter = QueryRewriter()
+        rewritten_query = _rewriter.rewrite(query, selected_text=selected_text)
+        if rewritten_query != query:
+            logger.info(f"[{doc_id}] 查询改写: '{query}' → '{rewritten_query}'")
+            query = rewritten_query
+    except Exception as e:
+        logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
+
+    # 检索耗时记录（需求 10.1）
+    timings = {}
+    t_total = time.perf_counter()
+
     index_path = os.path.join(vector_store_dir, f"{doc_id}.index")
     chunks_path = os.path.join(vector_store_dir, f"{doc_id}.pkl")
 
@@ -942,7 +1318,18 @@ def search_document_chunks(
         embedding_model_id = "local-minilm"
 
     embed_fn = get_embedding_function(embedding_model_id, api_key)
-    query_vector = embed_fn([query])
+
+    # 向量检索计时开始（需求 10.1）
+    t0 = time.perf_counter()
+
+    # 查询向量 LRU 缓存（需求 5.1, 5.2, 5.3）
+    cached_vector = _query_vector_cache.get(embedding_model_id, query)
+    if cached_vector is not None:
+        query_vector = cached_vector
+        logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
+    else:
+        query_vector = embed_fn([query])
+        _query_vector_cache.put(embedding_model_id, query, query_vector)
 
     search_k = max(candidate_k, top_k)
     D, I = index.search(np.array(query_vector).astype('float32'), search_k)
@@ -1001,11 +1388,18 @@ def search_document_chunks(
     # --- 短语匹配加权 + 表格碎片降权 ---
     vector_results = _phrase_boost(vector_results, query)
 
+    # 向量检索计时结束（需求 10.1）
+    timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
     # --- BM25混合检索 ---
-    if use_hybrid and not use_rerank:
+    # BM25 始终参与混合检索，rerank 模式下先 RRF 融合再 rerank（需求 2.1, 2.2）
+    if use_hybrid:
         try:
             from services.bm25_service import bm25_search
             from services.hybrid_search import hybrid_search_merge
+
+            # BM25 检索计时开始（需求 10.1）
+            t0 = time.perf_counter()
 
             bm25_results = bm25_search(doc_id, query, chunks, top_k=search_k)
             # 为BM25结果补充page信息
@@ -1023,7 +1417,30 @@ def search_document_chunks(
                     item['similarity'] = 0.5
                     item['similarity_percent'] = 50.0
 
+            # BM25 检索计时结束（需求 10.1）
+            timings["bm25_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
             print(f"[Hybrid] 向量: {len(vector_results)}条, BM25: {len(bm25_results)}条, 融合后: {len(results)}条")
+
+            # rerank 模式下：对 BM25+向量 RRF 融合结果执行 rerank（需求 2.1）
+            if use_rerank:
+                # Rerank 计时开始（需求 10.1）
+                t0 = time.perf_counter()
+
+                results = _apply_rerank(
+                    query,
+                    results,
+                    reranker_model,
+                    rerank_provider,
+                    rerank_api_key,
+                    rerank_endpoint
+                )
+                # rerank 后做短语加权和表格碎片降权
+                results = _phrase_boost(results, query, boost_factor=1.2)
+                results = results[:top_k]
+
+                # Rerank 计时结束（需求 10.1）
+                timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # --- 意群级别检索 + RRF 融合（在 BM25 混合检索之后） ---
             results = _merge_with_group_search(
@@ -1036,13 +1453,20 @@ def search_document_chunks(
                 top_k=top_k,
             )
 
+            # 总耗时记录（需求 10.1）
+            timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
+            logger.info(f"[{doc_id}] 检索耗时: {timings}")
+
             return results
         except Exception as e:
+            # BM25 失败时回退：rerank 模式回退到仅向量检索结果进行 rerank（需求 2.3）
             print(f"[Hybrid] BM25混合检索失败，回退到纯向量检索: {e}")
-            # 回退到纯向量检索
 
-    # --- 纯向量检索（fallback或rerank模式） ---
+    # --- 纯向量检索（BM25 失败回退 或 use_hybrid=False 时的路径） ---
     if use_rerank:
+        # Rerank 计时开始（需求 10.1）
+        t0 = time.perf_counter()
+
         results = _apply_rerank(
             query,
             vector_results,
@@ -1053,6 +1477,9 @@ def search_document_chunks(
         )
         # rerank 后也做短语加权和表格碎片降权
         results = _phrase_boost(results, query, boost_factor=1.2)
+
+        # Rerank 计时结束（需求 10.1）
+        timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     else:
         results = sorted(vector_results, key=lambda x: x.get("similarity", 0), reverse=True)
 
@@ -1068,6 +1495,10 @@ def search_document_chunks(
         query=query,
         top_k=top_k,
     )
+
+    # 总耗时记录（需求 10.1）
+    timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
+    logger.info(f"[{doc_id}] 检索耗时: {timings}")
 
     return results
 
@@ -1104,6 +1535,11 @@ def _merge_with_group_search(
     # 检查是否启用语义意群功能
     if not config.enable_semantic_groups:
         logger.info(f"[{doc_id}] 语义意群功能已禁用，使用分块级别检索结果")
+        return chunk_results
+
+    # 小文档跳过意群检索（需求 10.3）
+    if len(chunks) < config.small_doc_chunk_threshold:
+        logger.info(f"[{doc_id}] 小文档（{len(chunks)} 分块），跳过意群级别检索")
         return chunk_results
 
     try:
@@ -1177,7 +1613,8 @@ def get_relevant_context(
     candidate_k: int = 20,
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
-    rerank_endpoint: Optional[str] = None
+    rerank_endpoint: Optional[str] = None,
+    selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -1225,7 +1662,8 @@ def get_relevant_context(
         reranker_model=reranker_model,
         rerank_provider=rerank_provider,
         rerank_api_key=rerank_api_key,
-        rerank_endpoint=rerank_endpoint
+        rerank_endpoint=rerank_endpoint,
+        selected_text=selected_text,  # 传递 selected_text 用于查询改写
     )
 
     config = RAGConfig()
@@ -1238,6 +1676,7 @@ def get_relevant_context(
                 query=query,
                 results=results,
                 config=config,
+                vector_store_dir=vector_store_dir,
             )
             if context_str is not None:
                 return context_str, retrieval_meta
@@ -1249,8 +1688,31 @@ def get_relevant_context(
     relevant_chunks = [item["chunk"] for item in results]
     context_string = "\n\n...\n\n".join(relevant_chunks)
 
+    # 质量阈值检查（需求 8.1, 8.4）
+    low_relevance = False
+    if results:
+        max_similarity = max(r.get("similarity", 0.0) for r in results)
+        if max_similarity < config.relevance_threshold:
+            low_relevance = True
+            low_relevance_hint = (
+                "\n\n⚠️ 注意：以上检索结果与用户问题的相关度较低，"
+                "文档中可能不包含与该问题直接相关的内容。"
+                "请基于已有信息谨慎回答，并明确告知用户信息可能不够充分。"
+            )
+            context_string += low_relevance_hint
+            logger.info(
+                f"[{doc_id}] 回退路径检索结果质量低于阈值 "
+                f"(max_similarity={max_similarity:.3f} < threshold={config.relevance_threshold})"
+            )
+
     # 构建回退情况下的 retrieval_meta
-    fallback_type = "groups_disabled" if not config.enable_semantic_groups else "index_missing"
+    # 如果触发低质量阈值，优先记录 low_relevance（需求 8.3）
+    if low_relevance:
+        fallback_type = "low_relevance"
+        fallback_detail = "所有检索结果相似度低于质量阈值"
+    else:
+        fallback_type = "groups_disabled" if not config.enable_semantic_groups else "index_missing"
+        fallback_detail = f"回退到简单拼接逻辑，原因: {fallback_type}"
     retrieval_logger = RetrievalLogger()
     trace = RetrievalTrace(
         query=query,
@@ -1262,7 +1724,7 @@ def get_relevant_context(
         token_reserved=config.reserve_for_answer,
         token_used=0,
         fallback_type=fallback_type,
-        fallback_detail=f"回退到简单拼接逻辑，原因: {fallback_type}",
+        fallback_detail=fallback_detail,
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
@@ -1275,21 +1737,24 @@ def _build_context_with_groups(
     query: str,
     results: List[dict],
     config,
+    vector_store_dir: str = None,
 ) -> Tuple[Optional[str], dict]:
     """使用语义意群构建增强上下文
 
     流程：
     1. 加载语义意群数据
-    2. 使用 GranularitySelector.select_mixed 分配混合粒度
-    3. 使用 TokenBudgetManager.fit_within_budget 调整 Token 预算
-    4. 使用 ContextBuilder.build_context 构建格式化上下文
-    5. 使用 RetrievalLogger 记录检索追踪
+    2. 加载分块数据（用于 chunk_indices 精确映射）
+    3. 使用 GranularitySelector.select_mixed 分配混合粒度
+    4. 使用 TokenBudgetManager.fit_within_budget 调整 Token 预算
+    5. 使用 ContextBuilder.build_context 构建格式化上下文
+    6. 使用 RetrievalLogger 记录检索追踪
 
     Args:
         doc_id: 文档唯一标识
         query: 用户查询文本
         results: search_document_chunks 返回的搜索结果
         config: RAGConfig 配置对象
+        vector_store_dir: 向量索引存储目录（可选），用于加载分块数据以支持 chunk_indices 精确映射
 
     Returns:
         (context_string, retrieval_meta) 元组，如果意群不可用返回 (None, {})
@@ -1311,9 +1776,24 @@ def _build_context_with_groups(
 
     logger.info(f"[{doc_id}] 已加载 {len(groups)} 个语义意群，开始构建增强上下文")
 
+    # 步骤 1.5：加载分块数据，用于 chunk_indices 精确映射
+    chunks = None
+    if vector_store_dir:
+        try:
+            chunks_path = os.path.join(vector_store_dir, f"{doc_id}.pkl")
+            if os.path.exists(chunks_path):
+                with open(chunks_path, "rb") as f:
+                    chunks_data = pickle.load(f)
+                chunks = chunks_data.get("chunks", None)
+                if chunks:
+                    logger.info(f"[{doc_id}] 已加载 {len(chunks)} 个分块，用于 chunk_indices 精确映射")
+        except Exception as e:
+            logger.warning(f"[{doc_id}] 加载分块数据失败，回退到子串匹配: {e}")
+            chunks = None
+
     # 步骤 2：根据搜索结果对意群进行排序
     # 将搜索结果中的 chunk 映射回对应的意群，按 RRF/相关性排序
-    ranked_groups = _rank_groups_by_results(groups, results)
+    ranked_groups = _rank_groups_by_results(groups, results, chunks=chunks)
 
     if not ranked_groups:
         logger.info(f"[{doc_id}] 无法将搜索结果映射到意群，回退到简单拼接")
@@ -1349,6 +1829,23 @@ def _build_context_with_groups(
     # 步骤 6：计算实际使用的 Token 数
     token_used = sum(item.get("tokens", 0) for item in fitted_selections)
 
+    # 步骤 6.5：检索结果质量阈值检查（需求 8.1, 8.4）
+    low_relevance = False
+    if results:
+        max_similarity = max(r.get("similarity", 0.0) for r in results)
+        if max_similarity < config.relevance_threshold:
+            low_relevance = True
+            low_relevance_hint = (
+                "\n\n⚠️ 注意：以上检索结果与用户问题的相关度较低，"
+                "文档中可能不包含与该问题直接相关的内容。"
+                "请基于已有信息谨慎回答，并明确告知用户信息可能不够充分。"
+            )
+            context_string += low_relevance_hint
+            logger.info(
+                f"[{doc_id}] 检索结果质量低于阈值 "
+                f"(max_similarity={max_similarity:.3f} < threshold={config.relevance_threshold})"
+            )
+
     # 步骤 7：使用 RetrievalLogger 记录检索追踪
     # 查询类型已在步骤 3 中获取（selection_info）
 
@@ -1370,8 +1867,8 @@ def _build_context_with_groups(
             {"group_id": item["group"].group_id, "granularity": item["granularity"]}
             for item in fitted_selections
         ],
-        fallback_type=None,
-        fallback_detail=None,
+        fallback_type="low_relevance" if low_relevance else None,
+        fallback_detail="所有检索结果相似度低于质量阈值" if low_relevance else None,
         citations=citations,
     )
     retrieval_logger.log_trace(trace)
@@ -1390,16 +1887,17 @@ def _build_context_with_groups(
 def _rank_groups_by_results(
     groups: list,
     results: List[dict],
+    chunks: List[str] = None,
 ) -> list:
     """根据搜索结果对语义意群进行排序
 
-    将搜索结果中的 chunk 文本映射回对应的语义意群，
-    按 chunk 在搜索结果中的排名对意群进行排序（去重，保留最高排名）。
-    过滤掉相关性分数过低的结果，避免引入不相关的意群。
+    优先使用 chunk_indices 反向映射进行精确匹配（O(1) 查找），
+    当 chunks 参数不可用或匹配失败时，回退到子串匹配作为兜底策略。
 
     Args:
         groups: 语义意群列表
         results: search_document_chunks 返回的搜索结果
+        chunks: 文档的所有文本分块列表（可选），用于构建 chunk_text -> chunk_index 映射
 
     Returns:
         按相关性排序的语义意群列表（最相关的在前）
@@ -1407,9 +1905,18 @@ def _rank_groups_by_results(
     if not groups or not results:
         return []
 
-    # 构建 chunk 文本到意群的映射
-    # 每个意群的 full_text 是其所有 chunk 的拼接，
-    # 需要检查搜索结果中的 chunk 是否属于某个意群
+    # 构建 chunk_index → group 的反向映射（基于意群的 chunk_indices 字段）
+    chunk_idx_to_group = {}
+    for group in groups:
+        for idx in group.chunk_indices:
+            chunk_idx_to_group[idx] = group
+
+    # 构建 chunk_text → chunk_index 的映射（用于从搜索结果定位 chunk 索引）
+    chunk_text_to_idx = {}
+    if chunks:
+        for i, text in enumerate(chunks):
+            chunk_text_to_idx[text] = i
+
     group_scores = {}  # group_id -> 最佳排名（越小越好）
     group_similarity = {}  # group_id -> 最佳相似度分数
 
@@ -1421,22 +1928,33 @@ def _rank_groups_by_results(
         # 获取该 chunk 的相似度分数
         similarity = result.get("similarity", 0.0)
 
-        # 查找该 chunk 属于哪个意群
-        for group in groups:
-            # 检查 chunk 文本是否是意群全文的子串
-            if chunk_text in group.full_text:
-                if group.group_id not in group_scores:
-                    group_scores[group.group_id] = rank
-                    group_similarity[group.group_id] = similarity
-                else:
-                    # 保留最高排名（最小的 rank 值）
-                    if rank < group_scores[group.group_id]:
-                        group_scores[group.group_id] = rank
-                    # 保留最高相似度
-                    group_similarity[group.group_id] = max(
-                        group_similarity[group.group_id], similarity
-                    )
-                break  # 一个 chunk 只属于一个意群
+        matched_group = None
+
+        # 优先通过 chunk_index 精确匹配（O(1) 查找）
+        chunk_idx = chunk_text_to_idx.get(chunk_text)
+        if chunk_idx is not None:
+            matched_group = chunk_idx_to_group.get(chunk_idx)
+
+        # 回退到子串匹配作为兜底策略
+        if matched_group is None:
+            for group in groups:
+                if chunk_text in group.full_text:
+                    matched_group = group
+                    break
+
+        if matched_group:
+            gid = matched_group.group_id
+            if gid not in group_scores:
+                group_scores[gid] = rank
+                group_similarity[gid] = similarity
+            else:
+                # 保留最高排名（最小的 rank 值）
+                if rank < group_scores[gid]:
+                    group_scores[gid] = rank
+                # 保留最高相似度
+                group_similarity[gid] = max(
+                    group_similarity[gid], similarity
+                )
 
     # 过滤掉相关性过低的意群
     # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 40% 的意群
