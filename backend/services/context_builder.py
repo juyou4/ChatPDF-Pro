@@ -15,6 +15,7 @@
 """
 
 import logging
+import re
 from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class ContextBuilder:
         self,
         selections: List[dict],
         group_best_chunks: dict = None,
+        query: str = "",
     ) -> Tuple[str, List[dict]]:
         """将粒度选择结果组装为格式化上下文字符串
 
@@ -65,6 +67,7 @@ class ContextBuilder:
                 }
             group_best_chunks: 可选，group_id -> 最佳匹配 chunk 文本的映射，
                 用于生成更精确的引用高亮文本。如果未提供，回退到取文本前100字符。
+            query: 用户查询文本，用于从 chunk 中提取与查询最相关的片段作为 highlight_text。
 
         Returns:
             (context_string, citations) 元组
@@ -118,13 +121,17 @@ class ContextBuilder:
             context_parts.append("\n".join(parts))
 
             # 构建引文映射（包含高亮文本片段，用于前端定位高亮）
-            # 优先使用实际匹配的 chunk 文本（更精确），回退到文本前100字符
+            # 优先使用实际匹配的 chunk 文本中与查询最相关的片段
             if group_best_chunks and group_id in group_best_chunks:
-                # 使用搜索结果中实际匹配的 chunk 文本，截取前200字符
                 best_chunk = group_best_chunks[group_id]
-                highlight_text = best_chunk[:200].strip() if best_chunk else ""
+                # 从 chunk 中提取与查询最相关的片段（而非简单截取前N字符）
+                highlight_text = self._extract_relevant_snippet(
+                    best_chunk, query, max_len=200
+                ) if best_chunk else ""
             else:
-                highlight_text = text[:100].strip() if text else ""
+                highlight_text = self._extract_relevant_snippet(
+                    text, query, max_len=150
+                ) if text else ""
             citations.append({
                 "ref": ref_num,
                 "group_id": group_id,
@@ -141,6 +148,92 @@ class ContextBuilder:
         )
 
         return context_string, citations
+
+    def _extract_relevant_snippet(
+        self,
+        text: str,
+        query: str,
+        max_len: int = 200,
+    ) -> str:
+        """从文本中提取与查询最相关的片段
+
+        策略：
+        1. 将查询拆分为关键词
+        2. 在文本中找到关键词命中密度最高的窗口
+        3. 返回该窗口对应的原始文本片段
+
+        如果没有关键词命中，回退到取文本前 max_len 字符。
+
+        Args:
+            text: 源文本（chunk 或意群文本）
+            query: 用户查询文本
+            max_len: 返回片段的最大字符数
+
+        Returns:
+            与查询最相关的文本片段
+        """
+        if not text:
+            return ""
+        if not query or len(text) <= max_len:
+            return text[:max_len].strip()
+
+        # 提取查询关键词（去除停用词和短词）
+        terms = [
+            t for t in re.split(r'[\s,;，。；、？！?!：:""''""]+', query.lower())
+            if t and len(t) >= 2
+        ]
+        if not terms:
+            return text[:max_len].strip()
+
+        text_lower = text.lower()
+
+        # 找到所有关键词在文本中的命中位置
+        hit_positions = []
+        for term in terms:
+            start = 0
+            while True:
+                idx = text_lower.find(term, start)
+                if idx == -1:
+                    break
+                hit_positions.append(idx)
+                start = idx + len(term)
+
+        if not hit_positions:
+            # 没有关键词命中，回退到前 max_len 字符
+            return text[:max_len].strip()
+
+        hit_positions.sort()
+
+        # 滑动窗口：找到命中密度最高的 max_len 字符窗口
+        best_start = 0
+        best_count = 0
+
+        for pos in hit_positions:
+            # 窗口起始点：以当前命中位置为中心，向前偏移一半窗口
+            window_start = max(0, pos - max_len // 3)
+            window_end = window_start + max_len
+
+            # 统计窗口内的命中数
+            count = sum(1 for p in hit_positions if window_start <= p < window_end)
+            if count > best_count:
+                best_count = count
+                best_start = window_start
+
+        # 调整到句子边界（尽量不截断句子）
+        # 向前找到最近的句子起始（句号、换行等之后）
+        if best_start > 0:
+            # 在 best_start 前30字符范围内找句子边界
+            search_start = max(0, best_start - 30)
+            boundary_chars = '。\n.！？!?；;'
+            best_boundary = best_start
+            for i in range(best_start - 1, search_start - 1, -1):
+                if text[i] in boundary_chars:
+                    best_boundary = i + 1
+                    break
+            best_start = best_boundary
+
+        snippet = text[best_start:best_start + max_len].strip()
+        return snippet
 
     def build_citation_prompt(self, citations: List[dict]) -> str:
         """生成引文指示提示词，指导 LLM 在回答中使用 [1] [2] 等编号标注引用来源

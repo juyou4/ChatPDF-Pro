@@ -1704,16 +1704,22 @@ def get_relevant_context(
     context_string = "\n\n...\n\n".join(relevant_chunks)
 
     # 回退路径也生成基本的 citations（基于 chunk 的页码信息）
+    # 使用智能片段提取，从 chunk 中找到与查询最相关的部分
+    from services.context_builder import ContextBuilder
+    _fallback_builder = ContextBuilder()
     fallback_citations = []
     for idx, item in enumerate(results):
         chunk_text = item.get("chunk", "")
         page = item.get("page", 0)
         if chunk_text:
+            highlight_text = _fallback_builder._extract_relevant_snippet(
+                chunk_text, query, max_len=200
+            )
             fallback_citations.append({
                 "ref": idx + 1,
                 "group_id": f"chunk-{idx}",
                 "page_range": [page, page],
-                "highlight_text": chunk_text[:200].strip(),
+                "highlight_text": highlight_text,
             })
 
     # 质量阈值检查（需求 8.1, 8.4）
@@ -1853,7 +1859,9 @@ def _build_context_with_groups(
 
     # 步骤 5：使用 ContextBuilder 构建格式化上下文
     context_builder = ContextBuilder()
-    context_string, citations = context_builder.build_context(fitted_selections, group_best_chunks=group_best_chunks)
+    context_string, citations = context_builder.build_context(
+        fitted_selections, group_best_chunks=group_best_chunks, query=query
+    )
 
     # 步骤 6：计算实际使用的 Token 数
     token_used = sum(item.get("tokens", 0) for item in fitted_selections)
