@@ -133,25 +133,17 @@ if not exist "%OCR_DIR%\poppler.zip" (
     )
 )
 
-:: 解压 Poppler
+:: 解压 Poppler（使用 Python 自动适配 zip 内部目录名）
 if exist "%OCR_DIR%\poppler.zip" (
     echo   [▶] 解压 Poppler...
-    powershell -Command "Expand-Archive -Path '%OCR_DIR%\poppler.zip' -DestinationPath '%OCR_DIR%\poppler_temp' -Force" >nul 2>&1
+    python -c "import zipfile,shutil,os; z=zipfile.ZipFile(r'%OCR_DIR%\poppler.zip'); z.extractall(r'%OCR_DIR%\poppler_temp'); z.close(); dirs=[d for d in os.listdir(r'%OCR_DIR%\poppler_temp') if os.path.isdir(os.path.join(r'%OCR_DIR%\poppler_temp',d))]; src=dirs[0] if dirs else ''; shutil.copytree(os.path.join(r'%OCR_DIR%\poppler_temp',src), r'%OCR_DIR%\poppler', dirs_exist_ok=True) if src else None; shutil.rmtree(r'%OCR_DIR%\poppler_temp')" >nul 2>&1
     
-    if exist "%OCR_DIR%\poppler_temp\poppler-24.02.0-0" (
-        xcopy /E /I /Y "%OCR_DIR%\poppler_temp\poppler-24.02.0-0\*" "%OCR_DIR%\poppler\" >nul 2>&1
-        rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
-        
-        if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
-            set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
-            set "POPPLER_FOUND=1"
-            echo   [✓] Poppler 安装成功
-        ) else (
-            echo   [!] Poppler 解压失败
-        )
+    if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
+        set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
+        set "POPPLER_FOUND=1"
+        echo   [✓] Poppler 安装成功
     ) else (
-        echo   [!] Poppler 解压目录结构异常
-        rd /s /q "%OCR_DIR%\poppler_temp" >nul 2>&1
+        echo   [!] Poppler 解压失败
     )
 ) else (
     echo   [!] Poppler zip 文件不存在
