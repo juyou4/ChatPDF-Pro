@@ -1703,6 +1703,19 @@ def get_relevant_context(
     relevant_chunks = [item["chunk"] for item in results]
     context_string = "\n\n...\n\n".join(relevant_chunks)
 
+    # 回退路径也生成基本的 citations（基于 chunk 的页码信息）
+    fallback_citations = []
+    for idx, item in enumerate(results):
+        chunk_text = item.get("chunk", "")
+        page = item.get("page", 0)
+        if chunk_text:
+            fallback_citations.append({
+                "ref": idx + 1,
+                "group_id": f"chunk-{idx}",
+                "page_range": [page, page],
+                "highlight_text": chunk_text[:200].strip(),
+            })
+
     # 质量阈值检查（需求 8.1, 8.4）
     low_relevance = False
     if results:
@@ -1740,6 +1753,7 @@ def get_relevant_context(
         token_used=0,
         fallback_type=fallback_type,
         fallback_detail=fallback_detail,
+        citations=fallback_citations,
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
@@ -1808,7 +1822,7 @@ def _build_context_with_groups(
 
     # 步骤 2：根据搜索结果对意群进行排序
     # 将搜索结果中的 chunk 映射回对应的意群，按 RRF/相关性排序
-    ranked_groups = _rank_groups_by_results(groups, results, chunks=chunks)
+    ranked_groups, group_best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
     if not ranked_groups:
         logger.info(f"[{doc_id}] 无法将搜索结果映射到意群，回退到简单拼接")
@@ -1839,7 +1853,7 @@ def _build_context_with_groups(
 
     # 步骤 5：使用 ContextBuilder 构建格式化上下文
     context_builder = ContextBuilder()
-    context_string, citations = context_builder.build_context(fitted_selections)
+    context_string, citations = context_builder.build_context(fitted_selections, group_best_chunks=group_best_chunks)
 
     # 步骤 6：计算实际使用的 Token 数
     token_used = sum(item.get("tokens", 0) for item in fitted_selections)
@@ -1903,7 +1917,7 @@ def _rank_groups_by_results(
     groups: list,
     results: List[dict],
     chunks: List[str] = None,
-) -> list:
+) -> tuple:
     """根据搜索结果对语义意群进行排序
 
     优先使用 chunk_indices 反向映射进行精确匹配（O(1) 查找），
@@ -1915,10 +1929,12 @@ def _rank_groups_by_results(
         chunks: 文档的所有文本分块列表（可选），用于构建 chunk_text -> chunk_index 映射
 
     Returns:
-        按相关性排序的语义意群列表（最相关的在前）
+        (ranked_groups, group_best_chunks) 元组
+        - ranked_groups: 按相关性排序的语义意群列表（最相关的在前）
+        - group_best_chunks: dict，group_id -> 最佳匹配的 chunk 文本（用于精确引用高亮）
     """
     if not groups or not results:
-        return []
+        return [], {}
 
     # 构建 chunk_index → group 的反向映射（基于意群的 chunk_indices 字段）
     chunk_idx_to_group = {}
@@ -1934,6 +1950,7 @@ def _rank_groups_by_results(
 
     group_scores = {}  # group_id -> 最佳排名（越小越好）
     group_similarity = {}  # group_id -> 最佳相似度分数
+    group_best_chunks = {}  # group_id -> 最佳匹配的 chunk 文本（用于精确引用高亮）
 
     for rank, result in enumerate(results):
         chunk_text = result.get("chunk", "")
@@ -1962,21 +1979,24 @@ def _rank_groups_by_results(
             if gid not in group_scores:
                 group_scores[gid] = rank
                 group_similarity[gid] = similarity
+                # 记录该意群最佳匹配的 chunk 文本（相似度最高的那个）
+                group_best_chunks[gid] = chunk_text
             else:
                 # 保留最高排名（最小的 rank 值）
                 if rank < group_scores[gid]:
                     group_scores[gid] = rank
-                # 保留最高相似度
-                group_similarity[gid] = max(
-                    group_similarity[gid], similarity
-                )
+                # 保留最高相似度，同时更新最佳 chunk 文本
+                if similarity > group_similarity[gid]:
+                    group_similarity[gid] = similarity
+                    group_best_chunks[gid] = chunk_text
 
     # 过滤掉相关性过低的意群
-    # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 30% 的意群（从 40% 降至 30%，减少过度过滤）
+    # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 50% 的意群
+    # （从 30% 提升至 50%，避免引入不相关的意群）
     if group_similarity:
         best_similarity = max(group_similarity.values())
         if best_similarity > 0.5:
-            threshold = best_similarity * 0.3
+            threshold = best_similarity * 0.5
             filtered_ids = {
                 gid for gid, sim in group_similarity.items()
                 if sim >= threshold
@@ -1988,6 +2008,8 @@ def _rank_groups_by_results(
                     f"(阈值={threshold:.3f}, 最佳={best_similarity:.3f})"
                 )
             group_scores = {gid: r for gid, r in group_scores.items() if gid in filtered_ids}
+            # 同步清理 group_best_chunks
+            group_best_chunks = {gid: t for gid, t in group_best_chunks.items() if gid in filtered_ids}
 
     # 按排名排序意群
     sorted_group_ids = sorted(group_scores.keys(), key=lambda gid: group_scores[gid])
@@ -1997,4 +2019,4 @@ def _rank_groups_by_results(
 
     ranked_groups = [group_map[gid] for gid in sorted_group_ids if gid in group_map]
 
-    return ranked_groups
+    return ranked_groups, group_best_chunks

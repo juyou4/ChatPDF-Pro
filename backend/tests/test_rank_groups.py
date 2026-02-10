@@ -60,12 +60,15 @@ class TestRankGroupsByResultsWithChunkIndices:
             {"chunk": "chunk_0 文本内容", "similarity": 0.7},
         ]
 
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         # group-1 排名第一（chunk_2 排名 0），group-0 排名第二（chunk_0 排名 1）
         assert len(ranked) == 2
         assert ranked[0].group_id == "group-1"
         assert ranked[1].group_id == "group-0"
+        # 验证最佳 chunk 文本
+        assert best_chunks["group-1"] == "chunk_2 文本内容"
+        assert best_chunks["group-0"] == "chunk_0 文本内容"
 
     def test_fallback_to_substring_when_no_chunks(self):
         """验证 chunks=None 时回退到子串匹配"""
@@ -88,7 +91,7 @@ class TestRankGroupsByResultsWithChunkIndices:
         ]
 
         # chunks=None，应回退到子串匹配
-        ranked = _rank_groups_by_results(groups, results, chunks=None)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=None)
 
         assert len(ranked) == 2
         assert ranked[0].group_id == "group-1"
@@ -112,7 +115,7 @@ class TestRankGroupsByResultsWithChunkIndices:
             {"chunk": "额外的修改文本", "similarity": 0.7},
         ]
 
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         # 应通过子串匹配找到 group-0
         assert len(ranked) == 1
@@ -121,16 +124,18 @@ class TestRankGroupsByResultsWithChunkIndices:
     def test_empty_groups_returns_empty(self):
         """验证空意群列表返回空结果"""
         results = [{"chunk": "some text", "similarity": 0.5}]
-        ranked = _rank_groups_by_results([], results, chunks=["some text"])
+        ranked, best_chunks = _rank_groups_by_results([], results, chunks=["some text"])
         assert ranked == []
+        assert best_chunks == {}
 
     def test_empty_results_returns_empty(self):
         """验证空搜索结果返回空结果"""
         groups = [
             MockSemanticGroup(group_id="group-0", chunk_indices=[0], full_text="text"),
         ]
-        ranked = _rank_groups_by_results(groups, [], chunks=["text"])
+        ranked, best_chunks = _rank_groups_by_results(groups, [], chunks=["text"])
         assert ranked == []
+        assert best_chunks == {}
 
     def test_multiple_chunks_same_group(self):
         """验证同一意群的多个 chunk 出现在结果中时，保留最高排名"""
@@ -155,11 +160,15 @@ class TestRankGroupsByResultsWithChunkIndices:
             {"chunk": "chunk_a", "similarity": 0.7},   # rank 2 -> group-0（已有更好排名）
         ]
 
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         assert len(ranked) == 2
         assert ranked[0].group_id == "group-1"  # rank 0
         assert ranked[1].group_id == "group-0"  # rank 1（最佳排名）
+        # group-1 最佳 chunk 是 chunk_c
+        assert best_chunks["group-1"] == "chunk_c"
+        # group-0 最佳 chunk 是 chunk_b（相似度 0.8 > 0.7）
+        assert best_chunks["group-0"] == "chunk_b"
 
     def test_similarity_preserved_max(self):
         """验证同一意群的多个 chunk 保留最高相似度"""
@@ -178,11 +187,13 @@ class TestRankGroupsByResultsWithChunkIndices:
             {"chunk": "chunk_b", "similarity": 0.9},
         ]
 
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         # 应该有 1 个意群
         assert len(ranked) == 1
         assert ranked[0].group_id == "group-0"
+        # 最佳 chunk 应该是 chunk_b（相似度 0.9 > 0.6）
+        assert best_chunks["group-0"] == "chunk_b"
 
     def test_chunk_indices_priority_over_substring(self):
         """验证 chunk_indices 精确匹配优先于子串匹配
@@ -210,7 +221,7 @@ class TestRankGroupsByResultsWithChunkIndices:
         ]
 
         # 使用 chunk_indices 应精确匹配到 group-0
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         assert len(ranked) == 1
         assert ranked[0].group_id == "group-0"
@@ -232,7 +243,8 @@ class TestRankGroupsByResultsWithChunkIndices:
             {"chunk": "valid_chunk", "similarity": 0.7},
         ]
 
-        ranked = _rank_groups_by_results(groups, results, chunks=chunks)
+        ranked, best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
 
         assert len(ranked) == 1
         assert ranked[0].group_id == "group-0"
+        assert best_chunks["group-0"] == "valid_chunk"

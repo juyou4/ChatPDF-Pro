@@ -46,6 +46,7 @@ class ContextBuilder:
     def build_context(
         self,
         selections: List[dict],
+        group_best_chunks: dict = None,
     ) -> Tuple[str, List[dict]]:
         """将粒度选择结果组装为格式化上下文字符串
 
@@ -62,12 +63,14 @@ class ContextBuilder:
                     "granularity": str,      # 粒度: "full" | "digest" | "summary"
                     "tokens": int            # Token 数
                 }
+            group_best_chunks: 可选，group_id -> 最佳匹配 chunk 文本的映射，
+                用于生成更精确的引用高亮文本。如果未提供，回退到取文本前100字符。
 
         Returns:
             (context_string, citations) 元组
             - context_string: 格式化的上下文字符串
             - citations: 引文映射列表，每项格式为：
-                {"ref": int, "group_id": str, "page_range": [int, int]}
+                {"ref": int, "group_id": str, "page_range": [int, int], "highlight_text": str}
         """
         if not selections:
             return "", []
@@ -115,8 +118,13 @@ class ContextBuilder:
             context_parts.append("\n".join(parts))
 
             # 构建引文映射（包含高亮文本片段，用于前端定位高亮）
-            # 取文本前 100 字符作为高亮锚点文本（更短的片段匹配率更高）
-            highlight_text = text[:100].strip() if text else ""
+            # 优先使用实际匹配的 chunk 文本（更精确），回退到文本前100字符
+            if group_best_chunks and group_id in group_best_chunks:
+                # 使用搜索结果中实际匹配的 chunk 文本，截取前200字符
+                best_chunk = group_best_chunks[group_id]
+                highlight_text = best_chunk[:200].strip() if best_chunk else ""
+            else:
+                highlight_text = text[:100].strip() if text else ""
             citations.append({
                 "ref": ref_num,
                 "group_id": group_id,
@@ -175,8 +183,9 @@ class ContextBuilder:
             "- 每段引用的内容都应标注来源编号\n"
             "- 可以同时引用多个来源，如 [1][2]\n"
             "- 如果信息来自你的通用知识而非上下文，则无需标注编号\n"
-            "- 只引用与问题直接相关的来源，不要为了引用而引用不相关的内容\n"
-            "- 如果某个来源与问题无关，请不要引用它"
+            "- 只引用与用户问题直接相关的来源，不要为了引用而引用不相关的内容\n"
+            "- 如果某个来源与用户问题无关，请完全忽略它，不要在回答中提及\n"
+            "- 宁可少引用，也不要引用不相关的来源"
         )
 
         logger.info(f"引文指示提示词生成完成: {len(citations)} 个引用来源")

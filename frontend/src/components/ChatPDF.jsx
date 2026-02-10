@@ -708,11 +708,20 @@ const ChatPDF = () => {
           rafPending = false;
           if (!needsUpdate) return;
           needsUpdate = false;
-          setMessages(prev => prev.map(msg =>
-            msg.id === tempMsgId
-              ? { ...msg, content: currentText, thinking: currentThinking }
-              : msg
-          ));
+          // 优化：流式消息总是最后一条，直接替换末尾元素，避免遍历整个数组
+          setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last && last.id === tempMsgId) {
+              const updated = [...prev];
+              updated[updated.length - 1] = { ...last, content: currentText, thinking: currentThinking };
+              return updated;
+            }
+            return prev.map(msg =>
+              msg.id === tempMsgId
+                ? { ...msg, content: currentText, thinking: currentThinking }
+                : msg
+            );
+          });
         };
 
         const scheduleUpdate = () => {
@@ -2175,17 +2184,7 @@ const ChatPDF = () => {
                 );
               })
               }
-              {
-                isLoading && (
-                  <div className="flex justify-start">
-                    <div className="bg-white/50 rounded-2xl p-4 flex gap-2 items-center">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </div>
-                  </div>
-                )
-              }
+              {/* 等待动画已由 StreamingMarkdown 组件内部的 streaming-dots 处理 */}
               <div ref={messagesEndRef} />
             </div >
 

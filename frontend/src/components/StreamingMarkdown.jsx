@@ -367,7 +367,9 @@ const StreamingMarkdown = React.memo(({
 
   const processedContent = useMemo(() => {
     let text = content || '';
-    if (USE_LATEX_PREPROCESS) {
+    // 流式输出期间跳过重量级的 LaTeX 预处理，减少每帧计算开销
+    // 流结束后（isStreaming=false）再做一次完整处理
+    if (USE_LATEX_PREPROCESS && !isStreaming) {
       text = processLatexBrackets(text);
     }
     // 引文引用预处理：将 [n] 替换为 <cite> 标签
@@ -375,7 +377,7 @@ const StreamingMarkdown = React.memo(({
       text = processCitationRefs(text, citations);
     }
     return text;
-  }, [content, citations]);
+  }, [content, citations, isStreaming]);
 
   // Build plugins (stable, no dependencies that change during streaming)
   const remarkPlugins = React.useMemo(() => {
@@ -400,44 +402,45 @@ const StreamingMarkdown = React.memo(({
     return list;
   }, []);
 
-  // Use MutationObserver to catch genuinely NEW nodes as they're added
+  // 使用 MutationObserver 捕获新增 DOM 节点并添加 blur 动画
+  // 优化：使用 rAF 节流，将多次 mutation 合并为一次 DOM 操作，避免卡顿
   useEffect(() => {
     if (!enableBlurReveal || !containerRef.current) return;
 
     const container = containerRef.current;
+    let pendingNodes = [];
+    let rafId = null;
 
-    // MutationObserver fires for every DOM change
+    const flushAnimations = () => {
+      rafId = null;
+      const nodes = pendingNodes;
+      pendingNodes = [];
+      for (const node of nodes) {
+        if (node.nodeType === Node.ELEMENT_NODE && node.isConnected) {
+          node.classList.add('blur-reveal-animate');
+        }
+      }
+    };
+
     const observer = new MutationObserver((mutations) => {
-      if (!isStreaming) return; // Only animate during streaming
+      if (!isStreaming) return;
 
-      mutations.forEach((mutation) => {
-        // Handle added nodes
-        mutation.addedNodes.forEach((node) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE) {
-            // Apply animation to the new element
-            node.classList.add('blur-reveal-animate');
-
-            // Also animate any child elements
-            node.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, span, strong, em, code').forEach(child => {
-              child.classList.add('blur-reveal-animate');
-            });
+            pendingNodes.push(node);
           } else if (node.nodeType === Node.TEXT_NODE && node.parentElement) {
-            // For text nodes, animate the parent element if it hasn't been animated recently
-            const parent = node.parentElement;
-            if (!parent.classList.contains('blur-reveal-animate')) {
-              parent.classList.add('blur-reveal-animate');
-            }
-          }
-        });
-
-        // Handle character data changes (text content updates)
-        if (mutation.type === 'characterData' && mutation.target.parentElement) {
-          const parent = mutation.target.parentElement;
-          if (!parent.classList.contains('blur-reveal-animate')) {
-            parent.classList.add('blur-reveal-animate');
+            pendingNodes.push(node.parentElement);
           }
         }
-      });
+        if (mutation.type === 'characterData' && mutation.target.parentElement) {
+          pendingNodes.push(mutation.target.parentElement);
+        }
+      }
+
+      if (pendingNodes.length > 0 && rafId === null) {
+        rafId = requestAnimationFrame(flushAnimations);
+      }
     });
 
     observer.observe(container, {
@@ -447,7 +450,10 @@ const StreamingMarkdown = React.memo(({
       characterDataOldValue: false
     });
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [enableBlurReveal, isStreaming]);
 
   // Reset on new conversation
