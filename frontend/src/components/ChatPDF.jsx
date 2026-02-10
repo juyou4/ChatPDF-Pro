@@ -20,6 +20,7 @@ import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import ChatSettings from './ChatSettings';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
+import ThinkingBlock from './ThinkingBlock';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -128,7 +129,6 @@ const ChatPDF = () => {
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
-  const [thinkingExpanded, setThinkingExpanded] = useState({});
   // 深度思考模式开关（由 ModelQuickSwitch 控制）
   const [enableThinking, setEnableThinking] = useState(false);
 
@@ -681,7 +681,8 @@ const ChatPDF = () => {
       content: '',
       model: chatModel,
       isStreaming: true,
-      thinking: ''
+      thinking: '',
+      thinkingMs: 0
     }]);
 
     try {
@@ -700,6 +701,9 @@ const ChatPDF = () => {
         const decoder = new TextDecoder();
         let currentText = '';
         let currentThinking = '';
+        // 思考计时：记录首次收到 reasoning_content 的时间
+        let thinkingStartTime = null;
+        let thinkingEndTime = null;
         // 使用 rAF 批量更新，减少 React 重渲染次数，实现更流畅的流式输出
         let rafPending = false;
         let needsUpdate = false;
@@ -713,7 +717,8 @@ const ChatPDF = () => {
             const last = prev[prev.length - 1];
             if (last && last.id === tempMsgId) {
               const updated = [...prev];
-              updated[updated.length - 1] = { ...last, content: currentText, thinking: currentThinking };
+              const thinkingMs = thinkingStartTime ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
+              updated[updated.length - 1] = { ...last, content: currentText, thinking: currentThinking, thinkingMs };
               return updated;
             }
             return prev.map(msg =>
@@ -755,8 +760,14 @@ const ChatPDF = () => {
                 if (!parsed.done) {
                   if (chunkContent) {
                     currentText += chunkContent;
+                    // 收到正文内容时，标记思考结束
+                    if (thinkingStartTime && !thinkingEndTime) {
+                      thinkingEndTime = Date.now();
+                    }
                   }
                   if (chunkThinking) {
+                    // 首次收到思考内容，记录开始时间
+                    if (!thinkingStartTime) thinkingStartTime = Date.now();
                     currentThinking += chunkThinking;
                   }
                   if (chunkContent || chunkThinking) {
@@ -784,11 +795,12 @@ const ChatPDF = () => {
           flushUpdate();
         }
 
-        // 标记流式传输完成，保存思考文本和引文数据
+        // 标记流式传输完成，保存思考文本、耗时和引文数据
         const streamCitations = streamCitationsRef.current;
+        const finalThinkingMs = thinkingStartTime ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, isStreaming: false, thinking: currentThinking || '', citations: streamCitations || null }
+            ? { ...msg, isStreaming: false, thinking: currentThinking || '', thinkingMs: finalThinkingMs, citations: streamCitations || null }
             : msg
         ));
         streamCitationsRef.current = null;
@@ -950,14 +962,6 @@ const ChatPDF = () => {
     setTimeout(() => {
       sendMessage();
     }, 100);
-  };
-
-  const toggleThinkingPanel = (messageId) => {
-    const key = String(messageId);
-    setThinkingExpanded((prev) => ({
-      ...prev,
-      [key]: !(prev[key] ?? true)
-    }));
   };
 
   // Helper Functions
@@ -2044,9 +2048,7 @@ const ChatPDF = () => {
 
               {messages.map((msg, idx) => {
                 const messageKey = msg.id ?? idx;
-                const thinkingKey = String(messageKey);
                 const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
-                const isThinkingOpen = thinkingExpanded[thinkingKey] ?? true;
 
                 return (
                   <motion.div
@@ -2062,50 +2064,12 @@ const ChatPDF = () => {
                       style={msg.type !== 'user' ? { contain: 'inline-size' } : undefined}
                     >
                       {hasThinking && (
-                        <div className="mt-2 mb-2">
-                          <button
-                            onClick={() => toggleThinkingPanel(thinkingKey)}
-                            className={`group flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-all ${isThinkingOpen
-                              ? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
-                              : 'bg-gray-50 text-gray-500 hover:bg-gray-100 dark:bg-gray-900/50 dark:text-gray-400 dark:hover:bg-gray-800'
-                              }`}
-                          >
-                            <div className={`p-1 rounded-md ${isThinkingOpen ? 'bg-white shadow-sm dark:bg-gray-700' : 'bg-gray-200 dark:bg-gray-800'}`}>
-                              {/* 原子图标 */}
-                              <svg className={`w-3 h-3 ${isThinkingOpen ? 'text-amber-500' : 'text-gray-400'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                                <ellipse cx="12" cy="12" rx="10" ry="4" />
-                                <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
-                                <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
-                                <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-                              </svg>
-                            </div>
-                            <span>深度思考过程</span>
-                            <span className="opacity-50">Duration: {((msg.thinking?.length || 0) / 20).toFixed(1)}s</span>
-                            <ChevronDown className={`w-3 h-3 ml-auto transition-transform ${isThinkingOpen ? 'rotate-180' : ''}`} />
-                          </button>
-
-                          <AnimatePresence>
-                            {isThinkingOpen && (
-                              <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                                exit={{ opacity: 0, height: 0 }}
-                                className="overflow-hidden w-full min-w-0"
-                              >
-                                <div className="mt-2 pl-2 border-l-2 border-gray-100 dark:border-gray-800 ml-3 min-w-0">
-                                  <div className={`px-4 py-3 rounded-xl overflow-x-auto w-full max-w-full ${darkMode ? 'bg-gray-800/50 text-gray-300' : 'bg-gray-50/50 text-gray-600'}`}>
-                                    <StreamingMarkdown
-                                      content={msg.thinking}
-                                      isStreaming={false}
-                                      enableBlurReveal={false}
-                                      blurIntensity="light"
-                                    />
-                                  </div>
-                                </div>
-                              </motion.div>
-                            )}
-                          </AnimatePresence>
-                        </div>
+                        <ThinkingBlock
+                          content={msg.thinking}
+                          isStreaming={msg.isStreaming && streamingMessageId === msg.id}
+                          darkMode={darkMode}
+                          thinkingMs={msg.thinkingMs || 0}
+                        />
                       )}
 
                       {msg.hasImage && (

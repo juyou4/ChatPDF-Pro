@@ -876,3 +876,203 @@
         inset 0 2px 15px rgba(207, 209, 217, 0.3),
         0 10px 30px -10px rgba(180, 185, 200, 0.6);
 }
+
+
+/* ============================================================
+   深度思考展示组件样式（ThinkingBlock）
+   参考 cherry-studio 的卡片式设计
+   ============================================================ */
+
+.thinking-block {
+    margin: 8px 0;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+/* 头部区域：可点击折叠/展开 */
+.thinking-block-header {
+    display: flex;
+    align-items: center;
+    border: 0.5px solid #e5e7eb;
+    border-radius: 10px;
+    cursor: pointer;
+    user-select: none;
+    transition: height 150ms ease, border-radius 150ms ease;
+    overflow: hidden;
+    position: relative;
+}
+
+.thinking-block-header.expanded {
+    border-radius: 10px 10px 0 0;
+}
+
+.dark .thinking-block-header {
+    border-color: #374151;
+}
+
+/* 原子图标容器 */
+.thinking-block-icon {
+    width: 44px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    flex-shrink: 0;
+    padding-left: 4px;
+}
+
+.thinking-block-icon > div {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* 文本区域 */
+.thinking-block-text {
+    flex: 1;
+    height: 100%;
+    padding: 4px 0;
+    overflow: hidden;
+    position: relative;
+}
+
+/* 标题（计时器文本） */
+.thinking-block-title {
+    position: absolute;
+    inset: 0 0 auto 0;
+    font-size: 13px;
+    line-height: 14px;
+    font-weight: 500;
+    padding: 12px 0;
+    z-index: 10;
+    color: #374151;
+}
+
+.dark .thinking-block-title {
+    color: #d1d5db;
+}
+
+.thinking-timer-text {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* 右侧箭头 */
+.thinking-block-arrow {
+    width: 36px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    flex-shrink: 0;
+    color: #9ca3af;
+    transition: transform 150ms ease;
+}
+
+.thinking-block-arrow.expanded {
+    transform: rotate(90deg);
+}
+
+.dark .thinking-block-arrow {
+    color: #6b7280;
+}
+
+/* 思考内容滚动预览（收起时显示） */
+.thinking-preview-container {
+    width: 100%;
+    height: 100%;
+    mask: linear-gradient(
+        to bottom,
+        rgb(0 0 0 / 0%) 0%,
+        rgb(0 0 0 / 0%) 30%,
+        rgb(0 0 0 / 25%) 40%,
+        rgb(0 0 0 / 100%) 85%,
+        rgb(0 0 0 / 100%) 100%
+    );
+    position: relative;
+    overflow: hidden;
+}
+
+.thinking-preview-messages {
+    width: 100%;
+    position: absolute;
+    top: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+}
+
+.thinking-preview-line {
+    width: 100%;
+    font-size: 11px;
+    color: #9ca3af;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 8px;
+}
+
+.dark .thinking-preview-line {
+    color: #6b7280;
+}
+
+/* 展开的内容区域 */
+.thinking-block-body-wrapper {
+    overflow: hidden;
+}
+
+.thinking-block-body {
+    position: relative;
+    padding: 14px 16px;
+    border-width: 0 0.5px 0.5px 0.5px;
+    border-style: solid;
+    border-color: #e5e7eb;
+    border-radius: 0 0 10px 10px;
+    background: #fafafa;
+    font-size: 13px;
+    color: #6b7280;
+    line-height: 1.7;
+}
+
+.thinking-block-body.dark {
+    border-color: #374151;
+    background: rgba(31, 41, 55, 0.5);
+    color: #9ca3af;
+}
+
+.thinking-block-content {
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+/* 复制按钮 */
+.thinking-copy-btn {
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    background: none;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s;
+    border-radius: 4px;
+    z-index: 5;
+}
+
+.thinking-block-body:hover .thinking-copy-btn {
+    opacity: 0.7;
+}
+
+.thinking-copy-btn:hover {
+    opacity: 1 !important;
+    color: #374151;
+}
+
+.dark .thinking-copy-btn:hover {
+    color: #e5e7eb;
+}

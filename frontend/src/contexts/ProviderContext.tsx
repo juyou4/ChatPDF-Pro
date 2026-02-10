@@ -104,10 +104,19 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
             OLD_KEYS.forEach(key => localStorage.removeItem(key))
         }
 
-        // 版本匹配时使用保存的配置
+        // 版本匹配时使用保存的配置，并补全缺失的系统 Provider
         if (saved && savedVersion === CONFIG_VERSION) {
             try {
                 const parsed = JSON.parse(saved) as Provider[]
+                // 检查是否有新增的系统 Provider 不在缓存中，补全到列表末尾
+                const cachedIds = new Set(parsed.map(p => p.id))
+                const missing = SYSTEM_PROVIDERS.filter(sp => !cachedIds.has(sp.id))
+                if (missing.length > 0) {
+                    console.log(`🔧 补全 ${missing.length} 个缺失的系统 Provider:`, missing.map(p => p.id))
+                    const reconciled = [...parsed, ...missing]
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(reconciled))
+                    return reconciled
+                }
                 console.log('✅ Loaded providers from cache (v' + CONFIG_VERSION + ')')
                 return parsed
             } catch (error) {
