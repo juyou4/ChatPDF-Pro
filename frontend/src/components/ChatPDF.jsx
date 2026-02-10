@@ -700,11 +700,32 @@ const ChatPDF = () => {
         const decoder = new TextDecoder();
         let currentText = '';
         let currentThinking = '';
+        // 使用 rAF 批量更新，减少 React 重渲染次数，实现更流畅的流式输出
+        let rafPending = false;
+        let needsUpdate = false;
+
+        const flushUpdate = () => {
+          rafPending = false;
+          if (!needsUpdate) return;
+          needsUpdate = false;
+          setMessages(prev => prev.map(msg =>
+            msg.id === tempMsgId
+              ? { ...msg, content: currentText, thinking: currentThinking }
+              : msg
+          ));
+        };
+
+        const scheduleUpdate = () => {
+          needsUpdate = true;
+          if (!rafPending) {
+            rafPending = true;
+            requestAnimationFrame(flushUpdate);
+          }
+        };
 
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (streamingAbortRef.current.cancelled) break;
           if (streamingAbortRef.current.cancelled) break;
 
           const chunk = decoder.decode(value);
@@ -730,11 +751,7 @@ const ChatPDF = () => {
                     currentThinking += chunkThinking;
                   }
                   if (chunkContent || chunkThinking) {
-                    setMessages(prev => prev.map(msg =>
-                      msg.id === tempMsgId
-                        ? { ...msg, content: currentText, thinking: currentThinking }
-                        : msg
-                    ));
+                    scheduleUpdate();
                   }
                 } else {
                   // done=true 的最后一个 chunk，提取 retrieval_meta 中的 citations
@@ -743,11 +760,7 @@ const ChatPDF = () => {
                   }
                   if (chunkThinking) {
                     currentThinking += chunkThinking;
-                    setMessages(prev => prev.map(msg =>
-                      msg.id === tempMsgId
-                        ? { ...msg, content: currentText, thinking: currentThinking }
-                        : msg
-                    ));
+                    scheduleUpdate();
                   }
                 }
               } catch (e) {
@@ -755,6 +768,11 @@ const ChatPDF = () => {
               }
             }
           }
+        }
+
+        // 确保最后一批数据被刷新
+        if (needsUpdate) {
+          flushUpdate();
         }
 
         // 标记流式传输完成，保存思考文本和引文数据

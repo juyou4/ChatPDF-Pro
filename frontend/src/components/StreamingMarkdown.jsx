@@ -464,6 +464,9 @@ const StreamingMarkdown = React.memo(({
 
   const streamingClass = isStreaming ? 'streaming-active' : '';
 
+  // 流式输出等待指示器：内容为空时显示三点跳动动画
+  const showWaitingDots = isStreaming && (!content || content.trim().length === 0);
+
   // 构建引文映射表，用于快速查找引用编号对应的引文数据
   const citationMap = useMemo(() => {
     if (!citations || citations.length === 0) return null;
@@ -549,14 +552,22 @@ const StreamingMarkdown = React.memo(({
       ref={containerRef}
       className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${streamingClass}`}
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        remarkRehypeOptions={{ allowDangerousHtml: true }}
-        components={markdownComponents}
-      >
-        {processedContent}
-      </ReactMarkdown>
+      {showWaitingDots ? (
+        <div className="streaming-dots">
+          <span className="dot" />
+          <span className="dot" />
+          <span className="dot" />
+        </div>
+      ) : (
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          remarkRehypeOptions={{ allowDangerousHtml: true }}
+          components={markdownComponents}
+        >
+          {processedContent}
+        </ReactMarkdown>
+      )}
     </div>
   );
 }, (prevProps, nextProps) => {
