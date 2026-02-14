@@ -26,15 +26,22 @@ local_embedding_models = {}
 
 
 class QueryVectorCache:
-    """查询向量 LRU 缓存
+    """查询向量 LRU 缓存（支持磁盘持久化）
     
     使用 OrderedDict 实现 LRU 淘汰策略，缓存键为 (embedding_model_id, query_text) 元组，
     确保不同模型的查询向量不会混淆。
+    
+    支持通过 persist_path 启用磁盘持久化，跨会话复用查询向量。
     """
 
-    def __init__(self, max_size: int = 256):
+    def __init__(self, max_size: int = 256, persist_path: str = ""):
         self._cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
         self._max_size = max_size
+        self._persist_path = persist_path
+        self._dirty_count = 0  # 自上次持久化以来的写入次数
+        self._persist_interval = 20  # 每 N 次写入持久化一次
+        if persist_path:
+            self._load_from_disk()
 
     def get(self, model_id: str, query: str) -> Optional[np.ndarray]:
         """获取缓存的查询向量
@@ -69,10 +76,51 @@ class QueryVectorCache:
         self._cache.move_to_end(key)
         if len(self._cache) > self._max_size:
             self._cache.popitem(last=False)
+        # 定期持久化
+        self._dirty_count += 1
+        if self._persist_path and self._dirty_count >= self._persist_interval:
+            self._save_to_disk()
+            self._dirty_count = 0
+
+    def _load_from_disk(self):
+        """从磁盘加载缓存"""
+        if not self._persist_path or not os.path.exists(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, "rb") as f:
+                data = pickle.load(f)
+            if isinstance(data, OrderedDict):
+                self._cache = data
+                logger.info(f"[QueryVectorCache] 从磁盘加载 {len(self._cache)} 条缓存")
+        except Exception as e:
+            logger.warning(f"[QueryVectorCache] 磁盘缓存加载失败: {e}")
+
+    def _save_to_disk(self):
+        """持久化缓存到磁盘"""
+        if not self._persist_path:
+            return
+        try:
+            cache_dir = os.path.dirname(self._persist_path)
+            if cache_dir:
+                os.makedirs(cache_dir, exist_ok=True)
+            with open(self._persist_path, "wb") as f:
+                pickle.dump(self._cache, f)
+        except Exception as e:
+            logger.warning(f"[QueryVectorCache] 磁盘缓存保存失败: {e}")
+
+    def flush(self):
+        """立即持久化到磁盘"""
+        if self._persist_path and self._dirty_count > 0:
+            self._save_to_disk()
+            self._dirty_count = 0
 
 
-# 全局查询向量缓存实例（默认容量 256）
-_query_vector_cache = QueryVectorCache()
+# 全局查询向量缓存实例（默认容量 256，启用磁盘持久化）
+_cache_persist_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "cache", "query_vector_cache.pkl"
+)
+_query_vector_cache = QueryVectorCache(persist_path=_cache_persist_path)
 
 # 记录正在生成意群的文档 ID，防止重复提交（需求 6.1）
 _group_generation_in_progress: set[str] = set()
@@ -280,10 +328,26 @@ def get_chunk_params(embedding_model_id: str, base_chunk_size: int = 1200, base_
     return chunk_size, chunk_overlap
 
 
-def _distance_to_similarity(distance: float) -> float:
+def _distance_to_similarity(distance: float, is_ip: bool = True) -> float:
+    """将 FAISS 距离/分数转换为 0-1 相似度
+
+    Args:
+        distance: FAISS 返回的距离或分数
+        is_ip: True=Inner Product 分数（归一化后即余弦相似度），
+               False=L2 距离（旧索引兼容）
+
+    Returns:
+        0-1 范围的相似度值
+    """
     try:
-        safe_distance = max(distance, 0.0)
-        return float(1.0 / (1.0 + safe_distance))
+        if is_ip:
+            # IP 分数：归一化向量的内积 = 余弦相似度，范围 [-1, 1]
+            # 映射到 [0, 1]
+            return float(max(0.0, min(1.0, (distance + 1.0) / 2.0)))
+        else:
+            # L2 距离：旧索引兼容
+            safe_distance = max(distance, 0.0)
+            return float(1.0 / (1.0 + safe_distance))
     except Exception:
         return 0.0
 
@@ -415,6 +479,28 @@ def structure_aware_split(
     Returns:
         分块后的文本列表
     """
+    result = structure_aware_split_with_context(text, chunk_size, chunk_overlap)
+    return [chunk_text for chunk_text, _ in result]
+
+
+def structure_aware_split_with_context(
+    text: str,
+    chunk_size: int = 1200,
+    chunk_overlap: int = 200,
+) -> list[tuple[str, str]]:
+    """结构感知分块（带章节上下文）
+
+    与 structure_aware_split 相同的分块逻辑，但额外返回每个 chunk
+    所属的章节标题上下文，用于 Contextual Chunking。
+
+    Args:
+        text: 待分块的文本
+        chunk_size: 最大分块字符数（默认 1200）
+        chunk_overlap: 分块重叠字符数（默认 200）
+
+    Returns:
+        (chunk_text, heading_context) 元组列表
+    """
     if not text or not text.strip():
         return []
 
@@ -429,12 +515,12 @@ def structure_aware_split(
             raise ValueError("段落切分结果为空")
 
         # 步骤 3：合并段落为分块，尊重 chunk_size 限制
-        chunks = _merge_segments_into_chunks(segments, chunk_size, chunk_overlap)
+        chunks_with_ctx = _merge_segments_into_chunks(segments, chunk_size, chunk_overlap)
 
-        if not chunks:
+        if not chunks_with_ctx:
             raise ValueError("合并分块结果为空")
 
-        return chunks
+        return chunks_with_ctx
 
     except Exception as e:
         # 检测失败时回退到 RecursiveCharacterTextSplitter
@@ -445,7 +531,7 @@ def structure_aware_split(
             chunk_overlap=chunk_overlap,
             length_function=len,
         )
-        return text_splitter.split_text(text)
+        return [(c, "") for c in text_splitter.split_text(text)]
 
 
 def _find_protected_regions(text: str) -> list[tuple[int, int]]:
@@ -634,7 +720,7 @@ def _merge_segments_into_chunks(
     segments: list[dict],
     chunk_size: int,
     chunk_overlap: int,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """将段合并为分块，尊重 chunk_size 限制和受保护区域完整性
 
     合并策略：
@@ -642,6 +728,7 @@ def _merge_segments_into_chunks(
     - 受保护段独立或与相邻普通段落合并（不超过 chunk_size）
     - 受保护段本身超过 chunk_size 时单独成块
     - 通过重叠实现分块间的上下文连续性
+    - 追踪每个 chunk 所属的章节标题上下文
 
     Args:
         segments: 段列表（来自 _split_by_paragraphs_with_protection）
@@ -649,42 +736,47 @@ def _merge_segments_into_chunks(
         chunk_overlap: 分块重叠字符数
 
     Returns:
-        分块后的文本列表
+        (chunk_text, heading_context) 元组列表
+        - chunk_text: 分块文本
+        - heading_context: 该 chunk 所属的章节标题（可为空字符串）
     """
-    chunks = []
+    chunks = []  # [(text, heading)]
     current_parts = []  # 当前分块中的文本片段
     current_len = 0
+    active_heading = ""  # 当前活跃的章节标题
+
+    def _commit_chunk():
+        nonlocal current_parts, current_len
+        if current_parts:
+            chunks.append(("\n\n".join(current_parts), active_heading))
+            current_parts = []
+            current_len = 0
 
     for seg in segments:
         seg_text = seg["text"]
         seg_len = len(seg_text)
         is_protected = seg["protected"]
 
+        # 更新活跃标题（segments 带有 heading 字段）
+        seg_heading = seg.get("heading")
+        if seg_heading:
+            active_heading = seg_heading
+
         if is_protected:
             if seg_len > chunk_size:
-                # 受保护区域超过 chunk_size：先提交当前缓冲区，再将受保护区域单独成块
-                if current_parts:
-                    chunks.append("\n\n".join(current_parts))
-                    current_parts = []
-                    current_len = 0
-                chunks.append(seg_text)
+                _commit_chunk()
+                chunks.append((seg_text, active_heading))
             elif current_len + seg_len + 2 > chunk_size:
-                # 加入受保护区域会超过 chunk_size：先提交当前缓冲区
-                if current_parts:
-                    chunks.append("\n\n".join(current_parts))
-                    current_parts = []
-                    current_len = 0
+                _commit_chunk()
                 current_parts.append(seg_text)
                 current_len = seg_len
             else:
-                # 受保护区域可以合并到当前分块
                 current_parts.append(seg_text)
                 current_len += seg_len + (2 if current_parts else 0)
         else:
             # 普通段落
             if current_len + seg_len + 2 > chunk_size and current_parts:
-                # 当前分块已满，提交并开始新分块
-                chunks.append("\n\n".join(current_parts))
+                _commit_chunk()
 
                 # 实现重叠：从当前分块末尾取 overlap 部分作为新分块的开头
                 overlap_parts = _get_overlap_parts(current_parts, chunk_overlap)
@@ -695,10 +787,9 @@ def _merge_segments_into_chunks(
             current_len += seg_len + (2 if len(current_parts) > 1 else 0)
 
     # 提交最后一个分块
-    if current_parts:
-        chunks.append("\n\n".join(current_parts))
+    _commit_chunk()
 
-    return [c for c in chunks if c.strip()]
+    return [(c, h) for c, h in chunks if c.strip()]
 
 
 def _get_overlap_parts(parts: list[str], overlap_size: int) -> list[str]:
@@ -754,9 +845,16 @@ def build_vector_index(
         preprocessed_text = preprocess_text(text)
 
         # 优先使用结构感知分块，保护表格和公式完整性（需求 4.1, 4.2, 4.3, 4.4）
+        from services.rag_config import RAGConfig as _BuildRAGConfig
+        _build_rag_config = _BuildRAGConfig()
+
         try:
-            chunks = structure_aware_split(preprocessed_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            if chunks:
+            chunks_with_ctx = structure_aware_split_with_context(
+                preprocessed_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+            )
+            if chunks_with_ctx:
+                chunks = [c for c, _ in chunks_with_ctx]
+                chunk_headings = [h for _, h in chunks_with_ctx]
                 print(f"使用结构感知分块，生成 {len(chunks)} 个分块")
             else:
                 raise ValueError("结构感知分块返回空结果")
@@ -770,25 +868,87 @@ def build_vector_index(
                 length_function=len,
             )
             chunks = text_splitter.split_text(preprocessed_text)
+            chunk_headings = [""] * len(chunks)
         print(f"Split into {len(chunks)} chunks.")
 
         if not chunks:
             return
 
         embed_fn = get_embedding_function(embedding_model_id, api_key, api_host)
-        embeddings = embed_fn(chunks)
 
-        dimension = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(np.array(embeddings).astype('float32'))
+        # Contextual Chunking：用带章节前缀的文本做 embedding，提升语义区分度
+        if _build_rag_config.enable_contextual_chunking:
+            embed_texts = []
+            ctx_count = 0
+            for chunk_text, heading in zip(chunks, chunk_headings):
+                if heading:
+                    embed_texts.append(f"[章节: {heading}]\n{chunk_text}")
+                    ctx_count += 1
+                else:
+                    embed_texts.append(chunk_text)
+            if ctx_count > 0:
+                logger.info(f"[{doc_id}] Contextual Chunking: {ctx_count}/{len(chunks)} 个 chunk 注入章节上下文")
+            embeddings = embed_fn(embed_texts)
+        else:
+            embeddings = embed_fn(chunks)
+
+        embeddings_f32 = np.array(embeddings).astype('float32')
+        # 归一化向量，使 Inner Product = 余弦相似度
+        faiss.normalize_L2(embeddings_f32)
+
+        dimension = embeddings_f32.shape[1]
+        n_vectors = embeddings_f32.shape[0]
+
+        if n_vectors > 2000:
+            # 大文档：使用 IVF 索引加速检索
+            n_clusters = min(64, n_vectors // 10)
+            quantizer = faiss.IndexFlatIP(dimension)
+            index = faiss.IndexIVFFlat(quantizer, dimension, n_clusters, faiss.METRIC_INNER_PRODUCT)
+            index.train(embeddings_f32)
+            index.nprobe = min(8, n_clusters)
+            logger.info(f"[{doc_id}] 使用 IndexIVFFlat: {n_vectors} 向量, {n_clusters} 簇")
+        else:
+            index = faiss.IndexFlatIP(dimension)
+
+        index.add(embeddings_f32)
 
         os.makedirs(vector_store_dir, exist_ok=True)
         index_path = os.path.join(vector_store_dir, f"{doc_id}.index")
         chunks_path = os.path.join(vector_store_dir, f"{doc_id}.pkl")
 
         faiss.write_index(index, index_path)
+
+        # Parent-Child 分块：生成 parent chunks 并保存映射
+        parent_chunks = []
+        child_to_parent = {}  # child_index -> parent_index
+        parent_chunk_size = chunk_size * 3  # parent ~3600 字符
+        i = 0
+        while i < len(chunks):
+            # 合并连续 child chunks 为一个 parent
+            parent_parts = []
+            parent_len = 0
+            parent_idx = len(parent_chunks)
+            start_i = i
+            while i < len(chunks) and parent_len + len(chunks[i]) + 2 <= parent_chunk_size:
+                parent_parts.append(chunks[i])
+                parent_len += len(chunks[i]) + 2
+                child_to_parent[i] = parent_idx
+                i += 1
+            if not parent_parts:
+                # 单个 chunk 超过 parent_chunk_size
+                parent_parts.append(chunks[i])
+                child_to_parent[i] = parent_idx
+                i += 1
+            parent_chunks.append("\n\n".join(parent_parts))
+
+        save_data = {
+            "chunks": chunks,
+            "embedding_model": embedding_model_id,
+            "parent_chunks": parent_chunks,
+            "child_to_parent": child_to_parent,
+        }
         with open(chunks_path, "wb") as f:
-            pickle.dump({"chunks": chunks, "embedding_model": embedding_model_id}, f)
+            pickle.dump(save_data, f)
 
         print(f"Vector index saved to {index_path}")
 
@@ -1409,47 +1569,209 @@ def search_document_chunks(
     if isinstance(data, dict):
         chunks = data["chunks"]
         embedding_model_id = data.get("embedding_model", "local-minilm")
+        parent_chunks = data.get("parent_chunks", [])
+        child_to_parent = data.get("child_to_parent", {})
     else:
         chunks = data
         embedding_model_id = "local-minilm"
+        parent_chunks = []
+        child_to_parent = {}
 
     embed_fn = get_embedding_function(embedding_model_id, api_key)
+
+    # 检测索引类型：IP（新索引）还是 L2（旧索引）
+    is_ip_index = (index.metric_type == faiss.METRIC_INNER_PRODUCT)
+
+    def _normalize_query_vector(vec):
+        """归一化查询向量（仅 IP 索引需要）"""
+        v = np.array(vec).astype('float32')
+        if is_ip_index:
+            faiss.normalize_L2(v)
+        return v
+
+    # ---- RAG 优化：HyDE + 多查询扩展 ----
+    from services.rag_config import RAGConfig as _SearchRAGConfig
+    _search_rag_config = _SearchRAGConfig()
+
+    # HyDE：用假设文档的 embedding 替代原始查询 embedding
+    hyde_passage = None
+    if _search_rag_config.enable_hyde and api_key:
+        try:
+            from services.query_expander import generate_hyde_passage
+            hyde_passage = _run_async(generate_hyde_passage(query, api_key))
+            if hyde_passage:
+                logger.info(f"[{doc_id}] HyDE 启用，假设文档 {len(hyde_passage)} 字符")
+        except Exception as e:
+            logger.warning(f"[{doc_id}] HyDE 生成失败，降级为原始查询: {e}")
 
     # 向量检索计时开始（需求 10.1）
     t0 = time.perf_counter()
 
     # 查询向量 LRU 缓存（需求 5.1, 5.2, 5.3）
+    # HyDE 模式下：同时缓存原始查询向量和 HyDE 向量
     cached_vector = _query_vector_cache.get(embedding_model_id, query)
     if cached_vector is not None:
         query_vector = cached_vector
         logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
     else:
-        query_vector = embed_fn([query])
+        query_vector = _normalize_query_vector(embed_fn([query]))
         _query_vector_cache.put(embedding_model_id, query, query_vector)
 
+    # HyDE：额外生成假设文档的 embedding 用于检索
+    if hyde_passage:
+        hyde_cache_key = f"hyde:{query}"
+        cached_hyde = _query_vector_cache.get(embedding_model_id, hyde_cache_key)
+        if cached_hyde is not None:
+            hyde_vector = cached_hyde
+        else:
+            hyde_vector = _normalize_query_vector(embed_fn([hyde_passage]))
+            _query_vector_cache.put(embedding_model_id, hyde_cache_key, hyde_vector)
+    else:
+        hyde_vector = None
+
     search_k = max(candidate_k, top_k)
-    D, I = index.search(np.array(query_vector).astype('float32'), search_k)
+
+    # 主查询检索（使用 HyDE 向量或原始查询向量）
+    primary_vector = hyde_vector if hyde_vector is not None else query_vector
+    D, I = index.search(np.array(primary_vector).astype('float32'), search_k)
+
+    # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
+    if hyde_vector is not None:
+        D_orig, I_orig = index.search(np.array(query_vector).astype('float32'), search_k)
+    else:
+        D_orig, I_orig = None, None
 
     vector_results = []
     vector_chunk_set = set()  # 记录向量搜索已返回的 chunk
-    for dist, idx in zip(D[0], I[0]):
-        if idx < len(chunks):
-            chunk_text = chunks[idx]
-            page_num = _find_page_for_chunk(chunk_text, pages)
-            similarity = _distance_to_similarity(float(dist))
-            snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
 
-            vector_results.append({
-                "chunk": chunk_text,
-                "page": page_num,
-                "score": float(dist),
-                "similarity": similarity,
-                "similarity_percent": round(similarity * 100, 2),
-                "snippet": snippet,
-                "highlights": highlights,
-                "reranked": False
-            })
-            vector_chunk_set.add(chunk_text)
+    def _build_results_from_faiss(D_arr, I_arr):
+        """从 FAISS 搜索结果构建结果列表"""
+        results = []
+        for dist, idx in zip(D_arr[0], I_arr[0]):
+            if idx < len(chunks):
+                chunk_text = chunks[idx]
+                page_num = _find_page_for_chunk(chunk_text, pages)
+                similarity = _distance_to_similarity(float(dist), is_ip=is_ip_index)
+                snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
+                results.append({
+                    "chunk": chunk_text,
+                    "page": page_num,
+                    "score": float(dist),
+                    "similarity": similarity,
+                    "similarity_percent": round(similarity * 100, 2),
+                    "snippet": snippet,
+                    "highlights": highlights,
+                    "reranked": False
+                })
+        return results
+
+    def _expand_to_parent_chunks(results_list, top_n):
+        """将 child chunk 结果扩展为 parent chunk，去重同 parent 的命中
+
+        保留每个 parent 中最高分的 child 的元数据，
+        但将 chunk 文本替换为 parent chunk 文本。
+
+        Args:
+            results_list: child 级别的检索结果列表
+            top_n: 返回的最大结果数
+
+        Returns:
+            parent 级别的结果列表
+        """
+        if not parent_chunks or not child_to_parent:
+            return results_list
+
+        # child_text -> child_index 映射
+        child_text_to_idx = {chunks[i]: i for i in range(len(chunks))}
+
+        seen_parents = {}  # parent_idx -> best result item
+        expanded = []
+
+        for item in results_list:
+            child_text = item.get("chunk", "")
+            child_idx = child_text_to_idx.get(child_text)
+            if child_idx is None:
+                # 非标准 chunk（如精确短语注入），保留原样
+                expanded.append(item)
+                continue
+
+            p_idx = child_to_parent.get(child_idx)
+            if p_idx is None or p_idx >= len(parent_chunks):
+                expanded.append(item)
+                continue
+
+            if p_idx in seen_parents:
+                # 同一 parent 的多个 child，跳过（保留最高分的）
+                continue
+
+            # 替换 chunk 为 parent chunk
+            new_item = item.copy()
+            new_item["chunk"] = parent_chunks[p_idx]
+            new_item["child_chunk"] = child_text  # 保留原始 child 用于高亮
+            new_item["parent_expanded"] = True
+            seen_parents[p_idx] = True
+            expanded.append(new_item)
+
+        return expanded[:top_n]
+
+    primary_results = _build_results_from_faiss(D, I)
+
+    # HyDE 双路 RRF 融合：合并 HyDE 路和原始查询路的结果
+    if D_orig is not None and I_orig is not None:
+        orig_results = _build_results_from_faiss(D_orig, I_orig)
+        from services.hybrid_search import reciprocal_rank_fusion
+        vector_results = reciprocal_rank_fusion(
+            primary_results, orig_results,
+            k=60, top_k=search_k, chunk_key='chunk'
+        )
+        logger.info(
+            f"[{doc_id}] HyDE 双路 RRF 融合: "
+            f"HyDE路={len(primary_results)}, 原始路={len(orig_results)}, "
+            f"融合后={len(vector_results)}"
+        )
+    else:
+        vector_results = primary_results
+
+    for item in vector_results:
+        vector_chunk_set.add(item.get("chunk", ""))
+
+    # --- 多查询扩展 RRF 融合 ---
+    if _search_rag_config.enable_query_expansion and api_key:
+        try:
+            from services.query_expander import expand_query
+            expanded_queries = _run_async(
+                expand_query(query, api_key, n=_search_rag_config.query_expansion_n)
+            )
+            if expanded_queries:
+                from services.hybrid_search import reciprocal_rank_fusion
+                expansion_result_lists = [vector_results]
+                for eq in expanded_queries:
+                    eq_vector = _normalize_query_vector(embed_fn([eq]))
+                    D_eq, I_eq = index.search(np.array(eq_vector).astype('float32'), search_k)
+                    eq_results = _build_results_from_faiss(D_eq, I_eq)
+                    expansion_result_lists.append(eq_results)
+
+                vector_results = reciprocal_rank_fusion(
+                    *expansion_result_lists,
+                    k=60, top_k=search_k, chunk_key='chunk'
+                )
+                vector_chunk_set = {item.get("chunk", "") for item in vector_results}
+                logger.info(
+                    f"[{doc_id}] 多查询扩展 RRF 融合: "
+                    f"{len(expanded_queries)} 个扩展查询, "
+                    f"融合后={len(vector_results)}"
+                )
+        except Exception as e:
+            logger.warning(f"[{doc_id}] 多查询扩展失败，使用原始结果: {e}")
+
+    # --- Parent-Child 扩展 ---
+    if _search_rag_config.enable_parent_child_retrieval and parent_chunks and child_to_parent:
+        pre_expand_count = len(vector_results)
+        vector_results = _expand_to_parent_chunks(vector_results, search_k)
+        vector_chunk_set = {item.get("chunk", "") for item in vector_results}
+        logger.info(
+            f"[{doc_id}] Parent-Child 扩展: {pre_expand_count} → {len(vector_results)} 个结果"
+        )
 
     # --- 精确短语注入 ---
     # 如果查询包含多个词（短语），扫描所有 chunk 找到包含完整短语的，
@@ -1711,6 +2033,7 @@ def get_relevant_context(
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
+    model_context_window: int = 0,  # 动态 Token 预算：LLM 模型的上下文窗口大小
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -1763,6 +2086,17 @@ def get_relevant_context(
     )
 
     config = RAGConfig()
+
+    # 动态 Token 预算：根据模型上下文窗口动态调整
+    if config.token_budget_ratio > 0 and model_context_window > 0:
+        dynamic_budget = int(model_context_window * config.token_budget_ratio)
+        dynamic_budget = max(dynamic_budget, 2000)  # 最少 2000
+        if dynamic_budget != config.max_token_budget:
+            logger.info(
+                f"[{doc_id}] 动态 Token 预算: {config.max_token_budget} → {dynamic_budget} "
+                f"(模型窗口={model_context_window}, 比例={config.token_budget_ratio})"
+            )
+            config.max_token_budget = dynamic_budget
 
     # 尝试使用语义意群增强检索
     if config.enable_semantic_groups:

@@ -25,6 +25,12 @@ class RAGConfig:
         default_granularity: 默认粒度级别，可选 "summary"、"digest" 或 "full"
         relevance_threshold: 检索质量阈值，所有结果相似度低于此值时附加低质量提示
         small_doc_chunk_threshold: 小文档分块数阈值，低于此值时跳过意群级别检索以加速响应
+        enable_hyde: 是否启用 HyDE 假设文档嵌入
+        enable_query_expansion: 是否启用多查询扩展
+        query_expansion_n: 多查询扩展数量
+        enable_contextual_chunking: 是否启用上下文增强分块（章节标题注入）
+        enable_lost_in_middle_reorder: 是否启用 Lost-in-the-Middle 缓解
+        token_budget_ratio: 动态 Token 预算比例（0 表示使用固定 max_token_budget）
     """
 
     enable_semantic_groups: bool = True       # 是否启用意群功能
@@ -36,3 +42,12 @@ class RAGConfig:
     default_granularity: str = "digest"       # 默认粒度
     relevance_threshold: float = 0.3          # 检索质量阈值（需求 8.2）
     small_doc_chunk_threshold: int = 10       # 小文档分块数阈值，低于此值跳过意群检索（需求 10.3，从 20 降至 10 以提升召回率）
+
+    # ---- RAG 优化开关 ----
+    enable_hyde: bool = False                 # HyDE 假设文档嵌入，用 LLM 生成假设答案做检索
+    enable_query_expansion: bool = False      # 多查询扩展，LLM 生成多个改写查询合并检索
+    query_expansion_n: int = 3               # 多查询扩展数量
+    enable_contextual_chunking: bool = False  # 上下文增强分块，chunk 前注入章节标题
+    enable_lost_in_middle_reorder: bool = False  # Lost-in-the-Middle 缓解，交替排列上下文
+    enable_parent_child_retrieval: bool = False  # Parent-Child 分块：用小 chunk 检索，返回大 parent chunk
+    token_budget_ratio: float = 0.0          # 动态 Token 预算比例（0 表示使用固定 max_token_budget）

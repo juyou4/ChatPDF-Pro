@@ -78,6 +78,12 @@ class ContextBuilder:
         if not selections:
             return "", []
 
+        # Lost-in-the-Middle 缓解：交替排列，最相关内容在开头和结尾
+        from services.rag_config import RAGConfig
+        _ctx_rag_config = RAGConfig()
+        if _ctx_rag_config.enable_lost_in_middle_reorder and len(selections) > 2:
+            selections = self._reorder_lost_in_middle(selections)
+
         context_parts = []
         citations = []
 
@@ -234,6 +240,45 @@ class ContextBuilder:
 
         snippet = text[best_start:best_start + max_len].strip()
         return snippet
+
+    @staticmethod
+    def _reorder_lost_in_middle(selections: List[dict]) -> List[dict]:
+        """Lost-in-the-Middle 缓解：交替排列上下文
+
+        LLM 对长上下文中间的信息容易忽略。将最相关的内容放在开头和结尾，
+        次相关的放在中间。
+
+        输入顺序（按相关性降序）：#1, #2, #3, #4, #5, #6
+        输出顺序：#1, #3, #5, #6, #4, #2
+        即奇数位→开头侧，偶数位→结尾侧（逆序）
+
+        Args:
+            selections: 按相关性降序排列的选择列表
+
+        Returns:
+            重新排列的选择列表
+        """
+        if len(selections) <= 2:
+            return selections
+
+        head = []  # 开头侧（奇数位：0, 2, 4, ...）
+        tail = []  # 结尾侧（偶数位：1, 3, 5, ...）
+
+        for i, item in enumerate(selections):
+            if i % 2 == 0:
+                head.append(item)
+            else:
+                tail.append(item)
+
+        # 结尾侧逆序，使第2相关的排在最后
+        tail.reverse()
+
+        reordered = head + tail
+        logger.info(
+            f"Lost-in-the-Middle 重排: {len(selections)} 个意群, "
+            f"开头侧={len(head)}, 结尾侧={len(tail)}"
+        )
+        return reordered
 
     def build_citation_prompt(self, citations: List[dict]) -> str:
         """生成引文指示提示词，指导 LLM 在回答中使用 [1] [2] 等编号标注引用来源

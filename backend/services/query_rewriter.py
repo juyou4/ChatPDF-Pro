@@ -140,6 +140,112 @@ class QueryRewriter:
 
         return result
 
+    async def rewrite_with_llm(
+        self,
+        query: str,
+        chat_history: list[dict] = None,
+        selected_text: Optional[str] = None,
+        api_key: str = "",
+        model: str = "",
+        provider: str = "",
+        endpoint: str = "",
+    ) -> str:
+        """用 LLM 改写查询，支持多轮对话指代消解
+
+        先执行 regex 规则改写（零成本），再用 LLM 改写。
+        适用于多轮对话中"那它呢？""具体怎么做？"等需要上下文的查询。
+
+        Args:
+            query: 原始查询
+            chat_history: 对话历史 [{"role": "user"|"assistant", "content": "..."}]
+            selected_text: 用户选中的文本
+            api_key: LLM API 密钥
+            model: LLM 模型名称
+            provider: LLM 提供商
+            endpoint: LLM API 端点
+
+        Returns:
+            改写后的查询，失败时返回 regex 改写结果
+        """
+        # 第一步：先跑 regex 改写
+        rewritten = self.rewrite(query, selected_text=selected_text)
+
+        if not api_key:
+            return rewritten
+
+        # 第二步：构建 LLM 改写 prompt
+        history_text = ""
+        if chat_history:
+            recent = chat_history[-6:]  # 最近 3 轮对话
+            history_lines = []
+            for msg in recent:
+                role = "用户" if msg.get("role") == "user" else "助手"
+                content = msg.get("content", "")[:200]
+                history_lines.append(f"{role}: {content}")
+            history_text = "\n".join(history_lines)
+
+        selected_hint = ""
+        if selected_text and selected_text.strip():
+            selected_hint = f"\n用户选中的文本：{selected_text[:200]}"
+
+        prompt = f"""请将以下用户查询改写为一个独立的、适合检索文档的查询语句。
+要求：
+- 消解代词和指代（如"它"、"这个方法"等），使查询独立可理解
+- 保持原始意图不变
+- 直接输出改写后的查询，不要加任何前缀或解释
+- 如果查询已经足够清晰，直接返回原文
+
+{f'对话历史：{chr(10)}{history_text}' if history_text else ''}
+{selected_hint}
+
+当前查询：{rewritten}
+
+改写后的查询："""
+
+        try:
+            from services.chat_service import call_ai_api
+            from models.provider_registry import PROVIDER_CONFIG
+
+            if not model:
+                model = "gpt-4o-mini"
+            if not provider:
+                provider = "openai"
+            if not endpoint:
+                endpoint = PROVIDER_CONFIG.get(provider, {}).get("endpoint", "")
+
+            response = await call_ai_api(
+                messages=[{"role": "user", "content": prompt}],
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+                max_tokens=100,
+                temperature=0.3,
+            )
+
+            if isinstance(response, dict):
+                if response.get("error"):
+                    logger.warning(f"[LLM QueryRewrite] 调用失败: {response['error']}")
+                    return rewritten
+                content = response.get("content", "")
+                if not content and "choices" in response:
+                    choices = response["choices"]
+                    if choices and isinstance(choices, list):
+                        content = choices[0].get("message", {}).get("content", "")
+            else:
+                content = str(response) if response else ""
+
+            content = content.strip()
+            if content and len(content) > 3 and content != query:
+                logger.info(f"[LLM QueryRewrite] '{query}' → '{content}'")
+                return content
+
+            return rewritten
+
+        except Exception as e:
+            logger.warning(f"[LLM QueryRewrite] 失败，降级为 regex 改写: {e}")
+            return rewritten
+
     def _extract_key_content(self, text: str, max_chars: int = 50) -> str:
         """从选中文本中提取关键内容片段
 

@@ -137,7 +137,8 @@ async def vector_context(
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
-    middlewares: Optional[List[BaseMiddleware]] = None
+    middlewares: Optional[List[BaseMiddleware]] = None,
+    model_context_window: int = 0,
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -180,7 +181,8 @@ async def vector_context(
                 reranker_model=reranker_model,
                 rerank_provider=rerank_provider,
                 rerank_api_key=rerank_api_key,
-                rerank_endpoint=rerank_endpoint
+                rerank_endpoint=rerank_endpoint,
+                model_context_window=model_context_window
             ),
             timeout=60.0  # 60 秒超时
         )
