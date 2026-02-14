@@ -123,16 +123,57 @@ def _retrieve_memory_context(question: str, api_key: str = None) -> str:
 def _async_memory_write(svc, request):
     """异步记忆写入：提取 QA 摘要 + 更新关键词（需求 5.3）"""
     try:
-        # 提取 QA 摘要
+        # 提取 QA 摘要（传入 LLM 参数用于记忆提炼）
         if request.doc_id:
             # 构建完整对话历史（包含当前问题）
             history = list(request.chat_history or [])
             history.append({"role": "user", "content": request.question})
-            svc.save_qa_summary(request.doc_id, history)
+            svc.save_qa_summary(
+                request.doc_id,
+                history,
+                api_key=getattr(request, "api_key", None),
+                model=getattr(request, "model", None),
+                api_provider=getattr(request, "api_provider", None),
+            )
         # 更新关键词统计
         svc.update_keywords(request.question)
     except Exception as e:
         logger.error(f"异步记忆写入失败: {e}")
+
+
+# 跟踪已 flush 过的 doc_id，防止同一会话重复 flush
+_flushed_sessions: set = set()
+
+# Compaction 前自动 flush 的 token 阈值（借鉴 OpenClaw memoryFlush）
+_FLUSH_TOKEN_THRESHOLD = 6000  # ~6000 字符 ≈ 会话较长时
+
+
+def _maybe_flush_memory(request) -> None:
+    """当 chat_history 较长时，提前触发一次记忆写入（借鉴 OpenClaw memoryFlush）
+
+    防止长会话中间轮次的重要信息丢失。每个 doc_id 每次会话只 flush 一次。
+    """
+    if memory_service is None:
+        return
+    history = getattr(request, "chat_history", None)
+    if not history:
+        return
+    doc_id = getattr(request, "doc_id", "")
+    if not doc_id or doc_id in _flushed_sessions:
+        return
+
+    # 估算 token 数（简单用字符数近似）
+    total_chars = sum(len(m.get("content", "")) for m in history if isinstance(m, dict))
+    if total_chars < _FLUSH_TOKEN_THRESHOLD:
+        return
+
+    _flushed_sessions.add(doc_id)
+    logger.info(f"[Memory] Compaction flush 触发: doc_id={doc_id}, chars={total_chars}")
+    threading.Thread(
+        target=_async_memory_write,
+        args=(memory_service, request),
+        daemon=True,
+    ).start()
 
 
 def _should_use_memory(request) -> bool:
@@ -175,6 +216,10 @@ async def chat_with_pdf(request: ChatRequest):
     context = ""
     retrieval_meta = {}
     use_memory = _should_use_memory(request)
+
+    # Compaction 前自动 flush：长会话提前保存记忆（借鉴 OpenClaw）
+    if use_memory:
+        _maybe_flush_memory(request)
 
     # 记忆检索：在构建 system prompt 之前执行（需求 5.1）
     memory_context = ""

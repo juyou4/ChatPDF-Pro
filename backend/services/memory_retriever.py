@@ -6,12 +6,16 @@
 """
 
 import logging
+import math
+from datetime import datetime, timezone
 from typing import Optional
 
-from services.bm25_service import BM25Index
 from services.hybrid_search import hybrid_search_merge
 from services.memory_index import MemoryIndex
 from services.memory_store import MemoryStore
+
+# 时间衰减半衰期（天）
+_DECAY_HALF_LIFE_DAYS = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +71,38 @@ class MemoryRetriever:
             vector_results, bm25_results, top_k=top_k
         )
 
-        # 将融合结果转换为统一的输出格式
+        # 将融合结果转换为统一的输出格式，并应用时间衰减 + 动态重要性
+        now = datetime.now(timezone.utc)
         results = []
+        hit_entry_ids = []  # 记录命中的 entry_id，用于更新命中统计
+
         for item in merged:
             entry_id = item.get("entry_id", "")
             entry = entry_map.get(entry_id)
+            rrf_score = item.get("rrf_score", 0.0)
+
+            # 动态评分：基础重要性 × 时间衰减 × 命中次数加成
+            dynamic_score = rrf_score
+            if entry:
+                dynamic_score = self._compute_dynamic_score(
+                    rrf_score, entry, now
+                )
+                hit_entry_ids.append(entry_id)
+
             results.append({
                 "entry_id": entry_id,
                 "text": item.get("chunk", ""),
                 "source_type": entry.source_type if entry else "unknown",
                 "doc_id": entry.doc_id if entry else None,
-                "rrf_score": item.get("rrf_score", 0.0),
+                "rrf_score": dynamic_score,
             })
+
+        # 按动态评分重新排序
+        results.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
+
+        # 异步更新命中统计（不阻塞检索）
+        if hit_entry_ids:
+            self._record_hits(hit_entry_ids, entry_map, now)
 
         return results[:top_k]
 
@@ -109,42 +133,113 @@ class MemoryRetriever:
             return []
 
     def _bm25_search(self, query: str, entries: list, top_k: int = 3) -> list[dict]:
-        """BM25 检索，对记忆文本构建临时索引进行关键词匹配
+        """BM25 检索，使用 MemoryIndex 中持久化的 BM25 索引
 
         Args:
             query: 查询文本
-            entries: MemoryEntry 对象列表
+            entries: MemoryEntry 对象列表（保留参数兼容性）
             top_k: 返回数量
 
         Returns:
             格式化的 BM25 检索结果列表，每项包含 chunk 和 entry_id 字段
         """
-        if not entries:
-            return []
-
         try:
-            # 构建临时 BM25 索引
-            texts = [entry.content for entry in entries]
-            bm25_index = BM25Index()
-            bm25_index.build(texts)
-
-            # 执行检索
-            raw_results = bm25_index.search(query, top_k=top_k)
-
-            # 转换为 hybrid_search_merge 期望的格式
-            results = []
-            for item in raw_results:
-                idx = item["index"]
-                if 0 <= idx < len(entries):
-                    results.append({
-                        "chunk": item["chunk"],
-                        "entry_id": entries[idx].id,
-                        "score": item["score"],
-                    })
-            return results
+            return self.memory_index.bm25_search(query, top_k=top_k)
         except Exception as e:
             logger.error(f"记忆 BM25 检索失败: {e}")
             return []
+
+    @staticmethod
+    def _compute_dynamic_score(rrf_score: float, entry, now: datetime) -> float:
+        """计算动态评分：RRF 分数 × 重要性权重 × 时间衰减 × 命中加成
+
+        公式：score = rrf_score × importance_w × recency_decay × hit_boost
+        - importance_w: importance 归一化到 [0.5, 1.5] 区间
+        - recency_decay: exp(-days / half_life)，基于 last_hit_at 或 created_at
+        - hit_boost: 1 + log2(1 + hit_count) × 0.1
+
+        Args:
+            rrf_score: RRF 融合后的基础分数
+            entry: MemoryEntry 对象
+            now: 当前 UTC 时间
+
+        Returns:
+            调整后的动态分数
+        """
+        # 重要性权重：[0.5, 1.5]
+        importance_w = 0.5 + entry.importance
+
+        # 时间衰减：基于最后命中时间（无命中则用创建时间）
+        ref_time_str = entry.last_hit_at or entry.created_at
+        days_since = 0.0
+        if ref_time_str:
+            try:
+                ref_time = datetime.fromisoformat(ref_time_str)
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                delta = (now - ref_time).total_seconds() / 86400.0
+                days_since = max(0.0, delta)
+            except (ValueError, TypeError):
+                pass
+        recency_decay = math.exp(-days_since * math.log(2) / _DECAY_HALF_LIFE_DAYS)
+
+        # 命中次数加成：1 + log2(1 + hit_count) × 0.1
+        hit_boost = 1.0 + math.log2(1 + entry.hit_count) * 0.1
+
+        return rrf_score * importance_w * recency_decay * hit_boost
+
+    def _record_hits(self, entry_ids: list[str], entry_map: dict, now: datetime) -> None:
+        """记录检索命中：更新 hit_count 和 last_hit_at
+
+        遍历所有 session 和 profile 中的匹配条目，更新统计字段。
+
+        Args:
+            entry_ids: 本次命中的 entry_id 列表
+            entry_map: entry_id -> MemoryEntry 映射
+            now: 当前 UTC 时间
+        """
+        hit_set = set(entry_ids)
+        now_iso = now.isoformat()
+
+        try:
+            # 更新 profile 中的 entries
+            profile = self.memory_store.load_profile()
+            profile_changed = False
+            for e_data in profile.get("entries", []):
+                if e_data.get("id") in hit_set:
+                    e_data["hit_count"] = e_data.get("hit_count", 0) + 1
+                    e_data["last_hit_at"] = now_iso
+                    profile_changed = True
+            if profile_changed:
+                self.memory_store.save_profile(profile)
+
+            # 更新 sessions 中的 qa_summaries 和 important_memories
+            import os
+            sessions_dir = self.memory_store.sessions_dir
+            if os.path.exists(sessions_dir):
+                for filename in os.listdir(sessions_dir):
+                    if not filename.endswith("_session.json"):
+                        continue
+                    doc_id = filename.replace("_session.json", "")
+                    session = self.memory_store.load_session(doc_id)
+                    session_changed = False
+
+                    for item in session.get("qa_summaries", []):
+                        if item.get("id") in hit_set:
+                            item["hit_count"] = item.get("hit_count", 0) + 1
+                            item["last_hit_at"] = now_iso
+                            session_changed = True
+
+                    for item in session.get("important_memories", []):
+                        if item.get("id") in hit_set:
+                            item["hit_count"] = item.get("hit_count", 0) + 1
+                            item["last_hit_at"] = now_iso
+                            session_changed = True
+
+                    if session_changed:
+                        self.memory_store.save_session(doc_id, session)
+        except Exception as e:
+            logger.warning(f"记录记忆命中统计失败: {e}")
 
     def build_memory_context(self, memories: list[dict]) -> str:
         """将检索到的记忆条目格式化为上下文字符串

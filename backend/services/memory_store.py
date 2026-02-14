@@ -25,10 +25,12 @@ class MemoryEntry:
     """单条记忆条目"""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     content: str = ""
-    source_type: str = "manual"  # "auto_qa" | "manual" | "liked" | "keyword"
+    source_type: str = "manual"  # "auto_qa" | "manual" | "liked" | "keyword" | "llm_distilled"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     doc_id: Optional[str] = None
     importance: float = 0.5  # 0.0-1.0，manual/liked 默认 1.0，auto 默认 0.5
+    hit_count: int = 0  # 被检索命中的次数
+    last_hit_at: str = ""  # 最后一次被命中的时间
 
     def to_dict(self) -> dict:
         """序列化为字典"""
@@ -39,6 +41,8 @@ class MemoryEntry:
             "created_at": self.created_at,
             "doc_id": self.doc_id,
             "importance": self.importance,
+            "hit_count": self.hit_count,
+            "last_hit_at": self.last_hit_at,
         }
 
     @classmethod
@@ -51,6 +55,8 @@ class MemoryEntry:
             created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
             doc_id=data.get("doc_id"),
             importance=data.get("importance", 0.5),
+            hit_count=data.get("hit_count", 0),
+            last_hit_at=data.get("last_hit_at", ""),
         )
 
 

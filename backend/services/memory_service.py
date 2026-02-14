@@ -10,6 +10,7 @@
 - CRUD 操作：增删改查记忆条目
 - 摘要上限控制：超过上限时移除最早的非重要摘要
 """
+import asyncio
 import logging
 import os
 import uuid
@@ -80,18 +81,26 @@ class MemoryService:
     # ==================== 记忆写入 ====================
 
     def save_qa_summary(
-        self, doc_id: str, chat_history: list[dict], n: int = 3
+        self,
+        doc_id: str,
+        chat_history: list[dict],
+        n: int = 3,
+        api_key: str = None,
+        model: str = None,
+        api_provider: str = None,
     ) -> None:
         """从对话历史中提取最后 N 轮 QA 摘要并保存
 
-        每轮 QA 包含一问一答（user + assistant）。
-        问题截取前 100 字符，回答截取前 200 字符。
-        超过上限时移除最早的非重要摘要。
+        优先使用 LLM 提炼持久性事实（借鉴 OpenClaw），
+        LLM 不可用时降级为截断摘要。
 
         Args:
             doc_id: 文档标识
             chat_history: 对话历史列表，每项包含 role 和 content
             n: 提取最后 N 轮 QA 对，默认 3
+            api_key: LLM API 密钥（用于记忆提炼）
+            model: LLM 模型名称
+            api_provider: LLM 提供商
         """
         if not chat_history or not doc_id:
             return
@@ -107,20 +116,41 @@ class MemoryService:
         # 加载当前 session
         session = self.store.load_session(doc_id)
 
-        # 生成摘要并添加
-        for question, answer in recent_pairs:
-            truncated_q = question[:QUESTION_MAX_LEN]
-            truncated_a = answer[:ANSWER_MAX_LEN]
+        # 尝试 LLM 提炼
+        distilled_facts = None
+        if api_key and model and api_provider:
+            distilled_facts = self._distill_facts(
+                recent_pairs, api_key, model, api_provider
+            )
 
-            summary = {
-                "id": str(uuid.uuid4()),
-                "question": truncated_q,
-                "answer": truncated_a,
-                "source_type": "auto_qa",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "importance": 0.5,
-            }
-            session["qa_summaries"].append(summary)
+        if distilled_facts:
+            # LLM 提炼成功：每条事实作为一个高质量摘要
+            for fact in distilled_facts:
+                summary = {
+                    "id": str(uuid.uuid4()),
+                    "question": fact,
+                    "answer": "",
+                    "source_type": "llm_distilled",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "importance": 0.7,
+                }
+                session["qa_summaries"].append(summary)
+            logger.info(f"LLM 记忆提炼: {len(distilled_facts)} 条事实")
+        else:
+            # 降级：截断摘要
+            for question, answer in recent_pairs:
+                truncated_q = question[:QUESTION_MAX_LEN]
+                truncated_a = answer[:ANSWER_MAX_LEN]
+
+                summary = {
+                    "id": str(uuid.uuid4()),
+                    "question": truncated_q,
+                    "answer": truncated_a,
+                    "source_type": "auto_qa",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "importance": 0.5,
+                }
+                session["qa_summaries"].append(summary)
 
         # 摘要数量上限控制
         self._enforce_summary_limit(session)
@@ -128,6 +158,114 @@ class MemoryService:
         # 更新最后访问时间并保存
         session["last_accessed"] = datetime.now(timezone.utc).isoformat()
         self.store.save_session(doc_id, session)
+
+    def _distill_facts(
+        self,
+        qa_pairs: list[tuple[str, str]],
+        api_key: str,
+        model: str,
+        api_provider: str,
+    ) -> Optional[list[str]]:
+        """使用 LLM 从 QA 对中提炼持久性事实
+
+        借鉴 OpenClaw 记忆策略：让 LLM 决定哪些信息值得长期记住。
+
+        Args:
+            qa_pairs: [(question, answer), ...]
+            api_key: API 密钥
+            model: 模型名称
+            api_provider: 提供商
+
+        Returns:
+            事实列表，失败时返回 None
+        """
+        try:
+            from services.chat_service import call_ai_api
+
+            # 构建 QA 文本
+            qa_text = ""
+            for q, a in qa_pairs:
+                qa_text += f"用户问：{q[:500]}\nAI答：{a[:800]}\n\n"
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是记忆提炼助手。从以下问答记录中提取值得长期记住的关键事实，"
+                        "包括：用户偏好、重要结论、关键数据、用户纠正的错误。\n"
+                        "规则：\n"
+                        "- 每条事实一行，前面加 '- '\n"
+                        "- 最多提取 5 条最重要的事实\n"
+                        "- 只提取持久性信息，忽略临时性对话内容\n"
+                        "- 如果没有值得记住的内容，只回复：无\n"
+                        "- 不要添加任何解释或前缀"
+                    ),
+                },
+                {"role": "user", "content": qa_text.strip()},
+            ]
+
+            # 在新事件循环中同步调用异步 LLM API
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+
+            if loop and loop.is_running():
+                # 已在异步上下文中（不应该，因为是 threading 调用），用 run_coroutine_threadsafe
+                import concurrent.futures
+                future = asyncio.run_coroutine_threadsafe(
+                    call_ai_api(
+                        messages=messages,
+                        api_key=api_key,
+                        model=model,
+                        provider=api_provider,
+                        temperature=0.1,
+                        max_tokens=300,
+                    ),
+                    loop,
+                )
+                response = future.result(timeout=30)
+            else:
+                response = asyncio.run(
+                    call_ai_api(
+                        messages=messages,
+                        api_key=api_key,
+                        model=model,
+                        provider=api_provider,
+                        temperature=0.1,
+                        max_tokens=300,
+                    )
+                )
+
+            if isinstance(response, dict) and response.get("error"):
+                logger.warning(f"LLM 记忆提炼返回错误: {response['error']}")
+                return None
+
+            # 解析响应
+            content = ""
+            if isinstance(response, dict):
+                content = response.get("content", "") or response.get("message", {}).get("content", "")
+            elif isinstance(response, str):
+                content = response
+
+            if not content or content.strip() == "无":
+                return None
+
+            # 提取事实行
+            facts = []
+            for line in content.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("- "):
+                    fact = line[2:].strip()
+                    if fact and len(fact) > 3:
+                        facts.append(fact)
+
+            return facts if facts else None
+
+        except Exception as e:
+            logger.warning(f"LLM 记忆提炼失败，降级为截断: {e}")
+            return None
 
     def _extract_qa_pairs(self, chat_history: list[dict]) -> list[tuple[str, str]]:
         """从对话历史中提取 QA 对
