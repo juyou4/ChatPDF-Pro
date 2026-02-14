@@ -151,23 +151,30 @@ def _build_endpoint(base: str, path: str | None) -> str:
 
 def _normalize_api_host(provider_id: str, api_host: str | None) -> str:
     """
-    尝试把传入的 chat endpoint 还原成 base url，避免 /chat/completions 之类的尾部路径导致 /models 请求失败
+    把传入的 api_host 还原成可拼接 /models 的 base url。
+    只去掉已知的 chat/embedding 尾部路径（如 /chat/completions），保留有意义的路径前缀（如 /api/v3）。
     """
-    from urllib.parse import urlparse
-
     host = (api_host or "").strip()
     if not host:
         host = PROVIDER_CONFIG.get(provider_id, {}).get("endpoint", "")
 
-    # 如果是完整 URL，截取 scheme+netloc
-    parsed = urlparse(host)
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
+    if not host:
+        return host
 
-    # 否则尽量砍掉路径部分，只保留 host 段
-    host = host.split("://")[-1]
-    host = host.split("/")[0]
+    # 去掉已知的 API 尾部路径，保留 base path
+    known_suffixes = [
+        "/chat/completions",
+        "/completions",
+        "/embeddings",
+        "/v1/chat/completions",
+    ]
+    for suffix in known_suffixes:
+        if host.endswith(suffix):
+            host = host[: -len(suffix)]
+            break
+
     return host.rstrip("/")
+
 
 
 async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: List[str]):
@@ -258,7 +265,13 @@ class ModelFetchRequest(BaseModel):
 async def fetch_provider_models(request: ModelFetchRequest):
     """从Provider API获取模型列表（支持动态/静态）"""
     try:
-        if request.providerType and request.providerType.lower() in {"anthropic", "gemini"}:
+        # 不支持自动拉取模型列表的提供商：
+        # - anthropic/gemini：使用非 OpenAI 兼容的 API 格式
+        # - doubao：火山引擎 Ark API 虽然 OpenAI 兼容，但不提供 GET /models 端点
+        unsupported_providers = {"anthropic", "gemini", "doubao"}
+        if request.providerId in unsupported_providers or (
+            request.providerType and request.providerType.lower() in unsupported_providers
+        ):
             return {
                 "models": [],
                 "providerId": request.providerId,

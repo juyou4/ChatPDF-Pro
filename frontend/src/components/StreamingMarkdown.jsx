@@ -588,4 +588,5 @@ const StreamingMarkdown = React.memo(({
   );
 });
 
+export { processLatexBrackets };
 export default StreamingMarkdown;

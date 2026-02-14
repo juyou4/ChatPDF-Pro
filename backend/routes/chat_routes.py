@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Optional, List
 import json
+import logging
+import threading
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -8,6 +10,8 @@ from pydantic import BaseModel
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
 from services.vector_service import vector_context
+from services.retrieval_agent import RetrievalAgent
+from services.retrieval_tools import DocContext
 from services.glossary_service import glossary_service, build_glossary_prompt
 from services.table_service import protect_markdown_tables, restore_markdown_tables
 from services.query_analyzer import get_retrieval_strategy
@@ -24,10 +28,15 @@ from utils.middleware import (
 )
 from config import settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # 上下文构建器实例，用于生成引文指示提示词
 _context_builder = ContextBuilder()
+
+# 模块级变量，由 app.py 注入 MemoryService 实例
+memory_service = None
 
 
 def build_chat_middlewares():
@@ -66,13 +75,19 @@ class ChatRequest(BaseModel):
     protect_tables: bool = True   # 是否保护表格结构
     # 深度思考模式
     enable_thinking: bool = False  # 是否开启深度思考
-    # 模型参数（前端可调）
-    max_tokens: int = 8192  # 最大输出 token 数
-    temperature: float = 0.7  # 温度参数
-    top_p: float = 1.0  # 核采样参数
+    # 模型参数（前端可调，None 表示不传，由模型使用默认值）
+    max_tokens: Optional[int] = None  # 最大输出 token 数
+    temperature: Optional[float] = None  # 温度参数
+    top_p: Optional[float] = None  # 核采样参数
+    custom_params: Optional[dict] = None  # 自定义参数 {key: value}，直接透传给 API
+    reasoning_effort: Optional[str] = None  # 深度思考力度（'low'|'medium'|'high'）
     stream_output: bool = True  # 是否流式输出
     # 多轮对话历史（需求 3.2）
     chat_history: Optional[List[dict]] = None  # [{"role": "user"|"assistant", "content": "..."}]
+    # 记忆功能开关（需求 5.4）
+    enable_memory: bool = True  # 是否启用记忆功能
+    # Agent 多轮检索（需求 P0）
+    enable_agent_retrieval: bool = False  # 是否启用多轮 Agent 检索
 
 
 class ChatVisionRequest(BaseModel):
@@ -94,6 +109,59 @@ def _validate_rerank_request(req):
         raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
 
 
+def _retrieve_memory_context(question: str, api_key: str = None) -> str:
+    """检索记忆上下文，异常时返回空字符串（需求 5.1, 5.5）"""
+    if memory_service is None:
+        return ""
+    try:
+        return memory_service.retrieve_memories(question, api_key=api_key)
+    except Exception as e:
+        logger.error(f"记忆检索失败: {e}")
+        return ""
+
+
+def _async_memory_write(svc, request):
+    """异步记忆写入：提取 QA 摘要 + 更新关键词（需求 5.3）"""
+    try:
+        # 提取 QA 摘要
+        if request.doc_id:
+            # 构建完整对话历史（包含当前问题）
+            history = list(request.chat_history or [])
+            history.append({"role": "user", "content": request.question})
+            svc.save_qa_summary(request.doc_id, history)
+        # 更新关键词统计
+        svc.update_keywords(request.question)
+    except Exception as e:
+        logger.error(f"异步记忆写入失败: {e}")
+
+
+def _should_use_memory(request) -> bool:
+    """判断是否应启用记忆功能（需求 5.4）"""
+    return (
+        settings.memory_enabled
+        and getattr(request, "enable_memory", True)
+        and memory_service is not None
+    )
+
+
+def _inject_memory_context(system_prompt: str, memory_context: str) -> str:
+    """将记忆上下文注入 system prompt（需求 5.2）
+    格式：在文档内容之后、回答规则之前插入记忆段落"""
+    if not memory_context:
+        return system_prompt
+    # 在"回答规则："之前插入记忆上下文
+    marker = "\n回答规则："
+    if marker in system_prompt:
+        idx = system_prompt.index(marker)
+        return (
+            system_prompt[:idx]
+            + f"\n\n用户历史记忆：\n{memory_context}"
+            + system_prompt[idx:]
+        )
+    # 如果没有找到标记，追加到末尾
+    return system_prompt + f"\n\n用户历史记忆：\n{memory_context}"
+
+
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     if not hasattr(router, "documents_store"):
@@ -106,6 +174,14 @@ async def chat_with_pdf(request: ChatRequest):
 
     context = ""
     retrieval_meta = {}
+    use_memory = _should_use_memory(request)
+
+    # 记忆检索：在构建 system prompt 之前执行（需求 5.1）
+    memory_context = ""
+    if use_memory:
+        memory_context = _retrieve_memory_context(
+            request.question, api_key=request.api_key
+        )
 
     # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片
     if request.image_base64:
@@ -119,6 +195,9 @@ async def chat_with_pdf(request: ChatRequest):
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 简洁清晰，学术准确。"""
+
+        # 截图模式也注入记忆上下文（需求 5.2）
+        system_prompt = _inject_memory_context(system_prompt, memory_context)
 
         user_content = [
             {"type": "text", "text": request.question or "请分析这张图片"},
@@ -199,6 +278,9 @@ async def chat_with_pdf(request: ChatRequest):
             if citation_prompt:
                 system_prompt += f"\n\n{citation_prompt}"
 
+        # 注入记忆上下文到 system prompt（需求 5.2）
+        system_prompt = _inject_memory_context(system_prompt, memory_context)
+
         user_content = request.question
 
     messages = [
@@ -222,11 +304,21 @@ async def chat_with_pdf(request: ChatRequest):
             middlewares=middlewares,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
-            top_p=request.top_p
+            top_p=request.top_p,
+            custom_params=request.custom_params,
+            reasoning_effort=request.reasoning_effort,
         )
         message = response["choices"][0]["message"]
         answer = message["content"]
         reasoning_content = extract_reasoning_content(message)
+
+        # 异步触发记忆写入（需求 5.3）
+        if use_memory:
+            threading.Thread(
+                target=_async_memory_write,
+                args=(memory_service, request),
+                daemon=True,
+            ).start()
 
         return {
             "answer": answer,
@@ -256,6 +348,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
     context = ""
     retrieval_meta = {}
+    use_agent = False
+    use_memory = _should_use_memory(request)
+
+    # 记忆检索：在构建 system prompt 之前执行（需求 5.1）
+    memory_context = ""
+    if use_memory:
+        memory_context = _retrieve_memory_context(
+            request.question, api_key=request.api_key
+        )
 
     # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片
     if request.image_base64:
@@ -270,14 +371,24 @@ async def chat_with_pdf_stream(request: ChatRequest):
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 简洁清晰，学术准确。"""
 
+        # 截图模式也注入记忆上下文（需求 5.2）
+        system_prompt = _inject_memory_context(system_prompt, memory_context)
+
         user_content = [
             {"type": "text", "text": request.question or "请分析这张图片"},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"}}
         ]
     else:
         # 非截图模式：正常的文本检索流程
+        # Agent 模式标志：后续在 event_generator 中使用
+        use_agent = request.enable_agent_retrieval and not request.selected_text
+
         if request.selected_text:
             context = f"用户选中的文本：\n{request.selected_text}\n\n"
+        elif use_agent:
+            # Agent 模式：上下文由 event_generator 中的 RetrievalAgent 动态生成
+            # 此处仅设置占位，实际上下文在流式生成器中填充
+            context = ""
         elif request.enable_vector_search:
             _validate_rerank_request(request)
             
@@ -342,6 +453,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
             if citation_prompt:
                 system_prompt += f"\n\n{citation_prompt}"
 
+        # 注入记忆上下文到 system prompt（需求 5.2）
+        system_prompt = _inject_memory_context(system_prompt, memory_context)
+
         user_content = request.question
 
     messages = [
@@ -355,7 +469,97 @@ async def chat_with_pdf_stream(request: ChatRequest):
     messages.append({"role": "user", "content": user_content})
 
     async def event_generator():
+        nonlocal messages, system_prompt, retrieval_meta
         try:
+            # ============ Agent 多轮检索模式 ============
+            if use_agent:
+                from services.semantic_group_service import SemanticGroupService
+                from services.embedding_service import _get_semantic_groups_dir
+
+                # 构建 DocContext
+                full_text = doc.get("data", {}).get("full_text", "")
+                pages = doc.get("data", {}).get("pages", [])
+                chunks = doc.get("data", {}).get("chunks", [])
+                if not chunks:
+                    # 从 pages 提取 chunks
+                    chunks = [p.get("content", "") for p in pages if p.get("content")]
+
+                # 尝试加载语义意群
+                groups_dir = _get_semantic_groups_dir()
+                group_svc = SemanticGroupService()
+                semantic_groups = group_svc.load_groups(request.doc_id, groups_dir) or []
+
+                doc_ctx = DocContext(
+                    doc_id=request.doc_id,
+                    full_text=full_text,
+                    chunks=chunks,
+                    pages=pages,
+                    semantic_groups=semantic_groups,
+                    vector_store_dir=getattr(router, "vector_store_dir", ""),
+                    api_key=request.api_key or "",
+                )
+
+                agent = RetrievalAgent(
+                    api_key=request.api_key or "",
+                    model=request.model,
+                    provider=request.api_provider,
+                    endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
+                    max_rounds=settings.agent_max_rounds,
+                    temperature=settings.agent_planner_temperature,
+                )
+
+                agent_context = ""
+                async for event in agent.run(
+                    question=request.question,
+                    doc_ctx=doc_ctx,
+                    doc_name=doc.get("filename", ""),
+                ):
+                    if event["type"] == "retrieval_progress":
+                        # 向前端发送检索进度
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "retrieval_complete":
+                        agent_context = event.get("context", "")
+                        retrieval_meta["agent_search_history"] = event.get("search_history", [])
+                        retrieval_meta["agent_detail"] = event.get("detail", [])
+
+                # 用 Agent 获取的上下文重建 system_prompt
+                if agent_context:
+                    system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+文档总页数：{doc["data"]["total_pages"]}
+
+文档内容：
+{agent_context}
+
+回答规则：
+1. 基于文档内容准确回答，简洁清晰，学术准确。
+2. 不要声明你是否具备外部工具/联网等能力，不要输出与回答无关的免责声明。
+3. 优先依据文档内容回答；若文档信息不足，请基于常识给出概览性解答并明确不确定之处。
+4. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容，不要仅概括描述。
+   - 例如用户问"有什么公式"时，应直接展示公式的完整表达式。
+   - 对于数学公式，优先使用LaTeX格式展示（$公式$）。
+5. 不要说"根据您提供的有限片段"、"基于片段"等暗示信息不足的措辞，直接回答问题。"""
+
+                    # 重新注入记忆上下文
+                    system_prompt = _inject_memory_context(system_prompt, memory_context)
+
+                    # 检测生成类查询
+                    generation_prompt = get_generation_prompt(request.question)
+                    if generation_prompt:
+                        system_prompt += f"\n\n{generation_prompt}"
+
+                    # 重建 messages
+                    messages = [{"role": "system", "content": system_prompt}]
+                    if request.chat_history:
+                        for hist_msg in request.chat_history:
+                            if isinstance(hist_msg, dict) and hist_msg.get("role") in ("user", "assistant") and hist_msg.get("content"):
+                                messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
+                    messages.append({"role": "user", "content": request.question})
+
+            # ============ 非 Agent 模式的检索进度反馈 ============
+            if not use_agent and not request.image_base64:
+                yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'complete', 'message': '检索完成，正在生成回答...'}, ensure_ascii=False)}\n\n"
+
+            # ============ 流式 LLM 回答 ============
             middlewares = build_chat_middlewares()
             async for chunk in call_ai_api_stream(
                 messages,
@@ -367,7 +571,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 enable_thinking=request.enable_thinking,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
-                top_p=request.top_p
+                top_p=request.top_p,
+                custom_params=request.custom_params,
+                reasoning_effort=request.reasoning_effort,
             ):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
@@ -385,6 +591,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     chunk_data['retrieval_meta'] = retrieval_meta
                 yield f"data: {json.dumps(chunk_data)}\n\n"
                 if chunk.get("done"):
+                    # 异步触发记忆写入（需求 5.3）
+                    if use_memory:
+                        threading.Thread(
+                            target=_async_memory_write,
+                            args=(memory_service, request),
+                            daemon=True,
+                        ).start()
                     yield "data: [DONE]\n\n"
                     break
 

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
@@ -21,6 +21,7 @@ import ChatSettings from './ChatSettings';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
+import { useSmoothStream } from '../hooks/useSmoothStream';
 
 // API base URL – empty string so that Vite proxy forwards to backend
 const API_BASE_URL = '';
@@ -129,15 +130,65 @@ const ChatPDF = () => {
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
-  // 深度思考模式开关（由 ModelQuickSwitch 控制）
+  // 记忆交互状态：记录已点赞和已记住的消息索引
+  const [likedMessages, setLikedMessages] = useState(new Set());
+  const [rememberedMessages, setRememberedMessages] = useState(new Set());
+  // 深度思考模式开关（由 ModelQuickSwitch 控制，向后兼容）
   const [enableThinking, setEnableThinking] = useState(false);
+
+  // 流式缓冲渲染状态
+  const [contentStreamDone, setContentStreamDone] = useState(false);
+  const [thinkingStreamDone, setThinkingStreamDone] = useState(false);
+  // 记录当前流式消息 ID
+  const activeStreamMsgIdRef = useRef(null);
 
   // New three-layer context
   const { getProviderById } = useProvider();
   const { getModelById } = useModel();
   const { getDefaultModel } = useDefaults();
-  const { maxTokens, temperature, topP, contextCount, streamOutput } = useGlobalSettings();
+  const {
+    maxTokens, temperature, topP, contextCount, streamOutput,
+    enableTemperature, enableTopP, enableMaxTokens,
+    customParams, reasoningEffort, setReasoningEffort,
+    enableMemory,
+  } = useGlobalSettings();
   const chatPaneRef = useRef(null);
+
+  // 正文内容缓冲流
+  const contentStream = useSmoothStream({
+    onUpdate: (text) => {
+      const msgId = activeStreamMsgIdRef.current;
+      if (msgId == null) return;
+      setMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last && last.id === msgId) {
+          const updated = [...prev];
+          updated[updated.length - 1] = { ...last, content: text };
+          return updated;
+        }
+        return prev;
+      });
+    },
+    streamDone: contentStreamDone,
+  });
+
+  // 思考内容缓冲流
+  const thinkingStream = useSmoothStream({
+    onUpdate: (text) => {
+      const msgId = activeStreamMsgIdRef.current;
+      if (msgId == null) return;
+      setMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last && last.id === msgId) {
+          const updated = [...prev];
+          updated[updated.length - 1] = { ...last, thinking: text };
+          return updated;
+        }
+        return prev;
+      });
+    },
+    streamDone: thinkingStreamDone,
+  });
 
   // Helper functions to get current provider and model
   const getCurrentProvider = () => {
@@ -658,12 +709,21 @@ const ChatPDF = () => {
       api_provider: chatProvider,
       selected_text: selectedText || null,
       image_base64: screenshot ? screenshot.split(',')[1] : null,
-      enable_thinking: enableThinking,
-      max_tokens: maxTokens,
-      temperature: temperature,
-      top_p: topP,
+      // 用 reasoningEffort 替代原有的 enable_thinking boolean
+      enable_thinking: reasoningEffort !== 'off',
+      reasoning_effort: reasoningEffort !== 'off' ? reasoningEffort : null,
+      // 根据开关状态决定是否包含参数
+      max_tokens: enableMaxTokens ? maxTokens : null,
+      temperature: enableTemperature ? temperature : null,
+      top_p: enableTopP ? topP : null,
       stream_output: streamOutput,
-      chat_history: chatHistory.length > 0 ? chatHistory : null
+      chat_history: chatHistory.length > 0 ? chatHistory : null,
+      // 自定义参数转换为 dict
+      custom_params: customParams.length > 0 ? Object.fromEntries(
+        customParams.filter(p => p.name).map(p => [p.name, p.value])
+      ) : null,
+      // 记忆功能开关
+      enable_memory: enableMemory,
     };
 
     // Add placeholder message for streaming effect
@@ -688,6 +748,12 @@ const ChatPDF = () => {
     try {
       // 使用 SSE 流式传输（截图也支持流式，后端已处理多模态消息）
       if (streamSpeed !== 'off' && streamOutput) {
+        // 重置流式缓冲状态
+        setContentStreamDone(false);
+        setThinkingStreamDone(false);
+        contentStream.reset('');
+        thinkingStream.reset('');
+        activeStreamMsgIdRef.current = tempMsgId;
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -704,38 +770,6 @@ const ChatPDF = () => {
         // 思考计时：记录首次收到 reasoning_content 的时间
         let thinkingStartTime = null;
         let thinkingEndTime = null;
-        // 使用 rAF 批量更新，减少 React 重渲染次数，实现更流畅的流式输出
-        let rafPending = false;
-        let needsUpdate = false;
-
-        const flushUpdate = () => {
-          rafPending = false;
-          if (!needsUpdate) return;
-          needsUpdate = false;
-          // 优化：流式消息总是最后一条，直接替换末尾元素，避免遍历整个数组
-          setMessages(prev => {
-            const last = prev[prev.length - 1];
-            if (last && last.id === tempMsgId) {
-              const updated = [...prev];
-              const thinkingMs = thinkingStartTime ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
-              updated[updated.length - 1] = { ...last, content: currentText, thinking: currentThinking, thinkingMs };
-              return updated;
-            }
-            return prev.map(msg =>
-              msg.id === tempMsgId
-                ? { ...msg, content: currentText, thinking: currentThinking }
-                : msg
-            );
-          });
-        };
-
-        const scheduleUpdate = () => {
-          needsUpdate = true;
-          if (!rafPending) {
-            rafPending = true;
-            requestAnimationFrame(flushUpdate);
-          }
-        };
 
         while (true) {
           const { value, done } = await reader.read();
@@ -760,6 +794,7 @@ const ChatPDF = () => {
                 if (!parsed.done) {
                   if (chunkContent) {
                     currentText += chunkContent;
+                    contentStream.addChunk(chunkContent);
                     // 收到正文内容时，标记思考结束
                     if (thinkingStartTime && !thinkingEndTime) {
                       thinkingEndTime = Date.now();
@@ -769,9 +804,7 @@ const ChatPDF = () => {
                     // 首次收到思考内容，记录开始时间
                     if (!thinkingStartTime) thinkingStartTime = Date.now();
                     currentThinking += chunkThinking;
-                  }
-                  if (chunkContent || chunkThinking) {
-                    scheduleUpdate();
+                    thinkingStream.addChunk(chunkThinking);
                   }
                 } else {
                   // done=true 的最后一个 chunk，提取 retrieval_meta 中的 citations
@@ -780,7 +813,7 @@ const ChatPDF = () => {
                   }
                   if (chunkThinking) {
                     currentThinking += chunkThinking;
-                    scheduleUpdate();
+                    thinkingStream.addChunk(chunkThinking);
                   }
                 }
               } catch (e) {
@@ -790,20 +823,20 @@ const ChatPDF = () => {
           }
         }
 
-        // 确保最后一批数据被刷新
-        if (needsUpdate) {
-          flushUpdate();
-        }
+        // 标记流式传输完成，让 useSmoothStream 一次性渲染剩余字符
+        setContentStreamDone(true);
+        setThinkingStreamDone(true);
 
-        // 标记流式传输完成，保存思考文本、耗时和引文数据
+        // 使用 currentText 和 currentThinking 作为最终值确保完整性
         const streamCitations = streamCitationsRef.current;
         const finalThinkingMs = thinkingStartTime ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, isStreaming: false, thinking: currentThinking || '', thinkingMs: finalThinkingMs, citations: streamCitations || null }
+            ? { ...msg, content: currentText, thinking: currentThinking || '', isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitations || null }
             : msg
         ));
         streamCitationsRef.current = null;
+        activeStreamMsgIdRef.current = null;
         setStreamingMessageId(null);
       } else {
         // 非流式回退：统一使用 /chat 端点（后端已支持 image_base64 多模态）
@@ -913,6 +946,12 @@ const ChatPDF = () => {
       setIsLoading(false);
     }
     streamingAbortRef.current.cancelled = true;
+    // 重置流式缓冲
+    contentStream.reset('');
+    thinkingStream.reset('');
+    setContentStreamDone(false);
+    setThinkingStreamDone(false);
+    activeStreamMsgIdRef.current = null;
     if (streamingMessageId) {
       setMessages(prev => {
         const next = [...prev];
@@ -962,6 +1001,40 @@ const ChatPDF = () => {
     setTimeout(() => {
       sendMessage();
     }, 100);
+  };
+
+  // 保存消息到记忆系统
+  const saveToMemory = async (messageIndex, sourceType) => {
+    const msg = messages[messageIndex];
+    if (!msg || msg.type !== 'assistant') return;
+
+    // 找到对应的用户消息
+    const userMsg = messages.slice(0, messageIndex).reverse().find(m => m.type === 'user');
+    const question = userMsg ? userMsg.content.slice(0, 100) : '';
+    const answer = msg.content.slice(0, 200);
+    const content = `Q: ${question}\nA: ${answer}`;
+
+    try {
+      const res = await fetch('/api/memory/entries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content,
+          source_type: sourceType,
+          doc_id: docId,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      // 更新状态以显示视觉反馈
+      if (sourceType === 'liked') {
+        setLikedMessages(prev => new Set(prev).add(messageIndex));
+      } else {
+        setRememberedMessages(prev => new Set(prev).add(messageIndex));
+      }
+    } catch (err) {
+      console.error('保存记忆失败:', err);
+    }
   };
 
   // Helper Functions
@@ -2127,10 +2200,11 @@ const ChatPDF = () => {
                           </svg>
                         </button>
                         <button
-                          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
-                          title="点赞"
+                          onClick={() => saveToMemory(idx, 'liked')}
+                          className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${likedMessages.has(idx) ? 'text-pink-500' : 'text-gray-500 hover:text-gray-700'}`}
+                          title="点赞并记忆"
                         >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <svg className="w-4 h-4" fill={likedMessages.has(idx) ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
                           </svg>
                         </button>
@@ -2141,6 +2215,13 @@ const ChatPDF = () => {
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
                           </svg>
+                        </button>
+                        <button
+                          onClick={() => saveToMemory(idx, 'manual')}
+                          className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${rememberedMessages.has(idx) ? 'text-violet-500' : 'text-gray-500 hover:text-gray-700'}`}
+                          title="记住这个"
+                        >
+                          <Brain className={`w-4 h-4 ${rememberedMessages.has(idx) ? 'fill-current' : ''}`} />
                         </button>
                       </div>
                     )}
@@ -2182,7 +2263,10 @@ const ChatPDF = () => {
 
                   <div className="flex items-center gap-4 text-gray-400 mt-2">
                     {/* 模型快速切换器 */}
-                    <ModelQuickSwitch onThinkingChange={setEnableThinking} />
+                    <ModelQuickSwitch onThinkingChange={(enabled) => {
+                      setEnableThinking(enabled);
+                      // reasoningEffort 已由 ModelQuickSwitch 直接通过 GlobalSettingsContext 更新
+                    }} />
                     <button className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
                       <SlidersHorizontal className="w-5 h-5" />
                     </button>

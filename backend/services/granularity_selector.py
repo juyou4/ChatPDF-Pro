@@ -164,3 +164,103 @@ class GranularitySelector:
         )
 
         return result
+
+    def select_dynamic(
+        self,
+        query: str,
+        ranked_groups: List[SemanticGroup],
+        scores: List[float] = None,
+        max_tokens: int = 8000,
+    ) -> List[dict]:
+        """动态粒度选择（参考 paper-burner-x 的 selectMixedGranularity）
+
+        根据查询类型和相关性得分渐进分配粒度，受 token 预算约束自动降级。
+        初始全部给 summary → 按相关性得分+排名渐进升级 → 超预算时降级或截断。
+
+        与 select_mixed 的区别：
+        - select_mixed: 按固定排名分配，不考虑查询类型和 token 预算
+        - select_dynamic: 根据查询类型决定基线粒度，按相关性得分渐进升级，
+          并在 token 预算内自动降级
+
+        Args:
+            query: 用户查询文本
+            ranked_groups: 按相关性排序的语义意群列表（第一个最相关）
+            scores: 对应的相关性得分列表（可选，默认按排名递减）
+            max_tokens: 最大 Token 预算
+
+        Returns:
+            动态粒度分配列表: [{"group": SemanticGroup, "granularity": str, "tokens": int, "score": float}]
+        """
+        if not ranked_groups:
+            return []
+
+        from services.token_budget import TokenBudgetManager
+
+        # 分析查询类型
+        query_type: QueryType = analyze_query_type(query)
+        base_granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
+
+        # 粒度降级顺序
+        DOWNGRADE = {"full": "digest", "digest": "summary", "summary": None}
+
+        # 默认得分：按排名递减
+        if scores is None:
+            scores = [1.0 - i * 0.1 for i in range(len(ranked_groups))]
+
+        budget = TokenBudgetManager(max_tokens=max_tokens)
+        available = budget.available_tokens
+        accumulated = 0
+        result: List[dict] = []
+
+        for rank, group in enumerate(ranked_groups):
+            if rank >= max_groups:
+                break
+
+            score = scores[rank] if rank < len(scores) else 0.0
+
+            # 根据排名和查询类型决定初始粒度
+            if rank == 0:
+                # 最相关的意群：使用最高粒度
+                granularity = "full" if query_type != "overview" else "digest"
+            elif rank < 3:
+                # 前 3 个：使用基线粒度
+                granularity = base_granularity
+            else:
+                # 其余：使用 summary
+                granularity = "summary"
+
+            # 根据意群特征调整（短意群不需要 digest/full）
+            if group.char_count < 500 and granularity in ("digest", "full"):
+                granularity = "summary"
+
+            # Token 预算检查与降级
+            text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}
+            tokens = budget.estimate_tokens(getattr(group, text_attr[granularity], ""))
+
+            while accumulated + tokens > available and DOWNGRADE.get(granularity):
+                granularity = DOWNGRADE[granularity]
+                tokens = budget.estimate_tokens(getattr(group, text_attr[granularity], ""))
+
+            # 降级到 summary 仍超预算，停止添加
+            if accumulated + tokens > available:
+                logger.info(
+                    f"动态粒度: Token 预算已用尽（{accumulated}/{available}），"
+                    f"停止添加意群 {group.group_id}"
+                )
+                break
+
+            accumulated += tokens
+            result.append({
+                "group": group,
+                "granularity": granularity,
+                "tokens": tokens,
+                "score": score,
+            })
+
+        logger.info(
+            f"动态粒度分配: query_type={query_type}, 共 {len(result)} 个意群, "
+            f"总 tokens={accumulated}/{available}, "
+            f"分配: {[(r['group'].group_id, r['granularity']) for r in result]}"
+        )
+
+        return result

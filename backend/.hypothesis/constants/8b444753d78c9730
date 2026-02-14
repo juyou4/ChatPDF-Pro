@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\memory_store.py
+# hypothesis_version: 6.151.5
+
+[0.5, 'MemoryEntry', '_session.json', 'answer', 'auto_qa', 'content', 'created_at', 'doc_id', 'entries', 'focus_areas', 'id', 'importance', 'important_memories', 'keyword_frequencies', 'last_accessed', 'manual', 'memory_index', 'qa_summaries', 'question', 'r', 'sessions', 'source_type', 'updated_at', 'user_profile.json', 'utf-8', 'w']

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 
 const GlobalSettingsContext = createContext();
 
@@ -25,6 +25,16 @@ const DEFAULT_SETTINGS = {
     topP: 1.0,
     contextCount: 5,
     streamOutput: true,
+    // 参数启用开关
+    enableTemperature: true,    // 默认启用
+    enableTopP: false,          // 默认禁用（让模型用默认值）
+    enableMaxTokens: true,      // 默认启用
+    // 自定义参数
+    customParams: [],           // [{name: string, value: string|number|boolean, type: 'string'|'number'|'boolean'}]
+    // 深度思考力度
+    reasoningEffort: 'off',     // 'off' | 'low' | 'medium' | 'high'
+    // 记忆功能
+    enableMemory: true,         // 是否启用智能记忆系统
 };
 
 export const GlobalSettingsProvider = ({ children }) => {
@@ -36,6 +46,20 @@ export const GlobalSettingsProvider = ({ children }) => {
     const [topP, setTopP] = useState(DEFAULT_SETTINGS.topP);
     const [contextCount, setContextCount] = useState(DEFAULT_SETTINGS.contextCount);
     const [streamOutput, setStreamOutput] = useState(DEFAULT_SETTINGS.streamOutput);
+    // 参数启用开关
+    const [enableTemperature, setEnableTemperature] = useState(DEFAULT_SETTINGS.enableTemperature);
+    const [enableTopP, setEnableTopP] = useState(DEFAULT_SETTINGS.enableTopP);
+    const [enableMaxTokens, setEnableMaxTokens] = useState(DEFAULT_SETTINGS.enableMaxTokens);
+    // 自定义参数
+    const [customParams, setCustomParams] = useState(DEFAULT_SETTINGS.customParams);
+    // 深度思考力度
+    const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_SETTINGS.reasoningEffort);
+    // 记忆功能
+    const [enableMemory, setEnableMemory] = useState(DEFAULT_SETTINGS.enableMemory);
+
+    // 防抖保存相关 ref
+    const debounceTimerRef = useRef(null);
+    const pendingSettingsRef = useRef(null);
 
     // 从 localStorage 加载设置
     useEffect(() => {
@@ -52,6 +76,16 @@ export const GlobalSettingsProvider = ({ children }) => {
                     if (settings.topP !== undefined) setTopP(settings.topP);
                     if (settings.contextCount !== undefined) setContextCount(settings.contextCount);
                     if (settings.streamOutput !== undefined) setStreamOutput(settings.streamOutput);
+                    // 加载参数启用开关
+                    if (settings.enableTemperature !== undefined) setEnableTemperature(settings.enableTemperature);
+                    if (settings.enableTopP !== undefined) setEnableTopP(settings.enableTopP);
+                    if (settings.enableMaxTokens !== undefined) setEnableMaxTokens(settings.enableMaxTokens);
+                    // 加载自定义参数
+                    if (settings.customParams !== undefined) setCustomParams(settings.customParams);
+                    // 加载深度思考力度
+                    if (settings.reasoningEffort !== undefined) setReasoningEffort(settings.reasoningEffort);
+                    // 加载记忆功能开关
+                    if (settings.enableMemory !== undefined) setEnableMemory(settings.enableMemory);
                 }
             } catch (error) {
                 console.error('Failed to load global settings:', error);
@@ -60,27 +94,60 @@ export const GlobalSettingsProvider = ({ children }) => {
         loadSettings();
     }, []);
 
-    // 保存设置到 localStorage
-    useEffect(() => {
-        const saveSettings = () => {
+    // 防抖保存：立即将设置写入 pendingSettingsRef，500ms 后写入 localStorage
+    const flushSave = useCallback(() => {
+        if (pendingSettingsRef.current !== null) {
             try {
-                const settings = {
-                    fontFamily,
-                    customFont,
-                    globalScale,
-                    maxTokens,
-                    temperature,
-                    topP,
-                    contextCount,
-                    streamOutput,
-                };
-                localStorage.setItem('globalSettings', JSON.stringify(settings));
+                localStorage.setItem('globalSettings', JSON.stringify(pendingSettingsRef.current));
             } catch (error) {
-                console.error('Failed to save global settings:', error);
+                console.error('保存全局设置失败:', error);
             }
+            pendingSettingsRef.current = null;
+        }
+    }, []);
+
+    const debouncedSave = useCallback((settings) => {
+        pendingSettingsRef.current = settings;
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+        }
+        debounceTimerRef.current = setTimeout(() => {
+            flushSave();
+            debounceTimerRef.current = null;
+        }, 500);
+    }, [flushSave]);
+
+    // 监听所有设置变更，触发防抖保存
+    useEffect(() => {
+        const settings = {
+            fontFamily,
+            customFont,
+            globalScale,
+            maxTokens,
+            temperature,
+            topP,
+            contextCount,
+            streamOutput,
+            enableTemperature,
+            enableTopP,
+            enableMaxTokens,
+            customParams,
+            reasoningEffort,
+            enableMemory,
         };
-        saveSettings();
-    }, [fontFamily, customFont, globalScale, maxTokens, temperature, topP, contextCount, streamOutput]);
+        debouncedSave(settings);
+    }, [fontFamily, customFont, globalScale, maxTokens, temperature, topP, contextCount, streamOutput,
+        enableTemperature, enableTopP, enableMaxTokens, customParams, reasoningEffort, enableMemory, debouncedSave]);
+
+    // 组件卸载时 flush 未保存的数据
+    useEffect(() => {
+        return () => {
+            if (debounceTimerRef.current) {
+                clearTimeout(debounceTimerRef.current);
+            }
+            flushSave();
+        };
+    }, [flushSave]);
 
     // 应用字体到 CSS
     useEffect(() => {
@@ -164,6 +231,12 @@ export const GlobalSettingsProvider = ({ children }) => {
         setTopP(DEFAULT_SETTINGS.topP);
         setContextCount(DEFAULT_SETTINGS.contextCount);
         setStreamOutput(DEFAULT_SETTINGS.streamOutput);
+        setEnableTemperature(DEFAULT_SETTINGS.enableTemperature);
+        setEnableTopP(DEFAULT_SETTINGS.enableTopP);
+        setEnableMaxTokens(DEFAULT_SETTINGS.enableMaxTokens);
+        setCustomParams(DEFAULT_SETTINGS.customParams);
+        setReasoningEffort(DEFAULT_SETTINGS.reasoningEffort);
+        setEnableMemory(DEFAULT_SETTINGS.enableMemory);
     };
 
     // 导出设置
@@ -177,6 +250,12 @@ export const GlobalSettingsProvider = ({ children }) => {
             topP,
             contextCount,
             streamOutput,
+            enableTemperature,
+            enableTopP,
+            enableMaxTokens,
+            customParams,
+            reasoningEffort,
+            enableMemory,
             exportedAt: new Date().toISOString(),
         };
         return JSON.stringify(settings, null, 2);
@@ -194,9 +273,15 @@ export const GlobalSettingsProvider = ({ children }) => {
             if (settings.topP !== undefined) setTopP(settings.topP);
             if (settings.contextCount !== undefined) setContextCount(settings.contextCount);
             if (settings.streamOutput !== undefined) setStreamOutput(settings.streamOutput);
+            if (settings.enableTemperature !== undefined) setEnableTemperature(settings.enableTemperature);
+            if (settings.enableTopP !== undefined) setEnableTopP(settings.enableTopP);
+            if (settings.enableMaxTokens !== undefined) setEnableMaxTokens(settings.enableMaxTokens);
+            if (settings.customParams !== undefined) setCustomParams(settings.customParams);
+            if (settings.reasoningEffort !== undefined) setReasoningEffort(settings.reasoningEffort);
+            if (settings.enableMemory !== undefined) setEnableMemory(settings.enableMemory);
             return true;
         } catch (error) {
-            console.error('Failed to import settings:', error);
+            console.error('导入设置失败:', error);
             return false;
         }
     };
@@ -220,6 +305,12 @@ export const GlobalSettingsProvider = ({ children }) => {
         topP,
         contextCount,
         streamOutput,
+        enableTemperature,
+        enableTopP,
+        enableMaxTokens,
+        customParams,
+        reasoningEffort,
+        enableMemory,
 
         // 设置方法
         setFontFamily,
@@ -230,12 +321,19 @@ export const GlobalSettingsProvider = ({ children }) => {
         setTopP,
         setContextCount,
         setStreamOutput,
+        setEnableTemperature,
+        setEnableTopP,
+        setEnableMaxTokens,
+        setCustomParams,
+        setReasoningEffort,
+        setEnableMemory,
 
         // 工具方法
         resetSettings,
         exportSettings,
         importSettings,
         getCurrentFontName,
+        flushSave,
 
         // 常量
         PRESET_FONTS,

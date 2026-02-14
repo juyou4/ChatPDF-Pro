@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\rerank_service.py
+# hypothesis_version: 6.151.5
+
+[30.0, 100, 'aliyun', 'chunk', 'cohere', 'deepseek', 'jina', 'local', 'minimax', 'moonshot', 'openai', 'rerank_score', 'reranked', 'silicon', 'similarity', 'similarity_percent', 'zhipu']

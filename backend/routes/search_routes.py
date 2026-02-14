@@ -7,6 +7,9 @@ from pydantic import BaseModel
 from services.vector_service import vector_search
 from services.query_analyzer import get_retrieval_strategy
 from services.advanced_search import AdvancedSearchService
+from services.grep_service import grep_search
+from services.semantic_group_service import SemanticGroupService
+from services.embedding_service import _get_semantic_groups_dir
 from utils.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -20,6 +23,15 @@ router = APIRouter()
 
 # 高级搜索服务实例
 _advanced_search_service = AdvancedSearchService()
+
+
+class GrepSearchRequest(BaseModel):
+    """精确文本搜索（grep）请求模型"""
+    doc_id: str
+    query: str
+    limit: int = 20
+    context_chars: int = 2000
+    case_insensitive: bool = True
 
 
 class RegexSearchRequest(BaseModel):
@@ -129,6 +141,41 @@ async def search_in_pdf(request: SearchRequest):
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
 
+@router.post("/api/search/grep")
+async def grep_search_endpoint(request: GrepSearchRequest):
+    """精确文本搜索（grep）端点
+
+    支持 | 分隔多关键词 OR 逻辑，返回匹配位置和上下文片段。
+    """
+    try:
+        if not hasattr(router, "documents_store"):
+            raise HTTPException(status_code=500, detail="文档存储未初始化")
+
+        if request.doc_id not in router.documents_store:
+            raise HTTPException(status_code=404, detail="文档未找到")
+
+        doc = router.documents_store[request.doc_id]
+        full_text = doc.get("data", {}).get("full_text", "")
+
+        if not full_text:
+            return {"results": [], "total": 0}
+
+        results = grep_search(
+            query=request.query,
+            text=full_text,
+            limit=request.limit,
+            context_chars=request.context_chars,
+            case_insensitive=request.case_insensitive,
+        )
+
+        return {"results": results, "total": len(results)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Grep搜索失败: {str(e)}")
+
+
 @router.post("/api/search/regex")
 async def regex_search(request: RegexSearchRequest):
     """正则表达式搜索端点
@@ -206,3 +253,48 @@ async def boolean_search(request: BooleanSearchRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"布尔搜索失败: {str(e)}")
+
+
+class DocumentMapRequest(BaseModel):
+    """文档地图请求模型"""
+    doc_id: str
+    limit: int = 50
+
+
+@router.post("/api/document/map")
+async def document_map(request: DocumentMapRequest):
+    """文档结构概览（意群地图）端点
+
+    返回文档所有意群的 ID、字数、关键词、摘要和页码范围，
+    用于快速了解文档整体结构。
+    """
+    try:
+        # 加载意群数据
+        groups_dir = _get_semantic_groups_dir()
+        group_svc = SemanticGroupService()
+        groups = group_svc.load_groups(request.doc_id, groups_dir)
+
+        if groups is None:
+            return {
+                "map": [],
+                "total": 0,
+                "message": "该文档尚未生成语义意群，请先启用意群功能",
+            }
+
+        map_entries = []
+        for g in groups[:request.limit]:
+            map_entries.append({
+                "group_id": g.group_id,
+                "char_count": g.char_count,
+                "keywords": g.keywords,
+                "summary": g.summary[:200] if g.summary else "",
+                "page_range": list(g.page_range),
+            })
+
+        return {
+            "map": map_entries,
+            "total": len(map_entries),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取文档地图失败: {str(e)}")

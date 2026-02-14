@@ -24,7 +24,8 @@ export async function fetchModelsFromProvider(
                 providerId: provider.id,
                 apiKey: provider.apiKey,
                 apiHost: provider.apiHost,
-                fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint
+                fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint,
+                providerType: provider.id  // 传递 provider 类型，后端用于判断是否支持模型列表拉取
             })
         })
 

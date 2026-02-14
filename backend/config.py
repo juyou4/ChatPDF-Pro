@@ -1,3 +1,4 @@
+import logging
 from pydantic import Field, field_validator
 try:
     from pydantic_settings import BaseSettings
@@ -5,6 +6,8 @@ try:
 except ImportError:  # 兼容旧版依赖
     from pydantic import BaseSettings
     AliasChoices = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 class AppSettings(BaseSettings):
@@ -37,6 +40,20 @@ class AppSettings(BaseSettings):
     chat_fallback_model: str | None = Field(default=None, env="CHATPDF_CHAT_FALLBACK_MODEL")
     search_fallback_provider: str | None = Field(default=None, env="CHATPDF_SEARCH_FALLBACK_PROVIDER")
     search_fallback_model: str | None = Field(default=None, env="CHATPDF_SEARCH_FALLBACK_MODEL")
+
+    # ==================== Agent 检索配置 ====================
+    # Agent 检索最大轮数
+    agent_max_rounds: int = Field(
+        default=5,
+        validation_alias=AliasChoices("agent_max_rounds", "CHATPDF_AGENT_MAX_ROUNDS"),
+        description="Agent 检索最大轮数，范围 1-10"
+    )
+    # Agent planner 模型温度
+    agent_planner_temperature: float = Field(
+        default=0.3,
+        validation_alias=AliasChoices("agent_planner_temperature", "CHATPDF_AGENT_PLANNER_TEMPERATURE"),
+        description="Agent planner LLM 温度参数"
+    )
 
     # ==================== OCR 配置 ====================
     # OCR 默认模式: auto（自动检测）/ always（始终启用）/ never（禁用）
@@ -79,6 +96,65 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("mistral_ocr_base_url", "CHATPDF_MISTRAL_OCR_BASE_URL"),
         description="Mistral OCR API Base URL"
     )
+
+    # ==================== 记忆系统配置 ====================
+    # 记忆功能启用开关
+    memory_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_enabled", "CHATPDF_MEMORY_ENABLED"),
+        description="记忆功能启用开关"
+    )
+    # 关键词频率阈值，超过此值的关键词将被识别为用户关注领域
+    memory_keyword_threshold: int = Field(
+        default=3,
+        validation_alias=AliasChoices("memory_keyword_threshold", "CHATPDF_MEMORY_KEYWORD_THRESHOLD"),
+        description="关键词频率阈值，范围 1-100"
+    )
+    # QA 摘要保留上限
+    memory_max_summaries: int = Field(
+        default=50,
+        validation_alias=AliasChoices("memory_max_summaries", "CHATPDF_MEMORY_MAX_SUMMARIES"),
+        description="QA 摘要保留上限，范围 1-1000"
+    )
+    # 记忆检索返回条数
+    memory_retrieval_top_k: int = Field(
+        default=3,
+        validation_alias=AliasChoices("memory_retrieval_top_k", "CHATPDF_MEMORY_RETRIEVAL_TOP_K"),
+        description="记忆检索返回条数，范围 1-20"
+    )
+
+    @field_validator("memory_keyword_threshold")
+    @classmethod
+    def validate_memory_keyword_threshold(cls, v: int) -> int:
+        """校验关键词频率阈值，范围 1-100，超出范围使用默认值"""
+        if not (1 <= v <= 100):
+            logger.warning(
+                f"memory_keyword_threshold 值 {v} 超出合理范围 (1-100)，使用默认值 3"
+            )
+            return 3
+        return v
+
+    @field_validator("memory_max_summaries")
+    @classmethod
+    def validate_memory_max_summaries(cls, v: int) -> int:
+        """校验 QA 摘要保留上限，范围 1-1000，超出范围使用默认值"""
+        if not (1 <= v <= 1000):
+            logger.warning(
+                f"memory_max_summaries 值 {v} 超出合理范围 (1-1000)，使用默认值 50"
+            )
+            return 50
+        return v
+
+    @field_validator("memory_retrieval_top_k")
+    @classmethod
+    def validate_memory_retrieval_top_k(cls, v: int) -> int:
+        """校验记忆检索返回条数，范围 1-20，超出范围使用默认值"""
+        if not (1 <= v <= 20):
+            logger.warning(
+                f"memory_retrieval_top_k 值 {v} 超出合理范围 (1-20)，使用默认值 3"
+            )
+            return 3
+        return v
 
     @field_validator("ocr_default_mode")
     @classmethod

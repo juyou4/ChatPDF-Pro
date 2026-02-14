@@ -1,11 +1,13 @@
-import React from 'react';
-import { X, SlidersHorizontal, HelpCircle, RotateCcw } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /**
  * 对话设置面板
- * 参考 cherry-studio 风格，包含：模型温度、Top-P、上下文数、最大 Token 数、流式输出
+ * 参考 cherry-studio 风格，包含：模型温度、Top-P、上下文数、最大 Token 数、流式输出、自定义参数
+ * 每个参数行：标签 + 问号提示 | 开关（右侧）
+ * 开关启用时显示：滑块（80%宽度）+ 数字输入框（20%宽度）
  */
 const ChatSettings = ({ isOpen, onClose }) => {
     const {
@@ -14,11 +16,19 @@ const ChatSettings = ({ isOpen, onClose }) => {
         topP,
         contextCount,
         streamOutput,
+        enableTemperature,
+        enableTopP,
+        enableMaxTokens,
+        customParams,
         setMaxTokens,
         setTemperature,
         setTopP,
         setContextCount,
         setStreamOutput,
+        setEnableTemperature,
+        setEnableTopP,
+        setEnableMaxTokens,
+        setCustomParams,
         DEFAULT_SETTINGS,
     } = useGlobalSettings();
 
@@ -29,6 +39,32 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setTopP(DEFAULT_SETTINGS.topP);
         setContextCount(DEFAULT_SETTINGS.contextCount);
         setStreamOutput(DEFAULT_SETTINGS.streamOutput);
+        setEnableTemperature(DEFAULT_SETTINGS.enableTemperature);
+        setEnableTopP(DEFAULT_SETTINGS.enableTopP);
+        setEnableMaxTokens(DEFAULT_SETTINGS.enableMaxTokens);
+        setCustomParams(DEFAULT_SETTINGS.customParams);
+    };
+
+    // 添加自定义参数
+    const addCustomParam = () => {
+        setCustomParams([...customParams, { name: '', type: 'string', value: '' }]);
+    };
+
+    // 更新自定义参数
+    const updateCustomParam = (index, field, val) => {
+        const updated = [...customParams];
+        if (field === 'type') {
+            // 切换类型时重置值
+            updated[index] = { ...updated[index], type: val, value: val === 'boolean' ? false : val === 'number' ? 0 : '' };
+        } else {
+            updated[index] = { ...updated[index], [field]: val };
+        }
+        setCustomParams(updated);
+    };
+
+    // 删除自定义参数
+    const removeCustomParam = (index) => {
+        setCustomParams(customParams.filter((_, i) => i !== index));
     };
 
     if (!isOpen) return null;
@@ -68,69 +104,65 @@ const ChatSettings = ({ isOpen, onClose }) => {
 
                     <div className="p-6 space-y-6">
 
-                        {/* 模型温度 */}
-                        <SettingSlider
+                        {/* 模型温度 — 带开关 + 滑块 + 数字输入框 */}
+                        <SettingToggleSlider
                             label="模型温度"
                             tooltip="控制回答的随机性。值越低越精确，值越高越有创造性"
+                            enabled={enableTemperature}
+                            onToggle={setEnableTemperature}
                             value={temperature}
                             onChange={setTemperature}
                             min={0} max={2} step={0.1}
-                            displayValue={temperature.toFixed(1)}
+                            precision={1}
                             color="emerald"
-                            marks={['0', '0.7', '2']}
                         />
 
-                        {/* 分割线 */}
                         <div className="border-t border-gray-100"></div>
 
-                        {/* Top-P */}
-                        <SettingSlider
+                        {/* Top-P — 带开关 + 滑块 + 数字输入框 */}
+                        <SettingToggleSlider
                             label="Top-P"
                             tooltip="核采样参数。控制候选词的概率范围，值越小回答越集中"
+                            enabled={enableTopP}
+                            onToggle={setEnableTopP}
                             value={topP}
                             onChange={setTopP}
                             min={0} max={1} step={0.05}
-                            displayValue={topP.toFixed(2)}
+                            precision={2}
                             color="emerald"
-                            marks={['0', '1']}
                         />
 
-                        {/* 分割线 */}
                         <div className="border-t border-gray-100"></div>
 
-                        {/* 上下文数 */}
-                        <SettingSlider
+                        {/* 上下文数 — 无开关，滑块 + 数字输入框 */}
+                        <SettingSliderWithInput
                             label="上下文数"
                             tooltip="发送给模型的历史消息轮数。值越大模型记忆越多，但消耗更多 Token"
                             value={contextCount}
                             onChange={(v) => setContextCount(Math.round(v))}
                             min={0} max={50} step={1}
-                            displayValue={contextCount === 50 ? '不限' : String(contextCount)}
+                            precision={0}
                             color="emerald"
-                            marks={['0', '25', '50']}
                         />
 
-                        {/* 分割线 */}
                         <div className="border-t border-gray-100"></div>
 
-                        {/* 最大 Token 数 */}
+                        {/* 最大 Token 数 — 带开关 + 滑块 + 数字输入框 */}
                         <SettingToggleSlider
                             label="最大 Token 数"
                             tooltip="限制模型单次回复的最大长度。关闭则由模型自行决定"
-                            enabled={maxTokens > 0}
-                            onToggle={(on) => setMaxTokens(on ? DEFAULT_SETTINGS.maxTokens : 0)}
+                            enabled={enableMaxTokens}
+                            onToggle={setEnableMaxTokens}
                             value={maxTokens}
                             onChange={setMaxTokens}
                             min={512} max={32768} step={512}
-                            displayValue={maxTokens > 0 ? String(maxTokens) : '自动'}
+                            precision={0}
                             color="emerald"
-                            marks={['512', '8192', '32768']}
                         />
 
-                        {/* 分割线 */}
                         <div className="border-t border-gray-100"></div>
 
-                        {/* 流式输出 */}
+                        {/* 流式输出 — 保持不变 */}
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <span className="text-sm font-semibold text-gray-800">流式输出</span>
@@ -139,7 +171,43 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             <ToggleSwitch checked={streamOutput} onChange={setStreamOutput} />
                         </div>
 
-                        {/* 分割线 */}
+                        <div className="border-t border-gray-100"></div>
+
+                        {/* 自定义参数区域 */}
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">自定义参数</span>
+                                    <Tooltip text="添加任意 key-value 参数直接传给 API，如 DeepSeek 的 enable_search" />
+                                </div>
+                                <button
+                                    onClick={addCustomParam}
+                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors"
+                                >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    添加参数
+                                </button>
+                            </div>
+
+                            {/* 自定义参数列表 */}
+                            {customParams.length > 0 && (
+                                <div className="space-y-2">
+                                    {customParams.map((param, index) => (
+                                        <CustomParamRow
+                                            key={index}
+                                            param={param}
+                                            onChange={(field, val) => updateCustomParam(index, field, val)}
+                                            onRemove={() => removeCustomParam(index)}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+
+                            {customParams.length === 0 && (
+                                <p className="text-xs text-gray-400 text-center py-2">暂无自定义参数</p>
+                            )}
+                        </div>
+
                         <div className="border-t border-gray-100"></div>
 
                         {/* 重置按钮 */}
@@ -156,6 +224,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
         </AnimatePresence>
     );
 };
+
 
 /* ========== 子组件 ========== */
 
@@ -179,8 +248,55 @@ const ToggleSwitch = ({ checked, onChange }) => (
     </button>
 );
 
-/** 滑块设置行 */
-const SettingSlider = ({ label, tooltip, value, onChange, min, max, step, displayValue, color, marks }) => {
+/**
+ * 数字输入框组件
+ * 输入时实时更新本地 state，失焦时 clamp 并提交
+ */
+const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) => {
+    const [localValue, setLocalValue] = useState(String(value));
+
+    // 外部值变化时同步本地 state
+    useEffect(() => {
+        const formatted = precision > 0 ? Number(value).toFixed(precision) : String(Math.round(value));
+        setLocalValue(formatted);
+    }, [value, precision]);
+
+    const handleBlur = () => {
+        let num = parseFloat(localValue);
+        if (isNaN(num)) {
+            num = value; // 无效输入恢复原值
+        }
+        // clamp 到 min/max 范围
+        num = Math.min(Math.max(num, min), max);
+        // 按精度格式化
+        const formatted = precision > 0 ? Number(num).toFixed(precision) : String(Math.round(num));
+        setLocalValue(formatted);
+        onChange(Number(formatted));
+    };
+
+    return (
+        <input
+            type="text"
+            value={localValue}
+            onChange={(e) => setLocalValue(e.target.value)}
+            onBlur={handleBlur}
+            disabled={disabled}
+            className={`w-full text-center text-sm font-mono border rounded-lg px-2 py-1.5 outline-none transition-colors
+                ${disabled
+                    ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                    : 'bg-white text-gray-700 border-gray-200 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200'
+                }`}
+        />
+    );
+};
+
+/**
+ * 带开关的滑块 + 数字输入框设置行
+ * 布局：标签 + 提示 | 开关
+ * 启用时：滑块（80%）+ 数字输入框（20%）
+ * 禁用时：滑块和输入框变灰色禁用状态
+ */
+const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, precision, color }) => {
     const pct = ((value - min) / (max - min)) * 100;
     const c = color || 'emerald';
     const gradientColors = { emerald: '#10B981', blue: '#3B82F6', orange: '#F59E0B' };
@@ -188,51 +304,65 @@ const SettingSlider = ({ label, tooltip, value, onChange, min, max, step, displa
 
     return (
         <div className="space-y-3">
+            {/* 标题行：标签 + 提示 | 开关 */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold text-gray-800">{label}</span>
                     {tooltip && <Tooltip text={tooltip} />}
                 </div>
-                <span className="text-sm font-mono text-gray-600 bg-gray-100 px-2 py-0.5 rounded">{displayValue}</span>
+                <ToggleSwitch checked={enabled} onChange={onToggle} />
             </div>
-            <input
-                type="range"
-                min={min} max={max} step={step}
-                value={value}
-                onChange={(e) => onChange(parseFloat(e.target.value))}
-                className="w-full h-1.5 rounded-lg appearance-none cursor-pointer"
-                style={{ background: `linear-gradient(to right, ${gc} 0%, ${gc} ${pct}%, #E5E7EB ${pct}%, #E5E7EB 100%)` }}
-            />
-            {marks && (
-                <div className="flex justify-between text-xs text-gray-400">
-                    {marks.map((m, i) => <span key={i}>{m}</span>)}
+            {/* 滑块（80%）+ 数字输入框（20%）— 始终显示，禁用时灰色 */}
+            <div className="flex items-center gap-3">
+                <div className="flex-[4]">
+                    <input
+                        type="range"
+                        min={min} max={max} step={step}
+                        value={value}
+                        onChange={(e) => onChange(parseFloat(e.target.value))}
+                        disabled={!enabled}
+                        className={`w-full h-1.5 rounded-lg appearance-none ${enabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                        style={{
+                            background: enabled
+                                ? `linear-gradient(to right, ${gc} 0%, ${gc} ${pct}%, #E5E7EB ${pct}%, #E5E7EB 100%)`
+                                : '#E5E7EB'
+                        }}
+                    />
                 </div>
-            )}
+                <div className="flex-[1]">
+                    <NumberInput
+                        value={value}
+                        onChange={onChange}
+                        min={min} max={max} step={step}
+                        precision={precision}
+                        disabled={!enabled}
+                    />
+                </div>
+            </div>
         </div>
     );
 };
 
-/** 带开关的滑块设置行 */
-const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, displayValue, color, marks }) => {
-    const pct = enabled ? ((value - min) / (max - min)) * 100 : 0;
+/**
+ * 滑块 + 数字输入框设置行（无开关）
+ * 用于上下文数等始终启用的参数
+ */
+const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, step, precision, color }) => {
+    const pct = ((value - min) / (max - min)) * 100;
     const c = color || 'emerald';
     const gradientColors = { emerald: '#10B981', blue: '#3B82F6', orange: '#F59E0B' };
     const gc = gradientColors[c] || gradientColors.emerald;
 
     return (
         <div className="space-y-3">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-gray-800">{label}</span>
-                    {tooltip && <Tooltip text={tooltip} />}
-                </div>
-                <div className="flex items-center gap-3">
-                    {enabled && <span className="text-sm font-mono text-gray-600 bg-gray-100 px-2 py-0.5 rounded">{displayValue}</span>}
-                    <ToggleSwitch checked={enabled} onChange={onToggle} />
-                </div>
+            {/* 标题行 */}
+            <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-800">{label}</span>
+                {tooltip && <Tooltip text={tooltip} />}
             </div>
-            {enabled && (
-                <>
+            {/* 滑块（80%）+ 数字输入框（20%） */}
+            <div className="flex items-center gap-3">
+                <div className="flex-[4]">
                     <input
                         type="range"
                         min={min} max={max} step={step}
@@ -241,13 +371,70 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
                         className="w-full h-1.5 rounded-lg appearance-none cursor-pointer"
                         style={{ background: `linear-gradient(to right, ${gc} 0%, ${gc} ${pct}%, #E5E7EB ${pct}%, #E5E7EB 100%)` }}
                     />
-                    {marks && (
-                        <div className="flex justify-between text-xs text-gray-400">
-                            {marks.map((m, i) => <span key={i}>{m}</span>)}
-                        </div>
-                    )}
-                </>
+                </div>
+                <div className="flex-[1]">
+                    <NumberInput
+                        value={value}
+                        onChange={onChange}
+                        min={min} max={max} step={step}
+                        precision={precision}
+                        disabled={false}
+                    />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/**
+ * 自定义参数行
+ * 包含：参数名输入框、类型选择（string/number/boolean）、值输入框、删除按钮
+ */
+const CustomParamRow = ({ param, onChange, onRemove }) => {
+    return (
+        <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+            {/* 参数名 */}
+            <input
+                type="text"
+                value={param.name}
+                onChange={(e) => onChange('name', e.target.value)}
+                placeholder="参数名"
+                className="flex-[2] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white"
+            />
+            {/* 类型选择 */}
+            <select
+                value={param.type}
+                onChange={(e) => onChange('type', e.target.value)}
+                className="flex-[1] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white cursor-pointer"
+            >
+                <option value="string">string</option>
+                <option value="number">number</option>
+                <option value="boolean">boolean</option>
+            </select>
+            {/* 值输入 — 根据类型不同渲染不同控件 */}
+            {param.type === 'boolean' ? (
+                <div className="flex-[2] flex justify-center">
+                    <ToggleSwitch
+                        checked={!!param.value}
+                        onChange={(v) => onChange('value', v)}
+                    />
+                </div>
+            ) : (
+                <input
+                    type={param.type === 'number' ? 'number' : 'text'}
+                    value={param.value}
+                    onChange={(e) => onChange('value', param.type === 'number' ? Number(e.target.value) : e.target.value)}
+                    placeholder="值"
+                    className="flex-[2] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white"
+                />
             )}
+            {/* 删除按钮 */}
+            <button
+                onClick={onRemove}
+                className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+            >
+                <Trash2 className="w-4 h-4" />
+            </button>
         </div>
     );
 };

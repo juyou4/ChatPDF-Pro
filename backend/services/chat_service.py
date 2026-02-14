@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List, Optional
 import asyncio
 import httpx
 
@@ -56,9 +56,11 @@ async def call_ai_api(
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
     stream: bool = False,
-    max_tokens: int = 8192,
-    temperature: float = 0.7,
-    top_p: float = 1.0,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    custom_params: Optional[Dict] = None,
+    reasoning_effort: Optional[str] = None,
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
     payload = {
@@ -97,6 +99,8 @@ async def call_ai_api(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                custom_params=custom_params,
+                reasoning_effort=reasoning_effort,
             )
             # 如果上游返回错误结构，同样走重试逻辑
             if isinstance(response, dict) and response.get("error"):
@@ -138,9 +142,11 @@ async def call_ai_api_stream(
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
     enable_thinking: bool = False,
-    max_tokens: int = 8192,
-    temperature: float = 0.7,
-    top_p: float = 1.0,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    custom_params: Optional[Dict] = None,
+    reasoning_effort: Optional[str] = None,
 ):
     """流式调用（OpenAI 兼容走真正流式，其他回退为单次响应拆分）"""
     payload = {
@@ -167,15 +173,27 @@ async def call_ai_api_stream(
             "model": model,
             "messages": messages,
             "stream": True,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "top_p": top_p
         }
+        # 仅在参数非 None 时添加对应字段
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if top_p is not None:
+            body["top_p"] = top_p
+        # 透传 reasoning_effort 参数
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
+        # 合并自定义参数
+        if custom_params:
+            body.update(custom_params)
         # 深度思考模式：根据 provider 使用不同参数
         if enable_thinking:
             if provider.lower() in OPENAI_NATIVE:
                 # OpenAI 原生 API（GPT-5/o3/o4 系列）：使用 reasoning_effort 参数
-                body["reasoning_effort"] = "high"
+                # 如果前端已传入 reasoning_effort 则优先使用，否则默认 high
+                if "reasoning_effort" not in body:
+                    body["reasoning_effort"] = "high"
             elif provider.lower() in MINIMAX:
                 # MiniMax：使用 reasoning_split 分离思考内容
                 body["reasoning_split"] = True
@@ -236,9 +254,18 @@ async def call_ai_api_stream(
             "model": model,
             "messages": [m for m in messages if m.get("role") != "system"],
             "system": next((m["content"] for m in messages if m.get("role") == "system"), ""),
-            "max_tokens": max_tokens,
             "stream": True
         }
+        # 仅在参数非 None 时添加对应字段
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
+        # 合并自定义参数
+        if custom_params:
+            body.update(custom_params)
         # 深度思考模式：Anthropic extended thinking
         if enable_thinking:
             body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
@@ -287,11 +314,25 @@ async def call_ai_api_stream(
 
         payload = {
             "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
             "stream": True,
         }
+        # 仅在参数非 None 时添加 generationConfig 对应字段
+        generation_config = {}
+        if temperature is not None:
+            generation_config["temperature"] = temperature
+        if max_tokens is not None:
+            generation_config["maxOutputTokens"] = max_tokens
+        if top_p is not None:
+            generation_config["topP"] = top_p
+        if generation_config:
+            payload["generationConfig"] = generation_config
+        # 合并自定义参数
+        if custom_params:
+            payload.update(custom_params)
         # 深度思考模式：Gemini thinkingConfig
         if enable_thinking:
+            if "generationConfig" not in payload:
+                payload["generationConfig"] = {}
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 8192}
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
@@ -325,7 +366,9 @@ async def call_ai_api_stream(
 
     # 其他 provider 回退为一次性响应
     try:
-        resp = await call_ai_api(messages, api_key, model, provider, endpoint=endpoint, middlewares=middlewares)
+        resp = await call_ai_api(messages, api_key, model, provider, endpoint=endpoint, middlewares=middlewares,
+                                max_tokens=max_tokens, temperature=temperature, top_p=top_p,
+                                custom_params=custom_params, reasoning_effort=reasoning_effort)
         message = resp.get("choices", [{}])[0].get("message", {}) or {}
         answer = message.get("content", "")
         reasoning_text = extract_reasoning_content(message)

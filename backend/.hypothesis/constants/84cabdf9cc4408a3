@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\memory_retriever.py
+# hypothesis_version: 6.151.5
+
+[0.0, 'chunk', 'doc_id', 'entry_id', 'index', 'rrf_score', 'score', 'similarity', 'source_type', 'text', 'unknown', '用户历史记忆：']

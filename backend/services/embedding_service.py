@@ -498,24 +498,28 @@ def _split_by_paragraphs_with_protection(
     text: str,
     protected_regions: list[tuple[int, int]],
 ) -> list[dict]:
-    """按段落边界切分文本，同时保护受保护区域不被切割
+    """按段落和标题边界切分文本，同时保护受保护区域不被切割
 
     将文本分为两类段：
     - 普通段落：可以被进一步合并或切分
     - 受保护段：表格或公式块，必须保持完整
+
+    切分策略（优先级从高到低）：
+    1. 受保护区域边界（表格、公式块）
+    2. Markdown 标题边界（# ## ### 等）
+    3. 编号标题边界（1. 1.1 2.3.4 等）
+    4. 段落边界（双换行）
 
     Args:
         text: 原始文本
         protected_regions: 受保护区域的 (start, end) 列表
 
     Returns:
-        段列表，每个元素为 {"text": str, "protected": bool}
+        段列表，每个元素为 {"text": str, "protected": bool, "heading": str|None}
     """
     if not protected_regions:
-        # 没有受保护区域，直接按段落边界切分
-        paragraphs = re.split(r'\n\n+', text)
-        return [{"text": p.strip(), "protected": False}
-                for p in paragraphs if p.strip()]
+        # 没有受保护区域，按段落+标题边界切分
+        return _split_normal_text_with_headings(text)
 
     segments = []
     pos = 0
@@ -524,27 +528,104 @@ def _split_by_paragraphs_with_protection(
         # 处理受保护区域之前的普通文本
         if pos < region_start:
             normal_text = text[pos:region_start]
-            paragraphs = re.split(r'\n\n+', normal_text)
-            for p in paragraphs:
-                stripped = p.strip()
-                if stripped:
-                    segments.append({"text": stripped, "protected": False})
+            segments.extend(_split_normal_text_with_headings(normal_text))
 
         # 添加受保护区域
         protected_text = text[region_start:region_end].strip()
         if protected_text:
-            segments.append({"text": protected_text, "protected": True})
+            segments.append({"text": protected_text, "protected": True, "heading": None})
 
         pos = region_end
 
     # 处理最后一个受保护区域之后的普通文本
     if pos < len(text):
         remaining_text = text[pos:]
-        paragraphs = re.split(r'\n\n+', remaining_text)
-        for p in paragraphs:
-            stripped = p.strip()
-            if stripped:
-                segments.append({"text": stripped, "protected": False})
+        segments.extend(_split_normal_text_with_headings(remaining_text))
+
+    return segments
+
+
+# 标题检测正则（用于结构感知分段）
+_RE_HEADING_LINE = re.compile(
+    r'^(?:'
+    r'\s*#{1,6}\s+\S'       # Markdown 标题：# ## ###
+    r'|\s*\d+(\.\d+)*\.?\s+\S'  # 编号标题：1. 1.1 2.3.4
+    r')',
+    re.MULTILINE,
+)
+
+
+def _split_normal_text_with_headings(text: str) -> list[dict]:
+    """按标题边界和段落边界切分普通文本
+
+    优先在标题行前切分，其次在双换行处切分。
+
+    Args:
+        text: 普通文本（不含受保护区域）
+
+    Returns:
+        段列表，每个元素为 {"text": str, "protected": False, "heading": str|None}
+    """
+    if not text or not text.strip():
+        return []
+
+    # 按换行拆分为行，然后识别标题行并在标题前切分
+    lines = text.split('\n')
+    segments = []
+    current_lines = []
+    current_heading = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 检测是否为标题行
+        is_heading = False
+        if stripped:
+            if re.match(r'^\s*#{1,6}\s+\S', line):
+                is_heading = True
+            elif re.match(r'^\s*\d+(\.\d+)*\.?\s+\S', stripped):
+                is_heading = True
+            else:
+                # 全大写行（英文标题）
+                alpha_chars = re.sub(r'[^a-zA-Z]', '', stripped)
+                if len(alpha_chars) >= 2 and alpha_chars.isupper() and len(stripped) < 100:
+                    is_heading = True
+
+        if is_heading and current_lines:
+            # 遇到标题：先保存之前积累的段落
+            seg_text = '\n'.join(current_lines).strip()
+            if seg_text:
+                segments.append({
+                    "text": seg_text,
+                    "protected": False,
+                    "heading": current_heading,
+                })
+            current_lines = [line]
+            current_heading = stripped
+        elif not stripped and current_lines:
+            # 空行：检查是否是段落分隔（连续空行）
+            # 保留单个空行在当前段落中
+            current_lines.append(line)
+        else:
+            current_lines.append(line)
+            if is_heading and not current_heading:
+                current_heading = stripped
+
+    # 保存最后一个段落
+    if current_lines:
+        seg_text = '\n'.join(current_lines).strip()
+        if seg_text:
+            segments.append({
+                "text": seg_text,
+                "protected": False,
+                "heading": current_heading,
+            })
+
+    # 如果没有找到任何标题，回退到按双换行切分
+    if len(segments) <= 1 and text.strip():
+        paragraphs = re.split(r'\n\n+', text)
+        return [{"text": p.strip(), "protected": False, "heading": None}
+                for p in paragraphs if p.strip()]
 
     return segments
 

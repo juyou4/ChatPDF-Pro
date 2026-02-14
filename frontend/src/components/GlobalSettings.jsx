@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check } from 'lucide-react';
+import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain } from 'lucide-react';
+import MemoryPanel from './MemoryPanel';
 import { useGlobalSettings, PRESET_FONTS } from '../contexts/GlobalSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -15,9 +16,12 @@ const GlobalSettings = ({ isOpen, onClose }) => {
         exportSettings,
         importSettings,
         getCurrentFontName,
+        enableMemory,
+        setEnableMemory,
     } = useGlobalSettings();
 
     const [customFontInput, setCustomFontInput] = useState(customFont);
+    const [showMemoryPanel, setShowMemoryPanel] = useState(false);
     const [showImportDialog, setShowImportDialog] = useState(false);
     const [importText, setImportText] = useState('');
 
@@ -247,6 +251,40 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         {/* 分割线 */}
                         <div className="border-t border-gray-200"></div>
 
+                        {/* 记忆系统设置 */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2">
+                                <Brain className="w-5 h-5 text-violet-600" />
+                                <h3 className="text-lg font-semibold">记忆系统</h3>
+                            </div>
+
+                            {/* 记忆功能开关 */}
+                            <div className="flex items-center justify-between p-4 soft-card rounded-xl">
+                                <div>
+                                    <div className="font-medium text-gray-800">启用智能记忆</div>
+                                    <div className="text-sm text-gray-500 mt-0.5">AI 将记住你的对话偏好和重要信息</div>
+                                </div>
+                                <button
+                                    onClick={() => setEnableMemory(!enableMemory)}
+                                    className={`relative w-12 h-7 rounded-full transition-colors ${enableMemory ? 'bg-violet-500' : 'bg-gray-300'}`}
+                                >
+                                    <div className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${enableMemory ? 'translate-x-5' : ''}`} />
+                                </button>
+                            </div>
+
+                            {/* 管理记忆按钮 */}
+                            <button
+                                onClick={() => setShowMemoryPanel(true)}
+                                className="w-full soft-card flex items-center justify-center gap-2 px-4 py-3 text-violet-700 bg-violet-50/30 hover:bg-violet-50/80 rounded-xl transition-all"
+                            >
+                                <Brain className="w-4 h-4" />
+                                <span className="font-medium">管理记忆</span>
+                            </button>
+                        </div>
+
+                        {/* 分割线 */}
+                        <div className="border-t border-gray-200"></div>
+
                         {/* 操作按钮 */}
                         <div className="space-y-3">
                             <h3 className="text-sm font-semibold text-gray-700">操作</h3>
@@ -339,6 +377,8 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </div>
                     </motion.div>
                 )}
+                {/* 记忆管理面板 */}
+                <MemoryPanel isOpen={showMemoryPanel} onClose={() => setShowMemoryPanel(false)} />
             </motion.div>
         </AnimatePresence>
     );

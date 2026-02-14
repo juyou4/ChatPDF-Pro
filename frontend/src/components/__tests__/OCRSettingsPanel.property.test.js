@@ -78,7 +78,7 @@ describe('Property 7: OCR 设置持久化 round-trip', () => {
     // Feature: chatpdf-ocr-enhancement, Property 7: OCR 设置持久化 round-trip
     // **Validates: Requirements 6.3**
     const loaded = loadOCRSettings()
-    expect(loaded).toEqual({ mode: 'auto' })
+    expect(loaded).toEqual({ mode: 'auto', backend: 'auto' })
   })
 
   it('对于任意有效模式，多次连续写入后读取应返回最后写入的值', () => {

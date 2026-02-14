@@ -631,15 +631,16 @@ class SemanticGroupService:
         target_chars: int = 5000,
         min_chars: int = 2500,
         max_chars: int = 6000,
+        concurrency_limit: int = 10,
     ) -> List[SemanticGroup]:
         """将分块聚合为语义意群
 
         流程：
         1. 调用 _aggregate_chunks 聚合分块为候选意群
-        2. 对每个候选意群：
-           - 调用 _generate_summary(text, 80) 生成 summary
-           - 调用 _generate_summary(text, 1000) 生成 digest
-           - 调用 _extract_keywords(text) 提取关键词
+        2. 并发处理每个候选意群（受 concurrency_limit 限制）：
+           - 调用 _generate_summary(text, 80) 生成 summary（带指数退避重试）
+           - 调用 _generate_summary(text, 1000) 生成 digest（带指数退避重试）
+           - 调用 _extract_keywords(text) 提取关键词（带指数退避重试）
            - 构建 SemanticGroup 对象
         3. 返回完整的 SemanticGroup 列表
 
@@ -649,10 +650,13 @@ class SemanticGroupService:
             target_chars: 目标字符数（默认 5000）
             min_chars: 最小字符数（默认 2500）
             max_chars: 最大字符数（默认 6000）
+            concurrency_limit: LLM 调用并发上限（默认 10）
 
         Returns:
             语义意群列表
         """
+        from utils.concurrency import run_with_concurrency, retry_with_backoff
+
         # 步骤 1：聚合分块为候选意群
         candidates = self._aggregate_chunks(
             chunks, chunk_pages, target_chars, min_chars, max_chars
@@ -664,28 +668,45 @@ class SemanticGroupService:
         # 构建 LLM 元数据（所有意群共享同一次生成的元数据）
         llm_meta = self._build_llm_meta()
 
-        groups: List[SemanticGroup] = []
-
-        # 步骤 2：对每个候选意群生成摘要、精要和关键词
-        for index, candidate in enumerate(candidates):
+        # 步骤 2：并发处理每个候选意群
+        async def _process_candidate(item: tuple) -> SemanticGroup:
+            index, candidate = item
             full_text = candidate["full_text"]
 
-            # 生成 summary（≤80 字）和 digest（≤1000 字）
-            summary, summary_status = await self._generate_summary(full_text, 80)
-            digest, digest_status = await self._generate_summary(full_text, 1000)
+            # 生成 summary（≤80 字）— 带指数退避重试
+            try:
+                summary, summary_status = await retry_with_backoff(
+                    self._generate_summary, full_text, 80,
+                    max_retries=3, base_delay=0.6, max_delay=5.0,
+                )
+            except Exception:
+                summary, summary_status = full_text[:80], "failed"
 
-            # 提取关键词
-            keywords = await self._extract_keywords(full_text)
+            # 生成 digest（≤1000 字）— 带指数退避重试
+            try:
+                digest, digest_status = await retry_with_backoff(
+                    self._generate_summary, full_text, 1000,
+                    max_retries=3, base_delay=0.6, max_delay=5.0,
+                )
+            except Exception:
+                digest, digest_status = full_text[:1000], "failed"
+
+            # 提取关键词 — 带指数退避重试
+            try:
+                keywords = await retry_with_backoff(
+                    self._extract_keywords, full_text,
+                    max_retries=2, base_delay=0.5, max_delay=3.0,
+                )
+            except Exception:
+                keywords = []
 
             # summary_status 取 summary 和 digest 中较差的状态
-            # 如果任一为 "failed" 则标记为 "failed"
             if summary_status == "failed" or digest_status == "failed":
                 final_status = "failed"
             else:
                 final_status = "ok"
 
-            # 构建 SemanticGroup 对象
-            group = SemanticGroup(
+            return SemanticGroup(
                 group_id=f"group-{index}",
                 chunk_indices=candidate["chunk_indices"],
                 char_count=candidate["char_count"],
@@ -697,7 +718,14 @@ class SemanticGroupService:
                 summary_status=final_status,
                 llm_meta=llm_meta,
             )
-            groups.append(group)
 
-        logger.info(f"语义意群生成完成，共 {len(groups)} 个意群")
+        indexed_candidates = list(enumerate(candidates))
+        groups = await run_with_concurrency(
+            indexed_candidates, _process_candidate, limit=concurrency_limit
+        )
+
+        # 过滤掉失败返回的 None
+        groups = [g for g in groups if g is not None]
+
+        logger.info(f"语义意群生成完成，共 {len(groups)} 个意群（并发={concurrency_limit}）")
         return groups

@@ -15,10 +15,15 @@ from routes.system_routes import router as system_router
 from routes.document_routes import router as document_router, documents_store
 from routes.search_routes import router as search_router
 from routes.chat_routes import router as chat_router
+from routes import chat_routes
 from routes.summary_routes import router as summary_router
 from routes.glossary_routes import router as glossary_router
 from routes.prompt_pool_routes import router as prompt_pool_router
 from routes.preset_routes import router as preset_router
+from routes.memory_routes import router as memory_router
+from routes import memory_routes
+from services.memory_service import MemoryService
+from config import settings
 
 # Directories (resolve to project root so frontend/backend共用同一份数据)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -43,6 +48,17 @@ app.include_router(summary_router)
 app.include_router(glossary_router)
 app.include_router(prompt_pool_router)
 app.include_router(preset_router)
+app.include_router(memory_router)
+
+# 初始化 MemoryService 单例并注入到 memory_routes
+_memory_data_dir = str(DATA_DIR / "memory")
+_memory_service = MemoryService(data_dir=_memory_data_dir)
+# 应用配置参数
+_memory_service.max_summaries = settings.memory_max_summaries
+_memory_service.keyword_threshold = settings.memory_keyword_threshold
+# 注入到路由模块
+memory_routes.memory_service = _memory_service
+chat_routes.memory_service = _memory_service
 
 # Inject shared stores/paths to routers that need them
 search_router.documents_store = documents_store
