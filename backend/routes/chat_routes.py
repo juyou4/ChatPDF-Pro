@@ -109,12 +109,21 @@ def _validate_rerank_request(req):
         raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
 
 
-def _retrieve_memory_context(question: str, api_key: str = None) -> str:
-    """检索记忆上下文，异常时返回空字符串（需求 5.1, 5.5）"""
+def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = None) -> str:
+    """检索记忆上下文，异常时返回空字符串（需求 5.1, 5.5）
+    
+    Args:
+        question: 用户问题
+        api_key: API 密钥
+        doc_id: 当前文档 ID，用于文档相关性加权
+    """
     if memory_service is None:
         return ""
     try:
-        return memory_service.retrieve_memories(question, api_key=api_key)
+        # 使用文档相关性加权，但不过滤（保留跨文档记忆）
+        return memory_service.retrieve_memories(
+            question, api_key=api_key, doc_id=doc_id, filter_by_doc=False
+        )
     except Exception as e:
         logger.error(f"记忆检索失败: {e}")
         return ""
@@ -144,31 +153,50 @@ def _async_memory_write(svc, request):
 # 跟踪已 flush 过的 doc_id，防止同一会话重复 flush
 _flushed_sessions: set = set()
 
-# Compaction 前自动 flush 的 token 阈值（借鉴 OpenClaw memoryFlush）
-_FLUSH_TOKEN_THRESHOLD = 6000  # ~6000 字符 ≈ 会话较长时
-
 
 def _maybe_flush_memory(request) -> None:
     """当 chat_history 较长时，提前触发一次记忆写入（借鉴 OpenClaw memoryFlush）
 
     防止长会话中间轮次的重要信息丢失。每个 doc_id 每次会话只 flush 一次。
+    
+    优化点：
+    1. 使用精确的 token 估算（考虑中英文差异）
+    2. 基于配置化阈值触发
+    3. 支持禁用开关
     """
     if memory_service is None:
         return
+    
+    # 检查是否启用记忆刷新
+    if not settings.memory_flush_enabled:
+        return
+    
     history = getattr(request, "chat_history", None)
     if not history:
         return
+    
     doc_id = getattr(request, "doc_id", "")
     if not doc_id or doc_id in _flushed_sessions:
         return
 
-    # 估算 token 数（简单用字符数近似）
-    total_chars = sum(len(m.get("content", "")) for m in history if isinstance(m, dict))
-    if total_chars < _FLUSH_TOKEN_THRESHOLD:
+    # 使用精确的 token 估算（考虑中英文差异）
+    from services.token_budget import TokenBudget
+    budget = TokenBudget()
+    
+    total_tokens = 0
+    for msg in history:
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+            if content:
+                total_tokens += budget.estimate_tokens(content)
+    
+    # 检查是否达到阈值
+    threshold = settings.memory_flush_threshold_tokens
+    if total_tokens < threshold:
         return
 
     _flushed_sessions.add(doc_id)
-    logger.info(f"[Memory] Compaction flush 触发: doc_id={doc_id}, chars={total_chars}")
+    logger.info(f"[Memory] Compaction flush 触发: doc_id={doc_id}, tokens={total_tokens}, threshold={threshold}")
     threading.Thread(
         target=_async_memory_write,
         args=(memory_service, request),
@@ -225,7 +253,7 @@ async def chat_with_pdf(request: ChatRequest):
     memory_context = ""
     if use_memory:
         memory_context = _retrieve_memory_context(
-            request.question, api_key=request.api_key
+            request.question, api_key=request.api_key, doc_id=request.doc_id
         )
 
     # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片
@@ -400,7 +428,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
     memory_context = ""
     if use_memory:
         memory_context = _retrieve_memory_context(
-            request.question, api_key=request.api_key
+            request.question, api_key=request.api_key, doc_id=request.doc_id
         )
 
     # 截图模式：跳过向量检索，使用 vision 专用精简 prompt，让模型专注分析图片

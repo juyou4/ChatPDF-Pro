@@ -34,17 +34,21 @@ class MemoryRetriever:
         self.memory_store = memory_store
         self.memory_index = memory_index
 
-    def retrieve(self, query: str, top_k: int = 3, api_key: str = None) -> list[dict]:
+    def retrieve(self, query: str, top_k: int = 3, api_key: str = None, 
+                 doc_id: Optional[str] = None, filter_by_doc: bool = False) -> list[dict]:
         """混合检索相关记忆
 
         1. 向量检索：通过 memory_index.search 获取语义相关记忆
         2. BM25 检索：对所有记忆文本构建临时 BM25 索引进行关键词匹配
         3. RRF 融合：通过 hybrid_search_merge 合并两路结果
+        4. 文档相关性：同一文档的记忆优先（如果提供 doc_id）
 
         Args:
             query: 用户查询文本
             top_k: 返回的最大结果数，默认 3
             api_key: API 密钥（远程 embedding 模型需要）
+            doc_id: 当前文档 ID，用于文档相关性加权（可选）
+            filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
 
         Returns:
             top_k 条最相关记忆，每项包含 entry_id, text, source_type 等字段
@@ -56,6 +60,12 @@ class MemoryRetriever:
         all_entries = self.memory_store.get_all_entries()
         if not all_entries:
             return []
+
+        # 如果启用文档过滤，只保留当前文档的记忆
+        if filter_by_doc and doc_id:
+            all_entries = [e for e in all_entries if e.doc_id == doc_id]
+            if not all_entries:
+                return []
 
         # 构建 entry_id -> entry 的映射，方便后续查找
         entry_map = {entry.id: entry for entry in all_entries}
@@ -81,11 +91,11 @@ class MemoryRetriever:
             entry = entry_map.get(entry_id)
             rrf_score = item.get("rrf_score", 0.0)
 
-            # 动态评分：基础重要性 × 时间衰减 × 命中次数加成
+            # 动态评分：基础重要性 × 时间衰减 × 命中次数加成 × 文档相关性
             dynamic_score = rrf_score
             if entry:
                 dynamic_score = self._compute_dynamic_score(
-                    rrf_score, entry, now
+                    rrf_score, entry, now, doc_id=doc_id
                 )
                 hit_entry_ids.append(entry_id)
 
@@ -150,18 +160,21 @@ class MemoryRetriever:
             return []
 
     @staticmethod
-    def _compute_dynamic_score(rrf_score: float, entry, now: datetime) -> float:
-        """计算动态评分：RRF 分数 × 重要性权重 × 时间衰减 × 命中加成
+    def _compute_dynamic_score(rrf_score: float, entry, now: datetime, 
+                               doc_id: Optional[str] = None) -> float:
+        """计算动态评分：RRF 分数 × 重要性权重 × 时间衰减 × 命中加成 × 文档相关性
 
-        公式：score = rrf_score × importance_w × recency_decay × hit_boost
+        公式：score = rrf_score × importance_w × recency_decay × hit_boost × doc_relevance
         - importance_w: importance 归一化到 [0.5, 1.5] 区间
         - recency_decay: exp(-days / half_life)，基于 last_hit_at 或 created_at
         - hit_boost: 1 + log2(1 + hit_count) × 0.1
+        - doc_relevance: 文档相关性权重，同一文档的记忆权重 1.2，其他 1.0
 
         Args:
             rrf_score: RRF 融合后的基础分数
             entry: MemoryEntry 对象
             now: 当前 UTC 时间
+            doc_id: 当前文档 ID，用于文档相关性加权（可选）
 
         Returns:
             调整后的动态分数
@@ -170,6 +183,7 @@ class MemoryRetriever:
         importance_w = 0.5 + entry.importance
 
         # 时间衰减：基于最后命中时间（无命中则用创建时间）
+        # 优化：使用更平滑的衰减曲线
         ref_time_str = entry.last_hit_at or entry.created_at
         days_since = 0.0
         if ref_time_str:
@@ -181,12 +195,20 @@ class MemoryRetriever:
                 days_since = max(0.0, delta)
             except (ValueError, TypeError):
                 pass
+        
+        # 优化时间衰减：使用更平滑的指数衰减，半衰期 30 天
         recency_decay = math.exp(-days_since * math.log(2) / _DECAY_HALF_LIFE_DAYS)
+        # 确保衰减值在 [0.1, 1.0] 范围内，避免过度衰减
+        recency_decay = max(0.1, min(1.0, recency_decay))
 
         # 命中次数加成：1 + log2(1 + hit_count) × 0.1
-        hit_boost = 1.0 + math.log2(1 + entry.hit_count) * 0.1
+        # 限制最大加成，避免过度偏向高频记忆
+        hit_boost = 1.0 + min(0.3, math.log2(1 + entry.hit_count) * 0.1)
 
-        return rrf_score * importance_w * recency_decay * hit_boost
+        # 文档相关性权重：同一文档的记忆优先
+        doc_relevance = 1.2 if (doc_id and entry.doc_id == doc_id) else 1.0
+
+        return rrf_score * importance_w * recency_decay * hit_boost * doc_relevance
 
     def _record_hits(self, entry_ids: list[str], entry_map: dict, now: datetime) -> None:
         """记录检索命中：更新 hit_count 和 last_hit_at

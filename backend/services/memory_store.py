@@ -73,6 +73,7 @@ class MemoryStore:
         self.data_dir = data_dir
         self.profile_path = os.path.join(data_dir, "user_profile.json")
         self.sessions_dir = os.path.join(data_dir, "sessions")
+        self.memory_dir = os.path.join(data_dir, "memory")  # Markdown 源文件目录
         # 确保目录结构存在
         self._ensure_dirs()
 
@@ -80,6 +81,7 @@ class MemoryStore:
         """确保所有必需的目录存在"""
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.sessions_dir, exist_ok=True)
+        os.makedirs(self.memory_dir, exist_ok=True)  # Markdown 源文件目录
         os.makedirs(os.path.join(self.data_dir, "memory_index"), exist_ok=True)
 
     @staticmethod
@@ -296,6 +298,57 @@ class MemoryStore:
 
         return False
 
+    # ==================== Markdown 源文件支持 ====================
+    
+    def _get_memory_file_path(self) -> str:
+        """获取长期记忆 Markdown 文件路径"""
+        return os.path.join(self.memory_dir, "MEMORY.md")
+    
+    def _get_daily_memory_path(self) -> str:
+        """获取今日记忆日志文件路径"""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return os.path.join(self.memory_dir, f"{today}.md")
+    
+    def _append_to_markdown(self, filepath: str, content: str) -> None:
+        """追加内容到 Markdown 文件（append-only）"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, "a", encoding="utf-8") as f:
+                f.write(content + "\n\n")
+        except Exception as e:
+            logger.warning(f"写入 Markdown 文件失败 {filepath}: {e}")
+    
+    def _write_memory_markdown(self, entry: MemoryEntry, is_long_term: bool = False) -> None:
+        """将记忆条目写入 Markdown 文件
+        
+        Args:
+            entry: 记忆条目
+            is_long_term: 是否为长期记忆（写入 MEMORY.md），否则写入每日日志
+        """
+        if is_long_term:
+            filepath = self._get_memory_file_path()
+            prefix = "##"
+        else:
+            filepath = self._get_daily_memory_path()
+            prefix = "###"
+        
+        timestamp = entry.created_at or datetime.now(timezone.utc).isoformat()
+        source_label = {
+            "auto_qa": "自动摘要",
+            "manual": "手动记忆",
+            "liked": "点赞记忆",
+            "keyword": "关键词",
+            "llm_distilled": "LLM 提炼",
+        }.get(entry.source_type, entry.source_type)
+        
+        content = f"""{prefix} [{source_label}] {timestamp}
+
+{entry.content}
+
+---
+"""
+        self._append_to_markdown(filepath, content)
+    
     def clear_all(self) -> None:
         """清空所有记忆数据"""
         # 重置 profile
@@ -320,3 +373,13 @@ class MemoryStore:
                     os.remove(filepath)
                 except OSError as e:
                     logger.warning(f"删除索引文件失败 {filepath}: {e}")
+        
+        # 清空 Markdown 文件（可选，保留历史记录）
+        # 这里只清空 MEMORY.md，保留每日日志
+        memory_file = self._get_memory_file_path()
+        if os.path.exists(memory_file):
+            try:
+                with open(memory_file, "w", encoding="utf-8") as f:
+                    f.write("# 长期记忆\n\n")
+            except Exception as e:
+                logger.warning(f"清空 Markdown 文件失败 {memory_file}: {e}")

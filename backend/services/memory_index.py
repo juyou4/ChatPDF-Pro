@@ -45,6 +45,8 @@ class MemoryIndex:
         self.texts: list[str] = []
         # 内容 hash 映射：用于变更检测 + 增量索引
         self._content_hashes: dict[str, str] = {}  # entry_id -> content_hash
+        # 嵌入缓存：content_hash -> embedding，避免重复计算
+        self._embedding_cache: dict[str, np.ndarray] = {}  # content_hash -> embedding
         # 持久化 BM25 索引
         self._bm25: Optional[BM25Index] = None
 
@@ -58,11 +60,89 @@ class MemoryIndex:
         from services.embedding_service import get_embedding_function
         return get_embedding_function(self.embedding_model_id, api_key=api_key)
 
-    def _embed_texts(self, texts: list[str], api_key: str = None) -> np.ndarray:
-        """将文本列表转为向量数组"""
-        embed_fn = self._get_embed_fn(api_key)
-        embeddings = embed_fn(texts)
-        return np.array(embeddings, dtype=np.float32)
+    def _get_cached_embedding(self, text: str) -> Optional[np.ndarray]:
+        """获取缓存的 embedding
+        
+        Args:
+            text: 文本内容
+            
+        Returns:
+            缓存的 embedding，如果不存在则返回 None
+        """
+        content_hash = self._hash_content(text)
+        return self._embedding_cache.get(content_hash)
+    
+    def _cache_embedding(self, text: str, embedding: np.ndarray) -> None:
+        """缓存 embedding
+        
+        Args:
+            text: 文本内容
+            embedding: 对应的向量
+        """
+        content_hash = self._hash_content(text)
+        self._embedding_cache[content_hash] = embedding
+    
+    def _embed_texts(self, texts: list[str], api_key: str = None, use_cache: bool = True) -> np.ndarray:
+        """将文本列表转为向量数组，支持缓存
+        
+        Args:
+            texts: 文本列表
+            api_key: API 密钥
+            use_cache: 是否使用缓存，默认 True
+            
+        Returns:
+            向量数组
+        """
+        if not texts:
+            return np.array([], dtype=np.float32)
+        
+        # 检查缓存
+        cached_embeddings = []
+        uncached_texts = []
+        uncached_indices = []
+        
+        if use_cache:
+            for i, text in enumerate(texts):
+                cached = self._get_cached_embedding(text)
+                if cached is not None:
+                    cached_embeddings.append((i, cached))
+                else:
+                    uncached_texts.append(text)
+                    uncached_indices.append(i)
+        else:
+            uncached_texts = texts
+            uncached_indices = list(range(len(texts)))
+        
+        # 对未缓存的文本进行 embedding
+        new_embeddings = None
+        if uncached_texts:
+            embed_fn = self._get_embed_fn(api_key)
+            new_embeddings_list = embed_fn(uncached_texts)
+            new_embeddings = np.array(new_embeddings_list, dtype=np.float32)
+            
+            # 缓存新的 embedding
+            for text, emb in zip(uncached_texts, new_embeddings):
+                self._cache_embedding(text, emb)
+        
+        # 合并缓存和新的 embedding
+        if not cached_embeddings:
+            return new_embeddings if new_embeddings is not None else np.array([], dtype=np.float32)
+        
+        if new_embeddings is None:
+            # 全部来自缓存
+            result = np.zeros((len(texts), cached_embeddings[0][1].shape[0]), dtype=np.float32)
+            for i, emb in cached_embeddings:
+                result[i] = emb
+            return result
+        
+        # 合并缓存和新计算的
+        result = np.zeros((len(texts), new_embeddings.shape[1]), dtype=np.float32)
+        for i, emb in cached_embeddings:
+            result[i] = emb
+        for idx, emb in zip(uncached_indices, new_embeddings):
+            result[idx] = emb
+        
+        return result
 
     def add_entry(self, entry_id: str, text: str, api_key: str = None) -> None:
         """为记忆条目生成向量并添加到 FAISS 索引
@@ -81,7 +161,8 @@ class MemoryIndex:
             return
 
         try:
-            embeddings = self._embed_texts([text], api_key)
+            # 使用缓存机制进行 embedding
+            embeddings = self._embed_texts([text], api_key, use_cache=True)
             dimension = embeddings.shape[1]
 
             # 归一化向量，使 IP = 余弦相似度
@@ -214,6 +295,7 @@ class MemoryIndex:
         self.entry_ids = []
         self.texts = []
         self._content_hashes = {}
+        self._embedding_cache.clear()  # 清空嵌入缓存
 
         if not entries:
             self._bm25 = None
@@ -225,7 +307,8 @@ class MemoryIndex:
             texts = [e.content for e in entries]
             ids = [e.id for e in entries]
 
-            embeddings = self._embed_texts(texts, api_key)
+            # 使用缓存机制进行批量 embedding
+            embeddings = self._embed_texts(texts, api_key, use_cache=True)
             dimension = embeddings.shape[1]
 
             embeddings = _normalize_vectors(embeddings)
@@ -297,6 +380,7 @@ class MemoryIndex:
             os.remove(index_path)
 
         # 保存元数据（含 BM25 索引 + 内容 hash）
+        # 注意：embedding_cache 不持久化（内存缓存），每次启动重建
         meta = {
             "entry_ids": self.entry_ids,
             "texts": self.texts,

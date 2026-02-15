@@ -52,13 +52,27 @@ app.include_router(memory_router)
 
 # 初始化 MemoryService 单例并注入到 memory_routes
 _memory_data_dir = str(DATA_DIR / "memory")
-_memory_service = MemoryService(data_dir=_memory_data_dir)
+_memory_service = MemoryService(
+    data_dir=_memory_data_dir,
+    use_sqlite=settings.memory_use_sqlite
+)
 # 应用配置参数
 _memory_service.max_summaries = settings.memory_max_summaries
 _memory_service.keyword_threshold = settings.memory_keyword_threshold
 # 注入到路由模块
 memory_routes.memory_service = _memory_service
 chat_routes.memory_service = _memory_service
+
+# 初始化文件监听器（如果启用 Markdown 源文件）
+_memory_watcher = None
+if settings.memory_enabled:
+    try:
+        from services.memory_sync import MemoryFileWatcher
+        _memory_dir = str(DATA_DIR / "memory" / "memory")
+        _memory_watcher = MemoryFileWatcher(_memory_service, _memory_dir)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"初始化记忆文件监听器失败: {e}")
 
 # Inject shared stores/paths to routers that need them
 search_router.documents_store = documents_store
@@ -79,6 +93,41 @@ app.add_middleware(
 
 # Static for PDFs
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时的事件处理"""
+    # 启动记忆文件监听器
+    global _memory_watcher
+    if _memory_watcher:
+        try:
+            _memory_watcher.start()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"启动记忆文件监听器失败: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时的事件处理"""
+    # 停止记忆文件监听器
+    global _memory_watcher
+    if _memory_watcher:
+        try:
+            _memory_watcher.stop()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"停止记忆文件监听器失败: {e}")
+    
+    # 关闭 SQLite 连接（如果使用）
+    global _memory_service
+    if _memory_service and hasattr(_memory_service.store, 'close'):
+        try:
+            _memory_service.store.close()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"关闭 SQLite 连接失败: {e}")
 
 
 @app.get("/embedding_models")

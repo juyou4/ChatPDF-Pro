@@ -122,6 +122,24 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_retrieval_top_k", "CHATPDF_MEMORY_RETRIEVAL_TOP_K"),
         description="记忆检索返回条数，范围 1-20"
     )
+    # 是否使用 SQLite 存储（可选增强，默认 False 保持向后兼容）
+    memory_use_sqlite: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("memory_use_sqlite", "CHATPDF_MEMORY_USE_SQLITE"),
+        description="是否使用 SQLite 存储记忆（提供更好的查询性能）"
+    )
+    # Pre-compaction 记忆刷新配置
+    memory_flush_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_flush_enabled", "CHATPDF_MEMORY_FLUSH_ENABLED"),
+        description="是否启用 pre-compaction 记忆刷新"
+    )
+    # Pre-compaction 刷新阈值（token 数）
+    memory_flush_threshold_tokens: int = Field(
+        default=4000,
+        validation_alias=AliasChoices("memory_flush_threshold_tokens", "CHATPDF_MEMORY_FLUSH_THRESHOLD_TOKENS"),
+        description="触发记忆刷新的 token 阈值，范围 1000-20000"
+    )
 
     @field_validator("memory_keyword_threshold")
     @classmethod
@@ -154,6 +172,17 @@ class AppSettings(BaseSettings):
                 f"memory_retrieval_top_k 值 {v} 超出合理范围 (1-20)，使用默认值 3"
             )
             return 3
+        return v
+
+    @field_validator("memory_flush_threshold_tokens")
+    @classmethod
+    def validate_memory_flush_threshold_tokens(cls, v: int) -> int:
+        """校验记忆刷新阈值，范围 1000-20000，超出范围使用默认值"""
+        if not (1000 <= v <= 20000):
+            logger.warning(
+                f"memory_flush_threshold_tokens 值 {v} 超出合理范围 (1000-20000)，使用默认值 4000"
+            )
+            return 4000
         return v
 
     @field_validator("ocr_default_mode")

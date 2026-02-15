@@ -35,16 +35,31 @@ ANSWER_MAX_LEN = 200  # 回答截取最大长度
 class MemoryService:
     """记忆管理核心服务（单例）"""
 
-    def __init__(self, data_dir: str, embedding_model_id: str = "local-minilm"):
+    def __init__(self, data_dir: str, embedding_model_id: str = "local-minilm", use_sqlite: bool = False):
         """
         初始化记忆管理服务
 
         Args:
             data_dir: 记忆数据根目录，如 "data/memory/"
             embedding_model_id: embedding 模型 ID
+            use_sqlite: 是否使用 SQLite 存储（可选增强）
         """
         self.data_dir = data_dir
-        self.store = MemoryStore(data_dir)
+        
+        # 根据配置选择存储后端
+        if use_sqlite:
+            try:
+                from services.memory_store_sqlite import MemoryStoreSQLite
+                self.store = MemoryStoreSQLite(data_dir, use_sqlite=True)
+                logger.info("使用 SQLite 存储后端（增强查询性能）")
+            except Exception as e:
+                logger.warning(f"SQLite 存储初始化失败，回退到 JSON: {e}")
+                from services.memory_store import MemoryStore
+                self.store = MemoryStore(data_dir)
+        else:
+            from services.memory_store import MemoryStore
+            self.store = MemoryStore(data_dir)
+        
         self.index = MemoryIndex(
             os.path.join(data_dir, "memory_index"), embedding_model_id
         )
@@ -59,7 +74,8 @@ class MemoryService:
     # ==================== 记忆检索 ====================
 
     def retrieve_memories(
-        self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None
+        self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
+        doc_id: str = None, filter_by_doc: bool = False
     ) -> str:
         """检索相关记忆并返回格式化的上下文字符串
 
@@ -67,12 +83,25 @@ class MemoryService:
             query: 用户查询文本
             top_k: 返回的最大结果数
             api_key: API 密钥（远程模型需要）
+            doc_id: 当前文档 ID，用于文档相关性加权（可选）
+            filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
 
         Returns:
             格式化的记忆上下文字符串，无记忆时返回空字符串
         """
         try:
-            memories = self.retriever.retrieve(query, top_k=top_k, api_key=api_key)
+            # 定期评估记忆重要性（每 10 次检索评估一次，避免频繁计算）
+            import random
+            if random.random() < 0.1:  # 10% 概率触发评估
+                try:
+                    self.evaluate_and_update_importance()
+                except Exception as e:
+                    logger.debug(f"定期重要性评估失败（不影响检索）: {e}")
+            
+            memories = self.retriever.retrieve(
+                query, top_k=top_k, api_key=api_key, 
+                doc_id=doc_id, filter_by_doc=filter_by_doc
+            )
             return self.retriever.build_memory_context(memories)
         except Exception as e:
             logger.error(f"记忆检索失败: {e}")
@@ -158,6 +187,23 @@ class MemoryService:
         # 更新最后访问时间并保存
         session["last_accessed"] = datetime.now(timezone.utc).isoformat()
         self.store.save_session(doc_id, session)
+        
+        # 同步写入 Markdown 源文件（每日日志）
+        try:
+            from services.memory_store import MemoryEntry
+            for summary in session["qa_summaries"][-len(recent_pairs):]:
+                # 只写入新添加的摘要
+                entry = MemoryEntry(
+                    id=summary.get("id", ""),
+                    content=f"Q: {summary.get('question', '')}\nA: {summary.get('answer', '')}",
+                    source_type=summary.get("source_type", "auto_qa"),
+                    created_at=summary.get("created_at", ""),
+                    doc_id=doc_id,
+                    importance=summary.get("importance", 0.5),
+                )
+                self.store._write_memory_markdown(entry, is_long_term=False)
+        except Exception as e:
+            logger.warning(f"同步写入 Markdown 失败: {e}")
 
     def _distill_facts(
         self,
@@ -354,6 +400,12 @@ class MemoryService:
         session["important_memories"].append(entry.to_dict())
         session["last_accessed"] = datetime.now(timezone.utc).isoformat()
         self.store.save_session(doc_id, session)
+        
+        # 同步写入 Markdown 源文件（每日日志）
+        try:
+            self.store._write_memory_markdown(entry, is_long_term=False)
+        except Exception as e:
+            logger.warning(f"同步写入 Markdown 失败: {e}")
 
         # 添加到向量索引
         try:
@@ -486,6 +538,101 @@ class MemoryService:
         except Exception as e:
             logger.error(f"清空向量索引失败: {e}")
 
+    def evaluate_and_update_importance(self) -> None:
+        """自动评估并更新记忆重要性
+        
+        基于以下因素综合评分：
+        - 命中次数：频繁使用的记忆提升重要性
+        - 时间衰减：长期未使用的记忆降低重要性
+        - 用户标记：手动标记的记忆保持高重要性
+        
+        自动升降级规则：
+        - 命中次数 >= 5 且最近 7 天内使用过：提升到 0.8
+        - 命中次数 >= 10 且最近 3 天内使用过：提升到 1.0
+        - 超过 90 天未使用且命中次数 < 3：降低到 0.3
+        - 超过 180 天未使用：降低到 0.1
+        """
+        try:
+            from datetime import timedelta
+            
+            all_entries = self.store.get_all_entries()
+            now = datetime.now(timezone.utc)
+            updated_count = 0
+            
+            for entry in all_entries:
+                original_importance = entry.importance
+                new_importance = original_importance
+                
+                # 用户标记的记忆（importance >= 1.0）保持不变
+                if entry.importance >= 1.0:
+                    continue
+                
+                # 计算最后使用时间
+                last_hit_time = None
+                if entry.last_hit_at:
+                    try:
+                        last_hit_time = datetime.fromisoformat(entry.last_hit_at)
+                        if last_hit_time.tzinfo is None:
+                            last_hit_time = last_hit_time.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        pass
+                
+                if not last_hit_time:
+                    # 没有命中记录，使用创建时间
+                    try:
+                        last_hit_time = datetime.fromisoformat(entry.created_at)
+                        if last_hit_time.tzinfo is None:
+                            last_hit_time = last_hit_time.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        continue
+                
+                days_since_use = (now - last_hit_time).total_seconds() / 86400.0
+                hit_count = entry.hit_count
+                
+                # 自动提升规则
+                if hit_count >= 10 and days_since_use <= 3:
+                    new_importance = 1.0  # 最高重要性
+                elif hit_count >= 5 and days_since_use <= 7:
+                    new_importance = max(original_importance, 0.8)  # 提升到 0.8
+                elif hit_count >= 3 and days_since_use <= 14:
+                    new_importance = max(original_importance, 0.6)  # 提升到 0.6
+                
+                # 自动降级规则
+                elif days_since_use > 180:
+                    new_importance = 0.1  # 最低重要性
+                elif days_since_use > 90 and hit_count < 3:
+                    new_importance = min(original_importance, 0.3)  # 降低到 0.3
+                elif days_since_use > 60 and hit_count < 2:
+                    new_importance = min(original_importance, 0.4)  # 降低到 0.4
+                
+                # 如果重要性发生变化，更新条目
+                if abs(new_importance - original_importance) > 0.05:  # 变化超过 5% 才更新
+                    entry.importance = new_importance
+                    # 更新存储
+                    if entry.doc_id:
+                        session = self.store.load_session(entry.doc_id)
+                        # 在 important_memories 中查找并更新
+                        for item in session.get("important_memories", []):
+                            if item.get("id") == entry.id:
+                                item["importance"] = new_importance
+                                self.store.save_session(entry.doc_id, session)
+                                updated_count += 1
+                                break
+                    else:
+                        # 在 profile 中查找并更新
+                        profile = self.store.load_profile()
+                        for item in profile.get("entries", []):
+                            if item.get("id") == entry.id:
+                                item["importance"] = new_importance
+                                self.store.save_profile(profile)
+                                updated_count += 1
+                                break
+            
+            if updated_count > 0:
+                logger.info(f"自动评估记忆重要性: 更新了 {updated_count} 条记忆的重要性")
+        except Exception as e:
+            logger.error(f"自动评估记忆重要性失败: {e}")
+    
     def get_status(self) -> dict:
         """获取记忆系统状态
 
