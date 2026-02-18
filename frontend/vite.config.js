@@ -66,6 +66,24 @@ export default defineConfig({
     },
     build: {
         outDir: 'build',
-        sourcemap: true
+        sourcemap: false,
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    'vendor-react': ['react', 'react-dom'],
+                    'vendor-motion': ['framer-motion'],
+                    'vendor-markdown': [
+                        'react-markdown',
+                        'remark-gfm',
+                        'remark-math',
+                        'rehype-raw',
+                        'rehype-highlight',
+                        'rehype-katex',
+                    ],
+                    'vendor-mermaid': ['mermaid'],
+                    'vendor-pdf': ['pdfjs-dist', 'react-pdf'],
+                },
+            },
+        },
     }
 });

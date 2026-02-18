@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
-import rehypeMathjax from 'rehype-mathjax/browser';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 import mermaid from 'mermaid';
@@ -289,15 +288,11 @@ const StreamingMarkdown = React.memo(
       return plugins;
     }, [enableBlurReveal, isStreaming, content?.length]);
 
-    const rehypePlugins = React.useMemo(() => {
-      const list = [rehypeRaw, rehypeHighlight];
-      if (MATH_ENGINE === 'katex') {
-        list.splice(1, 0, [rehypeKatex, { strict: false, trust: true, output: 'html' }]);
-      } else if (MATH_ENGINE === 'mathjax') {
-        list.splice(1, 0, [rehypeMathjax, { svg: true }]);
-      }
-      return list;
-    }, []);
+    const rehypePlugins = React.useMemo(() => [
+      rehypeRaw,
+      [rehypeKatex, { strict: false, trust: true, output: 'html' }],
+      rehypeHighlight,
+    ], []);
 
     useEffect(() => {
       if (!content || content.length === 0) {

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -13,11 +13,29 @@ import TextSelectionToolbar from './TextSelectionToolbar';
 import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
-import EmbeddingSettings from './EmbeddingSettings';
-import OCRSettingsPanel, { loadOCRSettings } from './OCRSettingsPanel';
-import GlobalSettings from './GlobalSettings';
+// 大弹窗懒加载：只在首次打开时才加载对应 chunk，减少初始 bundle 体积
+const EmbeddingSettings = lazy(() => import('./EmbeddingSettings'));
+const OCRSettingsPanel = lazy(() => import('./OCRSettingsPanel'));
+const GlobalSettings = lazy(() => import('./GlobalSettings'));
+const ChatSettings = lazy(() => import('./ChatSettings'));
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
-import ChatSettings from './ChatSettings';
+
+// 内联 OCR 设置读取（从 OCRSettingsPanel 抽出，避免 eager import 大文件）
+const loadOCRSettings = () => {
+  try {
+    const raw = localStorage.getItem('ocrSettings');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const validModes = ['auto', 'always', 'never'];
+      const validBackends = ['auto', 'tesseract', 'paddleocr', 'mistral', 'mineru', 'doc2x'];
+      return {
+        mode: validModes.includes(parsed.mode) ? parsed.mode : 'auto',
+        backend: validBackends.includes(parsed.backend) ? parsed.backend : 'auto',
+      };
+    }
+  } catch { /* ignore */ }
+  return { mode: 'auto', backend: 'auto' };
+};
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
@@ -1415,7 +1433,8 @@ const ChatPDF = () => {
    * 根据 citation 中的 page_range 跳转 PDF 阅读器到对应页码
    * @param {object} citation - 引文数据，包含 ref、group_id、page_range
    */
-  const handleCitationClick = (citation) => {
+  // useCallback 确保引用稳定，防止 StreamingMarkdown 的 React.memo 因新函数引用而失效
+  const handleCitationClick = useCallback((citation) => {
     if (!citation || !citation.page_range) return;
     const targetPage = citation.page_range[0]; // 跳转到页码范围的起始页
     if (typeof targetPage === 'number' && targetPage > 0) {
@@ -1433,7 +1452,7 @@ const ChatPDF = () => {
         }, 400);
       }
     }
-  };
+  }, []); // setActiveHighlight/setCurrentPage 是 useState setter，引用永久稳定
 
   // 处理预设问题选择：填入输入框并自动发送
   const handlePresetSelect = (query) => {
@@ -2811,27 +2830,35 @@ const ChatPDF = () => {
         )}
       </AnimatePresence >
 
-      <EmbeddingSettings
-        isOpen={showEmbeddingSettings}
-        onClose={() => setShowEmbeddingSettings(false)}
-      />
+      <Suspense fallback={null}>
+        <EmbeddingSettings
+          isOpen={showEmbeddingSettings}
+          onClose={() => setShowEmbeddingSettings(false)}
+        />
+      </Suspense>
 
-      <GlobalSettings
-        isOpen={showGlobalSettings}
-        onClose={() => { setShowGlobalSettings(false); setShowSettings(true); }}
-      />
+      <Suspense fallback={null}>
+        <GlobalSettings
+          isOpen={showGlobalSettings}
+          onClose={() => { setShowGlobalSettings(false); setShowSettings(true); }}
+        />
+      </Suspense>
 
       {/* 对话设置面板 */}
-      <ChatSettings
-        isOpen={showChatSettings}
-        onClose={() => { setShowChatSettings(false); setShowSettings(true); }}
-      />
+      <Suspense fallback={null}>
+        <ChatSettings
+          isOpen={showChatSettings}
+          onClose={() => { setShowChatSettings(false); setShowSettings(true); }}
+        />
+      </Suspense>
 
       {/* OCR 设置面板 */}
-      <OCRSettingsPanel
-        isOpen={showOCRSettings}
-        onClose={() => { setShowOCRSettings(false); setShowSettings(true); }}
-      />
+      <Suspense fallback={null}>
+        <OCRSettingsPanel
+          isOpen={showOCRSettings}
+          onClose={() => { setShowOCRSettings(false); setShowSettings(true); }}
+        />
+      </Suspense>
     </div >
   );
 };
