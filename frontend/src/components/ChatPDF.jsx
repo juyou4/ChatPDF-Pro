@@ -771,56 +771,96 @@ const ChatPDF = () => {
         let thinkingStartTime = null;
         let thinkingEndTime = null;
 
+        // SSE 解析缓冲区：按 "\n\n" 分隔 event，避免 JSON 跨 chunk 时丢字
+        let sseBuffer = '';
+
+        const processSseEvent = (eventText) => {
+          // eventText 为不含末尾空行的单个 event
+          const lines = eventText.split(/\r?\n/);
+          const dataLines = [];
+          for (const ln of lines) {
+            if (ln.startsWith('data:')) {
+              dataLines.push(ln.slice(5).trimStart());
+            }
+          }
+          if (dataLines.length === 0) return;
+
+          // SSE 允许一个 event 多行 data:，拼接时用 \n
+          const data = dataLines.join('\n');
+          if (data === '[DONE]') {
+            // 交给外层 while 终止（通过抛出特殊标记）
+            throw new Error('__SSE_DONE__');
+          }
+
+          const parsed = JSON.parse(data);
+          if (parsed.error) {
+            throw new Error(parsed.error);
+          }
+
+          // 后端可能会插入检索进度事件（非 content/done 结构），这里忽略
+          if (parsed.type === 'retrieval_progress') {
+            return;
+          }
+
+          const chunkContent = parsed.content || '';
+          const chunkThinking = parsed.reasoning_content || '';
+
+          if (!parsed.done) {
+            if (chunkContent) {
+              currentText += chunkContent;
+              contentStream.addChunk(chunkContent);
+              if (thinkingStartTime && !thinkingEndTime) {
+                thinkingEndTime = Date.now();
+              }
+            }
+            if (chunkThinking) {
+              if (!thinkingStartTime) thinkingStartTime = Date.now();
+              currentThinking += chunkThinking;
+              thinkingStream.addChunk(chunkThinking);
+            }
+          } else {
+            if (parsed.retrieval_meta && parsed.retrieval_meta.citations) {
+              streamCitationsRef.current = parsed.retrieval_meta.citations;
+            }
+            if (chunkThinking) {
+              currentThinking += chunkThinking;
+              thinkingStream.addChunk(chunkThinking);
+            }
+          }
+        };
+
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
           if (streamingAbortRef.current.cancelled) break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
+          sseBuffer += decoder.decode(value, { stream: true });
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              if (data === '[DONE]') break;
+          // 按 event 边界切分（空行分隔）
+          let sepIdx;
+          while ((sepIdx = sseBuffer.indexOf('\n\n')) !== -1) {
+            const rawEvent = sseBuffer.slice(0, sepIdx);
+            sseBuffer = sseBuffer.slice(sepIdx + 2);
 
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.error) {
-                  throw new Error(parsed.error);
-                }
-                const chunkContent = parsed.content || '';
-                const chunkThinking = parsed.reasoning_content || '';
-                if (!parsed.done) {
-                  if (chunkContent) {
-                    currentText += chunkContent;
-                    contentStream.addChunk(chunkContent);
-                    // 收到正文内容时，标记思考结束
-                    if (thinkingStartTime && !thinkingEndTime) {
-                      thinkingEndTime = Date.now();
-                    }
-                  }
-                  if (chunkThinking) {
-                    // 首次收到思考内容，记录开始时间
-                    if (!thinkingStartTime) thinkingStartTime = Date.now();
-                    currentThinking += chunkThinking;
-                    thinkingStream.addChunk(chunkThinking);
-                  }
-                } else {
-                  // done=true 的最后一个 chunk，提取 retrieval_meta 中的 citations
-                  if (parsed.retrieval_meta && parsed.retrieval_meta.citations) {
-                    streamCitationsRef.current = parsed.retrieval_meta.citations;
-                  }
-                  if (chunkThinking) {
-                    currentThinking += chunkThinking;
-                    thinkingStream.addChunk(chunkThinking);
-                  }
-                }
-              } catch (e) {
-                // 跳过无效 JSON
+            const trimmed = rawEvent.trim();
+            if (!trimmed) continue;
+
+            try {
+              processSseEvent(trimmed);
+            } catch (e) {
+              if (e && e.message === '__SSE_DONE__') {
+                // 结束整个读取循环
+                sseBuffer = '';
+                sepIdx = -1;
+                break;
               }
+              // JSON 解析失败等：不吞掉，直接抛出让外层 catch 处理
+              throw e;
             }
           }
+
+          // 如果收到 DONE 标记跳出
+          if (sseBuffer === '' && streamingAbortRef.current.cancelled) break;
         }
 
         // 标记流式传输完成，让 useSmoothStream 一次性渲染剩余字符

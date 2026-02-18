@@ -48,10 +48,10 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
     }
   }, [isThinking, thinkingMs])
 
-  const seconds = ((displayMs < 100 ? 100 : displayMs) / 1000).toFixed(1)
+  const seconds = (Math.max(100, displayMs) / 1000).toFixed(1)
 
   return (
-    <span className="thinking-timer-text">
+    <span className="thinking-timer-text tabular-nums">
       {isThinking ? `思考中 ${seconds}s` : `已深度思考 ${seconds}s`}
     </span>
   )
@@ -59,41 +59,40 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
 
 /**
  * 思考过程滚动预览组件（cherry-studio 风格）
- * 在思考进行中且面板收起时，显示最新几行思考内容的滚动动画
+ * 优化：使用更平滑的滚动逻辑和 mask 遮罩
  */
 const ThinkingPreview = memo(({ content, isThinking, expanded }) => {
+  const containerRef = useRef(null)
+  
   const lines = useMemo(() => {
     if (!content) return []
-    const allLines = content.split('\n')
-    // 思考中时去掉最后一行（可能不完整）
-    const validLines = isThinking ? allLines.slice(0, -1) : allLines
-    return validLines.filter(l => l.trim() !== '')
-  }, [content, isThinking])
+    return content.split('\n')
+      .filter(l => l.trim() !== '')
+      .slice(-3) // 只保留最后3行用于滚动预览，降低 DOM 压力
+  }, [content])
 
-  // 只在思考中且面板收起时显示预览
-  const showPreview = isThinking && !expanded
+  const showPreview = isThinking && !expanded && lines.length > 0
 
-  if (!showPreview || lines.length < 1) return null
-
-  const LINE_HEIGHT = 16
-  // 只渲染最后 5 行
-  const visibleLines = lines.slice(-5)
+  if (!showPreview) return null
 
   return (
-    <div className="thinking-preview-container">
-      <motion.div
-        className="thinking-preview-messages"
-        style={{ height: lines.length * LINE_HEIGHT }}
-        initial={{ y: -2 }}
-        animate={{ y: -lines.length * LINE_HEIGHT - 2 }}
-        transition={{ duration: 0.15, ease: 'linear' }}
-      >
-        {visibleLines.map((line, i) => (
-          <div key={lines.length - 5 + i} className="thinking-preview-line" style={{ lineHeight: `${LINE_HEIGHT}px` }}>
-            {line}
-          </div>
-        ))}
-      </motion.div>
+    <div className="thinking-preview-container" ref={containerRef}>
+      <AnimatePresence mode="popLayout">
+        <motion.div
+          key={lines.join('|')} // 内容变化时触发动画
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.2 }}
+          className="thinking-preview-messages"
+        >
+          {lines.map((line, i) => (
+            <div key={i} className="thinking-preview-line">
+              {line}
+            </div>
+          ))}
+        </motion.div>
+      </AnimatePresence>
     </div>
   )
 })

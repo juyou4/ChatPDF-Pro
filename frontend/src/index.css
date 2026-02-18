@@ -615,8 +615,9 @@
 }
 
 /* 流式输出时，新增内容的淡入效果 */
+/* 流式输出时避免对 *:last-child 做动画（Markdown 结构频繁变化会导致重排/闪烁） */
 .streaming-active > div > *:last-child {
-    animation: stream-text-in 0.15s ease-out;
+    animation: none;
 }
 
 @keyframes stream-text-in {
@@ -630,8 +631,7 @@
 
 /* 流式输出打字光标 - 在最后一个块级元素末尾显示闪烁光标 */
 .streaming-active > div > p:last-of-type::after,
-.streaming-active > div > ul:last-of-type > li:last-child::after,
-.streaming-active > div > ol:last-of-type > li:last-child::after,
+.streaming-active > div > li:last-child::after,
 .streaming-active > div > blockquote:last-of-type > p:last-of-type::after {
     content: '';
     display: inline-block;
@@ -645,8 +645,7 @@
 }
 
 .dark .streaming-active > div > p:last-of-type::after,
-.dark .streaming-active > div > ul:last-of-type > li:last-child::after,
-.dark .streaming-active > div > ol:last-of-type > li:last-child::after,
+.dark .streaming-active > div > li:last-child::after,
 .dark .streaming-active > div > blockquote:last-of-type > p:last-of-type::after {
     background: #60A5FA;
 }
