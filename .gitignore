@@ -47,6 +47,7 @@ vector_stores/
 *.faiss
 *.pkl
 images/
+data/
 
 # Logs
 *.log

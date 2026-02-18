@@ -355,7 +355,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-              className={`w-full max-w-6xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/50 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6)] ${RADIUS_CLASS} overflow-hidden flex flex-col`}
+              className={`w-full max-w-6xl max-h-[92vh] soft-panel shadow-[0_30px_80px_-35px_rgba(15,23,42,0.4)] ${RADIUS_CLASS} overflow-hidden flex flex-col`}
             >
               {/* Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -398,9 +398,9 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       <button
                         key={p.id}
                         onClick={() => setActiveProviderId(p.id)}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl border text-left transition-colors ${p.id === activeProvider?.id
-                          ? 'border-blue-200 bg-blue-50/60 text-blue-700'
-                          : 'border-gray-200 hover:border-blue-200 hover:bg-blue-50/30 text-gray-700'
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all duration-200 ${p.id === activeProvider?.id
+                          ? 'bg-white shadow-md scale-[1.02] text-gray-900 z-10'
+                          : 'border border-gray-200 hover:border-blue-200 hover:bg-blue-50 text-gray-700'
                           }`}
                       >
                         <ProviderAvatar providerId={p.id} className="w-8 h-8" />
@@ -419,7 +419,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   <div className="mt-4 space-y-2">
                     <button
                       onClick={() => setCustomProviderFormOpen(v => !v)}
-                      className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 px-2 py-2 rounded-lg border border-gray-200 hover:border-blue-200 hover:bg-blue-50/40 transition"
+                      className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 px-2 py-2 rounded-lg border border-gray-200 hover:border-blue-200 hover:bg-blue-50 transition"
                     >
                       <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-blue-400" />
@@ -437,7 +437,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           transition={{ type: 'spring', stiffness: 260, damping: 28 }}
                           className="overflow-hidden"
                         >
-                          <div className="p-3 rounded-xl border border-gray-100 bg-white/70 space-y-2 shadow-sm">
+                          <div className="p-3 rounded-xl border border-gray-200 bg-white space-y-2 shadow-sm">
                             <input
                               className="soft-input px-3 py-2 rounded-lg border border-gray-200 w-full"
                               placeholder="providerId"
@@ -670,7 +670,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                               type="button"
                               aria-expanded={!isCollapsed}
                               onClick={() => toggleCollapse(type)}
-                              className={`w-full px-3 py-2 flex items-center justify-between bg-white/35 border-b border-white/40 ${isCollapsed ? RADIUS_CLASS : `${RADIUS_CLASS} rounded-b-none`} cursor-pointer hover:bg-white/55 focus:outline-none focus:ring-2 focus:ring-blue-200/60`}
+                              className={`w-full px-3 py-2 flex items-center justify-between bg-gray-50 border-b border-gray-100 ${isCollapsed ? RADIUS_CLASS : `${RADIUS_CLASS} rounded-b-none`} cursor-pointer hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-200/60`}
                             >
                               <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
                                 {meta.label}

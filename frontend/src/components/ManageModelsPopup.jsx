@@ -176,11 +176,11 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 20 }}
                         transition={{ duration: 0.2 }}
-                        className="soft-panel rounded-3xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col m-4"
+                        className="soft-panel rounded-3xl shadow-[0_20px_45px_-18px_rgba(15,23,42,0.35),0_8px_18px_-10px_rgba(15,23,42,0.2)] w-full max-w-5xl max-h-[85vh] flex flex-col m-4"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* Header */}
-                        <div className="flex items-center justify-between p-6 border-b border-white/20">
+                        <div className="flex items-center justify-between p-6 border-b border-gray-100">
                             <div className="flex items-center gap-3">
                                 <ProviderAvatar provider={provider} size={32} />
                                 <div>
@@ -348,7 +348,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                         </div>
 
                         {/* Footer */}
-                        <div className="px-6 py-4 border-t border-white/20">
+                        <div className="px-6 py-4 border-t border-gray-100">
                             <div className="flex items-center justify-between text-sm">
                                 <div className="text-gray-600">
                                     <span className="font-semibold text-gray-900">{embeddingCount}</span> 个Embedding模型 ·
@@ -473,7 +473,7 @@ function ModelList({ models, selectedModel, onSelectModel, isAdded, onAddModel, 
     const rerankModels = models.filter(m => m.type === 'rerank')
 
     return (
-        <div className="divide-y divide-white/30">
+        <div className="divide-y divide-gray-100">
             {embeddingModels.length > 0 && (
                 <div className="p-4">
                     <div className="text-xs font-bold text-gray-500 mb-3 px-2">
@@ -526,7 +526,7 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
             whileHover={{ scale: 1.01 }}
             className={`
                 p-3 rounded-xl cursor-pointer transition-all
-                ${isSelected ? 'bg-blue-50/80 ring-2 ring-blue-500/50' : 'bg-white/40 hover:bg-white/60'}
+                ${isSelected ? 'bg-blue-50 ring-2 ring-blue-200 shadow-sm' : 'bg-white border border-gray-100 hover:bg-gray-50 hover:shadow-sm'}
             `}
             onClick={() => onSelect(model)}
         >
@@ -550,7 +550,7 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
                             </span>
                         )}
                         {model.metadata?.dimension && (
-                            <span className="px-2 py-0.5 soft-panel rounded text-xs text-gray-600">
+                            <span className="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600">
                                 📐 {model.metadata.dimension}维
                             </span>
                         )}
@@ -662,7 +662,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
             {model.metadata && (
                 <div className="space-y-3">
                     {model.metadata.dimension && (
-                        <div className="soft-panel rounded-xl p-3">
+                        <div className="bg-white border border-gray-200 shadow-sm rounded-xl p-3">
                             <div className="text-xs text-gray-500 mb-1">向量维度</div>
                             <div className="text-lg font-bold text-gray-900">
                                 {model.metadata.dimension} 维
@@ -674,7 +674,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                         const priceText = getPricingLabel(model)
                         if (priceText) {
                             return (
-                                <div className="soft-panel rounded-xl p-3">
+                                <div className="bg-white border border-gray-200 shadow-sm rounded-xl p-3">
                                     <div className="text-xs text-gray-500 mb-1">价格</div>
                                     <div className="text-lg font-bold text-amber-700">
                                         {priceText}
@@ -683,7 +683,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                             )
                         }
                         return (
-                            <div className="soft-panel rounded-xl p-3">
+                            <div className="bg-white border border-gray-200 shadow-sm rounded-xl p-3">
                                 <div className="flex items-center gap-2">
                                     <Zap className="w-5 h-5 text-green-600" />
                                     <div className="text-lg font-bold text-green-700">免费模型</div>
@@ -693,7 +693,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                     })()}
 
                     {model.metadata.description && (
-                        <div className="soft-panel rounded-xl p-3">
+                        <div className="bg-white border border-gray-200 shadow-sm rounded-xl p-3">
                             <div className="text-xs text-gray-500 mb-1">描述</div>
                             <div className="text-sm text-gray-700">
                                 {model.metadata.description}
@@ -709,10 +709,10 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
                     className={`
-                        soft-panel rounded-xl p-4 border-2
+                        bg-white rounded-xl p-4 border-2 shadow-sm
                         ${modelTestResult.success
-                            ? 'border-green-500/50 bg-green-50/50'
-                            : 'border-red-500/50 bg-red-50/50'}
+                            ? 'border-green-200'
+                            : 'border-red-200'}
                     `}
                 >
                     <div className="flex items-start gap-3">
