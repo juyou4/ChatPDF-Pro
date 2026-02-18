@@ -25,7 +25,7 @@ export const VISION_CAPABLE_RULES = {
   grok: /^(grok-vision|grok-4)/i,
   // MiniMax abab6.5 系列
   minimax: /^abab6\.5/i,
-  // 豆包：1.5-Pro 及全部 Seed 系列（Seed 均为多模态）
+  // 豆包：1.5-Pro 系列及全部 Seed 系列（Seed 1.x / 2.0 Pro / Lite / Mini 均为多模态通用模型）
   doubao: /^(doubao-1\.5-pro|doubao-seed)/i,
   // Moonshot：moonshot-v1 系列支持图片输入
   moonshot: /^moonshot-v1/i,

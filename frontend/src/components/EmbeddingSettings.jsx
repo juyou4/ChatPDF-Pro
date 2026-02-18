@@ -78,7 +78,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   const [providerSearch, setProviderSearch] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
-  const [collapsedTypes, setCollapsedTypes] = useState({})
+  const [collapsedTypes, setCollapsedTypes] = useState({ chat: true, embedding: true, rerank: true, image: true })
   const [addModelForm, setAddModelForm] = useState({
     id: '',
     name: '',

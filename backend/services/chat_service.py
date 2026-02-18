@@ -1,10 +1,12 @@
 from typing import Dict, List, Optional
 import asyncio
+import json as _json
 import httpx
 
 from providers.factory import ProviderFactory
 from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT
 from models.provider_registry import PROVIDER_CONFIG
+from models.api_key_selector import select_api_key
 from utils.middleware import (
     BaseMiddleware,
     apply_middlewares_before,
@@ -12,6 +14,35 @@ from utils.middleware import (
     RetryMiddleware,
     FallbackMiddleware,
 )
+
+
+def _extract_api_error_message(body: str, status_code: int) -> str:
+    """从 API 错误响应体中提取用户友好的中文错误信息。
+    兼容 OpenAI 兼容格式：{"error": {"code": "...", "message": "..."}}。
+    """
+    try:
+        parsed = _json.loads(body) if body else {}
+        error_obj = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(error_obj, dict):
+            msg = error_obj.get("message") or ""
+            code = error_obj.get("code") or ""
+            label = f"（{code}）" if code else ""
+            if status_code == 429:
+                suffix = f"：{msg}" if msg else "，请稍后再试"
+                return f"请求过于频繁{label}{suffix}"
+            if status_code in (401, 403):
+                return f"认证失败（HTTP {status_code}）：{msg or 'API Key 无效或格式错误'}"
+            return f"API 错误（HTTP {status_code}{label}）：{msg}" if (msg or code) else f"API 返回错误（HTTP {status_code}）"
+        elif isinstance(error_obj, str):
+            return f"API 错误（HTTP {status_code}）：{error_obj}"
+    except Exception:
+        pass
+    # 无法解析，给出通用提示
+    if status_code == 429:
+        return "请求过于频繁（HTTP 429），请稍后再试"
+    if status_code in (401, 403):
+        return f"认证失败（HTTP {status_code}），请检查 API Key"
+    return f"API 返回错误（HTTP {status_code}）"
 
 
 def extract_reasoning_content(chunk: dict | list | str | None) -> str:
@@ -63,9 +94,11 @@ async def call_ai_api(
     reasoning_effort: Optional[str] = None,
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
+    # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
+    sanitized_key = select_api_key(api_key) or (api_key.strip() if api_key else "")
     payload = {
         "messages": messages,
-        "api_key": api_key,
+        "api_key": sanitized_key,
         "model": model,
         "provider": provider,
         # 如果未显式传入 endpoint，使用 ProviderRegistry 中的默认值（支持集成/单一服务商）
@@ -165,8 +198,10 @@ async def call_ai_api_stream(
 
     # OpenAI 兼容流式
     if provider.lower() in OPENAI_LIKE and endpoint:
+        # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
+        sanitized_key = select_api_key(api_key) or api_key.strip()
         headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {sanitized_key}",
             "Content-Type": "application/json"
         }
         body = {
@@ -208,7 +243,8 @@ async def call_ai_api_stream(
             async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
                 if resp.status_code != 200:
                     err_text = await resp.aread()
-                    yield {"error": err_text.decode("utf-8", errors="ignore"), "done": True}
+                    err_body = err_text.decode("utf-8", errors="ignore")
+                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
                     return
 
                 async for line in resp.aiter_lines():
@@ -219,7 +255,6 @@ async def call_ai_api_stream(
                         yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                         return
                     try:
-                        import json as _json
                         chunk = _json.loads(data)
                     except Exception:
                         continue
@@ -245,8 +280,9 @@ async def call_ai_api_stream(
 
     # Anthropic 流式
     if provider.lower() in ANTHROPIC:
+        sanitized_key = select_api_key(api_key) or api_key.strip()
         headers = {
-            "x-api-key": api_key,
+            "x-api-key": sanitized_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json"
         }
@@ -273,7 +309,8 @@ async def call_ai_api_stream(
             async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
                 if resp.status_code != 200:
                     err_text = await resp.aread()
-                    yield {"error": err_text.decode("utf-8", errors="ignore"), "done": True}
+                    err_body = err_text.decode("utf-8", errors="ignore")
+                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
                     return
                 async for line in resp.aiter_lines():
                     if not line:
@@ -297,8 +334,9 @@ async def call_ai_api_stream(
 
     # Gemini 流式（简单版，若失败则回退）
     if provider.lower() in GEMINI:
+        sanitized_key = select_api_key(api_key) or api_key.strip()
         # Gemini 流式 endpoint：:streamGenerateContent
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={sanitized_key}"
         contents = []
         for msg in messages:
             if msg["role"] == "system":
@@ -339,7 +377,8 @@ async def call_ai_api_stream(
             async with client.stream("POST", endpoint, json=payload) as resp:
                 if resp.status_code != 200:
                     err_text = await resp.aread()
-                    yield {"error": err_text.decode("utf-8", errors="ignore"), "done": True}
+                    err_body = err_text.decode("utf-8", errors="ignore")
+                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
                     return
                 async for line in resp.aiter_lines():
                     if not line:

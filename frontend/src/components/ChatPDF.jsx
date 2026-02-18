@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
@@ -69,7 +69,7 @@ const ChatPDF = () => {
   const [docInfo, setDocInfo] = useState(null);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(50); // Percentage
   const [messages, setMessages] = useState([]);
-  const [inputMessage, setInputMessage] = useState('');
+  const [hasInput, setHasInput] = useState(false); // 输入框非空标记，避免打字时触发全局重渲染
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -286,6 +286,8 @@ const ChatPDF = () => {
   const streamingAbortRef = useRef({ cancelled: false });
   // 用于在 SSE 流式响应中暂存 retrieval_meta.citations
   const streamCitationsRef = useRef(null);
+  // 输入框 ref：非受控模式，打字时直接操作 DOM，不触发 React 全局重渲染
+  const textareaRef = useRef(null);
 
   const [headerHeight, setHeaderHeight] = useState(null);
   const API_BASE_URL = ''; // Relative path due to proxy
@@ -672,8 +674,19 @@ const ChatPDF = () => {
     }
   };
 
+  // 统一设置输入框值（预设问题、翻译、AI解读等外部调用，直接操作 DOM 不走 React state 更新流）
+  const setInputValue = (val) => {
+    if (textareaRef.current) {
+      textareaRef.current.value = val;
+      textareaRef.current.style.height = '24px';
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
+    }
+    setHasInput(!!(val && val.trim()));
+  };
+
   const sendMessage = async () => {
-    if (!inputMessage.trim() && !screenshot) return;
+    const currentInput = textareaRef.current?.value ?? '';
+    if (!currentInput.trim() && !screenshot) return;
     
     // 使用新的凭证系统进行验证
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials();
@@ -690,23 +703,33 @@ const ChatPDF = () => {
 
     const userMsg = {
       type: 'user',
-      content: inputMessage,
+      content: currentInput,
       hasImage: !!screenshot
     };
 
     setMessages(prev => [...prev, userMsg]);
-    setInputMessage('');
+    // 清空输入框（非受控模式：直接操作 DOM）
+    if (textareaRef.current) {
+      textareaRef.current.value = '';
+      textareaRef.current.style.height = '24px';
+    }
+    setHasInput(false);
     setIsLoading(true);
 
     // 构建对话历史（使用当前 messages 状态，不包含刚添加的 userMsg，因为 setMessages 是异步的）
     const chatHistory = buildChatHistory(messages, contextCount);
 
+    // 获取当前 provider 配置（所有字段）
+    const { providerId: _pid } = getChatCredentials();
+    const chatProviderFull = getProviderById(_pid);
     const requestBody = {
       doc_id: docId,
       question: userMsg.content,
       api_key: chatApiKey,
       model: chatModel,
       api_provider: chatProvider,
+      // 传递用户配置的 API 地址，后端用于动态访问正确 endpoint
+      api_host: chatProviderFull?.apiHost || null,
       selected_text: selectedText || null,
       image_base64: screenshot ? screenshot.split(',')[1] : null,
       // 用 reasoningEffort 替代原有的 enable_thinking boolean
@@ -970,10 +993,17 @@ const ChatPDF = () => {
       if (error.name === 'AbortError') {
         return;
       }
-      setMessages(prev => [...prev, {
-        type: 'error',
-        content: '❌ Error: ' + error.message
-      }]);
+      // 重置流式状态，防止 useSmoothStream 停留在挂起状态
+      setContentStreamDone(true);
+      setThinkingStreamDone(true);
+      activeStreamMsgIdRef.current = null;
+      setStreamingMessageId(null);
+      // 把错误直接显示在已有的占位 assistant 气泡中（避免出现空气泡 + 独立错误气泡）
+      setMessages(prev => prev.map(msg =>
+        msg.id === tempMsgId
+          ? { ...msg, content: '❌ ' + error.message, isStreaming: false }
+          : msg
+      ));
     } finally {
       setIsLoading(false);
     }
@@ -1036,7 +1066,7 @@ const ChatPDF = () => {
     setMessages(prev => prev.slice(0, messageIndex));
 
     // Resend the user message
-    setInputMessage(userMessage.content);
+    setInputValue(userMessage.content);
     // Trigger send in next tick
     setTimeout(() => {
       sendMessage();
@@ -1320,7 +1350,7 @@ const ChatPDF = () => {
 
   // 4. AI 解读
   const handleAIExplain = () => {
-    setInputMessage(`请解释这段话：\n\n"${selectedText}"`);
+    setInputValue(`请解释这段话：\n\n"${selectedText}"`);
     setShowTextMenu(false);
     // 自动聚焦输入框
     setTimeout(() => {
@@ -1330,7 +1360,7 @@ const ChatPDF = () => {
 
   // 5. 翻译
   const handleTranslate = () => {
-    setInputMessage(`请将以下内容翻译成中文：\n\n"${selectedText}"`);
+    setInputValue(`请将以下内容翻译成中文：\n\n"${selectedText}"`);
     setShowTextMenu(false);
     setTimeout(() => {
       document.querySelector('textarea')?.focus();
@@ -1379,9 +1409,6 @@ const ChatPDF = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // 预设问题自动发送标记
-  const pendingSendRef = useRef(false);
-
   // ==================== 引文点击跳转处理 ====================
   /**
    * 处理引文引用点击事件
@@ -1408,19 +1435,12 @@ const ChatPDF = () => {
     }
   };
 
-  // 处理预设问题选择：填入输入框并标记待发送
+  // 处理预设问题选择：填入输入框并自动发送
   const handlePresetSelect = (query) => {
-    setInputMessage(query);
-    pendingSendRef.current = true;
+    setInputValue(query);
+    // setInputValue 同步写入 ref，sendMessage 可直接读取（rAF 确保当前帧 DOM 已更新）
+    requestAnimationFrame(() => sendMessage());
   };
-
-  // 当 inputMessage 更新且有待发送标记时，自动触发发送
-  useEffect(() => {
-    if (pendingSendRef.current && inputMessage.trim()) {
-      pendingSendRef.current = false;
-      sendMessage();
-    }
-  }, [inputMessage]);
 
   // 判断是否显示预设问题：文档已加载且没有用户/助手消息
   const showPresetQuestions = docId && messages.filter(
@@ -1620,9 +1640,8 @@ const ChatPDF = () => {
 
     // 自动发送操作：设置预设提示词后触发发送
     if (action.autoSend && action.prompt) {
-      setInputMessage(action.prompt)
-      // 使用 pendingSendRef 标记待发送，与预设问题相同的机制
-      pendingSendRef.current = true
+      setInputValue(action.prompt)
+      requestAnimationFrame(() => sendMessage())
     }
   }
 
@@ -2287,17 +2306,20 @@ const ChatPDF = () => {
                   <div className="flex items-center gap-2 mb-1">
 
                     <textarea
-                      value={inputMessage}
-                      onChange={(e) => setInputMessage(e.target.value)}
+                      ref={textareaRef}
+                      onChange={(e) => {
+                        // 自适应高度（直接操作 DOM，不触发 React 状态更新）
+                        e.target.style.height = '24px';
+                        e.target.style.height = e.target.scrollHeight + 'px';
+                        // 仅在 empty ↔ non-empty 转换时更新 hasInput，打字中间无重渲染
+                        const newHasInput = !!e.target.value.trim();
+                        if (newHasInput !== hasInput) setHasInput(newHasInput);
+                      }}
                       onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
                       placeholder="Summarize, rephrase, convert..."
                       className="w-full bg-transparent border-none outline-none text-gray-800 placeholder:text-gray-400 font-medium resize-none h-[24px] overflow-hidden leading-relaxed py-0 focus:ring-0 text-[15px]"
                       rows={1}
                       style={{ minHeight: '24px', maxHeight: '120px' }}
-                      onInput={(e) => {
-                        e.target.style.height = '24px';
-                        e.target.style.height = e.target.scrollHeight + 'px';
-                      }}
                     />
                   </div>
 
@@ -2338,7 +2360,7 @@ const ChatPDF = () => {
 
                 <motion.button
                   onClick={isLoading ? handleStop : sendMessage}
-                  disabled={!isLoading && (!inputMessage.trim() && !screenshot)}
+                  disabled={!isLoading && (!hasInput && !screenshot)}
                   className="glass-btn-3d relative z-10 flex-shrink-0"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -2527,44 +2549,44 @@ const ChatPDF = () => {
                       </div>
 
                       {/* Model Status Cards */}
-                      {/* Model Status Cards */}
+                      {/* Model Status Cards - Minimalistic Style */}
                       <div className="flex flex-col gap-3">
                         {/* Chat Model Card */}
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
-                          <div className="flex items-center gap-3 mb-2">
-                            <div className="p-1.5 rounded-lg bg-blue-50/80 text-blue-600 backdrop-blur-sm">
-                              <MessageSquare className="w-3.5 h-3.5" />
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-blue-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
+                          <div className="flex items-center gap-4">
+                            <MessageCircle className="w-5 h-5 text-gray-400 group-hover:text-blue-500 transition-colors" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Chat Model</div>
+                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
+                                {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
+                              </div>
                             </div>
-                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Chat Model</span>
-                          </div>
-                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
-                            {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
                           </div>
                         </div>
 
                         {/* Embedding Model Card */}
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
-                          <div className="flex items-center gap-3 mb-2">
-                            <div className="p-1.5 rounded-lg bg-purple-50/80 text-purple-600 backdrop-blur-sm">
-                              <Database className="w-3.5 h-3.5" />
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
+                          <div className="flex items-center gap-4">
+                            <Database className="w-5 h-5 text-gray-400 group-hover:text-purple-500 transition-colors" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Embedding</div>
+                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
+                                {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
+                              </div>
                             </div>
-                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Embedding</span>
-                          </div>
-                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
-                            {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
                           </div>
                         </div>
 
                         {/* Rerank Model Card */}
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-3 transition-all hover:border-amber-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm">
-                          <div className="flex items-center gap-3 mb-2">
-                            <div className="p-1.5 rounded-lg bg-amber-50/80 text-amber-600 backdrop-blur-sm">
-                              <ListFilter className="w-3.5 h-3.5" />
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-amber-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
+                          <div className="flex items-center gap-4">
+                            <ArrowUpDown className="w-5 h-5 text-gray-400 group-hover:text-amber-500 transition-colors" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Rerank</div>
+                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
+                                {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
+                              </div>
                             </div>
-                            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Rerank</span>
-                          </div>
-                          <div className="font-bold text-gray-800 text-sm truncate pl-1" title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
-                            {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
                           </div>
                         </div>
                       </div>

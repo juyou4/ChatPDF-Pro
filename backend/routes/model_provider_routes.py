@@ -226,6 +226,7 @@ async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: Li
         "Content-Type": "application/json"
     }
     last_error = None
+    auth_error = None  # 记录 401/403 认证失败，用于区分「key错误」和「端点不存在」
 
     for ep in endpoints:
         if not ep:
@@ -236,6 +237,19 @@ async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: Li
                 response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 return response.json(), url
+            # 401/403 表示 API Key 无效，立即返回认证失败（不继续尝试其他 endpoint）
+            if response.status_code in (401, 403):
+                try:
+                    err_body = response.json()
+                    err_msg = (
+                        err_body.get("error", {}).get("message")
+                        or err_body.get("message")
+                        or str(err_body)
+                    )
+                except Exception:
+                    err_msg = response.text[:200]
+                auth_error = f"API Key 无效或格式错误（HTTP {response.status_code}）: {err_msg}"
+                return None, auth_error
             last_error = f"HTTP {response.status_code}"
         except Exception as e:
             last_error = str(e)
@@ -272,7 +286,11 @@ async def test_provider_connection(request: ProviderTestRequest):
                 "latency": latency
             }
 
-        # 虽然未获取到模型列表，但连接本身成功
+        # 401/403 认证失败：API Key 无效或格式错误
+        if last_error and ("401" in last_error or "403" in last_error or "API Key 无效" in last_error):
+            return {"success": False, "message": last_error}
+
+        # 虽然未获取到模型列表，但连接本身成功（服务器可达且未返回 401/403）
         latency = int((time() - start_time) * 1000)
         return {
             "success": True,

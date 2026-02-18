@@ -17,7 +17,9 @@ from services.table_service import protect_markdown_tables, restore_markdown_tab
 from services.query_analyzer import get_retrieval_strategy
 from services.preset_service import get_generation_prompt
 from services.context_builder import ContextBuilder
+import base64
 from models.provider_registry import PROVIDER_CONFIG
+from models.dynamic_store import load_dynamic_providers
 from utils.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -31,6 +33,49 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
+    """按优先级解析 provider 的 chat endpoint：
+    1. 前端传入的 api_host（用户自定义地址）
+    2. 动态 provider 存储（用户通过 UI 添加的定制 provider）
+    3. 静态 PROVIDER_CONFIG（内置默认配置）
+    """
+    # 1. 前端明确传入了 api_host：拼接成完整 endpoint
+    if api_host and api_host.strip():
+        host = api_host.strip().rstrip('/')
+        # 如果已包含 /chat/completions 则直接使用
+        if host.endswith('/chat/completions'):
+            return host
+        return f"{host}/chat/completions"
+    # 2. 动态 provider 存储
+    dynamic = load_dynamic_providers()
+    if provider_id in dynamic:
+        return dynamic[provider_id].get("endpoint", "")
+    # 3. 静态内置配置
+    return PROVIDER_CONFIG.get(provider_id, {}).get("endpoint", "")
+
+
+def _detect_image_mime(image_base64: str) -> str:
+    """从 base64 直接检测图片实际 MIME 类型。
+    支持 JPEG, PNG, GIF, WebP；无法识别时回退为 image/jpeg。
+    16 个 base64 字符解码为恰好 12 字节，足够判断所有常见格式。
+    """
+    try:
+        # 16 base64 字符 = 4 组 * 3 字节/组 = 12 字节，正好是 4 的倍数，无需额外填充
+        chunk = image_base64[:16]
+        header = base64.b64decode(chunk)
+    except Exception:
+        return 'image/jpeg'
+    if header[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg'
+    if header[:4] == b'\x89PNG':
+        return 'image/png'
+    if header[:6] in (b'GIF87a', b'GIF89a'):
+        return 'image/gif'
+    if header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+        return 'image/webp'
+    return 'image/jpeg'
 
 # 上下文构建器实例，用于生成引文指示提示词
 _context_builder = ContextBuilder()
@@ -73,6 +118,8 @@ class ChatRequest(BaseModel):
     # 新增：术语库和表格保护选项
     enable_glossary: bool = True  # 是否启用术语库
     protect_tables: bool = True   # 是否保护表格结构
+    # 用户配置的 API 地址（可选，优先于静态 PROVIDER_CONFIG）
+    api_host: Optional[str] = None
     # 深度思考模式
     enable_thinking: bool = False  # 是否开启深度思考
     # 模型参数（前端可调，None 表示不传，由模型使用默认值）
@@ -272,9 +319,10 @@ async def chat_with_pdf(request: ChatRequest):
         # 截图模式也注入记忆上下文（需求 5.2）
         system_prompt = _inject_memory_context(system_prompt, memory_context)
 
+        mime_type = _detect_image_mime(request.image_base64)
         user_content = [
             {"type": "text", "text": request.question or "请分析这张图片"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"}}
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{request.image_base64}"}}
         ]
     else:
         # 非截图模式：正常的文本检索流程
@@ -373,7 +421,7 @@ async def chat_with_pdf(request: ChatRequest):
             request.api_key,
             request.model,
             request.api_provider,
-            endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
+            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
             middlewares=middlewares,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
@@ -447,9 +495,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
         # 截图模式也注入记忆上下文（需求 5.2）
         system_prompt = _inject_memory_context(system_prompt, memory_context)
 
+        mime_type = _detect_image_mime(request.image_base64)
         user_content = [
             {"type": "text", "text": request.question or "请分析这张图片"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"}}
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{request.image_base64}"}}
         ]
     else:
         # 非截图模式：正常的文本检索流程
@@ -576,7 +625,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     api_key=request.api_key or "",
                     model=request.model,
                     provider=request.api_provider,
-                    endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
+                    endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                     max_rounds=settings.agent_max_rounds,
                     temperature=settings.agent_planner_temperature,
                 )
@@ -639,7 +688,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 request.api_key,
                 request.model,
                 request.api_provider,
-                endpoint=PROVIDER_CONFIG.get(request.api_provider, {}).get("endpoint", ""),
+                endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                 middlewares=middlewares,
                 enable_thinking=request.enable_thinking,
                 max_tokens=request.max_tokens,
