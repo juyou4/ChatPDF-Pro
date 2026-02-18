@@ -116,8 +116,11 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^gpt-(4o|4-turbo|4\.1|5)', lower_id):
         # OpenAI GPT-4o、GPT-4 Turbo、GPT-4.1、GPT-5 系列均支持视觉
         tags.append("vision")
-    elif re.search(r'^claude-(3|sonnet-4|opus-4|haiku-4)', lower_id):
-        # Anthropic Claude 3+ 系列（含 claude-3-*、claude-sonnet-4、claude-opus-4、claude-haiku-4）
+    elif re.search(r'^(o3|o4)(-|$)', lower_id):
+        # OpenAI o3/o4 推理模型同样支持视觉输入
+        tags.append("vision")
+    elif re.search(r'^claude-(3|sonnet-4|opus-4|haiku-3|haiku-4)', lower_id):
+        # Anthropic Claude 3+ 全系（含 claude-haiku-3.x）均支持视觉
         tags.append("vision")
     elif re.search(r'^gemini-(2|[3-9])', lower_id):
         # Google Gemini 2+ 系列均支持视觉
@@ -131,8 +134,11 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^abab6\.5', lower_id):
         # MiniMax abab6.5 系列支持视觉
         tags.append("vision")
-    elif re.search(r'^doubao-1\.5-pro', lower_id):
-        # 字节跳动豆包 doubao-1.5-pro 系列支持视觉
+    elif re.search(r'^(doubao-1\.5-pro|doubao-seed)', lower_id):
+        # 字节跳动豆包：1.5-Pro 及全部 Seed 系列（Seed 均为多模态）
+        tags.append("vision")
+    elif re.search(r'^moonshot-v1', lower_id):
+        # Moonshot moonshot-v1 系列支持图片输入
         tags.append("vision")
 
     # 中文优化标签

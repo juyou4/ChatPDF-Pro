@@ -13,13 +13,22 @@
  * 覆盖 OpenAI、Anthropic、Google、阿里云、xAI、MiniMax、字节跳动等主流多模态模型系列。
  */
 export const VISION_CAPABLE_RULES = {
-  openai: /^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5)/i,
-  anthropic: /^(claude-3|claude-sonnet-4|claude-opus-4|claude-haiku-4)/i,
+  // OpenAI: GPT-4o/4-Turbo/4.1/5 系列 + o3/o4 推理模型均支持视觉
+  openai: /^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)/i,
+  // Anthropic: Claude 3 系列全系 + Claude 4 Sonnet/Opus/Haiku（含 haiku-3.x）
+  anthropic: /^(claude-3|claude-sonnet-4|claude-opus-4|claude-haiku-3|claude-haiku-4)/i,
+  // Google Gemini 2+ 全系均支持视觉
   gemini: /^gemini-(2|[3-9])/i,
+  // 通义千问 VL 和 Max 系列
   qwen: /^(qwen-vl|qwen-max)/i,
+  // xAI Grok 4 系列及专用视觉模型
   grok: /^(grok-vision|grok-4)/i,
+  // MiniMax abab6.5 系列
   minimax: /^abab6\.5/i,
-  doubao: /^doubao-1\.5-pro/i,
+  // 豆包：1.5-Pro 及全部 Seed 系列（Seed 均为多模态）
+  doubao: /^(doubao-1\.5-pro|doubao-seed)/i,
+  // Moonshot：moonshot-v1 系列支持图片输入
+  moonshot: /^moonshot-v1/i,
 }
 
 /**

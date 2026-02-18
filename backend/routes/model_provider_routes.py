@@ -50,27 +50,66 @@ async def get_models():
     # 这些模型不在 EMBEDDING_MODELS 中，但前端需要通过 /models API 获取
     CHAT_MODELS = {
         "openai": {
+            "gpt-4.1": "GPT-4.1",
+            "gpt-4.1-mini": "GPT-4.1 mini",
+            "o3": "OpenAI o3",
+            "o4-mini": "OpenAI o4-mini",
             "gpt-4o": "GPT-4o",
             "gpt-4o-mini": "GPT-4o mini",
         },
+        "aliyun": {
+            "qwen3-max": "Qwen3-Max",
+            "qwen3.5-plus": "Qwen3.5-Plus",
+            "qwen-plus": "Qwen-Plus",
+            "qwen-turbo": "Qwen-Turbo",
+        },
         "deepseek": {
-            "deepseek-chat": "DeepSeek Chat",
-            "deepseek-reasoner": "DeepSeek Reasoner",
+            "deepseek-chat": "DeepSeek V3",
+            "deepseek-reasoner": "DeepSeek R1",
         },
         "moonshot": {
-            "moonshot-v1-8k": "Moonshot v1 8K",
+            "kimi-k2.5": "Kimi K2.5",
+            "kimi-k2": "Kimi K2",
+            "moonshot-v1-128k": "Moonshot v1 128K",
             "moonshot-v1-32k": "Moonshot v1 32K",
+            "moonshot-v1-8k": "Moonshot v1 8K",
         },
         "zhipu": {
+            "glm-5": "GLM-5",
+            "glm-4.7": "GLM-4.7",
+            "glm-4.5": "GLM-4.5",
+            "glm-4.5-air": "GLM-4.5-Air",
             "glm-4-air": "GLM-4-Air",
-            "glm-4": "GLM-4",
         },
         "minimax": {
+            "MiniMax-Text-01": "MiniMax Text-01",
             "abab6.5s-chat": "abab6.5s-chat",
         },
         "silicon": {
-            "Qwen/Qwen-2.5-7B-Instruct": "Qwen 2.5 7B (SiliconFlow)",
+            "deepseek-ai/DeepSeek-R1": "DeepSeek R1 (SiliconFlow)",
             "deepseek-ai/DeepSeek-V3": "DeepSeek V3 (SiliconFlow)",
+            "Qwen/Qwen3-235B-A22B": "Qwen3-235B (SiliconFlow)",
+            "Qwen/Qwen2.5-7B-Instruct": "Qwen2.5 7B (SiliconFlow)",
+        },
+        "anthropic": {
+            "claude-opus-4-6": "Claude Opus 4.6",
+            "claude-sonnet-4-6": "Claude Sonnet 4.6",
+            "claude-opus-4-5": "Claude Opus 4.5",
+            "claude-sonnet-4-5": "Claude Sonnet 4.5",
+            "claude-haiku-3-5": "Claude Haiku 3.5",
+        },
+        "gemini": {
+            "gemini-3-pro": "Gemini 3 Pro",
+            "gemini-3-flash": "Gemini 3 Flash",
+            "gemini-2.5-pro": "Gemini 2.5 Pro",
+            "gemini-2.5-flash": "Gemini 2.5 Flash",
+            "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite",
+        },
+        "grok": {
+            "grok-4": "Grok 4",
+            "grok-4-1-fast": "Grok 4.1 Fast",
+            "grok-3": "Grok 3",
+            "grok-3-mini": "Grok 3 Mini",
         },
     }
 
@@ -265,10 +304,76 @@ class ModelFetchRequest(BaseModel):
 async def fetch_provider_models(request: ModelFetchRequest):
     """从Provider API获取模型列表（支持动态/静态）"""
     try:
-        # 不支持自动拉取模型列表的提供商：
-        # - anthropic/gemini：使用非 OpenAI 兼容的 API 格式
-        # - doubao：火山引擎 Ark API 虽然 OpenAI 兼容，但不提供 GET /models 端点
-        unsupported_providers = {"anthropic", "gemini", "doubao"}
+        # Anthropic Claude：使用非 OpenAI 格式 API，返回预设模型列表
+        if request.providerId == 'anthropic':
+            ANTHROPIC_PRESET_MODELS = [
+                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "type": "chat",
+                 "metadata": {"description": "Anthropic 旗舰模型，200K 上下文，最强编程与推理，支持 1M 上下文 (beta)"}},
+                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "type": "chat",
+                 "metadata": {"description": "Anthropic 最新均衡模型，Opus 级别推理能力，200K 上下文，同等价格"}},
+                {"id": "claude-opus-4-5", "name": "Claude Opus 4.5", "type": "chat",
+                 "metadata": {"description": "Claude Opus 系列前代，超强编程、Agent 工作流"}},
+                {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "type": "chat",
+                 "metadata": {"description": "Claude 均衡前代版本，高性价比"}},
+                {"id": "claude-haiku-3-5", "name": "Claude Haiku 3.5", "type": "chat",
+                 "metadata": {"description": "最快速轻量 Claude 模型，低成本高并发"}},
+            ]
+            return {
+                "models": [
+                    {
+                        "id": m["id"],
+                        "name": m["name"],
+                        "providerId": "anthropic",
+                        "type": m["type"],
+                        "capabilities": [{"type": m["type"], "isUserSelected": False}],
+                        "tags": infer_model_tags(m["id"]),
+                        "metadata": m["metadata"],
+                        "isSystem": True,
+                        "isUserAdded": False
+                    }
+                    for m in ANTHROPIC_PRESET_MODELS
+                ],
+                "providerId": "anthropic",
+                "timestamp": int(datetime.now().timestamp()),
+                "message": "已返回 Claude 预设模型列表（Anthropic 使用自定义 API 格式，如有新模型请手动添加）"
+            }
+
+        # Google Gemini：返回预设模型列表
+        if request.providerId == 'gemini':
+            GEMINI_PRESET_MODELS = [
+                {"id": "gemini-3-pro", "name": "Gemini 3 Pro", "type": "chat",
+                 "metadata": {"description": "Google 最新旗舰推理模型，1M 上下文，自适应思考，强多模态 (preview)"}},
+                {"id": "gemini-3-flash", "name": "Gemini 3 Flash", "type": "chat",
+                 "metadata": {"description": "Google 最新多模态理解模型，强编程与推理 (preview)"}},
+                {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "type": "chat",
+                 "metadata": {"description": "Gemini 旗舰稳定版，1M 上下文，自适应思考"}},
+                {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "type": "chat",
+                 "metadata": {"description": "Gemini 快速均衡版，可控推理预算"}},
+                {"id": "gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash-Lite", "type": "chat",
+                 "metadata": {"description": "Gemini 超轻量版，大规模低成本场景"}},
+            ]
+            return {
+                "models": [
+                    {
+                        "id": m["id"],
+                        "name": m["name"],
+                        "providerId": "gemini",
+                        "type": m["type"],
+                        "capabilities": [{"type": m["type"], "isUserSelected": False}],
+                        "tags": infer_model_tags(m["id"]),
+                        "metadata": m["metadata"],
+                        "isSystem": True,
+                        "isUserAdded": False
+                    }
+                    for m in GEMINI_PRESET_MODELS
+                ],
+                "providerId": "gemini",
+                "timestamp": int(datetime.now().timestamp()),
+                "message": "已返回 Gemini 预设模型列表（如有新模型请手动添加）"
+            }
+
+        # 其他不支持自动拉取的自定义 provider
+        unsupported_providers: set = set()
         if request.providerId in unsupported_providers or (
             request.providerType and request.providerType.lower() in unsupported_providers
         ):
@@ -278,6 +383,46 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 "providerType": request.providerType,
                 "timestamp": int(datetime.now().timestamp()),
                 "message": "该提供商不支持自动拉取模型列表，请在前端手动输入模型 ID"
+            }
+
+        # 字节跳动豆包：火山引擎 Ark API 不提供 GET /models 端点，返回预设模型列表
+        if request.providerId == 'doubao':
+            DOUBAO_PRESET_MODELS = [
+                {"id": "doubao-seed-2-0-pro", "name": "Doubao Seed 2.0 Pro", "type": "chat",
+                 "metadata": {"description": "豆包 2.0 旗舰模型，对标 GPT-5.2 / Gemini 3 Pro，支持长链路推理与多模态"}},
+                {"id": "doubao-seed-2-0-lite-260215", "name": "Doubao Seed 2.0 Lite", "type": "chat",
+                 "metadata": {"description": "豆包 2.0 Lite，均衡性能与成本，能力超越上一代豆包 1.8"}},
+                {"id": "doubao-seed-2-0-mini-260215", "name": "Doubao Seed 2.0 Mini", "type": "chat",
+                 "metadata": {"description": "豆包 2.0 Mini，低延迟高并发，适合成本敏感场景"}},
+                {"id": "doubao-seed-2-0-code-preview-260215", "name": "Doubao Seed 2.0 Code", "type": "chat",
+                 "metadata": {"description": "豆包 2.0 编程专项模型，深度优化 Agentic Coding 场景"}},
+                {"id": "doubao-seed-1-8", "name": "Doubao Seed 1.8", "type": "chat",
+                 "metadata": {"description": "豆包 1.8，上一代主力模型，多模态 Agent 场景优化"}},
+                {"id": "doubao-1-5-pro-32k-250115", "name": "Doubao 1.5 Pro 32K", "type": "chat",
+                 "metadata": {"description": "豆包 1.5 Pro，32K 上下文"}},
+                {"id": "doubao-embedding-large-250104", "name": "Doubao Embedding Large", "type": "embedding",
+                 "metadata": {"dimension": 4096, "maxTokens": 32768, "description": "豆包大尺寸嵌入模型"}},
+                {"id": "doubao-embedding-250104", "name": "Doubao Embedding", "type": "embedding",
+                 "metadata": {"dimension": 2048, "maxTokens": 32768, "description": "豆包标准嵌入模型"}},
+            ]
+            return {
+                "models": [
+                    {
+                        "id": m["id"],
+                        "name": m["name"],
+                        "providerId": "doubao",
+                        "type": m["type"],
+                        "capabilities": [{"type": m["type"], "isUserSelected": False}],
+                        "tags": infer_model_tags(m["id"]),
+                        "metadata": m["metadata"],
+                        "isSystem": True,
+                        "isUserAdded": False
+                    }
+                    for m in DOUBAO_PRESET_MODELS
+                ],
+                "providerId": "doubao",
+                "timestamp": int(datetime.now().timestamp()),
+                "message": "已返回豆包预设模型列表（火山引擎不支持动态拉取，如有新模型请手动添加）"
             }
 
         if request.providerId == 'local':

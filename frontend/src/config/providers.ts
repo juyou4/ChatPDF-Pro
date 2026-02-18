@@ -176,6 +176,60 @@ export const SYSTEM_PROVIDERS: Provider[] = [
             chatEndpoint: '/chat/completions',
             embeddingEndpoint: '/embeddings'
         }
+    },
+    {
+        id: 'anthropic',
+        name: 'Anthropic (Claude)',
+        logo: getProviderLogo('anthropic'),
+        apiKey: '',
+        apiHost: 'https://api.anthropic.com/v1',
+        enabled: false,
+        isSystem: true,
+        capabilities: {
+            chat: true,
+            embedding: false,
+            rerank: false
+        },
+        apiConfig: {
+            fetchModelsEndpoint: '/models',
+            chatEndpoint: '/messages'
+        }
+    },
+    {
+        id: 'gemini',
+        name: 'Google (Gemini)',
+        logo: getProviderLogo('gemini'),
+        apiKey: '',
+        apiHost: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        enabled: false,
+        isSystem: true,
+        capabilities: {
+            chat: true,
+            embedding: false,
+            rerank: false
+        },
+        apiConfig: {
+            fetchModelsEndpoint: '/models',
+            chatEndpoint: '/chat/completions'
+        }
+    },
+    {
+        id: 'grok',
+        name: 'xAI (Grok)',
+        logo: getProviderLogo('grok'),
+        apiKey: '',
+        apiHost: 'https://api.x.ai/v1',
+        enabled: false,
+        isSystem: true,
+        capabilities: {
+            chat: true,
+            embedding: false,
+            rerank: false
+        },
+        apiConfig: {
+            fetchModelsEndpoint: '/models',
+            chatEndpoint: '/chat/completions'
+        }
     }
 ]
 
