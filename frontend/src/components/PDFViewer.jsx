@@ -10,7 +10,7 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 // Configure worker - 直接指定版本以确保匹配
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel }, ref) => {
+const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -363,28 +363,28 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
     }, [highlightInfo, pageNumber, scale, numPages]);
 
     return (
-        <div className="relative h-full flex flex-col bg-[var(--color-bg-base)] rounded-2xl overflow-hidden">
-            <div className="flex items-center justify-between p-4 bg-white border-b border-gray-200">
+        <div className={`relative h-full flex flex-col rounded-2xl overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[var(--color-bg-base)]'}`}>
+            <div className={`flex items-center justify-between p-4 border-b transition-colors duration-200 ${darkMode ? 'bg-[#1a1d21] border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}>
                 <div className="flex items-center gap-2">
-                    <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-50">
+                    <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className={`p-2 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
                         <ChevronLeft className="w-5 h-5" />
                     </button>
                     <span className="text-sm font-medium px-3">{pageNumber} / {numPages || '--'}</span>
-                    <button onClick={() => changePage(1)} disabled={pageNumber >= (numPages || 1)} className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-50">
+                    <button onClick={() => changePage(1)} disabled={pageNumber >= (numPages || 1)} className={`p-2 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
                         <ChevronRight className="w-5 h-5" />
                     </button>
                 </div>
                 <div className="flex items-center gap-2">
-                    <button onClick={zoomOut} className="p-2 rounded-lg hover:bg-gray-100">
+                    <button onClick={zoomOut} className={`p-2 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
                         <ZoomOut className="w-5 h-5" />
                     </button>
                     <span className="text-sm font-medium px-2">{Math.round(scale * 100)}%</span>
-                    <button onClick={zoomIn} className="p-2 rounded-lg hover:bg-gray-100">
+                    <button onClick={zoomIn} className={`p-2 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
                         <ZoomIn className="w-5 h-5" />
                     </button>
                 </div>
             </div>
-            <div className="flex-1 overflow-auto p-6 flex items-start justify-center bg-[var(--color-bg-base)] pdf-scroll" onMouseUp={handleTextSelection}>
+            <div className={`flex-1 overflow-auto p-6 flex items-start justify-center pdf-scroll ${darkMode ? 'bg-[#0f1115]' : 'bg-[var(--color-bg-base)]'}`} onMouseUp={handleTextSelection}>
                 {error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>
@@ -408,7 +408,7 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                             </div>
                         }
                     >
-                        <div ref={ref} className="relative">
+                        <div ref={ref} className="relative" style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
                             <Page
                                 inputRef={pageRef}
                                 pageNumber={pageNumber}

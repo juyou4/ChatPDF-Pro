@@ -1075,3 +1075,22 @@
 .dark .thinking-copy-btn:hover {
     color: #e5e7eb;
 }
+
+/* --- Dark Mode Prose High Contrast --- */
+.dark .prose-invert {
+    --tw-prose-body: #e5e7eb;      /* gray-200 - brighter body text */
+    --tw-prose-headings: #f9fafb;  /* gray-50 */
+    --tw-prose-links: #60a5fa;     /* blue-400 */
+    --tw-prose-bold: #f3f4f6;      /* gray-100 */
+    --tw-prose-counters: #9ca3af;  /* gray-400 */
+    --tw-prose-bullets: #6b7280;   /* gray-500 */
+    --tw-prose-hr: #374151;        /* gray-700 */
+    --tw-prose-quotes: #f3f4f6;    /* gray-100 */
+    --tw-prose-quote-borders: #374151; /* gray-700 */
+    --tw-prose-captions: #9ca3af;  /* gray-400 */
+    --tw-prose-code: #f3f4f6;      /* gray-100 */
+    --tw-prose-pre-code: #e5e7eb;  /* gray-200 */
+    --tw-prose-pre-bg: #111827;    /* gray-900 */
+    --tw-prose-th-borders: #4b5563;/* gray-600 */
+    --tw-prose-td-borders: #374151;/* gray-700 */
+}

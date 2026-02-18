@@ -1686,7 +1686,7 @@ const ChatPDF = () => {
   // Render Components
   return (
     <div
-      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-white' : 'bg-transparent text-[var(--color-text-main)]'}`}
+      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-[#0f1115] text-gray-200' : 'bg-transparent text-[var(--color-text-main)]'}`}
       onClick={(e) => {
         if (!showTextMenu) return;
         // 避免刚选中文本时被同一次点击事件立刻关闭
@@ -1734,7 +1734,7 @@ const ChatPDF = () => {
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-gray-900/80 border-white/10 backdrop-blur-3xl backdrop-saturate-150' : 'bg-white/80 border-white/50 backdrop-blur-3xl backdrop-saturate-150 border shadow-xl'}`}
+        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150' : 'bg-white/80 border-white/50 backdrop-blur-3xl backdrop-saturate-150 border shadow-xl'}`}
       >
         <div className="w-72 mx-auto flex flex-col h-full items-stretch">
           <div className="px-6 py-8 flex items-center justify-between">
@@ -1775,7 +1775,11 @@ const ChatPDF = () => {
               <div
                 key={idx}
                 onClick={() => loadSession(item)}
-                className={`w-full max-w-[260px] p-3 rounded-xl cursor-pointer group flex items-center gap-3 transition-all duration-200 ${item.id === docId ? 'bg-white shadow-md scale-[1.02]' : 'hover:bg-white/40'}`}
+                className={`w-full max-w-[260px] p-3 rounded-xl cursor-pointer group flex items-center gap-3 transition-all duration-200 ${
+                  item.id === docId
+                    ? (darkMode ? 'bg-white/10 shadow-md scale-[1.02] text-white ring-1 ring-white/10' : 'bg-white shadow-md scale-[1.02]')
+                    : (darkMode ? 'text-gray-400 hover:bg-white/5 hover:text-gray-200' : 'hover:bg-white/40')
+                  }`}
               >
                 <MessageSquare className="w-5 h-5 text-blue-500" />
                 <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
@@ -1993,6 +1997,7 @@ const ChatPDF = () => {
                     isSelecting={isSelectingArea}
                     onAreaSelected={handleAreaSelected}
                     onSelectionCancel={handleSelectionCancel}
+                    darkMode={darkMode}
                     onTextSelect={(text) => {
                       if (text) {
                         setSelectedText(text);
@@ -2210,7 +2215,7 @@ const ChatPDF = () => {
                   >
                     <div className={`${msg.type === 'user'
                       ? 'max-w-[85%] rounded-2xl px-4 py-3 shadow-sm message-bubble-user rounded-tr-sm text-sm'
-                      : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-100 overflow-hidden'
+                      : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-50 overflow-hidden'
                       }`}
                       style={msg.type !== 'user' ? { contain: 'inline-size' } : undefined}
                     >
