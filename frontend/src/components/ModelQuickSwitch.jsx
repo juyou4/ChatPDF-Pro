@@ -75,11 +75,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     : null
 
   // ========== 深度思考相关 ==========
-  // 判断当前模型是否支持深度思考
-  // 条件：
-  // 1. 模型本身带 reasoning 标签
-  // 2. 同 provider 下有 reasoning 标签的模型
-  // 3. provider 本身已知支持思考模式（如 DeepSeek、智谱等，即使模型列表中没有 reasoning 标签）
+  // 已知支持通过参数开启思考模式的 provider（非推理模型也能开启）
   const THINKING_CAPABLE_PROVIDERS = new Set([
     'deepseek',  // deepseek-chat 支持 thinking 参数
     'zhipu',     // GLM-4.5+ 支持 thinking 参数
@@ -88,29 +84,63 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     'moonshot',  // kimi-k2-thinking 等自动输出
   ])
 
+  // 原生推理模型自动思考的 provider（这些 provider 的推理模型无需额外参数，始终输出思考内容）
+  const ALWAYS_THINKING_PROVIDERS = new Set([
+    'moonshot',  // Kimi 思考模型自动输出 reasoning_content
+    'doubao',    // 豆包 Seed 系列自动思考
+  ])
+
+  // 当前模型是否为原生推理模型（始终思考，不可关闭）
+  const isAlwaysThinking = useMemo(() => {
+    if (!currentModel?.tags?.includes('reasoning')) return false
+    if (!currentProviderId) return false
+    // 这些 provider 的推理模型始终自动思考
+    if (ALWAYS_THINKING_PROVIDERS.has(currentProviderId)) return true
+    // OpenAI o 系列、Gemini 推理系列等也是原生推理模型
+    const nativeReasoningIds = new Set([
+      'o3', 'o4-mini', 'o3-mini', 'o1', 'o1-mini',  // OpenAI 推理系列
+      'deepseek-reasoner',                             // DeepSeek R1
+      'grok-4', 'grok-4-1-fast', 'grok-3', 'grok-3-mini',  // Grok 推理系列
+    ])
+    if (nativeReasoningIds.has(currentModel.id)) return true
+    // 硅基流动托管的推理模型
+    if (currentModel.id.includes('DeepSeek-R1') || currentModel.id.includes('Qwen3-235B')) return true
+    return false
+  }, [currentModel, currentProviderId])
+
+  // 当前模型是否支持深度思考（显示按钮的条件）
   const supportsThinking = useMemo(() => {
     if (!currentProviderId) return false
-    // 当前模型本身就是 reasoning 模型
+    // 原生推理模型 — 始终显示按钮（锁定状态）
+    if (isAlwaysThinking) return true
+    // 当前模型带 reasoning 标签但不是"始终思考"类型 — 可选开关
     if (currentModel?.tags?.includes('reasoning')) return true
     // provider 已知支持思考模式
     if (THINKING_CAPABLE_PROVIDERS.has(currentProviderId)) return true
-    // 同 provider 下有 reasoning 模型，说明该 provider 的 API 支持 thinking 参数
+    // 同 provider 下有 reasoning 模型
     const chatModels = getModelsByType('chat')
     return chatModels.some(
       m => m.providerId === currentProviderId && m.tags?.includes('reasoning')
     )
-  }, [currentProviderId, currentModel, getModelsByType])
+  }, [currentProviderId, currentModel, isAlwaysThinking, getModelsByType])
 
   // 当前力度是否已开启（非 off）
-  const isThinkingActive = reasoningEffort !== 'off'
+  const isThinkingActive = isAlwaysThinking || reasoningEffort !== 'off'
 
-  // 切换模型时，如果新模型不支持思考，自动关闭
+  // 切换模型时的自动调整
   useEffect(() => {
-    if (!supportsThinking && isThinkingActive) {
+    if (isAlwaysThinking) {
+      // 原生推理模型：强制设为 high（实际不影响后端行为，仅 UI 状态一致）
+      if (reasoningEffort === 'off') {
+        setReasoningEffort('high')
+        onThinkingChange?.(true)
+      }
+    } else if (!supportsThinking && reasoningEffort !== 'off') {
+      // 不支持思考的模型：自动关闭
       setReasoningEffort('off')
       onThinkingChange?.(false)
     }
-  }, [supportsThinking, isThinkingActive, onThinkingChange, setReasoningEffort])
+  }, [supportsThinking, isAlwaysThinking, reasoningEffort, onThinkingChange, setReasoningEffort])
 
   // 选择力度级别
   const handleSelectEffort = (effortValue) => {
@@ -328,12 +358,17 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     {supportsThinking && (
       <div ref={effortMenuRef} className="relative">
         <button
-          onClick={() => setIsEffortMenuOpen(prev => !prev)}
-          title={`深度思考：${currentEffort.label}`}
+          onClick={() => !isAlwaysThinking && setIsEffortMenuOpen(prev => !prev)}
+          title={isAlwaysThinking
+            ? `${currentModel?.name || '当前模型'} 为原生推理模型，始终启用深度思考`
+            : `深度思考：${currentEffort.label}`
+          }
           className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-full border transition-all ${
-            isThinkingActive
-              ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-sm'
-              : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
+            isAlwaysThinking
+              ? 'border-purple-300 bg-purple-50 text-purple-700 cursor-default'
+              : isThinkingActive
+                ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-sm'
+                : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
           }`}
         >
           {/* 原子图标 */}
@@ -345,13 +380,16 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
           </svg>
           {/* 显示当前力度级别标识 */}
           <span>
-            {isThinkingActive ? `思考·${currentEffort.label}` : 'DeepThink'}
+            {isAlwaysThinking
+              ? '推理模型'
+              : isThinkingActive ? `思考·${currentEffort.label}` : 'DeepThink'
+            }
           </span>
         </button>
 
-        {/* 力度选择弹出菜单 — 向上弹出 */}
+        {/* 力度选择弹出菜单 — 向上弹出（原生推理模型不弹出） */}
         <AnimatePresence>
-          {isEffortMenuOpen && (
+          {isEffortMenuOpen && !isAlwaysThinking && (
             <motion.div
               initial={{ opacity: 0, y: 6, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
