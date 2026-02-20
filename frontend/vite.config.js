@@ -40,7 +40,14 @@ export default defineConfig({
             '/chat': {
                 target: 'http://127.0.0.1:8000',
                 changeOrigin: true,
-                secure: false
+                secure: false,
+                // Disable proxy buffering so SSE chunks reach the browser immediately
+                configure: (proxy) => {
+                    proxy.on('proxyRes', (proxyRes) => {
+                        // Flush each chunk to the browser right away (no Node buffering)
+                        proxyRes.on('data', () => {});
+                    });
+                },
             },
             '/uploads': {
                 target: 'http://127.0.0.1:8000',

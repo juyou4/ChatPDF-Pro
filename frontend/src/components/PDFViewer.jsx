@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, forwardRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, forwardRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -71,9 +71,78 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
     const zoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
 
     const [highlightRect, setHighlightRect] = useState(null);
-    // 支持多个高亮矩形，避免跨越空白区域的巨大单一矩形
     const [highlightRects, setHighlightRects] = useState([]);
     const pageRef = useRef(null);
+
+    // ── 自定义滚动条 ──
+    const THUMB_SIZE = 48;
+    const pdfScrollRef = useRef(null);
+    const [vThumb, setVThumb] = useState({ top: 0, visible: false });
+    const [hThumb, setHThumb] = useState({ left: 0, visible: false });
+    const isDragging = useRef(false);
+    const dragStart = useRef({});
+
+    const updateThumbs = useCallback(() => {
+        const el = pdfScrollRef.current;
+        if (!el) return;
+        const { scrollTop, scrollHeight, clientHeight, scrollLeft, scrollWidth, clientWidth } = el;
+        setVThumb(scrollHeight > clientHeight
+            ? { visible: true, top: 8 + (scrollTop / (scrollHeight - clientHeight)) * (clientHeight - THUMB_SIZE - 16) }
+            : { visible: false, top: 0 });
+        setHThumb(scrollWidth > clientWidth
+            ? { visible: true, left: 8 + (scrollLeft / (scrollWidth - clientWidth)) * (clientWidth - THUMB_SIZE - 16) }
+            : { visible: false, left: 0 });
+    }, []);
+
+    useEffect(() => {
+        const el = pdfScrollRef.current;
+        if (!el) return;
+        const ro = new ResizeObserver(updateThumbs);
+        ro.observe(el);
+        const t = setTimeout(updateThumbs, 100);
+        return () => { ro.disconnect(); clearTimeout(t); };
+    }, [updateThumbs]);
+
+    // 当缩放比例、页码或总页数变化时（PDF 重新渲染后），重新计算滚动条可见性
+    useEffect(() => {
+        const t = setTimeout(updateThumbs, 300);
+        return () => clearTimeout(t);
+    }, [scale, pageNumber, numPages, updateThumbs]);
+
+    const makeDragHandler = useCallback((axis) => (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging.current = true;
+        const el = pdfScrollRef.current;
+        dragStart.current = {
+            x: e.clientX, y: e.clientY,
+            scrollLeft: el.scrollLeft, scrollTop: el.scrollTop,
+        };
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'grabbing';
+        const onMove = (e) => {
+            const el = pdfScrollRef.current;
+            if (!el) return;
+            if (axis === 'v') {
+                const dy = e.clientY - dragStart.current.y;
+                const trackH = el.clientHeight - THUMB_SIZE - 16;
+                el.scrollTop = dragStart.current.scrollTop + (dy / trackH) * (el.scrollHeight - el.clientHeight);
+            } else {
+                const dx = e.clientX - dragStart.current.x;
+                const trackW = el.clientWidth - THUMB_SIZE - 16;
+                el.scrollLeft = dragStart.current.scrollLeft + (dx / trackW) * (el.scrollWidth - el.clientWidth);
+            }
+        };
+        const onUp = () => {
+            isDragging.current = false;
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }, []);
 
     useEffect(() => {
         let isMounted = true;
@@ -384,7 +453,14 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                     </button>
                 </div>
             </div>
-            <div className={`flex-1 overflow-auto p-6 flex items-start justify-center pdf-scroll ${darkMode ? 'bg-[#0f1115]' : 'bg-[var(--color-bg-base)]'}`} onMouseUp={handleTextSelection}>
+            <div className="relative flex-1 min-h-0">
+            <div
+                ref={pdfScrollRef}
+                className={`absolute inset-0 overflow-auto p-6 flex items-start justify-center pdf-scroll ${darkMode ? 'bg-[#0f1115]' : 'bg-[var(--color-bg-base)]'}`}
+                style={{ scrollbarWidth: 'none' }}
+                onMouseUp={handleTextSelection}
+                onScroll={updateThumbs}
+            >
                 {error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>
@@ -469,10 +545,36 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                     </Document>
                 )}
             </div>
+
+            {/* 竖向滚动条 */}
+            {vThumb.visible && (
+                <div className="absolute right-1.5 top-0 bottom-0 w-1.5 pointer-events-none z-10">
+                    <div
+                        className={`absolute w-full rounded-full pointer-events-auto cursor-grab active:cursor-grabbing transition-colors duration-200 ${
+                            darkMode ? 'bg-white/30 hover:bg-white/55' : 'bg-black/25 hover:bg-black/45'
+                        }`}
+                        style={{ top: vThumb.top, height: THUMB_SIZE }}
+                        onMouseDown={makeDragHandler('v')}
+                    />
+                </div>
+            )}
+            {/* 横向滚动条 */}
+            {hThumb.visible && (
+                <div className="absolute left-0 right-0 bottom-1.5 h-1.5 pointer-events-none z-10">
+                    <div
+                        className={`absolute h-full rounded-full pointer-events-auto cursor-grab active:cursor-grabbing transition-colors duration-200 ${
+                            darkMode ? 'bg-white/30 hover:bg-white/55' : 'bg-black/25 hover:bg-black/45'
+                        }`}
+                        style={{ left: hThumb.left, width: THUMB_SIZE }}
+                        onMouseDown={makeDragHandler('h')}
+                    />
+                </div>
+            )}
+            </div>
         </div>
     );
 });
 
-PDFViewer.displayName = 'PDFViewer';
+PDFViewer.displayName
 
 export default PDFViewer;

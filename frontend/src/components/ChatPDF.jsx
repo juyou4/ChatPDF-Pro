@@ -67,9 +67,11 @@ const PauseIcon = () => (
 const buildChatHistory = (messages, contextCount) => {
   if (!contextCount || contextCount <= 0) return [];
 
-  // 过滤出有效的对话消息（排除 system 和含图片的消息）
+  // 过滤出有效的对话消息（排除 system、含图片的消息、以及前端错误提示）
   const validMessages = messages.filter(msg =>
     (msg.type === 'user' || msg.type === 'assistant') && !msg.hasImage
+    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('⚠️ AI未返回内容'))
+    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('❌'))
   );
 
   // 取最近 contextCount * 2 条（每轮包含 user + assistant）
@@ -80,6 +82,22 @@ const buildChatHistory = (messages, contextCount) => {
     content: msg.content
   }));
 };
+
+// Pre-computed ring configurations for upload loading animation
+const UPLOAD_RING_CONFIGS = [
+  { s: 298, w: 14, c: 'rgba(100, 50, 255, 0.5)',  br: '52% 48% 55% 45% / 48% 52% 48% 52%', dur: 4.2, del: -2.1, dir: 'normal',  mix: 'screen' },
+  { s: 302, w: 22, c: 'rgba(50, 150, 255, 0.5)',  br: '45% 55% 48% 52% / 55% 45% 52% 48%', dur: 6.8, del: -4.3, dir: 'reverse', mix: 'screen' },
+  { s: 295, w: 17, c: 'rgba(0, 200, 255, 0.4)',   br: '58% 42% 45% 55% / 42% 58% 48% 52%', dur: 3.5, del: -1.7, dir: 'normal',  mix: 'overlay' },
+  { s: 304, w: 20, c: 'rgba(255, 100, 50, 0.5)',  br: '48% 52% 52% 48% / 58% 42% 55% 45%', dur: 7.3, del: -3.6, dir: 'reverse', mix: 'screen' },
+  { s: 293, w: 13, c: 'rgba(255, 200, 50, 0.4)',  br: '55% 45% 48% 52% / 45% 55% 42% 58%', dur: 5.1, del: -0.8, dir: 'normal',  mix: 'screen' },
+  { s: 301, w: 19, c: 'rgba(150, 50, 200, 0.5)',  br: '42% 58% 55% 45% / 52% 48% 58% 42%', dur: 4.7, del: -2.9, dir: 'reverse', mix: 'overlay' },
+  { s: 297, w: 16, c: 'rgba(100, 50, 255, 0.4)',  br: '50% 50% 52% 48% / 55% 45% 50% 50%', dur: 6.2, del: -4.8, dir: 'normal',  mix: 'screen' },
+  { s: 303, w: 23, c: 'rgba(50, 150, 255, 0.4)',  br: '46% 54% 50% 50% / 48% 52% 45% 55%', dur: 3.8, del: -1.2, dir: 'reverse', mix: 'screen' },
+  { s: 299, w: 15, c: 'rgba(0, 200, 255, 0.5)',   br: '53% 47% 46% 54% / 50% 50% 53% 47%', dur: 7.6, del: -3.1, dir: 'normal',  mix: 'overlay' },
+  { s: 305, w: 21, c: 'rgba(255, 100, 50, 0.4)',  br: '49% 51% 53% 47% / 46% 54% 49% 51%', dur: 4.9, del: -2.4, dir: 'reverse', mix: 'screen' },
+  { s: 292, w: 18, c: 'rgba(255, 200, 50, 0.5)',  br: '57% 43% 49% 51% / 53% 47% 46% 54%', dur: 5.5, del: -0.5, dir: 'normal',  mix: 'screen' },
+  { s: 300, w: 12, c: 'rgba(150, 50, 200, 0.4)',  br: '44% 56% 51% 49% / 57% 43% 52% 48%', dur: 6.5, del: -4.0, dir: 'reverse', mix: 'overlay' },
+];
 
 const ChatPDF = () => {
   // Core State
@@ -758,6 +776,7 @@ const ChatPDF = () => {
       temperature: enableTemperature ? temperature : null,
       top_p: enableTopP ? topP : null,
       stream_output: streamOutput,
+      enable_vector_search: enableVectorSearch,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
       // 自定义参数转换为 dict
       custom_params: customParams.length > 0 ? Object.fromEntries(
@@ -789,12 +808,14 @@ const ChatPDF = () => {
     try {
       // 使用 SSE 流式传输（截图也支持流式，后端已处理多模态消息）
       if (streamSpeed !== 'off' && streamOutput) {
-        // 重置流式缓冲状态
+      // 重置流式缓冲状态
+        // 先设置 activeStreamMsgIdRef 再 reset，否则 reset 内部的 onUpdate('') 会
+        // 用旧的 msgId 把上一条 AI 消息的 content 清空为空字符串
+        activeStreamMsgIdRef.current = tempMsgId;
         setContentStreamDone(false);
         setThinkingStreamDone(false);
         contentStream.reset('');
         thinkingStream.reset('');
-        activeStreamMsgIdRef.current = tempMsgId;
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -802,7 +823,14 @@ const ChatPDF = () => {
           signal: abortControllerRef.current.signal
         });
 
-        if (!response.ok) throw new Error('Failed to get response');
+        if (!response.ok) {
+          let errDetail = `HTTP ${response.status}`;
+          try {
+            const errBody = await response.json();
+            errDetail = errBody.detail || errBody.error?.message || errBody.message || JSON.stringify(errBody);
+          } catch { /* response not JSON, use status */ }
+          throw new Error(errDetail);
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -812,16 +840,29 @@ const ChatPDF = () => {
         let thinkingStartTime = null;
         let thinkingEndTime = null;
 
-        // SSE 解析缓冲区：按 "\n\n" 分隔 event，避免 JSON 跨 chunk 时丢字
+        // SSE 解析缓冲区：兼容 LF/CRLF 事件分隔，避免 JSON 跨 chunk 时丢字
         let sseBuffer = '';
+        let sseDone = false;
+
+        const findSseSeparator = (buffer) => {
+          const lfIdx = buffer.indexOf('\n\n');
+          const crlfIdx = buffer.indexOf('\r\n\r\n');
+          if (lfIdx === -1 && crlfIdx === -1) return { index: -1, length: 0 };
+          if (lfIdx === -1) return { index: crlfIdx, length: 4 };
+          if (crlfIdx === -1) return { index: lfIdx, length: 2 };
+          return lfIdx < crlfIdx
+            ? { index: lfIdx, length: 2 }
+            : { index: crlfIdx, length: 4 };
+        };
 
         const processSseEvent = (eventText) => {
           // eventText 为不含末尾空行的单个 event
           const lines = eventText.split(/\r?\n/);
           const dataLines = [];
           for (const ln of lines) {
-            if (ln.startsWith('data:')) {
-              dataLines.push(ln.slice(5).trimStart());
+            const trimmed = ln.trim();
+            if (trimmed.startsWith('data:')) {
+              dataLines.push(trimmed.slice(5).trimStart());
             }
           }
           if (dataLines.length === 0) return;
@@ -829,46 +870,57 @@ const ChatPDF = () => {
           // SSE 允许一个 event 多行 data:，拼接时用 \n
           const data = dataLines.join('\n');
           if (data === '[DONE]') {
-            // 交给外层 while 终止（通过抛出特殊标记）
-            throw new Error('__SSE_DONE__');
-          }
-
-          const parsed = JSON.parse(data);
-          if (parsed.error) {
-            throw new Error(parsed.error);
-          }
-
-          // 后端可能会插入检索进度事件（非 content/done 结构），这里忽略
-          if (parsed.type === 'retrieval_progress') {
+            sseDone = true;
             return;
           }
 
-          const chunkContent = parsed.content || '';
-          const chunkThinking = parsed.reasoning_content || '';
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) {
+              throw new Error(parsed.error);
+            }
 
-          if (!parsed.done) {
-            if (chunkContent) {
-              currentText += chunkContent;
-              contentStream.addChunk(chunkContent);
-              if (thinkingStartTime && !thinkingEndTime) {
-                thinkingEndTime = Date.now();
+            // 后端可能会插入检索进度事件（非 content/done 结构），这里忽略
+            if (parsed.type === 'retrieval_progress') {
+              return;
+            }
+
+            // 兼容 OpenAI 格式 (choices[0].delta) 和自定义格式 (content/reasoning_content)
+            const delta = parsed.choices?.[0]?.delta || {};
+            const chunkContent = delta.content || parsed.content || '';
+            const chunkThinking = delta.reasoning_content || parsed.reasoning_content || '';
+
+            if (!parsed.done && !parsed.choices?.[0]?.finish_reason) {
+              if (chunkContent) {
+                currentText += chunkContent;
+                contentStream.addChunk(chunkContent);
+                if (thinkingStartTime && !thinkingEndTime) {
+                  thinkingEndTime = Date.now();
+                }
               }
+              if (chunkThinking) {
+                if (!thinkingStartTime) thinkingStartTime = Date.now();
+                currentThinking += chunkThinking;
+                thinkingStream.addChunk(chunkThinking);
+              }
+            } else {
+              if (parsed.retrieval_meta && parsed.retrieval_meta.citations) {
+                streamCitationsRef.current = parsed.retrieval_meta.citations;
+              }
+              if (chunkThinking) {
+                currentThinking += chunkThinking;
+                thinkingStream.addChunk(chunkThinking);
+              }
+              sseDone = true;
             }
-            if (chunkThinking) {
-              if (!thinkingStartTime) thinkingStartTime = Date.now();
-              currentThinking += chunkThinking;
-              thinkingStream.addChunk(chunkThinking);
-            }
-          } else {
-            if (parsed.retrieval_meta && parsed.retrieval_meta.citations) {
-              streamCitationsRef.current = parsed.retrieval_meta.citations;
-            }
-            if (chunkThinking) {
-              currentThinking += chunkThinking;
-              thinkingStream.addChunk(chunkThinking);
-            }
+          } catch (e) {
+            console.error('SSE解析失败:', e, data);
           }
         };
+
+        if (!response.body) {
+          throw new Error('响应流为空');
+        }
 
         while (true) {
           const { value, done } = await reader.read();
@@ -877,31 +929,27 @@ const ChatPDF = () => {
 
           sseBuffer += decoder.decode(value, { stream: true });
 
-          // 按 event 边界切分（空行分隔）
-          let sepIdx;
-          while ((sepIdx = sseBuffer.indexOf('\n\n')) !== -1) {
+          // 按 event 边界切分（空行分隔，兼容 LF/CRLF）
+          while (true) {
+            const { index: sepIdx, length: sepLen } = findSseSeparator(sseBuffer);
+            if (sepIdx === -1) break;
             const rawEvent = sseBuffer.slice(0, sepIdx);
-            sseBuffer = sseBuffer.slice(sepIdx + 2);
+            sseBuffer = sseBuffer.slice(sepIdx + sepLen);
 
             const trimmed = rawEvent.trim();
             if (!trimmed) continue;
 
-            try {
-              processSseEvent(trimmed);
-            } catch (e) {
-              if (e && e.message === '__SSE_DONE__') {
-                // 结束整个读取循环
-                sseBuffer = '';
-                sepIdx = -1;
-                break;
-              }
-              // JSON 解析失败等：不吞掉，直接抛出让外层 catch 处理
-              throw e;
-            }
+            processSseEvent(trimmed);
+            if (sseDone) break;
           }
 
-          // 如果收到 DONE 标记跳出
+          if (sseDone) break;
           if (sseBuffer === '' && streamingAbortRef.current.cancelled) break;
+        }
+
+        // 某些代理会在结束前不补空行，尝试处理最后残留事件
+        if (!sseDone && sseBuffer.trim()) {
+          processSseEvent(sseBuffer.trim());
         }
 
         // 标记流式传输完成，让 useSmoothStream 一次性渲染剩余字符
@@ -911,9 +959,11 @@ const ChatPDF = () => {
         // 使用 currentText 和 currentThinking 作为最终值确保完整性
         const streamCitations = streamCitationsRef.current;
         const finalThinkingMs = thinkingStartTime ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
+        // 只要收到过 thinking，也不应提示“未返回内容”
+        const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容，请检查API密钥和模型配置是否正确');
         setMessages(prev => prev.map(msg =>
           msg.id === tempMsgId
-            ? { ...msg, content: currentText, thinking: currentThinking || '', isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitations || null }
+            ? { ...msg, content: finalContent, thinking: currentThinking || '', isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitations || null }
             : msg
         ));
         streamCitationsRef.current = null;
@@ -928,7 +978,14 @@ const ChatPDF = () => {
           body: JSON.stringify(requestBody)
         });
 
-        if (!response.ok) throw new Error('Failed to get response');
+        if (!response.ok) {
+          let errDetail = `HTTP ${response.status}`;
+          try {
+            const errBody = await response.json();
+            errDetail = errBody.detail || errBody.error?.message || errBody.message || JSON.stringify(errBody);
+          } catch { /* response not JSON, use status */ }
+          throw new Error(errDetail);
+        }
 
         const data = await response.json();
         const fullAnswer = data.answer;
@@ -1736,24 +1793,33 @@ const ChatPDF = () => {
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
         className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150' : 'bg-white/80 border-white/50 backdrop-blur-3xl backdrop-saturate-150 border shadow-xl'}`}
       >
-        <div className="w-72 mx-auto flex flex-col h-full items-stretch">
+        <div className="w-72 mx-auto flex flex-col h-full items-stretch relative">
+          {/* 收起侧边栏按钮 — 绝对定位于右上角，不占 flex 行空间 */}
+          <button
+            onClick={() => setShowSidebar(false)}
+            className={`absolute top-3 right-3 p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}
+            title="收起侧边栏"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
           <div className="px-6 py-8 flex items-center justify-between">
             <div className="flex items-center gap-3 font-bold text-2xl text-blue-600 tracking-tight">
               <Bot className="w-9 h-9" />
               <span>ChatPDF</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               {!isHeaderExpanded && (
                 <button
                   onClick={() => setIsHeaderExpanded(true)}
-                  className="p-2.5 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
+                  className={`p-2 rounded-full transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400 hover:text-gray-200' : 'hover:bg-black/5 text-gray-500 hover:text-gray-800'}`}
                   title="展开顶栏"
                 >
-                  <ChevronDown className="w-5 h-5" />
+                  <ChevronDown className="w-4 h-4" />
                 </button>
               )}
-              <button onClick={() => setDarkMode(!darkMode)} className="p-2.5 hover:bg-black/5 rounded-full transition-colors">
-                {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              <button onClick={() => setDarkMode(!darkMode)} className={`p-2 rounded-full transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400 hover:text-yellow-400' : 'hover:bg-black/5'}`}>
+                {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
             </div>
           </div>
@@ -1951,7 +2017,7 @@ const ChatPDF = () => {
           </motion.div>
         </motion.header>
 
-        {/* Floating Controls when Header is Collapsed AND Sidebar is Hidden */}
+        {/* Floating Controls: header collapsed + sidebar hidden */}
         <AnimatePresence>
           {!isHeaderExpanded && !showSidebar && (
             <motion.div
@@ -1959,15 +2025,29 @@ const ChatPDF = () => {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
               transition={{ duration: 0.3, ease: "easeOut" }}
-              className="absolute top-4 left-2 z-20 flex flex-col gap-2"
+              className="absolute top-4 left-2 z-20 flex flex-col gap-1.5"
             >
+              {/* 展开顶栏 */}
               <button
-                onClick={() => {
-                  setShowSidebar(true);
-                  setIsHeaderExpanded(true);
-                }}
-                className="p-2 bg-white/80 backdrop-blur-md shadow-sm rounded-full hover:bg-white hover:scale-105 transition-all text-gray-700 border border-white/50"
-                title="显示侧边栏 & 展开顶栏"
+                onClick={() => setIsHeaderExpanded(true)}
+                className={`p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${
+                  darkMode
+                    ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20'
+                    : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'
+                }`}
+                title="展开顶栏"
+              >
+                <ChevronDown className="w-4 h-4" />
+              </button>
+              {/* 切换侧边栏（仅当顶栏收起时在此显示，顶栏展开后由顶栏内 Menu 按钮控制） */}
+              <button
+                onClick={() => setShowSidebar(v => !v)}
+                className={`p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${
+                  darkMode
+                    ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20'
+                    : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'
+                }`}
+                title={showSidebar ? '收起侧边栏' : '显示侧边栏'}
               >
                 <Menu className="w-4 h-4" />
               </button>
@@ -2426,91 +2506,84 @@ const ChatPDF = () => {
       {/* Upload Progress Modal */}
       <AnimatePresence>
         {isUploading && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px] transition-colors">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90">
             <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 10 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 10 }}
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
               transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-              className="relative p-10 flex flex-col items-center gap-6 min-w-[340px] rounded-[32px] overflow-hidden"
-              style={{
-                background: 'rgba(255, 255, 255, 0.85)',
-                backdropFilter: 'blur(20px)',
-                boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.15), inset 0 0 0 1px rgba(255, 255, 255, 0.5)'
-              }}
+              className="flex flex-col items-center"
             >
-              {/* Glow Effect */}
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-blue-400/20 blur-[60px] rounded-full pointer-events-none" />
-
-              {/* Animated Icon */}
-              <div className="relative w-28 h-28 flex items-center justify-center z-10">
-                {/* Background ring */}
-                <svg className="w-full h-full rotate-[-90deg]" viewBox="0 0 100 100">
-                  <circle
-                    cx="50" cy="50" r="42"
-                    fill="none"
-                    stroke="#F3F4F6"
-                    strokeWidth="6"
-                    strokeLinecap="round"
-                  />
-                  {/* Progress ring */}
-                  <motion.circle
-                    cx="50" cy="50" r="42"
-                    fill="none"
-                    stroke="url(#progressGradient)"
-                    strokeWidth="6"
-                    strokeLinecap="round"
-                    strokeDasharray={264}
-                    strokeDashoffset={264}
-                    animate={{ strokeDashoffset: 264 - (264 * uploadProgress) / 100 }}
-                    transition={{ duration: 0.4, ease: 'easeOut' }}
-                  />
-                  <defs>
-                    <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                      <stop offset="0%" stopColor="#60A5FA" />
-                      <stop offset="100%" stopColor="#C084FC" />
-                    </linearGradient>
-                  </defs>
-                </svg>
-                {/* Center percentage */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <motion.span
-                    key={uploadProgress}
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-br from-blue-600 to-purple-600"
+              {/* Ring loader: outer wrapper for text layering */}
+              <div style={{ position: 'relative', width: 300, height: 300 }}>
+                {/* Rings layer with blur+contrast filter */}
+                <div style={{ position: 'absolute', inset: 0, filter: 'blur(0.5px) contrast(1.2)' }}>
+                  {UPLOAD_RING_CONFIGS.map((cfg, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        width: cfg.s,
+                        height: cfg.s,
+                        borderRadius: cfg.br,
+                        border: `${cfg.w}px solid ${cfg.c}`,
+                        background: 'transparent',
+                        mixBlendMode: cfg.mix,
+                        pointerEvents: 'none',
+                        animation: `chatpdf-spin ${cfg.dur}s linear ${cfg.del}s infinite ${cfg.dir}`,
+                      }}
+                    />
+                  ))}
+                </div>
+                {/* Progress text — above the filter layer, crisp */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 10,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  <span
+                    style={{
+                      color: 'rgba(255, 255, 255, 0.9)',
+                      fontSize: '2.5rem',
+                      fontWeight: 200,
+                      letterSpacing: '2px',
+                      textShadow: '0 0 15px rgba(255, 255, 255, 0.3)',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
                   >
                     {uploadProgress}%
-                  </motion.span>
+                  </span>
+                  <span
+                    style={{
+                      color: 'rgba(255, 255, 255, 0.55)',
+                      fontSize: '0.7rem',
+                      letterSpacing: '4px',
+                      textTransform: 'uppercase',
+                      marginTop: '6px',
+                    }}
+                  >
+                    {uploadStatus === 'uploading' ? 'Uploading' : 'Processing'}
+                  </span>
                 </div>
               </div>
-
-              {/* Status Text */}
-              <div className="text-center space-y-1.5 z-10">
-                <motion.h3
-                  key={uploadStatus}
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="text-xl font-semibold text-gray-800 tracking-tight"
-                >
-                  {uploadStatus === 'uploading' ? '正在上传文档...' : '正在智能解析...'}
-                </motion.h3>
-                <p className="text-sm text-gray-500 font-medium">
-                  {uploadStatus === 'uploading'
-                    ? '请保持网络连接畅通'
-                    : 'AI正在构建知识库索引'}
-                </p>
-              </div>
-
-              {/* Progress Bar */}
-              <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden z-10">
-                <motion.div
-                  className="h-full bg-gradient-to-r from-blue-400 to-purple-500 rounded-full"
-                  initial={{ width: 0 }}
-                  animate={{ width: `${uploadProgress}%` }}
-                  transition={{ duration: 0.4, ease: 'easeOut' }}
-                />
-              </div>
+              {/* Status text below rings */}
+              <motion.p
+                key={uploadStatus}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{ color: 'rgba(255, 255, 255, 0.6)', fontSize: '0.9rem', fontWeight: 300, letterSpacing: '0.5px', marginTop: '8px' }}
+              >
+                {uploadStatus === 'uploading' ? '正在上传文档...' : 'AI 正在构建知识库索引'}
+              </motion.p>
             </motion.div>
           </div>
         )}

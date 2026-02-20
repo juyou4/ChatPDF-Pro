@@ -615,8 +615,9 @@
 }
 
 /* 流式输出时，新增内容的淡入效果 */
-/* 流式输出时避免对 *:last-child 做动画（Markdown 结构频繁变化会导致重排/闪烁） */
-.streaming-active > div > *:last-child {
+/* 流式输出时避免对 *:last-child 做动画（Markdown 结构频繁变化会导致重排/闪烁）
+   排除 .dot，否则等待动画的第三个点会被误设为 animation: none */
+.streaming-active > div > *:last-child:not(.dot) {
     animation: none;
 }
 
@@ -655,43 +656,35 @@
     50%, 100% { opacity: 0; }
 }
 
-/* 流式输出等待指示器（内容为空时的三点跳动动画） */
+/* AI 回复等待动画（三点脉冲） */
 .streaming-dots {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     padding: 8px 0;
 }
 
 .streaming-dots .dot {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: #94A3B8;
-    animation: streaming-dot-bounce 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+    background-color: #94A3B8;
+    animation: bblFadInOut 1.8s infinite ease-in-out both;
 }
 
 .dark .streaming-dots .dot {
-    background: #64748B;
+    background-color: #64748B;
 }
 
-.streaming-dots .dot:nth-child(2) {
-    animation-delay: 0.15s;
-}
+/* 三个点依次错开脉冲，与原始 bblFadInOut 相同的时序分布 */
+.streaming-dots .dot:nth-child(1) { animation-delay: -0.32s; }
+.streaming-dots .dot:nth-child(2) { animation-delay: -0.16s; }
+/* .dot:nth-child(3) 使用默认 0s 延迟 */
 
-.streaming-dots .dot:nth-child(3) {
-    animation-delay: 0.3s;
-}
-
-@keyframes streaming-dot-bounce {
-    0%, 60%, 100% {
-        transform: translateY(0);
-        opacity: 0.4;
-    }
-    30% {
-        transform: translateY(-6px);
-        opacity: 1;
-    }
+@keyframes bblFadInOut {
+    0%, 80%, 100% { transform: scale(0.4); opacity: 0.25; }
+    40%           { transform: scale(1);   opacity: 1;    }
 }
 
 /* 流式输出完成时的平滑过渡 */
@@ -1074,6 +1067,61 @@
 
 .dark .thinking-copy-btn:hover {
     color: #e5e7eb;
+}
+
+/* ============================================================
+   PDF 区滚动条美化
+   ============================================================ */
+
+/* Firefox */
+.pdf-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+.dark .pdf-scroll {
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+/* WebKit (Chrome / Edge / Safari) */
+/* 隐藏原生滚动条，改用自定义 overlay */
+.pdf-scroll::-webkit-scrollbar {
+    display: none;
+}
+.pdf-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+.pdf-scroll::-webkit-scrollbar-corner {
+    background: transparent;
+}
+/* 默认状态：极淡，几乎不可见 */
+.pdf-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 9999px;
+}
+/* 鼠标悬停在容器上时变清晰 */
+.pdf-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.22);
+}
+/* 拖拽时更深 */
+.pdf-scroll::-webkit-scrollbar-thumb:active {
+    background: rgba(0, 0, 0, 0.38);
+}
+
+/* 夜间模式 */
+.dark .pdf-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.10);
+}
+.dark .pdf-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
+}
+.dark .pdf-scroll::-webkit-scrollbar-thumb:active {
+    background: rgba(255, 255, 255, 0.38);
+}
+
+/* Upload loading animation - spinning rings */
+@keyframes chatpdf-spin {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to   { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 /* --- Dark Mode Prose High Contrast --- */

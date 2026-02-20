@@ -4,7 +4,7 @@ import json as _json
 import httpx
 
 from providers.factory import ProviderFactory
-from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT
+from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT, DOUBAO
 from models.provider_registry import PROVIDER_CONFIG
 from models.api_key_selector import select_api_key
 from utils.middleware import (
@@ -232,41 +232,81 @@ async def call_ai_api_stream(
             elif provider.lower() in MINIMAX:
                 # MiniMax：使用 reasoning_split 分离思考内容
                 body["reasoning_split"] = True
-            elif provider.lower() not in MOONSHOT:
+            elif provider.lower() not in MOONSHOT and provider.lower() not in DOUBAO:
                 # DeepSeek / 智谱 / 通用 OpenAI 兼容：使用 thinking 参数
-                # Moonshot/Kimi 的思考模型自动输出，无需额外参数
+                # Moonshot/Kimi 和豆包 Seed 系列自动思考，无需额外参数
                 body["thinking"] = {"type": "enabled"}
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
 
+        # ── 诊断日志 ──
+        print(f"\n[Stream] ▶ provider={provider}, model={model}")
+        print(f"[Stream]   endpoint={endpoint}")
+        print(f"[Stream]   enable_thinking={enable_thinking}, body keys={list(body.keys())}")
+        _chunk_count = 0
+        _content_chars = 0
+        _reasoning_chars = 0
+
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
+                print(f"[Stream]   HTTP {resp.status_code}")
                 if resp.status_code != 200:
                     err_text = await resp.aread()
                     err_body = err_text.decode("utf-8", errors="ignore")
+                    print(f"[Stream]   ✗ Error body: {err_body[:500]}")
                     yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
                     return
 
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
-                    data = line[6:].strip() if line.startswith("data: ") else line.strip()
+                    # 前 3 行原始 SSE 打印，帮助诊断格式问题
+                    if _chunk_count < 3:
+                        print(f"[Stream]   raw[{_chunk_count}]: {line[:200]}")
+                    # 兼容 "data: " 和 "data:" 两种 SSE 前缀（某些代理/服务商省略空格）
+                    if line.startswith("data: "):
+                        data = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data = line[5:].strip()
+                    else:
+                        data = line.strip()
                     if data == "[DONE]":
+                        print(f"[Stream] ◀ done (chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars})")
                         yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                         return
                     try:
                         chunk = _json.loads(data)
                     except Exception:
                         continue
-                    delta = chunk.get("choices", [{}])[0].get("delta", {}) or chunk.get("choices", [{}])[0].get("message", {})
+                    # Detect API-level errors embedded inside HTTP-200 SSE bodies
+                    # (e.g. Doubao / volcengine returns {"error": {...}} with status 200)
+                    api_error = chunk.get("error")
+                    if api_error:
+                        if isinstance(api_error, dict):
+                            err_msg = api_error.get("message") or api_error.get("msg") or str(api_error)
+                        else:
+                            err_msg = str(api_error)
+                        print(f"[Stream]   ✗ API error in SSE: {err_msg}")
+                        yield {"error": err_msg, "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                        return
+                    # 防止 choices 为空列表时 [0] 抛 IndexError
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or choice.get("message") or {}
                     content = delta.get("content") or ""
                     reasoning_content = extract_reasoning_content(delta)
                     # MiniMax 的思考内容在 reasoning_details 字段中
                     if not reasoning_content:
-                        reasoning_details = delta.get("reasoning_details") or chunk.get("choices", [{}])[0].get("reasoning_details")
+                        reasoning_details = delta.get("reasoning_details") or choice.get("reasoning_details")
                         if reasoning_details:
                             reasoning_content = extract_reasoning_content(reasoning_details)
+                    # 只要有内容或推理内容，就 yield。
                     if content or reasoning_content:
+                        _chunk_count += 1
+                        _content_chars += len(content)
+                        _reasoning_chars += len(reasoning_content)
                         yield {
                             "content": content,
                             "reasoning_content": reasoning_content,
@@ -275,6 +315,16 @@ async def call_ai_api_stream(
                             "used_model": model,
                             "fallback_used": False
                         }
+                    elif _chunk_count == 0:
+                        # 发送一个空的心跳包，防止前端因长时间拿不到第一个 chunk 而判定超时/无响应
+                        yield {
+                            "content": "",
+                            "done": False,
+                            "used_provider": provider,
+                            "used_model": model,
+                            "fallback_used": False
+                        }
+                print(f"[Stream] ◀ end-of-stream (no [DONE]) (chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars})")
                 yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
         return
 
@@ -388,7 +438,6 @@ async def call_ai_api_stream(
                         yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                         return
                     try:
-                        import json as _json
                         chunk = _json.loads(data)
                     except Exception:
                         continue

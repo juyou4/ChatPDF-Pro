@@ -2,7 +2,7 @@ import re
 from typing import Optional
 
 # Embedding and rerank model detection regex (inspired by cherry-studio)
-EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-)', re.I)
+EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm)', re.I)
 RERANKING_REGEX = re.compile(r'(?:rerank|re-rank|re-ranker|re-ranking|retrieval|retriever)', re.I)
 
 

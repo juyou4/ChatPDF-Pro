@@ -210,6 +210,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'openai',
         type: 'chat',
         metadata: { description: 'OpenAI 最强非推理模型，1M Token 上下文，指令遵循能力大幅提升' },
+        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -218,6 +219,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'openai',
         type: 'chat',
         metadata: { description: 'GPT-4.1 轻量版，速度快成本低，1M Token 上下文' },
+        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -244,6 +246,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'openai',
         type: 'chat',
         metadata: { description: 'OpenAI 多模态旗舰（前代）' },
+        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -252,6 +255,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'openai',
         type: 'chat',
         metadata: { description: 'GPT-4o 轻量版，高性价比' },
+        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     // ── 阿里云 通义千问 ──
@@ -261,6 +265,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'aliyun',
         type: 'chat',
         metadata: { description: '通义千问旗舰模型，1T+ 参数，全球排名第三' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -269,6 +274,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'aliyun',
         type: 'chat',
         metadata: { description: '最新 Qwen3.5 均衡版，性能优于 Qwen3-Max，成本更低' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -302,6 +308,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'deepseek',
         type: 'chat',
         metadata: { description: 'DeepSeek 推理增强模型 (R1)' },
+        tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     // ── Moonshot (Kimi) ──
@@ -355,6 +362,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'zhipu',
         type: 'chat',
         metadata: { description: '智谱最新旗舰，744B MoE，全球开源第一，2026-02 发布' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -363,6 +371,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'zhipu',
         type: 'chat',
         metadata: { description: '智谱编程增强模型，Agentic Coding 能力优化' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -371,6 +380,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'zhipu',
         type: 'chat',
         metadata: { description: '智谱 Agent 基座模型，推理+代码+Agentic 原生融合' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -379,6 +389,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'zhipu',
         type: 'chat',
         metadata: { description: 'GLM-4.5 轻量版，高性价比' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -413,6 +424,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'anthropic',
         type: 'chat',
         metadata: { description: 'Anthropic 旗舰模型，200K 上下文，最强编程与推理，支持 1M 上下文 (beta)' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -421,6 +433,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'anthropic',
         type: 'chat',
         metadata: { description: 'Anthropic 最新均衡模型，Opus 级别推理能力，200K 上下文，同等价格' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -429,6 +442,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'anthropic',
         type: 'chat',
         metadata: { description: 'Claude Opus 系列前代，超强编程、Agent 工作流' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -437,6 +451,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'anthropic',
         type: 'chat',
         metadata: { description: 'Claude 均衡前代版本，高性价比' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -455,6 +470,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Google 最新旗舰推理模型，1M 上下文，自适应思考，强多模态 (preview)' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -463,6 +479,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Google 最新多模态理解模型，强编程与推理 (preview)' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -471,6 +488,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Gemini 旗舰稳定版，1M 上下文，自适应思考' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -479,6 +497,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Gemini 快速均衡版，可控推理预算' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -487,6 +506,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Gemini 超轻量版，大规模低成本场景' },
+        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     // ── xAI (Grok) ──
@@ -496,6 +516,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'grok',
         type: 'chat',
         metadata: { description: 'xAI 最新旗舰，256K 上下文，原生工具调用与实时搜索' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -504,6 +525,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'grok',
         type: 'chat',
         metadata: { description: 'Grok 4.1 快速版，2M 上下文，强 Agent 工具调用' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -512,6 +534,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'grok',
         type: 'chat',
         metadata: { description: 'Grok 3 旗舰，强推理能力' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -520,6 +543,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'grok',
         type: 'chat',
         metadata: { description: 'Grok 3 轻量版，低成本快速响应' },
+        tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     // ── 硬基流动 (SiliconFlow) ──
@@ -529,6 +553,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'silicon',
         type: 'chat',
         metadata: { description: '托管于硅基流动的 DeepSeek R1 推理模型' },
+        tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -545,6 +570,7 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'silicon',
         type: 'chat',
         metadata: { description: '托管于硅基流动的通义千问3 旗舰开源版' },
+        tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -592,7 +618,7 @@ export const DOUBAO_MODELS: Model[] = [
         metadata: {
             description: '豆包 2.0 旗舰模型，对标 GPT-5.2 / Gemini 3 Pro，支持长链路推理与多模态'
         },
-        tags: ['vision'],
+        tags: ['vision', 'reasoning'],
         isSystem: true,
         isUserAdded: false
     },
@@ -604,6 +630,7 @@ export const DOUBAO_MODELS: Model[] = [
         metadata: {
             description: '豆包 2.0 Lite，均衡性能与成本，能力超越上一代豆包 1.8'
         },
+        tags: ['vision', 'reasoning'],
         isSystem: true,
         isUserAdded: false
     },
@@ -615,6 +642,7 @@ export const DOUBAO_MODELS: Model[] = [
         metadata: {
             description: '豆包 2.0 Mini，低延迟高并发，适合成本敏感场景'
         },
+        tags: ['vision', 'reasoning'],
         isSystem: true,
         isUserAdded: false
     },
@@ -626,6 +654,7 @@ export const DOUBAO_MODELS: Model[] = [
         metadata: {
             description: '豆包 2.0 编程专项模型，深度优化 Agentic Coding 场景'
         },
+        tags: ['vision', 'reasoning'],
         isSystem: true,
         isUserAdded: false
     },
@@ -637,7 +666,7 @@ export const DOUBAO_MODELS: Model[] = [
         metadata: {
             description: '豆包 1.8，上一代主力模型，多模态 Agent 场景优化'
         },
-        tags: ['vision'],
+        tags: ['vision', 'reasoning'],
         isSystem: true,
         isUserAdded: false
     },

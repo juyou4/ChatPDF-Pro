@@ -10,3 +10,5 @@ OPENAI_NATIVE = {"openai"}
 MINIMAX = {"minimax"}
 # Moonshot/Kimi 的思考模型自动输出 reasoning_content，无需额外参数
 MOONSHOT = {"moonshot"}
+# 豆包 Seed 系列自动思考，无需额外参数（同 Moonshot）
+DOUBAO = {"doubao"}

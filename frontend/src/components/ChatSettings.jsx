@@ -87,18 +87,18 @@ const ChatSettings = ({ isOpen, onClose }) => {
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* 头部 */}
-                    <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-100 p-6 flex items-center justify-between z-10">
+                    <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-200 px-6 py-4 flex items-center justify-between z-10">
                         <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-xl flex items-center justify-center">
-                                <SlidersHorizontal className="w-5 h-5 text-white" />
+                            <div className="w-9 h-9 bg-gray-100 rounded-lg flex items-center justify-center">
+                                <SlidersHorizontal className="w-5 h-5 text-gray-600" />
                             </div>
                             <div>
-                                <h2 className="text-2xl font-bold">对话设置</h2>
-                                <p className="text-sm text-gray-500">调整模型生成参数</p>
+                                <h2 className="text-xl font-semibold text-gray-900">对话设置</h2>
+                                <p className="text-xs text-gray-500">调整模型生成参数</p>
                             </div>
                         </div>
-                        <button onClick={onClose} className="p-2 hover:bg-black/5 rounded-full transition-colors">
-                            <X className="w-6 h-6" />
+                        <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
+                            <X className="w-5 h-5 text-gray-500" />
                         </button>
                     </div>
 
@@ -117,7 +117,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             color="emerald"
                         />
 
-                        <div className="border-t border-gray-100"></div>
+                        <div className="border-t border-gray-200"></div>
 
                         {/* Top-P — 带开关 + 滑块 + 数字输入框 */}
                         <SettingToggleSlider
@@ -182,7 +182,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                 </div>
                                 <button
                                     onClick={addCustomParam}
-                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors"
+                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors"
                                 >
                                     <Plus className="w-3.5 h-3.5" />
                                     添加参数
@@ -213,7 +213,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                         {/* 重置按钮 */}
                         <button
                             onClick={() => { if (confirm('确定要重置所有对话参数为默认值吗？')) resetChatSettings(); }}
-                            className="soft-card w-full flex items-center justify-center gap-2 px-4 py-3 text-gray-700 hover:text-red-600 hover:bg-red-50/50 rounded-xl transition-all"
+                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200 rounded-md transition-colors"
                         >
                             <RotateCcw className="w-4 h-4" />
                             <span className="font-medium">重置为默认值</span>
@@ -238,13 +238,13 @@ const Tooltip = ({ text }) => (
     </div>
 );
 
-/** 开关组件 — 仿 cherry-studio 绿色胶囊 */
+/** 开关组件 — 简约中性风格 */
 const ToggleSwitch = ({ checked, onChange }) => (
     <button
         onClick={() => onChange(!checked)}
-        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-emerald-500' : 'bg-gray-300'}`}
+        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-gray-700' : 'bg-gray-300'}`}
     >
-        <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : ''}`} />
+        <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${checked ? 'translate-x-5' : ''}`} />
     </button>
 );
 
@@ -281,10 +281,10 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
             onChange={(e) => setLocalValue(e.target.value)}
             onBlur={handleBlur}
             disabled={disabled}
-            className={`w-full text-center text-sm font-mono border rounded-lg px-2 py-1.5 outline-none transition-colors
+            className={`w-full text-center text-sm font-mono border rounded-md px-2 py-1.5 outline-none transition-colors
                 ${disabled
-                    ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-                    : 'bg-white text-gray-700 border-gray-200 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200'
+                    ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
+                    : 'bg-white text-gray-800 border-gray-300 focus:border-gray-500 focus:ring-1 focus:ring-gray-200'
                 }`}
         />
     );
@@ -298,9 +298,8 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
  */
 const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, precision, color }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    const c = color || 'emerald';
-    const gradientColors = { emerald: '#10B981', blue: '#3B82F6', orange: '#F59E0B' };
-    const gc = gradientColors[c] || gradientColors.emerald;
+    // 简约风格：统一使用中性灰色
+    const gc = '#6B7280'; // gray-500
 
     return (
         <div className="space-y-3">
@@ -349,9 +348,8 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
  */
 const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, step, precision, color }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    const c = color || 'emerald';
-    const gradientColors = { emerald: '#10B981', blue: '#3B82F6', orange: '#F59E0B' };
-    const gc = gradientColors[c] || gradientColors.emerald;
+    // 简约风格：统一使用中性灰色
+    const gc = '#6B7280'; // gray-500
 
     return (
         <div className="space-y-3">
@@ -399,13 +397,13 @@ const CustomParamRow = ({ param, onChange, onRemove }) => {
                 value={param.name}
                 onChange={(e) => onChange('name', e.target.value)}
                 placeholder="参数名"
-                className="flex-[2] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white"
+                className="flex-[2] text-sm border border-gray-300 rounded-md px-2 py-1.5 outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-200 bg-white"
             />
             {/* 类型选择 */}
             <select
                 value={param.type}
                 onChange={(e) => onChange('type', e.target.value)}
-                className="flex-[1] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white cursor-pointer"
+                className="flex-[1] text-sm border border-gray-300 rounded-md px-2 py-1.5 outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-200 bg-white cursor-pointer"
             >
                 <option value="string">string</option>
                 <option value="number">number</option>
@@ -425,7 +423,7 @@ const CustomParamRow = ({ param, onChange, onRemove }) => {
                     value={param.value}
                     onChange={(e) => onChange('value', param.type === 'number' ? Number(e.target.value) : e.target.value)}
                     placeholder="值"
-                    className="flex-[2] text-sm border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 bg-white"
+                    className="flex-[2] text-sm border border-gray-300 rounded-md px-2 py-1.5 outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-200 bg-white"
                 />
             )}
             {/* 删除按钮 */}
