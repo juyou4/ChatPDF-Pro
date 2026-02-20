@@ -877,7 +877,12 @@ const ChatPDF = () => {
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) {
-              throw new Error(parsed.error);
+              // 将 API 错误信息作为内容显示给用户，而非静默吞掉
+              const errMsg = `❌ ${parsed.error}`;
+              currentText = errMsg;
+              contentStream.addChunk(errMsg);
+              sseDone = true;
+              return;
             }
 
             // 后端可能会插入检索进度事件（非 content/done 结构），这里忽略
