@@ -873,7 +873,7 @@ const ChatPDF = () => {
         <div className="flex-1 flex overflow-hidden px-8 pb-8 gap-4 pt-2">
           {docId ? (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`} style={{ width: `${pdfPanelWidth}%` }}>
-              <PDFViewer ref={pdfContainerRef} pdfUrl={docInfo?.pdf_url} page={currentPage} onPageChange={setCurrentPage} highlightInfo={activeHighlight} isSelecting={isSelectingArea} onAreaSelected={handleAreaSelected} onSelectionCancel={handleSelectionCancel} darkMode={darkMode} />
+              <PDFViewer ref={pdfContainerRef} pdfUrl={docInfo?.pdf_url || (docId ? `/uploads/${docId}.pdf` : undefined)} page={currentPage} onPageChange={setCurrentPage} highlightInfo={activeHighlight} isSelecting={isSelectingArea} onAreaSelected={handleAreaSelected} onSelectionCancel={handleSelectionCancel} darkMode={darkMode} />
             </motion.div>
           ) : (
             <div className="flex-1 flex items-center justify-center relative">

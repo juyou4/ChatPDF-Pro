@@ -23,8 +23,10 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
         }
     }, [page, pageNumber]);
 
-    // 确保 PDF URL 是完整路径
-    const fullPdfUrl = pdfUrl?.startsWith('http') ? pdfUrl : `${window.location.origin}${pdfUrl}`;
+    // 确保 PDF URL 是完整路径，且 pdfUrl 有效时才构建
+    const fullPdfUrl = pdfUrl
+        ? (pdfUrl.startsWith('http') ? pdfUrl : `${window.location.origin}${pdfUrl}`)
+        : null;
 
     console.log('📄 PDFViewer - Loading PDF:', fullPdfUrl);
 
@@ -461,7 +463,14 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                 onMouseUp={handleTextSelection}
                 onScroll={updateThumbs}
             >
-                {error ? (
+                {!fullPdfUrl ? (
+                    <div className="flex items-center justify-center h-full">
+                        <div className="text-center">
+                            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+                            <div className="text-gray-500">文档加载中...</div>
+                        </div>
+                    </div>
+                ) : error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>
                         <div className="text-lg font-semibold text-gray-700 mb-2">PDF加载失败</div>
