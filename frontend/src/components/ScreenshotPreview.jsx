@@ -9,14 +9,12 @@ import {
   Languages,
   Copy,
   X,
+  Trash2,
 } from 'lucide-react'
 import { SCREENSHOT_ACTIONS } from '../utils/screenshotUtils'
 
 /**
  * 图标名称到 Lucide 组件的映射
- *
- * 将 SCREENSHOT_ACTIONS 配置中的字符串图标名称
- * 映射为实际的 Lucide React 图标组件。
  */
 const ICON_MAP = {
   MessageSquarePlus,
@@ -29,112 +27,103 @@ const ICON_MAP = {
 }
 
 /**
- * 主要操作按钮的 key 列表（按显示顺序排列）
- * 不包含 'copy'，因为它是次要操作，单独渲染
+ * 主要操作按钮的 key 列表
  */
 const PRIMARY_ACTION_KEYS = ['ask', 'explain', 'table', 'formula', 'ocr', 'translate']
 
 /**
- * 截图预览与快捷操作组件
+ * 截图预览列表组件（支持最多 9 张）
  *
- * 在聊天输入框上方显示截图缩略图和快捷操作按钮。
- * 使用 framer-motion 实现进入/退出动画。
- *
- * @param {string} screenshotData - base64 图片数据（data URL 格式）
- * @param {function} onAction - 快捷操作回调，参数为 action 类型字符串
- *   'ask' | 'explain' | 'table' | 'formula' | 'ocr' | 'translate' | 'copy'
- * @param {function} onClose - 关闭预览回调
+ * @param {Array} screenshots - 截图数组 [{id, dataUrl}]
+ * @param {function} onAction - 快捷操作回调 (actionKey, screenshotId)
+ * @param {function} onClose - 删除单张或清空全部的回调 (id)
  */
-function ScreenshotPreview({ screenshotData, onAction, onClose }) {
+function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
   // 处理快捷操作按钮点击
   const handleAction = useCallback(
-    (actionKey) => {
-      onAction?.(actionKey)
+    (actionKey, screenshotId) => {
+      onAction?.(actionKey, screenshotId)
     },
     [onAction]
   )
 
-  // 无截图数据时不渲染
-  if (!screenshotData) return null
+  if (!screenshots || screenshots.length === 0) return null
 
   return (
     <AnimatePresence>
-      {screenshotData && (
-        <motion.div
-          data-testid="screenshot-preview"
-          initial={{ opacity: 0, y: 16, scale: 0.96 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 16, scale: 0.96 }}
-          transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-          className="mx-4 mb-3 p-3 bg-white/90 backdrop-blur-md rounded-2xl shadow-lg border border-gray-100/80 ring-1 ring-black/5"
-        >
-          {/* 上方区域：缩略图 + 关闭按钮 */}
-          <div className="flex items-start gap-3">
-            {/* 截图缩略图 */}
-            <div className="relative flex-shrink-0">
-              <img
-                src={screenshotData}
-                alt="截图预览"
-                data-testid="screenshot-thumbnail"
-                className="rounded-lg border border-gray-200/60 shadow-sm object-contain"
-                style={{ maxHeight: '120px', maxWidth: '200px' }}
-              />
-            </div>
-
-            {/* 快捷操作按钮区域 */}
-            <div className="flex-1 flex flex-col gap-2 min-w-0">
-              {/* 主要操作按钮行 */}
-              <div className="flex flex-wrap gap-1.5">
-                {PRIMARY_ACTION_KEYS.map((key) => {
-                  const action = SCREENSHOT_ACTIONS[key]
-                  const IconComponent = ICON_MAP[action.icon]
-                  return (
-                    <button
-                      key={key}
-                      data-testid={`action-${key}`}
-                      onClick={() => handleAction(key)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                        text-gray-700 bg-gray-50 hover:bg-blue-50 hover:text-blue-600
-                        border border-gray-200/80 hover:border-blue-200
-                        rounded-full transition-all duration-150 shadow-sm hover:shadow"
-                      title={action.label}
-                    >
-                      {IconComponent && <IconComponent className="w-3.5 h-3.5" />}
-                      <span>{action.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-
-              {/* 次要操作：复制按钮（样式较小） */}
-              <div className="flex items-center gap-2">
-                <button
-                  data-testid="action-copy"
-                  onClick={() => handleAction('copy')}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium
-                    text-gray-400 hover:text-gray-600 bg-transparent hover:bg-gray-50
-                    rounded-md transition-all duration-150"
-                  title={SCREENSHOT_ACTIONS.copy.label}
-                >
-                  <Copy className="w-3 h-3" />
-                  <span>{SCREENSHOT_ACTIONS.copy.label}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* 关闭按钮 */}
+      <motion.div
+        data-testid="screenshot-preview"
+        initial={{ opacity: 0, y: 16, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 16, scale: 0.96 }}
+        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+        className="mx-4 mb-3 p-3 bg-white/90 backdrop-blur-md rounded-2xl shadow-lg border border-gray-100/80 ring-1 ring-black/5"
+      >
+        <div className="flex flex-col gap-3">
+          {/* 标题与清空按钮 */}
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+              截图附件 ({screenshots.length}/9)
+            </span>
             <button
-              data-testid="close-button"
-              onClick={onClose}
-              className="flex-shrink-0 p-1 text-gray-400 hover:text-gray-600
-                hover:bg-gray-100 rounded-full transition-colors duration-150"
-              title="关闭预览"
+              onClick={() => onClose?.(null)}
+              className="text-[11px] text-gray-400 hover:text-red-500 transition-colors flex items-center gap-1"
             >
-              <X className="w-4 h-4" />
+              <Trash2 className="w-3 h-3" />
+              清空全部
             </button>
           </div>
-        </motion.div>
-      )}
+
+          {/* 缩略图网格 */}
+          <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-2">
+            {screenshots.map((s) => (
+              <div key={s.id} className="relative group aspect-square">
+                <img
+                  src={s.dataUrl}
+                  alt="截图"
+                  className="w-full h-full object-cover rounded-lg border border-gray-200 shadow-sm transition-transform group-hover:scale-[1.02]"
+                />
+                {/* 悬浮删除按钮 */}
+                <button
+                  onClick={() => onClose?.(s.id)}
+                  className="absolute -top-1.5 -right-1.5 p-0.5 bg-red-500 text-white rounded-full 
+                    opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-red-600"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* 针对最后一张图的快捷操作 (如果有的话) */}
+          {screenshots.length > 0 && (
+            <div className="flex items-start gap-3 pt-2 border-t border-gray-100/50">
+              <div className="flex-1 flex flex-col gap-2 min-w-0">
+                <div className="flex flex-wrap gap-1.5">
+                  {PRIMARY_ACTION_KEYS.map((key) => {
+                    const action = SCREENSHOT_ACTIONS[key]
+                    const IconComponent = ICON_MAP[action.icon]
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => handleAction(key, screenshots[screenshots.length - 1].id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium
+                          text-gray-700 bg-gray-50 hover:bg-blue-50 hover:text-blue-600
+                          border border-gray-200/80 hover:border-blue-200
+                          rounded-full transition-all duration-150"
+                        title={action.label}
+                      >
+                        {IconComponent && <IconComponent className="w-3 h-3" />}
+                        <span>{action.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </motion.div>
     </AnimatePresence>
   )
 }

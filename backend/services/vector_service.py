@@ -94,7 +94,8 @@ async def vector_search(
 
     try:
         # 将同步搜索函数放到线程池中执行，避免阻塞事件循环
-        results = await asyncio.wait_for(
+        # search_document_chunks 返回 (results, timings) 元组，此处仅需 results
+        results, _timings = await asyncio.wait_for(
             asyncio.to_thread(
                 search_document_chunks,
                 doc_id,

@@ -1527,7 +1527,15 @@ def search_document_chunks(
     rerank_endpoint: Optional[str] = None,
     use_hybrid: bool = True,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
-) -> List[dict]:
+) -> Tuple[List[dict], dict]:
+    """检索文档 chunk，返回检索结果和各阶段耗时。
+
+    Returns:
+        (results, timings) 元组
+        - results: 检索结果列表，每项包含 chunk、page、score 等字段
+        - timings: 各阶段耗时字典（毫秒），如 {"vector_search_ms": 12.3, "total_ms": 29.3}
+          未执行的阶段不包含对应字段
+    """
     # 查询改写（需求 1.1, 1.5）
     try:
         from services.query_rewriter import QueryRewriter
@@ -1861,6 +1869,8 @@ def search_document_chunks(
                 timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # --- 意群级别检索 + RRF 融合（在 BM25 混合检索之后） ---
+            # 意群检索计时开始
+            t0 = time.perf_counter()
             results = _merge_with_group_search(
                 doc_id=doc_id,
                 chunk_results=results,
@@ -1870,12 +1880,16 @@ def search_document_chunks(
                 query=query,
                 top_k=top_k,
             )
+            # 意群检索计时结束（仅在实际执行时记录）
+            group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
+            if group_search_elapsed > 0.1:
+                timings["group_search_ms"] = group_search_elapsed
 
             # 总耗时记录（需求 10.1）
             timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
             logger.info(f"[{doc_id}] 检索耗时: {timings}")
 
-            return results
+            return results, timings
         except Exception as e:
             # BM25 失败时回退：rerank 模式回退到仅向量检索结果进行 rerank（需求 2.3）
             print(f"[Hybrid] BM25混合检索失败，回退到纯向量检索: {e}")
@@ -1904,6 +1918,8 @@ def search_document_chunks(
     results = results[:top_k]
 
     # --- 意群级别检索 + RRF 融合（在纯向量/rerank 检索之后） ---
+    # 意群检索计时开始
+    t0 = time.perf_counter()
     results = _merge_with_group_search(
         doc_id=doc_id,
         chunk_results=results,
@@ -1913,12 +1929,16 @@ def search_document_chunks(
         query=query,
         top_k=top_k,
     )
+    # 意群检索计时结束（仅在实际执行时记录）
+    group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
+    if group_search_elapsed > 0.1:
+        timings["group_search_ms"] = group_search_elapsed
 
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     logger.info(f"[{doc_id}] 检索耗时: {timings}")
 
-    return results
+    return results, timings
 
 
 def _merge_with_group_search(
@@ -2068,8 +2088,8 @@ def get_relevant_context(
     from services.context_builder import ContextBuilder
     from services.retrieval_logger import RetrievalLogger, RetrievalTrace
 
-    # 获取搜索结果
-    results = search_document_chunks(
+    # 获取搜索结果，解构返回的 (results, timings) 元组
+    results, timings = search_document_chunks(
         doc_id,
         query,
         vector_store_dir=vector_store_dir,
@@ -2107,6 +2127,7 @@ def get_relevant_context(
                 results=results,
                 config=config,
                 vector_store_dir=vector_store_dir,
+                timings=timings,
             )
             if context_str is not None:
                 return context_str, retrieval_meta
@@ -2179,6 +2200,9 @@ def get_relevant_context(
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
 
+    # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
+    retrieval_meta["timings"] = timings
+
     return context_string, retrieval_meta
 
 
@@ -2188,6 +2212,7 @@ def _build_context_with_groups(
     results: List[dict],
     config,
     vector_store_dir: str = None,
+    timings: dict = None,
 ) -> Tuple[Optional[str], dict]:
     """使用语义意群构建增强上下文
 
@@ -2205,6 +2230,7 @@ def _build_context_with_groups(
         results: search_document_chunks 返回的搜索结果
         config: RAGConfig 配置对象
         vector_store_dir: 向量索引存储目录（可选），用于加载分块数据以支持 chunk_indices 精确映射
+        timings: search_document_chunks 返回的各阶段耗时字典（可选），将合并到 retrieval_meta 中
 
     Returns:
         (context_string, retrieval_meta) 元组，如果意群不可用返回 (None, {})
@@ -2325,6 +2351,10 @@ def _build_context_with_groups(
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
+
+    # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
+    if timings is not None:
+        retrieval_meta["timings"] = timings
 
     logger.info(
         f"[{doc_id}] 增强上下文构建完成: "
