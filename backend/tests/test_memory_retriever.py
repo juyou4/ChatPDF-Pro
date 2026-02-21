@@ -23,7 +23,7 @@ from services.memory_retriever import MemoryRetriever
 # ==================== 辅助工具 ====================
 
 
-def _fake_embed_fn(texts, api_key=None):
+def _fake_embed_fn(texts, api_key=None, **kwargs):
     """模拟 embedding 函数，返回固定维度的确定性向量"""
     result = []
     for text in texts:
@@ -183,7 +183,7 @@ class TestBM25Search:
         results = retriever._bm25_search("查询", [], top_k=3)
         assert results == []
 
-    def test_bm25_search_returns_results(self, retriever, memory_store):
+    def test_bm25_search_returns_results(self, retriever, memory_store, memory_index):
         """BM25 能检索到包含关键词的记忆"""
         entries = [
             _make_entry("Python 编程语言"),
@@ -192,6 +192,7 @@ class TestBM25Search:
         ]
         for e in entries:
             memory_store.add_entry(e)
+            memory_index.add_entry(e.id, e.content)
 
         results = retriever._bm25_search("编程", entries, top_k=3)
         assert len(results) > 0

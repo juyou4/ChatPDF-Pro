@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\models\model_detector.py
+# hypothesis_version: 6.151.5
+
+['\\b(o1|o3|o4)\\b', '^(o3|o4)(-|$)', '^(qwen-vl|qwen-max)', '^abab6\\.5', '^gemini-(2|[3-9])', '^moonshot-v1', 'alibaba', 'anthropic', 'chat', 'chinese', 'chinese_optimized', 'claude', 'deepseek-r', 'doubao', 'embedding', 'free', 'function_calling', 'gemini', 'glm', 'glm-4\\.[5-9]', 'gpt', 'gpt-4\\.5', 'gpt-5', 'isUserSelected', 'kimi', 'minimax', 'minimax-m2', 'moonshot', 'multilingual', 'openai', 'qwen', 'reasoner', 'reasoning', 'rerank', 'text-embedding', 'think', 'type', 'vision', 'vl', 'web_search', 'zh', 'zhipu']

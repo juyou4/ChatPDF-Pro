@@ -49,6 +49,7 @@ class ContextBuilder:
         selections: List[dict],
         group_best_chunks: dict = None,
         query: str = "",
+        selected_text: str = "",
     ) -> Tuple[str, List[dict]]:
         """将粒度选择结果组装为格式化上下文字符串
 
@@ -68,6 +69,7 @@ class ContextBuilder:
             group_best_chunks: 可选，group_id -> 最佳匹配 chunk 文本的映射，
                 用于生成更精确的引用高亮文本。如果未提供，回退到取文本前100字符。
             query: 用户查询文本，用于从 chunk 中提取与查询最相关的片段作为 highlight_text。
+            selected_text: 用户框选的文本，关键词也纳入高亮匹配范围。
 
         Returns:
             (context_string, citations) 元组
@@ -132,11 +134,11 @@ class ContextBuilder:
                 best_chunk = group_best_chunks[group_id]
                 # 从 chunk 中提取与查询最相关的片段（而非简单截取前N字符）
                 highlight_text = self._extract_relevant_snippet(
-                    best_chunk, query, max_len=200
+                    best_chunk, query, max_len=200, selected_text=selected_text
                 ) if best_chunk else ""
             else:
                 highlight_text = self._extract_relevant_snippet(
-                    text, query, max_len=150
+                    text, query, max_len=150, selected_text=selected_text
                 ) if text else ""
             citations.append({
                 "ref": ref_num,
@@ -160,11 +162,12 @@ class ContextBuilder:
         text: str,
         query: str,
         max_len: int = 200,
+        selected_text: str = "",
     ) -> str:
         """从文本中提取与查询最相关的片段
 
         策略：
-        1. 将查询拆分为关键词
+        1. 将查询和 selected_text 合并后拆分为关键词
         2. 在文本中找到关键词命中密度最高的窗口
         3. 返回该窗口对应的原始文本片段
 
@@ -174,6 +177,7 @@ class ContextBuilder:
             text: 源文本（chunk 或意群文本）
             query: 用户查询文本
             max_len: 返回片段的最大字符数
+            selected_text: 用户框选的文本，关键词也纳入匹配范围
 
         Returns:
             与查询最相关的文本片段
@@ -183,9 +187,14 @@ class ContextBuilder:
         if not query or len(text) <= max_len:
             return text[:max_len].strip()
 
-        # 提取查询关键词（去除停用词和短词）
+        # 合并 query 和 selected_text 的关键词
+        combined_source = query
+        if selected_text:
+            combined_source = f"{query} {selected_text[:100]}"
+
+        # 提取关键词（去除停用词和短词）
         terms = [
-            t for t in re.split(r'[\s,;，。；、？！?!：:""''""]+', query.lower())
+            t for t in re.split(r'[\s,;，。；、？！?!：:""''""]+', combined_source.lower())
             if t and len(t) >= 2
         ]
         if not terms:

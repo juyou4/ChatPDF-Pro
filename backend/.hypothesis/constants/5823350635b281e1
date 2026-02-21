@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\grep_service.py
+# hypothesis_version: 6.151.5
+
+[1.0, 100, 2000, 'backward', 'context_snippet', 'forward', 'keyword', 'match_offset', 'match_text', 'score', '|', '。\n.！？!?；;']

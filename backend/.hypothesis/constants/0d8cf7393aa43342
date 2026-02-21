@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\config.py
+# hypothesis_version: 6.151.5
+
+[0.3, 0.5, 30.0, 120.0, 100, 200, 600, 1000, 4000, 20000, '.env', 'Agent 检索最大轮数，范围 1-10', 'CHATPDF_CHAT_DEGRADE', 'CHATPDF_CHAT_LOGGING', 'CHATPDF_CHAT_TIMEOUT', 'CHATPDF_OCR_BACKEND', 'CHATPDF_OCR_DPI', 'CHATPDF_OCR_LANGUAGE', 'Mistral OCR API Key', 'QA 摘要保留上限，范围 1-1000', 'agent_max_rounds', 'always', 'auto', 'chi_sim+eng', 'logs/errors.log', 'memory_enabled', 'memory_flush_enabled', 'memory_max_summaries', 'memory_use_sqlite', 'mistral_ocr_api_key', 'mistral_ocr_base_url', 'never', 'ocr_backend', 'ocr_default_mode', 'ocr_dpi', 'ocr_language', 'stream_buffer_size', '关键词频率阈值，范围 1-100', '搜索暂不可用，请稍后重试', '服务繁忙，请稍后重试', '记忆功能启用开关', '记忆检索返回条数，范围 1-20']

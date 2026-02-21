@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\providers\openai_provider.py
+# hypothesis_version: 6.151.5
+
+[120.0, 200, 'Authorization', 'Content-Type', 'application/json', 'max_tokens', 'messages', 'model', 'reasoning_effort', 'stream', 'temperature', 'top_p']

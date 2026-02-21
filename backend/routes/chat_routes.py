@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
 from services.vector_service import vector_context
+from services.selected_text_locator import locate_selected_text
 from services.retrieval_agent import RetrievalAgent
 from services.retrieval_tools import DocContext
 from services.glossary_service import glossary_service, build_glossary_prompt
@@ -298,6 +299,43 @@ def _inject_memory_context(system_prompt: str, memory_context: str) -> str:
     return system_prompt + f"\n\n用户历史记忆：\n{memory_context}"
 
 
+def _build_fused_context(
+    selected_text: str,
+    retrieval_context: str,
+    selected_page_info: dict,
+) -> str:
+    """融合框选文本和检索上下文
+
+    将 selected_text 作为优先上下文置于检索结果之前，
+    并标注框选文本的页码来源。
+    """
+    page_label = ""
+    if selected_page_info:
+        ps = selected_page_info.get("page_start", 0)
+        pe = selected_page_info.get("page_end", 0)
+        page_label = f"（页码: {ps}-{pe}）" if ps != pe else f"（页码: {ps}）"
+
+    parts = [f"用户选中的文本{page_label}：\n{selected_text}"]
+    if retrieval_context:
+        parts.append(f"\n\n相关文档片段：\n\n{retrieval_context}")
+    return "\n".join(parts)
+
+
+def _build_selected_text_citation(
+    selected_text: str,
+    selected_page_info: dict,
+) -> dict:
+    """基于框选文本位置生成基础 citation"""
+    ps = selected_page_info.get("page_start", 1) if selected_page_info else 1
+    pe = selected_page_info.get("page_end", ps) if selected_page_info else ps
+    return {
+        "ref": 1,
+        "group_id": "selected-text",
+        "page_range": [ps, pe],
+        "highlight_text": selected_text[:200].strip(),
+    }
+
+
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     if not hasattr(router, "documents_store"):
@@ -340,7 +378,45 @@ async def chat_with_pdf(request: ChatRequest):
             mime = _detect_mime_type(img_b64)
             user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
     else:
-        if request.selected_text:
+        if request.selected_text and request.enable_vector_search:
+            # 融合模式：selected_text + 向量检索
+            _validate_rerank_request(request)
+            selected_page_info = locate_selected_text(
+                request.selected_text, doc.get("data", {}).get("pages", [])
+            )
+            try:
+                strategy = get_retrieval_strategy(request.question)
+                dynamic_top_k = strategy['top_k']
+                context_result = await vector_context(
+                    request.doc_id, request.question, vector_store_dir=router.vector_store_dir,
+                    pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
+                    top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
+                    use_rerank=request.use_rerank, reranker_model=request.reranker_model,
+                    rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
+                    rerank_endpoint=request.rerank_endpoint,
+                    middlewares=[
+                        *( [LoggingMiddleware()] if settings.enable_chat_logging else [] ),
+                        RetryMiddleware(retries=settings.chat_retry_retries, delay=settings.chat_retry_delay),
+                        ErrorCaptureMiddleware()
+                    ],
+                    selected_text=request.selected_text,
+                )
+                retrieval_context = context_result.get("context", "")
+                retrieval_meta = context_result.get("retrieval_meta", {})
+                # 融合：selected_text 优先 + 检索补充
+                context = _build_fused_context(
+                    request.selected_text, retrieval_context, selected_page_info
+                )
+                # 如果检索没有返回 citations，基于 selected_text 位置生成基础 citation
+                if not retrieval_meta.get("citations"):
+                    retrieval_meta["citations"] = [_build_selected_text_citation(
+                        request.selected_text, selected_page_info
+                    )]
+            except Exception as e:
+                logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
+                context = f"用户选中的文本：\n{request.selected_text}\n\n"
+        elif request.selected_text:
+            # 仅 selected_text 模式（向量检索未启用）
             context = f"用户选中的文本：\n{request.selected_text}\n\n"
         elif request.enable_vector_search:
             _validate_rerank_request(request)
@@ -459,7 +535,44 @@ async def chat_with_pdf_stream(request: ChatRequest):
             user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
     else:
         use_agent = request.enable_agent_retrieval and not request.selected_text
-        if request.selected_text:
+        if request.selected_text and request.enable_vector_search:
+            # 融合模式：selected_text + 向量检索
+            _validate_rerank_request(request)
+            selected_page_info = locate_selected_text(
+                request.selected_text, doc.get("data", {}).get("pages", [])
+            )
+            try:
+                strategy = get_retrieval_strategy(request.question)
+                dynamic_top_k = strategy['top_k']
+                context_result = await vector_context(
+                    request.doc_id, request.question, vector_store_dir=router.vector_store_dir,
+                    pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
+                    top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
+                    use_rerank=request.use_rerank, reranker_model=request.reranker_model,
+                    rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
+                    rerank_endpoint=request.rerank_endpoint,
+                    middlewares=[
+                        *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
+                        RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
+                    ],
+                    selected_text=request.selected_text,
+                )
+                retrieval_context = context_result.get("context", "")
+                retrieval_meta = context_result.get("retrieval_meta", {})
+                # 融合：selected_text 优先 + 检索补充
+                context = _build_fused_context(
+                    request.selected_text, retrieval_context, selected_page_info
+                )
+                # 如果检索没有返回 citations，基于 selected_text 位置生成基础 citation
+                if not retrieval_meta.get("citations"):
+                    retrieval_meta["citations"] = [_build_selected_text_citation(
+                        request.selected_text, selected_page_info
+                    )]
+            except Exception as e:
+                logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
+                context = f"用户选中的文本：\n{request.selected_text}\n\n"
+        elif request.selected_text:
+            # 仅 selected_text 模式（向量检索未启用）
             context = f"用户选中的文本：\n{request.selected_text}\n\n"
         elif use_agent:
             context = ""

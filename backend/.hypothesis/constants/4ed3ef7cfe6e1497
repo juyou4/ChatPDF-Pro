@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\retrieval_agent.py
+# hypothesis_version: 6.151.5
+
+[0.3, 60.0, 100, 200, 500, 2000, 50000, '...', '...(截断)', 'Authorization', 'BM25', 'Content-Type', 'GREP', 'LLM 规划中...', 'application/json', 'args', 'boolean_search', 'char_count', 'choices', 'complete', 'completed', 'content', 'context', 'current', 'detail', 'endpoint', 'executing', 'fetch', 'final', 'full', 'granularity', 'grep', 'groupId', 'group_id', 'keyword_search', 'keywords', 'map', 'max_tokens', 'message', 'messages', 'model', 'operations', 'pattern', 'pending', 'phase', 'planning', 'query', 'regex_search', 'resultCount', 'result_count', 'results', 'retrieval_complete', 'retrieval_progress', 'role', 'round', 'round_start', 'search_history', 'start', 'summary', 'system', 'taskStatus', 'task_status', 'temperature', 'text', 'tool', 'tool_result', 'type', 'user', 'vector_search', '{', '}', '✗ 无结果', '向量', '布尔', '文档地图', '无', '正则', '正在分析问题，规划检索策略...', '获取意群']

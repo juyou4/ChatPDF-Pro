@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\retrieval_tools.py
+# hypothesis_version: 6.151.5
+
+[200, 1500, 2000, 8000, 'boolean_search', 'caseInsensitive', 'char_count', 'chunk', 'context', 'context_snippet', 'digest', 'error', 'fetch', 'full', 'full_text', 'granularity', 'grep', 'groupId', 'group_id', 'keyword_search', 'keywords', 'limit', 'map', 'map_entries', 'page_range', 'pattern', 'query', 'regex_search', 'result_count', 'results', 'summary', 'vector_search', '、', '关键词为空', '意群 ID 为空', '无', '无意群数据', '查询为空', '正则模式为空']

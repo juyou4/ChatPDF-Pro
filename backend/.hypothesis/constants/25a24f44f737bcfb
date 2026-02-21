@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\vector_service.py
+# hypothesis_version: 6.151.5
+
+[60.0, 400, 'api_key', 'candidate_k', 'context', 'doc_id', 'error', 'pages', 'query', 'rerank_api_key', 'rerank_endpoint', 'rerank_provider', 'reranker_model', 'results', 'retrieval_meta', 'top_k', 'use_rerank', 'vector_store_dir', '搜索超时，请稍后重试或关闭重排序功能', '检索超时，请稍后重试或关闭重排序功能']

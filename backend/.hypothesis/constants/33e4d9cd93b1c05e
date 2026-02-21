@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\memory_index.py
+# hypothesis_version: 6.151.5
+
+[0.0, 1.0, 'bm25', 'chunk', 'content_hashes', 'embedding_model', 'entry_id', 'entry_ids', 'index', 'local-minilm', 'memory.index', 'memory.pkl', 'rb', 'score', 'similarity', 'text', 'texts', 'utf-8', 'wb', '记忆向量索引元数据不存在，跳过加载', '记忆向量索引已清空']

@@ -24,7 +24,7 @@ from services.memory_store import MemoryEntry
 # ==================== 辅助工具 ====================
 
 
-def _fake_embed_fn(texts, api_key=None):
+def _fake_embed_fn(texts, api_key=None, **kwargs):
     """模拟 embedding 函数，返回固定维度的确定性向量"""
     # 基于文本哈希生成确定性向量，维度为 8
     result = []

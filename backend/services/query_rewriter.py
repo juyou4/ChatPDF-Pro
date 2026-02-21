@@ -83,6 +83,11 @@ class QueryRewriter:
             # 第二步：应用口语化模式替换
             rewritten = self._replace_colloquial(rewritten)
 
+            # 第三步（新增）：如果有 selected_text 且查询未被代词解析改变，
+            # 追加 selected_text 关键内容以增强检索
+            if selected_text and selected_text.strip() and rewritten == query:
+                rewritten = self._augment_with_selected_text(rewritten, selected_text)
+
             return rewritten
         except Exception as e:
             # 改写失败时返回原始查询，记录警告日志
@@ -139,6 +144,27 @@ class QueryRewriter:
                 result = result.replace(pronoun, key_content, 1)
 
         return result
+
+    def _augment_with_selected_text(
+        self, query: str, selected_text: str, max_augment_chars: int = 80
+    ) -> str:
+        """将 selected_text 关键内容追加到查询中增强检索语义
+
+        仅在查询未被指示代词解析改变时调用。
+        提取 selected_text 的关键内容片段，追加到查询末尾。
+
+        Args:
+            query: 原始查询
+            selected_text: 用户选中的文本
+            max_augment_chars: 追加内容的最大字符数，默认 80
+
+        Returns:
+            追加关键内容后的查询，如果无法提取关键内容则返回原始查询
+        """
+        key_content = self._extract_key_content(selected_text, max_chars=max_augment_chars)
+        if not key_content:
+            return query
+        return f"{query} {key_content}"
 
     async def rewrite_with_llm(
         self,

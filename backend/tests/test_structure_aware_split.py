@@ -127,9 +127,10 @@ class TestMergeSegmentsIntoChunks:
         ]
         chunks = _merge_segments_into_chunks(segments, chunk_size=100, chunk_overlap=20)
         assert len(chunks) == 1
-        assert "短段落一" in chunks[0]
-        assert "短段落二" in chunks[0]
-        assert "短段落三" in chunks[0]
+        # _merge_segments_into_chunks 返回 (text, heading) 元组列表
+        assert "短段落一" in chunks[0][0]
+        assert "短段落二" in chunks[0][0]
+        assert "短段落三" in chunks[0][0]
 
     def test_large_segments_split(self):
         """大段落被分到不同分块"""
@@ -150,8 +151,8 @@ class TestMergeSegmentsIntoChunks:
             {"text": "后文" * 50, "protected": False},
         ]
         chunks = _merge_segments_into_chunks(segments, chunk_size=200, chunk_overlap=30)
-        # 表格应完整出现在某个分块中
-        table_found = any(table_text in chunk for chunk in chunks)
+        # 表格应完整出现在某个分块中（chunks 为 (text, heading) 元组列表）
+        table_found = any(table_text in chunk[0] for chunk in chunks)
         assert table_found, "表格应完整出现在某个分块中"
 
     def test_oversized_protected_region(self):
@@ -163,8 +164,8 @@ class TestMergeSegmentsIntoChunks:
             {"text": "后文内容", "protected": False},
         ]
         chunks = _merge_segments_into_chunks(segments, chunk_size=100, chunk_overlap=20)
-        # 超大表格应单独成块
-        assert any(big_table.strip() in chunk for chunk in chunks)
+        # 超大表格应单独成块（chunks 为 (text, heading) 元组列表）
+        assert any(big_table.strip() in chunk[0] for chunk in chunks)
 
 
 class TestGetOverlapParts:

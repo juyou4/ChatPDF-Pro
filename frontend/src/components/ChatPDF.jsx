@@ -495,7 +495,7 @@ const ChatPDF = () => {
         className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
       >
         <div className={`${msg.type === 'user'
-          ? 'max-w-[85%] rounded-2xl px-4 py-3 shadow-sm message-bubble-user rounded-tr-sm text-sm'
+          ? 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
           : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-50 overflow-hidden'
         }`}
           style={msg.type !== 'user' ? { contain: 'inline-size' } : undefined}

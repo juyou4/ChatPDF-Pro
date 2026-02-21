@@ -140,6 +140,7 @@ async def vector_context(
     rerank_endpoint: Optional[str] = None,
     middlewares: Optional[List[BaseMiddleware]] = None,
     model_context_window: int = 0,
+    selected_text: Optional[str] = None,  # 框选文本，用于融合检索
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -183,7 +184,8 @@ async def vector_context(
                 rerank_provider=rerank_provider,
                 rerank_api_key=rerank_api_key,
                 rerank_endpoint=rerank_endpoint,
-                model_context_window=model_context_window
+                model_context_window=model_context_window,
+                selected_text=selected_text,  # 透传框选文本
             ),
             timeout=60.0  # 60 秒超时
         )

@@ -1,0 +1,4 @@
+# file: E:\Project\Chatpdf\backend\services\memory_store.py
+# hypothesis_version: 6.151.5
+
+[0.5, '# 长期记忆\n\n', '##', '###', '%Y-%m-%d', 'LLM 提炼', 'MEMORY.md', 'MemoryEntry', '_session.json', 'a', 'answer', 'auto_qa', 'content', 'created_at', 'doc_id', 'entries', 'focus_areas', 'hit_count', 'id', 'importance', 'important_memories', 'keyword', 'keyword_frequencies', 'last_accessed', 'last_hit_at', 'liked', 'llm_distilled', 'manual', 'memory', 'memory_index', 'qa_summaries', 'question', 'r', 'sessions', 'source_type', 'updated_at', 'user_profile.json', 'utf-8', 'w', '关键词', '手动记忆', '点赞记忆', '自动摘要']
