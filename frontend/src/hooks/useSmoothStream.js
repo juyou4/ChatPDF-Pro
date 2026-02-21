@@ -26,17 +26,19 @@ function splitChunk(chunk) {
 }
 
 /**
- * 字符级流式缓冲渲染 Hook
+ * 字符级流式缓冲渲染 Hook（ref 直写模式）
  *
  * 将后端 SSE 推送的文本块拆分为字符队列，通过 requestAnimationFrame
- * 循环按帧动态渲染，实现平滑的打字机效果。
+ * 循环按帧动态渲染。流式输出期间通过 contentRef 直接更新 DOM，
+ * 避免触发 React 状态更新和重渲染。流结束后通过 getFinalText()
+ * 获取最终文本，供调用方同步到 React 状态。
  *
  * @param {Object} options
- * @param {Function} options.onUpdate - 每帧渲染后的回调，参数为当前已渲染的完整文本
+ * @param {Function} [options.onUpdate] - 每帧渲染后的回调（向后兼容，可选）
  * @param {boolean} options.streamDone - 流式传输是否已完成
  * @param {number} [options.minDelay=10] - 两次渲染之间的最小间隔（毫秒）
  * @param {string} [options.initialText=''] - 初始文本
- * @returns {{ addChunk: Function, reset: Function }}
+ * @returns {{ addChunk: Function, reset: Function, contentRef: React.RefObject, getFinalText: Function }}
  */
 export { splitChunk }
 
@@ -49,6 +51,10 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
   const displayedTextRef = useRef(initialText)
   /** @type {React.MutableRefObject<number>} 上次渲染时间戳，用于最小延迟控制 */
   const lastUpdateTimeRef = useRef(0)
+  /** @type {React.MutableRefObject<HTMLElement|null>} 指向 DOM 元素的 ref，用于直接更新 DOM */
+  const contentRef = useRef(null)
+  /** @type {React.MutableRefObject<string>} 流结束后的最终文本 */
+  const finalTextRef = useRef(initialText)
 
   /**
    * 将新文本块加入字符队列
@@ -70,21 +76,36 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
       }
       chunkQueueRef.current = []
       displayedTextRef.current = newText
-      onUpdate(newText)
+      finalTextRef.current = newText
+      // 重置 DOM 元素内容
+      if (contentRef.current) {
+        contentRef.current.textContent = newText
+      }
+      // 向后兼容：如果提供了 onUpdate 回调，也调用它
+      if (onUpdate) {
+        onUpdate(newText)
+      }
     },
     [onUpdate]
   )
+
+  /**
+   * 获取流结束后的最终文本
+   * 供调用方在流结束后同步到 React 状态
+   * @returns {string} 最终文本
+   */
+  const getFinalText = useCallback(() => finalTextRef.current, [])
 
   /**
    * rAF 渲染循环
    *
    * 每帧执行逻辑：
    *   1. 队列为空 + 流未结束 -> 等待下一帧
-   *   2. 队列为空 + 流已结束 -> 输出最终文本，停止循环
+   *   2. 队列为空 + 流已结束 -> 记录最终文本，停止循环
    *   3. 距上次渲染 < minDelay -> 等待下一帧
    *   4. 计算本帧字符数: Math.max(1, Math.floor(queue.length / 5))
    *   5. 流已结束 -> 一次性渲染所有剩余字符
-   *   6. 取出字符追加到 displayedText，调用 onUpdate
+   *   6. 取出字符追加到 displayedText，直接写入 DOM
    *   7. 队列仍有内容 -> 继续下一帧
    */
   const renderLoop = useCallback(
@@ -93,9 +114,12 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
         // 1. 队列为空时的处理
         if (chunkQueueRef.current.length === 0) {
           if (streamDone) {
-            // 流已结束，输出最终文本并停止循环
-            const finalText = displayedTextRef.current
-            onUpdate(finalText)
+            // 流已结束，记录最终文本
+            finalTextRef.current = displayedTextRef.current
+            // 向后兼容：调用 onUpdate 通知最终文本
+            if (onUpdate) {
+              onUpdate(displayedTextRef.current)
+            }
             return
           }
           // 流未结束，等待下一帧
@@ -122,13 +146,24 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
         const charsToRender = chunkQueueRef.current.slice(0, charsToRenderCount)
         displayedTextRef.current += charsToRender.join('')
 
-        // 6. 调用 onUpdate 回调更新 UI
-        onUpdate(displayedTextRef.current)
+        // 6. 直接更新 DOM 元素（ref 直写模式，避免 React setState）
+        if (contentRef.current) {
+          contentRef.current.textContent = displayedTextRef.current
+        }
 
-        // 7. 更新队列，移除已渲染的字符
+        // 7. 向后兼容：如果提供了 onUpdate 回调，也调用它
+        //    注意：在纯 ref 直写模式下，调用方不应传入 onUpdate
+        if (onUpdate) {
+          onUpdate(displayedTextRef.current)
+        }
+
+        // 8. 记录最终文本（持续更新，确保 getFinalText 随时可用）
+        finalTextRef.current = displayedTextRef.current
+
+        // 9. 更新队列，移除已渲染的字符
         chunkQueueRef.current = chunkQueueRef.current.slice(charsToRenderCount)
 
-        // 8. 队列仍有内容，继续下一帧
+        // 10. 队列仍有内容，继续下一帧
         if (chunkQueueRef.current.length > 0) {
           animationFrameRef.current = requestAnimationFrame(renderLoop)
         }
@@ -152,5 +187,5 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
     }
   }, [renderLoop])
 
-  return { addChunk, reset }
+  return { addChunk, reset, contentRef, getFinalText }
 }

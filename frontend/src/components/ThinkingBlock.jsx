@@ -109,7 +109,7 @@ const ThinkingPreview = memo(({ content, isThinking, expanded }) => {
  * - 思考完成后自动折叠
  * - 圆角卡片边框风格
  */
-const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs }) => {
+const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef }) => {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
   const wasStreamingRef = useRef(false)
@@ -206,6 +206,7 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs }) => {
                   isStreaming={isStreaming}
                   enableBlurReveal={false}
                   blurIntensity="light"
+                  streamingRef={streamingRef}
                 />
               </div>
             </div>

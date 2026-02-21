@@ -83,6 +83,8 @@
     box-shadow: var(--shadow-md);
     border-radius: var(--radius-card);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    /* 提示浏览器预优化 hover 时的 transform 动画 */
+    will-change: transform;
 }
 
 .soft-card:hover {
@@ -90,10 +92,10 @@
     transform: translateY(-4px);
 }
 
+/* 静态面板 - 使用预计算的半透明背景替代 backdrop-filter，减少合成开销 */
 .soft-panel {
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    background: rgba(255, 255, 255, 0.92);
+    /* 移除 backdrop-filter，用更高不透明度补偿模糊效果 */
 
     /* 3D Lighting Borders */
     border-top: 1px solid rgba(255, 255, 255, 0.8);
@@ -104,12 +106,27 @@
     box-shadow: var(--shadow-float);
     border-radius: var(--radius-panel);
     transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    /* 提示浏览器预优化 hover 时的 transform 动画 */
+    will-change: transform;
 }
 
 .soft-panel:hover {
     transform: translateY(-4px);
     box-shadow: var(--shadow-hover);
-    background: rgba(255, 255, 255, 0.92);
+    background: rgba(255, 255, 255, 0.95);
+}
+
+/* 静态背景工具类 - 用预计算颜色替代 backdrop-filter */
+.glass-panel-static {
+    background: rgba(255, 255, 255, 0.85);
+    /* 不使用 backdrop-filter，降低合成层开销 */
+}
+
+/* 交互元素工具类 - 仅下拉菜单、弹窗等交互元素保留 backdrop-filter */
+.glass-panel-interactive {
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    will-change: backdrop-filter;
 }
 
 .message-bubble-user {
@@ -173,6 +190,8 @@
     justify-content: center;
     align-items: center;
     transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    /* 提示浏览器预优化 hover 时的 transform/scale 动画 */
+    will-change: transform;
 
     /* 光影层 - Scaled for 64px size */
     box-shadow:
@@ -614,6 +633,22 @@
     animation: none;
 }
 
+/* 流式输出期间禁用所有 blur-reveal 逐字动画，避免频繁触发 filter/opacity 导致掉帧 */
+.streaming-active .blur-reveal-animate {
+    animation: none !important;
+    opacity: 1 !important;
+}
+
+.streaming-active .animate-blur-reveal {
+    animation: none !important;
+    opacity: 1 !important;
+}
+
+.streaming-active .blur-reveal-char {
+    filter: none !important;
+    opacity: 1 !important;
+}
+
 /* 流式输出时，新增内容的淡入效果 */
 /* 流式输出时避免对 *:last-child 做动画（Markdown 结构频繁变化会导致重排/闪烁）
    排除 .dot，否则等待动画的第三个点会被误设为 animation: none */
@@ -671,6 +706,8 @@
     flex-shrink: 0;
     background-color: #94A3B8;
     animation: bblFadInOut 1.8s infinite ease-in-out both;
+    /* 持续脉冲动画，提示浏览器预优化 transform 和 opacity */
+    will-change: transform, opacity;
 }
 
 .dark .streaming-dots .dot {
@@ -776,6 +813,8 @@
 
 .animate-blob {
     animation: blob 7s infinite;
+    /* 持续动画元素，提示浏览器预创建合成层 */
+    will-change: transform;
 }
 
 .animation-delay-2000 {

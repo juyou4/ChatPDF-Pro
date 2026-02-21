@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useDefaults } from '../contexts/DefaultsContext'
 import { useModel } from '../contexts/ModelContext'
 import { useProvider } from '../contexts/ProviderContext'
-import { useGlobalSettings } from '../contexts/GlobalSettingsContext'
+import { useChatParams } from '../contexts/ChatParamsContext'
 import ProviderAvatar from './ProviderAvatar'
 import { filterChatModels, groupModelsByProvider, formatModelKey, filterModelsByKeyword } from '../utils/modelQuickSwitchUtils'
 
@@ -35,8 +35,8 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
   const { getModelsByType, getModelById } = useModel()
   const { getEnabledProviders, getProviderById } = useProvider()
 
-  // ========== GlobalSettingsContext — 深度思考力度 ==========
-  const { reasoningEffort, setReasoningEffort } = useGlobalSettings()
+  // ========== ChatParamsContext — 深度思考力度 ==========
+  const { reasoningEffort, setReasoningEffort } = useChatParams()
 
   // ========== 内部状态 ==========
   // 控制模型下拉菜单的显示/隐藏

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2 } from 'lucide-react';
-import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
+import { useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from '../contexts/ChatParamsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /**
@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
  * 开关启用时显示：滑块（80%宽度）+ 数字输入框（20%宽度）
  */
 const ChatSettings = ({ isOpen, onClose }) => {
+    // 使用细粒度 Hook 订阅对话参数（需求 2.3）
     const {
         maxTokens,
         temperature,
@@ -29,8 +30,9 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setEnableTopP,
         setEnableMaxTokens,
         setCustomParams,
-        DEFAULT_SETTINGS,
-    } = useGlobalSettings();
+    } = useChatParams();
+
+    const DEFAULT_SETTINGS = CHAT_PARAMS_DEFAULT_SETTINGS;
 
     // 重置对话参数
     const resetChatSettings = () => {

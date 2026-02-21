@@ -2,20 +2,26 @@ import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
-import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
-import mermaid from 'mermaid';
+import rehypeKatexCached from '../utils/rehypeKatexCached.js';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { visit } from 'unist-util-visit';
 import CitationLink from './CitationLink';
 
-mermaid.initialize({
-  startOnLoad: false,
-  securityLevel: 'strict',
-  theme: 'default',
-});
+// mermaid 动态加载：仅在首次遇到 Mermaid 代码块时触发加载，
+// 使用单例 Promise 模式避免重复加载（需求 7.1）
+let mermaidPromise = null;
+const loadMermaid = () => {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid').then(m => {
+      m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' });
+      return m.default;
+    });
+  }
+  return mermaidPromise;
+};
 
 let mermaidIdCounter = 0;
 
@@ -46,8 +52,10 @@ const MermaidBlock = React.memo(({ code, defer }) => {
 
     timerRef.current = setTimeout(async () => {
       try {
+        // 动态加载 mermaid，首次调用时触发下载（需求 7.1）
+        const mermaidInstance = await loadMermaid();
         const uniqueId = `${idRef.current}-${Date.now()}`;
-        const { svg: renderedSvg } = await mermaid.render(uniqueId, code.trim());
+        const { svg: renderedSvg } = await mermaidInstance.render(uniqueId, code.trim());
         setSvg(renderedSvg);
         setError(false);
       } catch (err) {
@@ -261,10 +269,16 @@ const processCitationRefs = (text, citations) => {
 };
 
 const StreamingMarkdown = React.memo(
-  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null }) => {
+  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null }) => {
     const containerRef = useRef(null);
 
+    // ref 直写模式：流式输出期间通过 streamingRef 直接更新 DOM，
+    // 不经过 React 状态更新和 ReactMarkdown 渲染
+    const isRefDirectWrite = isStreaming && streamingRef != null;
+
     const processedContent = useMemo(() => {
+      // ref 直写模式下不需要处理内容（由 DOM 直接显示纯文本）
+      if (isRefDirectWrite) return '';
       let text = content || '';
       if (USE_LATEX_PREPROCESS && !isStreaming) {
         text = processLatexBrackets(text);
@@ -273,24 +287,34 @@ const StreamingMarkdown = React.memo(
         text = processCitationRefs(text, citations);
       }
       return text;
-    }, [content, citations, isStreaming]);
+    }, [content, citations, isStreaming, isRefDirectWrite]);
 
-    const remarkPlugins = React.useMemo(() => {
+    // 基础 remark 插件数组缓存：配置不变时保持引用稳定，
+    // 避免 ReactMarkdown 因插件引用变化而重新初始化（需求 6.3）
+    const baseRemarkPlugins = React.useMemo(() => {
       const plugins = [];
       if (MATH_ENGINE !== 'none') {
         plugins.push([remarkMath, { singleDollarTextMath: ENABLE_SINGLE_DOLLAR }]);
       }
       plugins.push(remarkGfm);
-
-      if (enableBlurReveal && isStreaming) {
-        plugins.push([remarkBlurRevealAST, { isStreaming, stableOffset: content?.length || 0 }]);
-      }
       return plugins;
-    }, [enableBlurReveal, isStreaming, content?.length]);
+    }, []);
 
+    // 完整 remark 插件数组：仅在需要 blur-reveal 动画时追加动态插件，
+    // 非流式输出时直接复用稳定的基础插件数组引用
+    const remarkPlugins = React.useMemo(() => {
+      if (enableBlurReveal && isStreaming) {
+        return [...baseRemarkPlugins, [remarkBlurRevealAST, { isStreaming, stableOffset: content?.length || 0 }]];
+      }
+      return baseRemarkPlugins;
+    }, [baseRemarkPlugins, enableBlurReveal, isStreaming, content?.length]);
+
+    // rehype 插件数组缓存：配置固定，空依赖保持引用稳定（需求 6.3）
+    // 使用带缓存的 rehypeKatexCached 替代 rehypeKatex，
+    // 相同公式表达式直接返回缓存结果，避免重复渲染（需求 6.2）
     const rehypePlugins = React.useMemo(() => [
       rehypeRaw,
-      [rehypeKatex, { strict: false, trust: true, output: 'html' }],
+      [rehypeKatexCached, { strict: false, trust: true, output: 'html' }],
       rehypeHighlight,
     ], []);
 
@@ -381,7 +405,15 @@ const StreamingMarkdown = React.memo(
         ref={containerRef}
         className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${streamingClass}`}
       >
-        {showWaitingDots ? (
+        {isRefDirectWrite ? (
+          // ref 直写模式：流式输出期间显示纯文本容器，
+          // useSmoothStream 通过 streamingRef 直接写入 textContent，
+          // 避免触发 React 状态更新和 ReactMarkdown 重渲染（需求 4.2）
+          <div
+            ref={streamingRef}
+            className="whitespace-pre-wrap break-words"
+          />
+        ) : showWaitingDots ? (
           <div className="streaming-dots">
             <span className="dot" />
             <span className="dot" />
@@ -400,16 +432,19 @@ const StreamingMarkdown = React.memo(
       </div>
     );
   },
+  // 自定义比较函数：仅在关键 props 变化时重渲染
+  // ref 直写模式下，streamingRef 的存在/消失也需要触发重渲染
   (prevProps, nextProps) => {
     return (
       prevProps.content === nextProps.content &&
       prevProps.isStreaming === nextProps.isStreaming &&
-      prevProps.enableBlurReveal === nextProps.enableBlurReveal &&
-      prevProps.citations === nextProps.citations &&
-      prevProps.onCitationClick === nextProps.onCitationClick
+      (prevProps.streamingRef != null) === (nextProps.streamingRef != null)
     );
   }
 );
+
+// 为 React DevTools 添加显示名称
+StreamingMarkdown.displayName = 'StreamingMarkdown';
 
 export { processLatexBrackets };
 export default StreamingMarkdown;

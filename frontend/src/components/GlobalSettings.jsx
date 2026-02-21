@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
-import { useGlobalSettings, PRESET_FONTS } from '../contexts/GlobalSettingsContext';
+import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
+import { useChatParams } from '../contexts/ChatParamsContext';
+import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
+    // 使用细粒度 Hook 订阅字体设置（需求 2.2）
     const {
         fontFamily,
         customFont,
@@ -12,13 +15,18 @@ const GlobalSettings = ({ isOpen, onClose }) => {
         setFontFamily,
         setCustomFont,
         setGlobalScale,
-        resetSettings,
-        exportSettings,
-        importSettings,
         getCurrentFontName,
-        enableMemory,
-        setEnableMemory,
-    } = useGlobalSettings();
+        resetFontSettings,
+    } = useFontSettings();
+    // 记忆功能属于对话参数
+    const { enableMemory, setEnableMemory, resetChatParams } = useChatParams();
+    // 导入/导出需要聚合层（涉及所有设置）
+    const { exportSettings, importSettings } = useGlobalSettings();
+    // 聚合重置
+    const resetSettings = () => {
+        resetFontSettings();
+        resetChatParams();
+    };
 
     const [customFontInput, setCustomFontInput] = useState(customFont);
     const [showMemoryPanel, setShowMemoryPanel] = useState(false);

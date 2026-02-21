@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback, forwardRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, forwardRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import SelectionOverlay from './SelectionOverlay';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import pdfPageCache from '../utils/pdfPageCache';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -10,10 +12,12 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 // Configure worker - 直接指定版本以确保匹配
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false }, ref) => {
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
+    // 防抖缩放值：实际 PDF 渲染使用防抖后的值（150ms），避免频繁重渲染
+    const debouncedScale = useDebouncedValue(scale, 150);
     const [selectedText, setSelectedText] = useState('');
     const [error, setError] = useState(null);
 
@@ -76,6 +80,44 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
     const [highlightRects, setHighlightRects] = useState([]);
     const pageRef = useRef(null);
 
+    // ── PDF 页面 canvas 缓存：渲染完成后捕获 canvas 数据 ──
+    // 缓存的图片 dataURL，用于在页面加载/重渲染期间显示占位图
+    const [cachedImage, setCachedImage] = useState(() =>
+        pdfPageCache.get(pageNumber, scale) || null
+    );
+
+    // 页码或缩放变化时，立即尝试从缓存获取占位图
+    useEffect(() => {
+        const cached = pdfPageCache.get(pageNumber, debouncedScale);
+        setCachedImage(cached || null);
+    }, [pageNumber, debouncedScale]);
+
+    // 页面渲染成功后，捕获 canvas 数据存入缓存
+    const handlePageRenderSuccess = useCallback(() => {
+        try {
+            const pageEl = pageRef.current;
+            if (!pageEl) return;
+            const canvas = pageEl.querySelector('canvas');
+            if (!canvas) return;
+            const dataURL = canvas.toDataURL('image/png');
+            pdfPageCache.set(pageNumber, debouncedScale, dataURL);
+            // 更新当前缓存图片（下次切换回来时可用）
+            setCachedImage(dataURL);
+        } catch (e) {
+            // canvas 捕获失败时静默忽略，不影响正常渲染
+            console.warn('⚠️ PDF 页面缓存捕获失败:', e);
+        }
+    }, [pageNumber, debouncedScale]);
+
+    // ── 相邻页面预渲染：计算需要预渲染的前后页码 ──
+    const pagesToPrerender = useMemo(() => {
+        if (!numPages) return [];
+        const pages = [];
+        if (pageNumber > 1) pages.push(pageNumber - 1);
+        if (pageNumber < numPages) pages.push(pageNumber + 1);
+        return pages;
+    }, [pageNumber, numPages]);
+
     // ── 自定义滚动条 ──
     const THUMB_SIZE = 48;
     const pdfScrollRef = useRef(null);
@@ -109,7 +151,7 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
     useEffect(() => {
         const t = setTimeout(updateThumbs, 300);
         return () => clearTimeout(t);
-    }, [scale, pageNumber, numPages, updateThumbs]);
+    }, [scale, debouncedScale, pageNumber, numPages, updateThumbs]);
 
     const makeDragHandler = useCallback((axis) => (e) => {
         e.preventDefault();
@@ -494,13 +536,34 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                         }
                     >
                         <div ref={ref} className="relative" style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
+                            {/* 缩放过渡期间使用 CSS transform 即时缩放缓存画面，避免白屏 */}
+                            <div style={scale !== debouncedScale ? {
+                                transform: `scale(${scale / debouncedScale})`,
+                                transformOrigin: 'top left',
+                            } : undefined}>
+                            {/* 缓存占位图：在页面加载/重渲染期间显示已缓存的 canvas 快照 */}
+                            {cachedImage && (
+                                <img
+                                    src={cachedImage}
+                                    alt=""
+                                    style={{
+                                        position: 'absolute',
+                                        top: 0,
+                                        left: 0,
+                                        zIndex: 0,
+                                        pointerEvents: 'none',
+                                    }}
+                                />
+                            )}
                             <Page
                                 inputRef={pageRef}
                                 pageNumber={pageNumber}
-                                scale={scale}
+                                scale={debouncedScale}
                                 renderTextLayer={true}
                                 renderAnnotationLayer={true}
+                                onRenderSuccess={handlePageRenderSuccess}
                             />
+                            </div>
                             {/* 框选遮罩层，覆盖在 PDF 页面上方 */}
                             <SelectionOverlay
                                 active={isSelecting}
@@ -550,6 +613,27 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
+                            {/* 相邻页面预渲染：隐藏渲染前后页面，预热 canvas 缓存 */}
+                            {pagesToPrerender.map(p => (
+                                <div
+                                    key={`prerender-${p}`}
+                                    style={{
+                                        position: 'absolute',
+                                        visibility: 'hidden',
+                                        pointerEvents: 'none',
+                                        top: 0,
+                                        left: 0,
+                                    }}
+                                    aria-hidden="true"
+                                >
+                                    <Page
+                                        pageNumber={p}
+                                        scale={debouncedScale}
+                                        renderTextLayer={false}
+                                        renderAnnotationLayer={false}
+                                    />
+                                </div>
+                            ))}
                         </div>
                     </Document>
                 )}
@@ -582,8 +666,9 @@ const PDFViewer = forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page
             </div>
         </div>
     );
-});
+}));
 
-PDFViewer.displayName
+// 设置 displayName 便于 React DevTools 调试
+PDFViewer.displayName = 'PDFViewer';
 
 export default PDFViewer;

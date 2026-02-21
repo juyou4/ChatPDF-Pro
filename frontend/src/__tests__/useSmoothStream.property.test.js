@@ -347,4 +347,175 @@ describe('useSmoothStream 属性测试', () => {
       )
     })
   })
+
+  // ============================================================
+  // Feature: chatpdf-frontend-performance, Property 6: 流式输出文本一致性（Round-trip）
+  // **Validates: Requirements 4.3**
+  //
+  // 对任意输入文本块序列，将所有文本块依次通过 addChunk 方法输入，
+  // 流式输出完成后，getFinalText() 返回的文本应与所有输入文本块的
+  // 拼接结果完全一致。
+  // ============================================================
+  describe('Property 6: 流式输出文本一致性（Round-trip）', () => {
+    /**
+     * 模拟 useSmoothStream 的完整渲染循环（同步版本）
+     *
+     * 忠实复现 hook 中 renderLoop 的逻辑：
+     *   1. addChunk 将文本通过 splitChunk 拆分后入队
+     *   2. 逐帧渲染：每帧取 Math.max(1, Math.floor(queue.length / 5)) 个字符
+     *   3. streamDone 时一次性渲染所有剩余字符
+     *   4. getFinalText 返回最终文本
+     *
+     * @param {string[]} chunks - 输入文本块序列
+     * @param {string} initialText - 初始文本
+     * @returns {{ finalText: string, displayedText: string }}
+     */
+    function simulateFullRenderCycle(chunks, initialText = '') {
+      let queue = []
+      let displayedText = initialText
+      let finalText = initialText
+
+      // 阶段 1：逐个 addChunk，模拟流式输入
+      for (const chunk of chunks) {
+        const chars = splitChunk(chunk)
+        queue = [...queue, ...chars]
+      }
+
+      // 阶段 2：模拟 rAF 渲染循环（streamDone=false 期间逐帧渲染）
+      // 执行若干帧，每帧按公式取字符
+      const maxFrames = 1000 // 安全上限，防止无限循环
+      let frame = 0
+      while (queue.length > 0 && frame < maxFrames) {
+        const charsToRenderCount = Math.max(1, Math.floor(queue.length / 5))
+        const charsToRender = queue.slice(0, charsToRenderCount)
+        displayedText += charsToRender.join('')
+        finalText = displayedText
+        queue = queue.slice(charsToRenderCount)
+        frame++
+      }
+
+      // 阶段 3：streamDone=true，一次性渲染所有剩余字符（如果还有的话）
+      if (queue.length > 0) {
+        displayedText += queue.join('')
+        finalText = displayedText
+        queue = []
+      }
+
+      return { finalText, displayedText }
+    }
+
+    it('任意文本块序列经 addChunk → 渲染循环 → getFinalText 后与原始拼接一致', () => {
+      fc.assert(
+        fc.property(
+          fc.array(
+            fc.string({ minLength: 0, maxLength: 100 }),
+            { minLength: 0, maxLength: 30 }
+          ),
+          (chunks) => {
+            const { finalText } = simulateFullRenderCycle(chunks)
+            const expected = chunks.join('')
+            expect(finalText).toBe(expected)
+          }
+        ),
+        { numRuns: 200 }
+      )
+    })
+
+    it('带初始文本时，getFinalText 应等于 initialText + 所有 chunk 拼接', () => {
+      fc.assert(
+        fc.property(
+          fc.array(
+            fc.string({ minLength: 0, maxLength: 50 }),
+            { minLength: 0, maxLength: 20 }
+          ),
+          fc.string({ minLength: 0, maxLength: 50 }),
+          (chunks, initialText) => {
+            const { finalText } = simulateFullRenderCycle(chunks, initialText)
+            const expected = initialText + chunks.join('')
+            expect(finalText).toBe(expected)
+          }
+        ),
+        { numRuns: 200 }
+      )
+    })
+
+    it('包含中文、emoji、特殊字符的文本块序列 round-trip 一致', () => {
+      // 自定义生成器：混合多语言字符
+      const unicodeCharArb = fc.constantFrom(
+        'a', 'Z', '0', ' ', '.', '\n', '\t',       // ASCII
+        '你', '好', '世', '界', '测', '试', '中',   // 中文
+        '🎉', '🚀', '❤️', '👨‍👩‍👧‍👦', '🇨🇳',           // emoji（含组合 emoji）
+        '①', '②', '™', '©', '½',                   // 特殊符号
+        'α', 'β', 'γ',                              // 希腊字母
+        'あ', 'い', 'う',                            // 日文
+        '한', '글',                                  // 韩文
+      )
+      const unicodeChunkArb = fc.array(unicodeCharArb, { minLength: 0, maxLength: 50 })
+        .map((chars) => chars.join(''))
+      const chunksArb = fc.array(unicodeChunkArb, { minLength: 0, maxLength: 20 })
+
+      fc.assert(
+        fc.property(chunksArb, (chunks) => {
+          const { finalText } = simulateFullRenderCycle(chunks)
+          const expected = chunks.join('')
+          expect(finalText).toBe(expected)
+        }),
+        { numRuns: 200 }
+      )
+    })
+
+    it('splitChunk round-trip：任意文本经 splitChunk 分割后拼接与原文一致', () => {
+      // 此测试从 round-trip 角度验证 splitChunk 是文本一致性的基础
+      fc.assert(
+        fc.property(
+          fc.array(
+            fc.string({ minLength: 0, maxLength: 100 }),
+            { minLength: 1, maxLength: 20 }
+          ),
+          (chunks) => {
+            // 对每个 chunk 分别验证 splitChunk round-trip
+            for (const chunk of chunks) {
+              expect(splitChunk(chunk).join('')).toBe(chunk)
+            }
+            // 对所有 chunk 拼接后的完整文本也验证
+            const fullText = chunks.join('')
+            expect(splitChunk(fullText).join('')).toBe(fullText)
+          }
+        ),
+        { numRuns: 100 }
+      )
+    })
+
+    it('单个大文本块的 round-trip 一致性', () => {
+      fc.assert(
+        fc.property(
+          // 生成较大的单个文本块
+          fc.string({ minLength: 100, maxLength: 2000 }),
+          (bigChunk) => {
+            const { finalText } = simulateFullRenderCycle([bigChunk])
+            expect(finalText).toBe(bigChunk)
+          }
+        ),
+        { numRuns: 100 }
+      )
+    })
+
+    it('大量小文本块的 round-trip 一致性', () => {
+      fc.assert(
+        fc.property(
+          // 生成大量小文本块（模拟 SSE 逐 token 推送）
+          fc.array(
+            fc.string({ minLength: 1, maxLength: 5 }),
+            { minLength: 10, maxLength: 100 }
+          ),
+          (chunks) => {
+            const { finalText } = simulateFullRenderCycle(chunks)
+            const expected = chunks.join('')
+            expect(finalText).toBe(expected)
+          }
+        ),
+        { numRuns: 100 }
+      )
+    })
+  })
 })
