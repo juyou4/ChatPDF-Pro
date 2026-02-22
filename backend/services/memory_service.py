@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from services.keyword_extractor import KeywordExtractor
@@ -23,6 +23,15 @@ from services.memory_retriever import MemoryRetriever
 from services.memory_store import MemoryEntry, MemoryStore
 
 logger = logging.getLogger(__name__)
+
+# 延迟导入新模块的辅助函数，避免循环依赖
+def _import_new_modules():
+    """延迟导入新增模块，返回 (MemoryTagger, MemoryCompressor, ContextInjector, ActivePool)"""
+    from services.memory_tagger import MemoryTagger
+    from services.memory_compressor import MemoryCompressor
+    from services.context_injector import ContextInjector
+    from services.active_pool import ActivePool
+    return MemoryTagger, MemoryCompressor, ContextInjector, ActivePool
 
 # 默认配置
 DEFAULT_MAX_SUMMARIES = 50  # QA 摘要数量上限
@@ -63,13 +72,78 @@ class MemoryService:
         self.index = MemoryIndex(
             os.path.join(data_dir, "memory_index"), embedding_model_id
         )
-        self.retriever = MemoryRetriever(self.store, self.index)
         self.keyword_extractor = KeywordExtractor()
         self.max_summaries = DEFAULT_MAX_SUMMARIES
         self.keyword_threshold = DEFAULT_KEYWORD_THRESHOLD
 
+        # 初始化新增模块（使用 _safe_execute 确保优雅降级）
+        self.tagger = None
+        self.compressor = None
+        self.context_injector = None
+        self.active_pool = None
+        try:
+            from config import settings as app_settings
+        except Exception:
+            app_settings = None
+
+        try:
+            MemoryTagger, MemoryCompressor, ContextInjector, ActivePool = _import_new_modules()
+            self.tagger = MemoryTagger()
+            compression_threshold = getattr(app_settings, "memory_compression_threshold", 20) if app_settings else 20
+            self.compressor = MemoryCompressor(compression_threshold=compression_threshold)
+            token_budget = getattr(app_settings, "memory_injection_token_budget", 800) if app_settings else 800
+            self.context_injector = ContextInjector(token_budget=token_budget)
+            pool_size = getattr(app_settings, "memory_active_pool_size", 100) if app_settings else 100
+            self.active_pool = ActivePool(capacity=pool_size)
+        except Exception as e:
+            logger.warning(f"[MemoryService] 新增模块初始化失败，降级为基础功能: {e}")
+
+        # 初始化检索器（传入 active_pool）
+        self.retriever = MemoryRetriever(self.store, self.index, active_pool=self.active_pool)
+
         # 尝试加载已有的向量索引
         self.index.load()
+
+        # 预加载活跃记忆池
+        self._safe_execute("ActivePool.preload", self._preload_active_pool)
+
+    # ==================== 安全执行与预加载 ====================
+
+    def _safe_execute(self, component_name: str, func, *args, **kwargs):
+        """安全执行组件方法，异常时降级
+
+        Args:
+            component_name: 组件名称（用于日志）
+            func: 要执行的函数
+            *args, **kwargs: 函数参数
+
+        Returns:
+            函数返回值，异常时返回 None
+        """
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"[{component_name}] 执行失败，降级处理: {e}")
+            return None
+
+    def _preload_active_pool(self) -> None:
+        """预加载活跃记忆池（服务启动时调用）
+
+        从存储中加载最近使用的记忆条目到 Active_Pool。
+        """
+        if not self.active_pool:
+            return
+        try:
+            all_entries = self.store.get_all_entries()
+            # 按 last_hit_at 降序排列，取前 N 条
+            sorted_entries = sorted(
+                all_entries,
+                key=lambda e: e.last_hit_at or "",
+                reverse=True,
+            )
+            self.active_pool.preload(sorted_entries[:self.active_pool.capacity])
+        except Exception as e:
+            logger.warning(f"[ActivePool] 预加载失败: {e}")
 
     # ==================== 记忆检索 ====================
 
@@ -102,10 +176,244 @@ class MemoryService:
                 query, top_k=top_k, api_key=api_key, 
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
+            
+            # 检索后触发晋升检查
+            for mem in memories:
+                try:
+                    entry = MemoryEntry.from_dict(mem) if isinstance(mem, dict) else mem
+                    self.check_and_promote(entry)
+                except Exception as e:
+                    logger.debug(f"晋升检查失败（不影响检索）: {e}")
+
+            # 检索命中的记忆加入 Active_Pool（Page-In）
+            if self.active_pool and memories:
+                for mem in memories:
+                    try:
+                        entry = MemoryEntry.from_dict(mem) if isinstance(mem, dict) else mem
+                        self.active_pool.put(entry)
+                    except Exception as e:
+                        logger.debug(f"Active_Pool Page-In 失败: {e}")
+            
             return self.retriever.build_memory_context(memories)
         except Exception as e:
             logger.error(f"记忆检索失败: {e}")
             return ""
+
+    def retrieve_memories_raw(
+        self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
+        doc_id: str = None, filter_by_doc: bool = False
+    ) -> list[dict]:
+        """检索相关记忆并返回原始记忆列表（供 ContextInjector 使用）
+
+        Args:
+            query: 用户查询文本
+            top_k: 返回的最大结果数
+            api_key: API 密钥
+            doc_id: 当前文档 ID
+            filter_by_doc: 是否只返回当前文档的记忆
+
+        Returns:
+            记忆字典列表，每条包含 content, memory_tier, importance 等字段
+        """
+        try:
+            memories = self.retriever.retrieve(
+                query, top_k=top_k, api_key=api_key,
+                doc_id=doc_id, filter_by_doc=filter_by_doc
+            )
+            # 补充 memory_tier 和 tags 信息
+            all_entries = self.store.get_all_entries()
+            entry_map = {e.id: e for e in all_entries}
+            enriched = []
+            for mem in memories:
+                entry_id = mem.get("entry_id", "")
+                entry = entry_map.get(entry_id)
+                enriched_mem = dict(mem)
+                if entry:
+                    enriched_mem["content"] = mem.get("text", entry.content)
+                    enriched_mem["memory_tier"] = entry.memory_tier
+                    enriched_mem["importance"] = entry.importance
+                    enriched_mem["tags"] = entry.tags
+                else:
+                    enriched_mem.setdefault("content", mem.get("text", ""))
+                    enriched_mem.setdefault("memory_tier", "short_term")
+                    enriched_mem.setdefault("importance", 0.5)
+                    enriched_mem.setdefault("tags", [])
+                enriched.append(enriched_mem)
+            return enriched
+        except Exception as e:
+            logger.error(f"记忆原始检索失败: {e}")
+            return []
+
+    # ==================== 分层记忆架构 ====================
+
+    def check_and_promote(self, entry: MemoryEntry) -> None:
+        """检查并执行记忆晋升
+
+        晋升条件：
+        - memory_tier 为 "short_term"
+        - hit_count >= 晋升阈值（默认 5）
+        - last_hit_at 在最近 7 天内
+
+        Args:
+            entry: 待检查的记忆条目
+        """
+        if entry.memory_tier != "short_term":
+            return
+
+        # 读取配置的晋升阈值
+        try:
+            from config import settings
+            promotion_threshold = settings.memory_promotion_threshold
+        except Exception:
+            promotion_threshold = 5
+
+        if entry.hit_count < promotion_threshold:
+            return
+
+        # 检查 last_hit_at 是否在最近 7 天内
+        if not entry.last_hit_at:
+            return
+
+        try:
+            last_hit_time = datetime.fromisoformat(entry.last_hit_at)
+            if last_hit_time.tzinfo is None:
+                last_hit_time = last_hit_time.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return
+
+        now = datetime.now(timezone.utc)
+        if (now - last_hit_time) > timedelta(days=7):
+            return
+
+        # 满足晋升条件，更新 memory_tier
+        entry.memory_tier = "long_term"
+        self._persist_tier_change(entry)
+        logger.info(f"记忆晋升: {entry.id} short_term -> long_term (hit_count={entry.hit_count})")
+
+    def check_and_demote(self) -> None:
+        """检查并执行记忆降级
+
+        降级条件：
+        - memory_tier 为 "long_term"
+        - 距离 last_hit_at 超过降级天数（默认 90 天）
+        - hit_count < 3
+        """
+        try:
+            from config import settings
+            demotion_days = settings.memory_demotion_days
+        except Exception:
+            demotion_days = 90
+
+        now = datetime.now(timezone.utc)
+        all_entries = self.store.get_all_entries()
+        demoted_count = 0
+
+        for entry in all_entries:
+            if entry.memory_tier != "long_term":
+                continue
+            if entry.hit_count >= 3:
+                continue
+
+            # 计算距离 last_hit_at 的天数
+            last_hit_time = None
+            if entry.last_hit_at:
+                try:
+                    last_hit_time = datetime.fromisoformat(entry.last_hit_at)
+                    if last_hit_time.tzinfo is None:
+                        last_hit_time = last_hit_time.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    pass
+
+            if not last_hit_time:
+                # 没有命中记录，使用创建时间
+                try:
+                    last_hit_time = datetime.fromisoformat(entry.created_at)
+                    if last_hit_time.tzinfo is None:
+                        last_hit_time = last_hit_time.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+
+            days_since_hit = (now - last_hit_time).total_seconds() / 86400.0
+            if days_since_hit > demotion_days:
+                entry.memory_tier = "archived"
+                self._persist_tier_change(entry)
+                demoted_count += 1
+
+        if demoted_count > 0:
+            logger.info(f"记忆降级: {demoted_count} 条记忆 long_term -> archived")
+
+    def _persist_tier_change(self, entry: MemoryEntry) -> None:
+        """持久化记忆层级变更到存储
+
+        在 profile 的 entries 和 session 的 important_memories 中查找并更新 memory_tier。
+
+        Args:
+            entry: 已更新 memory_tier 的记忆条目
+        """
+        # 在 profile 中查找
+        profile = self.store.load_profile()
+        for item in profile.get("entries", []):
+            if item.get("id") == entry.id:
+                item["memory_tier"] = entry.memory_tier
+                self.store.save_profile(profile)
+                return
+
+        # 在 session 中查找
+        if entry.doc_id:
+            session = self.store.load_session(entry.doc_id)
+            for item in session.get("important_memories", []):
+                if item.get("id") == entry.id:
+                    item["memory_tier"] = entry.memory_tier
+                    self.store.save_session(entry.doc_id, session)
+                    return
+
+    def get_working_memory(self, chat_history: list[dict], window_size: int = None) -> list[dict]:
+        """获取工作记忆（滑动窗口）
+
+        从对话历史中提取最近 N 轮对话（user + assistant 配对）。
+
+        Args:
+            chat_history: 完整对话历史列表，每项包含 role 和 content
+            window_size: 窗口大小（保留的轮数），默认从配置读取
+
+        Returns:
+            最近 N 轮对话的消息列表
+        """
+        if window_size is None:
+            try:
+                from config import settings
+                window_size = settings.memory_working_window_size
+            except Exception:
+                window_size = 10
+
+        if not chat_history:
+            return []
+
+        # 提取 user+assistant 配对的轮次
+        rounds: list[list[dict]] = []
+        i = 0
+        while i < len(chat_history):
+            msg = chat_history[i]
+            if msg.get("role") == "user":
+                # 尝试配对下一条 assistant 消息
+                round_msgs = [msg]
+                if i + 1 < len(chat_history) and chat_history[i + 1].get("role") == "assistant":
+                    round_msgs.append(chat_history[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                rounds.append(round_msgs)
+            else:
+                i += 1
+
+        # 取最后 N 轮
+        recent_rounds = rounds[-window_size:] if len(rounds) > window_size else rounds
+
+        # 展平为消息列表
+        result = []
+        for round_msgs in recent_rounds:
+            result.extend(round_msgs)
+        return result
 
     # ==================== 记忆写入 ====================
 
@@ -204,6 +512,36 @@ class MemoryService:
                 self.store._write_memory_markdown(entry, is_long_term=False)
         except Exception as e:
             logger.warning(f"同步写入 Markdown 失败: {e}")
+
+        # 保存完成后检查是否需要压缩（安全执行）
+        self._safe_execute("MemoryCompressor.check", self._check_and_compress, doc_id, api_key, model, api_provider)
+
+    def _check_and_compress(self, doc_id: str, api_key: str = None, model: str = None, api_provider: str = None) -> None:
+        """检查并执行记忆压缩
+
+        当同一文档的记忆条目数量超过压缩阈值时，触发压缩流程。
+
+        Args:
+            doc_id: 文档 ID
+            api_key: LLM API 密钥
+            model: LLM 模型名称
+            api_provider: LLM 提供商
+        """
+        if not self.compressor or not doc_id:
+            return
+        all_entries = self.store.get_all_entries()
+        if not self.compressor.should_compress(doc_id, all_entries):
+            return
+        # 筛选该文档的记忆条目
+        doc_entries = [e for e in all_entries if e.doc_id == doc_id]
+        compressed = self.compressor.compress(doc_entries, api_key=api_key, model=model, api_provider=api_provider)
+        if compressed:
+            # 删除原始条目，写入压缩后的条目
+            for e in doc_entries:
+                self.store.delete_entry(e.id)
+            for c in compressed:
+                self.store.add_entry(c)
+            logger.info(f"[MemoryCompressor] 文档 {doc_id} 压缩完成: {len(doc_entries)} -> {len(compressed)}")
 
     def _distill_facts(
         self,
@@ -393,6 +731,7 @@ class MemoryService:
             created_at=datetime.now(timezone.utc).isoformat(),
             doc_id=doc_id,
             importance=1.0,  # 重要记忆默认 1.0
+            memory_tier="long_term",  # 手动标记直接进入长期记忆
         )
 
         # 保存到 session 的 important_memories
@@ -455,7 +794,7 @@ class MemoryService:
     ) -> MemoryEntry:
         """添加记忆条目
 
-        同时添加到 store 和 index。
+        同时添加到 store 和 index，并自动打标签。
 
         Args:
             content: 记忆内容文本
@@ -474,6 +813,12 @@ class MemoryService:
             doc_id=doc_id,
             importance=importance,
         )
+
+        # 自动打标签（安全执行，失败不影响写入）
+        if self.tagger:
+            tags = self._safe_execute("MemoryTagger.auto_tag", self.tagger.auto_tag, content)
+            if tags:
+                entry.tags = tags
 
         # 保存到 store
         self.store.add_entry(entry)
@@ -630,6 +975,12 @@ class MemoryService:
             
             if updated_count > 0:
                 logger.info(f"自动评估记忆重要性: 更新了 {updated_count} 条记忆的重要性")
+            
+            # 评估完成后触发降级检查
+            try:
+                self.check_and_demote()
+            except Exception as e:
+                logger.debug(f"降级检查失败（不影响评估）: {e}")
         except Exception as e:
             logger.error(f"自动评估记忆重要性失败: {e}")
     

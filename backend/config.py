@@ -148,6 +148,42 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_flush_threshold_tokens", "CHATPDF_MEMORY_FLUSH_THRESHOLD_TOKENS"),
         description="触发记忆刷新的 token 阈值，范围 1000-20000"
     )
+    # 工作记忆窗口大小（保留最近 N 轮对话）
+    memory_working_window_size: int = Field(
+        default=10,
+        validation_alias=AliasChoices("memory_working_window_size", "CHATPDF_MEMORY_WORKING_WINDOW_SIZE"),
+        description="工作记忆窗口大小，范围 1-50"
+    )
+    # 晋升命中次数阈值（短期记忆晋升为长期记忆所需的命中次数）
+    memory_promotion_threshold: int = Field(
+        default=5,
+        validation_alias=AliasChoices("memory_promotion_threshold", "CHATPDF_MEMORY_PROMOTION_THRESHOLD"),
+        description="晋升命中次数阈值，范围 1-100"
+    )
+    # 降级天数阈值（长期记忆超过此天数未命中则降级）
+    memory_demotion_days: int = Field(
+        default=90,
+        validation_alias=AliasChoices("memory_demotion_days", "CHATPDF_MEMORY_DEMOTION_DAYS"),
+        description="降级天数阈值，范围 1-365"
+    )
+    # 压缩触发条目数（同一文档记忆超过此数量触发压缩）
+    memory_compression_threshold: int = Field(
+        default=20,
+        validation_alias=AliasChoices("memory_compression_threshold", "CHATPDF_MEMORY_COMPRESSION_THRESHOLD"),
+        description="压缩触发条目数，范围 5-200"
+    )
+    # 活跃记忆池容量（类 OS RAM，LRU 策略管理）
+    memory_active_pool_size: int = Field(
+        default=100,
+        validation_alias=AliasChoices("memory_active_pool_size", "CHATPDF_MEMORY_ACTIVE_POOL_SIZE"),
+        description="活跃记忆池容量，范围 10-1000"
+    )
+    # 注入 token 预算（记忆注入到 system prompt 的最大 token 数）
+    memory_injection_token_budget: int = Field(
+        default=800,
+        validation_alias=AliasChoices("memory_injection_token_budget", "CHATPDF_MEMORY_INJECTION_TOKEN_BUDGET"),
+        description="注入 token 预算，范围 100-5000"
+    )
 
     @field_validator("memory_keyword_threshold")
     @classmethod
@@ -191,6 +227,72 @@ class AppSettings(BaseSettings):
                 f"memory_flush_threshold_tokens 值 {v} 超出合理范围 (1000-20000)，使用默认值 4000"
             )
             return 4000
+        return v
+
+    @field_validator("memory_working_window_size")
+    @classmethod
+    def validate_memory_working_window_size(cls, v: int) -> int:
+        """校验工作记忆窗口大小，范围 1-50，超出范围使用默认值"""
+        if not (1 <= v <= 50):
+            logger.warning(
+                f"memory_working_window_size 值 {v} 超出合理范围 (1-50)，使用默认值 10"
+            )
+            return 10
+        return v
+
+    @field_validator("memory_promotion_threshold")
+    @classmethod
+    def validate_memory_promotion_threshold(cls, v: int) -> int:
+        """校验晋升命中次数阈值，范围 1-100，超出范围使用默认值"""
+        if not (1 <= v <= 100):
+            logger.warning(
+                f"memory_promotion_threshold 值 {v} 超出合理范围 (1-100)，使用默认值 5"
+            )
+            return 5
+        return v
+
+    @field_validator("memory_demotion_days")
+    @classmethod
+    def validate_memory_demotion_days(cls, v: int) -> int:
+        """校验降级天数阈值，范围 1-365，超出范围使用默认值"""
+        if not (1 <= v <= 365):
+            logger.warning(
+                f"memory_demotion_days 值 {v} 超出合理范围 (1-365)，使用默认值 90"
+            )
+            return 90
+        return v
+
+    @field_validator("memory_compression_threshold")
+    @classmethod
+    def validate_memory_compression_threshold(cls, v: int) -> int:
+        """校验压缩触发条目数，范围 5-200，超出范围使用默认值"""
+        if not (5 <= v <= 200):
+            logger.warning(
+                f"memory_compression_threshold 值 {v} 超出合理范围 (5-200)，使用默认值 20"
+            )
+            return 20
+        return v
+
+    @field_validator("memory_active_pool_size")
+    @classmethod
+    def validate_memory_active_pool_size(cls, v: int) -> int:
+        """校验活跃记忆池容量，范围 10-1000，超出范围使用默认值"""
+        if not (10 <= v <= 1000):
+            logger.warning(
+                f"memory_active_pool_size 值 {v} 超出合理范围 (10-1000)，使用默认值 100"
+            )
+            return 100
+        return v
+
+    @field_validator("memory_injection_token_budget")
+    @classmethod
+    def validate_memory_injection_token_budget(cls, v: int) -> int:
+        """校验注入 token 预算，范围 100-5000，超出范围使用默认值"""
+        if not (100 <= v <= 5000):
+            logger.warning(
+                f"memory_injection_token_budget 值 {v} 超出合理范围 (100-5000)，使用默认值 800"
+            )
+            return 800
         return v
 
     @field_validator("ocr_default_mode")

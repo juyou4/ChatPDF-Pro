@@ -226,6 +226,40 @@ def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = N
         return ""
 
 
+def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = None) -> list[dict]:
+    """检索原始记忆列表（供 ContextInjector 使用）"""
+    if memory_service is None:
+        return []
+    try:
+        return memory_service.retrieve_memories_raw(
+            question, api_key=api_key, doc_id=doc_id, filter_by_doc=False
+        )
+    except Exception as e:
+        logger.error(f"记忆原始检索失败: {e}")
+        return []
+
+
+def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: list[dict] = None) -> str:
+    """智能注入记忆上下文：优先使用 ContextInjector，失败时回退到简单注入
+
+    Args:
+        system_prompt: 原始 system prompt
+        memory_context: 格式化的记忆上下文字符串（降级用）
+        raw_memories: 原始记忆列表（供 ContextInjector 使用）
+
+    Returns:
+        注入记忆后的 system prompt
+    """
+    # 优先使用 ContextInjector
+    if raw_memories and memory_service and hasattr(memory_service, 'context_injector') and memory_service.context_injector:
+        try:
+            return memory_service.context_injector.inject(system_prompt, raw_memories)
+        except Exception as e:
+            logger.warning(f"ContextInjector 注入失败，回退到简单注入: {e}")
+    # 降级为原有简单注入
+    return _inject_memory_context(system_prompt, memory_context)
+
+
 def _async_memory_write(svc, request):
     try:
         if request.doc_id:
@@ -350,8 +384,12 @@ async def chat_with_pdf(request: ChatRequest):
     if use_memory:
         _maybe_flush_memory(request)
     memory_context = ""
+    raw_memories = []
     if use_memory:
         memory_context = _retrieve_memory_context(
+            request.question, api_key=request.api_key, doc_id=request.doc_id
+        )
+        raw_memories = _retrieve_raw_memories(
             request.question, api_key=request.api_key, doc_id=request.doc_id
         )
 
@@ -372,7 +410,7 @@ async def chat_with_pdf(request: ChatRequest):
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 简洁清晰，学术准确。"""
-        system_prompt = _inject_memory_context(system_prompt, memory_context)
+        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
             mime = _detect_mime_type(img_b64)
@@ -460,7 +498,7 @@ async def chat_with_pdf(request: ChatRequest):
         if citations:
             citation_prompt = _context_builder.build_citation_prompt(citations)
             if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
-        system_prompt = _inject_memory_context(system_prompt, memory_context)
+        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = request.question
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -507,8 +545,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
     use_agent = False
     use_memory = _should_use_memory(request)
     memory_context = ""
+    raw_memories = []
     if use_memory:
         memory_context = _retrieve_memory_context(
+            request.question, api_key=request.api_key, doc_id=request.doc_id
+        )
+        raw_memories = _retrieve_raw_memories(
             request.question, api_key=request.api_key, doc_id=request.doc_id
         )
 
@@ -528,7 +570,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 简洁清晰，学术准确。"""
-        system_prompt = _inject_memory_context(system_prompt, memory_context)
+        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
             mime = _detect_mime_type(img_b64)
@@ -610,7 +652,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
         if citations:
             citation_prompt = _context_builder.build_citation_prompt(citations)
             if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
-        system_prompt = _inject_memory_context(system_prompt, memory_context)
+        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = request.question
 
     messages = [{"role": "system", "content": system_prompt}]

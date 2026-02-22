@@ -23,25 +23,30 @@ logger = logging.getLogger(__name__)
 class MemoryRetriever:
     """记忆混合检索器"""
 
-    def __init__(self, memory_store: MemoryStore, memory_index: MemoryIndex):
+    def __init__(self, memory_store: MemoryStore, memory_index: MemoryIndex, active_pool=None):
         """
         初始化记忆检索器
 
         Args:
             memory_store: 记忆持久化存储实例
             memory_index: 记忆向量索引实例
+            active_pool: 活跃记忆池实例（可选，用于优先检索）
         """
         self.memory_store = memory_store
         self.memory_index = memory_index
+        self.active_pool = active_pool
 
     def retrieve(self, query: str, top_k: int = 3, api_key: str = None, 
-                 doc_id: Optional[str] = None, filter_by_doc: bool = False) -> list[dict]:
+                 doc_id: Optional[str] = None, filter_by_doc: bool = False,
+                 filter_tags: Optional[list[str]] = None) -> list[dict]:
         """混合检索相关记忆
 
-        1. 向量检索：通过 memory_index.search 获取语义相关记忆
-        2. BM25 检索：对所有记忆文本构建临时 BM25 索引进行关键词匹配
-        3. RRF 融合：通过 hybrid_search_merge 合并两路结果
-        4. 文档相关性：同一文档的记忆优先（如果提供 doc_id）
+        1. 优先从 Active_Pool 检索（如果可用）
+        2. 向量检索：通过 memory_index.search 获取语义相关记忆
+        3. BM25 检索：对所有记忆文本构建临时 BM25 索引进行关键词匹配
+        4. RRF 融合：通过 hybrid_search_merge 合并两路结果
+        5. 文档相关性：同一文档的记忆优先（如果提供 doc_id）
+        6. 标签过滤：仅返回包含指定标签的记忆（如果提供 filter_tags）
 
         Args:
             query: 用户查询文本
@@ -49,6 +54,7 @@ class MemoryRetriever:
             api_key: API 密钥（远程 embedding 模型需要）
             doc_id: 当前文档 ID，用于文档相关性加权（可选）
             filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
+            filter_tags: 标签过滤列表，仅返回包含指定标签的记忆（可选）
 
         Returns:
             top_k 条最相关记忆，每项包含 entry_id, text, source_type 等字段
@@ -67,8 +73,17 @@ class MemoryRetriever:
             if not all_entries:
                 return []
 
+        # 标签过滤：仅保留包含指定标签的记忆
+        if filter_tags:
+            filter_set = set(filter_tags)
+            all_entries = [e for e in all_entries if filter_set.intersection(e.tags)]
+            if not all_entries:
+                return []
+
         # 构建 entry_id -> entry 的映射，方便后续查找
         entry_map = {entry.id: entry for entry in all_entries}
+        # 构建 entry_id -> doc_id 索引，用于优化 _record_hits
+        self._entry_doc_index = {entry.id: entry.doc_id for entry in all_entries}
 
         # 1. 向量检索
         vector_results = self._vector_search(query, top_k=top_k, api_key=api_key)
@@ -213,7 +228,8 @@ class MemoryRetriever:
     def _record_hits(self, entry_ids: list[str], entry_map: dict, now: datetime) -> None:
         """记录检索命中：更新 hit_count 和 last_hit_at
 
-        遍历所有 session 和 profile 中的匹配条目，更新统计字段。
+        使用 entry_id → doc_id 索引优化，仅加载命中条目所在的 session，
+        避免遍历所有 session 文件。
 
         Args:
             entry_ids: 本次命中的 entry_id 列表
@@ -223,43 +239,55 @@ class MemoryRetriever:
         hit_set = set(entry_ids)
         now_iso = now.isoformat()
 
+        # 使用 entry_id → doc_id 索引（在 retrieve 中构建）
+        entry_doc_index = getattr(self, "_entry_doc_index", {})
+
         try:
+            # 按 doc_id 分组命中的 entry_id，减少文件 I/O
+            profile_hits = set()
+            session_hits: dict[str, set[str]] = {}  # doc_id -> set of entry_ids
+
+            for eid in hit_set:
+                doc_id = entry_doc_index.get(eid)
+                if doc_id is None:
+                    # 无 doc_id 的条目在 profile 中
+                    profile_hits.add(eid)
+                else:
+                    if doc_id not in session_hits:
+                        session_hits[doc_id] = set()
+                    session_hits[doc_id].add(eid)
+
             # 更新 profile 中的 entries
-            profile = self.memory_store.load_profile()
-            profile_changed = False
-            for e_data in profile.get("entries", []):
-                if e_data.get("id") in hit_set:
-                    e_data["hit_count"] = e_data.get("hit_count", 0) + 1
-                    e_data["last_hit_at"] = now_iso
-                    profile_changed = True
-            if profile_changed:
-                self.memory_store.save_profile(profile)
+            if profile_hits:
+                profile = self.memory_store.load_profile()
+                profile_changed = False
+                for e_data in profile.get("entries", []):
+                    if e_data.get("id") in profile_hits:
+                        e_data["hit_count"] = e_data.get("hit_count", 0) + 1
+                        e_data["last_hit_at"] = now_iso
+                        profile_changed = True
+                if profile_changed:
+                    self.memory_store.save_profile(profile)
 
-            # 更新 sessions 中的 qa_summaries 和 important_memories
-            import os
-            sessions_dir = self.memory_store.sessions_dir
-            if os.path.exists(sessions_dir):
-                for filename in os.listdir(sessions_dir):
-                    if not filename.endswith("_session.json"):
-                        continue
-                    doc_id = filename.replace("_session.json", "")
-                    session = self.memory_store.load_session(doc_id)
-                    session_changed = False
+            # 仅加载包含命中条目的 session
+            for doc_id, eids in session_hits.items():
+                session = self.memory_store.load_session(doc_id)
+                session_changed = False
 
-                    for item in session.get("qa_summaries", []):
-                        if item.get("id") in hit_set:
-                            item["hit_count"] = item.get("hit_count", 0) + 1
-                            item["last_hit_at"] = now_iso
-                            session_changed = True
+                for item in session.get("qa_summaries", []):
+                    if item.get("id") in eids:
+                        item["hit_count"] = item.get("hit_count", 0) + 1
+                        item["last_hit_at"] = now_iso
+                        session_changed = True
 
-                    for item in session.get("important_memories", []):
-                        if item.get("id") in hit_set:
-                            item["hit_count"] = item.get("hit_count", 0) + 1
-                            item["last_hit_at"] = now_iso
-                            session_changed = True
+                for item in session.get("important_memories", []):
+                    if item.get("id") in eids:
+                        item["hit_count"] = item.get("hit_count", 0) + 1
+                        item["last_hit_at"] = now_iso
+                        session_changed = True
 
-                    if session_changed:
-                        self.memory_store.save_session(doc_id, session)
+                if session_changed:
+                    self.memory_store.save_session(doc_id, session)
         except Exception as e:
             logger.warning(f"记录记忆命中统计失败: {e}")
 

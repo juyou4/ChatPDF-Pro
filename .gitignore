@@ -59,6 +59,7 @@ yarn-debug.log*
 .coverage
 htmlcov/
 .pytest_cache/
+.hypothesis/
 
 # OS
 .DS_Store

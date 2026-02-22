@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from services.memory_cache import MemoryCache
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,12 +27,15 @@ class MemoryEntry:
     """单条记忆条目"""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     content: str = ""
-    source_type: str = "manual"  # "auto_qa" | "manual" | "liked" | "keyword" | "llm_distilled"
+    source_type: str = "manual"  # "auto_qa" | "manual" | "liked" | "keyword" | "llm_distilled" | "compressed"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     doc_id: Optional[str] = None
     importance: float = 0.5  # 0.0-1.0，manual/liked 默认 1.0，auto 默认 0.5
     hit_count: int = 0  # 被检索命中的次数
     last_hit_at: str = ""  # 最后一次被命中的时间
+    # 新增字段：记忆层级和分类标签
+    memory_tier: str = "short_term"  # "working" | "short_term" | "long_term" | "archived"
+    tags: list[str] = field(default_factory=list)  # 分类标签，如 "concept" | "fact" | "preference" 等
 
     def to_dict(self) -> dict:
         """序列化为字典"""
@@ -43,11 +48,13 @@ class MemoryEntry:
             "importance": self.importance,
             "hit_count": self.hit_count,
             "last_hit_at": self.last_hit_at,
+            "memory_tier": self.memory_tier,
+            "tags": self.tags,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryEntry":
-        """从字典反序列化"""
+        """从字典反序列化，缺失的新字段使用默认值以保证向后兼容"""
         return cls(
             id=data.get("id", str(uuid.uuid4())),
             content=data.get("content", ""),
@@ -57,6 +64,8 @@ class MemoryEntry:
             importance=data.get("importance", 0.5),
             hit_count=data.get("hit_count", 0),
             last_hit_at=data.get("last_hit_at", ""),
+            memory_tier=data.get("memory_tier", "short_term"),
+            tags=data.get("tags", []),
         )
 
 
@@ -74,6 +83,8 @@ class MemoryStore:
         self.profile_path = os.path.join(data_dir, "user_profile.json")
         self.sessions_dir = os.path.join(data_dir, "sessions")
         self.memory_dir = os.path.join(data_dir, "memory")  # Markdown 源文件目录
+        # 初始化内存缓存
+        self.cache = MemoryCache()
         # 确保目录结构存在
         self._ensure_dirs()
 
@@ -153,7 +164,12 @@ class MemoryStore:
     # ==================== 条目 CRUD ====================
 
     def get_all_entries(self) -> list:
-        """获取所有记忆条目（从 profile + 所有 session 中汇总）"""
+        """获取所有记忆条目（从 profile + 所有 session 中汇总），优先使用缓存"""
+        # 先检查缓存
+        cached = self.cache.get_all_entries()
+        if cached is not None:
+            return cached
+
         entries: list[MemoryEntry] = []
 
         # 从 profile 中收集
@@ -188,6 +204,8 @@ class MemoryStore:
                         "doc_id": data.get("doc_id"),
                     }))
 
+        # 将结果写入缓存
+        self.cache.set_all_entries(entries)
         return entries
 
     def add_entry(self, entry: MemoryEntry) -> None:
@@ -208,6 +226,8 @@ class MemoryStore:
             session["important_memories"].append(entry.to_dict())
             session["last_accessed"] = datetime.now(timezone.utc).isoformat()
             self.save_session(entry.doc_id, session)
+        # 写入后使缓存失效
+        self.cache.invalidate()
 
     def delete_entry(self, entry_id: str) -> bool:
         """删除指定记忆条目，返回是否成功"""
@@ -220,6 +240,8 @@ class MemoryStore:
         if len(profile["entries"]) < original_len:
             profile["updated_at"] = datetime.now(timezone.utc).isoformat()
             self.save_profile(profile)
+            # 删除后使缓存失效
+            self.cache.invalidate()
             return True
 
         # 在所有 session 中查找
@@ -241,6 +263,8 @@ class MemoryStore:
                 if len(data["qa_summaries"]) < orig_qa:
                     data["last_accessed"] = datetime.now(timezone.utc).isoformat()
                     self.save_session(doc_id, data)
+                    # 删除后使缓存失效
+                    self.cache.invalidate()
                     return True
 
                 # 在 important_memories 中查找
@@ -251,9 +275,50 @@ class MemoryStore:
                 if len(data["important_memories"]) < orig_im:
                     data["last_accessed"] = datetime.now(timezone.utc).isoformat()
                     self.save_session(doc_id, data)
+                    # 删除后使缓存失效
+                    self.cache.invalidate()
                     return True
 
         return False
+
+    def batch_add_entries(self, entries: list) -> None:
+        """批量写入记忆条目，按 doc_id 分组减少文件 I/O
+
+        Args:
+            entries: MemoryEntry 对象列表
+        """
+        if not entries:
+            return
+
+        # 按 doc_id 分组
+        profile_entries = []
+        session_groups: dict[str, list] = {}
+        for entry in entries:
+            if entry.doc_id is None:
+                profile_entries.append(entry)
+            else:
+                if entry.doc_id not in session_groups:
+                    session_groups[entry.doc_id] = []
+                session_groups[entry.doc_id].append(entry)
+
+        # 批量写入 profile
+        if profile_entries:
+            profile = self.load_profile()
+            for entry in profile_entries:
+                profile["entries"].append(entry.to_dict())
+            profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.save_profile(profile)
+
+        # 批量写入各 session
+        for doc_id, doc_entries in session_groups.items():
+            session = self.load_session(doc_id)
+            for entry in doc_entries:
+                session["important_memories"].append(entry.to_dict())
+            session["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            self.save_session(doc_id, session)
+
+        # 写入后使缓存失效
+        self.cache.invalidate()
 
     def update_entry(self, entry_id: str, content: str) -> bool:
         """更新指定记忆条目的内容，返回是否成功"""
@@ -264,6 +329,8 @@ class MemoryStore:
                 entry["content"] = content
                 profile["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self.save_profile(profile)
+                # 更新后使缓存失效
+                self.cache.invalidate()
                 return True
 
         # 在所有 session 中查找
@@ -286,6 +353,8 @@ class MemoryStore:
                         item["answer"] = ""
                         data["last_accessed"] = datetime.now(timezone.utc).isoformat()
                         self.save_session(doc_id, data)
+                        # 更新后使缓存失效
+                        self.cache.invalidate()
                         return True
 
                 # 在 important_memories 中查找
@@ -294,6 +363,8 @@ class MemoryStore:
                         item["content"] = content
                         data["last_accessed"] = datetime.now(timezone.utc).isoformat()
                         self.save_session(doc_id, data)
+                        # 更新后使缓存失效
+                        self.cache.invalidate()
                         return True
 
         return False
@@ -353,6 +424,8 @@ class MemoryStore:
         """清空所有记忆数据"""
         # 重置 profile
         self.save_profile(self._default_profile())
+        # 清空后使缓存失效
+        self.cache.invalidate()
 
         # 删除所有 session 文件
         if os.path.exists(self.sessions_dir):

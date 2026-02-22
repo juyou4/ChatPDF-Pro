@@ -51,9 +51,14 @@ class MemoryStoreSQLite(MemoryStore):
                     importance REAL DEFAULT 0.5,
                     created_at TEXT,
                     hit_count INTEGER DEFAULT 0,
-                    last_hit_at TEXT
+                    last_hit_at TEXT,
+                    memory_tier TEXT DEFAULT 'short_term',
+                    tags TEXT DEFAULT '[]'
                 )
             """)
+            
+            # 为旧表添加新列（如果不存在）
+            self._migrate_add_columns()
             
             # 创建 FTS5 虚拟表（用于全文检索）
             try:
@@ -78,6 +83,12 @@ class MemoryStoreSQLite(MemoryStore):
             self._db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_importance ON memory_entries(importance)
             """)
+            self._db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_memory_tier ON memory_entries(memory_tier)
+            """)
+            self._db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_last_hit_at ON memory_entries(last_hit_at)
+            """)
             
             self._db.commit()
             logger.info(f"SQLite 数据库已初始化: {self.db_path}")
@@ -85,6 +96,24 @@ class MemoryStoreSQLite(MemoryStore):
             logger.error(f"初始化 SQLite 数据库失败: {e}")
             self.use_sqlite = False
             self._db = None
+
+    def _migrate_add_columns(self) -> None:
+        """为旧表添加 memory_tier 和 tags 列（如果不存在）"""
+        if not self._db:
+            return
+        try:
+            # 检查列是否存在
+            cursor = self._db.execute("PRAGMA table_info(memory_entries)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "memory_tier" not in columns:
+                self._db.execute("ALTER TABLE memory_entries ADD COLUMN memory_tier TEXT DEFAULT 'short_term'")
+                logger.info("SQLite: 已添加 memory_tier 列")
+            if "tags" not in columns:
+                self._db.execute("ALTER TABLE memory_entries ADD COLUMN tags TEXT DEFAULT '[]'")
+                logger.info("SQLite: 已添加 tags 列")
+            self._db.commit()
+        except Exception as e:
+            logger.warning(f"SQLite 列迁移失败: {e}")
     
     def _sync_from_json(self) -> None:
         """从 JSON 文件同步数据到 SQLite（一次性迁移）"""
@@ -104,15 +133,17 @@ class MemoryStoreSQLite(MemoryStore):
             if not all_entries:
                 return
             
-            # 批量插入
+            # 批量插入（包含新字段 memory_tier 和 tags）
+            import json as _json
             self._db.executemany("""
                 INSERT OR IGNORE INTO memory_entries 
-                (id, content, source_type, doc_id, importance, created_at, hit_count, last_hit_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, content, source_type, doc_id, importance, created_at, hit_count, last_hit_at, memory_tier, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 (
                     e.id, e.content, e.source_type, e.doc_id,
-                    e.importance, e.created_at, e.hit_count, e.last_hit_at
+                    e.importance, e.created_at, e.hit_count, e.last_hit_at,
+                    e.memory_tier, _json.dumps(e.tags, ensure_ascii=False)
                 )
                 for e in all_entries
             ])
@@ -130,6 +161,42 @@ class MemoryStoreSQLite(MemoryStore):
         except Exception as e:
             logger.error(f"从 JSON 同步到 SQLite 失败: {e}")
             self._db.rollback()
+
+    def migrate_json_to_sqlite(self) -> int:
+        """JSON → SQLite 数据迁移工具方法
+
+        强制从 JSON 加载所有条目并写入 SQLite，即使 SQLite 已有数据。
+
+        Returns:
+            迁移的条目数量
+        """
+        if not self.use_sqlite or not self._db:
+            logger.warning("SQLite 未启用，无法执行迁移")
+            return 0
+        try:
+            import json as _json
+            all_entries = super().get_all_entries()
+            if not all_entries:
+                return 0
+            self._db.executemany("""
+                INSERT OR REPLACE INTO memory_entries
+                (id, content, source_type, doc_id, importance, created_at, hit_count, last_hit_at, memory_tier, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                (
+                    e.id, e.content, e.source_type, e.doc_id,
+                    e.importance, e.created_at, e.hit_count, e.last_hit_at,
+                    e.memory_tier, _json.dumps(e.tags, ensure_ascii=False)
+                )
+                for e in all_entries
+            ])
+            self._db.commit()
+            logger.info(f"JSON → SQLite 迁移完成: {len(all_entries)} 条记忆")
+            return len(all_entries)
+        except Exception as e:
+            logger.error(f"JSON → SQLite 迁移失败: {e}")
+            self._db.rollback()
+            return 0
     
     def _has_fts5(self) -> bool:
         """检查 FTS5 是否可用"""
@@ -150,13 +217,20 @@ class MemoryStoreSQLite(MemoryStore):
                 
                 rows = self._db.execute("""
                     SELECT id, content, source_type, doc_id, importance,
-                           created_at, hit_count, last_hit_at
+                           created_at, hit_count, last_hit_at, memory_tier, tags
                     FROM memory_entries
                     ORDER BY created_at DESC
                 """).fetchall()
                 
+                import json as _json
                 entries = []
                 for row in rows:
+                    # 解析 tags JSON 字符串
+                    tags_raw = row["tags"] if "tags" in row.keys() else "[]"
+                    try:
+                        tags = _json.loads(tags_raw) if tags_raw else []
+                    except (ValueError, TypeError):
+                        tags = []
                     entries.append(MemoryEntry(
                         id=row["id"],
                         content=row["content"],
@@ -166,6 +240,8 @@ class MemoryStoreSQLite(MemoryStore):
                         created_at=row["created_at"],
                         hit_count=row["hit_count"],
                         last_hit_at=row["last_hit_at"],
+                        memory_tier=row["memory_tier"] if "memory_tier" in row.keys() else "short_term",
+                        tags=tags,
                     ))
                 return entries
             except Exception as e:
@@ -182,13 +258,15 @@ class MemoryStoreSQLite(MemoryStore):
         # 如果启用 SQLite，也写入 SQLite
         if self.use_sqlite and self._db:
             try:
+                import json as _json
                 self._db.execute("""
                     INSERT OR REPLACE INTO memory_entries
-                    (id, content, source_type, doc_id, importance, created_at, hit_count, last_hit_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, content, source_type, doc_id, importance, created_at, hit_count, last_hit_at, memory_tier, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     entry.id, entry.content, entry.source_type, entry.doc_id,
-                    entry.importance, entry.created_at, entry.hit_count, entry.last_hit_at
+                    entry.importance, entry.created_at, entry.hit_count, entry.last_hit_at,
+                    entry.memory_tier, _json.dumps(entry.tags, ensure_ascii=False)
                 ))
                 
                 # 更新 FTS5 索引
