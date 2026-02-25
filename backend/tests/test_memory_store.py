@@ -35,6 +35,8 @@ class TestMemoryEntry:
         assert entry.created_at  # 时间戳不为空
         assert entry.doc_id is None
         assert entry.importance == 0.5
+        assert entry.memory_tier == "short_term"
+        assert entry.tags == []
 
     def test_custom_values(self):
         """自定义值应正确设置"""
@@ -45,15 +47,19 @@ class TestMemoryEntry:
             created_at="2024-01-15T10:30:00Z",
             doc_id="doc-123",
             importance=1.0,
+            memory_tier="long_term",
+            tags=["concept", "fact"],
         )
         assert entry.id == "test-id"
         assert entry.content == "测试内容"
         assert entry.source_type == "liked"
         assert entry.doc_id == "doc-123"
         assert entry.importance == 1.0
+        assert entry.memory_tier == "long_term"
+        assert entry.tags == ["concept", "fact"]
 
     def test_to_dict(self):
-        """to_dict 应返回包含所有字段的字典"""
+        """to_dict 应返回包含所有字段的字典（含 memory_tier 和 tags）"""
         entry = MemoryEntry(
             id="test-id",
             content="测试内容",
@@ -61,6 +67,8 @@ class TestMemoryEntry:
             created_at="2024-01-15T10:30:00Z",
             doc_id=None,
             importance=1.0,
+            memory_tier="long_term",
+            tags=["concept"],
         )
         d = entry.to_dict()
         assert d["id"] == "test-id"
@@ -69,9 +77,11 @@ class TestMemoryEntry:
         assert d["created_at"] == "2024-01-15T10:30:00Z"
         assert d["doc_id"] is None
         assert d["importance"] == 1.0
+        assert d["memory_tier"] == "long_term"
+        assert d["tags"] == ["concept"]
 
     def test_from_dict(self):
-        """from_dict 应正确还原 MemoryEntry"""
+        """from_dict 应正确还原 MemoryEntry（含 memory_tier 和 tags）"""
         data = {
             "id": "test-id",
             "content": "测试内容",
@@ -79,6 +89,8 @@ class TestMemoryEntry:
             "created_at": "2024-01-15T10:30:00Z",
             "doc_id": "doc-123",
             "importance": 0.8,
+            "memory_tier": "long_term",
+            "tags": ["fact", "method"],
         }
         entry = MemoryEntry.from_dict(data)
         assert entry.id == "test-id"
@@ -86,9 +98,11 @@ class TestMemoryEntry:
         assert entry.source_type == "liked"
         assert entry.doc_id == "doc-123"
         assert entry.importance == 0.8
+        assert entry.memory_tier == "long_term"
+        assert entry.tags == ["fact", "method"]
 
     def test_roundtrip_serialization(self):
-        """序列化后反序列化应得到等价对象（需求 1.6）"""
+        """序列化后反序列化应得到等价对象（需求 1.6, 9.4）"""
         entry = MemoryEntry(
             id="roundtrip-id",
             content="往返测试内容",
@@ -96,6 +110,8 @@ class TestMemoryEntry:
             created_at="2024-06-01T12:00:00Z",
             doc_id="doc-abc",
             importance=0.7,
+            memory_tier="long_term",
+            tags=["concept", "conclusion"],
         )
         d = entry.to_dict()
         # 模拟 JSON 序列化/反序列化
@@ -109,15 +125,40 @@ class TestMemoryEntry:
         assert restored.created_at == entry.created_at
         assert restored.doc_id == entry.doc_id
         assert restored.importance == entry.importance
+        assert restored.memory_tier == entry.memory_tier
+        assert restored.tags == entry.tags
 
     def test_from_dict_with_missing_fields(self):
-        """from_dict 缺少字段时应使用默认值"""
+        """from_dict 缺少字段时应使用默认值（含新增字段向后兼容）"""
         entry = MemoryEntry.from_dict({})
         assert entry.id  # 应生成 UUID
         assert entry.content == ""
         assert entry.source_type == "manual"
         assert entry.doc_id is None
         assert entry.importance == 0.5
+        assert entry.memory_tier == "short_term"
+        assert entry.tags == []
+
+    def test_from_dict_old_data_without_new_fields(self):
+        """旧版数据（不含 memory_tier 和 tags）应向后兼容，使用默认值"""
+        old_data = {
+            "id": "old-entry",
+            "content": "旧版记忆内容",
+            "source_type": "auto_qa",
+            "created_at": "2024-01-01T00:00:00Z",
+            "doc_id": "doc-old",
+            "importance": 0.6,
+            "hit_count": 3,
+            "last_hit_at": "2024-01-10T00:00:00Z",
+        }
+        entry = MemoryEntry.from_dict(old_data)
+        # 旧字段正常还原
+        assert entry.id == "old-entry"
+        assert entry.content == "旧版记忆内容"
+        assert entry.hit_count == 3
+        # 新字段使用默认值
+        assert entry.memory_tier == "short_term"
+        assert entry.tags == []
 
 
 # ==================== MemoryStore 测试 ====================
@@ -335,15 +376,17 @@ class TestMemoryEntrySerializationProperty:
     应得到与原始对象等价的 MemoryEntry。
     """
 
-    # 构建 MemoryEntry 的 Hypothesis 策略
+    # 构建 MemoryEntry 的 Hypothesis 策略（含新增字段 memory_tier 和 tags）
     memory_entry_strategy = st.builds(
         MemoryEntry,
         id=st.uuids().map(str),
         content=st.text(min_size=0, max_size=500),
-        source_type=st.sampled_from(["auto_qa", "manual", "liked", "keyword"]),
+        source_type=st.sampled_from(["auto_qa", "manual", "liked", "keyword", "compressed"]),
         created_at=st.datetimes().map(lambda dt: dt.isoformat()),
         doc_id=st.one_of(st.none(), st.text(min_size=1, max_size=100)),
         importance=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+        memory_tier=st.sampled_from(["working", "short_term", "long_term", "archived"]),
+        tags=st.lists(st.sampled_from(["concept", "fact", "preference", "method", "conclusion", "correction"]), max_size=6, unique=True),
     )
 
     @given(entry=memory_entry_strategy)
@@ -367,6 +410,8 @@ class TestMemoryEntrySerializationProperty:
         assert restored.created_at == entry.created_at, f"created_at 不一致"
         assert restored.doc_id == entry.doc_id, f"doc_id 不一致"
         assert restored.importance == entry.importance, f"importance 不一致"
+        assert restored.memory_tier == entry.memory_tier, f"memory_tier 不一致"
+        assert restored.tags == entry.tags, f"tags 不一致"
 
 
 class TestDefaultStructureProperty:

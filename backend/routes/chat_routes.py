@@ -34,6 +34,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS = 30
 
 
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
@@ -99,43 +100,53 @@ async def _buffered_stream(raw_stream):
                 break
         return
 
-    # 缓冲模式：累积 content 和 reasoning_content
-    buffer_content = ""
-    buffer_reasoning = ""
+    # 缓冲模式：使用 list 累积避免 O(n²) 字符串拼接
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    content_len = 0
+    reasoning_len = 0
 
     async for chunk in raw_stream:
         # 错误或终止信号：立即刷新缓冲区并转发
         if chunk.get("error") or chunk.get("done"):
-            if buffer_content or buffer_reasoning:
+            if content_parts or reasoning_parts:
                 yield {
-                    "content": buffer_content,
-                    "reasoning_content": buffer_reasoning,
+                    "content": "".join(content_parts),
+                    "reasoning_content": "".join(reasoning_parts),
                     "done": False,
                 }
-                buffer_content = ""
-                buffer_reasoning = ""
+                content_parts.clear()
+                reasoning_parts.clear()
+                content_len = reasoning_len = 0
             yield chunk
             break
 
         # 累积到缓冲区
-        buffer_content += chunk.get("content", "")
-        buffer_reasoning += chunk.get("reasoning_content", "")
+        c = chunk.get("content", "")
+        r = chunk.get("reasoning_content", "")
+        if c:
+            content_parts.append(c)
+            content_len += len(c)
+        if r:
+            reasoning_parts.append(r)
+            reasoning_len += len(r)
 
         # 缓冲区达到阈值，立即发送
-        if len(buffer_content) >= buffer_size:
+        if content_len >= buffer_size or reasoning_len >= buffer_size:
             yield {
-                "content": buffer_content,
-                "reasoning_content": buffer_reasoning,
+                "content": "".join(content_parts),
+                "reasoning_content": "".join(reasoning_parts),
                 "done": False,
             }
-            buffer_content = ""
-            buffer_reasoning = ""
+            content_parts.clear()
+            reasoning_parts.clear()
+            content_len = reasoning_len = 0
 
     # 流正常结束但未收到 done/error 信号时，刷新剩余缓冲
-    if buffer_content or buffer_reasoning:
+    if content_parts or reasoning_parts:
         yield {
-            "content": buffer_content,
-            "reasoning_content": buffer_reasoning,
+            "content": "".join(content_parts),
+            "reasoning_content": "".join(reasoning_parts),
             "done": False,
         }
 
@@ -146,8 +157,14 @@ _context_builder = ContextBuilder()
 # 模块级变量，由 app.py 注入 MemoryService 实例
 memory_service = None
 
+# ---- 中间件链缓存（settings 在运行期间不变）----
+_cached_chat_middlewares: list | None = None
+
 
 def build_chat_middlewares():
+    global _cached_chat_middlewares
+    if _cached_chat_middlewares is not None:
+        return _cached_chat_middlewares
     middlewares = []
     if settings.enable_chat_logging:
         middlewares.append(LoggingMiddleware())
@@ -158,6 +175,7 @@ def build_chat_middlewares():
         middlewares.append(FallbackMiddleware(settings.chat_fallback_provider, settings.chat_fallback_model))
     if settings.enable_chat_degrade:
         middlewares.append(DegradeOnErrorMiddleware(fallback_content=settings.degrade_message))
+    _cached_chat_middlewares = middlewares
     return middlewares
 
 
@@ -337,6 +355,7 @@ def _build_fused_context(
     selected_text: str,
     retrieval_context: str,
     selected_page_info: dict,
+    selected_ref: Optional[int] = None,
 ) -> str:
     """融合框选文本和检索上下文
 
@@ -349,7 +368,13 @@ def _build_fused_context(
         pe = selected_page_info.get("page_end", 0)
         page_label = f"（页码: {ps}-{pe}）" if ps != pe else f"（页码: {ps}）"
 
-    parts = [f"用户选中的文本{page_label}：\n{selected_text}"]
+    selected_title = (
+        f"[{selected_ref}]用户选中的文本{page_label}"
+        if selected_ref is not None else
+        f"用户选中的文本{page_label}"
+    )
+
+    parts = [f"{selected_title}：\n{selected_text}"]
     if retrieval_context:
         parts.append(f"\n\n相关文档片段：\n\n{retrieval_context}")
     return "\n".join(parts)
@@ -368,6 +393,16 @@ def _build_selected_text_citation(
         "page_range": [ps, pe],
         "highlight_text": selected_text[:200].strip(),
     }
+
+
+def _build_selected_text_fallback_citations(
+    selected_text: str,
+    selected_page_info: dict,
+):
+    """仅在检索引用缺失时，为较长 selected_text 生成兜底 citation。"""
+    if not selected_text or len(selected_text.strip()) < _MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS:
+        return []
+    return [_build_selected_text_citation(selected_text, selected_page_info)]
 
 
 @router.post("/chat")
@@ -441,21 +476,37 @@ async def chat_with_pdf(request: ChatRequest):
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = context_result.get("retrieval_meta", {})
+                retrieval_citations = retrieval_meta.get("citations") or []
+                fallback_selected_citations = _build_selected_text_fallback_citations(
+                    request.selected_text, selected_page_info
+                )
+                retrieval_meta["citations"] = retrieval_citations or fallback_selected_citations
                 # 融合：selected_text 优先 + 检索补充
                 context = _build_fused_context(
-                    request.selected_text, retrieval_context, selected_page_info
+                    request.selected_text,
+                    retrieval_context,
+                    selected_page_info,
+                    selected_ref=1 if (not retrieval_citations and fallback_selected_citations) else None,
                 )
-                # 如果检索没有返回 citations，基于 selected_text 位置生成基础 citation
-                if not retrieval_meta.get("citations"):
-                    retrieval_meta["citations"] = [_build_selected_text_citation(
-                        request.selected_text, selected_page_info
-                    )]
             except Exception as e:
                 logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
                 context = f"用户选中的文本：\n{request.selected_text}\n\n"
         elif request.selected_text:
             # 仅 selected_text 模式（向量检索未启用）
-            context = f"用户选中的文本：\n{request.selected_text}\n\n"
+            selected_page_info = locate_selected_text(
+                request.selected_text, doc.get("data", {}).get("pages", [])
+            )
+            context = _build_fused_context(
+                request.selected_text,
+                "",
+                selected_page_info,
+                selected_ref=1 if _build_selected_text_fallback_citations(
+                    request.selected_text, selected_page_info
+                ) else None,
+            )
+            retrieval_meta["citations"] = _build_selected_text_fallback_citations(
+                request.selected_text, selected_page_info
+            )
         elif request.enable_vector_search:
             _validate_rerank_request(request)
             strategy = get_retrieval_strategy(request.question)
@@ -601,21 +652,37 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = context_result.get("retrieval_meta", {})
+                retrieval_citations = retrieval_meta.get("citations") or []
+                fallback_selected_citations = _build_selected_text_fallback_citations(
+                    request.selected_text, selected_page_info
+                )
+                retrieval_meta["citations"] = retrieval_citations or fallback_selected_citations
                 # 融合：selected_text 优先 + 检索补充
                 context = _build_fused_context(
-                    request.selected_text, retrieval_context, selected_page_info
+                    request.selected_text,
+                    retrieval_context,
+                    selected_page_info,
+                    selected_ref=1 if (not retrieval_citations and fallback_selected_citations) else None,
                 )
-                # 如果检索没有返回 citations，基于 selected_text 位置生成基础 citation
-                if not retrieval_meta.get("citations"):
-                    retrieval_meta["citations"] = [_build_selected_text_citation(
-                        request.selected_text, selected_page_info
-                    )]
             except Exception as e:
                 logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
                 context = f"用户选中的文本：\n{request.selected_text}\n\n"
         elif request.selected_text:
             # 仅 selected_text 模式（向量检索未启用）
-            context = f"用户选中的文本：\n{request.selected_text}\n\n"
+            selected_page_info = locate_selected_text(
+                request.selected_text, doc.get("data", {}).get("pages", [])
+            )
+            context = _build_fused_context(
+                request.selected_text,
+                "",
+                selected_page_info,
+                selected_ref=1 if _build_selected_text_fallback_citations(
+                    request.selected_text, selected_page_info
+                ) else None,
+            )
+            retrieval_meta["citations"] = _build_selected_text_fallback_citations(
+                request.selected_text, selected_page_info
+            )
         elif use_agent:
             context = ""
         elif request.enable_vector_search:

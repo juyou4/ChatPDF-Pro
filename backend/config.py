@@ -100,7 +100,7 @@ class AppSettings(BaseSettings):
     # ==================== 流式输出缓冲配置 ====================
     # 流式输出缓冲字符数阈值，累积超过此值后发送，0 表示禁用缓冲（直通模式）
     stream_buffer_size: int = Field(
-        default=20,
+        default=5,
         validation_alias=AliasChoices("stream_buffer_size", "CHATPDF_STREAM_BUFFER_SIZE"),
         description="流式输出缓冲字符数阈值，累积超过此值后发送，0 表示禁用缓冲"
     )

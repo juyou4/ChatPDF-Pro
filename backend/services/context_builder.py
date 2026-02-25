@@ -35,6 +35,11 @@ GRANULARITY_TEXT_ATTR = {
 }
 
 
+# ---- 模块级单例 ----
+from services.rag_config import RAGConfig as _RAGConfig
+_rag_config = _RAGConfig()
+
+
 class ContextBuilder:
     """上下文构建器
 
@@ -81,9 +86,7 @@ class ContextBuilder:
             return "", []
 
         # Lost-in-the-Middle 缓解：交替排列，最相关内容在开头和结尾
-        from services.rag_config import RAGConfig
-        _ctx_rag_config = RAGConfig()
-        if _ctx_rag_config.enable_lost_in_middle_reorder and len(selections) > 2:
+        if _rag_config.enable_lost_in_middle_reorder and len(selections) > 2:
             selections = self._reorder_lost_in_middle(selections)
 
         context_parts = []
@@ -327,12 +330,15 @@ class ContextBuilder:
             f"{refs_text}\n"
             "\n"
             "注意：\n"
+            "- 只能使用“可用的引用来源”里出现过的编号，禁止创造新编号\n"
+            "- 禁止改写编号含义：同一个编号必须始终对应同一个来源\n"
             "- 每段引用的内容都应标注来源编号\n"
             "- 可以同时引用多个来源，如 [1][2]\n"
             "- 如果信息来自你的通用知识而非上下文，则无需标注编号\n"
             "- 只引用与用户问题直接相关的来源，不要为了引用而引用不相关的内容\n"
             "- 如果某个来源与用户问题无关，请完全忽略它，不要在回答中提及\n"
-            "- 宁可少引用，也不要引用不相关的来源"
+            "- 宁可少引用，也不要引用不相关的来源\n"
+            "- 输出前请自检：若出现不在列表内的编号，必须删除该编号"
         )
 
         logger.info(f"引文指示提示词生成完成: {len(citations)} 个引用来源")

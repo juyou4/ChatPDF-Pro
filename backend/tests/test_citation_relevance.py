@@ -12,7 +12,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from routes.chat_routes import _build_fused_context, _build_selected_text_citation
+from routes.chat_routes import (
+    _build_fused_context,
+    _build_selected_text_citation,
+    _build_selected_text_fallback_citations,
+)
 
 
 class TestBuildFusedContext:
@@ -161,3 +165,38 @@ class TestBuildSelectedTextCitation:
 
         # page_start 默认 1，page_end 默认等于 page_start
         assert citation["page_range"] == [1, 1]
+
+
+class TestSelectedTextFallbackCitation:
+    """selected_text 兜底引用策略测试"""
+
+    def test_short_selected_text_should_not_generate_fallback_citation(self):
+        """短 selected_text 不应生成兜底 citation（避免出现无关单一引用）"""
+        citations = _build_selected_text_fallback_citations(
+            "短标题",
+            {"page_start": 1, "page_end": 1},
+        )
+        assert citations == []
+
+    def test_long_selected_text_should_generate_fallback_citation(self):
+        """较长 selected_text 可生成 1 条兜底 citation"""
+        citations = _build_selected_text_fallback_citations(
+            "这是一个足够长的框选文本片段，用于测试兜底引用生成逻辑是否生效。",
+            {"page_start": 3, "page_end": 3},
+        )
+        assert len(citations) == 1
+        assert citations[0]["ref"] == 1
+        assert citations[0]["group_id"] == "selected-text"
+        assert citations[0]["page_range"] == [3, 3]
+
+    def test_build_fused_context_with_selected_ref(self):
+        """selected_ref 传入时，框选文本标题应显式带引用编号"""
+        fused = _build_fused_context(
+            selected_text="框选内容",
+            retrieval_context="",
+            selected_page_info={"page_start": 2, "page_end": 2},
+            selected_ref=1,
+        )
+
+        assert "[1]用户选中的文本（页码: 2）" in fused
+        assert "框选内容" in fused

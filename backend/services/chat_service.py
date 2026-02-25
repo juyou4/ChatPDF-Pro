@@ -1,7 +1,10 @@
 from typing import Dict, List, Optional
 import asyncio
 import json as _json
+import logging
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from providers.factory import ProviderFactory
 from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT, DOUBAO
@@ -236,24 +239,26 @@ async def call_ai_api_stream(
                 # DeepSeek / 智谱 / 通用 OpenAI 兼容：使用 thinking 参数
                 # Moonshot/Kimi 和豆包 Seed 系列自动思考，无需额外参数
                 body["thinking"] = {"type": "enabled"}
+                # DeepSeek 思考模式要求显式设置 max_tokens，否则可能不返回思考内容
+                # 保底设为 8192，若用户已设置更大值则保留
+                if "max_tokens" not in body or (body.get("max_tokens") or 0) < 8192:
+                    body["max_tokens"] = 8192
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
 
         # ── 诊断日志 ──
-        print(f"\n[Stream] ▶ provider={provider}, model={model}")
-        print(f"[Stream]   endpoint={endpoint}")
-        print(f"[Stream]   enable_thinking={enable_thinking}, body keys={list(body.keys())}")
+        logger.debug(f"[Stream] ▶ provider={provider}, model={model}, endpoint={endpoint}, enable_thinking={enable_thinking}, body keys={list(body.keys())}")
         _chunk_count = 0
         _content_chars = 0
         _reasoning_chars = 0
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
-                print(f"[Stream]   HTTP {resp.status_code}")
+                logger.debug(f"[Stream] HTTP {resp.status_code}")
                 if resp.status_code != 200:
                     err_text = await resp.aread()
                     err_body = err_text.decode("utf-8", errors="ignore")
-                    print(f"[Stream]   ✗ Error body: {err_body[:500]}")
+                    logger.warning(f"[Stream] Error body: {err_body[:500]}")
                     yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
                     return
 
@@ -262,7 +267,7 @@ async def call_ai_api_stream(
                         continue
                     # 前 3 行原始 SSE 打印，帮助诊断格式问题
                     if _chunk_count < 3:
-                        print(f"[Stream]   raw[{_chunk_count}]: {line[:200]}")
+                        logger.debug(f"[Stream] raw[{_chunk_count}]: {line[:200]}")
                     # 兼容 "data: " 和 "data:" 两种 SSE 前缀（某些代理/服务商省略空格）
                     if line.startswith("data: "):
                         data = line[6:].strip()
@@ -271,7 +276,7 @@ async def call_ai_api_stream(
                     else:
                         data = line.strip()
                     if data == "[DONE]":
-                        print(f"[Stream] ◀ done (chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars})")
+                        logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
                         yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                         return
                     try:
@@ -286,7 +291,7 @@ async def call_ai_api_stream(
                             err_msg = api_error.get("message") or api_error.get("msg") or str(api_error)
                         else:
                             err_msg = str(api_error)
-                        print(f"[Stream]   ✗ API error in SSE: {err_msg}")
+                        logger.warning(f"[Stream] API error in SSE: {err_msg}")
                         yield {"error": err_msg, "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                         return
                     # 防止 choices 为空列表时 [0] 抛 IndexError
@@ -324,7 +329,7 @@ async def call_ai_api_stream(
                             "used_model": model,
                             "fallback_used": False
                         }
-                print(f"[Stream] ◀ end-of-stream (no [DONE]) (chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars})")
+                logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
                 yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
         return
 

@@ -71,6 +71,8 @@ class BM25Index:
         self.term_freqs: List[Dict[str, int]] = []  # 每个文档的term频率
         self.idf: Dict[str, float] = {}
         self.chunks: List[str] = []
+        # 倒排索引: term -> 包含该 term 的文档索引列表
+        self.inverted_index: Dict[str, List[int]] = {}
 
     def build(self, chunks: List[str]):
         """构建BM25索引"""
@@ -97,6 +99,14 @@ class BM25Index:
 
         self.avg_dl = sum(self.doc_lengths) / max(self.doc_count, 1)
 
+        # 构建倒排索引: term -> 包含该 term 的文档索引列表
+        self.inverted_index = {}
+        for i, tf in enumerate(self.term_freqs):
+            for term in tf:
+                if term not in self.inverted_index:
+                    self.inverted_index[term] = []
+                self.inverted_index[term].append(i)
+
         # 预计算IDF
         self.idf = {}
         for term, df in self.doc_freqs.items():
@@ -104,7 +114,7 @@ class BM25Index:
             self.idf[term] = math.log((self.doc_count - df + 0.5) / (df + 0.5) + 1.0)
 
     def score(self, query: str) -> List[float]:
-        """计算查询与所有文档的BM25分数"""
+        """计算查询与所有文档的BM25分数（使用倒排索引加速）"""
         query_tokens = _tokenize(query)
         scores = [0.0] * self.doc_count
 
@@ -113,10 +123,9 @@ class BM25Index:
                 continue
             idf_val = self.idf[token]
 
-            for i in range(self.doc_count):
-                tf = self.term_freqs[i].get(token, 0)
-                if tf == 0:
-                    continue
+            # 通过倒排索引只访问包含该 term 的文档，避免 O(D) 全量遍历
+            for i in self.inverted_index.get(token, ()):
+                tf = self.term_freqs[i][token]
                 dl = self.doc_lengths[i]
                 # BM25 scoring
                 numerator = tf * (self.k1 + 1)

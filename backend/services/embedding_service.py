@@ -24,6 +24,97 @@ logger = logging.getLogger(__name__)
 # Lazy-loaded caches
 local_embedding_models = {}
 
+# ---- OpenAI Client 连接池 ----
+_openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash) -> OpenAI
+
+
+def _get_openai_client(api_key: str, api_base: str) -> "OpenAI":
+    """获取或创建 OpenAI client（连接池复用）"""
+    from openai import OpenAI
+    key_hash = hash(api_key)
+    cache_key = (api_base, key_hash)
+    if cache_key in _openai_clients:
+        return _openai_clients[cache_key]
+    client = OpenAI(api_key=api_key, base_url=api_base)
+    _openai_clients[cache_key] = client
+    return client
+
+
+# ---- FAISS 索引 LRU 缓存 ----
+class _IndexCache:
+    """FAISS 索引 + chunks 数据 + 意群索引的 LRU 内存缓存
+
+    避免每次搜索请求都从磁盘读取 index/pkl 文件。
+    通过文件 mtime 检测更新，容量满时淘汰最久未用条目。
+    """
+
+    def __init__(self, max_size: int = 20):
+        self._store: OrderedDict[str, dict] = OrderedDict()
+        self._max_size = max_size
+
+    def get_index(self, doc_id: str, index_path: str, chunks_path: str):
+        """获取缓存的 FAISS index 和 chunks data，未命中返回 None"""
+        if doc_id in self._store:
+            entry = self._store[doc_id]
+            try:
+                cur_mtime = os.path.getmtime(index_path)
+                if cur_mtime == entry.get("index_mtime"):
+                    self._store.move_to_end(doc_id)
+                    return entry["index"], entry["data"]
+            except OSError:
+                pass
+            # mtime changed or error, invalidate
+            self._store.pop(doc_id, None)
+        return None
+
+    def put_index(self, doc_id: str, index, data, index_path: str):
+        """缓存 FAISS index 和 chunks data"""
+        try:
+            mtime = os.path.getmtime(index_path)
+        except OSError:
+            mtime = 0
+        if doc_id in self._store:
+            self._store[doc_id].update({"index": index, "data": data, "index_mtime": mtime})
+            self._store.move_to_end(doc_id)
+        else:
+            self._store[doc_id] = {"index": index, "data": data, "index_mtime": mtime}
+        if len(self._store) > self._max_size:
+            self._store.popitem(last=False)
+
+    def get_group_index(self, doc_id: str):
+        """获取缓存的意群索引数据"""
+        entry = self._store.get(doc_id)
+        if entry:
+            return entry.get("group_index_data")
+        return None
+
+    def put_group_index(self, doc_id: str, group_index_data):
+        """缓存意群索引数据"""
+        if doc_id in self._store:
+            self._store[doc_id]["group_index_data"] = group_index_data
+
+    def get_group_data(self, doc_id: str):
+        """获取缓存的意群 JSON 数据"""
+        entry = self._store.get(doc_id)
+        if entry:
+            return entry.get("group_chunk_map")
+        return None
+
+    def put_group_data(self, doc_id: str, group_chunk_map):
+        """缓存意群 JSON 数据"""
+        if doc_id in self._store:
+            self._store[doc_id]["group_chunk_map"] = group_chunk_map
+
+    def invalidate(self, doc_id: str = ""):
+        """使缓存失效"""
+        if doc_id:
+            self._store.pop(doc_id, None)
+        else:
+            self._store.clear()
+
+
+_index_cache = _IndexCache(max_size=20)
+
 
 class QueryVectorCache:
     """查询向量 LRU 缓存（支持磁盘持久化）
@@ -124,6 +215,24 @@ _query_vector_cache = QueryVectorCache(persist_path=_cache_persist_path)
 
 # 记录正在生成意群的文档 ID，防止重复提交（需求 6.1）
 _group_generation_in_progress: set[str] = set()
+
+# ---- 模块级单例：避免热路径中重复实例化和重复 import ----
+from services.query_rewriter import QueryRewriter as _QueryRewriter
+from services.query_analyzer import analyze_query_type as _analyze_query_type
+from services.rag_config import RAGConfig as _RAGConfig
+from services.context_builder import ContextBuilder as _ContextBuilder
+from services.retrieval_logger import RetrievalLogger as _RetrievalLogger, RetrievalTrace as _RetrievalTrace
+
+_query_rewriter_singleton = _QueryRewriter()
+_rag_config_singleton = _RAGConfig()
+_context_builder_singleton = _ContextBuilder()
+_retrieval_logger_singleton = _RetrievalLogger()
+
+# ---- 意群数据目录（只计算一次）----
+_SEMANTIC_GROUPS_DIR: str = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "semantic_groups"
+)
 
 
 def preprocess_text(text: str) -> str:
@@ -287,13 +396,12 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     if not actual_key:
         raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
-    from openai import OpenAI
-
     api_base = api_base or "https://api.openai.com/v1"
     if not api_base.endswith('/v1') and not api_base.endswith('/v1/'):
         api_base = api_base.rstrip('/') + '/v1'
 
-    client = OpenAI(api_key=actual_key, base_url=api_base)
+    # 使用连接池复用 OpenAI client，避免每次创建新连接
+    client = _get_openai_client(actual_key, api_base)
 
     def embed_texts(texts):
         response = client.embeddings.create(
@@ -410,13 +518,53 @@ def _extract_snippet_and_highlights(text: str, query: str, window: int = 100) ->
     return snippet, highlights
 
 
-def _find_page_for_chunk(chunk_text: str, pages: List[dict]) -> int:
+def _build_page_index(pages: List[dict]) -> dict:
+    """构建页面内容前缀索引，用于 O(1) 查找 chunk 所在页码
+
+    对每个页面，按 80 字符窗口滑动提取前缀片段，构建 prefix -> page_num 映射。
+    """
+    if not pages:
+        return {}
+    index = {}
+    for page in pages:
+        content = page.get("content", "")
+        page_num = page.get("page", 1)
+        if not content:
+            continue
+        # 每隔 40 字符取一个 80 字符窗口作为索引键
+        step = 40
+        for i in range(0, max(1, len(content) - 79), step):
+            key = content[i:i + 80]
+            if key not in index:
+                index[key] = page_num
+    return index
+
+
+def _find_page_for_chunk(chunk_text: str, pages: List[dict], page_index: dict = None) -> int:
+    """查找 chunk 所在的页码
+
+    如果提供了 page_index（预构建的哈希索引），使用 O(1) 查找；
+    否则回退到线性扫描。
+    """
     if not pages:
         return 1
 
+    prefix = chunk_text[:80]
+
+    # 快速路径：使用预构建索引
+    if page_index:
+        if prefix in page_index:
+            return page_index[prefix]
+        # 尝试在索引中查找匹配的窗口
+        prefix60 = chunk_text[:60].lower()
+        for key, page_num in page_index.items():
+            if prefix60 in key.lower():
+                return page_num
+
+    # 慢速路径：线性扫描
     for page in pages:
         content = page.get("content", "")
-        if chunk_text[:80] in content:
+        if prefix in content:
             return page.get("page", 1)
         if chunk_text[:60].lower() in content.lower():
             return page.get("page", 1)
@@ -828,7 +976,7 @@ def build_vector_index(
     pages: List[dict] = None
 ):
     try:
-        print(f"Building vector index for {doc_id}...")
+        logger.info(f"[{doc_id}] Building vector index...")
         # 使用 Model_ID_Resolver 统一解析模型 ID
         registry_key, config = resolve_model_id(embedding_model_id)
         if registry_key is not None:
@@ -855,7 +1003,7 @@ def build_vector_index(
             if chunks_with_ctx:
                 chunks = [c for c, _ in chunks_with_ctx]
                 chunk_headings = [h for _, h in chunks_with_ctx]
-                print(f"使用结构感知分块，生成 {len(chunks)} 个分块")
+                logger.info(f"[{doc_id}] 使用结构感知分块，生成 {len(chunks)} 个分块")
             else:
                 raise ValueError("结构感知分块返回空结果")
         except Exception as e:
@@ -869,7 +1017,7 @@ def build_vector_index(
             )
             chunks = text_splitter.split_text(preprocessed_text)
             chunk_headings = [""] * len(chunks)
-        print(f"Split into {len(chunks)} chunks.")
+        logger.info(f"[{doc_id}] Split into {len(chunks)} chunks")
 
         if not chunks:
             return
@@ -950,7 +1098,7 @@ def build_vector_index(
         with open(chunks_path, "wb") as f:
             pickle.dump(save_data, f)
 
-        print(f"Vector index saved to {index_path}")
+        logger.info(f"[{doc_id}] Vector index saved to {index_path}")
 
         # ---- 语义意群异步生成与意群级别向量索引构建（需求 6.1）----
         _build_semantic_group_index_async(
@@ -962,7 +1110,7 @@ def build_vector_index(
         )
 
     except Exception as e:
-        print(f"Error building vector index for {doc_id}: {e}")
+        logger.error(f"[{doc_id}] Error building vector index: {e}")
         raise
 
 
@@ -1105,7 +1253,6 @@ def _build_semantic_group_index(
     except Exception as e:
         # 意群生成失败不影响主流程，记录警告并继续
         logger.warning(f"[{doc_id}] 语义意群生成失败，继续使用分块级别索引: {e}")
-        print(f"Warning: Semantic group generation failed for {doc_id}: {e}")
 
 
 def _derive_chunk_pages(chunks: List[str], pages: List[dict]) -> List[int]:
@@ -1180,6 +1327,11 @@ def _load_group_index(doc_id: str) -> Optional[dict]:
         logger.info(f"[{doc_id}] 意群级别索引不存在，回退到仅分块级别检索")
         return None
 
+    # 优先从缓存读取
+    cached_gid = _index_cache.get_group_index(doc_id)
+    if cached_gid is not None:
+        return cached_gid
+
     try:
         group_index = faiss.read_index(group_index_path)
         with open(group_meta_path, "rb") as f:
@@ -1192,12 +1344,14 @@ def _load_group_index(doc_id: str) -> Optional[dict]:
             logger.warning(f"[{doc_id}] 意群元数据为空，回退到仅分块级别检索")
             return None
 
-        logger.info(f"[{doc_id}] 已加载意群级别索引，共 {len(group_ids)} 个意群")
-        return {
+        result = {
             "index": group_index,
             "digest_texts": digest_texts,
             "group_ids": group_ids,
         }
+        _index_cache.put_group_index(doc_id, result)
+        logger.info(f"[{doc_id}] 已加载意群级别索引，共 {len(group_ids)} 个意群")
+        return result
     except Exception as e:
         logger.warning(f"[{doc_id}] 加载意群级别索引失败，回退到仅分块级别检索: {e}")
         return None
@@ -1221,6 +1375,11 @@ def _load_group_data(doc_id: str) -> Optional[dict]:
     if not os.path.exists(groups_json_path):
         return None
 
+    # 优先从缓存读取
+    cached_gcm = _index_cache.get_group_data(doc_id)
+    if cached_gcm is not None:
+        return cached_gcm
+
     try:
         import json
         with open(groups_json_path, "r", encoding="utf-8") as f:
@@ -1232,6 +1391,7 @@ def _load_group_data(doc_id: str) -> Optional[dict]:
         for g in groups:
             group_chunk_map[g["group_id"]] = g.get("chunk_indices", [])
 
+        _index_cache.put_group_data(doc_id, group_chunk_map)
         return group_chunk_map
     except Exception as e:
         logger.warning(f"[{doc_id}] 加载意群 JSON 数据失败: {e}")
@@ -1536,11 +1696,9 @@ def search_document_chunks(
         - timings: 各阶段耗时字典（毫秒），如 {"vector_search_ms": 12.3, "total_ms": 29.3}
           未执行的阶段不包含对应字段
     """
-    # 查询改写（需求 1.1, 1.5）
+    # 查询改写（需求 1.1, 1.5）—— 使用模块级单例避免重复实例化
     try:
-        from services.query_rewriter import QueryRewriter
-        _rewriter = QueryRewriter()
-        rewritten_query = _rewriter.rewrite(query, selected_text=selected_text)
+        rewritten_query = _query_rewriter_singleton.rewrite(query, selected_text=selected_text)
         if rewritten_query != query:
             logger.info(f"[{doc_id}] 查询改写: '{query}' → '{rewritten_query}'")
             query = rewritten_query
@@ -1548,8 +1706,7 @@ def search_document_chunks(
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
 
     # 查询类型分析 + 动态 candidate_k（提升召回率）
-    from services.query_analyzer import analyze_query_type
-    query_type = analyze_query_type(query)
+    query_type = _analyze_query_type(query)
     # 根据查询类型动态调整 candidate_k
     dynamic_candidate_k_map = {
         'extraction': 50,   # 提取性问题需要更大候选池
@@ -1570,9 +1727,15 @@ def search_document_chunks(
     if not os.path.exists(index_path) or not os.path.exists(chunks_path):
         raise HTTPException(status_code=404, detail="向量索引未找到,请重新上传PDF")
 
-    index = faiss.read_index(index_path)
-    with open(chunks_path, "rb") as f:
-        data = pickle.load(f)
+    # 优先从 LRU 缓存读取，避免每次磁盘 I/O
+    cached = _index_cache.get_index(doc_id, index_path, chunks_path)
+    if cached is not None:
+        index, data = cached
+    else:
+        index = faiss.read_index(index_path)
+        with open(chunks_path, "rb") as f:
+            data = pickle.load(f)
+        _index_cache.put_index(doc_id, index, data, index_path)
 
     if isinstance(data, dict):
         chunks = data["chunks"]
@@ -1587,6 +1750,9 @@ def search_document_chunks(
 
     embed_fn = get_embedding_function(embedding_model_id, api_key)
 
+    # 预构建页面前缀索引，加速 chunk → 页码映射
+    _page_index = _build_page_index(pages)
+
     # 检测索引类型：IP（新索引）还是 L2（旧索引）
     is_ip_index = (index.metric_type == faiss.METRIC_INNER_PRODUCT)
 
@@ -1598,8 +1764,7 @@ def search_document_chunks(
         return v
 
     # ---- RAG 优化：HyDE + 多查询扩展 ----
-    from services.rag_config import RAGConfig as _SearchRAGConfig
-    _search_rag_config = _SearchRAGConfig()
+    _search_rag_config = _rag_config_singleton
 
     # HyDE：用假设文档的 embedding 替代原始查询 embedding
     hyde_passage = None
@@ -1658,7 +1823,7 @@ def search_document_chunks(
         for dist, idx in zip(D_arr[0], I_arr[0]):
             if idx < len(chunks):
                 chunk_text = chunks[idx]
-                page_num = _find_page_for_chunk(chunk_text, pages)
+                page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
                 similarity = _distance_to_similarity(float(dist), is_ip=is_ip_index)
                 snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
                 results.append({
@@ -1791,7 +1956,7 @@ def search_document_chunks(
             if chunk_text in vector_chunk_set:
                 continue
             if query_lower in chunk_text.lower():
-                page_num = _find_page_for_chunk(chunk_text, pages)
+                page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
                 snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
                 vector_results.append({
                     "chunk": chunk_text,
@@ -1830,7 +1995,7 @@ def search_document_chunks(
             bm25_results = bm25_search(doc_id, query, chunks, top_k=search_k)
             # 为BM25结果补充page信息
             for item in bm25_results:
-                item['page'] = _find_page_for_chunk(item['chunk'], pages)
+                item['page'] = _find_page_for_chunk(item['chunk'], pages, page_index=_page_index)
 
             results = hybrid_search_merge(vector_results, bm25_results, top_k=top_k, query_type=query_type)
             # 补充snippet/highlights（BM25结果可能缺少）
@@ -1846,7 +2011,7 @@ def search_document_chunks(
             # BM25 检索计时结束（需求 10.1）
             timings["bm25_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
-            print(f"[Hybrid] 向量: {len(vector_results)}条, BM25: {len(bm25_results)}条, 融合后: {len(results)}条")
+            logger.info(f"[{doc_id}][Hybrid] 向量: {len(vector_results)}条, BM25: {len(bm25_results)}条, 融合后: {len(results)}条")
 
             # rerank 模式下：对 BM25+向量 RRF 融合结果执行 rerank（需求 2.1）
             if use_rerank:
@@ -1892,7 +2057,7 @@ def search_document_chunks(
             return results, timings
         except Exception as e:
             # BM25 失败时回退：rerank 模式回退到仅向量检索结果进行 rerank（需求 2.3）
-            print(f"[Hybrid] BM25混合检索失败，回退到纯向量检索: {e}")
+            logger.warning(f"[{doc_id}][Hybrid] BM25混合检索失败，回退到纯向量检索: {e}")
 
     # --- 纯向量检索（BM25 失败回退 或 use_hybrid=False 时的路径） ---
     if use_rerank:
@@ -1966,9 +2131,7 @@ def _merge_with_group_search(
     Returns:
         融合后的结果列表，或原始分块结果（降级时）
     """
-    from services.rag_config import RAGConfig
-
-    config = RAGConfig()
+    config = _rag_config_singleton
 
     # 检查是否启用语义意群功能
     if not config.enable_semantic_groups:
@@ -2029,14 +2192,8 @@ def _merge_with_group_search(
 
 
 def _get_semantic_groups_dir() -> str:
-    """获取语义意群数据存储目录路径
-
-    Returns:
-        语义意群数据目录的绝对路径
-    """
-    data_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(os.path.dirname(data_dir), "data")
-    return os.path.join(data_dir, "semantic_groups")
+    """获取语义意群数据存储目录路径（使用模块级缓存常量）"""
+    return _SEMANTIC_GROUPS_DIR
 
 
 def get_relevant_context(
@@ -2081,12 +2238,10 @@ def get_relevant_context(
         - retrieval_meta: 检索元数据字典，包含 query_type、granularities、
           token_used、fallback、citations 等信息
     """
-    from services.rag_config import RAGConfig
+    # 延迟导入（仅首次触发模块加载，后续为字典查找）
     from services.semantic_group_service import SemanticGroupService
     from services.granularity_selector import GranularitySelector
     from services.token_budget import TokenBudgetManager
-    from services.context_builder import ContextBuilder
-    from services.retrieval_logger import RetrievalLogger, RetrievalTrace
 
     # 获取搜索结果，解构返回的 (results, timings) 元组
     results, timings = search_document_chunks(
@@ -2105,7 +2260,7 @@ def get_relevant_context(
         selected_text=selected_text,  # 传递 selected_text 用于查询改写
     )
 
-    config = RAGConfig()
+    config = _rag_config_singleton
 
     # 动态 Token 预算：根据模型上下文窗口动态调整
     if config.token_budget_ratio > 0 and model_context_window > 0:
@@ -2141,14 +2296,12 @@ def get_relevant_context(
 
     # 回退路径也生成基本的 citations（基于 chunk 的页码信息）
     # 使用智能片段提取，从 chunk 中找到与查询最相关的部分
-    from services.context_builder import ContextBuilder
-    _fallback_builder = ContextBuilder()
     fallback_citations = []
     for idx, item in enumerate(results):
         chunk_text = item.get("chunk", "")
         page = item.get("page", 0)
         if chunk_text:
-            highlight_text = _fallback_builder._extract_relevant_snippet(
+            highlight_text = _context_builder_singleton._extract_relevant_snippet(
                 chunk_text, query, max_len=200
             )
             fallback_citations.append({
@@ -2183,8 +2336,7 @@ def get_relevant_context(
     else:
         fallback_type = "groups_disabled" if not config.enable_semantic_groups else "index_missing"
         fallback_detail = f"回退到简单拼接逻辑，原因: {fallback_type}"
-    retrieval_logger = RetrievalLogger()
-    trace = RetrievalTrace(
+    trace = _RetrievalTrace(
         query=query,
         query_type="unknown",
         query_confidence=0.0,
@@ -2197,8 +2349,8 @@ def get_relevant_context(
         fallback_detail=fallback_detail,
         citations=fallback_citations,
     )
-    retrieval_logger.log_trace(trace)
-    retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
+    _retrieval_logger_singleton.log_trace(trace)
+    retrieval_meta = _retrieval_logger_singleton.to_retrieval_meta(trace)
 
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
     retrieval_meta["timings"] = timings
