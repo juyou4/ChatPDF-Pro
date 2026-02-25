@@ -50,7 +50,7 @@ export default function EmbeddingModelSelector() {
                 onClick={() => setIsOpen(!isOpen)}
                 className={`
           w-full soft-card rounded-2xl p-4 transition-all duration-200
-          ${isOpen ? 'shadow-xl ring-2 ring-primary-500/50' : 'shadow-lg hover:shadow-xl'}
+          ${isOpen ? 'shadow-xl ring-2 ring-purple-500/50' : 'shadow-lg hover:shadow-xl'}
         `}
             >
                 <div className="flex items-center justify-between">
@@ -133,7 +133,7 @@ export default function EmbeddingModelSelector() {
                                                         }}
                                                         className={`
                                   w-full px-4 py-3 text-left transition-colors
-                                  ${isSelected ? 'bg-primary-50/50' : ''}
+                                  ${isSelected ? 'bg-purple-50/50' : ''}
                                   ${modelIndex === 0 ? '' : 'border-t border-white/30'}
                                 `}
                                                     >
@@ -166,7 +166,7 @@ export default function EmbeddingModelSelector() {
                                                                 <motion.div
                                                                     initial={{ scale: 0 }}
                                                                     animate={{ scale: 1 }}
-                                                                    className="w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center flex-shrink-0"
+                                                                    className="w-6 h-6 bg-purple-500 rounded-full flex items-center justify-center flex-shrink-0"
                                                                 >
                                                                     <Check className="w-4 h-4 text-white" />
                                                                 </motion.div>

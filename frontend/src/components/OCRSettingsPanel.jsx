@@ -679,7 +679,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         )}
                       </span>
                       {ocrStatus.recommended && (
-                        <span className="ml-auto text-xs text-primary-600 bg-primary-50 px-2 py-0.5 rounded-full border border-primary-100">
+                        <span className="ml-auto text-xs text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
                           推荐：{BACKEND_LABELS[ocrStatus.recommended] || ocrStatus.recommended}
                         </span>
                       )}
@@ -763,14 +763,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         onClick={() => handleModeChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                            : 'border-gray-100 hover:border-primary-200 hover:bg-primary-50/30 text-gray-700'
+                            ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                            : 'border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 text-gray-700'
                         }`}
                       >
                         <div
                           className={`p-1.5 rounded-lg ${
                             isActive
-                              ? 'bg-primary-100 text-primary-600'
+                              ? 'bg-purple-100 text-purple-600'
                               : 'bg-gray-100 text-gray-500'
                           }`}
                         >
@@ -782,14 +782,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-primary-500' : 'text-gray-400'
+                              isActive ? 'text-purple-500' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-primary-500 flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-purple-500 flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -815,8 +815,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         onClick={() => handleBackendChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                            : 'border-gray-100 hover:border-primary-200 hover:bg-primary-50/30 text-gray-700'
+                            ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                            : 'border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 text-gray-700'
                         }`}
                       >
                         <div className="flex-1 min-w-0">
@@ -825,14 +825,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-primary-500' : 'text-gray-400'
+                              isActive ? 'text-purple-500' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-primary-500 flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-purple-500 flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -893,7 +893,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                             ? '输入新 Key 以更新（留空保持不变）'
                             : '输入 Mistral API Key'
                         }
-                        className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                        className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                       />
                       {/* 显示/隐藏 API Key 切换按钮 */}
                       <button
@@ -924,7 +924,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         value={mistralBaseUrl}
                         onChange={(e) => setMistralBaseUrl(e.target.value)}
                         placeholder="https://api.mistral.ai"
-                        className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                        className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                       />
                     </div>
                   </div>
@@ -971,7 +971,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <button
                       onClick={handleValidateKey}
                       disabled={!mistralApiKey.trim() || validateStatus === 'loading'}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-primary-200 bg-primary-50/60 text-primary-700 hover:bg-primary-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
                       {validateStatus === 'loading' ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1081,7 +1081,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           value={mineruWorkerUrl}
                           onChange={(e) => setMineruWorkerUrl(e.target.value)}
                           placeholder="https://your-worker.workers.dev"
-                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                         />
                       </div>
                     </div>
@@ -1108,7 +1108,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                               ? '输入新 Auth Key 以更新（留空保持不变）'
                               : '如果 Worker 启用了访问控制，填写这里'
                           }
-                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                         />
                         <button
                           type="button"
@@ -1134,8 +1134,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setMineruTokenMode('frontend')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             mineruTokenMode === 'frontend'
-                              ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-primary-200 hover:bg-primary-50/30'
+                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
                           }`}
                         >
                           前端透传
@@ -1144,8 +1144,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setMineruTokenMode('worker')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             mineruTokenMode === 'worker'
-                              ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-primary-200 hover:bg-primary-50/30'
+                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
                           }`}
                         >
                           Worker 配置
@@ -1177,7 +1177,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                 ? '输入新 Token 以更新（留空保持不变）'
                                 : '输入 MinerU API Token'
                             }
-                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                           />
                           <button
                             type="button"
@@ -1206,7 +1206,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <div
                             onClick={() => setMineruEnableOcr(!mineruEnableOcr)}
                             className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableOcr ? 'bg-primary-500' : 'bg-gray-300'
+                              mineruEnableOcr ? 'bg-purple-500' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1222,7 +1222,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <div
                             onClick={() => setMineruEnableFormula(!mineruEnableFormula)}
                             className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableFormula ? 'bg-primary-500' : 'bg-gray-300'
+                              mineruEnableFormula ? 'bg-purple-500' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1238,7 +1238,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <div
                             onClick={() => setMineruEnableTable(!mineruEnableTable)}
                             className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableTable ? 'bg-primary-500' : 'bg-gray-300'
+                              mineruEnableTable ? 'bg-purple-500' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1293,7 +1293,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <button
                         onClick={handleMineruValidate}
                         disabled={!mineruWorkerUrl.trim() || mineruValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-primary-200 bg-primary-50/60 text-primary-700 hover:bg-primary-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {mineruValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1404,7 +1404,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           value={doc2xWorkerUrl}
                           onChange={(e) => setDoc2xWorkerUrl(e.target.value)}
                           placeholder="https://your-worker.workers.dev"
-                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                         />
                       </div>
                     </div>
@@ -1431,7 +1431,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                               ? '输入新 Auth Key 以更新（留空保持不变）'
                               : '如果 Worker 启用了访问控制，填写这里'
                           }
-                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                         />
                         <button
                           type="button"
@@ -1457,8 +1457,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setDoc2xTokenMode('frontend')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             doc2xTokenMode === 'frontend'
-                              ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-primary-200 hover:bg-primary-50/30'
+                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
                           }`}
                         >
                           前端透传
@@ -1467,8 +1467,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setDoc2xTokenMode('worker')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             doc2xTokenMode === 'worker'
-                              ? 'border-primary-200 bg-primary-50/60 text-primary-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-primary-200 hover:bg-primary-50/30'
+                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
                           }`}
                         >
                           Worker 配置
@@ -1500,7 +1500,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                 ? '输入新 Token 以更新（留空保持不变）'
                                 : '输入 Doc2X API Token'
                             }
-                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-primary-300 focus:ring-2 focus:ring-primary-100 outline-none transition-all placeholder:text-gray-300"
+                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
                           />
                           <button
                             type="button"
@@ -1559,7 +1559,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <button
                         onClick={handleDoc2xValidate}
                         disabled={!doc2xWorkerUrl.trim() || doc2xValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-primary-200 bg-primary-50/60 text-primary-700 hover:bg-primary-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {doc2xValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />

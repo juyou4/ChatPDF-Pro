@@ -508,7 +508,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 {!fullPdfUrl ? (
                     <div className="flex items-center justify-center h-full">
                         <div className="text-center">
-                            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-500 mb-4"></div>
+                            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
                             <div className="text-gray-500">文档加载中...</div>
                         </div>
                     </div>
@@ -529,7 +529,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         loading={
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center">
-                                    <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-500 mb-4"></div>
+                                    <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
                                     <div className="text-gray-500">加载PDF中...</div>
                                 </div>
                             </div>
@@ -594,7 +594,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         className={`absolute border-2 rounded-lg pointer-events-none z-10 ${
                                             highlightInfo?.source === 'citation'
                                                 ? 'border-amber-500 bg-amber-500/20'
-                                                : 'border-primary-500 bg-primary-500/20'
+                                                : 'border-purple-500 bg-purple-500/20'
                                         }`}
                                         style={{
                                             boxShadow: highlightInfo?.source === 'citation'
@@ -605,7 +605,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         {/* 只在第一个矩形上显示标签 */}
                                         {idx === 0 && (
                                             <div className={`absolute -top-3 -right-3 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm ${
-                                                highlightInfo?.source === 'citation' ? 'bg-amber-500' : 'bg-primary-500'
+                                                highlightInfo?.source === 'citation' ? 'bg-amber-500' : 'bg-purple-500'
                                             }`}>
                                                 {highlightInfo?.source === 'citation' ? '📎 引用' : '匹配'}
                                             </div>

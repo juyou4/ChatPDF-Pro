@@ -329,7 +329,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                             onClick={() => handleSelectModel(provider.id, model.id)}
                             className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg transition-colors ${
                               isSelected
-                                ? 'bg-primary-50/80 text-primary-600 font-medium'
+                                ? 'bg-purple-50/80 text-purple-600 font-medium'
                                 : 'text-gray-700 hover:bg-gray-100/60'
                             }`}
                           >
@@ -337,7 +337,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                             <span className="truncate">{model.name}</span>
                             {/* 选中状态的勾选图标 */}
                             {isSelected && (
-                              <Check className="w-3.5 h-3.5 flex-shrink-0 text-primary-600" />
+                              <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600" />
                             )}
                           </button>
                         )
@@ -365,9 +365,9 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
           }
           className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-full border transition-all ${
             isAlwaysThinking
-              ? 'border-primary-300 bg-primary-50 text-primary-700 cursor-default'
+              ? 'border-purple-300 bg-purple-50 text-purple-700 cursor-default'
               : isThinkingActive
-                ? 'border-primary-300 bg-primary-50 text-primary-700 shadow-sm'
+                ? 'border-purple-300 bg-purple-50 text-purple-700 shadow-sm'
                 : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
           }`}
         >
@@ -406,13 +406,13 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                     onClick={() => handleSelectEffort(option.value)}
                     className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg transition-colors ${
                       isSelected
-                        ? 'bg-primary-50/80 text-primary-600 font-medium'
+                        ? 'bg-purple-50/80 text-purple-600 font-medium'
                         : 'text-gray-700 hover:bg-gray-100/60'
                     }`}
                   >
                     <span>{option.label}</span>
                     {isSelected && (
-                      <Check className="w-3.5 h-3.5 flex-shrink-0 text-primary-600" />
+                      <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600" />
                     )}
                   </button>
                 )

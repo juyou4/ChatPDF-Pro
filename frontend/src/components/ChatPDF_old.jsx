@@ -1809,7 +1809,7 @@ const ChatPDF = () => {
           </button>
 
           <div className="px-6 py-8 flex items-center justify-between">
-            <div className="flex items-center gap-3 font-bold text-2xl text-primary-600 tracking-tight">
+            <div className="flex items-center gap-3 font-bold text-2xl text-purple-600 tracking-tight">
               <Bot className="w-9 h-9" />
               <span>ChatPDF</span>
             </div>
@@ -1852,7 +1852,7 @@ const ChatPDF = () => {
                     : (darkMode ? 'text-gray-400 hover:bg-white/5 hover:text-gray-200' : 'hover:bg-white/40')
                   }`}
               >
-                <MessageSquare className="w-5 h-5 text-primary-500" />
+                <MessageSquare className="w-5 h-5 text-purple-500" />
                 <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
                 <button
                   onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
@@ -1911,12 +1911,12 @@ const ChatPDF = () => {
                 </button>
 
                 <div className="flex items-center gap-4">
-                  <div className="bg-primary-600 text-white p-2.5 rounded-xl shadow-sm">
+                  <div className="bg-purple-600 text-white p-2.5 rounded-xl shadow-sm">
                     <FileText className="w-6 h-6" />
                   </div>
                   <div>
                     <h1 className="text-2xl font-bold text-[var(--color-text-main)]">
-                      ChatPDF Pro <span className="text-xs bg-primary-100 text-primary-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
+                      ChatPDF Pro <span className="text-xs bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
                     </h1>
                     <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
                   </div>
@@ -1941,7 +1941,7 @@ const ChatPDF = () => {
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !isSearching) handleSearch();
                       }}
-                      className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-primary-400"
+                      className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-purple-400"
                       disabled={isSearching}
                     />
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
@@ -1952,8 +1952,8 @@ const ChatPDF = () => {
                     onClick={() => handleSearch()}
                     disabled={isSearching}
                     className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching
-                      ? 'bg-primary-200 text-primary-700 cursor-wait'
-                      : 'bg-primary-600 text-white hover:shadow-md hover:bg-primary-700'
+                      ? 'bg-purple-200 text-purple-700 cursor-wait'
+                      : 'bg-purple-600 text-white hover:shadow-md hover:bg-purple-700'
                       }`}
                   >
                     {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
@@ -1961,7 +1961,7 @@ const ChatPDF = () => {
                   </motion.button>
                   <button
                     onClick={() => setUseRerank(v => !v)}
-                    className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerank ? 'bg-primary-50 text-primary-700 border-primary-200' : 'bg-white text-gray-600 border-gray-200'
+                    className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerank ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200'
                       }`}
                     title="使用重排模型提高结果质量"
                   >
@@ -2143,13 +2143,13 @@ const ChatPDF = () => {
             <div className="flex-1 flex items-center justify-center relative overflow-hidden">
               {/* Background Blobs */}
               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full max-w-lg max-h-lg pointer-events-none">
-                <div className="blob bg-primary-200 w-72 h-72 top-0 left-0 mix-blend-multiply animate-blob"></div>
+                <div className="blob bg-purple-200 w-72 h-72 top-0 left-0 mix-blend-multiply animate-blob"></div>
                 <div className="blob bg-cyan-100 w-72 h-72 bottom-0 right-0 mix-blend-multiply animate-blob animation-delay-2000"></div>
               </div>
 
               <div className="text-center space-y-8 max-w-md relative z-10">
                 <div className="w-24 h-24 bg-white/50 backdrop-blur-md rounded-[32px] flex items-center justify-center mx-auto shadow-sm border border-white/60">
-                  <Upload className="w-10 h-10 text-primary-500/80" />
+                  <Upload className="w-10 h-10 text-purple-500/80" />
                 </div>
 
                 <div className="space-y-2">
@@ -2187,7 +2187,7 @@ const ChatPDF = () => {
             }}
           >
             {/* Invisible trigger area, visible line on hover */}
-            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-primary-500/50 transition-colors duration-200" />
+            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-purple-500/50 transition-colors duration-200" />
           </div>
 
           {/* Right: Chat Area (Floating Card) */}
@@ -2203,14 +2203,14 @@ const ChatPDF = () => {
                 <div className="rounded-3xl border border-black/5 bg-white/70 backdrop-blur-sm p-4 space-y-3 shadow-sm">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <Search className="w-4 h-4 text-primary-500" />
+                      <Search className="w-4 h-4 text-purple-500" />
                       <span className="font-semibold text-sm text-gray-800">文档搜索</span>
                       {useRerank && (
-                        <span className="text-xs text-primary-700 bg-primary-50 px-2 py-0.5 rounded-full border border-primary-100">
+                        <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
                           已开启重排
                         </span>
                       )}
-                      {isSearching && <Loader2 className="w-4 h-4 animate-spin text-primary-500" />}
+                      {isSearching && <Loader2 className="w-4 h-4 animate-spin text-purple-500" />}
                     </div>
                     {searchResults.length > 0 && (
                       <span className="text-xs text-gray-500">找到 {searchResults.length} 个候选</span>
@@ -2255,18 +2255,18 @@ const ChatPDF = () => {
                       <button
                         key={`result-${idx}`}
                         onClick={() => focusResult(idx)}
-                        className="w-full text-left p-3 rounded-2xl border border-gray-100 hover:border-primary-200 hover:bg-primary-50/40 transition-all relative"
+                        className="w-full text-left p-3 rounded-2xl border border-gray-100 hover:border-purple-200 hover:bg-purple-50/40 transition-all relative"
                       >
                         <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
                           <div className="flex items-center gap-1.5">
                             <span>第 {result.page || 1} 页 · #{idx + 1}</span>
                             {result.reranked && (
-                              <span className="text-[10px] text-primary-700 bg-primary-50 px-1.5 py-0.5 rounded-full border border-primary-100">
+                              <span className="text-[10px] text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded-full border border-purple-100">
                                 Rerank
                               </span>
                             )}
                           </div>
-                          <span className={`font-semibold ${formatSimilarity(result) >= 80 ? 'text-green-600' : 'text-primary-600'}`}>
+                          <span className={`font-semibold ${formatSimilarity(result) >= 80 ? 'text-green-600' : 'text-purple-600'}`}>
                             匹配度 {formatSimilarity(result)}%
                           </span>
                         </div>
@@ -2324,7 +2324,7 @@ const ChatPDF = () => {
                       {/* AI Avatar/Header for Assistant Messages */}
                       {msg.type === 'assistant' && (
                         <div className="flex items-center gap-2 mb-2 select-none">
-                          <div className="p-1 rounded-lg bg-primary-600 text-white shadow-sm">
+                          <div className="p-1 rounded-lg bg-purple-600 text-white shadow-sm">
                             <Bot className="w-4 h-4" />
                           </div>
                           <span className="font-bold text-sm text-gray-800 dark:text-gray-100">AI Assistant</span>
@@ -2386,7 +2386,7 @@ const ChatPDF = () => {
                         </button>
                         <button
                           onClick={() => saveToMemory(idx, 'manual')}
-                          className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${rememberedMessages.has(idx) ? 'text-primary-500' : 'text-gray-500 hover:text-gray-700'}`}
+                          className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${rememberedMessages.has(idx) ? 'text-purple-500' : 'text-gray-500 hover:text-gray-700'}`}
                           title="记住这个"
                         >
                           <Brain className={`w-4 h-4 ${rememberedMessages.has(idx) ? 'fill-current' : ''}`} />
@@ -2455,7 +2455,7 @@ const ChatPDF = () => {
                         className={`transition-colors p-1 rounded-md ${
                           docId
                             ? isSelectingArea
-                              ? 'text-primary-600 bg-primary-50 hover:bg-primary-100'
+                              ? 'text-purple-600 bg-purple-50 hover:bg-purple-100'
                               : 'hover:text-gray-600 hover:bg-gray-50'
                             : 'text-gray-300 cursor-not-allowed'
                         }`}
@@ -2620,16 +2620,16 @@ const ChatPDF = () => {
 
               <div className="space-y-4 px-8 overflow-y-auto flex-1">
                 {/* 模型服务管理入口（对话/嵌入/重排统一管理） */}
-                <div className="relative overflow-hidden rounded-[32px] border border-primary-100/50 bg-gradient-to-br from-white/40 to-primary-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
-                  <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-primary-500/10 rounded-full blur-3xl"></div>
-                  <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-20 h-20 bg-primary-500/10 rounded-full blur-2xl"></div>
+                <div className="relative overflow-hidden rounded-[32px] border border-purple-100/50 bg-gradient-to-br from-white/40 to-purple-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
+                  <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-purple-500/10 rounded-full blur-3xl"></div>
+                  <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-20 h-20 bg-purple-500/10 rounded-full blur-2xl"></div>
 
                   <div className="relative bg-white/30 backdrop-blur-sm rounded-[28px] p-5 border border-white/50">
                     <div className="flex flex-col gap-5">
                       {/* Header Section */}
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-[20px] bg-gradient-to-br from-primary-500/90 to-indigo-600/90 shadow-lg shadow-primary-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
+                          <div className="w-12 h-12 rounded-[20px] bg-gradient-to-br from-purple-500/90 to-indigo-600/90 shadow-lg shadow-purple-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
                             <Server className="w-6 h-6" />
                           </div>
                           <div className="space-y-0.5">
@@ -2654,9 +2654,9 @@ const ChatPDF = () => {
                       {/* Model Status Cards - Minimalistic Style */}
                       <div className="flex flex-col gap-3">
                         {/* Chat Model Card */}
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-primary-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
                           <div className="flex items-center gap-4">
-                            <MessageCircle className="w-5 h-5 text-gray-400 group-hover:text-primary-500 transition-colors" />
+                            <MessageCircle className="w-5 h-5 text-gray-400 group-hover:text-purple-500 transition-colors" />
                             <div className="flex-1 min-w-0">
                               <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Chat Model</div>
                               <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
@@ -2667,9 +2667,9 @@ const ChatPDF = () => {
                         </div>
 
                         {/* Embedding Model Card */}
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-primary-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
+                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-purple-200 hover:bg-white/60 hover:shadow-sm backdrop-blur-sm cursor-pointer">
                           <div className="flex items-center gap-4">
-                            <Database className="w-5 h-5 text-gray-400 group-hover:text-primary-500 transition-colors" />
+                            <Database className="w-5 h-5 text-gray-400 group-hover:text-purple-500 transition-colors" />
                             <div className="flex-1 min-w-0">
                               <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Embedding</div>
                               <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
@@ -2699,11 +2699,11 @@ const ChatPDF = () => {
                 <div className="pt-4 border-t border-gray-100">
                   <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
                     <span className="font-medium">Vector Search</span>
-                    <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-primary-600 w-5 h-5" />
+                    <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-purple-600 w-5 h-5" />
                   </label>
                   <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
                     <span className="font-medium">Screenshot Analysis</span>
-                    <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-primary-600 w-5 h-5" />
+                    <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-purple-600 w-5 h-5" />
                   </label>
                   {lastCallInfo && (
                     <div className="mt-3 p-3 rounded-[18px] border text-xs text-gray-700 bg-gray-50">
@@ -2730,7 +2730,7 @@ const ChatPDF = () => {
 
                   <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg mt-3">
                     <span className="font-medium">Blur Reveal 效果</span>
-                    <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-primary-600 w-5 h-5" />
+                    <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-purple-600 w-5 h-5" />
                   </label>
                   <p className="text-xs text-gray-500 ml-2 mb-2">流式输出时每个新字符从模糊到清晰的渐变效果（逐字符效果）</p>
 
@@ -2816,7 +2816,7 @@ const ChatPDF = () => {
                           type="text"
                           value={searchEngineUrl}
                           onChange={(e) => setSearchEngineUrl(e.target.value)}
-                          className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none"
+                          className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-purple-500 outline-none"
                           placeholder="例如：https://www.google.com/search?q={query}"
                         />
                         <p className="text-xs text-gray-500">
@@ -2860,7 +2860,7 @@ const ChatPDF = () => {
                               navigator.clipboard.writeText(storageInfo.uploads_dir);
                               alert('路径已复制到剪贴板！');
                             }}
-                            className="p-1.5 hover:bg-primary-100 text-primary-600 rounded transition-colors"
+                            className="p-1.5 hover:bg-purple-100 text-purple-600 rounded transition-colors"
                             title="复制路径"
                           >
                             <Copy className="w-4 h-4" />
@@ -2882,7 +2882,7 @@ const ChatPDF = () => {
                               navigator.clipboard.writeText(storageInfo.data_dir);
                               alert('路径已复制到剪贴板！');
                             }}
-                            className="p-1.5 hover:bg-primary-100 text-primary-600 rounded transition-colors"
+                            className="p-1.5 hover:bg-purple-100 text-purple-600 rounded transition-colors"
                             title="复制路径"
                           >
                             <Copy className="w-4 h-4" />
@@ -2967,7 +2967,7 @@ const CustomSelect = ({ value, onChange, options }) => {
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full p-3 rounded-[18px] border border-gray-200 bg-white/50 backdrop-blur-sm flex items-center justify-between hover:border-primary-300 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+        className="w-full p-3 rounded-[18px] border border-gray-200 bg-white/50 backdrop-blur-sm flex items-center justify-between hover:border-purple-300 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500/20"
       >
         <span className="text-sm font-medium text-gray-700">{selectedLabel}</span>
         <ChevronDown
@@ -2995,12 +2995,12 @@ const CustomSelect = ({ value, onChange, options }) => {
                   }}
                   className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between
                     ${option.value === value
-                      ? 'bg-primary-50 text-primary-600 font-medium'
+                      ? 'bg-purple-50 text-purple-600 font-medium'
                       : 'text-gray-700 hover:bg-gray-50'
                     }`}
                 >
                   {option.label}
-                  {option.value === value && <div className="w-1.5 h-1.5 rounded-full bg-primary-500" />}
+                  {option.value === value && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
                 </button>
               ))}
             </div>

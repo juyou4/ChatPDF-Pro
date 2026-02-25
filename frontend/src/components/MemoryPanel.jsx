@@ -15,10 +15,10 @@ const SOURCE_TYPE_LABELS = {
 
 // 来源类型对应的颜色样式
 const SOURCE_TYPE_COLORS = {
-  auto_qa: 'bg-primary-100 text-primary-700',
+  auto_qa: 'bg-purple-100 text-purple-700',
   manual: 'bg-green-100 text-green-700',
   liked: 'bg-pink-100 text-pink-700',
-  keyword: 'bg-primary-100 text-primary-700',
+  keyword: 'bg-purple-100 text-purple-700',
 };
 
 // 截取内容摘要（最多 50 字符）
@@ -180,7 +180,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
           {/* 头部 */}
           <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-100 p-6 flex items-center justify-between z-10">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-pink-600 rounded-xl flex items-center justify-center">
+              <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-600 rounded-xl flex items-center justify-center">
                 <Brain className="w-5 h-5 text-white" />
               </div>
               <div>
@@ -288,7 +288,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                                 <button
                                   onClick={() => handleSave(entry.id)}
                                   disabled={isOperating}
-                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors disabled:opacity-50"
                                 >
                                   {isOperating ? (
                                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

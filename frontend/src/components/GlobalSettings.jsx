@@ -108,7 +108,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                     {/* Header */}
                     <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-100 p-6 flex items-center justify-between z-10">
                         <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-600 rounded-xl flex items-center justify-center">
+                            <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
                                 <Type className="w-5 h-5 text-white" />
                             </div>
                             <div>
@@ -128,7 +128,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         {/* 字体设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
-                                <Type className="w-5 h-5 text-primary-600" />
+                                <Type className="w-5 h-5 text-purple-600" />
                                 <h3 className="text-lg font-semibold">字体设置</h3>
                             </div>
 
@@ -141,7 +141,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             key={font.id}
                                             onClick={() => setFontFamily(font.id)}
                                             className={`p-3 rounded-xl transition-all relative overflow-hidden group ${fontFamily === font.id
-                                                ? 'soft-card ring-2 ring-primary-500 bg-primary-50/50'
+                                                ? 'soft-card ring-2 ring-purple-500 bg-purple-50/50'
                                                 : 'soft-card hover:bg-[var(--color-bg-subtle)]'
                                                 }`}
                                             style={{ fontFamily: font.value }}
@@ -149,7 +149,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             <div className="flex items-center justify-between relative z-10">
                                                 <span className="font-medium text-gray-800">{font.name}</span>
                                                 {fontFamily === font.id && (
-                                                    <div className="bg-primary-500 rounded-full p-0.5">
+                                                    <div className="bg-purple-500 rounded-full p-0.5">
                                                         <Check className="w-3 h-3 text-white" />
                                                     </div>
                                                 )}
@@ -178,7 +178,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     />
                                     <button
                                         onClick={applyCustomFont}
-                                        className="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl transition-colors font-medium"
+                                        className="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl transition-colors font-medium"
                                     >
                                         应用
                                     </button>
@@ -206,13 +206,13 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         {/* 字体大小设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
-                                <ZoomIn className="w-5 h-5 text-primary-600" />
+                                <ZoomIn className="w-5 h-5 text-purple-600" />
                                 <h3 className="text-lg font-semibold">字体大小</h3>
                             </div>
 
                             {/* 当前字体大小显示 */}
                             <div className="text-center">
-                                <div className="text-4xl font-bold text-primary-600">
+                                <div className="text-4xl font-bold text-purple-600">
                                     {Math.round(16 * globalScale)}px
                                 </div>
                                 <div className="text-sm text-gray-500 mt-1">当前基准字体大小</div>
@@ -246,7 +246,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         key={preset.value}
                                         onClick={() => setGlobalScale(preset.value)}
                                         className={`py-2 rounded-lg transition-all font-medium ${Math.abs(globalScale - preset.value) < 0.01
-                                            ? 'bg-gradient-to-br from-primary-500 to-primary-600 text-white shadow-lg shadow-primary-500/30 transform scale-105'
+                                            ? 'bg-gradient-to-br from-purple-500 to-purple-600 text-white shadow-lg shadow-purple-500/30 transform scale-105'
                                             : 'soft-card text-gray-600 hover:text-gray-900'
                                             }`}
                                     >
@@ -262,7 +262,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         {/* 记忆系统设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
-                                <Brain className="w-5 h-5 text-primary-600" />
+                                <Brain className="w-5 h-5 text-purple-600" />
                                 <h3 className="text-lg font-semibold">记忆系统</h3>
                             </div>
 
@@ -274,7 +274,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 </div>
                                 <button
                                     onClick={() => setEnableMemory(!enableMemory)}
-                                    className={`relative w-12 h-7 rounded-full transition-colors ${enableMemory ? 'bg-primary-500' : 'bg-gray-300'}`}
+                                    className={`relative w-12 h-7 rounded-full transition-colors ${enableMemory ? 'bg-purple-500' : 'bg-gray-300'}`}
                                 >
                                     <div className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${enableMemory ? 'translate-x-5' : ''}`} />
                                 </button>
@@ -283,7 +283,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             {/* 管理记忆按钮 */}
                             <button
                                 onClick={() => setShowMemoryPanel(true)}
-                                className="w-full soft-card flex items-center justify-center gap-2 px-4 py-3 text-primary-700 bg-primary-50/30 hover:bg-primary-50/80 rounded-xl transition-all"
+                                className="w-full soft-card flex items-center justify-center gap-2 px-4 py-3 text-purple-700 bg-purple-50/30 hover:bg-purple-50/80 rounded-xl transition-all"
                             >
                                 <Brain className="w-4 h-4" />
                                 <span className="font-medium">管理记忆</span>
@@ -322,7 +322,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 </button>
 
                                 {/* 导入设置（文件） */}
-                                <label className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-primary-700 bg-primary-50/30 hover:bg-primary-50/80 rounded-xl transition-all cursor-pointer col-span-1">
+                                <label className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-purple-700 bg-purple-50/30 hover:bg-purple-50/80 rounded-xl transition-all cursor-pointer col-span-1">
                                     <Upload className="w-4 h-4" />
                                     <span className="font-medium">导入文件</span>
                                     <input
@@ -336,7 +336,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 {/* 导入设置（文本） */}
                                 <button
                                     onClick={() => setShowImportDialog(true)}
-                                    className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-primary-700 bg-primary-50/30 hover:bg-primary-50/80 rounded-xl transition-all"
+                                    className="soft-card flex items-center justify-center gap-2 px-4 py-3 text-purple-700 bg-purple-50/30 hover:bg-purple-50/80 rounded-xl transition-all"
                                 >
                                     <Upload className="w-4 h-4" />
                                     <span className="font-medium">粘贴文本</span>
@@ -368,7 +368,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             <div className="flex gap-3 mt-4">
                                 <button
                                     onClick={handleImport}
-                                    className="flex-1 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl transition-colors font-medium"
+                                    className="flex-1 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl transition-colors font-medium"
                                 >
                                     导入
                                 </button>
