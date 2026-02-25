@@ -13,9 +13,9 @@
     --color-bg-subtle: #F9FAFB;
 
     /* --- Brand Colors --- */
-    --color-primary: #8e75f0;
-    --color-primary-soft: #C4B5FD;
-    --color-primary-light: #F5F3FF;
+    --color-primary: #8871e4;
+    --color-primary-soft: #cfc6f4;
+    --color-primary-light: #f3f0fc;
 
     /* --- Text Colors --- */
     --color-text-main: #1F2937;
@@ -130,7 +130,7 @@
 }
 
 .message-bubble-user {
-    background: linear-gradient(135deg, var(--color-primary) 0%, #7860df 100%);
+    background: linear-gradient(135deg, var(--color-primary) 0%, #6c5ab6 100%);
     color: white;
     box-shadow: 
         0 8px 16px -4px rgba(139, 92, 246, 0.3),
@@ -169,7 +169,7 @@
 }
 
 .soft-button-primary:hover {
-    background-color: #846cf2;
+    background-color: #6c5ab6;
     box-shadow: var(--shadow-md);
 }
 
@@ -679,7 +679,7 @@
     display: inline-block;
     width: 2px;
     height: 1.1em;
-    background: #7860df;
+    background: #6c5ab6;
     margin-left: 1px;
     animation: streaming-cursor-blink 0.7s steps(2) infinite;
     vertical-align: text-bottom;
