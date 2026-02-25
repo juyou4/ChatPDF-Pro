@@ -51,18 +51,14 @@
 #root {
     width: 100%;
     min-height: 100vh;
-    background-color: #FDFCF8;
+    background-color: #faf9ff;
     /* Warm off-white base */
     background-image:
-        radial-gradient(at 0% 0%, hsla(11, 100%, 89%, 0.8) 0px, transparent 55%),
-        /* 浅桃红/粉红 - 左上区域 */
-        radial-gradient(at 100% 0%, hsla(240, 100%, 94%, 0.9) 0px, transparent 65%),
-        /* 极浅蓝紫 - 右上区域 */
-        radial-gradient(at 0% 100%, hsla(190, 80%, 94%, 0.8) 0px, transparent 55%),
-        /* 浅天蓝 - 左下区域 */
-        radial-gradient(at 100% 100%, hsla(330, 80%, 96%, 0.8) 0px, transparent 65%),
-        /* 浅洋红/亮粉 - 右下区域 */
-        radial-gradient(at 50% 50%, hsla(280, 80%, 95%, 0.6) 0px, transparent 75%);
+        radial-gradient(circle at 10% 10%, rgba(255, 205, 185, 0.95) 0%, transparent 65%),
+        radial-gradient(circle at 90% 10%, rgba(215, 220, 255, 0.95) 0%, transparent 65%),
+        radial-gradient(circle at 10% 90%, rgba(220, 240, 255, 0.95) 0%, transparent 65%),
+        radial-gradient(circle at 90% 90%, rgba(250, 245, 255, 0.95) 0%, transparent 65%),
+        radial-gradient(circle at 50% 40%, rgba(255, 215, 235, 0.8) 0%, transparent 70%);
     background-attachment: fixed;
     color: var(--color-text-main);
     font-family: var(--global-font-family);
