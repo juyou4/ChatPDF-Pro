@@ -51,14 +51,14 @@
 #root {
     width: 100%;
     min-height: 100vh;
-    background-color: #faf9ff;
+    background-color: #ffffff;
     /* Warm off-white base */
     background-image:
-        radial-gradient(circle at 10% 10%, rgba(255, 205, 185, 0.95) 0%, transparent 65%),
-        radial-gradient(circle at 90% 10%, rgba(215, 220, 255, 0.95) 0%, transparent 65%),
-        radial-gradient(circle at 10% 90%, rgba(220, 240, 255, 0.95) 0%, transparent 65%),
-        radial-gradient(circle at 90% 90%, rgba(250, 245, 255, 0.95) 0%, transparent 65%),
-        radial-gradient(circle at 50% 40%, rgba(255, 215, 235, 0.8) 0%, transparent 70%);
+        radial-gradient(farthest-corner at 0% 0%, rgba(255, 215, 205, 1) 0%, rgba(255, 215, 205, 0) 100%),
+        radial-gradient(farthest-corner at 100% 0%, rgba(225, 230, 255, 1) 0%, rgba(225, 230, 255, 0) 100%),
+        radial-gradient(farthest-corner at 0% 100%, rgba(230, 245, 255, 1) 0%, rgba(230, 245, 255, 0) 100%),
+        radial-gradient(farthest-corner at 100% 100%, rgba(245, 240, 255, 1) 0%, rgba(245, 240, 255, 0) 100%),
+        radial-gradient(farthest-corner at 50% 50%, rgba(255, 235, 245, 0.8) 0%, rgba(255, 235, 245, 0) 100%);
     background-attachment: fixed;
     color: var(--color-text-main);
     font-family: var(--global-font-family);
