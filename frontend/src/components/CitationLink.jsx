@@ -36,7 +36,7 @@ const CitationLink = React.memo(({ refNumber, citation, onClick }) => {
       type="button"
       onClick={handleClick}
       title={tooltipText}
-      className="inline-flex items-center justify-center min-w-[1.5em] px-1 py-0 mx-0.5 text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 hover:text-blue-700 hover:border-blue-300 cursor-pointer transition-colors duration-150 align-baseline leading-tight no-underline dark:text-blue-300 dark:bg-blue-900/30 dark:border-blue-700/50 dark:hover:bg-blue-800/40 dark:hover:text-blue-200"
+      className="inline-flex items-center justify-center min-w-[1.5em] px-1 py-0 mx-0.5 text-xs font-semibold text-primary-600 bg-primary-50 border border-primary-200 rounded hover:bg-primary-100 hover:text-primary-700 hover:border-primary-300 cursor-pointer transition-colors duration-150 align-baseline leading-tight no-underline dark:text-primary-300 dark:bg-primary-900/30 dark:border-primary-700/50 dark:hover:bg-primary-800/40 dark:hover:text-primary-200"
       style={{ fontSize: '0.8em', verticalAlign: 'super' }}
     >
       {refNumber}

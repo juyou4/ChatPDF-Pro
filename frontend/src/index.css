@@ -13,9 +13,9 @@
     --color-bg-subtle: #F9FAFB;
 
     /* --- Brand Colors --- */
-    --color-primary: #3B82F6;
-    --color-primary-soft: #93C5FD;
-    --color-primary-light: #EFF6FF;
+    --color-primary: #8e75f0;
+    --color-primary-soft: #C4B5FD;
+    --color-primary-light: #F5F3FF;
 
     /* --- Text Colors --- */
     --color-text-main: #1F2937;
@@ -54,17 +54,17 @@
     background-color: #FDFCF8;
     /* Warm off-white base */
     background-image:
-        radial-gradient(at 80% 0%, hsla(280, 85%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 80% 0%, hsla(260, 85%, 96%, 1) 0px, transparent 50%),
         /* Pale Purple */
-        radial-gradient(at 0% 20%, hsla(10, 90%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 0% 20%, hsla(270, 90%, 96%, 1) 0px, transparent 50%),
         /* Soft Pink/Peach */
-        radial-gradient(at 80% 50%, hsla(200, 85%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 80% 50%, hsla(250, 85%, 96%, 1) 0px, transparent 50%),
         /* Light Blue */
-        radial-gradient(at 0% 80%, hsla(40, 90%, 96%, 1) 0px, transparent 50%),
+        radial-gradient(at 0% 80%, hsla(265, 90%, 96%, 1) 0px, transparent 50%),
         /* Warm Beige/Yellow */
-        radial-gradient(at 80% 100%, hsla(240, 85%, 97%, 1) 0px, transparent 50%),
+        radial-gradient(at 80% 100%, hsla(275, 85%, 97%, 1) 0px, transparent 50%),
         /* Soft Indigo */
-        radial-gradient(at 0% 0%, hsla(340, 100%, 97%, 1) 0px, transparent 50%);
+        radial-gradient(at 0% 0%, hsla(255, 100%, 97%, 1) 0px, transparent 50%);
     /* Pink top-left */
     background-attachment: fixed;
     color: var(--color-text-main);
@@ -130,11 +130,11 @@
 }
 
 .message-bubble-user {
-    background: linear-gradient(135deg, var(--color-primary) 0%, #2563EB 100%);
+    background: linear-gradient(135deg, var(--color-primary) 0%, #7860df 100%);
     color: white;
     box-shadow: 
-        0 8px 16px -4px rgba(59, 130, 246, 0.3),
-        0 4px 6px -2px rgba(59, 130, 246, 0.1),
+        0 8px 16px -4px rgba(139, 92, 246, 0.3),
+        0 4px 6px -2px rgba(139, 92, 246, 0.1),
         inset 0 1px 0 rgba(255, 255, 255, 0.3),
         inset 0 -2px 0 rgba(0, 0, 0, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -169,7 +169,7 @@
 }
 
 .soft-button-primary:hover {
-    background-color: #2563EB;
+    background-color: #7860df;
     box-shadow: var(--shadow-md);
 }
 
@@ -679,7 +679,7 @@
     display: inline-block;
     width: 2px;
     height: 1.1em;
-    background: #3B82F6;
+    background: #7860df;
     margin-left: 1px;
     animation: streaming-cursor-blink 0.7s steps(2) infinite;
     vertical-align: text-bottom;

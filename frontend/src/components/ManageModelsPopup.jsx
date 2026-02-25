@@ -209,7 +209,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                 className={`
                                     px-4 py-2 rounded-xl font-semibold text-sm transition-all
                                     ${activeTab === 'available'
-                                        ? 'bg-blue-500 text-white shadow-md'
+                                        ? 'bg-primary-500 text-white shadow-md'
                                         : 'text-gray-600 hover:bg-gray-100'
                                     }
                                 `}
@@ -221,7 +221,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                 className={`
                                     px-4 py-2 rounded-xl font-semibold text-sm transition-all
                                     ${activeTab === 'my-models'
-                                        ? 'bg-blue-500 text-white shadow-md'
+                                        ? 'bg-primary-500 text-white shadow-md'
                                         : 'text-gray-600 hover:bg-gray-100'
                                     }
                                 `}
@@ -269,7 +269,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                             whileTap={{ scale: 0.98 }}
                                             onClick={handleFetchModels}
                                             disabled={isFetching}
-                                            className="px-4 py-2 bg-blue-500 text-white rounded-xl font-semibold text-sm shadow-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                            className="px-4 py-2 bg-primary-500 text-white rounded-xl font-semibold text-sm shadow-md hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                                         >
                                             <Download className="w-4 h-4" />
                                             {isFetching ? '获取中...' : '获取模型'}
@@ -526,7 +526,7 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
             whileHover={{ scale: 1.01 }}
             className={`
                 p-3 rounded-xl cursor-pointer transition-all
-                ${isSelected ? 'bg-blue-50 ring-2 ring-blue-200 shadow-sm' : 'bg-white border border-gray-100 hover:bg-gray-50 hover:shadow-sm'}
+                ${isSelected ? 'bg-primary-50 ring-2 ring-primary-200 shadow-sm' : 'bg-white border border-gray-100 hover:bg-gray-50 hover:shadow-sm'}
             `}
             onClick={() => onSelect(model)}
         >
@@ -536,7 +536,7 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
                         {model.name}
                     </div>
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                        <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-semibold">
+                        <span className="px-2 py-0.5 bg-primary-100 text-primary-700 rounded text-xs font-semibold">
                             {model.type === 'embedding' ? 'Embedding' : 'Rerank'}
                         </span>
                         {model.isSystem && (
@@ -653,7 +653,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
 
             {/* Type Badge */}
             <div>
-                <div className="inline-block px-3 py-1 bg-blue-100 text-blue-700 rounded-lg text-sm font-semibold">
+                <div className="inline-block px-3 py-1 bg-primary-100 text-primary-700 rounded-lg text-sm font-semibold">
                     {model.type === 'embedding' ? 'Embedding 模型' : 'Rerank 模型'}
                 </div>
             </div>
@@ -785,7 +785,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                         w-full px-4 py-3 rounded-xl font-semibold shadow-md flex items-center justify-center gap-2
                         ${testingModel
                             ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
-                            : 'bg-blue-500 text-white hover:bg-blue-600'}
+                            : 'bg-primary-500 text-white hover:bg-primary-600'}
                     `}
                 >
                     {testingModel ? (

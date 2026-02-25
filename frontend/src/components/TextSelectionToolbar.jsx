@@ -102,13 +102,13 @@ const TextSelectionToolbar = ({
       icon: MessageSquare,
       label: '笔记',
       action: onAddNote,
-      color: 'text-blue-600 hover:text-blue-700'
+      color: 'text-primary-600 hover:text-primary-700'
     },
     {
       icon: Sparkles,
       label: 'AI 解读',
       action: onAIExplain,
-      color: 'text-purple-600 hover:text-purple-700'
+      color: 'text-primary-600 hover:text-primary-700'
     },
     {
       icon: Globe,

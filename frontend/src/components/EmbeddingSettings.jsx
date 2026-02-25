@@ -269,7 +269,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   const renderModelRow = (model) => (
     <div
       key={`${model.providerId}-${model.id}`}
-      className="group flex items-center justify-between px-4 py-3 rounded-xl hover:bg-[var(--color-bg-subtle)] border border-transparent hover:border-blue-100 transition-all"
+      className="group flex items-center justify-between px-4 py-3 rounded-xl hover:bg-[var(--color-bg-subtle)] border border-transparent hover:border-primary-100 transition-all"
     >
       <div className="flex items-center gap-4 overflow-hidden">
         <ProviderAvatar providerId={getIconProviderId(model)} size={36} className="flex-shrink-0 shadow-sm" />
@@ -293,12 +293,12 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className="truncate max-w-[200px]" title={model.id}>{model.id}</span>
             {model.type === 'chat' && (
-              <span className="flex-shrink-0 px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 text-[10px] font-medium border border-blue-100">
+              <span className="flex-shrink-0 px-1.5 py-0.5 rounded bg-primary-50 text-primary-600 text-[10px] font-medium border border-primary-100">
                 Chat
               </span>
             )}
             {model.type === 'embedding' && (
-              <span className="flex-shrink-0 px-1.5 py-0.5 rounded bg-purple-50 text-purple-600 text-[10px] font-medium border border-purple-100">
+              <span className="flex-shrink-0 px-1.5 py-0.5 rounded bg-primary-50 text-primary-600 text-[10px] font-medium border border-primary-100">
                 Embedding
               </span>
             )}
@@ -315,8 +315,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
         <button
           onClick={() => handleSetDefault(model.type, model.id)}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${isDefaultModel(model.type, model.id)
-            ? 'bg-blue-600 text-white shadow-sm hover:bg-blue-700'
-            : 'bg-white border border-gray-200 text-gray-600 hover:border-blue-300 hover:text-blue-600'
+            ? 'bg-primary-600 text-white shadow-sm hover:bg-primary-700'
+            : 'bg-white border border-gray-200 text-gray-600 hover:border-primary-300 hover:text-primary-600'
             }`}
         >
           {isDefaultModel(model.type, model.id) ? '默认' : '设为默认'}
@@ -333,7 +333,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
       </div>
       {/* Always show default badge if it is default, even when not hovering */}
       {isDefaultModel(model.type, model.id) && (
-        <div className="group-hover:hidden px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">
+        <div className="group-hover:hidden px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-50 text-primary-700 border border-primary-100">
           默认
         </div>
       )}
@@ -360,7 +360,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
               {/* Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-blue-50 text-blue-700">
+                  <div className="p-2 rounded-xl bg-primary-50 text-primary-700">
                     <Server className="w-5 h-5" />
                   </div>
                   <div>
@@ -385,7 +385,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       value={providerSearch}
                       onChange={(e) => setProviderSearch(e.target.value)}
                       placeholder="搜索模型平台..."
-                      className="w-full pl-9 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      className="w-full pl-9 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none"
                     />
                   </div>
                   <div className="space-y-2 overflow-y-auto pr-1">
@@ -400,7 +400,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                         onClick={() => setActiveProviderId(p.id)}
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all duration-200 ${p.id === activeProvider?.id
                           ? 'bg-white shadow-md scale-[1.02] text-gray-900 z-10'
-                          : 'border border-gray-200 hover:border-blue-200 hover:bg-blue-50 text-gray-700'
+                          : 'border border-gray-200 hover:border-primary-200 hover:bg-primary-50 text-gray-700'
                           }`}
                       >
                         <ProviderAvatar providerId={p.id} className="w-8 h-8" />
@@ -419,10 +419,10 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   <div className="mt-4 space-y-2">
                     <button
                       onClick={() => setCustomProviderFormOpen(v => !v)}
-                      className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 px-2 py-2 rounded-lg border border-gray-200 hover:border-blue-200 hover:bg-blue-50 transition"
+                      className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 px-2 py-2 rounded-lg border border-gray-200 hover:border-primary-200 hover:bg-primary-50 transition"
                     >
                       <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-blue-400" />
+                        <span className="w-2 h-2 rounded-full bg-primary-400" />
                         自定义 Provider（OpenAI 兼容）
                       </div>
                       <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${customProviderFormOpen ? '' : '-rotate-90'}`} />
@@ -499,7 +499,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           type="checkbox"
                           checked={!!activeProvider?.enabled}
                           onChange={e => handleProviderUpdate('enabled', e.target.checked)}
-                          className="accent-blue-600 w-4 h-4"
+                          className="accent-primary-600 w-4 h-4"
                         />
                         启用
                       </label>
@@ -515,7 +515,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                             onChange={e => handleProviderUpdate('apiKey', e.target.value)}
                             placeholder="sk-... （多个 Key 用逗号分隔）"
                             type="password"
-                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none"
                           />
                         </div>
                       </div>
@@ -527,7 +527,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                             value={activeProvider?.apiHost || ''}
                             onChange={e => handleProviderUpdate('apiHost', e.target.value)}
                             placeholder="https://api.openai.com/v1"
-                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none"
                           />
                         </div>
                       </div>
@@ -545,7 +545,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       <button
                         onClick={handleSyncModels}
                         disabled={!activeProvider || isFetching}
-                        className="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-700 hover:border-blue-200 hover:text-blue-700 flex items-center gap-2 disabled:opacity-60"
+                        className="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-700 hover:border-primary-200 hover:text-primary-700 flex items-center gap-2 disabled:opacity-60"
                       >
                         <RefreshCw className="w-4 h-4" />
                         同步模型
@@ -605,8 +605,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                 key={tag.value}
                                 className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs cursor-pointer transition-colors ${
                                   newModelTags.includes(tag.value)
-                                    ? 'border-blue-300 bg-blue-50 text-blue-700'
-                                    : 'border-gray-200 bg-white text-gray-600 hover:border-blue-200'
+                                    ? 'border-primary-300 bg-primary-50 text-primary-700'
+                                    : 'border-gray-200 bg-white text-gray-600 hover:border-primary-200'
                                 }`}
                               >
                                 <input
@@ -670,7 +670,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                               type="button"
                               aria-expanded={!isCollapsed}
                               onClick={() => toggleCollapse(type)}
-                              className={`w-full px-3 py-2 flex items-center justify-between bg-gray-50 border-b border-gray-100 ${isCollapsed ? RADIUS_CLASS : `${RADIUS_CLASS} rounded-b-none`} cursor-pointer hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-200/60`}
+                              className={`w-full px-3 py-2 flex items-center justify-between bg-gray-50 border-b border-gray-100 ${isCollapsed ? RADIUS_CLASS : `${RADIUS_CLASS} rounded-b-none`} cursor-pointer hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-200/60`}
                             >
                               <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
                                 {meta.label}

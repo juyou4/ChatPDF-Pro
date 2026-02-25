@@ -108,8 +108,8 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
                         key={key}
                         onClick={() => handleAction(key, screenshots[screenshots.length - 1].id)}
                         className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                          text-gray-700 bg-gray-50 hover:bg-blue-50 hover:text-blue-600
-                          border border-gray-200/80 hover:border-blue-200
+                          text-gray-700 bg-gray-50 hover:bg-primary-50 hover:text-primary-600
+                          border border-gray-200/80 hover:border-primary-200
                           rounded-full transition-all duration-150"
                         title={action.label}
                       >
