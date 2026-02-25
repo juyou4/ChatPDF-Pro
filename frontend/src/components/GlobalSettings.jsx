@@ -229,7 +229,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     onChange={(e) => setGlobalScale(parseInt(e.target.value) / 100)}
                                     className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
                                     style={{
-                                        background: `linear-gradient(to right, #3B82F6 0%, #3B82F6 ${((globalScale - 0.5) / 1.5) * 100}%, #E5E7EB ${((globalScale - 0.5) / 1.5) * 100}%, #E5E7EB 100%)`
+                                        background: `linear-gradient(to right, #8871e4 0%, #8871e4 ${((globalScale - 0.5) / 1.5) * 100}%, #E5E7EB ${((globalScale - 0.5) / 1.5) * 100}%, #E5E7EB 100%)`
                                     }}
                                 />
                                 <div className="flex justify-between text-xs text-gray-500">
