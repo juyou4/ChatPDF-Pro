@@ -126,7 +126,7 @@ export default function EmbeddingModelSelector() {
                                                 return (
                                                     <motion.button
                                                         key={model.id}
-                                                        whileHover={{ backgroundColor: 'rgba(59, 130, 246, 0.05)' }}
+                                                        whileHover={{ backgroundColor: 'rgba(136, 113, 228, 0.05)' }}
                                                         onClick={() => {
                                                             setDefaultModel('embeddingModel', `${provider.id}:${model.id}`)
                                                             setIsOpen(false)

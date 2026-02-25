@@ -599,7 +599,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         style={{
                                             boxShadow: highlightInfo?.source === 'citation'
                                                 ? '0 0 0 2px rgba(245, 158, 11, 0.15), 0 4px 12px -1px rgba(245, 158, 11, 0.2)'
-                                                : '0 0 0 2px rgba(59, 130, 246, 0.1), 0 4px 6px -1px rgba(59, 130, 246, 0.1)'
+                                                : '0 0 0 2px rgba(136, 113, 228, 0.1), 0 4px 6px -1px rgba(136, 113, 228, 0.1)'
                                         }}
                                     >
                                         {/* 只在第一个矩形上显示标签 */}

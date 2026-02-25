@@ -162,7 +162,7 @@ function SelectionOverlay({ active, onCapture, onCancel }) {
               height: selectionRect.height,
               // 选区本身透明，box-shadow 形成四周暗色遮罩
               boxShadow: getOverlayBoxShadow(),
-              border: '2px dashed rgba(59, 130, 246, 0.8)',
+              border: '2px dashed rgba(136, 113, 228, 0.8)',
               borderRadius: '2px',
               backgroundColor: 'transparent',
               pointerEvents: 'none',
