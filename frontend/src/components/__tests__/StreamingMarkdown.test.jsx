@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
 import * as fc from 'fast-check';
+vi.mock('../../contexts/ChatParamsContext', () => ({
+  useChatParams: () => ({
+    codeCollapsible: false,
+    codeWrappable: true,
+    codeShowLineNumbers: false,
+  }),
+}));
 import { streamingMarkdownAreEqual } from '../StreamingMarkdown.jsx';
 
 /**
@@ -142,7 +149,7 @@ const citationRefArb = (ref) =>
  */
 const safeTextArb = fc
   .string({ minLength: 0, maxLength: 30 })
-  .map((s) => s.replace(/[\[\]!\0()]/g, ''));
+  .map((s) => s.replace(/[[\]!()\0]/g, ''));
 
 describe('Feature: chatpdf-citation-fix, Property 4: processCitationRefs 正确替换有效引用并保留无效引用', () => {
   /**
@@ -487,5 +494,48 @@ describe('集成测试：完整引文渲染链路', () => {
     expect(buttons.length).toBe(1);
     // [99] 应保持为纯文本
     expect(screen.getByText(/\[99\]/)).toBeInTheDocument();
+  });
+});
+
+describe('流式等待动画', () => {
+  it('ref 直写模式在尚未收到正文时应显示三个等待点', async () => {
+    const streamingRef = React.createRef();
+    const { container } = render(
+      <StreamingMarkdown
+        content=""
+        isStreaming={true}
+        citations={null}
+        streamingRef={streamingRef}
+      />
+    );
+
+    await waitFor(() => {
+      const dots = container.querySelectorAll('.streaming-dots .dot');
+      expect(dots.length).toBe(3);
+    });
+  });
+
+  it('ref 直写模式收到正文后应自动隐藏等待点', async () => {
+    const streamingRef = React.createRef();
+    const { container } = render(
+      <StreamingMarkdown
+        content=""
+        isStreaming={true}
+        citations={null}
+        streamingRef={streamingRef}
+      />
+    );
+
+    await waitFor(() => {
+      expect(streamingRef.current).toBeTruthy();
+    });
+
+    // 模拟 useSmoothStream 直写文本
+    streamingRef.current.textContent = '已收到流式文本';
+
+    await waitFor(() => {
+      const dots = container.querySelectorAll('.streaming-dots .dot');
+      expect(dots.length).toBe(0);
+    });
   });
 });

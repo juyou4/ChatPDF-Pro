@@ -246,11 +246,18 @@ async def call_ai_api_stream(
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
 
+        # 置信度评分：请求 logprobs（仅非思考模式，避免干扰）
+        if not enable_thinking:
+            body["logprobs"] = True
+            body.setdefault("top_logprobs", 1)
+
         # ── 诊断日志 ──
         logger.debug(f"[Stream] ▶ provider={provider}, model={model}, endpoint={endpoint}, enable_thinking={enable_thinking}, body keys={list(body.keys())}")
         _chunk_count = 0
         _content_chars = 0
         _reasoning_chars = 0
+        _logprobs_sum = 0.0
+        _logprobs_count = 0
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
@@ -277,7 +284,11 @@ async def call_ai_api_stream(
                         data = line.strip()
                     if data == "[DONE]":
                         logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                        yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                        _done_payload = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                        if _logprobs_count > 0:
+                            import math
+                            _done_payload["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                        yield _done_payload
                         return
                     try:
                         chunk = _json.loads(data)
@@ -307,6 +318,14 @@ async def call_ai_api_stream(
                         reasoning_details = delta.get("reasoning_details") or choice.get("reasoning_details")
                         if reasoning_details:
                             reasoning_content = extract_reasoning_content(reasoning_details)
+                    # 收集 logprobs 用于置信度评分
+                    chunk_logprobs = choice.get("logprobs")
+                    if chunk_logprobs and isinstance(chunk_logprobs, dict):
+                        for token_info in (chunk_logprobs.get("content") or []):
+                            lp = token_info.get("logprob")
+                            if lp is not None and isinstance(lp, (int, float)):
+                                _logprobs_sum += lp
+                                _logprobs_count += 1
                     # 只要有内容或推理内容，就 yield。
                     if content or reasoning_content:
                         _chunk_count += 1
@@ -330,7 +349,11 @@ async def call_ai_api_stream(
                             "fallback_used": False
                         }
                 logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                _done_payload2 = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                if _logprobs_count > 0:
+                    import math
+                    _done_payload2["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                yield _done_payload2
         return
 
     # Anthropic 流式

@@ -38,6 +38,14 @@ vi.mock('../../contexts/ChatParamsContext', () => ({
         enableMaxTokens: true,
         customParams: [],
         thoughtAutoCollapse: mockThoughtAutoCollapse,
+        sendShortcut: 'Enter',
+        confirmDeleteMessage: true,
+        confirmRegenerateMessage: false,
+        codeCollapsible: false,
+        codeWrappable: true,
+        codeShowLineNumbers: false,
+        messageStyle: 'plain',
+        messageFontSize: 14,
         setMaxTokens: vi.fn(),
         setTemperature: vi.fn(),
         setTopP: vi.fn(),
@@ -48,6 +56,14 @@ vi.mock('../../contexts/ChatParamsContext', () => ({
         setEnableMaxTokens: vi.fn(),
         setCustomParams: vi.fn(),
         setThoughtAutoCollapse: mockSetThoughtAutoCollapse,
+        setSendShortcut: vi.fn(),
+        setConfirmDeleteMessage: vi.fn(),
+        setConfirmRegenerateMessage: vi.fn(),
+        setCodeCollapsible: vi.fn(),
+        setCodeWrappable: vi.fn(),
+        setCodeShowLineNumbers: vi.fn(),
+        setMessageStyle: vi.fn(),
+        setMessageFontSize: vi.fn(),
     }),
     CHAT_PARAMS_DEFAULT_SETTINGS: {
         maxTokens: 8192,
@@ -62,6 +78,14 @@ vi.mock('../../contexts/ChatParamsContext', () => ({
         reasoningEffort: 'off',
         enableMemory: true,
         thoughtAutoCollapse: true,
+        sendShortcut: 'Enter',
+        confirmDeleteMessage: true,
+        confirmRegenerateMessage: false,
+        codeCollapsible: false,
+        codeWrappable: true,
+        codeShowLineNumbers: false,
+        messageStyle: 'plain',
+        messageFontSize: 14,
     },
 }));
 
@@ -79,7 +103,7 @@ vi.mock('framer-motion', () => ({
 
 import ChatSettings from '../ChatSettings';
 
-describe('ChatSettings - 新开关单元测试', () => {
+describe('ChatSettings - 开关单元测试', () => {
     beforeEach(() => {
         mockMessageFont = 'system';
         mockThoughtAutoCollapse = true;
@@ -87,26 +111,46 @@ describe('ChatSettings - 新开关单元测试', () => {
         mockSetThoughtAutoCollapse.mockClear();
     });
 
-    it('应渲染「使用衬线字体」开关', () => {
+    it('应渲染「思考自动折叠」开关', () => {
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('使用衬线字体')).toBeTruthy();
-    });
-
-    it('应渲染「思考内容自动折叠」开关', () => {
-        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('思考内容自动折叠')).toBeTruthy();
-    });
-
-    it('衬线字体开关默认应为关闭状态（messageFont=system）', () => {
-        mockMessageFont = 'system';
-        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        // 开关存在即可，具体 checked 状态由 ToggleSwitch 内部处理
-        expect(screen.getByText('使用衬线字体')).toBeTruthy();
+        expect(screen.getByText('思考自动折叠')).toBeTruthy();
     });
 
     it('思考自动折叠开关默认应为开启状态', () => {
         mockThoughtAutoCollapse = true;
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('思考内容自动折叠')).toBeTruthy();
+        expect(screen.getByText('思考自动折叠')).toBeTruthy();
+    });
+
+    it('应渲染「发送快捷键」选择按钮', () => {
+        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
+        expect(screen.getByText('发送快捷键')).toBeTruthy();
+        expect(screen.getByText('Enter')).toBeTruthy();
+        expect(screen.getByText('Ctrl+Enter')).toBeTruthy();
+    });
+
+    it('应渲染「删除消息确认」和「重新生成确认」开关', () => {
+        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
+        expect(screen.getByText('删除消息确认')).toBeTruthy();
+        expect(screen.getByText('重新生成确认')).toBeTruthy();
+    });
+
+    it('应渲染「代码块设置」分组', () => {
+        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
+        expect(screen.getByText('代码块折叠')).toBeTruthy();
+        expect(screen.getByText('代码自动换行')).toBeTruthy();
+        expect(screen.getByText('显示行号')).toBeTruthy();
+    });
+
+    it('应渲染「消息样式」选择按钮', () => {
+        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
+        expect(screen.getByText('消息样式')).toBeTruthy();
+        expect(screen.getByText('平铺')).toBeTruthy();
+        expect(screen.getByText('气泡')).toBeTruthy();
+    });
+
+    it('应渲染「消息字体大小」设置', () => {
+        render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
+        expect(screen.getByText('消息字体大小')).toBeTruthy();
     });
 });

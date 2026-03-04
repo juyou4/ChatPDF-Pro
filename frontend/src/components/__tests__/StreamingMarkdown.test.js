@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { processLatexBrackets } from '../StreamingMarkdown.jsx';
+import { processLatexBrackets } from '../../utils/processLatexBrackets.js';
 
 describe('StreamingMarkdown 渲染功能', () => {
   describe('流式模式下跳过 LaTeX 预处理 (Requirements 4.1)', () => {

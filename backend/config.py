@@ -97,6 +97,20 @@ class AppSettings(BaseSettings):
         description="Mistral OCR API Base URL"
     )
 
+    # ==================== 查询改写配置 ====================
+    # 是否启用 LLM 查询改写（多轮对话指代消解）
+    enable_llm_query_rewrite: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("enable_llm_query_rewrite", "CHATPDF_ENABLE_LLM_QUERY_REWRITE"),
+        description="是否启用 LLM 查询改写"
+    )
+    # 查询长度阈值：超过此长度的查询不做 LLM 改写（信息已足够）
+    query_rewrite_trigger_length: int = Field(
+        default=150,
+        validation_alias=AliasChoices("query_rewrite_trigger_length", "CHATPDF_QUERY_REWRITE_TRIGGER_LENGTH"),
+        description="触发 LLM 改写的最大查询长度"
+    )
+
     # ==================== 流式输出缓冲配置 ====================
     # 流式输出缓冲字符数阈值，累积超过此值后发送，0 表示禁用缓冲（直通模式）
     stream_buffer_size: int = Field(

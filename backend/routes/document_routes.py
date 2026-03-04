@@ -13,6 +13,8 @@ import pdfplumber
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 
 from services.vector_service import create_index
+from services.url_loader_service import fetch_url_content
+from services.multi_format_loader import is_supported_format, extract_from_file
 from runtime_mode import runtime
 from services.ocr_service import (
     is_ocr_available,
@@ -975,11 +977,57 @@ async def upload_pdf(
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
                     缺失时使用后端配置中的 ocr_default_mode 默认值。
     """
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="只支持PDF文件")
+    filename_lower = file.filename.lower()
+    is_pdf = filename_lower.endswith('.pdf')
+    is_multi_format = is_supported_format(file.filename)
+
+    if not is_pdf and not is_multi_format:
+        supported = "PDF, DOCX, XLSX, TXT, MD, CSV"
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式，支持: {supported}")
 
     try:
         content = await file.read()
+
+        # 多格式文档处理（非 PDF）
+        if is_multi_format and not is_pdf:
+            import tempfile
+            suffix = Path(file.filename).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            try:
+                normalized_model = normalize_embedding_model_id(embedding_model)
+                if not normalized_model:
+                    raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置")
+                embedding_model = normalized_model
+
+                extracted_data = extract_from_file(tmp_path, file.filename)
+                doc_id = generate_doc_id(extracted_data["full_text"])
+
+                documents_store[doc_id] = {
+                    "filename": file.filename,
+                    "upload_time": datetime.now().isoformat(),
+                    "data": extracted_data,
+                    "pdf_url": None,
+                }
+                save_document(doc_id, documents_store[doc_id])
+                create_index(
+                    doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR),
+                    embedding_model, embedding_api_key, embedding_api_host,
+                    pages=extracted_data.get("pages"),
+                )
+                return {
+                    "message": "文档上传成功",
+                    "doc_id": doc_id,
+                    "filename": file.filename,
+                    "total_pages": extracted_data["total_pages"],
+                    "total_chars": len(extracted_data["full_text"]),
+                    "source_type": extracted_data.get("source_type", "unknown"),
+                }
+            finally:
+                os.unlink(tmp_path)
+
         pdf_file = io.BytesIO(content)
 
         normalized_model = normalize_embedding_model_id(embedding_model)
@@ -1054,6 +1102,84 @@ async def upload_pdf(
         raise HTTPException(status_code=500, detail=f"PDF处理失败: {str(e)}")
 
 
+@router.post("/documents/url")
+async def import_url(
+    request: Request,
+):
+    """将网页 URL 转为文档并索引到向量库
+
+    请求体 JSON:
+        url: 目标网页 URL
+        embedding_model: 文本嵌入模型
+        embedding_api_key: 云端嵌入模型的 API 密钥（可选）
+        embedding_api_host: 自定义 API 地址（可选）
+    """
+    try:
+        body = await request.json()
+        url = body.get("url", "").strip()
+        embedding_model = body.get("embedding_model", "local-minilm")
+        embedding_api_key = body.get("embedding_api_key")
+        embedding_api_host = body.get("embedding_api_host")
+
+        if not url:
+            raise HTTPException(status_code=400, detail="URL 不能为空")
+
+        normalized_model = normalize_embedding_model_id(embedding_model)
+        if not normalized_model:
+            raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置")
+        embedding_model = normalized_model
+
+        # 抓取网页内容
+        result = await fetch_url_content(url)
+        title = result["title"]
+        content = result["content"]
+
+        if not content or len(content) < 10:
+            raise HTTPException(status_code=400, detail="网页内容为空或过短")
+
+        doc_id = generate_doc_id(content)
+
+        # 构建与 PDF 文档兼容的数据结构
+        extracted_data = {
+            "full_text": content,
+            "total_pages": 1,
+            "pages": [{"page": 1, "text": content}],
+            "source_type": "url",
+            "source_url": url,
+        }
+
+        documents_store[doc_id] = {
+            "filename": f"🌐 {title[:60]}",
+            "upload_time": datetime.now().isoformat(),
+            "data": extracted_data,
+            "pdf_url": None,
+        }
+
+        save_document(doc_id, documents_store[doc_id])
+
+        create_index(
+            doc_id, content, str(VECTOR_STORE_DIR),
+            embedding_model, embedding_api_key, embedding_api_host,
+            pages=extracted_data["pages"],
+        )
+
+        return {
+            "message": "URL 导入成功",
+            "doc_id": doc_id,
+            "filename": f"🌐 {title[:60]}",
+            "title": title,
+            "url": url,
+            "total_chars": len(content),
+        }
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"URL 导入失败: {str(e)}")
+
+
 @router.get("/document/{doc_id}")
 async def get_document(doc_id: str):
     if doc_id not in documents_store:
@@ -1075,6 +1201,59 @@ async def get_document(doc_id: str):
         "extraction_quality": doc["data"].get("extraction_quality", "unknown"),
         "extraction_method": doc["data"].get("extraction_method", "unknown")
     }
+
+
+@router.get("/document/{doc_id}/thumbnail/{page}")
+async def get_page_thumbnail(doc_id: str, page: int):
+    """按需生成 PDF 页面缩略图
+
+    使用 pymupdf 渲染指定页面为 40dpi 缩略图，返回 base64 编码的 JPEG。
+    单页缩略图约 5-15KB。
+
+    Args:
+        doc_id: 文档 ID
+        page: 页码（1-indexed）
+    """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    pdf_url = doc.get("pdf_url")
+    if not pdf_url:
+        raise HTTPException(status_code=400, detail="该文档无 PDF 文件（可能是 URL 导入的文档）")
+
+    pdf_path = UPLOAD_DIR / pdf_url.split("/")[-1]
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="PDF 文件不存在")
+
+    try:
+        import fitz
+        import base64
+
+        pdf_doc = fitz.open(str(pdf_path))
+        if page < 1 or page > len(pdf_doc):
+            pdf_doc.close()
+            raise HTTPException(status_code=400, detail=f"页码超出范围 (1-{len(pdf_doc)})")
+
+        pdf_page = pdf_doc[page - 1]
+        # 40dpi 缩略图，体积小且足够预览
+        pix = pdf_page.get_pixmap(dpi=40)
+        img_bytes = pix.tobytes("jpeg")
+        pdf_doc.close()
+
+        b64 = base64.b64encode(img_bytes).decode("ascii")
+        return {
+            "doc_id": doc_id,
+            "page": page,
+            "thumbnail": f"data:image/jpeg;base64,{b64}",
+            "width": pix.width,
+            "height": pix.height,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"缩略图生成失败: {str(e)}")
 
 
 @router.get("/api/ocr/status")

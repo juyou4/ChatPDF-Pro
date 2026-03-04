@@ -2727,12 +2727,25 @@ def get_relevant_context(
         fallback_type=fallback_type,
         fallback_detail=fallback_detail,
         citations=fallback_citations,
+        max_relevance_score=max((r.get("similarity", 0.0) for r in results), default=-1.0),
     )
     _retrieval_logger_singleton.log_trace(trace)
     retrieval_meta = _retrieval_logger_singleton.to_retrieval_meta(trace)
 
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
     retrieval_meta["timings"] = timings
+
+    # 传递原始 chunks 用于结构化引文匹配
+    retrieval_meta["_chunks"] = [
+        {"text": item.get("chunk", ""), "page": item.get("page", 0), "group_id": f"chunk-{i}"}
+        for i, item in enumerate(results)
+    ]
+
+    # 回退路径：chunk 即为 LLM 看到的上下文段，直接复用
+    retrieval_meta["_context_segments"] = [
+        {"ref": idx + 1, "text": item.get("chunk", "")}
+        for idx, item in enumerate(results)
+    ]
 
     return context_string, retrieval_meta
 
@@ -2879,6 +2892,7 @@ def _build_context_with_groups(
         fallback_type="low_relevance" if low_relevance else None,
         fallback_detail="所有检索结果相似度低于质量阈值" if low_relevance else None,
         citations=citations,
+        max_relevance_score=max((r.get("similarity", 0.0) for r in results), default=-1.0),
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
@@ -2886,6 +2900,22 @@ def _build_context_with_groups(
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
     if timings is not None:
         retrieval_meta["timings"] = timings
+
+    # 传递原始 chunks 用于结构化引文匹配
+    retrieval_meta["_chunks"] = [
+        {"text": item.get("chunk", ""), "page": item.get("page", 0), "group_id": item.get("group_id", "")}
+        for item in results
+    ]
+
+    # 传递意群级上下文段（LLM 实际看到的文本），用于精确引文匹配
+    _context_segments = []
+    for idx, selection in enumerate(fitted_selections):
+        group = selection["group"]
+        granularity = selection.get("granularity", "full")
+        text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}.get(granularity, "full_text")
+        text = getattr(group, text_attr, "")
+        _context_segments.append({"ref": idx + 1, "text": text})
+    retrieval_meta["_context_segments"] = _context_segments
 
     logger.info(
         f"[{doc_id}] 增强上下文构建完成: "

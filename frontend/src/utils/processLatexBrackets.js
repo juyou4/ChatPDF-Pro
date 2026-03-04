@@ -53,33 +53,16 @@ const normalizeExistingDollarMath = (content) => {
     .join('');
 };
 
-const AUTO_WRAP_LATEX_FRAGMENT_REGEX = /[A-Za-z0-9{}_^=+\-*/\\(). ]*\\[A-Za-z]{2,}[A-Za-z0-9{}_^=+\-*/\\(). ]*/g;
+const STANDALONE_LATEX_COMMAND_REGEX = /\\[A-Za-z]{2,}(?:\s*\{[^{}]*\})*/g;
 
-const maybeWrapLatexFragment = (fragment) => {
+const maybeWrapLatexCommand = (fragment) => {
   if (!fragment || typeof fragment !== 'string') return fragment;
-  const leading = (fragment.match(/^\s*/) || [''])[0];
-  const trailing = (fragment.match(/\s*$/) || [''])[0];
-  const core = fragment.slice(leading.length, fragment.length - trailing.length);
-  const trimmed = core.trim();
-  if (!trimmed) return fragment;
-  if (trimmed.startsWith('$') && trimmed.endsWith('$')) return fragment;
-  if (trimmed.length > 120) return fragment;
-
-  const commandNames = Array.from(trimmed.matchAll(/\\([A-Za-z]{2,})/g))
-    .map((m) => m[1].toLowerCase());
-  if (commandNames.length === 0) return fragment;
-
-  const hasMathHint = commandNames.some((cmd) => MATH_COMMAND_HINTS.has(cmd));
-  if (!hasMathHint) return fragment;
-
-  // 避免把英文说明句整段包进公式（例如 "Input is ...")
-  const firstSlash = trimmed.indexOf('\\');
-  const prefix = firstSlash > 0 ? trimmed.slice(0, firstSlash).trim() : '';
-  if (prefix && /[a-z]{2,}/.test(prefix)) {
-    return fragment;
-  }
-
-  return `${leading}$${normalizeLatexEscapes(trimmed)}$${trailing}`;
+  const commandMatch = fragment.match(/^\\([A-Za-z]{2,})/);
+  if (!commandMatch) return fragment;
+  const command = commandMatch[1].toLowerCase();
+  if (!MATH_COMMAND_HINTS.has(command)) return fragment;
+  const normalized = normalizeLatexEscapes(fragment);
+  return `$${normalized}$`;
 };
 
 const autoWrapStandaloneLatexFragments = (content) => {
@@ -94,7 +77,7 @@ const autoWrapStandaloneLatexFragments = (content) => {
       ) {
         return seg;
       }
-      return seg.replace(AUTO_WRAP_LATEX_FRAGMENT_REGEX, (m) => maybeWrapLatexFragment(m));
+      return seg.replace(STANDALONE_LATEX_COMMAND_REGEX, (m) => maybeWrapLatexCommand(m));
     })
     .join('');
 };

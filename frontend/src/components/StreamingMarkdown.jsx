@@ -5,6 +5,17 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 import rehypeKatex from 'rehype-katex';
+// rehype-mathjax/svg 使用 CJS 的 mathjax-full，不能静态 import
+// 改为懒加载，失败时 fallback 到 KaTeX
+let _rehypeMathjaxSvg = null;
+let _mathjaxLoadAttempted = false;
+const loadMathjax = () => {
+  if (_mathjaxLoadAttempted) return Promise.resolve(_rehypeMathjaxSvg);
+  _mathjaxLoadAttempted = true;
+  return import('rehype-mathjax/svg')
+    .then(m => { _rehypeMathjaxSvg = m.default || m; return _rehypeMathjaxSvg; })
+    .catch(() => { _rehypeMathjaxSvg = null; return null; });
+};
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { visit } from 'unist-util-visit';
@@ -234,6 +245,14 @@ const StreamingMarkdown = React.memo(
     const containerRef = useRef(null);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
     const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
+    const [mathjaxReady, setMathjaxReady] = useState(!!_rehypeMathjaxSvg);
+
+    // MathJax 懒加载：仅在用户选择 MathJax 引擎时触发
+    useEffect(() => {
+      if (mathEngine === 'MathJax' && !_rehypeMathjaxSvg && !_mathjaxLoadAttempted) {
+        loadMathjax().then(mod => { if (mod) setMathjaxReady(true); });
+      }
+    }, [mathEngine]);
 
     // ref 直写模式：流式输出期间通过 streamingRef 直接更新 DOM，
     // 不经过 React 状态更新和 ReactMarkdown 渲染
@@ -252,15 +271,21 @@ const StreamingMarkdown = React.memo(
       return text;
     }, [content, citations, isStreaming, isRefDirectWrite, mathEngine]);
 
+    const shouldUseSingleDollarMath = React.useMemo(() => {
+      if (mathEnableSingleDollar) return true;
+      // 用户关闭单 $ 时，仅在明显 LaTeX 片段场景下兜底开启，避免公式整体失效
+      return /(^|[^\\])\$[^$\n]*\\[A-Za-z]{2,}[^$\n]*\$/m.test(processedContent || '');
+    }, [mathEnableSingleDollar, processedContent]);
+
     // 基础 remark 插件数组缓存：配置不变时保持引用稳定，
     // 避免 ReactMarkdown 因插件引用变化而重新初始化（需求 6.3）
     const baseRemarkPlugins = React.useMemo(() => {
       const plugins = [remarkGfm];
       if (mathEngine !== 'none') {
-        plugins.push([remarkMath, { singleDollarTextMath: mathEnableSingleDollar }]);
+        plugins.push([remarkMath, { singleDollarTextMath: shouldUseSingleDollarMath }]);
       }
       return plugins;
-    }, [mathEngine, mathEnableSingleDollar]);
+    }, [mathEngine, shouldUseSingleDollarMath]);
 
     // 完整 remark 插件数组：仅在需要 blur-reveal 动画时追加动态插件，
     // 非流式输出时直接复用稳定的基础插件数组引用
@@ -271,37 +296,26 @@ const StreamingMarkdown = React.memo(
       return baseRemarkPlugins;
     }, [baseRemarkPlugins, enableBlurReveal, isStreaming, content?.length]);
 
-    // rehype 插件数组缓存：配置固定，空依赖保持引用稳定（需求 6.3）
-    // 使用带缓存的 rehypeKatexCached 替代 rehypeKatex，
-    // 相同公式表达式直接返回缓存结果，避免重复渲染（需求 6.2）
-    // MathJax 懒加载：仅在用户切换到 MathJax 引擎时动态 import，避免 2MB 静态打包
-    const [rehypeMathjaxPlugin, setRehypeMathjaxPlugin] = useState(null);
-    useEffect(() => {
-      if (mathEngine === 'MathJax' && !rehypeMathjaxPlugin) {
-        import('rehype-mathjax/svg').then(mod => {
-          setRehypeMathjaxPlugin(() => mod.default);
-        }).catch(err => {
-          console.error('[StreamingMarkdown] Failed to load rehype-mathjax:', err);
-        });
-      }
-    }, [mathEngine, rehypeMathjaxPlugin]);
-
     const rehypePlugins = React.useMemo(() => {
       const plugins = [];
       if (mathEngine === 'KaTeX') {
         // 标准 rehype-katex 生成完整 HAST 节点，rehypeRaw 顺序无关
         plugins.push(rehypeRaw);
         plugins.push([rehypeKatex, { strict: false, trust: true, output: 'html' }]);
-      } else if (mathEngine === 'MathJax' && rehypeMathjaxPlugin) {
+      } else if (mathEngine === 'MathJax' && _rehypeMathjaxSvg) {
         // MathJax 生成完整 HAST SVG 节点，rehypeRaw 需在其前处理 markdown 中的原始 HTML
         plugins.push(rehypeRaw);
-        plugins.push(rehypeMathjaxPlugin);
+        plugins.push(_rehypeMathjaxSvg);
+      } else if (mathEngine === 'MathJax' && !_rehypeMathjaxSvg) {
+        // MathJax 加载失败，fallback 到 KaTeX
+        plugins.push(rehypeRaw);
+        plugins.push([rehypeKatex, { strict: false, trust: true, output: 'html' }]);
       } else {
         plugins.push(rehypeRaw);
       }
       plugins.push(rehypeHighlight);
       return plugins;
-    }, [mathEngine, rehypeMathjaxPlugin]);
+    }, [mathEngine, mathjaxReady]);
 
     useEffect(() => {
       if (!content || content.length === 0) {

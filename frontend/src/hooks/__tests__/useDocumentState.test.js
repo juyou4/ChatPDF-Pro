@@ -17,8 +17,7 @@ describe('useDocumentState', () => {
   let mockSetScreenshots;
   let mockSetIsLoading;
   let mockSetSelectedText;
-  let mockGetCurrentProvider;
-  let mockGetCurrentEmbeddingModel;
+  let mockGetEmbeddingConfig;
 
   beforeEach(() => {
     localStorage.clear();
@@ -31,8 +30,7 @@ describe('useDocumentState', () => {
     mockSetScreenshots = vi.fn();
     mockSetIsLoading = vi.fn();
     mockSetSelectedText = vi.fn();
-    mockGetCurrentProvider = vi.fn(() => null);
-    mockGetCurrentEmbeddingModel = vi.fn(() => null);
+    mockGetEmbeddingConfig = vi.fn(() => null);
 
     // 默认 fetch 返回空响应
     mockFetch.mockResolvedValue({
@@ -42,8 +40,7 @@ describe('useDocumentState', () => {
   });
 
   const defaultOptions = () => ({
-    getCurrentProvider: mockGetCurrentProvider,
-    getCurrentEmbeddingModel: mockGetCurrentEmbeddingModel,
+    getEmbeddingConfig: mockGetEmbeddingConfig,
     setMessages: mockSetMessages,
     setCurrentPage: mockSetCurrentPage,
     setScreenshots: mockSetScreenshots,
@@ -288,8 +285,7 @@ describe('useDocumentState', () => {
 
   it('不传跨域回调时 startNewChat 不崩溃', () => {
     const { result } = renderHook(() => useDocumentState({
-      getCurrentProvider: mockGetCurrentProvider,
-      getCurrentEmbeddingModel: mockGetCurrentEmbeddingModel,
+      getEmbeddingConfig: mockGetEmbeddingConfig,
     }));
 
     expect(() => {
