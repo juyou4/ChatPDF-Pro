@@ -127,6 +127,11 @@ export function useMessageState({
   const abortControllerRef = useRef(null);
   const streamingAbortRef = useRef({ cancelled: false });
   const streamCitationsRef = useRef(null);
+  const streamMaxRelevanceRef = useRef(null);
+  const streamFollowupRef = useRef(null);
+  const streamQaScoreRef = useRef(null);
+  const streamConvNameRef = useRef(null);
+  const streamMindmapRef = useRef(null);
   const streamWebSearchRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -241,6 +246,11 @@ export function useMessageState({
     abortControllerRef.current = new AbortController();
     streamingAbortRef.current.cancelled = false;
     streamCitationsRef.current = null;
+    streamMaxRelevanceRef.current = null;
+    streamFollowupRef.current = null;
+    streamQaScoreRef.current = null;
+    streamConvNameRef.current = null;
+    streamMindmapRef.current = null;
     streamWebSearchRef.current = null;
 
     // 创建临时助手消息
@@ -345,6 +355,18 @@ export function useMessageState({
               streamWebSearchRef.current = p.sources || [];
               return;
             }
+            if (p.type === 'followup_questions') {
+              streamFollowupRef.current = p.questions || [];
+              return;
+            }
+            if (p.type === 'conv_name') {
+              streamConvNameRef.current = p.name || null;
+              return;
+            }
+            if (p.type === 'mindmap') {
+              streamMindmapRef.current = p.markdown || null;
+              return;
+            }
             const delta = p.choices?.[0]?.delta || {};
             const cc = delta.content || p.content || '';
             const ct = delta.reasoning_content || p.reasoning_content || '';
@@ -361,6 +383,8 @@ export function useMessageState({
               }
             } else {
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
+              if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
+              if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
               if (ct) { currentThinking += ct; thinkingStream.addChunk(ct); }
               sseDone = true;
@@ -406,7 +430,7 @@ export function useMessageState({
         const normalizedFinalContent = normalizeAssistantCitations(finalContent, streamCitationsRef.current);
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: normalizedFinalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitationsRef.current, webSearchSources: streamWebSearchRef.current || null }
+            ? { ...m, content: normalizedFinalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitationsRef.current, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;

@@ -27,6 +27,8 @@ import { useScreenshotState } from '../hooks/useScreenshotState';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
+import EvidencePanel from './EvidencePanel';
+import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
 
@@ -336,6 +338,13 @@ const ChatPDF = () => {
     streamingThinkingRef,
   } = messageState;
 
+  // 双向联动：当前高亮的引文编号
+  const [activeCitationRef, setActiveCitationRef] = useState(null);
+
+  // 用户反馈
+  const [feedbackTarget, setFeedbackTarget] = useState(null); // {idx, msg}
+  const [dislikedMessages, setDislikedMessages] = useState(new Set());
+
   // 将 setter 函数注册到 ref 桥接对象，供 useDocumentState 和 useScreenshotState 使用
   messageSettersRef.current = { setMessages, setIsLoading, setInputValue, sendMessage };
   pdfSettersRef.current = { setCurrentPage, setSelectedText };
@@ -604,13 +613,19 @@ const ChatPDF = () => {
               </div>
             </div>
           )}
+          {msg.maxRelevanceScore !== null && msg.maxRelevanceScore !== undefined && msg.maxRelevanceScore >= 0 && msg.maxRelevanceScore < 0.3 && !msg.isStreaming && (
+            <div className="mb-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs flex items-center gap-1.5">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
+              <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
+            </div>
+          )}
           <StreamingMarkdown
             content={msg.content}
             isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
             enableBlurReveal={enableBlurReveal}
             blurIntensity={blurIntensity}
             citations={msg.citations || null}
-            onCitationClick={handleCitationClick}
+            onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
           />
           {/* 联网搜索来源 */}
@@ -618,6 +633,19 @@ const ChatPDF = () => {
             <WebSearchSourcesBadge sources={msg.webSearchSources} />
           )}
         </div>
+        {/* 证据面板 */}
+        {msg.type === 'assistant' && !msg.isStreaming && msg.citations && msg.citations.length > 0 && (
+          <EvidencePanel
+            citations={msg.citations}
+            onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
+            activeRef={activeCitationRef}
+            onRefHover={setActiveCitationRef}
+          />
+        )}
+        {/* 思维导图 */}
+        {msg.type === 'assistant' && !msg.isStreaming && msg.mindmapMarkdown && (
+          <MindmapView markdown={msg.mindmapMarkdown} />
+        )}
         {/* 消息操作按钮 */}
         {msg.type === 'assistant' && !msg.isStreaming && (
           <div className="flex items-center gap-1 mt-1 ml-2">
@@ -632,12 +660,39 @@ const ChatPDF = () => {
             <button onClick={() => saveToMemory(idx, 'liked')} className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${likedMessages.has(idx) ? 'text-pink-500' : 'text-gray-500 hover:text-gray-700'}`} title="点赞并记忆">
               <svg className="w-4 h-4" fill={likedMessages.has(idx) ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
             </button>
-            <button className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors" title="点踩">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" /></svg>
+            <button onClick={() => setFeedbackTarget({ idx, msg })} className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${dislikedMessages.has(idx) ? 'text-orange-500' : 'text-gray-500 hover:text-gray-700'}`} title="点踩并反馈">
+              <svg className="w-4 h-4" fill={dislikedMessages.has(idx) ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" /></svg>
             </button>
             <button onClick={() => saveToMemory(idx, 'manual')} className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${rememberedMessages.has(idx) ? 'text-purple-500' : 'text-gray-500 hover:text-gray-700'}`} title="记住这个">
               <Brain className={`w-4 h-4 ${rememberedMessages.has(idx) ? 'fill-current' : ''}`} />
             </button>
+            {msg.qaScore != null && (
+              <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${msg.qaScore >= 0.7 ? 'bg-green-50 text-green-600' : msg.qaScore >= 0.4 ? 'bg-yellow-50 text-yellow-600' : 'bg-red-50 text-red-600'}`} title={`回答置信度: ${(msg.qaScore * 100).toFixed(0)}%`}>
+                {(msg.qaScore * 100).toFixed(0)}%
+              </span>
+            )}
+          </div>
+        )}
+        {/* 动态追问建议 */}
+        {msg.type === 'assistant' && !msg.isStreaming && msg.followupQuestions && msg.followupQuestions.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-2 ml-2">
+            {msg.followupQuestions.map((q, qi) => (
+              <button
+                key={qi}
+                onClick={() => {
+                  const textarea = document.querySelector('textarea');
+                  if (textarea) {
+                    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                    nativeInputValueSetter.call(textarea, q);
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    textarea.focus();
+                  }
+                }}
+                className="text-xs px-2.5 py-1.5 rounded-full border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-300 transition-colors cursor-pointer"
+              >
+                {q}
+              </button>
+            ))}
           </div>
         )}
       </motion.div>
@@ -648,7 +703,36 @@ const ChatPDF = () => {
     likedMessages, rememberedMessages,
     handleCitationClick, copyMessage, regenerateMessage, saveToMemory,
     messageStyle, messageFontSize, confirmRegenerateMessage, reasoningEffort,
+    activeCitationRef, setActiveCitationRef,
+    dislikedMessages, setFeedbackTarget,
   ]);
+
+  // ========== 反馈提交 ==========
+  const handleFeedbackSubmit = useCallback(async (issueTypes, detail) => {
+    if (!feedbackTarget) return;
+    const { idx, msg } = feedbackTarget;
+    const prevMsg = messages[idx - 1];
+    try {
+      await fetch('/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          doc_id: docId || '',
+          message_idx: idx,
+          feedback_type: 'dislike',
+          issue_types: issueTypes,
+          detail,
+          question: prevMsg?.type === 'user' ? prevMsg.content : '',
+          answer: (msg.content || '').slice(0, 500),
+          model: msg.model || '',
+        }),
+      });
+      setDislikedMessages(prev => new Set(prev).add(idx));
+    } catch (e) {
+      console.error('反馈提交失败', e);
+    }
+    setFeedbackTarget(null);
+  }, [feedbackTarget, messages, docId]);
 
   // ========== 渲染 ==========
   return (
@@ -1486,7 +1570,83 @@ const ChatPDF = () => {
       <Suspense fallback={null}>
         <OCRSettingsPanel isOpen={showOCRSettings} onClose={handleOCRSettingsClose} />
       </Suspense>
+
+      {/* 反馈 Modal */}
+      <AnimatePresence>
+        {feedbackTarget && (
+          <FeedbackModal
+            onSubmit={handleFeedbackSubmit}
+            onClose={() => setFeedbackTarget(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
+  );
+};
+
+// 反馈 Modal 组件
+const ISSUE_OPTIONS = [
+  { value: 'wrong_answer', label: '答案错误' },
+  { value: 'wrong_citation', label: '引文不对' },
+  { value: 'irrelevant', label: '答非所问' },
+  { value: 'offensive', label: '内容不当' },
+];
+
+const FeedbackModal = ({ onSubmit, onClose }) => {
+  const [selectedIssues, setSelectedIssues] = useState([]);
+  const [detail, setDetail] = useState('');
+
+  const toggleIssue = (val) => {
+    setSelectedIssues(prev =>
+      prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]
+    );
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+        className="bg-white rounded-2xl shadow-xl p-5 w-80 max-w-[90vw]"
+        onClick={e => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">反馈问题</h3>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {ISSUE_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => toggleIssue(opt.value)}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                selectedIssues.includes(opt.value)
+                  ? 'border-orange-400 bg-orange-50 text-orange-600'
+                  : 'border-gray-200 text-gray-500 hover:border-gray-300'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <textarea
+          value={detail}
+          onChange={e => setDetail(e.target.value)}
+          placeholder="补充说明（可选）"
+          className="w-full text-xs border border-gray-200 rounded-lg p-2.5 resize-none h-16 focus:outline-none focus:ring-1 focus:ring-orange-300 mb-3"
+        />
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="text-xs px-3 py-1.5 text-gray-500 hover:text-gray-700">取消</button>
+          <button
+            onClick={() => onSubmit(selectedIssues, detail)}
+            disabled={selectedIssues.length === 0}
+            className="text-xs px-4 py-1.5 rounded-lg bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            提交
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
   );
 };
 

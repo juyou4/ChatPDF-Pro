@@ -118,6 +118,15 @@ vi.mock('../components/CitationLink', () => ({
   default: ({ refNumber }) => <span data-testid="mock-citation">[{refNumber}]</span>,
 }));
 
+// Mock ChatParamsContext（StreamingMarkdown 依赖）
+vi.mock('../contexts/ChatParamsContext', () => ({
+  useChatParams: () => ({
+    codeCollapsible: false,
+    codeWrappable: true,
+    codeShowLineNumbers: false,
+  }),
+}));
+
 // ========== 导入被测组件 ==========
 
 import PDFViewer from '../components/PDFViewer';

@@ -25,6 +25,8 @@ from routes.prompt_pool_routes import router as prompt_pool_router
 from routes.preset_routes import router as preset_router
 from routes.memory_routes import router as memory_router
 from routes import memory_routes
+from routes.feedback_routes import router as feedback_router
+from routes import feedback_routes
 from services.memory_service import MemoryService
 from config import settings
 
@@ -59,6 +61,7 @@ app.include_router(glossary_router)
 app.include_router(prompt_pool_router)
 app.include_router(preset_router)
 app.include_router(memory_router)
+app.include_router(feedback_router)
 
 # 初始化 MemoryService 单例并注入到 memory_routes
 _memory_data_dir = str(DATA_DIR / "memory")
@@ -72,6 +75,7 @@ _memory_service.keyword_threshold = settings.memory_keyword_threshold
 # 注入到路由模块
 memory_routes.memory_service = _memory_service
 chat_routes.memory_service = _memory_service
+feedback_routes.init_feedback_dir(DATA_DIR)
 
 # 初始化文件监听器（如果启用 Markdown 源文件）
 _memory_watcher = None

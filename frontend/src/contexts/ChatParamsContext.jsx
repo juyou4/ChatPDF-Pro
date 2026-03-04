@@ -6,6 +6,15 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 
 const ChatParamsContext = createContext();
 
+const normalizeMathEngine = (value) => {
+    if (typeof value !== 'string') return CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'katex') return 'KaTeX';
+    if (normalized === 'mathjax') return 'MathJax';
+    if (normalized === 'none' || normalized === 'off' || normalized === '关闭') return 'none';
+    return CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine;
+};
+
 // 对话参数默认设置
 export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     maxTokens: 8192,
@@ -106,7 +115,7 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.codeCollapsible !== undefined) setCodeCollapsible(settings.codeCollapsible);
                 if (settings.codeWrappable !== undefined) setCodeWrappable(settings.codeWrappable);
                 if (settings.codeShowLineNumbers !== undefined) setCodeShowLineNumbers(settings.codeShowLineNumbers);
-                if (settings.mathEngine !== undefined) setMathEngine(settings.mathEngine);
+                if (settings.mathEngine !== undefined) setMathEngine(normalizeMathEngine(settings.mathEngine));
                 if (settings.mathEnableSingleDollar !== undefined) setMathEnableSingleDollar(settings.mathEnableSingleDollar);
                 if (settings.messageStyle !== undefined) setMessageStyle(settings.messageStyle);
                 if (settings.messageFontSize !== undefined) setMessageFontSize(settings.messageFontSize);
@@ -133,7 +142,7 @@ export const ChatParamsProvider = ({ children }) => {
                     if (globalSettings.codeCollapsible !== undefined) setCodeCollapsible(globalSettings.codeCollapsible);
                     if (globalSettings.codeWrappable !== undefined) setCodeWrappable(globalSettings.codeWrappable);
                     if (globalSettings.codeShowLineNumbers !== undefined) setCodeShowLineNumbers(globalSettings.codeShowLineNumbers);
-                    if (globalSettings.mathEngine !== undefined) setMathEngine(globalSettings.mathEngine);
+                    if (globalSettings.mathEngine !== undefined) setMathEngine(normalizeMathEngine(globalSettings.mathEngine));
                     if (globalSettings.mathEnableSingleDollar !== undefined) setMathEnableSingleDollar(globalSettings.mathEnableSingleDollar);
                     if (globalSettings.messageStyle !== undefined) setMessageStyle(globalSettings.messageStyle);
                     if (globalSettings.messageFontSize !== undefined) setMessageFontSize(globalSettings.messageFontSize);

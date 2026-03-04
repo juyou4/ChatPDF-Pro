@@ -61,6 +61,7 @@ class RetrievalTrace:
     fallback_detail: Optional[str] = None
     citations: List[dict] = field(default_factory=list)
     timing: dict = field(default_factory=dict)  # 各阶段耗时（毫秒）（需求 10.2）
+    max_relevance_score: float = -1.0  # 检索结果中的最高相关性分数，-1 表示未计算
 
 
 class RetrievalLogger:
@@ -175,7 +176,7 @@ class RetrievalLogger:
                 "detail": trace.fallback_detail or "",
             }
 
-        return {
+        meta = {
             "query_type": trace.query_type,
             "granularities": granularities,
             "token_used": trace.token_used,
@@ -183,3 +184,6 @@ class RetrievalLogger:
             "citations": trace.citations,
             "timing": trace.timing,
         }
+        if trace.max_relevance_score >= 0:
+            meta["max_relevance_score"] = round(trace.max_relevance_score, 4)
+        return meta

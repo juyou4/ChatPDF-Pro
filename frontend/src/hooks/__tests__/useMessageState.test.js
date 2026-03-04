@@ -11,6 +11,14 @@ vi.mock('../useSmoothStream', () => ({
   }),
 }));
 
+vi.mock('../../contexts/WebSearchContext', () => ({
+  useWebSearch: () => ({
+    enableWebSearch: false,
+    webSearchProvider: 'duckduckgo',
+    webSearchApiKey: '',
+  }),
+}));
+
 import {
   useMessageState,
   STREAM_FIRST_EVENT_TIMEOUT_MS,

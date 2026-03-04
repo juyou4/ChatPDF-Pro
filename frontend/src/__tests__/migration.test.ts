@@ -170,6 +170,25 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
             }
         ), { numRuns: 100 })
     })
+
+    it('迁移时自动升级废弃 embedding 模型 ID（跨厂商）', () => {
+        const oldData = JSON.stringify({
+            embeddingModel: 'openai:text-embedding-ada-002',
+            assistantModel: 'deepseek:deepseek-chat',
+        })
+
+        const result = migrateDefaults(oldData)
+        expect(result).not.toBeNull()
+        expect(result?.embeddingModel).toBe('openai:text-embedding-3-small')
+
+        const oldData2 = JSON.stringify({
+            embeddingModel: 'minimax:embo-01',
+            assistantModel: 'deepseek:deepseek-chat',
+        })
+        const result2 = migrateDefaults(oldData2)
+        expect(result2).not.toBeNull()
+        expect(result2?.embeddingModel).toBe('minimax:minimax-embedding-v2')
+    })
 })
 
 // ---- Property 8: 无效旧数据迁移回退到默认值 ----
