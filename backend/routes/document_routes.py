@@ -10,9 +10,10 @@ from typing import Optional
 
 import PyPDF2
 import pdfplumber
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 
 from services.vector_service import create_index
+from runtime_mode import runtime
 from services.ocr_service import (
     is_ocr_available,
     detect_pdf_quality,
@@ -35,19 +36,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Project root (two levels up from routes/) so storage matches app.py
-BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = BASE_DIR / "data"
+# 目录策略与 app.py 保持一致：
+# - desktop: 使用 runtime.data_dir（由 Electron 传入）
+# - server: 使用项目根目录 data/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if runtime.is_desktop:
+    DATA_DIR = Path(runtime.data_dir)
+else:
+    DATA_DIR = PROJECT_ROOT / "data"
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = DATA_DIR / "uploads"
 
 # Legacy paths from the old layout (stored under backend/)
-LEGACY_BASE_DIR = Path(__file__).resolve().parents[1]
-LEGACY_DATA_DIR = LEGACY_BASE_DIR / "data"
-LEGACY_DOCS_DIR = LEGACY_DATA_DIR / "docs"
-LEGACY_VECTOR_STORE_DIR = LEGACY_DATA_DIR / "vector_stores"
-LEGACY_UPLOAD_DIR = LEGACY_BASE_DIR / "uploads"
+LEGACY_BACKEND_DATA_DIR = BACKEND_ROOT / "data"
+LEGACY_BACKEND_DOCS_DIR = LEGACY_BACKEND_DATA_DIR / "docs"
+LEGACY_BACKEND_VECTOR_STORE_DIR = LEGACY_BACKEND_DATA_DIR / "vector_stores"
+LEGACY_BACKEND_UPLOAD_DIR = BACKEND_ROOT / "uploads"
+LEGACY_PROJECT_UPLOAD_DIR = PROJECT_ROOT / "uploads"
 
 documents_store = {}
 
@@ -82,10 +89,11 @@ def load_documents():
 def migrate_legacy_storage():
     """Move files from old backend/* paths to project root if needed."""
     migrations = [
-        (LEGACY_DOCS_DIR, DOCS_DIR, "*.json"),
-        (LEGACY_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.index"),
-        (LEGACY_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.pkl"),
-        (LEGACY_UPLOAD_DIR, UPLOAD_DIR, "*.pdf"),
+        (LEGACY_BACKEND_DOCS_DIR, DOCS_DIR, "*.json"),
+        (LEGACY_BACKEND_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.index"),
+        (LEGACY_BACKEND_VECTOR_STORE_DIR, VECTOR_STORE_DIR, "*.pkl"),
+        (LEGACY_BACKEND_UPLOAD_DIR, UPLOAD_DIR, "*.pdf"),
+        (LEGACY_PROJECT_UPLOAD_DIR, UPLOAD_DIR, "*.pdf"),
     ]
 
     for src_dir, dest_dir, pattern in migrations:
@@ -951,10 +959,10 @@ def extract_text_from_pdf(
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
-    embedding_model: str = "local-minilm",
-    embedding_api_key: Optional[str] = None,
-    embedding_api_host: Optional[str] = None,
-    enable_ocr: Optional[str] = None
+    embedding_model: str = Form("local-minilm"),
+    embedding_api_key: Optional[str] = Form(None),
+    embedding_api_host: Optional[str] = Form(None),
+    enable_ocr: Optional[str] = Form(None)
 ):
     """
     上传并处理 PDF 文件
@@ -978,6 +986,13 @@ async def upload_pdf(
         if not normalized_model:
             raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置或格式不正确（建议使用 provider:model 格式）")
         embedding_model = normalized_model
+
+        # 桌面模式下本地模型不可用，提前拦截
+        if runtime.is_desktop and ('local' in embedding_model.lower().split(':')[0] or embedding_model in ('local-minilm',)):
+            raise HTTPException(
+                status_code=400,
+                detail="桌面版不支持本地 Embedding 模型，请在设置中选择远程 Embedding 服务（如 OpenAI、硅基流动等）并配置 API Key"
+            )
 
         # 当 enable_ocr 参数缺失时，回退到配置中的默认值
         ocr_mode = enable_ocr if enable_ocr is not None else settings.ocr_default_mode
@@ -1031,6 +1046,10 @@ async def upload_pdf(
         
         return response
 
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"PDF处理失败: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF处理失败: {str(e)}")
 

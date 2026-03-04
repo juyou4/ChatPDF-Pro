@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSmoothStream } from './useSmoothStream';
+import { useWebSearch } from '../contexts/WebSearchContext';
 
 // API base URL
 const API_BASE_URL = '';
+export const STREAM_FIRST_EVENT_TIMEOUT_MS = 15000;
 
 /**
  * 构建聊天历史记录
@@ -24,6 +26,57 @@ export const buildChatHistory = (messages, contextCount) => {
     role: msg.type === 'user' ? 'user' : 'assistant',
     content: msg.content
   }));
+};
+
+const tokenizeForCitation = (text = '') => {
+  const lowered = String(text).toLowerCase();
+  const tokens = lowered.match(/[a-z0-9]+|[\u4e00-\u9fff]/g);
+  return tokens || [];
+};
+
+const calcTokenOverlap = (left, right) => {
+  if (!left.length || !right.length) return 0;
+  const rightSet = new Set(right);
+  let score = 0;
+  for (const token of left) {
+    if (rightSet.has(token)) score += 1;
+  }
+  return score;
+};
+
+export const normalizeAssistantCitations = (content, citations) => {
+  if (!content || !Array.isArray(citations) || citations.length <= 1) return content;
+
+  const refRegex = /\[(\d{1,3})\]/g;
+  const refsInText = [...String(content).matchAll(refRegex)].map(m => Number(m[1]));
+  const uniqueRefs = new Set(refsInText);
+  if (uniqueRefs.size !== 1) return content;
+
+  const paragraphs = String(content).split(/\n{2,}/);
+  const normalized = paragraphs.map((paragraph) => {
+    refRegex.lastIndex = 0;
+    if (!refRegex.test(paragraph)) return paragraph;
+    refRegex.lastIndex = 0;
+
+    const paraTokens = tokenizeForCitation(paragraph);
+    let bestRef = Number([...uniqueRefs][0]);
+    let bestScore = -1;
+
+    for (const c of citations) {
+      const ref = Number(c?.ref);
+      if (!Number.isFinite(ref)) continue;
+      const citationTokens = tokenizeForCitation(c?.highlight_text || '');
+      const score = calcTokenOverlap(paraTokens, citationTokens);
+      if (score > bestScore) {
+        bestScore = score;
+        bestRef = ref;
+      }
+    }
+
+    return paragraph.replace(refRegex, `[${bestRef}]`);
+  });
+
+  return normalized.join('\n\n');
 };
 
 /**
@@ -74,6 +127,7 @@ export function useMessageState({
   const abortControllerRef = useRef(null);
   const streamingAbortRef = useRef({ cancelled: false });
   const streamCitationsRef = useRef(null);
+  const streamWebSearchRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -85,6 +139,8 @@ export function useMessageState({
     customParams, reasoningEffort,
     enableMemory,
   } = globalSettings;
+
+  const { enableWebSearch, webSearchProvider, webSearchApiKey } = useWebSearch();
 
   // ========== 流式输出 Hook（ref 直写模式，需求 4.2） ==========
   // 流式输出期间不调用 setMessages，通过 contentRef 直接更新 DOM
@@ -175,6 +231,9 @@ export function useMessageState({
         ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
         : null,
       enable_memory: enableMemory,
+      enable_web_search: enableWebSearch,
+      web_search_provider: webSearchProvider,
+      web_search_api_key: webSearchApiKey || null,
     };
 
     // 中止之前的请求
@@ -182,6 +241,7 @@ export function useMessageState({
     abortControllerRef.current = new AbortController();
     streamingAbortRef.current.cancelled = false;
     streamCitationsRef.current = null;
+    streamWebSearchRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -191,14 +251,38 @@ export function useMessageState({
       isStreaming: true, thinking: '', thinkingMs: 0,
     }]);
 
+    // 每次发送前重置流式状态，确保 rAF 循环重启且无残留数据
+    setContentStreamDone(false);
+    setThinkingStreamDone(false);
+    contentStream.reset('');
+    thinkingStream.reset('');
+
+    let firstEventTimeoutTriggered = false;
     try {
       if (streamSpeed !== 'off' && streamOutput) {
         // ===== 流式输出模式 =====
         activeStreamMsgIdRef.current = tempMsgId;
-        setContentStreamDone(false);
-        setThinkingStreamDone(false);
-        contentStream.reset('');
-        thinkingStream.reset('');
+
+        let firstEventReceived = false;
+        let firstEventTimer = null;
+        const clearFirstEventTimer = () => {
+          if (firstEventTimer) {
+            clearTimeout(firstEventTimer);
+            firstEventTimer = null;
+          }
+        };
+        const markFirstEventReceived = () => {
+          if (!firstEventReceived) {
+            firstEventReceived = true;
+            clearFirstEventTimer();
+          }
+        };
+        firstEventTimer = setTimeout(() => {
+          if (firstEventReceived || streamingAbortRef.current.cancelled) return;
+          firstEventTimeoutTriggered = true;
+          streamingAbortRef.current.cancelled = true;
+          abortControllerRef.current?.abort();
+        }, STREAM_FIRST_EVENT_TIMEOUT_MS);
 
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
@@ -213,6 +297,7 @@ export function useMessageState({
             const eb = await response.json();
             ed = eb.detail || eb.error?.message || eb.message || JSON.stringify(eb);
           } catch (e) { /* ignore */ }
+          clearFirstEventTimer();
           throw new Error(ed);
         }
 
@@ -244,6 +329,7 @@ export function useMessageState({
           }
           if (dl.length === 0) return;
           const data = dl.join('\n');
+          markFirstEventReceived();
           if (data === '[DONE]') { sseDone = true; return; }
           try {
             const p = JSON.parse(data);
@@ -255,6 +341,10 @@ export function useMessageState({
               return;
             }
             if (p.type === 'retrieval_progress') return;
+            if (p.type === 'web_search') {
+              streamWebSearchRef.current = p.sources || [];
+              return;
+            }
             const delta = p.choices?.[0]?.delta || {};
             const cc = delta.content || p.content || '';
             const ct = delta.reasoning_content || p.reasoning_content || '';
@@ -271,6 +361,7 @@ export function useMessageState({
               }
             } else {
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
+              if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
               if (ct) { currentThinking += ct; thinkingStream.addChunk(ct); }
               sseDone = true;
             }
@@ -280,31 +371,42 @@ export function useMessageState({
         };
 
         // 读取流数据
-        while (true) {
+        let reading = true;
+        while (reading) {
           const { value, done } = await reader.read();
           if (done || streamingAbortRef.current.cancelled) break;
           sseBuffer += decoder.decode(value, { stream: true });
-          while (true) {
+          let parsing = true;
+          while (parsing) {
             const { index: si, length: sl } = findSseSeparator(sseBuffer);
-            if (si === -1) break;
+            if (si === -1) {
+              parsing = false;
+              continue;
+            }
             const re = sseBuffer.slice(0, si);
             sseBuffer = sseBuffer.slice(si + sl);
             if (re.trim()) processSseEvent(re.trim());
-            if (sseDone) break;
+            if (sseDone) {
+              parsing = false;
+              reading = false;
+            }
           }
-          if (sseDone) break;
+          if (sseDone) reading = false;
         }
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
+        clearFirstEventTimer();
 
-        // 流结束，同步最终状态
+        // 流结束，等待一帧让 rAF 渲染循环处理剩余字符，再同步最终状态
+        await new Promise(r => requestAnimationFrame(r));
         setContentStreamDone(true);
         setThinkingStreamDone(true);
         const finalThinkingMs = thinkingStartTime
           ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
         const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
+        const normalizedFinalContent = normalizeAssistantCitations(finalContent, streamCitationsRef.current);
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitationsRef.current }
+            ? { ...m, content: normalizedFinalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitationsRef.current, webSearchSources: streamWebSearchRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -328,23 +430,27 @@ export function useMessageState({
         }
 
         const data = await response.json();
+        const normalizedAnswer = normalizeAssistantCitations(data.answer, data.retrieval_meta?.citations);
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: data.answer, thinking: data.reasoning_content || '', isStreaming: false, citations: data.retrieval_meta?.citations }
+            ? { ...m, content: normalizedAnswer, thinking: data.reasoning_content || '', isStreaming: false, citations: data.retrieval_meta?.citations, webSearchSources: data.web_search_sources || null }
             : m
         ));
         setStreamingMessageId(null);
       }
     } catch (error) {
-      if (error.name === 'AbortError') return;
+      if (error.name === 'AbortError' && !firstEventTimeoutTriggered) return;
+      const errorMessage = firstEventTimeoutTriggered
+        ? `首包超时（${STREAM_FIRST_EVENT_TIMEOUT_MS}ms），请重试或切换模型`
+        : error.message;
       setContentStreamDone(true);
       setThinkingStreamDone(true);
       activeStreamMsgIdRef.current = null;
       setStreamingMessageId(null);
       setMessages(prev => prev.map(m =>
         m.id === tempMsgId
-          ? { ...m, content: '❌ ' + error.message, isStreaming: false }
+          ? { ...m, content: '❌ ' + errorMessage, isStreaming: false }
           : m
       ));
     } finally {
@@ -356,6 +462,7 @@ export function useMessageState({
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, enableMemory,
+    enableWebSearch, webSearchProvider, webSearchApiKey,
   ]);
 
   /**

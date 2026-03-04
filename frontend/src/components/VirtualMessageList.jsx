@@ -130,7 +130,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
   });
 
   // 计算可视范围
-  const visibleRange = useMemo(
+  const rawVisibleRange = useMemo(
     () => calculateVisibleRange(
       scrollState.scrollTop,
       scrollState.containerHeight,
@@ -141,6 +141,21 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     ),
     [scrollState.scrollTop, scrollState.containerHeight, messages, bufferSize, estimatedHeight]
   );
+
+  // 流式输出时确保 streaming message 始终在可见范围内，避免 ref 直写内容丢失
+  const visibleRange = useMemo(() => {
+    if (streamingMessageId && messages.length > 0) {
+      const lastIdx = messages.length - 1;
+      const streamMsg = messages[lastIdx];
+      if (streamMsg && String(streamMsg.id) === String(streamingMessageId)) {
+        return {
+          start: rawVisibleRange.start,
+          end: Math.max(rawVisibleRange.end, messages.length),
+        };
+      }
+    }
+    return rawVisibleRange;
+  }, [rawVisibleRange, streamingMessageId, messages]);
 
   // 计算 padding 占位
   const { paddingTop, paddingBottom } = useMemo(

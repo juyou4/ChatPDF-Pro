@@ -1,0 +1,47 @@
+# ==================== 公共基座依赖 ====================
+# 本地部署和桌面应用都需要的核心依赖
+# 使用方式：pip install -r requirements-base.txt
+
+# ==================== Web 框架 ====================
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# 数据验证
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# HTTP客户端
+httpx==0.28.1
+
+# 环境变量
+python-dotenv==1.0.1
+
+# ==================== PDF处理 ====================
+PyPDF2==3.0.1
+pdfplumber==0.11.4
+PyMuPDF==1.24.0
+Pillow>=10.0.0
+
+# OCR支持 (可选，用于扫描版PDF)
+pdf2image==1.17.0
+pytesseract==0.3.13
+
+# ==================== 向量检索系统 ====================
+langchain==0.3.13
+langchain-community==0.3.13
+langchain-core==0.3.28
+
+# 向量数据库
+faiss-cpu==1.9.0.post1
+
+# 数值计算
+numpy>=1.24.0
+
+# ==================== AI SDK ====================
+openai==1.57.2
+anthropic==0.40.0
+google-generativeai==0.8.3
+
+# ==================== 记忆系统增强 ====================
+watchdog>=3.0.0

@@ -540,7 +540,14 @@ async def test_model(request: ModelTestRequest):
 
     try:
         if request.providerId == 'local':
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except (ImportError, OSError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="本地模型不可用（sentence-transformers 未安装）。"
+                           "请使用远程模型，或安装完整依赖: pip install -r requirements.txt"
+                )
             model = SentenceTransformer(request.modelId)
             test_text = "这是一个测试句子用于验证模型功能"
             embedding = model.encode([test_text])

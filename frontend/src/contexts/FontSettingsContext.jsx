@@ -23,6 +23,8 @@ export const FONT_DEFAULT_SETTINGS = {
     fontFamily: 'inter',
     customFont: '',
     globalScale: 1.0,
+    // 向后兼容旧版 globalSettings/fontSettings 中的 messageFont 字段
+    messageFont: 'system',
 };
 
 /**
@@ -59,6 +61,7 @@ export const FontSettingsProvider = ({ children }) => {
     const [fontFamily, setFontFamily] = useState(FONT_DEFAULT_SETTINGS.fontFamily);
     const [customFont, setCustomFont] = useState(FONT_DEFAULT_SETTINGS.customFont);
     const [globalScale, setGlobalScale] = useState(FONT_DEFAULT_SETTINGS.globalScale);
+    const [messageFont, setMessageFont] = useState(FONT_DEFAULT_SETTINGS.messageFont);
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
@@ -73,6 +76,7 @@ export const FontSettingsProvider = ({ children }) => {
                 if (settings.fontFamily !== undefined) setFontFamily(settings.fontFamily);
                 if (settings.customFont !== undefined) setCustomFont(settings.customFont);
                 if (settings.globalScale !== undefined) setGlobalScale(settings.globalScale);
+                if (settings.messageFont !== undefined) setMessageFont(settings.messageFont);
             } else {
                 // 兼容旧版：从 globalSettings 中迁移字体设置
                 const globalSaved = localStorage.getItem('globalSettings');
@@ -81,6 +85,7 @@ export const FontSettingsProvider = ({ children }) => {
                     if (globalSettings.fontFamily !== undefined) setFontFamily(globalSettings.fontFamily);
                     if (globalSettings.customFont !== undefined) setCustomFont(globalSettings.customFont);
                     if (globalSettings.globalScale !== undefined) setGlobalScale(globalSettings.globalScale);
+                    if (globalSettings.messageFont !== undefined) setMessageFont(globalSettings.messageFont);
                 }
             }
         } catch (error) {
@@ -113,9 +118,9 @@ export const FontSettingsProvider = ({ children }) => {
 
     // 监听字体设置变更，触发防抖保存
     useEffect(() => {
-        const settings = { fontFamily, customFont, globalScale };
+        const settings = { fontFamily, customFont, globalScale, messageFont };
         debouncedSave(settings);
-    }, [fontFamily, customFont, globalScale, debouncedSave]);
+    }, [fontFamily, customFont, globalScale, messageFont, debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据
     useEffect(() => {
@@ -185,6 +190,7 @@ export const FontSettingsProvider = ({ children }) => {
         setFontFamily(FONT_DEFAULT_SETTINGS.fontFamily);
         setCustomFont(FONT_DEFAULT_SETTINGS.customFont);
         setGlobalScale(FONT_DEFAULT_SETTINGS.globalScale);
+        setMessageFont(FONT_DEFAULT_SETTINGS.messageFont);
     }, []);
 
     const value = {
@@ -192,11 +198,13 @@ export const FontSettingsProvider = ({ children }) => {
         fontFamily,
         customFont,
         globalScale,
+        messageFont,
 
         // 设置方法
         setFontFamily,
         setCustomFont,
         setGlobalScale,
+        setMessageFont,
 
         // 工具方法
         getCurrentFontName,

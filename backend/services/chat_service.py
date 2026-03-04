@@ -241,7 +241,7 @@ async def call_ai_api_stream(
                 body["thinking"] = {"type": "enabled"}
                 # DeepSeek 思考模式要求显式设置 max_tokens，否则可能不返回思考内容
                 # 保底设为 8192，若用户已设置更大值则保留
-                if "max_tokens" not in body or (body.get("max_tokens") or 0) < 8192:
+                if "max_tokens" not in body:
                     body["max_tokens"] = 8192
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)

@@ -1,0 +1,8 @@
+# ==================== 桌面应用模式专用依赖 ====================
+# 不包含本地 ML 模型（sentence-transformers/torch），体积更轻
+# 使用方式：pip install -r requirements-desktop.txt
+
+-r requirements-base.txt
+
+# 桌面专用（可选）
+# platformdirs>=4.0.0  # 跨平台数据目录（目前 runtime_mode.py 自行处理）

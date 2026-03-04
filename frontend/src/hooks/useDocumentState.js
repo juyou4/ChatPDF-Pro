@@ -24,12 +24,48 @@ const loadOCRSettings = () => {
 const API_BASE_URL = '';
 
 /**
+ * 解析后端错误响应，尽量提取可读错误信息
+ */
+const getUploadErrorMessage = (xhr) => {
+  if (xhr.status === 401) {
+    return '桌面后端鉴权失败，请重启 ChatPDF Pro 后重试';
+  }
+
+  const fallback = `Upload failed (HTTP ${xhr.status || 'unknown'})`;
+  const raw = xhr.responseText;
+  if (!raw) return fallback;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.detail === 'string' && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+    if (Array.isArray(parsed?.detail)) {
+      const msgs = parsed.detail
+        .map((item) => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item.msg === 'string') return item.msg;
+          return null;
+        })
+        .filter(Boolean);
+      if (msgs.length > 0) return msgs.join('；');
+    }
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+      return parsed.message;
+    }
+  } catch {
+    // ignore JSON parse error
+  }
+
+  return raw.slice(0, 300) || fallback;
+};
+
+/**
  * 文档状态管理 Hook
  * 管理文档上传、docId、docInfo、会话历史等状态和逻辑
  *
  * @param {Object} options - 配置选项
- * @param {Function} options.getCurrentProvider - 获取当前 embedding provider
- * @param {Function} options.getCurrentEmbeddingModel - 获取当前 embedding 模型
+ * @param {Function} options.getEmbeddingConfig - 获取 embedding 配置（compositeKey + provider）
  * @param {Function} options.setMessages - 设置消息列表（跨域状态）
  * @param {Function} options.setCurrentPage - 设置当前 PDF 页码（跨域状态）
  * @param {Function} options.setScreenshots - 设置截图列表（跨域状态）
@@ -37,8 +73,7 @@ const API_BASE_URL = '';
  * @param {Function} options.setSelectedText - 设置选中文本（跨域状态）
  */
 export function useDocumentState({
-  getCurrentProvider,
-  getCurrentEmbeddingModel,
+  getEmbeddingConfig,
   setMessages,
   setCurrentPage,
   setScreenshots,
@@ -97,29 +132,53 @@ export function useDocumentState({
     const formData = new FormData();
     formData.append('file', file);
 
-    // 获取 embedding 配置
-    const provider = getCurrentProvider?.();
-    const emodel = getCurrentEmbeddingModel?.();
-    if (emodel && provider) {
-      const compositeKey = `${provider.id}:${emodel.id}`;
-      formData.append('embedding_model', compositeKey);
-      if (provider.id !== 'local') {
-        if (!provider.apiKey) {
-          alert(`请先为 ${provider.name} 配置 API Key`);
-          setIsUploading(false);
-          return;
-        }
-        formData.append('embedding_api_key', provider.apiKey);
-        formData.append('embedding_api_host', provider.apiHost);
+    // 获取 embedding 配置（直接从 DefaultsContext 读取 compositeKey，不依赖 ModelContext）
+    const embeddingConfig = getEmbeddingConfig?.();
+    if (!embeddingConfig || embeddingConfig.isValid === false) {
+      let reasonHint = '请先在设置中选择可用的 Embedding 模型并配置 API Key。';
+      if (embeddingConfig?.reason === 'model_not_found') {
+        reasonHint = `当前默认 Embedding 模型不存在或已下线：${embeddingConfig.providerId || ''}:${embeddingConfig.modelId || ''}。\n请重新选择可用的 Embedding 模型。`;
+      } else if (embeddingConfig?.reason === 'wrong_type') {
+        reasonHint = `当前默认模型类型是 ${embeddingConfig.modelType || 'unknown'}，不是 Embedding。\n请切换到 Embedding 模型后再上传。`;
+      } else if (embeddingConfig?.reason === 'provider_missing') {
+        reasonHint = `当前默认模型对应的 Provider 不存在：${embeddingConfig.providerId || 'unknown'}。\n请在模型服务中重新配置。`;
       }
-    } else {
-      formData.append('embedding_model', 'local:all-MiniLM-L6-v2');
+      alert(`${reasonHint}\n\n路径：右上角设置 → 模型服务 → EMBEDDING`);
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    formData.append('embedding_model', embeddingConfig.compositeKey);
+    if (embeddingConfig.providerId !== 'local') {
+      if (!embeddingConfig.provider?.apiKey) {
+        alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 API Key`);
+        setIsUploading(false);
+        return;
+      }
+      formData.append('embedding_api_key', embeddingConfig.provider.apiKey);
+      formData.append('embedding_api_host', embeddingConfig.provider.apiHost);
     }
 
     // OCR 设置
     const ocrSettings = loadOCRSettings();
     formData.append('enable_ocr', ocrSettings.mode || 'auto');
     formData.append('ocr_backend', ocrSettings.backend || 'auto');
+
+    // 桌面模式显式注入后端地址和 token，避免 XHR 拦截初始化时序导致 401
+    let uploadUrl = `${API_BASE_URL}/upload`;
+    let backendToken = '';
+    const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
+    if (isDesktop) {
+      try {
+        const desktopBase = await window.chatpdfDesktop.getApiBaseUrl();
+        const normalizedBase = desktopBase ? desktopBase.replace(/\/$/, '') : '';
+        uploadUrl = normalizedBase ? `${normalizedBase}/upload` : '/upload';
+        backendToken = (await window.chatpdfDesktop.getBackendToken()) || '';
+      } catch (e) {
+        console.warn('[Upload] 获取桌面后端配置失败，回退默认请求路径', e);
+      }
+    }
 
     try {
       const data = await new Promise((resolve, reject) => {
@@ -137,11 +196,14 @@ export function useDocumentState({
               reject(e);
             }
           } else {
-            reject(new Error('Upload failed'));
+            reject(new Error(getUploadErrorMessage(xhr)));
           }
         });
         xhr.addEventListener('error', () => reject(new Error('Network error')));
-        xhr.open('POST', `${API_BASE_URL}/upload`);
+        xhr.open('POST', uploadUrl);
+        if (backendToken) {
+          xhr.setRequestHeader('X-ChatPDF-Token', backendToken);
+        }
         xhr.send(formData);
       });
 
@@ -169,7 +231,7 @@ export function useDocumentState({
       }, 500);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  }, [getCurrentProvider, getCurrentEmbeddingModel, setMessages]);
+  }, [getEmbeddingConfig, setMessages]);
 
   /**
    * 开始新对话（重置文档和相关状态）

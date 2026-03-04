@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown } from 'lucide-react';
+import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
@@ -11,11 +11,13 @@ import TextSelectionToolbar from './TextSelectionToolbar';
 import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
+import { useCapabilities } from '../contexts/CapabilitiesContext';
 const EmbeddingSettings = lazy(() => import('./EmbeddingSettings'));
 const OCRSettingsPanel = lazy(() => import('./OCRSettingsPanel'));
 const GlobalSettings = lazy(() => import('./GlobalSettings'));
 const ChatSettings = lazy(() => import('./ChatSettings'));
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
+import { useChatParams } from '../contexts/ChatParamsContext';
 import { useDebouncedLocalStorage } from '../hooks/useDebouncedLocalStorage';
 import { useUIState } from '../hooks/useUIState';
 import { useDocumentState } from '../hooks/useDocumentState';
@@ -26,6 +28,44 @@ import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
 import VirtualMessageList from './VirtualMessageList';
+import WebSearchButton from './WebSearchButton';
+
+const WebSearchSourcesBadge = ({ sources }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!sources || sources.length === 0) return null;
+  return (
+    <div className="mt-3 border-t border-gray-100 pt-2">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 text-xs text-purple-600 hover:text-purple-800 transition-colors font-medium"
+      >
+        <Globe className="w-3.5 h-3.5" />
+        <span>联网搜索来源 ({sources.length})</span>
+        <ChevronDown className={`w-3 h-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-1.5">
+          {sources.map((src, i) => (
+            <a
+              key={i}
+              href={src.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-start gap-2 p-2 rounded-lg bg-purple-50/50 hover:bg-purple-50 transition-colors group"
+            >
+              <span className="text-[10px] font-bold text-purple-500 bg-purple-100 rounded px-1 py-0.5 mt-0.5 flex-shrink-0">{i + 1}</span>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-gray-800 truncate group-hover:text-purple-700">{src.title}</div>
+                {src.snippet && <div className="text-[11px] text-gray-500 line-clamp-2 mt-0.5">{src.snippet}</div>}
+              </div>
+              <ArrowUpRight className="w-3 h-3 text-gray-400 group-hover:text-purple-500 flex-shrink-0 mt-0.5" />
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const SendIcon = () => (
   <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -60,8 +100,10 @@ const ChatPDF = () => {
   const { getProviderById } = useProvider();
   const { getModelById } = useModel();
   const { getDefaultModel } = useDefaults();
+  const { hasLocalRerank } = useCapabilities();
   const globalSettings = useGlobalSettings();
   const { setReasoningEffort, reasoningEffort } = globalSettings;
+  const { sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers } = useChatParams();
 
   // ========== 设置状态 - 使用防抖 localStorage 写入（需求 8.1） ==========
   const [apiKey, setApiKey] = useDebouncedLocalStorage('apiKey', '');
@@ -100,19 +142,44 @@ const ChatPDF = () => {
   } = useUIState();
 
   // ========== 模型/凭证辅助函数 ==========
-  const getCurrentProvider = useCallback(() => {
+  const getEmbeddingConfig = useCallback(() => {
     const emk = getDefaultModel('embeddingModel');
-    if (!emk) return null;
-    const [pid] = emk.split(':');
-    return getProviderById(pid);
-  }, [getDefaultModel, getProviderById]);
+    if (!emk) {
+      return { isValid: false, reason: 'not_selected' };
+    }
 
-  const getCurrentEmbeddingModel = useCallback(() => {
-    const emk = getDefaultModel('embeddingModel');
-    if (!emk) return null;
-    const [pid, mid] = emk.split(':');
-    return getModelById(mid, pid);
-  }, [getDefaultModel, getModelById]);
+    const [pid, ...rest] = emk.split(':');
+    const modelId = rest.join(':');
+    const provider = getProviderById(pid);
+    if (!provider) {
+      return { isValid: false, reason: 'provider_missing', compositeKey: emk, providerId: pid, modelId };
+    }
+
+    const modelObj = modelId ? getModelById(modelId, pid) : null;
+    if (!modelObj) {
+      return { isValid: false, reason: 'model_not_found', compositeKey: emk, providerId: pid, modelId, provider };
+    }
+    if (modelObj.type !== 'embedding') {
+      return {
+        isValid: false,
+        reason: 'wrong_type',
+        compositeKey: emk,
+        providerId: pid,
+        modelId,
+        modelType: modelObj.type,
+        provider,
+      };
+    }
+
+    return {
+      isValid: true,
+      compositeKey: emk,
+      providerId: pid,
+      modelId,
+      model: modelObj,
+      provider,
+    };
+  }, [getDefaultModel, getProviderById, getModelById]);
 
   const getCurrentChatModel = useCallback(() => {
     const chatKey = getDefaultModel('assistantModel');
@@ -139,11 +206,17 @@ const ChatPDF = () => {
       const [pid, mid] = rrk.split(':');
       return { providerId: pid, modelId: mid };
     }
-    return { providerId: 'local', modelId: 'BAAI/bge-reranker-base' };
-  }, [getDefaultModel]);
+    // 没有配置 rerank 模型时，仅在本地 rerank 可用时才 fallback 到本地
+    if (hasLocalRerank) {
+      return { providerId: 'local', modelId: 'BAAI/bge-reranker-base' };
+    }
+    return null;
+  }, [getDefaultModel, hasLocalRerank]);
 
   const getRerankCredentials = useCallback(() => {
-    const { providerId, modelId } = getCurrentRerankModel();
+    const rerankModel = getCurrentRerankModel();
+    if (!rerankModel) return null;
+    const { providerId, modelId } = rerankModel;
     const provider = getProviderById(providerId);
     return { providerId, modelId, apiKey: provider?.apiKey || embeddingApiKey || apiKey };
   }, [getCurrentRerankModel, getProviderById, embeddingApiKey, apiKey]);
@@ -173,8 +246,7 @@ const ChatPDF = () => {
   const screenshotSettersRef = useRef({});
 
   const documentState = useDocumentState({
-    getCurrentProvider,
-    getCurrentEmbeddingModel,
+    getEmbeddingConfig,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
     setScreenshots: (...args) => screenshotSettersRef.current.setScreenshots?.(...args),
@@ -488,34 +560,25 @@ const ChatPDF = () => {
   // ========== 虚拟消息列表渲染回调（useCallback 稳定引用） ==========
   const renderMessage = useCallback((msg, idx) => {
     const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
+    const isStreamingCurrentMessage = msg.isStreaming && streamingMessageId === msg.id;
+    const shouldShowThinking = hasThinking || (isStreamingCurrentMessage && reasoningEffort !== 'off');
     return (
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}
+        style={{ fontSize: `${messageFontSize}px` }}
       >
         <div className={`${msg.type === 'user'
-          ? 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
-          : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-50 overflow-hidden'
+          ? messageStyle === 'bubble'
+            ? 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
+            : 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
+          : messageStyle === 'bubble'
+            ? 'max-w-[90%] min-w-0 bg-gray-50 dark:bg-gray-800/50 rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 dark:text-gray-50 overflow-hidden shadow-sm'
+            : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-50 overflow-hidden'
         }`}
-          style={msg.type !== 'user' ? { contain: 'inline-size' } : undefined}
+          style={msg.type !== 'user' && messageStyle !== 'bubble' ? { contain: 'inline-size' } : undefined}
         >
-          {hasThinking && (
-            <ThinkingBlock
-              content={msg.thinking}
-              isStreaming={msg.isStreaming && streamingMessageId === msg.id}
-              darkMode={darkMode}
-              thinkingMs={msg.thinkingMs || 0}
-              streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingThinkingRef : undefined}
-            />
-          )}
-          {msg.hasImage && (
-            <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
-              <div className="bg-black/10 p-2 flex items-center gap-2 text-xs">
-                <ImageIcon className="w-3 h-3" /> Image attached
-              </div>
-            </div>
-          )}
           {msg.type === 'assistant' && (
             <div className="flex items-center gap-2 mb-2 select-none">
               <div className="p-1 rounded-lg bg-purple-600 text-white shadow-sm">
@@ -525,15 +588,35 @@ const ChatPDF = () => {
               {msg.model && <span className="text-xs text-gray-400 border border-gray-200 rounded px-1.5 py-0.5">{msg.model}</span>}
             </div>
           )}
+          {shouldShowThinking && (
+            <ThinkingBlock
+              content={msg.thinking}
+              isStreaming={isStreamingCurrentMessage}
+              darkMode={darkMode}
+              thinkingMs={msg.thinkingMs || 0}
+              streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
+            />
+          )}
+          {msg.hasImage && (
+            <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
+              <div className="bg-black/10 p-2 flex items-center gap-2 text-xs">
+                <ImageIcon className="w-3 h-3" /> Image attached
+              </div>
+            </div>
+          )}
           <StreamingMarkdown
             content={msg.content}
-            isStreaming={msg.isStreaming || false}
+            isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
             enableBlurReveal={enableBlurReveal}
             blurIntensity={blurIntensity}
             citations={msg.citations || null}
             onCitationClick={handleCitationClick}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
           />
+          {/* 联网搜索来源 */}
+          {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
+            <WebSearchSourcesBadge sources={msg.webSearchSources} />
+          )}
         </div>
         {/* 消息操作按钮 */}
         {msg.type === 'assistant' && !msg.isStreaming && (
@@ -543,7 +626,7 @@ const ChatPDF = () => {
                 <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
               ) : (<Copy className="w-4 h-4" />)}
             </button>
-            <button onClick={() => regenerateMessage(idx)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors" title="重新生成">
+            <button onClick={() => { if (!confirmRegenerateMessage || confirm('确定要重新生成这条回答吗？')) regenerateMessage(idx); }} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors" title="重新生成">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
             </button>
             <button onClick={() => saveToMemory(idx, 'liked')} className={`p-1.5 rounded-lg hover:bg-gray-100 transition-colors ${likedMessages.has(idx) ? 'text-pink-500' : 'text-gray-500 hover:text-gray-700'}`} title="点赞并记忆">
@@ -564,6 +647,7 @@ const ChatPDF = () => {
     streamingThinkingRef, streamingContentRef, copiedMessageId,
     likedMessages, rememberedMessages,
     handleCitationClick, copyMessage, regenerateMessage, saveToMemory,
+    messageStyle, messageFontSize, confirmRegenerateMessage, reasoningEffort,
   ]);
 
   // ========== 渲染 ==========
@@ -658,7 +742,7 @@ const ChatPDF = () => {
                 <MessageSquare className="w-5 h-5 text-purple-500" />
                 <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
                 <button
-                  onClick={(e) => { e.stopPropagation(); deleteSession(item.id); }}
+                  onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
                   className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -1042,7 +1126,13 @@ const ChatPDF = () => {
                         const newHasInput = !!e.target.value.trim();
                         if (newHasInput !== hasInput) setHasInput(newHasInput);
                       }}
-                      onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
+                      onKeyDown={(e) => {
+                        if (sendShortcut === 'Ctrl+Enter') {
+                          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+                        } else {
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                        }
+                      }}
                       placeholder="Summarize, rephrase, convert..."
                       className="w-full bg-transparent border-none outline-none text-gray-800 placeholder:text-gray-400 font-medium resize-none h-[24px] overflow-hidden leading-relaxed py-0 focus:ring-0 text-[15px]"
                       rows={1}
@@ -1057,6 +1147,7 @@ const ChatPDF = () => {
                     <button onClick={() => fileInputRef.current?.click()} className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
                       <Paperclip className="w-5 h-5" />
                     </button>
+                    <WebSearchButton />
                     {isVisionCapable && (
                       <button
                         onClick={() => setIsSelectingArea(true)}

@@ -122,14 +122,14 @@ export const SILICON_MODELS: Model[] = [
         }
     },
     {
-        id: 'Qwen/Qwen-Embedding-8B',
-        name: 'Qwen Embedding 8B',
+        id: 'Qwen/Qwen3-Embedding-8B',
+        name: 'Qwen3 Embedding 8B',
         providerId: 'silicon',
         type: 'embedding',
         metadata: {
             dimension: 1024,
             maxTokens: 8192,
-            description: '阿里通义千问嵌入模型'
+            description: '阿里通义千问第三代嵌入模型'
         },
         isSystem: true,
         isUserAdded: false,

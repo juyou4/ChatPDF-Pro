@@ -1,0 +1,8 @@
+# ==================== 本地部署（服务器模式）专用依赖 ====================
+# 包含本地 ML 模型支持（sentence-transformers + torch）
+# 使用方式：pip install -r requirements-server.txt
+
+-r requirements-base.txt
+
+# 文本向量化（本地模型）
+sentence-transformers==3.3.1

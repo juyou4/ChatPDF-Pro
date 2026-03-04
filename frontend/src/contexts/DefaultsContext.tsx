@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import type { DefaultModels, DefaultModelType } from '../types/defaults'
+import { useCapabilities } from './CapabilitiesContext'
 
 /**
  * DefaultsContext接口定义
@@ -19,16 +20,32 @@ const CONFIG_VERSION = '4.0'
 const STORAGE_KEY = 'defaultModels'
 const VERSION_KEY = 'defaultModelsVersion'
 
+const DEPRECATED_EMBEDDING_MODEL_ALIASES: Record<string, string> = {
+    'Qwen/Qwen-Embedding-8B': 'Qwen/Qwen3-Embedding-8B',
+    'text-embedding-ada-002': 'text-embedding-3-small',
+    'embo-01': 'minimax-embedding-v2',
+}
+
 /**
  * 初始默认配置
  * 使用系统推荐的模型作为默认值
  */
 const normalizeEmbeddingKey = (value?: string | null) => {
     if (!value) return undefined
-    // 如果已经包含 provider 前缀则直接返回
-    if (value.includes(':')) return value
+
+    const mapModelId = (modelId: string) =>
+        DEPRECATED_EMBEDDING_MODEL_ALIASES[modelId] || modelId
+
+    // provider:modelId 格式
+    if (value.includes(':')) {
+        const [providerId, ...rest] = value.split(':')
+        const modelId = rest.join(':')
+        if (!modelId) return value
+        return `${providerId}:${mapModelId(modelId)}`
+    }
+
     // 旧格式只存模型ID时，默认加上 local 前缀
-    return `local:${value}`
+    return `local:${mapModelId(value)}`
 }
 
 const INITIAL_DEFAULTS: DefaultModels = {
@@ -73,6 +90,8 @@ export function migrateDefaults(oldData: string): DefaultModels | null {
 }
 
 export function DefaultsProvider({ children }: { children: ReactNode }) {
+    const { hasLocalEmbedding } = useCapabilities()
+
     const [defaults, setDefaults] = useState<DefaultModels>(() => {
         const savedVersion = localStorage.getItem(VERSION_KEY)
         const saved = localStorage.getItem(STORAGE_KEY)
@@ -145,9 +164,14 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
 
     /**
      * 获取默认模型
+     * 当本地 embedding 不可用时，如果默认值指向 local provider，返回 undefined
      */
     const getDefaultModel = (type: DefaultModelType): string | undefined => {
-        return defaults[type]
+        const value = defaults[type]
+        if (!hasLocalEmbedding && value?.startsWith('local:')) {
+            return undefined
+        }
+        return value
     }
 
     /**
