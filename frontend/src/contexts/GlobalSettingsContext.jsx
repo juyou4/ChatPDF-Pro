@@ -54,6 +54,7 @@ const GlobalSettingsBridge = ({ children }) => {
             fontFamily: fontSettings.fontFamily,
             customFont: fontSettings.customFont,
             globalScale: fontSettings.globalScale,
+            messageFont: fontSettings.messageFont,
             // 对话参数
             maxTokens: chatParams.maxTokens,
             temperature: chatParams.temperature,
@@ -66,15 +67,28 @@ const GlobalSettingsBridge = ({ children }) => {
             customParams: chatParams.customParams,
             reasoningEffort: chatParams.reasoningEffort,
             enableMemory: chatParams.enableMemory,
+            thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
+            sendShortcut: chatParams.sendShortcut,
+            confirmDeleteMessage: chatParams.confirmDeleteMessage,
+            confirmRegenerateMessage: chatParams.confirmRegenerateMessage,
+            codeCollapsible: chatParams.codeCollapsible,
+            codeWrappable: chatParams.codeWrappable,
+            codeShowLineNumbers: chatParams.codeShowLineNumbers,
+            messageStyle: chatParams.messageStyle,
+            messageFontSize: chatParams.messageFontSize,
             exportedAt: new Date().toISOString(),
         };
         return JSON.stringify(settings, null, 2);
     }, [
-        fontSettings.fontFamily, fontSettings.customFont, fontSettings.globalScale,
+        fontSettings.fontFamily, fontSettings.customFont, fontSettings.globalScale, fontSettings.messageFont,
         chatParams.maxTokens, chatParams.temperature, chatParams.topP,
         chatParams.contextCount, chatParams.streamOutput,
         chatParams.enableTemperature, chatParams.enableTopP, chatParams.enableMaxTokens,
         chatParams.customParams, chatParams.reasoningEffort, chatParams.enableMemory,
+        chatParams.thoughtAutoCollapse, chatParams.sendShortcut,
+        chatParams.confirmDeleteMessage, chatParams.confirmRegenerateMessage,
+        chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
+        chatParams.messageStyle, chatParams.messageFontSize,
     ]);
 
     // 聚合导入：将设置分发到对应的子 Context
@@ -85,6 +99,7 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.fontFamily !== undefined) fontSettings.setFontFamily(settings.fontFamily);
             if (settings.customFont !== undefined) fontSettings.setCustomFont(settings.customFont);
             if (settings.globalScale !== undefined) fontSettings.setGlobalScale(settings.globalScale);
+            if (settings.messageFont !== undefined) fontSettings.setMessageFont(settings.messageFont);
             // 对话参数相关
             if (settings.maxTokens !== undefined) chatParams.setMaxTokens(settings.maxTokens);
             if (settings.temperature !== undefined) chatParams.setTemperature(settings.temperature);
@@ -97,17 +112,30 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.customParams !== undefined) chatParams.setCustomParams(settings.customParams);
             if (settings.reasoningEffort !== undefined) chatParams.setReasoningEffort(settings.reasoningEffort);
             if (settings.enableMemory !== undefined) chatParams.setEnableMemory(settings.enableMemory);
+            if (settings.thoughtAutoCollapse !== undefined) chatParams.setThoughtAutoCollapse(settings.thoughtAutoCollapse);
+            if (settings.sendShortcut !== undefined) chatParams.setSendShortcut(settings.sendShortcut);
+            if (settings.confirmDeleteMessage !== undefined) chatParams.setConfirmDeleteMessage(settings.confirmDeleteMessage);
+            if (settings.confirmRegenerateMessage !== undefined) chatParams.setConfirmRegenerateMessage(settings.confirmRegenerateMessage);
+            if (settings.codeCollapsible !== undefined) chatParams.setCodeCollapsible(settings.codeCollapsible);
+            if (settings.codeWrappable !== undefined) chatParams.setCodeWrappable(settings.codeWrappable);
+            if (settings.codeShowLineNumbers !== undefined) chatParams.setCodeShowLineNumbers(settings.codeShowLineNumbers);
+            if (settings.messageStyle !== undefined) chatParams.setMessageStyle(settings.messageStyle);
+            if (settings.messageFontSize !== undefined) chatParams.setMessageFontSize(settings.messageFontSize);
             return true;
         } catch (error) {
             console.error('导入设置失败:', error);
             return false;
         }
     }, [
-        fontSettings.setFontFamily, fontSettings.setCustomFont, fontSettings.setGlobalScale,
+        fontSettings.setFontFamily, fontSettings.setCustomFont, fontSettings.setGlobalScale, fontSettings.setMessageFont,
         chatParams.setMaxTokens, chatParams.setTemperature, chatParams.setTopP,
         chatParams.setContextCount, chatParams.setStreamOutput,
         chatParams.setEnableTemperature, chatParams.setEnableTopP, chatParams.setEnableMaxTokens,
         chatParams.setCustomParams, chatParams.setReasoningEffort, chatParams.setEnableMemory,
+        chatParams.setThoughtAutoCollapse, chatParams.setSendShortcut,
+        chatParams.setConfirmDeleteMessage, chatParams.setConfirmRegenerateMessage,
+        chatParams.setCodeCollapsible, chatParams.setCodeWrappable, chatParams.setCodeShowLineNumbers,
+        chatParams.setMessageStyle, chatParams.setMessageFontSize,
     ]);
 
     // 聚合 flushSave：同时 flush 两个子 Context
@@ -122,6 +150,7 @@ const GlobalSettingsBridge = ({ children }) => {
         fontFamily: fontSettings.fontFamily,
         customFont: fontSettings.customFont,
         globalScale: fontSettings.globalScale,
+        messageFont: fontSettings.messageFont,
 
         // 对话参数状态
         maxTokens: chatParams.maxTokens,
@@ -135,11 +164,21 @@ const GlobalSettingsBridge = ({ children }) => {
         customParams: chatParams.customParams,
         reasoningEffort: chatParams.reasoningEffort,
         enableMemory: chatParams.enableMemory,
+        thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
+        sendShortcut: chatParams.sendShortcut,
+        confirmDeleteMessage: chatParams.confirmDeleteMessage,
+        confirmRegenerateMessage: chatParams.confirmRegenerateMessage,
+        codeCollapsible: chatParams.codeCollapsible,
+        codeWrappable: chatParams.codeWrappable,
+        codeShowLineNumbers: chatParams.codeShowLineNumbers,
+        messageStyle: chatParams.messageStyle,
+        messageFontSize: chatParams.messageFontSize,
 
         // 字体设置方法
         setFontFamily: fontSettings.setFontFamily,
         setCustomFont: fontSettings.setCustomFont,
         setGlobalScale: fontSettings.setGlobalScale,
+        setMessageFont: fontSettings.setMessageFont,
 
         // 对话参数设置方法
         setMaxTokens: chatParams.setMaxTokens,
@@ -153,6 +192,15 @@ const GlobalSettingsBridge = ({ children }) => {
         setCustomParams: chatParams.setCustomParams,
         setReasoningEffort: chatParams.setReasoningEffort,
         setEnableMemory: chatParams.setEnableMemory,
+        setThoughtAutoCollapse: chatParams.setThoughtAutoCollapse,
+        setSendShortcut: chatParams.setSendShortcut,
+        setConfirmDeleteMessage: chatParams.setConfirmDeleteMessage,
+        setConfirmRegenerateMessage: chatParams.setConfirmRegenerateMessage,
+        setCodeCollapsible: chatParams.setCodeCollapsible,
+        setCodeWrappable: chatParams.setCodeWrappable,
+        setCodeShowLineNumbers: chatParams.setCodeShowLineNumbers,
+        setMessageStyle: chatParams.setMessageStyle,
+        setMessageFontSize: chatParams.setMessageFontSize,
 
         // 聚合工具方法
         resetSettings,

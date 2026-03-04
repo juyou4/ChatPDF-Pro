@@ -20,6 +20,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const debouncedScale = useDebouncedValue(scale, 150);
     const [selectedText, setSelectedText] = useState('');
     const [error, setError] = useState(null);
+    const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
+    const [desktopApiBaseUrl, setDesktopApiBaseUrl] = useState('');
+    const [desktopBackendToken, setDesktopBackendToken] = useState('');
 
     useEffect(() => {
         if (typeof page === 'number' && page > 0 && page !== pageNumber) {
@@ -27,10 +30,62 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         }
     }, [page, pageNumber]);
 
-    // 确保 PDF URL 是完整路径，且 pdfUrl 有效时才构建
-    const fullPdfUrl = pdfUrl
-        ? (pdfUrl.startsWith('http') ? pdfUrl : `${window.location.origin}${pdfUrl}`)
-        : null;
+    // 桌面模式下通过 preload IPC 获取后端地址与鉴权 token
+    useEffect(() => {
+        let cancelled = false;
+
+        if (!isDesktop) return () => {};
+
+        (async () => {
+            try {
+                const [apiBaseUrl, backendToken] = await Promise.all([
+                    window.chatpdfDesktop.getApiBaseUrl(),
+                    window.chatpdfDesktop.getBackendToken(),
+                ]);
+                if (cancelled) return;
+                setDesktopApiBaseUrl((apiBaseUrl || '').replace(/\/$/, ''));
+                setDesktopBackendToken(backendToken || '');
+            } catch (e) {
+                console.warn('[PDFViewer] 获取桌面后端连接信息失败', e);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isDesktop]);
+
+    // 构建 PDF 完整 URL：桌面端使用后端地址，Web 端使用当前 origin
+    const fullPdfUrl = useMemo(() => {
+        if (!pdfUrl) return null;
+        if (pdfUrl.startsWith('http://') || pdfUrl.startsWith('https://')) return pdfUrl;
+
+        if (isDesktop) {
+            if (!desktopApiBaseUrl) return null;
+            return `${desktopApiBaseUrl}${pdfUrl.startsWith('/') ? '' : '/'}${pdfUrl}`;
+        }
+
+        const origin = typeof window !== 'undefined' ? window.location.origin : '';
+        if (!origin) return pdfUrl;
+        return `${origin}${pdfUrl.startsWith('/') ? '' : '/'}${pdfUrl}`;
+    }, [pdfUrl, isDesktop, desktopApiBaseUrl]);
+
+    // react-pdf 支持通过 file 对象传递 httpHeaders，桌面端必须携带 token 访问 /uploads
+    const pdfFile = useMemo(() => {
+        if (!fullPdfUrl) return null;
+
+        if (isDesktop) {
+            if (!desktopBackendToken) return null;
+            return {
+                url: fullPdfUrl,
+                httpHeaders: {
+                    'X-ChatPDF-Token': desktopBackendToken,
+                },
+            };
+        }
+
+        return fullPdfUrl;
+    }, [fullPdfUrl, isDesktop, desktopBackendToken]);
 
     console.log('📄 PDFViewer - Loading PDF:', fullPdfUrl);
 
@@ -505,7 +560,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 onMouseUp={handleTextSelection}
                 onScroll={updateThumbs}
             >
-                {!fullPdfUrl ? (
+                {!pdfFile ? (
                     <div className="flex items-center justify-center h-full">
                         <div className="text-center">
                             <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
@@ -523,7 +578,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     </div>
                 ) : (
                     <Document
-                        file={fullPdfUrl}
+                        file={pdfFile}
                         onLoadSuccess={onDocumentLoadSuccess}
                         onLoadError={onDocumentLoadError}
                         loading={

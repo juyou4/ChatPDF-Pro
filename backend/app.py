@@ -3,11 +3,14 @@ ChatPDF backend - main app entry mounting all routers.
 """
 
 import os
+import time
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from runtime_mode import runtime
+from middleware.desktop_auth import DesktopAuthMiddleware
 from models.model_registry import EMBEDDING_MODELS
 from models.dynamic_store import load_dynamic_models
 from routes.model_provider_routes import router as model_provider_router
@@ -25,12 +28,19 @@ from routes import memory_routes
 from services.memory_service import MemoryService
 from config import settings
 
-# Directories (resolve to project root so frontend/backend共用同一份数据)
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+# 应用启动时间戳
+_startup_time = time.time()
+
+# Directories
+# 桌面模式使用 runtime.data_dir（AppData），服务器模式使用项目根目录
+if runtime.is_desktop:
+    DATA_DIR = Path(runtime.data_dir)
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    DATA_DIR = BASE_DIR / "data"
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = DATA_DIR / "uploads"
 DATA_DIR.mkdir(exist_ok=True)
 DOCS_DIR.mkdir(exist_ok=True)
 VECTOR_STORE_DIR.mkdir(exist_ok=True)
@@ -82,7 +92,7 @@ search_router.vector_store_dir = str(VECTOR_STORE_DIR)
 chat_router.vector_store_dir = str(VECTOR_STORE_DIR)
 summary_router.vector_store_dir = str(VECTOR_STORE_DIR)
 
-# Middleware
+# Middleware（注意：中间件按添加的逆序执行，最后添加的最先执行）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -90,6 +100,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 桌面模式安全中间件（仅桌面模式生效）
+app.add_middleware(DesktopAuthMiddleware, runtime_config=runtime)
 
 # Static for PDFs
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -185,7 +198,43 @@ def _kill_port(port: int):
         pass
 
 
+@app.get("/capabilities")
+async def get_capabilities():
+    """返回后端能力信息，前端据此动态调整 UI
+
+    桌面模式下隐藏本地模型选项，提示用户配置 API Key。
+    服务器模式下返回完整能力列表。
+    """
+    from services.embedding_service import _HAS_SENTENCE_TRANSFORMERS
+    from services.rerank_service import _HAS_CROSS_ENCODER
+
+    # 收集可用的 embedding provider 列表
+    embedding_providers = ["openai", "silicon", "aliyun", "deepseek", "moonshot",
+                           "zhipu", "minimax", "ollama"]
+    if _HAS_SENTENCE_TRANSFORMERS:
+        embedding_providers.insert(0, "local")
+
+    # 收集可用的 rerank provider 列表
+    rerank_providers = ["cohere", "jina", "silicon", "aliyun"]
+    if _HAS_CROSS_ENCODER:
+        rerank_providers.insert(0, "local")
+
+    return {
+        "mode": runtime.mode_name,
+        "version": "3.0.1",
+        "has_local_embedding": _HAS_SENTENCE_TRANSFORMERS,
+        "has_local_rerank": _HAS_CROSS_ENCODER,
+        "embedding_providers": embedding_providers,
+        "rerank_providers": rerank_providers,
+        "needs_api_key": runtime.is_desktop or not _HAS_SENTENCE_TRANSFORMERS,
+        "data_dir": runtime.data_dir,
+        "uptime": int(time.time() - _startup_time),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
-    _kill_port(8000)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = runtime.CHATPDF_PORT
+    host = runtime.host
+    _kill_port(port)
+    uvicorn.run(app, host=host, port=port)

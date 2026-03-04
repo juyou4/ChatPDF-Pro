@@ -65,7 +65,26 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Electron build
+electron/dist/
+electron/release/
+electron/release-test/
+electron/node_modules/
+
+# PyInstaller
+backend/dist/
+backend/build/
+*.spec.bak
+
 # Temporary files
 *.tmp
 *.bak
 *.swp
+_fix_*.py
+test_*.mjs
+.tmp-smoke-data/
+
+# Dev test dependencies (not needed in repo)
+rehype-stringify/
+remark-parse/
+remark-rehype/

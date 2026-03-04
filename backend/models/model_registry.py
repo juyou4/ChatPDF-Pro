@@ -110,16 +110,17 @@ EMBEDDING_MODELS = {
         "price": "Free/Limited",
         "description": "Hosted Qwen3 embedding (SiliconFlow)"
     },
-    # SiliconFlow - Qwen Embedding 8B（前端 systemModels.ts 中定义的模型）
+    # SiliconFlow - Qwen Embedding 8B（历史兼容键名，实际请求自动映射到 Qwen3）
     "Qwen/Qwen-Embedding-8B": {
         "name": "SiliconFlow: Qwen-Embedding-8B",
         "provider": "openai",
         "base_url": "https://api.siliconflow.cn/v1",
         "embedding_endpoint": "/embeddings",
+        "model_name": "Qwen/Qwen3-Embedding-8B",
         "dimension": 1024,
         "max_tokens": 8192,
         "price": "Paid",
-        "description": "阿里通义千问嵌入模型（硅基流动托管）"
+        "description": "历史模型 ID（已兼容映射到 Qwen3-Embedding-8B）"
     },
     # MiniMax（保留 embo-01 以兼容旧数据）
     "embo-01": {
@@ -154,4 +155,3 @@ EMBEDDING_MODELS = {
         "description": "DeepSeek 嵌入模型"
     }
 }
-

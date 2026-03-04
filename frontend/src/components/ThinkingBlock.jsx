@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from '
 import { motion, AnimatePresence } from 'framer-motion'
 import { Copy, Check, ChevronRight } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
+import { useChatParams } from '../contexts/ChatParamsContext'
 
 /**
  * 原子图标 SVG 组件
@@ -113,16 +114,17 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
   const wasStreamingRef = useRef(false)
+  const { thoughtAutoCollapse } = useChatParams()
 
-  // 思考完成后自动折叠
+  // 思考完成后自动折叠（受 thoughtAutoCollapse 设置控制）
   useEffect(() => {
-    if (wasStreamingRef.current && !isStreaming && content) {
+    if (wasStreamingRef.current && !isStreaming && content && thoughtAutoCollapse) {
       // 延迟折叠，让用户看到完成状态
       const timer = setTimeout(() => setExpanded(false), 600)
       return () => clearTimeout(timer)
     }
     wasStreamingRef.current = isStreaming
-  }, [isStreaming, content])
+  }, [isStreaming, content, thoughtAutoCollapse])
 
   // 复制思考内容
   const handleCopy = useCallback((e) => {

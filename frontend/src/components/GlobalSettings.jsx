@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain } from 'lucide-react';
+import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
+import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
@@ -32,6 +33,14 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const [showMemoryPanel, setShowMemoryPanel] = useState(false);
     const [showImportDialog, setShowImportDialog] = useState(false);
     const [importText, setImportText] = useState('');
+    const [showApiKey, setShowApiKey] = useState(false);
+
+    const {
+        enableWebSearch, webSearchProvider, webSearchApiKey,
+        setEnableWebSearch, setWebSearchProvider, setWebSearchApiKey,
+    } = useWebSearch();
+    const currentSearchProvider = WEB_SEARCH_PROVIDERS.find(p => p.id === webSearchProvider) || WEB_SEARCH_PROVIDERS[0];
+    const needsApiKey = currentSearchProvider.requiresApiKey;
 
     // 快捷缩放按钮
     const scalePresets = [
@@ -288,6 +297,111 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 <Brain className="w-4 h-4" />
                                 <span className="font-medium">管理记忆</span>
                             </button>
+                        </div>
+
+                        {/* 分割线 */}
+                        <div className="border-t border-gray-200"></div>
+
+                        {/* 联网搜索设置 */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2">
+                                <Globe className="w-5 h-5 text-purple-600" />
+                                <h3 className="text-lg font-semibold">联网搜索</h3>
+                            </div>
+
+                            {/* 联网搜索开关 */}
+                            <div className="flex items-center justify-between p-4 soft-card rounded-xl">
+                                <div>
+                                    <div className="font-medium text-gray-800">启用联网搜索</div>
+                                    <div className="text-sm text-gray-500 mt-0.5">对话时自动搜索网络补充信息</div>
+                                </div>
+                                <button
+                                    onClick={() => setEnableWebSearch(!enableWebSearch)}
+                                    className={`relative w-12 h-7 rounded-full transition-colors ${enableWebSearch ? 'bg-purple-500' : 'bg-gray-300'}`}
+                                >
+                                    <div className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${enableWebSearch ? 'translate-x-5' : ''}`} />
+                                </button>
+                            </div>
+
+                            {/* 开启后展开的子设置 */}
+                            {enableWebSearch && (
+                              <div className="ml-2 pl-4 space-y-4">
+                                {/* 搜索引擎选择 */}
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-gray-700">搜索引擎</label>
+                                    <div className="space-y-2">
+                                        {WEB_SEARCH_PROVIDERS.map((provider) => (
+                                            <button
+                                                key={provider.id}
+                                                onClick={() => setWebSearchProvider(provider.id)}
+                                                className={`w-full p-3 rounded-xl transition-all text-left relative ${
+                                                    webSearchProvider === provider.id
+                                                        ? 'soft-card ring-2 ring-purple-500 bg-purple-50/50'
+                                                        : 'soft-card hover:bg-[var(--color-bg-subtle)]'
+                                                }`}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-medium text-gray-800 text-sm">{provider.name}</span>
+                                                            {!provider.requiresApiKey && (
+                                                                <span className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">免费</span>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mt-0.5">{provider.description}</p>
+                                                    </div>
+                                                    {webSearchProvider === provider.id && (
+                                                        <div className="bg-purple-500 rounded-full p-0.5 flex-shrink-0">
+                                                            <Check className="w-3 h-3 text-white" />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* API Key 输入 */}
+                                {needsApiKey && (
+                                    <div className="space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <label className="text-sm font-medium text-gray-700">API Key</label>
+                                            {currentSearchProvider.apiKeyUrl && (
+                                                <a
+                                                    href={currentSearchProvider.apiKeyUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="flex items-center gap-1 text-xs text-purple-500 hover:text-purple-700 transition-colors"
+                                                >
+                                                    获取 Key
+                                                    <ExternalLink className="w-3 h-3" />
+                                                </a>
+                                            )}
+                                        </div>
+                                        <div className="relative">
+                                            <input
+                                                type={showApiKey ? 'text' : 'password'}
+                                                value={webSearchApiKey}
+                                                onChange={(e) => setWebSearchApiKey(e.target.value)}
+                                                placeholder={currentSearchProvider.apiKeyPlaceholder || `输入 ${currentSearchProvider.name} API Key`}
+                                                className="w-full px-4 py-3 pr-10 soft-input rounded-xl outline-none text-sm"
+                                            />
+                                            <button
+                                                onClick={() => setShowApiKey(!showApiKey)}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                                            >
+                                                {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                            </button>
+                                        </div>
+                                        {!webSearchApiKey && (
+                                            <p className="text-xs text-amber-600">
+                                                未配置 API Key，将回退到 DuckDuckGo 免费搜索
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+                              </div>
+                            )}
                         </div>
 
                         {/* 分割线 */}

@@ -1,0 +1,11 @@
+build/
+dist/
+coverage/
+node_modules/
+
+# 历史调试/备份文件（不参与构建）
+src/components/ChatPDF_old.jsx
+src/components/ChatPDF_fixed_sse.js
+src/components/ChatPDF_processSseEvent.js
+src/components/ChatPDF_v2.js
+src/components/ChatPDF_v3.js

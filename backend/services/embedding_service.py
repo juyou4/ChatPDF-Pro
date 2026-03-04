@@ -9,9 +9,14 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 import faiss
+import httpx
 import numpy as np
 from fastapi import HTTPException
-from sentence_transformers import SentenceTransformer
+try:
+    from sentence_transformers import SentenceTransformer
+    _HAS_SENTENCE_TRANSFORMERS = True
+except (ImportError, OSError):
+    _HAS_SENTENCE_TRANSFORMERS = False
 
 from models.api_key_selector import select_api_key
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
@@ -305,6 +310,301 @@ def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[
     return None
 
 
+def _estimate_embedding_tokens(text: str) -> int:
+    """粗略估算文本 token 数（偏保守）"""
+    if not text:
+        return 1
+    content = text.strip()
+    if not content:
+        return 1
+
+    ascii_chars = sum(1 for ch in content if ord(ch) < 128)
+    non_ascii_chars = len(content) - ascii_chars
+    # 英文约 3.5 字符/token；中日韩字符按 ~1 token 估算并略放大
+    est = int(ascii_chars / 3.5 + non_ascii_chars * 1.1)
+    return max(1, est)
+
+
+def _truncate_text_to_token_budget(text: str, token_budget: int) -> str:
+    """将文本截断到 token 预算内（保持单条输入 -> 单条向量映射）"""
+    budget = max(1, int(token_budget))
+    if _estimate_embedding_tokens(text) <= budget:
+        return text
+
+    left, right = 1, len(text)
+    best = text[:1]
+    while left <= right:
+        mid = (left + right) // 2
+        candidate = text[:mid]
+        if _estimate_embedding_tokens(candidate) <= budget:
+            best = candidate
+            left = mid + 1
+        else:
+            right = mid - 1
+    return best
+
+
+def _prepare_embedding_batches(texts: List[str], token_budget: int) -> List[List[str]]:
+    """按总 token 预算分批；超长单条文本会自动截断"""
+    budget = max(1, int(token_budget))
+    batches: List[List[str]] = []
+    current_batch: List[str] = []
+    current_tokens = 0
+
+    for idx, raw in enumerate(texts):
+        text = raw if isinstance(raw, str) else str(raw)
+        est = _estimate_embedding_tokens(text)
+
+        if est > budget:
+            truncated = _truncate_text_to_token_budget(text, budget)
+            logger.warning(
+                f"[EmbeddingBatch] 文本过长，已截断: idx={idx}, est_tokens={est}, "
+                f"budget={budget}, old_chars={len(text)}, new_chars={len(truncated)}"
+            )
+            text = truncated
+            est = _estimate_embedding_tokens(text)
+
+        if current_batch and (current_tokens + est > budget):
+            batches.append(current_batch)
+            current_batch = []
+            current_tokens = 0
+
+        current_batch.append(text)
+        current_tokens += est
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def _is_token_limit_error(exc: Exception) -> bool:
+    """判断是否为 embedding 输入 token 超限错误"""
+    msg = str(exc).lower()
+    hints = (
+        "input must have less than",
+        "maximum context length",
+        "too many tokens",
+        "token limit",
+    )
+    return ("token" in msg) and any(h in msg for h in hints)
+
+
+def _is_model_not_found_error(exc: Exception) -> bool:
+    """判断是否为模型不存在/未开通类错误。"""
+    # 1) 先尝试从异常对象中解析结构化错误（openai/httpx）
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                # 常见格式 A: {"code":20012,"message":"..."}
+                code = body.get("code")
+                message = body.get("message", "")
+                if str(code) == "20012":
+                    return True
+                # 常见格式 B: {"error":{"code":"model_not_found","message":"..."}}
+                if isinstance(body.get("error"), dict):
+                    e = body["error"]
+                    ecode = e.get("code")
+                    emsg = e.get("message", "")
+                    if str(ecode) == "20012" or str(ecode).lower() in {"model_not_found", "no_such_model"}:
+                        return True
+                    if isinstance(emsg, str) and "model does not exist" in emsg.lower():
+                        return True
+                if isinstance(message, str) and "model does not exist" in message.lower():
+                    return True
+        except Exception:
+            pass
+
+    # 2) 回退到字符串匹配
+    msg = str(exc).lower()
+    if "model" not in msg:
+        return False
+    hints = (
+        "model does not exist",
+        "model not exist",
+        "model_not_found",
+        "no such model",
+        "code: 20012",
+        "code:20012",
+        "'code': 20012",
+        "'code':20012",
+        '"code": 20012',
+        '"code":20012',
+    )
+    return any(h in msg for h in hints)
+
+
+def _fetch_available_model_ids(api_base: str, api_key: str) -> list[str]:
+    """从提供商拉取可用模型列表（最佳努力，不抛异常）。"""
+    if not api_base or not api_key:
+        return []
+
+    base = api_base.rstrip("/")
+    urls = []
+    if base.endswith("/v1"):
+        urls.append(f"{base}/models")
+    else:
+        urls.append(f"{base}/v1/models")
+        urls.append(f"{base}/models")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for url in urls:
+        try:
+            with httpx.Client(timeout=httpx.Timeout(8.0, connect=5.0)) as client:
+                resp = client.get(url, headers=headers)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("data", []) if isinstance(data, dict) else []
+            model_ids = []
+            for item in items:
+                model_id = item.get("id") if isinstance(item, dict) else None
+                if isinstance(model_id, str) and model_id.strip():
+                    model_ids.append(model_id.strip())
+            if model_ids:
+                return model_ids
+        except Exception:
+            continue
+
+    return []
+
+
+def _select_fallback_embedding_model(
+    available_models: list[str],
+    preferred_model: str,
+    excluded_models: Optional[list[str]] = None,
+) -> Optional[str]:
+    """从可用模型中选择 embedding 回退模型。"""
+    if not available_models:
+        return None
+
+    # 去重并保序
+    seen = set()
+    models = []
+    for model_id in available_models:
+        if model_id not in seen:
+            seen.add(model_id)
+            models.append(model_id)
+
+    # 排除已确认失败的模型，避免“回退”仍选回原模型
+    exclude_set = {
+        m.strip().lower()
+        for m in (excluded_models or [])
+        if isinstance(m, str) and m.strip()
+    }
+    if exclude_set:
+        models = [m for m in models if m.lower() not in exclude_set]
+        if not models:
+            return None
+
+    preferred = (preferred_model or "").strip()
+    if preferred:
+        # 1) 模型别名升级（优先把历史模型切到新 ID）
+        alias_targets = {
+            "qwen/qwen-embedding-8b": "Qwen/Qwen3-Embedding-8B",
+            "text-embedding-ada-002": "text-embedding-3-small",
+            "embo-01": "minimax-embedding-v2",
+        }
+        mapped_target = alias_targets.get(preferred.lower())
+        if mapped_target:
+            for model_id in models:
+                if model_id.lower() == mapped_target.lower():
+                    return model_id
+
+        # 2) 后缀匹配（例如 Pro/BAAI/bge-m3 与 BAAI/bge-m3）
+        for model_id in models:
+            if model_id.lower().endswith(preferred.lower()):
+                return model_id
+
+    # 3) 优先常见 embedding 模型
+    prefer_order = [
+        "BAAI/bge-m3",
+        "Qwen/Qwen3-Embedding-8B",
+        "text-embedding-3-small",
+        "text-embedding-3-large",
+        "text-embedding-v3",
+        "minimax-embedding-v2",
+        "deepseek-embedding-v1",
+        "moonshot-embedding-v1",
+        "embedding-3",
+        "Qwen/Qwen-Embedding-8B",
+    ]
+    for target in prefer_order:
+        for model_id in models:
+            if model_id.lower() == target.lower():
+                return model_id
+
+    # 4) 任意可识别的 embedding 模型
+    for model_id in models:
+        if is_embedding_model(model_id) and not is_rerank_model(model_id):
+            return model_id
+
+    return None
+
+
+def _embed_batch_with_auto_shrink(
+    client,
+    model: str,
+    batch: List[str],
+    token_budget: int,
+    depth: int = 0
+) -> List[list]:
+    """嵌入调用：token 超限时自动拆分 batch；单条超限时自动截断重试"""
+    if depth > 12:
+        raise RuntimeError("embedding 重试层级过深，已中止")
+
+    try:
+        response = client.embeddings.create(model=model, input=batch)
+        data = getattr(response, "data", [])
+        if len(data) != len(batch):
+            raise ValueError(
+                f"Embedding 返回数量不匹配: input={len(batch)}, output={len(data)}"
+            )
+        return [item.embedding for item in data]
+    except Exception as exc:
+        if not _is_token_limit_error(exc):
+            raise
+
+        # 多条场景：二分拆批，避免整批失败
+        if len(batch) > 1:
+            mid = len(batch) // 2
+            logger.warning(
+                f"[EmbeddingBatch] 触发 token 限制，自动拆分重试: size={len(batch)} -> "
+                f"{mid}+{len(batch)-mid}"
+            )
+            left = _embed_batch_with_auto_shrink(client, model, batch[:mid], token_budget, depth + 1)
+            right = _embed_batch_with_auto_shrink(client, model, batch[mid:], token_budget, depth + 1)
+            return left + right
+
+        # 单条场景：继续缩短文本并重试
+        original = batch[0]
+        reduced_budget = max(64, int(token_budget * 0.85))
+        truncated = _truncate_text_to_token_budget(original, reduced_budget)
+        if len(truncated) >= len(original):
+            fallback_len = max(1, len(original) // 2)
+            truncated = original[:fallback_len]
+        if not truncated:
+            truncated = original[:1]
+
+        logger.warning(
+            f"[EmbeddingBatch] 单条文本超限，自动缩短重试: old_chars={len(original)}, "
+            f"new_chars={len(truncated)}, budget={reduced_budget}"
+        )
+        return _embed_batch_with_auto_shrink(
+            client,
+            model,
+            [truncated],
+            reduced_budget,
+            depth + 1
+        )
+
+
 def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
     """获取指定模型的 embedding 函数
 
@@ -385,6 +685,11 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
 
     # 本地模型：使用 SentenceTransformer
     if provider == "local":
+        if not _HAS_SENTENCE_TRANSFORMERS:
+            raise ValueError(
+                "本地 embedding 模型不可用（sentence-transformers 未安装）。"
+                "请使用远程 embedding API，或安装完整依赖: pip install -r requirements.txt"
+            )
         if model_name not in local_embedding_models:
             logger.info(f"加载本地 embedding 模型: {model_name}")
             local_embedding_models[model_name] = SentenceTransformer(model_name)
@@ -403,12 +708,83 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     # 使用连接池复用 OpenAI client，避免每次创建新连接
     client = _get_openai_client(actual_key, api_base)
 
+    # 远程 embedding 接口通常限制“单次请求总 token”，不是“单条文本 token”
+    # 使用模型 max_tokens 的 90% 作为单请求预算，并自动分批请求。
+    cfg = EMBEDDING_MODELS.get(embedding_model_id, {})
+    max_tokens = int(cfg.get("max_tokens") or 8192)
+    request_token_budget = max(128, int(max_tokens * 0.9))
+    # 优先使用 model_name 作为真实请求模型 ID（动态模型场景下 key != model_id）
+    model_for_request = model_name or embedding_model_id
+    fallback_checked = False
+
     def embed_texts(texts):
-        response = client.embeddings.create(
-            model=embedding_model_id,
-            input=texts
-        )
-        return np.array([item.embedding for item in response.data])
+        nonlocal model_for_request, fallback_checked
+        if texts is None:
+            return np.array([])
+        if isinstance(texts, str):
+            text_list = [texts]
+        else:
+            text_list = [t if isinstance(t, str) else str(t) for t in texts]
+        if not text_list:
+            return np.array([])
+
+        batches = _prepare_embedding_batches(text_list, request_token_budget)
+        if len(batches) > 1:
+            logger.info(
+                f"[EmbeddingBatch] 模型={embedding_model_id}, 文本数={len(text_list)}, "
+                f"分批={len(batches)}, 预算={request_token_budget}"
+            )
+
+        vectors: List[list] = []
+        for batch in batches:
+            try:
+                vectors.extend(
+                    _embed_batch_with_auto_shrink(
+                        client=client,
+                        model=model_for_request,
+                        batch=batch,
+                        token_budget=request_token_budget,
+                    )
+                )
+            except Exception as exc:
+                # 模型不存在时，自动探测可用 embedding 模型并回退一次
+                if not fallback_checked and _is_model_not_found_error(exc):
+                    fallback_checked = True
+                    available_models = _fetch_available_model_ids(api_base, actual_key)
+                    fallback_model = _select_fallback_embedding_model(
+                        available_models=available_models,
+                        preferred_model=model_for_request,
+                        excluded_models=[model_for_request],
+                    )
+                    if fallback_model and fallback_model != model_for_request:
+                        logger.warning(
+                            f"[EmbeddingModelFallback] 模型不可用，自动回退: "
+                            f"{model_for_request} -> {fallback_model}"
+                        )
+                        model_for_request = fallback_model
+                        vectors.extend(
+                            _embed_batch_with_auto_shrink(
+                                client=client,
+                                model=model_for_request,
+                                batch=batch,
+                                token_budget=request_token_budget,
+                            )
+                        )
+                        continue
+
+                    raise ValueError(
+                        f"Embedding模型 '{model_for_request}' 不存在或未开通。"
+                        "请在「模型服务」中同步模型后重新选择可用的 Embedding 模型。"
+                    ) from exc
+
+                raise
+
+        if len(vectors) != len(text_list):
+            raise ValueError(
+                f"Embedding 向量数量异常: input={len(text_list)}, output={len(vectors)}"
+            )
+
+        return np.array(vectors)
 
     return embed_texts
 
@@ -420,9 +796,12 @@ def get_chunk_params(embedding_model_id: str, base_chunk_size: int = 1200, base_
 
     chunk_size = base_chunk_size
     if max_ctx:
-        # 使用更大的比例（50%而不是40%），并提高上限到2500
-        chunk_size = min(chunk_size, int(max_ctx * 0.5))
-        chunk_size = max(1000, min(chunk_size, 2500))  # 提高下限到1000，上限到2500
+        # 小上下文模型（如 512）不能被固定下限放大；按上下文窗口动态夹紧
+        safe_max = max(128, int(max_ctx * 0.6))
+        dynamic_floor = min(1000, max(200, int(max_ctx * 0.2)))
+        chunk_size = min(chunk_size, safe_max, 2500)
+        chunk_size = max(dynamic_floor, chunk_size)
+        chunk_size = min(chunk_size, safe_max)
     else:
         # 如果没有max_tokens配置，使用默认的1200
         chunk_size = base_chunk_size

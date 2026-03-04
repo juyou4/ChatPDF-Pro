@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2 } from 'lucide-react';
+import { X, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2, Code, MessageSquare, Type, Sigma } from 'lucide-react';
 import { useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from '../contexts/ChatParamsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -21,6 +21,17 @@ const ChatSettings = ({ isOpen, onClose }) => {
         enableTopP,
         enableMaxTokens,
         customParams,
+        thoughtAutoCollapse,
+        sendShortcut,
+        confirmDeleteMessage,
+        confirmRegenerateMessage,
+        codeCollapsible,
+        codeWrappable,
+        codeShowLineNumbers,
+        mathEngine,
+        mathEnableSingleDollar,
+        messageStyle,
+        messageFontSize,
         setMaxTokens,
         setTemperature,
         setTopP,
@@ -30,6 +41,17 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setEnableTopP,
         setEnableMaxTokens,
         setCustomParams,
+        setThoughtAutoCollapse,
+        setSendShortcut,
+        setConfirmDeleteMessage,
+        setConfirmRegenerateMessage,
+        setCodeCollapsible,
+        setCodeWrappable,
+        setCodeShowLineNumbers,
+        setMathEngine,
+        setMathEnableSingleDollar,
+        setMessageStyle,
+        setMessageFontSize,
     } = useChatParams();
 
     const DEFAULT_SETTINGS = CHAT_PARAMS_DEFAULT_SETTINGS;
@@ -45,6 +67,17 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setEnableTopP(DEFAULT_SETTINGS.enableTopP);
         setEnableMaxTokens(DEFAULT_SETTINGS.enableMaxTokens);
         setCustomParams(DEFAULT_SETTINGS.customParams);
+        setThoughtAutoCollapse(DEFAULT_SETTINGS.thoughtAutoCollapse);
+        setSendShortcut(DEFAULT_SETTINGS.sendShortcut);
+        setConfirmDeleteMessage(DEFAULT_SETTINGS.confirmDeleteMessage);
+        setConfirmRegenerateMessage(DEFAULT_SETTINGS.confirmRegenerateMessage);
+        setCodeCollapsible(DEFAULT_SETTINGS.codeCollapsible);
+        setCodeWrappable(DEFAULT_SETTINGS.codeWrappable);
+        setCodeShowLineNumbers(DEFAULT_SETTINGS.codeShowLineNumbers);
+        setMathEngine(DEFAULT_SETTINGS.mathEngine);
+        setMathEnableSingleDollar(DEFAULT_SETTINGS.mathEnableSingleDollar);
+        setMessageStyle(DEFAULT_SETTINGS.messageStyle);
+        setMessageFontSize(DEFAULT_SETTINGS.messageFontSize);
     };
 
     // 添加自定义参数
@@ -210,7 +243,204 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             )}
                         </div>
 
-                        <div className="border-t border-gray-100"></div>
+                        <div className="border-t border-gray-200"></div>
+
+                        {/* ===== 行为设置 ===== */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2 mb-1">
+                                <SlidersHorizontal className="w-4 h-4 text-gray-500" />
+                                <span className="text-sm font-bold text-gray-700">行为设置</span>
+                            </div>
+
+                            {/* 思考完成后自动折叠 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">思考自动折叠</span>
+                                    <Tooltip text="开启后，深度思考完成时自动折叠思考过程内容" />
+                                </div>
+                                <ToggleSwitch checked={thoughtAutoCollapse} onChange={setThoughtAutoCollapse} />
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 发送快捷键 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">发送快捷键</span>
+                                    <Tooltip text="选择发送消息的快捷键方式" />
+                                </div>
+                                <div className="flex gap-1">
+                                    {['Enter', 'Ctrl+Enter'].map((key) => (
+                                        <button
+                                            key={key}
+                                            onClick={() => setSendShortcut(key)}
+                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                                                sendShortcut === key
+                                                    ? 'bg-gray-700 text-white'
+                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                        >
+                                            {key}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 删除消息确认 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">删除消息确认</span>
+                                    <Tooltip text="删除消息前弹出确认对话框，防止误操作" />
+                                </div>
+                                <ToggleSwitch checked={confirmDeleteMessage} onChange={setConfirmDeleteMessage} />
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 重新生成确认 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">重新生成确认</span>
+                                    <Tooltip text="重新生成回答前弹出确认对话框" />
+                                </div>
+                                <ToggleSwitch checked={confirmRegenerateMessage} onChange={setConfirmRegenerateMessage} />
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-200"></div>
+
+                        {/* ===== 代码块设置 ===== */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2 mb-1">
+                                <Code className="w-4 h-4 text-gray-500" />
+                                <span className="text-sm font-bold text-gray-700">代码块设置</span>
+                            </div>
+
+                            {/* 代码块可折叠 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">代码块折叠</span>
+                                    <Tooltip text="允许折叠/展开代码块，方便浏览长回答" />
+                                </div>
+                                <ToggleSwitch checked={codeCollapsible} onChange={setCodeCollapsible} />
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 代码自动换行 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">代码自动换行</span>
+                                    <Tooltip text="代码块内容超出宽度时自动换行，而非水平滚动" />
+                                </div>
+                                <ToggleSwitch checked={codeWrappable} onChange={setCodeWrappable} />
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 代码行号 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">显示行号</span>
+                                    <Tooltip text="在代码块左侧显示行号" />
+                                </div>
+                                <ToggleSwitch checked={codeShowLineNumbers} onChange={setCodeShowLineNumbers} />
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-200"></div>
+
+                        {/* ===== 数学公式设置 ===== */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2 mb-1">
+                                <Sigma className="w-4 h-4 text-gray-500" />
+                                <span className="text-sm font-bold text-gray-700">数学公式</span>
+                            </div>
+
+                            {/* 数学引擎 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">渲染引擎</span>
+                                    <Tooltip text="选择数学公式渲染引擎。KaTeX 速度快，MathJax 兼容性好，关闭则不渲染公式" />
+                                </div>
+                                <div className="flex gap-1">
+                                    {[{ value: 'KaTeX', label: 'KaTeX' }, { value: 'MathJax', label: 'MathJax' }, { value: 'none', label: '关闭' }].map(({ value, label }) => (
+                                        <button
+                                            key={value}
+                                            onClick={() => setMathEngine(value)}
+                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                                                mathEngine === value
+                                                    ? 'bg-gray-700 text-white'
+                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 单 $ 行内公式 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">单 $ 行内公式</span>
+                                    <Tooltip text="启用后，$...$ 会被识别为行内公式。关闭可避免与美元符号冲突" />
+                                </div>
+                                <ToggleSwitch checked={mathEnableSingleDollar} onChange={setMathEnableSingleDollar} />
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-200"></div>
+
+                        {/* ===== 消息显示设置 ===== */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2 mb-1">
+                                <MessageSquare className="w-4 h-4 text-gray-500" />
+                                <span className="text-sm font-bold text-gray-700">消息显示</span>
+                            </div>
+
+                            {/* 消息样式 */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-800">消息样式</span>
+                                    <Tooltip text="选择消息的显示风格" />
+                                </div>
+                                <div className="flex gap-1">
+                                    {[{ value: 'plain', label: '平铺' }, { value: 'bubble', label: '气泡' }].map(({ value, label }) => (
+                                        <button
+                                            key={value}
+                                            onClick={() => setMessageStyle(value)}
+                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                                                messageStyle === value
+                                                    ? 'bg-gray-700 text-white'
+                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="border-t border-gray-100"></div>
+
+                            {/* 消息字体大小 */}
+                            <SettingSliderWithInput
+                                label="消息字体大小"
+                                tooltip="调整对话消息的字体大小（12-22px）"
+                                value={messageFontSize}
+                                onChange={(v) => setMessageFontSize(Math.round(v))}
+                                min={12} max={22} step={1}
+                                precision={0}
+                                color="emerald"
+                            />
+                        </div>
+
+                        <div className="border-t border-gray-200"></div>
 
                         {/* 重置按钮 */}
                         <button

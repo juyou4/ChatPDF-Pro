@@ -23,6 +23,24 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     reasoningEffort: 'off',     // 'off' | 'low' | 'medium' | 'high'
     // 记忆功能
     enableMemory: true,         // 是否启用智能记忆系统
+    // 思考过程自动折叠
+    thoughtAutoCollapse: true,  // 思考完成后自动折叠
+    // 发送快捷键
+    sendShortcut: 'Enter',      // 'Enter' | 'Ctrl+Enter'
+    // 消息操作确认
+    confirmDeleteMessage: true, // 删除消息前确认
+    confirmRegenerateMessage: false, // 重新生成前确认
+    // 代码块增强
+    codeCollapsible: false,     // 代码块可折叠
+    codeWrappable: true,        // 代码块自动换行
+    codeShowLineNumbers: false, // 代码块显示行号
+    // 数学公式引擎
+    mathEngine: 'KaTeX',            // 'KaTeX' | 'MathJax' | 'none'
+    mathEnableSingleDollar: true,   // 是否启用单 $ 行内公式
+    // 消息样式
+    messageStyle: 'plain',     // 'plain' | 'bubble'
+    // 消息字体大小
+    messageFontSize: 14,        // 12-22px
 };
 
 export const ChatParamsProvider = ({ children }) => {
@@ -41,6 +59,24 @@ export const ChatParamsProvider = ({ children }) => {
     const [reasoningEffort, setReasoningEffort] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.reasoningEffort);
     // 记忆功能
     const [enableMemory, setEnableMemory] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
+    // 思考过程自动折叠
+    const [thoughtAutoCollapse, setThoughtAutoCollapse] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.thoughtAutoCollapse);
+    // 发送快捷键
+    const [sendShortcut, setSendShortcut] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.sendShortcut);
+    // 消息操作确认
+    const [confirmDeleteMessage, setConfirmDeleteMessage] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.confirmDeleteMessage);
+    const [confirmRegenerateMessage, setConfirmRegenerateMessage] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.confirmRegenerateMessage);
+    // 代码块增强
+    const [codeCollapsible, setCodeCollapsible] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.codeCollapsible);
+    const [codeWrappable, setCodeWrappable] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.codeWrappable);
+    const [codeShowLineNumbers, setCodeShowLineNumbers] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.codeShowLineNumbers);
+    // 数学公式引擎
+    const [mathEngine, setMathEngine] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine);
+    const [mathEnableSingleDollar, setMathEnableSingleDollar] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.mathEnableSingleDollar);
+    // 消息样式
+    const [messageStyle, setMessageStyle] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.messageStyle);
+    // 消息字体大小
+    const [messageFontSize, setMessageFontSize] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize);
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
@@ -63,6 +99,17 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.customParams !== undefined) setCustomParams(settings.customParams);
                 if (settings.reasoningEffort !== undefined) setReasoningEffort(settings.reasoningEffort);
                 if (settings.enableMemory !== undefined) setEnableMemory(settings.enableMemory);
+                if (settings.thoughtAutoCollapse !== undefined) setThoughtAutoCollapse(settings.thoughtAutoCollapse);
+                if (settings.sendShortcut !== undefined) setSendShortcut(settings.sendShortcut);
+                if (settings.confirmDeleteMessage !== undefined) setConfirmDeleteMessage(settings.confirmDeleteMessage);
+                if (settings.confirmRegenerateMessage !== undefined) setConfirmRegenerateMessage(settings.confirmRegenerateMessage);
+                if (settings.codeCollapsible !== undefined) setCodeCollapsible(settings.codeCollapsible);
+                if (settings.codeWrappable !== undefined) setCodeWrappable(settings.codeWrappable);
+                if (settings.codeShowLineNumbers !== undefined) setCodeShowLineNumbers(settings.codeShowLineNumbers);
+                if (settings.mathEngine !== undefined) setMathEngine(settings.mathEngine);
+                if (settings.mathEnableSingleDollar !== undefined) setMathEnableSingleDollar(settings.mathEnableSingleDollar);
+                if (settings.messageStyle !== undefined) setMessageStyle(settings.messageStyle);
+                if (settings.messageFontSize !== undefined) setMessageFontSize(settings.messageFontSize);
             } else {
                 // 兼容旧版：从 globalSettings 中迁移对话参数
                 const globalSaved = localStorage.getItem('globalSettings');
@@ -79,6 +126,17 @@ export const ChatParamsProvider = ({ children }) => {
                     if (globalSettings.customParams !== undefined) setCustomParams(globalSettings.customParams);
                     if (globalSettings.reasoningEffort !== undefined) setReasoningEffort(globalSettings.reasoningEffort);
                     if (globalSettings.enableMemory !== undefined) setEnableMemory(globalSettings.enableMemory);
+                    if (globalSettings.thoughtAutoCollapse !== undefined) setThoughtAutoCollapse(globalSettings.thoughtAutoCollapse);
+                    if (globalSettings.sendShortcut !== undefined) setSendShortcut(globalSettings.sendShortcut);
+                    if (globalSettings.confirmDeleteMessage !== undefined) setConfirmDeleteMessage(globalSettings.confirmDeleteMessage);
+                    if (globalSettings.confirmRegenerateMessage !== undefined) setConfirmRegenerateMessage(globalSettings.confirmRegenerateMessage);
+                    if (globalSettings.codeCollapsible !== undefined) setCodeCollapsible(globalSettings.codeCollapsible);
+                    if (globalSettings.codeWrappable !== undefined) setCodeWrappable(globalSettings.codeWrappable);
+                    if (globalSettings.codeShowLineNumbers !== undefined) setCodeShowLineNumbers(globalSettings.codeShowLineNumbers);
+                    if (globalSettings.mathEngine !== undefined) setMathEngine(globalSettings.mathEngine);
+                    if (globalSettings.mathEnableSingleDollar !== undefined) setMathEnableSingleDollar(globalSettings.mathEnableSingleDollar);
+                    if (globalSettings.messageStyle !== undefined) setMessageStyle(globalSettings.messageStyle);
+                    if (globalSettings.messageFontSize !== undefined) setMessageFontSize(globalSettings.messageFontSize);
                 }
             }
         } catch (error) {
@@ -123,11 +181,26 @@ export const ChatParamsProvider = ({ children }) => {
             customParams,
             reasoningEffort,
             enableMemory,
+            thoughtAutoCollapse,
+            sendShortcut,
+            confirmDeleteMessage,
+            confirmRegenerateMessage,
+            codeCollapsible,
+            codeWrappable,
+            codeShowLineNumbers,
+            mathEngine,
+            mathEnableSingleDollar,
+            messageStyle,
+            messageFontSize,
         };
         debouncedSave(settings);
     }, [maxTokens, temperature, topP, contextCount, streamOutput,
         enableTemperature, enableTopP, enableMaxTokens, customParams,
-        reasoningEffort, enableMemory, debouncedSave]);
+        reasoningEffort, enableMemory, thoughtAutoCollapse, sendShortcut,
+        confirmDeleteMessage, confirmRegenerateMessage,
+        codeCollapsible, codeWrappable, codeShowLineNumbers,
+        mathEngine, mathEnableSingleDollar,
+        messageStyle, messageFontSize, debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
     useEffect(() => {
@@ -155,6 +228,17 @@ export const ChatParamsProvider = ({ children }) => {
         setCustomParams(CHAT_PARAMS_DEFAULT_SETTINGS.customParams);
         setReasoningEffort(CHAT_PARAMS_DEFAULT_SETTINGS.reasoningEffort);
         setEnableMemory(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
+        setThoughtAutoCollapse(CHAT_PARAMS_DEFAULT_SETTINGS.thoughtAutoCollapse);
+        setSendShortcut(CHAT_PARAMS_DEFAULT_SETTINGS.sendShortcut);
+        setConfirmDeleteMessage(CHAT_PARAMS_DEFAULT_SETTINGS.confirmDeleteMessage);
+        setConfirmRegenerateMessage(CHAT_PARAMS_DEFAULT_SETTINGS.confirmRegenerateMessage);
+        setCodeCollapsible(CHAT_PARAMS_DEFAULT_SETTINGS.codeCollapsible);
+        setCodeWrappable(CHAT_PARAMS_DEFAULT_SETTINGS.codeWrappable);
+        setCodeShowLineNumbers(CHAT_PARAMS_DEFAULT_SETTINGS.codeShowLineNumbers);
+        setMathEngine(CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine);
+        setMathEnableSingleDollar(CHAT_PARAMS_DEFAULT_SETTINGS.mathEnableSingleDollar);
+        setMessageStyle(CHAT_PARAMS_DEFAULT_SETTINGS.messageStyle);
+        setMessageFontSize(CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize);
     }, []);
 
     const value = {
@@ -170,6 +254,17 @@ export const ChatParamsProvider = ({ children }) => {
         customParams,
         reasoningEffort,
         enableMemory,
+        thoughtAutoCollapse,
+        sendShortcut,
+        confirmDeleteMessage,
+        confirmRegenerateMessage,
+        codeCollapsible,
+        codeWrappable,
+        codeShowLineNumbers,
+        mathEngine,
+        mathEnableSingleDollar,
+        messageStyle,
+        messageFontSize,
 
         // 设置方法
         setMaxTokens,
@@ -183,6 +278,17 @@ export const ChatParamsProvider = ({ children }) => {
         setCustomParams,
         setReasoningEffort,
         setEnableMemory,
+        setThoughtAutoCollapse,
+        setSendShortcut,
+        setConfirmDeleteMessage,
+        setConfirmRegenerateMessage,
+        setCodeCollapsible,
+        setCodeWrappable,
+        setCodeShowLineNumbers,
+        setMathEngine,
+        setMathEnableSingleDollar,
+        setMessageStyle,
+        setMessageFontSize,
 
         // 工具方法
         resetChatParams,

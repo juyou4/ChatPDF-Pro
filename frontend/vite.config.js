@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
+    base: './',
     plugins: [react()],
     server: {
         port: 3000,
@@ -60,6 +61,11 @@ export default defineConfig({
                 secure: false
             },
             '/storage_info': {
+                target: 'http://127.0.0.1:8000',
+                changeOrigin: true,
+                secure: false
+            },
+            '/capabilities': {
                 target: 'http://127.0.0.1:8000',
                 changeOrigin: true,
                 secure: false

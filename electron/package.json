@@ -1,0 +1,73 @@
+{
+  "name": "chatpdf-desktop",
+  "productName": "ChatPDF Pro",
+  "version": "3.0.1",
+  "description": "Smart PDF Assistant - Chat with your documents",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsc && electron .",
+    "build": "tsc",
+    "start": "electron .",
+    "package": "npm run build && electron-builder build --publish never",
+    "package:win": "npm run build && electron-builder build --win --publish never",
+    "package:mac": "npm run build && electron-builder build --mac --publish never",
+    "package:linux": "npm run build && electron-builder build --linux --publish never"
+  },
+  "author": "ChatPDF Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "get-port": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.chatpdf.desktop",
+    "productName": "ChatPDF Pro",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/build",
+        "to": "renderer",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../backend/dist/chatpdf-backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "sign": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "resources/icon.icns"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "resources/icon.png"
+    }
+  }
+}

@@ -113,6 +113,11 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
       try {
         // 1. 队列为空时的处理
         if (chunkQueueRef.current.length === 0) {
+          // 兼容 ref 延迟挂载：如果文本已渲染到内存但 DOM 还未绑定，
+          // 在空队列阶段持续尝试同步，避免出现“流式结束前一直空白，最后一次性显示”。
+          if (contentRef.current && contentRef.current.textContent !== displayedTextRef.current) {
+            contentRef.current.textContent = displayedTextRef.current
+          }
           if (streamDone) {
             // 流已结束，记录最终文本
             finalTextRef.current = displayedTextRef.current
@@ -163,8 +168,10 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
         // 9. 更新队列，移除已渲染的字符
         chunkQueueRef.current = chunkQueueRef.current.slice(charsToRenderCount)
 
-        // 10. 队列仍有内容，继续下一帧
-        if (chunkQueueRef.current.length > 0) {
+        // 10. 继续下一帧：
+        // - 只要流未结束，就持续轮询（允许后续新 chunk 随时进入队列）
+        // - 流已结束但队列仍有残留，也继续直到清空
+        if (!streamDone || chunkQueueRef.current.length > 0) {
           animationFrameRef.current = requestAnimationFrame(renderLoop)
         }
       } catch (error) {

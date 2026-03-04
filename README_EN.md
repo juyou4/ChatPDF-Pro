@@ -1,15 +1,15 @@
-# ChatPDF Pro v3.0.0
+# ChatPDF Pro v3.0.1
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.0-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.1-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
 **Smart Document Assistant - Chat with your PDFs** · [中文](README.md)
 
-[Quick Start](#quick-start) • [Features](#core-features) • [What's New in v3.0](#whats-new-in-v30) • [Tech Stack](#tech-stack) • [Configuration](#configuration)
+[Quick Start](#quick-start) • [Features](#core-features) • [What's New in v3.0.1](#whats-new-in-v301) • [Tech Stack](#tech-stack) • [Configuration](#configuration)
 
 </div>
 
@@ -29,7 +29,32 @@
 
 ---
 
-## What's New in v3.0
+## What's New in v3.0.1
+
+### 🖥️ Desktop Client (Electron)
+- **Standalone App** - Windows desktop client built with Electron, no browser needed
+- **One-Click Install** - NSIS installer, ready to use after installation
+- **Integrated Backend** - PyInstaller-packaged backend starts with the app, no Python setup required
+
+### 🧠 Deep Thinking Mode
+- **Reasoning Visualization** - Real-time display of AI reasoning process (ThinkingBlock) with collapse/expand
+- **Adjustable Reasoning** - Support for low / medium / high reasoning intensity
+- **Streaming Thinking** - Both thinking and response content support character-by-character streaming
+
+### 🔢 Math Formula Engine
+- **Multi-Engine Support** - Choose between KaTeX, MathJax, or disabled math rendering
+- **Chat Settings Integration** - Switch math engine directly in the chat settings panel
+- **Single Dollar Sign** - Optional `$...$` inline math support (enabled by default)
+- **LaTeX Bracket Conversion** - Auto-converts `\[...\]` / `\(...\)` to `$$...$$` / `$...$`
+
+### 🌐 Web Search
+- **AI Web Search** - Enable web search in conversations for real-time internet information
+- **Source Display** - Web search results include source links, expandable for details
+
+### ⚡ Streaming Output Optimization
+- **Ref Direct-Write Mode** - During streaming, writes text directly via DOM ref, avoiding React re-renders
+- **Smooth Character Animation** - useSmoothStream hook for natural character-by-character reveal
+- **Virtual Message List** - Only renders visible messages, significantly improving scroll performance
 
 ### 🧠 Semantic Groups
 - **Smart Aggregation** - Merges text chunks into ~5000-character semantically coherent units, respecting page, heading, and table boundaries
@@ -80,9 +105,11 @@
 ### AI Chat
 - **Multi-Model Support** - OpenAI, Anthropic, Google Gemini, Grok, Ollama, and more
 - **Context-Aware Q&A** - Intelligent answers based on document content with accurate citations
-- **Streaming Output** - Real-time typewriter-style responses with adjustable speed
-- **Markdown Rendering** - Full support for code highlighting, math formulas (KaTeX), tables, lists
+- **Streaming Output** - Real-time typewriter-style responses with ref direct-write mode
+- **Deep Thinking** - Real-time reasoning visualization with low/medium/high intensity
+- **Markdown Rendering** - Full support for code highlighting, math formulas (KaTeX/MathJax switchable), tables, lists
 - **Mermaid Rendering** - Auto-detects and renders Mermaid flowchart code blocks
+- **Web Search** - AI can fetch real-time internet information with source links
 - **Conversation History** - Auto-saves chat records, supports switching and deleting sessions
 
 ### Intelligent Retrieval (v3.0 Upgrade)
@@ -105,6 +132,9 @@
 - **Citation Navigation** - Click reference numbers in AI responses to jump to PDF pages
 - **Text Selection Toolbar** - Copy, search, AI interpret/translate selected text
 - **Keyboard Shortcuts** - Enter to send, Shift+Enter for new line
+- **Code Block Settings** - Collapsible, word-wrap, line numbers
+- **Font Settings** - Adjustable message font size
+- **Model Quick Switch** - Quick model switching at the top of chat area
 
 ---
 
@@ -207,8 +237,9 @@ Available in settings:
 - **Styling**: Tailwind CSS 3.4 + Framer Motion
 - **Markdown**: ReactMarkdown + rehype/remark ecosystem
 - **Flowcharts**: Mermaid - auto-renders code blocks as visual diagrams
-- **Math**: KaTeX
+- **Math**: KaTeX / MathJax (user-switchable)
 - **Code Highlighting**: Highlight.js
+- **Desktop**: Electron 26 + electron-builder
 
 ### Backend
 - **Framework**: FastAPI 0.115
@@ -237,34 +268,43 @@ ChatPDF/
 │   │   ├── components/
 │   │   │   ├── ChatPDF.jsx          # Main app component
 │   │   │   ├── PDFViewer.jsx        # PDF rendering
+│   │   │   ├── StreamingMarkdown.jsx # Markdown + math + Mermaid rendering
+│   │   │   ├── ThinkingBlock.jsx    # Deep thinking visualization
+│   │   │   ├── ChatSettings.jsx     # Chat parameter settings
+│   │   │   ├── VirtualMessageList.jsx # Virtualized message list
 │   │   │   ├── PresetQuestions.jsx   # Preset question bar
-│   │   │   ├── StreamingMarkdown.jsx # Markdown + Mermaid rendering
 │   │   │   └── CitationLink.jsx     # Citation click-to-navigate
-│   │   └── main.jsx
+│   │   ├── contexts/
+│   │   │   ├── ChatParamsContext.jsx # Chat params (incl. math engine)
+│   │   │   ├── GlobalSettingsContext.jsx
+│   │   │   └── WebSearchContext.jsx  # Web search state
+│   │   ├── hooks/
+│   │   │   ├── useMessageState.js    # Message state + streaming
+│   │   │   └── useSmoothStream.js    # Smooth streaming output
+│   │   └── utils/
+│   │       └── processLatexBrackets.js # LaTeX bracket conversion
 │   ├── package.json
 │   └── vite.config.js
 ├── backend/                     # FastAPI backend
-│   ├── app.py                   # Main app and routes
+│   ├── app.py                   # Main app entry
+│   ├── desktop_entry.py         # Desktop mode entry
+│   ├── routes/                  # API routes
 │   ├── services/
 │   │   ├── semantic_group_service.py  # Semantic group generation
 │   │   ├── granularity_selector.py    # Smart granularity selection
 │   │   ├── token_budget.py            # Token budget management
 │   │   ├── context_builder.py         # Context building + citations
-│   │   ├── advanced_search.py         # Regex/boolean search
-│   │   ├── preset_service.py          # Preset questions + prompts
-│   │   ├── retrieval_logger.py        # Retrieval observability
+│   │   ├── chat_service.py            # AI chat + deep thinking
+│   │   ├── web_search_service.py      # Web search service
 │   │   ├── embedding_service.py       # Vector indexing + retrieval
-│   │   ├── query_analyzer.py          # Query intent analysis
-│   │   ├── bm25_service.py            # BM25 retrieval
-│   │   ├── hybrid_search.py           # Hybrid search + RRF fusion
-│   │   └── rag_config.py              # RAG configuration
-│   ├── requirements.txt
-│   └── tests/                   # Unit tests + property-based tests
-├── data/
-│   ├── semantic_groups/         # Group data (JSON + FAISS indexes)
-│   └── vector_stores/           # Chunk vector indexes
-├── start.sh / start.bat         # Startup scripts
-├── THIRD_PARTY_NOTICES.md       # Third-party notices
+│   │   ├── hybrid_search.py           # BM25 + vector hybrid search
+│   │   └── rerank_service.py          # Reranking service
+│   └── requirements.txt
+├── electron/                    # Electron desktop
+│   ├── main.js                  # Electron main process
+│   └── package.json
+├── scripts/                     # Build scripts
+├── start.sh / start.bat         # Web startup scripts
 └── README.md
 ```
 
@@ -315,7 +355,20 @@ A: For scanned PDFs, consider OCR preprocessing first. pdfplumber works best wit
 
 ## Changelog
 
-### v3.0.0 (Current)
+### v3.0.1 (Current)
+- 🖥️ Electron Desktop Client - Windows standalone app with NSIS installer and integrated backend
+- 🧠 Deep Thinking Mode - Real-time reasoning visualization (ThinkingBlock) with collapse/expand and intensity control
+- 🔢 Math Engine Selection - Switch between KaTeX / MathJax / disabled in chat settings, single dollar inline math
+- 🌐 Web Search - AI web search in conversations with source links
+- ⚡ Streaming Optimization - Ref direct-write mode + useSmoothStream smooth character animation
+- 📜 Virtual Message List - Only renders visible messages for improved performance
+- 🔤 Code Block Settings - Collapsible, word-wrap, line numbers configurable
+- 🔠 Font Settings - Adjustable message font size
+- 🔀 Model Quick Switch - Quick model switching at the top of chat area
+- 🔍 OCR Settings Panel - Dedicated OCR configuration interface
+- 🔗 LaTeX Bracket Conversion - Ported cherry-studio balanced bracket matching algorithm
+
+### v3.0.0
 - 🧠 Semantic Groups - Aggregates chunks into semantically complete units with three-level granularity (summary/digest/full)
 - 🎯 Smart Granularity Selection - Automatically matches best detail level to query type
 - 💰 Token Budget Management - Language-aware estimation with smart degradation

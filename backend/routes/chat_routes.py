@@ -18,6 +18,7 @@ from services.table_service import protect_markdown_tables, restore_markdown_tab
 from services.query_analyzer import get_retrieval_strategy
 from services.preset_service import get_generation_prompt
 from services.context_builder import ContextBuilder
+from services.web_search_service import SearchManager, format_search_results
 import base64
 from models.provider_registry import PROVIDER_CONFIG
 from models.dynamic_store import load_dynamic_providers
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS = 30
+_MAX_WEB_SEARCH_RESULTS = 10
 
 
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
@@ -211,6 +213,10 @@ class ChatRequest(BaseModel):
     chat_history: Optional[List[dict]] = None
     enable_memory: bool = True
     enable_agent_retrieval: bool = False
+    enable_web_search: bool = False
+    web_search_provider: Optional[str] = "duckduckgo"
+    web_search_api_key: Optional[str] = None
+    web_search_max_results: Optional[int] = 5
 
 
 class ChatVisionRequest(BaseModel):
@@ -374,7 +380,8 @@ def _build_fused_context(
         f"用户选中的文本{page_label}"
     )
 
-    parts = [f"{selected_title}：\n{selected_text}"]
+    # 将 selected_text 放在块首，确保后续任何检索上下文都在其后出现。
+    parts = [f"{selected_text}\n\n{selected_title}"]
     if retrieval_context:
         parts.append(f"\n\n相关文档片段：\n\n{retrieval_context}")
     return "\n".join(parts)
@@ -405,6 +412,37 @@ def _build_selected_text_fallback_citations(
     return [_build_selected_text_citation(selected_text, selected_page_info)]
 
 
+def _normalize_web_search_max_results(value: Optional[int]) -> int:
+    if value is None:
+        return 5
+    return max(1, min(int(value), _MAX_WEB_SEARCH_RESULTS))
+
+
+async def _maybe_perform_web_search(request: ChatRequest) -> tuple[list[dict], str]:
+    """按请求开关执行联网搜索，返回 (sources, formatted_context)。"""
+    if not getattr(request, "enable_web_search", False):
+        return [], ""
+    if not request.question or not request.question.strip():
+        return [], ""
+
+    provider = request.web_search_provider or "duckduckgo"
+    max_results = _normalize_web_search_max_results(request.web_search_max_results)
+
+    try:
+        sources = await SearchManager.search(
+            query=request.question,
+            provider=provider,
+            api_key=request.web_search_api_key,
+            max_results=max_results,
+        )
+        if not sources:
+            return [], ""
+        return sources, format_search_results(sources)
+    except Exception as e:
+        logger.warning(f"联网搜索失败，已降级为仅文档检索: {e}")
+        return [], ""
+
+
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     if not hasattr(router, "documents_store"):
@@ -415,6 +453,8 @@ async def chat_with_pdf(request: ChatRequest):
     doc = store[request.doc_id]
     context = ""
     retrieval_meta = {}
+    web_search_sources: list[dict] = []
+    web_search_context = ""
     use_memory = _should_use_memory(request)
     if use_memory:
         _maybe_flush_memory(request)
@@ -433,6 +473,9 @@ async def chat_with_pdf(request: ChatRequest):
     if request.image_base64 and request.image_base64 not in image_list:
         image_list = [request.image_base64] + image_list
     image_list = [img for img in image_list if img]
+
+    if not image_list:
+        web_search_sources, web_search_context = await _maybe_perform_web_search(request)
 
     if image_list:
         print(f"[Chat] 📸 截图模式：处理 {len(image_list)} 张图")
@@ -543,6 +586,12 @@ async def chat_with_pdf(request: ChatRequest):
         if request.enable_glossary:
             glossary_instruction = build_glossary_prompt(context)
             if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
+        if web_search_context:
+            system_prompt += (
+                "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
+                f"{web_search_context}\n"
+                "\n回答时可参考联网结果，但不得与文档事实冲突。"
+            )
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
         citations = retrieval_meta.get("citations", [])
@@ -577,7 +626,8 @@ async def chat_with_pdf(request: ChatRequest):
             "doc_id": request.doc_id, "question": request.question,
             "timestamp": datetime.now().isoformat(), "used_provider": response.get("_used_provider"),
             "used_model": response.get("_used_model"), "fallback_used": response.get("_fallback_used", False),
-            "retrieval_meta": retrieval_meta
+            "retrieval_meta": retrieval_meta,
+            "web_search_sources": web_search_sources,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI调用失败: {str(e)}")
@@ -593,6 +643,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
     doc = store[request.doc_id]
     context = ""
     retrieval_meta = {}
+    web_search_sources: list[dict] = []
+    web_search_context = ""
     use_agent = False
     use_memory = _should_use_memory(request)
     memory_context = ""
@@ -609,6 +661,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
     if request.image_base64 and request.image_base64 not in image_list:
         image_list = [request.image_base64] + image_list
     image_list = [img for img in image_list if img]
+
+    if not image_list:
+        web_search_sources, web_search_context = await _maybe_perform_web_search(request)
 
     if image_list:
         print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
@@ -715,6 +770,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
 1. 基于文档内容准确回答。"""
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
+        if web_search_context:
+            system_prompt += (
+                "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
+                f"{web_search_context}\n"
+                "\n回答时可参考联网结果，但不得与文档事实冲突。"
+            )
         citations = retrieval_meta.get("citations", [])
         if citations:
             citation_prompt = _context_builder.build_citation_prompt(citations)
@@ -730,11 +791,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
     messages.append({"role": "user", "content": user_content})
 
     async def event_generator():
-        nonlocal messages, system_prompt, retrieval_meta
+        nonlocal messages, system_prompt, retrieval_meta, web_search_sources
         try:
             if use_agent:
                 # ... Agent 逻辑省略，保持原样 ...
                 pass
+            if web_search_sources:
+                yield f"data: {json.dumps({'type': 'web_search', 'sources': web_search_sources}, ensure_ascii=False)}\n\n"
             if not use_agent and not image_list:
                 yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'complete', 'message': '检索完成'}, ensure_ascii=False)}\n\n"
             # 使用 _buffered_stream 包装流式输出，合并高频小 chunk 减少 SSE 事件频率
@@ -755,7 +818,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     'done': chunk.get('done', False), 'used_provider': chunk.get('used_provider'),
                     'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used'),
                 }
-                if chunk.get("done"): chunk_data['retrieval_meta'] = retrieval_meta
+                if chunk.get("done"):
+                    chunk_data['retrieval_meta'] = retrieval_meta
+                    chunk_data['web_search_sources'] = web_search_sources
                 yield f"data: {json.dumps(chunk_data)}\n\n"
                 if chunk.get("done"):
                     if use_memory: threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()

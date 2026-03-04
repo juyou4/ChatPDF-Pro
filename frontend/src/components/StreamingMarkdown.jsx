@@ -4,11 +4,13 @@ import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
-import rehypeKatexCached from '../utils/rehypeKatexCached.js';
+import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { visit } from 'unist-util-visit';
 import CitationLink from './CitationLink';
+import { processLatexBrackets } from '../utils/processLatexBrackets.js';
+import { useChatParams } from '../contexts/ChatParamsContext';
 
 // mermaid 动态加载：仅在首次遇到 Mermaid 代码块时触发加载，
 // 使用单例 Promise 模式避免重复加载（需求 7.1）
@@ -112,9 +114,6 @@ const MermaidBlock = React.memo(({ code, defer }) => {
   );
 });
 
-const MATH_ENGINE = 'katex';
-const ENABLE_SINGLE_DOLLAR = true;
-const USE_LATEX_PREPROCESS = true;
 
 function escapeHtml(str) {
   return str
@@ -156,105 +155,7 @@ const remarkBlurRevealAST = (options) => {
   };
 };
 
-const MATH_HEURISTIC_REGEX = /(\\(frac|int|sum|prod|sqrt|log|exp|pi|rho|eta|theta|alpha|beta|gamma|delta|lambda|mu|tau|sigma|epsilon|phi|psi|omega|partial|Sigma|Delta|Gamma|Lambda|Omega|Phi|Pi|Psi|Theta|Xi)|[∑∏∞≈≠≤≥→←]|[_^][{a-zA-Z0-9]|[A-Za-z]\s*=\s*[A-Za-z0-9])/;
-
-const normalizeMathText = (expr) => {
-  let out = expr || '';
-  out = out.replace(/([A-Za-z\\]+)_([A-Za-z0-9]+)/g, (_m, g1, g2) => `${g1}_{${g2}}`);
-  out = out.replace(/([A-Za-z\\]+)\^([A-Za-z0-9]+)/g, (_m, g1, g2) => `${g1}^{${g2}}`);
-  return out;
-};
-
-const wrapBareMathLines = (segment) => {
-  return segment
-    .split(/\n/)
-    .map((line) => {
-      if (!line.trim()) return line;
-      if (line.includes('$') || line.includes('`') || line.includes('http')) return line;
-
-      const trimmed = line.trim();
-      const labelMatch = trimmed.match(/^(.{0,12}?[：:])\s*(.+)$/);
-      if (labelMatch && MATH_HEURISTIC_REGEX.test(labelMatch[2])) {
-        const normalized = normalizeMathText(labelMatch[2]);
-        return `${labelMatch[1]}\n$$\n${normalized}\n$$`;
-      }
-
-      if (MATH_HEURISTIC_REGEX.test(trimmed)) {
-        return `$$\n${normalizeMathText(trimmed)}\n$$`;
-      }
-      return line;
-    })
-    .join('\n');
-};
-
-const processLatexBrackets = (text) => {
-  if (!text || typeof text !== 'string') return text;
-
-  const fencedPattern = /(```[\s\S]*?```|~~~[\s\S]*?~~~)/g;
-  const segments = text.split(fencedPattern);
-  const fences = text.match(fencedPattern) || [];
-
-  const transformed = segments.map((segment, idx) => {
-    if (idx % 2 === 1) {
-      const fence = fences[(idx - 1) / 2];
-
-      const langMatch = fence.match(/^(```|~~~)([\w-]*)\n/);
-      const fenceLang = langMatch ? langMatch[2].toLowerCase() : '';
-      if (fenceLang === 'mermaid') {
-        return fence;
-      }
-
-      const innerMatch = fence.match(/^(```|~~~)(?:[\w-]*\n)?([\s\S]*?)\1$/);
-      if (innerMatch) {
-        const innerContent = innerMatch[2];
-        if (
-          MATH_HEURISTIC_REGEX.test(innerContent) &&
-          !innerContent.includes('import ') &&
-          !innerContent.includes('function ') &&
-          !innerContent.includes('const ')
-        ) {
-          return `\n$$\n${normalizeMathText(innerContent.trim())}\n$$\n`;
-        }
-      }
-      return fence;
-    }
-
-    const inlineParts = segment.split(/(`[^`]*`)/g);
-    const handled = inlineParts
-      .map((part, i) => {
-        if (i % 2 === 1) return part;
-        let current = part;
-        current = current.replace(/\\\[((?:.|\r?\n)*?)\\\]/g, (_m, p1) => `$$${p1}$$`);
-        current = current.replace(/\\\(((?:.|\r?\n)*?)\\\)/g, (_m, p1) => `$${p1}$`);
-        return current;
-      })
-      .join('');
-
-    let finalSegment = handled;
-
-    finalSegment = finalSegment.replace(/`([^`]+)`/g, (match, codeContent) => {
-      if (codeContent.trim().startsWith('$') && codeContent.trim().endsWith('$')) {
-        return codeContent;
-      }
-      if (codeContent.trim().startsWith('\\(') && codeContent.trim().endsWith('\\)')) {
-        return '$' + codeContent.trim().slice(2, -2) + '$';
-      }
-
-      if (MATH_HEURISTIC_REGEX.test(codeContent)) {
-        if (codeContent.includes('=') || codeContent.includes('\\') || codeContent.length > 3) {
-          return `$${codeContent}$`;
-        }
-      }
-      return match;
-    });
-
-    return wrapBareMathLines(finalSegment);
-  });
-
-  return transformed.join('');
-};
-
-const processCitationRefs = (text, citations) => {
+export const processCitationRefs = (text, citations) => {
   if (!text || !citations || citations.length === 0) return text;
 
   const validRefs = new Set(citations.map((c) => c.ref));
@@ -268,9 +169,71 @@ const processCitationRefs = (text, citations) => {
   });
 };
 
+/**
+ * 可折叠的 pre 代码块组件
+ * 超过 10 行的代码块默认折叠，显示前 5 行 + 展开按钮
+ */
+const CollapsiblePre = ({ children, ...props }) => {
+  const [collapsed, setCollapsed] = useState(true);
+  const contentRef = useRef(null);
+
+  const lineCount = useMemo(() => {
+    const text = React.Children.toArray(children)
+      .map(child => {
+        if (typeof child === 'string') return child;
+        if (React.isValidElement(child) && child.props?.children) {
+          return String(child.props.children);
+        }
+        return '';
+      })
+      .join('');
+    return (text.match(/\n/g) || []).length + 1;
+  }, [children]);
+
+  const shouldCollapse = lineCount > 10;
+
+  return (
+    <div className="collapsible-code-block relative">
+      <pre
+        {...props}
+        ref={contentRef}
+        style={{
+          ...(shouldCollapse && collapsed ? { maxHeight: '160px', overflow: 'hidden' } : {}),
+        }}
+      >
+        {children}
+      </pre>
+      {shouldCollapse && (
+        <>
+          {collapsed && (
+            <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-gray-100 dark:from-gray-800 to-transparent pointer-events-none" />
+          )}
+          <button
+            onClick={() => setCollapsed(prev => !prev)}
+            className="w-full text-center text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 py-1 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 transition-colors"
+          >
+            {collapsed ? `展开全部 (${lineCount} 行)` : '收起'}
+          </button>
+        </>
+      )}
+    </div>
+  );
+};
+
+export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
+  return (
+    prevProps.content === nextProps.content &&
+    prevProps.isStreaming === nextProps.isStreaming &&
+    (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
+    prevProps.citations === nextProps.citations
+  );
+};
+
 const StreamingMarkdown = React.memo(
   ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null }) => {
     const containerRef = useRef(null);
+    const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
+    const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
 
     // ref 直写模式：流式输出期间通过 streamingRef 直接更新 DOM，
     // 不经过 React 状态更新和 ReactMarkdown 渲染
@@ -280,25 +243,24 @@ const StreamingMarkdown = React.memo(
       // ref 直写模式下不需要处理内容（由 DOM 直接显示纯文本）
       if (isRefDirectWrite) return '';
       let text = content || '';
-      if (USE_LATEX_PREPROCESS && !isStreaming) {
+      if (mathEngine !== 'none') {
         text = processLatexBrackets(text);
       }
       if (citations && citations.length > 0) {
         text = processCitationRefs(text, citations);
       }
       return text;
-    }, [content, citations, isStreaming, isRefDirectWrite]);
+    }, [content, citations, isStreaming, isRefDirectWrite, mathEngine]);
 
     // 基础 remark 插件数组缓存：配置不变时保持引用稳定，
     // 避免 ReactMarkdown 因插件引用变化而重新初始化（需求 6.3）
     const baseRemarkPlugins = React.useMemo(() => {
-      const plugins = [];
-      if (MATH_ENGINE !== 'none') {
-        plugins.push([remarkMath, { singleDollarTextMath: ENABLE_SINGLE_DOLLAR }]);
+      const plugins = [remarkGfm];
+      if (mathEngine !== 'none') {
+        plugins.push([remarkMath, { singleDollarTextMath: mathEnableSingleDollar }]);
       }
-      plugins.push(remarkGfm);
       return plugins;
-    }, []);
+    }, [mathEngine, mathEnableSingleDollar]);
 
     // 完整 remark 插件数组：仅在需要 blur-reveal 动画时追加动态插件，
     // 非流式输出时直接复用稳定的基础插件数组引用
@@ -312,11 +274,34 @@ const StreamingMarkdown = React.memo(
     // rehype 插件数组缓存：配置固定，空依赖保持引用稳定（需求 6.3）
     // 使用带缓存的 rehypeKatexCached 替代 rehypeKatex，
     // 相同公式表达式直接返回缓存结果，避免重复渲染（需求 6.2）
-    const rehypePlugins = React.useMemo(() => [
-      rehypeRaw,
-      [rehypeKatexCached, { strict: false, trust: true, output: 'html' }],
-      rehypeHighlight,
-    ], []);
+    // MathJax 懒加载：仅在用户切换到 MathJax 引擎时动态 import，避免 2MB 静态打包
+    const [rehypeMathjaxPlugin, setRehypeMathjaxPlugin] = useState(null);
+    useEffect(() => {
+      if (mathEngine === 'MathJax' && !rehypeMathjaxPlugin) {
+        import('rehype-mathjax/svg').then(mod => {
+          setRehypeMathjaxPlugin(() => mod.default);
+        }).catch(err => {
+          console.error('[StreamingMarkdown] Failed to load rehype-mathjax:', err);
+        });
+      }
+    }, [mathEngine, rehypeMathjaxPlugin]);
+
+    const rehypePlugins = React.useMemo(() => {
+      const plugins = [];
+      if (mathEngine === 'KaTeX') {
+        // 标准 rehype-katex 生成完整 HAST 节点，rehypeRaw 顺序无关
+        plugins.push(rehypeRaw);
+        plugins.push([rehypeKatex, { strict: false, trust: true, output: 'html' }]);
+      } else if (mathEngine === 'MathJax' && rehypeMathjaxPlugin) {
+        // MathJax 生成完整 HAST SVG 节点，rehypeRaw 需在其前处理 markdown 中的原始 HTML
+        plugins.push(rehypeRaw);
+        plugins.push(rehypeMathjaxPlugin);
+      } else {
+        plugins.push(rehypeRaw);
+      }
+      plugins.push(rehypeHighlight);
+      return plugins;
+    }, [mathEngine, rehypeMathjaxPlugin]);
 
     useEffect(() => {
       if (!content || content.length === 0) {
@@ -329,8 +314,35 @@ const StreamingMarkdown = React.memo(
     }, [content]);
 
     const streamingClass = isStreaming ? 'streaming-active' : '';
+    const showWaitingDots = isStreaming && (
+      isRefDirectWrite
+        ? !hasDirectWriteContent
+        : (!content || content.trim().length === 0)
+    );
 
-    const showWaitingDots = isStreaming && (!content || content.trim().length === 0);
+    useEffect(() => {
+      if (!isRefDirectWrite) {
+        setHasDirectWriteContent(false);
+        return;
+      }
+
+      const el = streamingRef?.current;
+      if (!el) {
+        setHasDirectWriteContent(false);
+        return;
+      }
+
+      const syncHasContent = () => {
+        const text = el.textContent || '';
+        setHasDirectWriteContent(text.trim().length > 0);
+      };
+
+      syncHasContent();
+      const observer = new MutationObserver(syncHasContent);
+      observer.observe(el, { childList: true, subtree: true, characterData: true });
+
+      return () => observer.disconnect();
+    }, [isRefDirectWrite, streamingRef]);
 
     const citationMap = useMemo(() => {
       if (!citations || citations.length === 0) return null;
@@ -372,8 +384,27 @@ const StreamingMarkdown = React.memo(
             return <MermaidBlock code={mermaidCode} defer={isStreaming} />;
           }
 
+          if (!inline && codeShowLineNumbers) {
+            const codeStr = String(children).replace(/\n$/, '');
+            const lines = codeStr.split('\n');
+            return (
+              <code className={className} {...props} style={{ ...(codeWrappable ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } : {}) }}>
+                <table className="code-line-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
+                  <tbody>
+                    {lines.map((line, i) => (
+                      <tr key={i}>
+                        <td className="code-line-number" style={{ userSelect: 'none', paddingRight: '12px', textAlign: 'right', color: '#9ca3af', minWidth: '2em', verticalAlign: 'top' }}>{i + 1}</td>
+                        <td className="code-line-content" style={{ whiteSpace: codeWrappable ? 'pre-wrap' : 'pre' }}>{line}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </code>
+            );
+          }
+
           return (
-            <code className={className} {...props}>
+            <code className={className} {...props} style={{ ...((!inline && codeWrappable) ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } : {}) }}>
               {children}
             </code>
           );
@@ -394,10 +425,14 @@ const StreamingMarkdown = React.memo(
             return <>{children}</>;
           }
 
-          return <pre {...props}>{children}</pre>;
+          if (codeCollapsible) {
+            return <CollapsiblePre {...props}>{children}</CollapsiblePre>;
+          }
+
+          return <pre {...props} style={{ ...(codeWrappable ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } : {}) }}>{children}</pre>;
         }
       }),
-      [citationMap, handleCitationClick, isStreaming]
+      [citationMap, handleCitationClick, isStreaming, codeCollapsible, codeWrappable, codeShowLineNumbers]
     );
 
     return (
@@ -409,10 +444,19 @@ const StreamingMarkdown = React.memo(
           // ref 直写模式：流式输出期间显示纯文本容器，
           // useSmoothStream 通过 streamingRef 直接写入 textContent，
           // 避免触发 React 状态更新和 ReactMarkdown 重渲染（需求 4.2）
-          <div
-            ref={streamingRef}
-            className="whitespace-pre-wrap break-words"
-          />
+          <div className="relative min-h-[20px]">
+            <div
+              ref={streamingRef}
+              className="whitespace-pre-wrap break-words"
+            />
+            {showWaitingDots && (
+              <div className="streaming-dots absolute left-0 top-0">
+                <span className="dot" />
+                <span className="dot" />
+                <span className="dot" />
+              </div>
+            )}
+          </div>
         ) : showWaitingDots ? (
           <div className="streaming-dots">
             <span className="dot" />
@@ -434,17 +478,11 @@ const StreamingMarkdown = React.memo(
   },
   // 自定义比较函数：仅在关键 props 变化时重渲染
   // ref 直写模式下，streamingRef 的存在/消失也需要触发重渲染
-  (prevProps, nextProps) => {
-    return (
-      prevProps.content === nextProps.content &&
-      prevProps.isStreaming === nextProps.isStreaming &&
-      (prevProps.streamingRef != null) === (nextProps.streamingRef != null)
-    );
-  }
+  streamingMarkdownAreEqual
 );
 
 // 为 React DevTools 添加显示名称
 StreamingMarkdown.displayName = 'StreamingMarkdown';
 
-export { processLatexBrackets };
+export { processLatexBrackets } from '../utils/processLatexBrackets.js';
 export default StreamingMarkdown;

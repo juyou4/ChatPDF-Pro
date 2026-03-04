@@ -38,6 +38,32 @@ PROVIDER_BASE_URL_HINTS = {
     "openai": "openai.com",
 }
 
+# 废弃模型 ID 映射：用于兼容旧安装包/旧配置中的历史模型键名
+DEPRECATED_MODEL_ID_ALIASES = {
+    # SiliconFlow 旧 ID（已逐步下线） -> 新 ID
+    "Qwen/Qwen-Embedding-8B": "Qwen/Qwen3-Embedding-8B",
+    # OpenAI 经典 embedding 旧 ID（兼容迁移到 3-small）
+    "text-embedding-ada-002": "text-embedding-3-small",
+    # MiniMax 旧 embedding ID
+    "embo-01": "minimax-embedding-v2",
+}
+
+
+def normalize_deprecated_model_id(raw_model_id: str) -> str:
+    """将历史模型 ID 归一到当前可用模型 ID。
+
+    支持 plain key 和 composite key（provider:modelId）两种输入。
+    """
+    if not raw_model_id:
+        return raw_model_id
+
+    if ":" in raw_model_id:
+        provider_part, model_part = raw_model_id.split(":", 1)
+        mapped_model_part = DEPRECATED_MODEL_ID_ALIASES.get(model_part, model_part)
+        return f"{provider_part}:{mapped_model_part}"
+
+    return DEPRECATED_MODEL_ID_ALIASES.get(raw_model_id, raw_model_id)
+
 
 def resolve_model_id(
     raw_model_id: str,
@@ -58,6 +84,8 @@ def resolve_model_id(
     """
     if not raw_model_id:
         return None, None
+
+    raw_model_id = normalize_deprecated_model_id(raw_model_id)
 
     # 1. 直接匹配：纯 modelId 或旧格式（如 "local-minilm"）
     if raw_model_id in EMBEDDING_MODELS:

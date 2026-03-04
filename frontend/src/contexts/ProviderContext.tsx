@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react'
 import { SYSTEM_PROVIDERS } from '../config/providers'
 import type { Provider, ProviderUpdate, ProviderTestResult } from '../types/provider'
+import { useCapabilities } from './CapabilitiesContext'
 
 /**
  * ProviderContext接口定义
@@ -76,6 +77,8 @@ export function migrateProviders(oldData: string): Provider[] | null {
 }
 
 export function ProviderProvider({ children }: { children: ReactNode }) {
+    const { hasLocalEmbedding, hasLocalRerank } = useCapabilities()
+
     const [providers, setProviders] = useState<Provider[]>(() => {
         const savedVersion = localStorage.getItem(VERSION_KEY)
         const saved = localStorage.getItem(STORAGE_KEY)
@@ -217,18 +220,24 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
         }
     }
 
+    // 根据后端能力过滤 provider 列表（桌面模式下隐藏不可用的本地模型）
+    const filteredProviders = useMemo(() => {
+        if (hasLocalEmbedding) return providers
+        return providers.filter(p => p.id !== 'local')
+    }, [providers, hasLocalEmbedding])
+
     /**
      * 根据ID获取Provider
      */
     const getProviderById = (id: string): Provider | null => {
-        return providers.find(p => p.id === id) || null
+        return filteredProviders.find(p => p.id === id) || null
     }
 
     /**
      * 获取所有启用的Providers
      */
     const getEnabledProviders = (): Provider[] => {
-        return providers.filter(p => p.enabled)
+        return filteredProviders.filter(p => p.enabled)
     }
 
     /**
@@ -245,7 +254,7 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
     return (
         <ProviderContext.Provider
             value={{
-                providers,
+                providers: filteredProviders,
                 addProvider,
                 updateProvider,
                 testConnection,

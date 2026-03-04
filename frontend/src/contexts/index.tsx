@@ -11,6 +11,7 @@
 export { ProviderProvider, useProvider } from './ProviderContext'
 export { ModelProvider, useModel } from './ModelContext'
 export { DefaultsProvider, useDefaults } from './DefaultsContext'
+export { CapabilitiesProvider, useCapabilities } from './CapabilitiesContext'
 
 /**
  * 三层架构组合Provider
@@ -22,18 +23,21 @@ export { DefaultsProvider, useDefaults } from './DefaultsContext'
  * </ThreeLayerProvider>
  */
 import React, { ReactNode } from 'react'
+import { CapabilitiesProvider } from './CapabilitiesContext'
 import { ProviderProvider } from './ProviderContext'
 import { ModelProvider } from './ModelContext'
 import { DefaultsProvider } from './DefaultsContext'
 
 export function ThreeLayerProvider({ children }: { children: ReactNode }) {
     return (
-        <ProviderProvider>
-            <ModelProvider>
-                <DefaultsProvider>
-                    {children}
-                </DefaultsProvider>
-            </ModelProvider>
-        </ProviderProvider>
+        <CapabilitiesProvider>
+            <ProviderProvider>
+                <ModelProvider>
+                    <DefaultsProvider>
+                        {children}
+                    </DefaultsProvider>
+                </ModelProvider>
+            </ProviderProvider>
+        </CapabilitiesProvider>
     )
 }

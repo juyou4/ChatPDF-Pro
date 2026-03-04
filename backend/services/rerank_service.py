@@ -2,7 +2,11 @@ import logging
 from typing import List, Optional
 
 import httpx
-from sentence_transformers import CrossEncoder
+try:
+    from sentence_transformers import CrossEncoder
+    _HAS_CROSS_ENCODER = True
+except (ImportError, OSError):
+    _HAS_CROSS_ENCODER = False
 from models.api_key_selector import select_api_key
 from services import rerank_api_service
 
@@ -15,7 +19,13 @@ class RerankService:
     def __init__(self):
         self._cache = {}
 
-    def _get_model(self, model_name: str) -> CrossEncoder:
+    def _get_model(self, model_name: str):
+        if not _HAS_CROSS_ENCODER:
+            raise ValueError(
+                "本地 rerank 模型不可用（sentence-transformers 未安装）。"
+                "请使用远程 rerank API（Cohere/Jina/硅基流动等），"
+                "或安装完整依赖: pip install -r requirements.txt"
+            )
         if model_name not in self._cache:
             logger.info(f"[RerankService] 加载本地模型: {model_name}（首次加载可能需要下载）")
             try:
