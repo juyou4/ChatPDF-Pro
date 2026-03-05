@@ -2429,6 +2429,16 @@ def search_document_chunks(
             if group_search_elapsed > 0.1:
                 timings["group_search_ms"] = group_search_elapsed
 
+            # 邻居 chunk 上下文扩展
+            try:
+                from config import settings as _cfg
+                _expand_n = _cfg.num_expand_context_chunk
+                if _expand_n > 0:
+                    from services.chunk_expander import expand_context_chunks
+                    results = expand_context_chunks(results, chunks, expand_n=_expand_n)
+            except Exception as _expand_err:
+                logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
+
             # 总耗时记录（需求 10.1）
             timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
             logger.info(f"[{doc_id}] 检索耗时: {timings}")
@@ -2477,6 +2487,16 @@ def search_document_chunks(
     group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
     if group_search_elapsed > 0.1:
         timings["group_search_ms"] = group_search_elapsed
+
+    # 邻居 chunk 上下文扩展
+    try:
+        from config import settings
+        _expand_n = settings.num_expand_context_chunk
+        if _expand_n > 0:
+            from services.chunk_expander import expand_context_chunks
+            results = expand_context_chunks(results, chunks, expand_n=_expand_n)
+    except Exception as _expand_err:
+        logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
 
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)

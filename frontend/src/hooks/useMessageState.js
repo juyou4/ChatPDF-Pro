@@ -93,6 +93,8 @@ export const normalizeAssistantCitations = (content, citations) => {
  * @param {Function} options.getProviderById - 根据 ID 获取 provider
  * @param {string} options.streamSpeed - 流式输出速度设置
  * @param {boolean} options.enableVectorSearch - 是否启用向量搜索
+ * @param {boolean} options.enableBlurReveal - 是否启用 Blur Reveal 动画
+ * @param {string} options.blurIntensity - Blur Reveal 强度（light|medium|strong）
  * @param {Object} options.globalSettings - 全局设置（来自 useGlobalSettings）
  */
 export function useMessageState({
@@ -105,6 +107,11 @@ export function useMessageState({
   getProviderById,
   streamSpeed = 'normal',
   enableVectorSearch = false,
+  enableGraphRAG = false,
+  enableJiebaBM25 = true,
+  numExpandContextChunk = 1,
+  enableBlurReveal = false,
+  blurIntensity = 'medium',
   globalSettings = {},
 } = {}) {
   // ========== 消息核心状态 ==========
@@ -141,7 +148,7 @@ export function useMessageState({
   const {
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens,
-    customParams, reasoningEffort,
+    customParams, reasoningEffort, answerDetailLevel,
     enableMemory,
   } = globalSettings;
 
@@ -152,6 +159,8 @@ export function useMessageState({
   // 流结束后通过 getFinalText() 一次性同步到 React 状态
   const contentStream = useSmoothStream({
     streamDone: contentStreamDone,
+    enableBlurReveal,
+    blurIntensity,
   });
 
   const thinkingStream = useSmoothStream({
@@ -226,11 +235,15 @@ export function useMessageState({
       image_base64: screenshots[0]?.dataUrl ? screenshots[0].dataUrl.split(',')[1] : null,
       enable_thinking: reasoningEffort !== 'off',
       reasoning_effort: reasoningEffort !== 'off' ? reasoningEffort : null,
+      answer_detail: answerDetailLevel || 'standard',
       max_tokens: enableMaxTokens ? maxTokens : null,
       temperature: enableTemperature ? temperature : null,
       top_p: enableTopP ? topP : null,
       stream_output: streamOutput,
       enable_vector_search: enableVectorSearch,
+      enable_graphrag: enableGraphRAG,
+      enable_jieba_bm25: enableJiebaBM25,
+      num_expand_context_chunk: numExpandContextChunk,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
       custom_params: customParams?.length > 0
         ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
@@ -485,7 +498,7 @@ export function useMessageState({
     getChatCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
-    reasoningEffort, enableMemory,
+    reasoningEffort, answerDetailLevel, enableMemory,
     enableWebSearch, webSearchProvider, webSearchApiKey,
   ]);
 

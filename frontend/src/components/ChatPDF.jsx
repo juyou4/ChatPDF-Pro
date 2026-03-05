@@ -123,6 +123,9 @@ const ChatPDF = () => {
   const [toolbarScale, setToolbarScale] = useDebouncedLocalStorage('toolbarScale', 1);
   const [useRerankSetting, setUseRerankSetting] = useDebouncedLocalStorage('useRerank', true);
   const [rerankerModel, setRerankerModel] = useDebouncedLocalStorage('rerankerModel', 'BAAI/bge-reranker-base');
+  const [enableGraphRAG, setEnableGraphRAG] = useDebouncedLocalStorage('enableGraphRAG', false);
+  const [enableJiebaBM25, setEnableJiebaBM25] = useDebouncedLocalStorage('enableJiebaBM25', true);
+  const [numExpandContextChunk, setNumExpandContextChunk] = useDebouncedLocalStorage('numExpandContextChunk', 1);
 
   // 不需要持久化的设置状态
   const [availableModels, setAvailableModels] = useState({});
@@ -319,6 +322,11 @@ const ChatPDF = () => {
     getProviderById,
     streamSpeed,
     enableVectorSearch,
+    enableGraphRAG,
+    enableJiebaBM25,
+    numExpandContextChunk,
+    enableBlurReveal,
+    blurIntensity,
     globalSettings,
   });
   const {
@@ -1412,6 +1420,37 @@ const ChatPDF = () => {
                     <span className="font-medium">Screenshot Analysis</span>
                     <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-purple-600 w-5 h-5" />
                   </label>
+
+                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mt-4 mb-1 px-2">检索增强</h4>
+                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
+                    <div>
+                      <span className="font-medium">GraphRAG 知识图谱</span>
+                      <p className="text-xs text-gray-500">实体关系提取 + 社区聚类增强检索</p>
+                    </div>
+                    <input type="checkbox" checked={enableGraphRAG} onChange={e => setEnableGraphRAG(e.target.checked)} className="accent-purple-600 w-5 h-5" />
+                  </label>
+                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
+                    <div>
+                      <span className="font-medium">jieba 中文分词</span>
+                      <p className="text-xs text-gray-500">提升 BM25 中文关键词匹配精度</p>
+                    </div>
+                    <input type="checkbox" checked={enableJiebaBM25} onChange={e => setEnableJiebaBM25(e.target.checked)} className="accent-purple-600 w-5 h-5" />
+                  </label>
+                  <div className="p-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">邻居上下文扩展</label>
+                    <CustomSelect
+                      value={numExpandContextChunk}
+                      onChange={setNumExpandContextChunk}
+                      options={[
+                        { value: 0, label: '关闭' },
+                        { value: 1, label: '±1 块（前后各 1 个）' },
+                        { value: 2, label: '±2 块（前后各 2 个）' },
+                        { value: 3, label: '±3 块（前后各 3 个）' },
+                      ]}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">命中 chunk 前后各扩展 N 个邻居块作为上下文</p>
+                  </div>
+
                   {lastCallInfo && (
                     <div className="mt-3 p-3 rounded-[18px] border text-xs text-gray-700 bg-gray-50">
                       <div>调用来源: <strong>{lastCallInfo.provider || '未知'}</strong></div>

@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS = 30
 _MAX_WEB_SEARCH_RESULTS = 10
+_DEFAULT_ANSWER_DETAIL = "standard"
+_VALID_ANSWER_DETAILS = {"concise", "standard", "detailed"}
 
 
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
@@ -266,10 +268,14 @@ class ChatRequest(BaseModel):
     chat_history: Optional[List[dict]] = None
     enable_memory: bool = True
     enable_agent_retrieval: bool = False
+    answer_detail: Optional[str] = _DEFAULT_ANSWER_DETAIL
     enable_web_search: bool = False
-    web_search_provider: Optional[str] = "duckduckgo"
+    web_search_provider: Optional[str] = "auto"
     web_search_api_key: Optional[str] = None
     web_search_max_results: Optional[int] = 5
+    enable_graphrag: bool = False
+    enable_jieba_bm25: bool = True
+    num_expand_context_chunk: int = 1
 
 
 class ChatVisionRequest(BaseModel):
@@ -471,6 +477,28 @@ def _normalize_web_search_max_results(value: Optional[int]) -> int:
     return max(1, min(int(value), _MAX_WEB_SEARCH_RESULTS))
 
 
+def _normalize_answer_detail(value: Optional[str]) -> str:
+    if not value:
+        return _DEFAULT_ANSWER_DETAIL
+    detail = str(value).strip().lower()
+    if detail in _VALID_ANSWER_DETAILS:
+        return detail
+    return _DEFAULT_ANSWER_DETAIL
+
+
+def _build_answer_style_instruction(answer_detail: str) -> str:
+    """根据回答详细度生成提示词指令。"""
+    detail = _normalize_answer_detail(answer_detail)
+    if detail == "concise":
+        return "回答风格：简洁模式。优先给出结论，控制篇幅，避免冗长展开。"
+    if detail == "detailed":
+        return (
+            "回答风格：详细模式。请分点展开背景、依据、推理与结论，"
+            "在不偏离问题的前提下尽量完整，不要过度省略关键细节。"
+        )
+    return "回答风格：标准模式。结构清晰，覆盖关键点，必要时适度展开。"
+
+
 async def _maybe_perform_web_search(request: ChatRequest) -> tuple[list[dict], str]:
     """按请求开关执行联网搜索，返回 (sources, formatted_context)。"""
     if not getattr(request, "enable_web_search", False):
@@ -478,7 +506,7 @@ async def _maybe_perform_web_search(request: ChatRequest) -> tuple[list[dict], s
     if not request.question or not request.question.strip():
         return [], ""
 
-    provider = request.web_search_provider or "duckduckgo"
+    provider = request.web_search_provider or "auto"
     max_results = _normalize_web_search_max_results(request.web_search_max_results)
 
     try:
@@ -532,6 +560,7 @@ async def chat_with_pdf(request: ChatRequest):
 
     if image_list:
         print(f"[Chat] 📸 截图模式：处理 {len(image_list)} 张图")
+        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 用户从文档中截取了 {len(image_list)} 张图片并发送给你。请仔细分析这些图片内容并回答问题。
 
@@ -540,7 +569,8 @@ async def chat_with_pdf(request: ChatRequest):
 2. 如果图片包含图表，请分析数据趋势和关键信息。
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
-5. 简洁清晰，学术准确。"""
+5. 学术准确、表达清晰。
+6. {answer_style_instruction}"""
         system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
@@ -637,6 +667,7 @@ async def chat_with_pdf(request: ChatRequest):
         else:
             context = doc["data"]["full_text"][:8000]
 
+        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
@@ -644,9 +675,10 @@ async def chat_with_pdf(request: ChatRequest):
 {context}
 
 回答规则：
-1. 基于文档内容准确回答，简洁清晰，学术准确。
+1. 基于文档内容准确回答，学术准确、表达清晰。
 2. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容。
 3. 优先依据文档内容回答。"""
+        system_prompt += f"\n4. {answer_style_instruction}"
         if request.enable_glossary:
             glossary_instruction = build_glossary_prompt(context)
             if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
@@ -751,6 +783,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
     if image_list:
         print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
+        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 用户从文档中截取了 {len(image_list)} 张图片并发送给你。请仔细分析这些图片内容并回答问题。
 
@@ -759,13 +792,18 @@ async def chat_with_pdf_stream(request: ChatRequest):
 2. 如果图片包含图表，请分析数据和关键信息。
 3. 如果图片包含公式，请使用 LaTeX 格式（$公式$）展示。
 4. 如果图片包含表格，请转换为 Markdown 格式。
-5. 简洁清晰，学术准确。"""
+5. 学术准确、表达清晰。
+6. {answer_style_instruction}"""
         system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
             mime = _detect_mime_type(img_b64)
             user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
     else:
+        # 应用前端传入的检索增强设置到全局配置（即时生效）
+        settings.bm25_use_jieba = request.enable_jieba_bm25
+        settings.num_expand_context_chunk = request.num_expand_context_chunk
+
         use_agent = request.enable_agent_retrieval and not request.selected_text
         # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
         search_query = await _maybe_rewrite_query(
@@ -877,12 +915,25 @@ async def chat_with_pdf_stream(request: ChatRequest):
         else:
             context = doc["data"]["full_text"][:8000]
 
+        # GraphRAG 上下文融合：如果该文档已构建 GraphRAG 索引，追加知识图谱上下文
+        if (settings.enable_graphrag or request.enable_graphrag) and hasattr(router, "_graphrag_instances") and request.doc_id in router._graphrag_instances:
+            try:
+                graphrag_inst = router._graphrag_instances[request.doc_id]
+                graphrag_context = await graphrag_inst.aquery_context(search_query)
+                if graphrag_context:
+                    context += f"\n\n## 知识图谱关联信息\n{graphrag_context}"
+                    logger.debug(f"[Chat] GraphRAG 上下文已融合，长度={len(graphrag_context)}")
+            except Exception as e:
+                logger.warning(f"[Chat] GraphRAG 上下文获取失败: {e}")
+
+        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档内容：
 {context}
 
 回答规则：
 1. 基于文档内容准确回答。"""
+        system_prompt += f"\n2. {answer_style_instruction}"
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
         if web_search_context:
