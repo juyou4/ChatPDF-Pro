@@ -38,11 +38,33 @@ function splitChunk(chunk) {
  * @param {boolean} options.streamDone - 流式传输是否已完成
  * @param {number} [options.minDelay=10] - 两次渲染之间的最小间隔（毫秒）
  * @param {string} [options.initialText=''] - 初始文本
+ * @param {boolean} [options.enableBlurReveal=false] - 是否启用 Blur Reveal 动画
+ * @param {string} [options.blurIntensity='medium'] - Blur Reveal 强度（light|medium|strong）
  * @returns {{ addChunk: Function, reset: Function, contentRef: React.RefObject, getFinalText: Function }}
  */
 export { splitChunk }
 
-export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialText = '' }) => {
+const appendBlurRevealChars = (container, chars, intensity = 'medium') => {
+  if (!container || !chars || chars.length === 0) return
+  const fragment = document.createDocumentFragment()
+  const intensityClass = `blur-intensity-${intensity}`
+  for (const ch of chars) {
+    const span = document.createElement('span')
+    span.className = `animate-blur-reveal blur-reveal-animate ${intensityClass}`
+    span.textContent = ch
+    fragment.appendChild(span)
+  }
+  container.appendChild(fragment)
+}
+
+export const useSmoothStream = ({
+  onUpdate,
+  streamDone,
+  minDelay = 10,
+  initialText = '',
+  enableBlurReveal = false,
+  blurIntensity = 'medium',
+}) => {
   /** @type {React.MutableRefObject<string[]>} 待渲染字符队列 */
   const chunkQueueRef = useRef([])
   /** @type {React.MutableRefObject<number|null>} 当前 rAF ID，用于清理 */
@@ -116,6 +138,7 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
           // 兼容 ref 延迟挂载：如果文本已渲染到内存但 DOM 还未绑定，
           // 在空队列阶段持续尝试同步，避免出现“流式结束前一直空白，最后一次性显示”。
           if (contentRef.current && contentRef.current.textContent !== displayedTextRef.current) {
+            // DOM 与内存状态不一致时，统一回填纯文本，避免动画节点断层
             contentRef.current.textContent = displayedTextRef.current
           }
           if (streamDone) {
@@ -149,11 +172,22 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
 
         // 5. 取出字符并追加到已渲染文本
         const charsToRender = chunkQueueRef.current.slice(0, charsToRenderCount)
+        const previousText = displayedTextRef.current
         displayedTextRef.current += charsToRender.join('')
 
         // 6. 直接更新 DOM 元素（ref 直写模式，避免 React setState）
         if (contentRef.current) {
-          contentRef.current.textContent = displayedTextRef.current
+          if (enableBlurReveal) {
+            // 仅在 DOM 已同步到上一帧文本时追加动画字符；
+            // 若发生延迟挂载或不同步，回退为整段文本直写以保证一致性。
+            if ((contentRef.current.textContent || '') === previousText) {
+              appendBlurRevealChars(contentRef.current, charsToRender, blurIntensity)
+            } else {
+              contentRef.current.textContent = displayedTextRef.current
+            }
+          } else {
+            contentRef.current.textContent = displayedTextRef.current
+          }
         }
 
         // 7. 向后兼容：如果提供了 onUpdate 回调，也调用它
@@ -180,7 +214,7 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
         animationFrameRef.current = requestAnimationFrame(renderLoop)
       }
     },
-    [streamDone, onUpdate, minDelay]
+    [streamDone, onUpdate, minDelay, enableBlurReveal, blurIntensity]
   )
 
   // 启动渲染循环，组件卸载时取消 rAF 防止内存泄漏

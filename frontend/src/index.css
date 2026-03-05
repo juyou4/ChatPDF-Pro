@@ -503,15 +503,17 @@
 }
 
 .blur-reveal-animate {
-    animation: blur-reveal-smooth 0.2s ease-out forwards;
-    will-change: opacity;
+    animation: blur-reveal-smooth var(--blur-duration, 0.25s) ease-out forwards;
+    will-change: filter, opacity;
 }
 
 @keyframes blur-reveal-smooth {
     0% {
-        opacity: 0.4;
+        filter: blur(var(--blur-distance, 3px));
+        opacity: 0.15;
     }
     100% {
+        filter: blur(0);
         opacity: 1;
     }
 }
@@ -650,17 +652,17 @@
 }
 
 /* 流式输出期间禁用所有 blur-reveal 逐字动画，避免频繁触发 filter/opacity 导致掉帧 */
-.streaming-active .blur-reveal-animate {
+.streaming-active:not(.blur-reveal-enabled) .blur-reveal-animate {
     animation: none !important;
     opacity: 1 !important;
 }
 
-.streaming-active .animate-blur-reveal {
+.streaming-active:not(.blur-reveal-enabled) .animate-blur-reveal {
     animation: none !important;
     opacity: 1 !important;
 }
 
-.streaming-active .blur-reveal-char {
+.streaming-active:not(.blur-reveal-enabled) .blur-reveal-char {
     filter: none !important;
     opacity: 1 !important;
 }

@@ -25,4 +25,31 @@ describe('useSmoothStream', () => {
       expect(el.textContent).toBe('延迟挂载补写测试');
     });
   });
+
+  it('启用 Blur Reveal 时，应追加带动画类名的字符节点', async () => {
+    const { result } = renderHook(() =>
+      useSmoothStream({
+        streamDone: false,
+        minDelay: 0,
+        enableBlurReveal: true,
+        blurIntensity: 'strong',
+      })
+    );
+
+    const el = document.createElement('div');
+    act(() => {
+      result.current.contentRef.current = el;
+      result.current.addChunk('动画');
+    });
+
+    await waitFor(() => {
+      expect(el.textContent).toBe('动画');
+    });
+
+    await waitFor(() => {
+      expect(el.querySelectorAll('.blur-reveal-animate').length).toBeGreaterThanOrEqual(2);
+    });
+
+    expect(el.querySelector('.blur-intensity-strong')).toBeTruthy();
+  });
 });

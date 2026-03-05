@@ -66,6 +66,7 @@ const GlobalSettingsBridge = ({ children }) => {
             enableMaxTokens: chatParams.enableMaxTokens,
             customParams: chatParams.customParams,
             reasoningEffort: chatParams.reasoningEffort,
+            answerDetailLevel: chatParams.answerDetailLevel,
             enableMemory: chatParams.enableMemory,
             thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
             sendShortcut: chatParams.sendShortcut,
@@ -84,7 +85,7 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.maxTokens, chatParams.temperature, chatParams.topP,
         chatParams.contextCount, chatParams.streamOutput,
         chatParams.enableTemperature, chatParams.enableTopP, chatParams.enableMaxTokens,
-        chatParams.customParams, chatParams.reasoningEffort, chatParams.enableMemory,
+        chatParams.customParams, chatParams.reasoningEffort, chatParams.answerDetailLevel, chatParams.enableMemory,
         chatParams.thoughtAutoCollapse, chatParams.sendShortcut,
         chatParams.confirmDeleteMessage, chatParams.confirmRegenerateMessage,
         chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
@@ -111,6 +112,7 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.enableMaxTokens !== undefined) chatParams.setEnableMaxTokens(settings.enableMaxTokens);
             if (settings.customParams !== undefined) chatParams.setCustomParams(settings.customParams);
             if (settings.reasoningEffort !== undefined) chatParams.setReasoningEffort(settings.reasoningEffort);
+            if (settings.answerDetailLevel !== undefined) chatParams.setAnswerDetailLevel(settings.answerDetailLevel);
             if (settings.enableMemory !== undefined) chatParams.setEnableMemory(settings.enableMemory);
             if (settings.thoughtAutoCollapse !== undefined) chatParams.setThoughtAutoCollapse(settings.thoughtAutoCollapse);
             if (settings.sendShortcut !== undefined) chatParams.setSendShortcut(settings.sendShortcut);
@@ -131,7 +133,7 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.setMaxTokens, chatParams.setTemperature, chatParams.setTopP,
         chatParams.setContextCount, chatParams.setStreamOutput,
         chatParams.setEnableTemperature, chatParams.setEnableTopP, chatParams.setEnableMaxTokens,
-        chatParams.setCustomParams, chatParams.setReasoningEffort, chatParams.setEnableMemory,
+        chatParams.setCustomParams, chatParams.setReasoningEffort, chatParams.setAnswerDetailLevel, chatParams.setEnableMemory,
         chatParams.setThoughtAutoCollapse, chatParams.setSendShortcut,
         chatParams.setConfirmDeleteMessage, chatParams.setConfirmRegenerateMessage,
         chatParams.setCodeCollapsible, chatParams.setCodeWrappable, chatParams.setCodeShowLineNumbers,
@@ -163,6 +165,7 @@ const GlobalSettingsBridge = ({ children }) => {
         enableMaxTokens: chatParams.enableMaxTokens,
         customParams: chatParams.customParams,
         reasoningEffort: chatParams.reasoningEffort,
+        answerDetailLevel: chatParams.answerDetailLevel,
         enableMemory: chatParams.enableMemory,
         thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
         sendShortcut: chatParams.sendShortcut,
@@ -191,6 +194,7 @@ const GlobalSettingsBridge = ({ children }) => {
         setEnableMaxTokens: chatParams.setEnableMaxTokens,
         setCustomParams: chatParams.setCustomParams,
         setReasoningEffort: chatParams.setReasoningEffort,
+        setAnswerDetailLevel: chatParams.setAnswerDetailLevel,
         setEnableMemory: chatParams.setEnableMemory,
         setThoughtAutoCollapse: chatParams.setThoughtAutoCollapse,
         setSendShortcut: chatParams.setSendShortcut,
