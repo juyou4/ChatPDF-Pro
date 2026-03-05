@@ -104,6 +104,7 @@ export const ALIYUN_MODELS: Model[] = [
  * 硅基流动模型
  */
 export const SILICON_MODELS: Model[] = [
+    //  Embedding 模型 
     {
         id: 'BAAI/bge-m3',
         name: 'BAAI/bge-m3',
@@ -112,14 +113,53 @@ export const SILICON_MODELS: Model[] = [
         metadata: {
             dimension: 1024,
             maxTokens: 8192,
-            description: '开源，托管在硅基流动'
+            description: '多语言多功能嵌入模型，支持稠密/稀疏/多向量检索'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'Pro/BAAI/bge-m3',
+        name: 'Pro/BAAI/bge-m3',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 8192,
+            description: 'bge-m3 加速版，更快推理速度'
         },
         isSystem: true,
         isUserAdded: false,
         pricing: {
-            input: 0.02,
-            currency: 'USD'
+            input: 0.07,
+            currency: 'CNY'
         }
+    },
+    {
+        id: 'BAAI/bge-large-zh-v1.5',
+        name: 'BAAI/bge-large-zh-v1.5',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 512,
+            description: '中文大型嵌入模型，中文场景效果最佳'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'BAAI/bge-large-en-v1.5',
+        name: 'BAAI/bge-large-en-v1.5',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 512,
+            description: '英文大型嵌入模型'
+        },
+        isSystem: true,
+        isUserAdded: false
     },
     {
         id: 'Qwen/Qwen3-Embedding-8B',
@@ -129,7 +169,7 @@ export const SILICON_MODELS: Model[] = [
         metadata: {
             dimension: 1024,
             maxTokens: 8192,
-            description: '阿里通义千问第三代嵌入模型'
+            description: '通义千问第三代嵌入模型，8B 参数，效果最强'
         },
         isSystem: true,
         isUserAdded: false,
@@ -139,17 +179,112 @@ export const SILICON_MODELS: Model[] = [
         }
     },
     {
+        id: 'Qwen/Qwen3-Embedding-4B',
+        name: 'Qwen3 Embedding 4B',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 8192,
+            description: '通义千问第三代嵌入模型，4B 参数，均衡性能与成本'
+        },
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.14,
+            currency: 'CNY'
+        }
+    },
+    {
+        id: 'Qwen/Qwen3-Embedding-0.6B',
+        name: 'Qwen3 Embedding 0.6B',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 8192,
+            description: '通义千问第三代嵌入模型，0.6B 参数，轻量低成本'
+        },
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.07,
+            currency: 'CNY'
+        }
+    },
+    {
+        id: 'netease-youdao/bce-embedding-base_v1',
+        name: 'BCE Embedding Base v1',
+        providerId: 'silicon',
+        type: 'embedding',
+        metadata: {
+            dimension: 768,
+            maxTokens: 512,
+            description: '网易有道跨语言嵌入模型，中英文效果好'
+        },
+        isSystem: true,
+        isUserAdded: false
+    },
+    //  Rerank 模型 
+    {
         id: 'BAAI/bge-reranker-v2-m3',
         name: 'BGE Reranker v2-M3',
         providerId: 'silicon',
         type: 'rerank',
         metadata: {
-            dimension: 0,
             maxTokens: 8192,
-            description: '重排模型，用于结果重新排序'
+            description: 'BGE 多语言重排模型，用于结果重新排序'
         },
         isSystem: true,
         isUserAdded: false
+    },
+    {
+        id: 'Qwen/Qwen3-Reranker-8B',
+        name: 'Qwen3 Reranker 8B',
+        providerId: 'silicon',
+        type: 'rerank',
+        metadata: {
+            maxTokens: 8192,
+            description: '通义千问第三代重排模型，8B 参数'
+        },
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.28,
+            currency: 'CNY'
+        }
+    },
+    {
+        id: 'Qwen/Qwen3-Reranker-4B',
+        name: 'Qwen3 Reranker 4B',
+        providerId: 'silicon',
+        type: 'rerank',
+        metadata: {
+            maxTokens: 8192,
+            description: '通义千问第三代重排模型，4B 参数'
+        },
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.14,
+            currency: 'CNY'
+        }
+    },
+    {
+        id: 'Qwen/Qwen3-Reranker-0.6B',
+        name: 'Qwen3 Reranker 0.6B',
+        providerId: 'silicon',
+        type: 'rerank',
+        metadata: {
+            maxTokens: 8192,
+            description: '通义千问第三代重排模型，0.6B 参数，轻量低成本'
+        },
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.07,
+            currency: 'CNY'
+        }
     }
 ]
 

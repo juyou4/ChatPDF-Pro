@@ -73,22 +73,23 @@ export function parseOpenAIModels(
 
 /**
  * 根据模型ID推断模型类型
+ * 正则与后端 model_detector.py 保持一致
  */
 export function detectModelType(modelId: string): ModelType {
     const lowerModelId = modelId.toLowerCase()
 
-    // Rerank模型识别
-    if (/rerank|re-rank|ranker|ranking/i.test(lowerModelId)) {
+    // Rerank模型识别（优先级最高，避免 retrieval 关键字误分类）
+    if (/rerank|re-rank|re-ranker|re-ranking|retrieval|retriever/i.test(lowerModelId)) {
         return 'rerank'
     }
 
-    // Embedding模型识别
-    if (/embedding|embed/i.test(lowerModelId)) {
+    // Embedding模型识别（与后端 EMBEDDING_REGEX 对齐）
+    if (/(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)/i.test(lowerModelId)) {
         return 'embedding'
     }
 
     // 图像生成模型识别
-    if (/dall-e|dalle|stable-diffusion|midjourney|imagen/i.test(lowerModelId)) {
+    if (/dall-e|dalle|stable-diffusion|midjourney|imagen|diffusion|sd/i.test(lowerModelId)) {
         return 'image'
     }
 

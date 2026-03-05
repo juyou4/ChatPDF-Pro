@@ -133,6 +133,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
     }
 
     // Statistics
+    const chatCount = myModels.filter(m => m.type === 'chat').length
     const embeddingCount = myModels.filter(m => m.type === 'embedding').length
     const rerankCount = myModels.filter(m => m.type === 'rerank').length
 
@@ -257,6 +258,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                     className="soft-input rounded-xl px-4 py-2 text-sm font-semibold text-gray-700"
                                 >
                                     <option value="all">全部类型</option>
+                                    <option value="chat">Chat</option>
                                     <option value="embedding">Embedding</option>
                                     <option value="rerank">Rerank</option>
                                 </select>
@@ -351,7 +353,8 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                         <div className="px-6 py-4 border-t border-gray-100">
                             <div className="flex items-center justify-between text-sm">
                                 <div className="text-gray-600">
-                                    <span className="font-semibold text-gray-900">{embeddingCount}</span> 个Embedding模型 ·
+                                    <span className="font-semibold text-gray-900">{chatCount}</span> 个Chat模型 ·
+                                    <span className="font-semibold text-gray-900 ml-1">{embeddingCount}</span> 个Embedding模型 ·
                                     <span className="font-semibold text-gray-900 ml-1">{rerankCount}</span> 个Rerank模型
                                 </div>
                                 <div className="text-gray-500">
@@ -413,6 +416,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                                         value={newModelForm.type}
                                                         onChange={(e) => setNewModelForm({ ...newModelForm, type: e.target.value })}
                                                     >
+                                                        <option value="chat">Chat</option>
                                                         <option value="embedding">Embedding</option>
                                                         <option value="rerank">Rerank</option>
                                                     </select>
@@ -469,52 +473,39 @@ function ModelList({ models, selectedModel, onSelectModel, isAdded, onAddModel, 
     }
 
     // Group models by type
+    const chatModels = models.filter(m => m.type === 'chat')
     const embeddingModels = models.filter(m => m.type === 'embedding')
     const rerankModels = models.filter(m => m.type === 'rerank')
 
+    const renderGroup = (title, groupModels) => {
+        if (groupModels.length === 0) return null
+        return (
+            <div className="p-4">
+                <div className="text-xs font-bold text-gray-500 mb-3 px-2">
+                    {title} ({groupModels.length})
+                </div>
+                <div className="space-y-2">
+                    {groupModels.map(model => (
+                        <ModelCard
+                            key={model.id}
+                            model={model}
+                            isSelected={selectedModel?.id === model.id}
+                            isAdded={isAdded(model.id)}
+                            onSelect={onSelectModel}
+                            onAdd={onAddModel ? () => onAddModel(model, providerId) : null}
+                            onRemove={onRemoveModel ? () => onRemoveModel(model.id, providerId) : null}
+                        />
+                    ))}
+                </div>
+            </div>
+        )
+    }
+
     return (
         <div className="divide-y divide-gray-100">
-            {embeddingModels.length > 0 && (
-                <div className="p-4">
-                    <div className="text-xs font-bold text-gray-500 mb-3 px-2">
-                        EMBEDDING 模型 ({embeddingModels.length})
-                    </div>
-                    <div className="space-y-2">
-                        {embeddingModels.map(model => (
-                            <ModelCard
-                                key={model.id}
-                                model={model}
-                                isSelected={selectedModel?.id === model.id}
-                                isAdded={isAdded(model.id)}
-                                onSelect={onSelectModel}
-                                onAdd={onAddModel ? () => onAddModel(model, providerId) : null}
-                                onRemove={onRemoveModel ? () => onRemoveModel(model.id, providerId) : null}
-                            />
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {rerankModels.length > 0 && (
-                <div className="p-4">
-                    <div className="text-xs font-bold text-gray-500 mb-3 px-2">
-                        RERANK 模型 ({rerankModels.length})
-                    </div>
-                    <div className="space-y-2">
-                        {rerankModels.map(model => (
-                            <ModelCard
-                                key={model.id}
-                                model={model}
-                                isSelected={selectedModel?.id === model.id}
-                                isAdded={isAdded(model.id)}
-                                onSelect={onSelectModel}
-                                onAdd={onAddModel ? () => onAddModel(model, providerId) : null}
-                                onRemove={onRemoveModel ? () => onRemoveModel(model.id, providerId) : null}
-                            />
-                        ))}
-                    </div>
-                </div>
-            )}
+            {renderGroup('CHAT 模型', chatModels)}
+            {renderGroup('EMBEDDING 模型', embeddingModels)}
+            {renderGroup('RERANK 模型', rerankModels)}
         </div>
     )
 }
@@ -536,8 +527,12 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
                         {model.name}
                     </div>
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                        <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-semibold">
-                            {model.type === 'embedding' ? 'Embedding' : 'Rerank'}
+                        <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                            model.type === 'chat' ? 'bg-blue-100 text-blue-700' :
+                            model.type === 'embedding' ? 'bg-purple-100 text-purple-700' :
+                            'bg-orange-100 text-orange-700'
+                        }`}>
+                            {model.type === 'chat' ? 'Chat' : model.type === 'embedding' ? 'Embedding' : 'Rerank'}
                         </span>
                         {model.isSystem && (
                             <span className="px-2 py-0.5 bg-gray-200 text-gray-700 rounded text-xs font-semibold">

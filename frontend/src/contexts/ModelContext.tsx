@@ -37,7 +37,7 @@ interface ModelContextType {
 
 const ModelContext = createContext<ModelContextType | undefined>(undefined)
 
-const CONFIG_VERSION = '4.0'
+const CONFIG_VERSION = '4.1'
 const STORAGE_KEY = 'userModels'
 const VERSION_KEY = 'userModelsVersion'
 const LAST_SYNC_KEY = 'modelsLastSync'

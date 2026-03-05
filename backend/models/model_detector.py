@@ -2,7 +2,10 @@ import re
 from typing import Optional
 
 # Embedding and rerank model detection regex (inspired by cherry-studio)
-EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm)', re.I)
+EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)', re.I)
+
+# 不支持的模型（TTS、语音、审核等），同步时应过滤
+NOT_SUPPORTED_REGEX = re.compile(r'(?:^tts|whisper|speech|audio|moderation|canary)', re.I)
 RERANKING_REGEX = re.compile(r'(?:rerank|re-rank|re-ranker|re-ranking|retrieval|retriever)', re.I)
 
 
