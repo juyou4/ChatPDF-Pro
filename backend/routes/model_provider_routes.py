@@ -13,7 +13,7 @@ from models.dynamic_store import (
     load_dynamic_models,
     save_dynamic_models,
 )
-from models.model_detector import infer_model_tags
+from models.model_detector import infer_model_tags, is_embedding_model, is_rerank_model, NOT_SUPPORTED_REGEX
 from models.api_key_selector import select_api_key
 
 
@@ -485,6 +485,9 @@ async def fetch_provider_models(request: ModelFetchRequest):
         if 'data' in data and isinstance(data['data'], list):
             for item in data['data']:
                 model_id = item.get('id', '')
+                # 过滤不支持的模型（TTS、语音、审核等）
+                if NOT_SUPPORTED_REGEX.search(model_id):
+                    continue
                 model_type = _detect_model_type(model_id)
                 # 推断模型标签（如 free、vision、reasoning 等）
                 tags = infer_model_tags(model_id)
@@ -698,17 +701,18 @@ import re
 
 
 def _detect_model_type(model_id: str) -> str:
-    lower_id = model_id.lower()
-    if any(k in lower_id for k in ['embedding', 'embed', 'vector']):
-        return 'embedding'
-    if any(k in lower_id for k in ['rerank', 're-rank']):
+    """统一使用 model_detector.py 的正则检测模型类型
+
+    优先级：rerank > embedding > image > chat（默认）
+    """
+    if is_rerank_model(model_id):
         return 'rerank'
-    if any(k in lower_id for k in ['vision', 'gpt-4', 'claude', 'gemini', 'gpt']):
-        return 'chat'
-    if re.search(r'image|img|diffusion|sd', lower_id):
+    if is_embedding_model(model_id):
+        return 'embedding'
+    lower_id = model_id.lower()
+    if re.search(r'image|img|diffusion|sd|dall-e|dalle', lower_id):
         return 'image'
-    else:
-        return 'chat'
+    return 'chat'
 
 
 def _infer_model_metadata(model_id: str, model_type: str) -> dict:
