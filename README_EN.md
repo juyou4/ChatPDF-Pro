@@ -9,7 +9,7 @@
 
 **Smart Document Assistant - Chat with your PDFs** · [中文](README.md)
 
-[Quick Start](#quick-start) • [Features](#core-features) • [What's New in v3.0.1](#whats-new-in-v301) • [Tech Stack](#tech-stack) • [Configuration](#configuration)
+[Quick Start](#quick-start) • [Features](#core-features) • [What's New in v3.0.1](#whats-new-in-v301) • [Tech Stack](#tech-stack) • [Architecture](#architecture)
 
 </div>
 
@@ -19,410 +19,190 @@
 
 ![ChatPDF Pro Screenshot](docs/screenshot.png)
 
-*Professional PDF reading and AI chat interface with native PDF rendering, conversation history, and intelligent text extraction*
+*Professional PDF reading and AI chat interface with native PDF rendering, conversation history, and intelligent text extraction.*
 
-### One-Click Start
+### Standalone Desktop Client
 
-![ChatPDF Pro One-Click Start](docs/one-click-start.png)
-
-> `start.bat` / `start.sh` automatically checks for updates, installs dependencies, starts both backend and frontend, and opens the browser. Close the terminal to stop all services.
+A self-contained Windows desktop application built with Electron. The Python backend is fully integrated and packaged using PyInstaller, ensuring it works **out of the box without any Python or Node.js environment configuration.**
 
 ---
 
 ## What's New in v3.0.1
 
-### 🖥️ Desktop Client (Electron)
-- **Standalone App** - Windows desktop client built with Electron, no browser needed
-- **One-Click Install** - NSIS installer, ready to use after installation
-- **Integrated Backend** - PyInstaller-packaged backend starts with the app, no Python setup required
+### Desktop Architecture (Electron)
+- **Standalone Application** - Windows desktop client built on Electron 26, breaking free from browser limitations.
+- **One-Click Installation** - Provided as an NSIS installer. Just double-click to install and run.
+- **Embedded Backend** - FastAPI backend packaged with PyInstaller. The app's process manager automatically finds an available port and spawns the backend service upon startup.
 
-### 🧠 Deep Thinking Mode
-- **Reasoning Visualization** - Real-time display of AI reasoning process (ThinkingBlock) with collapse/expand
-- **Adjustable Reasoning** - Support for low / medium / high reasoning intensity
-- **Streaming Thinking** - Both thinking and response content support character-by-character streaming
+### Deep Thinking Mode
+- **Reasoning Visualization** - Real-time display of the AI's ThinkingBlock in the chat area, with manual collapse/expand support.
+- **Adjustable Intensity** - Dynamically adjust reasoning intensity (Low, Medium, High) in chat settings.
+- **Smooth Streaming** - Both thinking processes and final responses support RequestAnimationFrame-based smooth character-by-character rendering.
 
-### 🔢 Math Formula Engine
-- **Multi-Engine Support** - Choose between KaTeX, MathJax, or disabled math rendering
-- **Chat Settings Integration** - Switch math engine directly in the chat settings panel
-- **Single Dollar Sign** - Optional `$...$` inline math support (enabled by default)
-- **LaTeX Bracket Conversion** - Auto-converts `\[...\]` / `\(...\)` to `$$...$$` / `$...$`
+### Math Formula Rendering
+- **Dual Engines** - Built-in KaTeX and MathJax engines. Users can switch between them or disable rendering entirely via settings.
+- **Single Dollar Support** - Renders inline math with `$...$`, resolving conflicts between plain text and formula syntax.
+- **LaTeX Bracket Conversion** - Employs a balanced matching algorithm to automatically convert `\[...\]` and `\(...\)` into standard Markdown math syntax.
 
-### 🌐 Web Search
-- **AI Web Search** - Enable web search in conversations for real-time internet information
-- **Source Display** - Web search results include source links, expandable for details
-
-### ⚡ Streaming Output Optimization
-- **Ref Direct-Write Mode** - During streaming, writes text directly via DOM ref, avoiding React re-renders
-- **Smooth Character Animation** - useSmoothStream hook for natural character-by-character reveal
-- **Virtual Message List** - Only renders visible messages, significantly improving scroll performance
-
-### 🧠 Semantic Groups
-- **Smart Aggregation** - Merges text chunks into ~5000-character semantically coherent units, respecting page, heading, and table boundaries
-- **Three-Level Granularity** - Each group auto-generates summary (80 chars), digest (1000 chars), and full text representations
-- **LLM Summaries** - AI-generated high-quality summaries and keywords, with automatic fallback to text truncation on failure
-
-### 🎯 Smart Granularity Selection
-- **Query Intent Detection** - Automatically classifies questions as overview, extraction, analytical, or specific
-- **Dynamic Granularity Matching** - Overview questions get more groups with summaries; detail questions get fewer groups with full text
-- **Mixed Granularity Retrieval** - Top-ranked groups get full text, next ones get digest, the rest get summary
-
-### 💰 Token Budget Management
-- **Language-Aware Estimation** - Chinese at 1.5 chars/token, English at 4 chars/token for accurate estimation
-- **Smart Degradation** - When budget runs low, downgrades granularity (full→digest→summary) instead of dropping content
-- **Answer Reservation** - Automatically reserves 1500 tokens for LLM response generation
-
-### 🔍 Advanced Search
-- **Regex Search** - Use `/regex:` prefix for regular expression matching
-- **Boolean Search** - Support AND, OR, NOT logical operators
-- **Context Snippets** - Each result includes surrounding context
-
-### ⚡ Preset Questions & Visualization
-- **Quick Actions** - Preset buttons for "Summarize", "Key Formulas", "Research Methods", etc.
-- **Mind Maps** - AI generates structured Markdown mind maps
-- **Flowcharts** - AI generates Mermaid syntax flowcharts, auto-rendered in the frontend
-
-### 📎 Citation Tracking
-- **Reference Numbers** - AI responses automatically include [1] [2] citation markers
-- **Click to Navigate** - Click citation numbers to jump to the corresponding PDF page
-- **Source Verification** - Easily verify the accuracy of AI responses
-
-### 📊 Retrieval Observability
-- **Structured Logging** - Records query type, hit sources, token usage for every retrieval
-- **Fallback Tracking** - Automatically logs degradation reasons (LLM failure, missing index, etc.)
-- **Debug Info** - API responses include retrieval_meta field for troubleshooting
+### Connectivity & UI Optimization
+- **Web Search** - Allows the AI to fetch real-time internet information, displaying clear source links at the bottom of the response.
+- **Render Performance** - Implements Virtual List scrolling, maintaining 60fps performance even with extensive, text-heavy conversation histories.
+- **DOM Direct-Write** - Bypasses React state updates during streaming output by directly modifying DOM nodes via refs, significantly reducing memory and CPU footprint.
 
 ---
 
 ## Core Features
 
 ### PDF Document Processing
-- **Native PDF Rendering** - High-fidelity display via PDF.js with zoom, pagination, and text selection
-- **Smart Text Extraction** - High-quality extraction using pdfplumber with complex layout support
-- **Table Recognition** - Automatic detection and extraction of tables into structured text
-- **Page-by-Page Indexing** - Per-page extraction and indexing with precise page navigation
-- **Adjustable Zoom** - 50%-200% smooth zoom with reading preference adaptation
+- **Native Rendering** - High-fidelity document display via PDF.js with smooth zooming, pagination, and text selection.
+- **Multimodal Extraction** - Uses `pdfplumber` for high-quality text extraction, accurately recognizing complex multi-column layouts.
+- **Structural Parsing** - Automatically detects and extracts PDF tables, converting them into Markdown structures easily understood by LLMs.
 
-### AI Chat
-- **Multi-Model Support** - OpenAI, Anthropic, Google Gemini, Grok, Ollama, and more
-- **Context-Aware Q&A** - Intelligent answers based on document content with accurate citations
-- **Streaming Output** - Real-time typewriter-style responses with ref direct-write mode
-- **Deep Thinking** - Real-time reasoning visualization with low/medium/high intensity
-- **Markdown Rendering** - Full support for code highlighting, math formulas (KaTeX/MathJax switchable), tables, lists
-- **Mermaid Rendering** - Auto-detects and renders Mermaid flowchart code blocks
-- **Web Search** - AI can fetch real-time internet information with source links
-- **Conversation History** - Auto-saves chat records, supports switching and deleting sessions
+### Intelligent Retrieval (RAG v3.0)
+- **Semantic Groups** - Aggregates scattered text chunks into semantically coherent units of ~5000 characters, respecting page, heading, and table boundaries.
+- **Three-Level Granularity** - Automatically generates Summary (80 chars), Digest (1000 chars), and Full text representations for every semantic group.
+- **Dynamic Granularity Matching** - Leverages LLMs to infer user intent (e.g., overview, extraction, specific data) during retrieval, automatically returning the optimal text granularity.
+- **Token Budget Control** - Estimates token counts accurately based on target models and character properties (Chinese vs. English). Triggers intelligent granularity degradation instead of hard truncation when approaching context limits.
+- **Dual-Index Retrieval** - Queries both chunk-level and group-level FAISS vector indexes simultaneously, combining with BM25 algorithms and RRF (Reciprocal Rank Fusion) for reranking.
 
-### Intelligent Retrieval (v3.0 Upgrade)
-- **Semantic Groups** - Aggregates chunks into semantically complete groups with three granularity levels
-- **Dual-Index Search** - Queries both chunk-level and group-level FAISS vector indexes simultaneously
-- **BM25 + Vector Hybrid** - Keyword matching and semantic understanding complement each other via RRF fusion
-- **Smart Granularity Selection** - Automatically picks the best detail level based on question type
-- **Token Budget Management** - Language-aware context length control with smart degradation
-
-### Visual Analysis
-- **Screenshot Capture** - Full-page or area selection screenshots for multimodal AI analysis
-- **Chart Recognition** - GPT-4V, Claude Sonnet, and other vision models understand charts, formulas, diagrams
-- **Multimodal Q&A** - Combined text and image analysis
-
-### User Interface
-- **Healing Blue Design** - Modern blue-white UI with glassmorphism effects and smooth animations
-- **Responsive Layout** - Draggable divider between PDF preview and chat area
-- **Dark Mode** - Light/dark theme toggle
-- **Preset Question Bar** - Quick-action buttons appear after document loads
-- **Citation Navigation** - Click reference numbers in AI responses to jump to PDF pages
-- **Text Selection Toolbar** - Copy, search, AI interpret/translate selected text
-- **Keyboard Shortcuts** - Enter to send, Shift+Enter for new line
-- **Code Block Settings** - Collapsible, word-wrap, line numbers
-- **Font Settings** - Adjustable message font size
-- **Model Quick Switch** - Quick model switching at the top of chat area
+### AI Chat Capabilities
+- **Multi-Model Support** - Native integration with OpenAI, Anthropic, Google Gemini, Grok, and local Ollama models.
+- **Precise Citations** - Automatically generates [1], [2] inline citations. Clicking a citation highlights the source in the PDF view and scrolls smoothly to the exact page.
+- **Text Selection Toolbar** - Selecting text in the PDF triggers a floating toolbar for instant AI explanation, translation, or inclusion as context for the next query.
+- **Visual Diagrams** - Automatically parses and renders Mermaid code blocks generated by the AI, perfect for flowcharts and mind maps.
 
 ---
 
 ## Quick Start
 
-### One-Click Start (Recommended)
+### Option 1: Download Desktop Client (Recommended)
 
-**Windows:**
-```bash
-start.bat
-```
+Download the latest `.exe` installer directly from the [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) page.
+Install and double-click the desktop icon to run. No environment setup required.
 
-**Linux/Mac:**
-```bash
-chmod +x start.sh
-./start.sh
-```
+### Option 2: Run from Source (Web Mode)
 
-The startup script automatically:
-- Checks for and applies updates
-- Installs missing dependencies
-- Starts backend (port 8000) and frontend (port 3000)
-- Opens the browser
-
-### Manual Start
-
-**Backend:**
+**1. Backend Service (Python 3.10+)**
 ```bash
 cd backend
 pip install -r requirements.txt
 python app.py
 ```
 
-**Frontend:**
+**2. Frontend Service (Node.js 18+)**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-Visit http://localhost:3000 to get started.
-
----
-
-## Configuration
-
-### API Key Setup
-
-On first use, configure your AI provider's API Key:
-
-1. Click "Settings & API Key" button (bottom-left)
-2. Select API Provider (OpenAI, Anthropic, Google, etc.)
-3. Choose a model
-4. Enter your API Key
-5. Save settings
-
-Settings are saved to browser localStorage automatically.
-
-### Supported AI Providers
-
-| Provider | Sample Models | Vision | Notes |
-|----------|---------------|--------|-------|
-| OpenAI | GPT-4o, GPT-4 Turbo, GPT-4o Mini | ✓ | Best multimodal experience |
-| Anthropic | Claude Sonnet 4.5, Claude 3 Opus | ✓ | Excellent long-context |
-| Google | Gemini 2.5 Pro, Gemini 2.5 Flash | ✓ | Cost-effective |
-| Grok (xAI) | Grok 4.1, Grok Vision | ✓ | xAI models |
-| Qwen (DashScope) | qwen-max, qwen-long, qwen-vl | Partial | Lower cost, long docs |
-| Doubao (Volcano) | doubao-1.5-pro-256k | Partial | Good value in China |
-| MiniMax | abab6.5-chat / s-chat | ✗ | OpenAI-compatible API |
-| Ollama | Llama 3, Qwen, Mistral | ✗ | Local, free |
-| Custom OpenAI-compatible | Any `chat/completions` endpoint | Depends | Set custom base_url + API Key |
-
-### Local Models (Ollama)
-
-No API Key needed, runs entirely locally:
-
-1. Install Ollama: https://ollama.com/
-2. Pull a model: `ollama pull llama3`
-3. Select "Local (Ollama)" provider in settings
-4. Start chatting
-
-### Feature Toggles
-
-Available in settings:
-
-- **Vector Search** - Enhanced vector retrieval (requires longer indexing time)
-- **Semantic Groups** - Semantic group feature (new in v3.0, enabled by default)
-- **Screenshot Analysis** - Screenshot analysis (vision models only)
-- **Streaming Speed** - Fast / Normal / Slow / Off
-- **Custom Search Engine** - Enter template URL with `{query}` placeholder
+Visit `http://localhost:3000` to start using the application.
 
 ---
 
 ## Tech Stack
 
 ### Frontend
-- **Build Tool**: Vite 6.0
-- **Framework**: React 18.3
-- **PDF Rendering**: react-pdf 9.0 + PDF.js 4.8.69
-- **Styling**: Tailwind CSS 3.4 + Framer Motion
-- **Markdown**: ReactMarkdown + rehype/remark ecosystem
-- **Flowcharts**: Mermaid - auto-renders code blocks as visual diagrams
-- **Math**: KaTeX / MathJax (user-switchable)
-- **Code Highlighting**: Highlight.js
-- **Desktop**: Electron 26 + electron-builder
+- **Core**: React 18 + Vite 6 + Tailwind CSS
+- **PDF Rendering**: react-pdf 9.0 + PDF.js
+- **UI Animation**: Framer Motion
+- **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
+- **Desktop Environment**: Electron 26 + electron-builder
 
 ### Backend
-- **Framework**: FastAPI 0.115
-- **PDF Processing**: pdfplumber 0.11
-- **AI Orchestration**: LangChain 0.3
-- **Vector Database**: FAISS (chunk-level + group-level dual indexes)
-- **Text Embeddings**: Sentence Transformers 3.3
-- **Retrieval**: BM25 + vector hybrid search with RRF fusion
-- **Semantic Groups**: Three-level granularity (summary/digest/full) + smart selection
-- **Token Management**: Language-aware estimation + budget control + smart degradation
-- **HTTP Client**: httpx
-
-### AI SDKs
-- openai 1.57
-- anthropic 0.40
-- google-generativeai 0.8
+- **Framework**: FastAPI 0.115 (Uvicorn async driven)
+- **PDF Processing**: pdfplumber
+- **Vector Database**: FAISS
+- **Retrieval Architecture**: Semantic Groups + Dual-Index RRF Fusion
+- **Model SDKs**: OpenAI, Anthropic, Google Generative AI
 
 ---
 
-## Project Structure
+## Architecture
 
-```
+```text
 ChatPDF/
 ├── frontend/                    # React frontend
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ChatPDF.jsx          # Main app component
-│   │   │   ├── PDFViewer.jsx        # PDF rendering
-│   │   │   ├── StreamingMarkdown.jsx # Markdown + math + Mermaid rendering
-│   │   │   ├── ThinkingBlock.jsx    # Deep thinking visualization
-│   │   │   ├── ChatSettings.jsx     # Chat parameter settings
-│   │   │   ├── VirtualMessageList.jsx # Virtualized message list
-│   │   │   ├── PresetQuestions.jsx   # Preset question bar
-│   │   │   └── CitationLink.jsx     # Citation click-to-navigate
+│   │   │   ├── ChatPDF.jsx          # Main application component
+│   │   │   ├── PDFViewer.jsx        # PDF rendering core
+│   │   │   ├── StreamingMarkdown.jsx # Markdown + Math + Mermaid rendering
+│   │   │   ├── ThinkingBlock.jsx    # Deep thinking visualizer
+│   │   │   ├── ChatSettings.jsx     # Chat parameter configuration
+│   │   │   ├── VirtualMessageList.jsx # Virtualized scroll list
+│   │   │   ├── PresetQuestions.jsx   # Quick action buttons
+│   │   │   └── CitationLink.jsx     # Interactive citation links
 │   │   ├── contexts/
-│   │   │   ├── ChatParamsContext.jsx # Chat params (incl. math engine)
+│   │   │   ├── ChatParamsContext.jsx # Chat parameters (incl. Math Engine)
 │   │   │   ├── GlobalSettingsContext.jsx
 │   │   │   └── WebSearchContext.jsx  # Web search state
 │   │   ├── hooks/
-│   │   │   ├── useMessageState.js    # Message state + streaming
-│   │   │   └── useSmoothStream.js    # Smooth streaming output
+│   │   │   ├── useMessageState.js    # Message state & streaming requests
+│   │   │   └── useSmoothStream.js    # Smooth streaming orchestrator
 │   │   └── utils/
-│   │       └── processLatexBrackets.js # LaTeX bracket conversion
+│   │       └── processLatexBrackets.js # Balanced LaTeX bracket parser
 │   ├── package.json
 │   └── vite.config.js
 ├── backend/                     # FastAPI backend
-│   ├── app.py                   # Main app entry
-│   ├── desktop_entry.py         # Desktop mode entry
-│   ├── routes/                  # API routes
+│   ├── app.py                   # Main application entry
+│   ├── desktop_entry.py         # PyInstaller frozen entry point
+│   ├── routes/                  # API routing layer
 │   ├── services/
-│   │   ├── semantic_group_service.py  # Semantic group generation
-│   │   ├── granularity_selector.py    # Smart granularity selection
-│   │   ├── token_budget.py            # Token budget management
-│   │   ├── context_builder.py         # Context building + citations
-│   │   ├── chat_service.py            # AI chat + deep thinking
-│   │   ├── web_search_service.py      # Web search service
-│   │   ├── embedding_service.py       # Vector indexing + retrieval
-│   │   ├── hybrid_search.py           # BM25 + vector hybrid search
-│   │   └── rerank_service.py          # Reranking service
+│   │   ├── semantic_group_service.py  # Semantic group chunking
+│   │   ├── hybrid_search.py           # Hybrid retrieval + RRF fusion
+│   │   ├── context_builder.py         # Prompt assembly & citation generation
+│   │   ├── chat_service.py            # AI chat logic & thinking stream handler
+│   │   ├── web_search_service.py      # Internet search engine integration
+│   │   ├── embedding_service.py       # Embedding calculation & FAISS indexing
+│   │   └── rerank_service.py          # Cross-encoder reranking
 │   └── requirements.txt
-├── electron/                    # Electron desktop
-│   ├── main.js                  # Electron main process
+├── electron/                    # Electron desktop environment
+│   ├── src/main.ts              # Main process: Window mgmt, Backend spawner
 │   └── package.json
-├── scripts/                     # Build scripts
-├── start.sh / start.bat         # Web startup scripts
+├── scripts/                     # Cross-platform build scripts
 └── README.md
 ```
 
 ---
 
-## Usage Tips
-
-### Efficient Reading
-1. **Text Selection Q&A** - Select text in the PDF, then ask questions about the selected content
-2. **Preset Questions** - Click preset buttons after document loads for quick summaries, formulas, methods
-3. **Adjust Layout** - Drag the divider to resize PDF and chat areas
-
-### Smart Retrieval
-1. **Auto Granularity** - Asking "summarize the paper" returns more groups with summaries; "specific data" returns fewer groups with full text
-2. **Regex Search** - Type `/regex:pattern` for exact pattern matching
-3. **Boolean Search** - Use `term1 AND term2`, `term1 OR term2`, `NOT term` for combined searches
-
-### Citation Verification
-1. Numbers like [1] [2] in AI responses correspond to specific document locations
-2. Click the numbers to jump directly to the relevant PDF page
-3. Check retrieval_meta in API responses for detailed retrieval info
-
-### Visualization
-1. Click "Generate Mind Map" for a structured document overview
-2. Click "Generate Flowchart" for a Mermaid visual flowchart
-3. Flowcharts render automatically; you can also copy the Mermaid code for other tools
-
----
-
 ## FAQ
 
-**Q: PDF won't display?**
-A: Ensure the backend is running (port 8000). Check browser console for errors.
+**Q: The desktop client launches with a blank screen or throws an error?**
+A: Ensure no system proxy is intercepting localhost traffic, or try running as Administrator. On first launch, the app silently starts the Python engine in the background, which may take a few seconds.
 
-**Q: API calls failing?**
-A: Verify your API Key, check account balance, and confirm network connectivity.
+**Q: PDF doesn't display in Web mode?**
+A: Verify the backend service is running (default port 8000). Check the browser console for CORS or network interception errors.
 
-**Q: Local model not responding?**
-A: Confirm Ollama is running (`ollama serve`) and the model is downloaded (`ollama list`).
+**Q: API calls fail or timeout?**
+A: Check if your API Key format is correct. Ensure your network environment can reach the provider's endpoint (e.g., OpenAI may require specific network routing or a custom base URL proxy).
 
-**Q: Semantic group generation failed?**
-A: Group summaries require LLM API calls. If unavailable, the system automatically falls back to text truncation without affecting basic functionality.
+**Q: Connection refused when using local models (Ollama)?**
+A: Ensure the Ollama background service is running and you have set the system environment variable `OLLAMA_ORIGINS="*"` to allow Cross-Origin requests.
 
-**Q: Poor text extraction quality?**
-A: For scanned PDFs, consider OCR preprocessing first. pdfplumber works best with text-based PDFs.
+**Q: Math formulas are rendering as garbage text?**
+A: Switch between KaTeX and MathJax in the settings panel (bottom left). KaTeX is faster, while MathJax offers better compatibility for complex nested LaTeX.
 
 ---
 
 ## Changelog
 
 ### v3.0.1 (Current)
-- 🖥️ Electron Desktop Client - Windows standalone app with NSIS installer and integrated backend
-- 🧠 Deep Thinking Mode - Real-time reasoning visualization (ThinkingBlock) with collapse/expand and intensity control
-- 🔢 Math Engine Selection - Switch between KaTeX / MathJax / disabled in chat settings, single dollar inline math
-- 🌐 Web Search - AI web search in conversations with source links
-- ⚡ Streaming Optimization - Ref direct-write mode + useSmoothStream smooth character animation
-- 📜 Virtual Message List - Only renders visible messages for improved performance
-- 🔤 Code Block Settings - Collapsible, word-wrap, line numbers configurable
-- 🔠 Font Settings - Adjustable message font size
-- 🔀 Model Quick Switch - Quick model switching at the top of chat area
-- 🔍 OCR Settings Panel - Dedicated OCR configuration interface
-- 🔗 LaTeX Bracket Conversion - Ported cherry-studio balanced bracket matching algorithm
+- **Desktop Client Release**: Full Windows standalone application packaged via Electron 26 and PyInstaller.
+- **Deep Thinking Enhancements**: Introduced `ThinkingBlock` for multi-tier reasoning visualization and smooth collapsing.
+- **Math Engine Iteration**: Support for hot-swapping between KaTeX and MathJax, resolving rendering crashes on complex LaTeX.
+- **Render Optimization**: Rewrote `StreamingMarkdown`'s underlying logic to use DOM Ref direct-writes, bypassing React reconciliation overhead. Added virtual lists to eliminate lag in extensive histories.
 
 ### v3.0.0
-- 🧠 Semantic Groups - Aggregates chunks into semantically complete units with three-level granularity (summary/digest/full)
-- 🎯 Smart Granularity Selection - Automatically matches best detail level to query type
-- 💰 Token Budget Management - Language-aware estimation with smart degradation
-- 🔍 Advanced Search - Regex and boolean logic search
-- ⚡ Preset Questions - One-click common questions with mind map and flowchart generation
-- 📎 Citation Tracking - AI responses cite sources with click-to-navigate to PDF pages
-- 📊 Retrieval Observability - Structured logging with debug info in API responses
-- 🔄 Group-Level Vector Index - Dual chunk + group indexes with RRF fusion
-- ⬇️ Graceful Degradation - Configurable feature toggles with automatic fallback
-
-### v2.0.3
-- Draggable & resizable text selection toolbar
-- Custom search engine URL templates
-
-### v2.0.2
-- Upgraded to pdfplumber for higher quality text extraction
-- Table auto-detection and formatting
-- Full conversation history management
-
-### v2.0.0
-- New healing blue UI design
-- Vite 6.0 + React 18.3 upgrade
-- Dark mode support
-- Multi-provider AI integration
-- Screenshot and visual analysis
+- **RAG Architecture Rewrite**: Introduced Semantic Groups and a three-tier granularity (Full/Digest/Summary) degradation strategy.
+- **Precise Token Accounting**: Dynamic budget system based on language character properties.
+- **Dual-Track Retrieval**: Combined group-level and chunk-level FAISS vector retrieval with RRF fusion.
 
 ---
 
 ## Acknowledgments
 
-The RAG optimization in this project draws design inspiration from [Paper Burner X](https://github.com/Feather-2/paper-burner-x) (semantic groups, three-level granularity, smart granularity selection concepts). Paper Burner X is licensed under AGPL-3.0, copyright Feather-2 and contributors. All ChatPDF implementation code is independently written in Python without copying source code. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
-
----
-
-## Contributing
-
-Issues and Pull Requests are welcome!
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
+The RAG retrieval pipeline in this project, specifically the concepts of "Semantic Groups" and "Multi-level Granularity Auto-degradation," was inspired by the design philosophy of [Paper Burner X](https://github.com/Feather-2/paper-burner-x). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
-<div align="center">
-
-**If this project helps you, please give it a ⭐ Star!**
-
-Made with ❤️ by ChatPDF Team
-
-</div>
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
