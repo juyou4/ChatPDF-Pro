@@ -1256,6 +1256,109 @@ async def get_page_thumbnail(doc_id: str, page: int):
         raise HTTPException(status_code=500, detail=f"缩略图生成失败: {str(e)}")
 
 
+@router.post("/document/{doc_id}/graphrag/build")
+async def build_graphrag_index(doc_id: str, request: Request):
+    """为文档构建 GraphRAG 知识图谱索引
+
+    请求体 JSON:
+        api_key: LLM API 密钥
+        model: LLM 模型名
+        api_provider: LLM 提供商
+        api_host: LLM API 地址（可选）
+        embedding_model: Embedding 模型名（可选）
+        embedding_api_key: Embedding API 密钥（可选）
+        embedding_api_host: Embedding API 地址（可选）
+    """
+    if not settings.enable_graphrag:
+        raise HTTPException(status_code=400, detail="GraphRAG 未启用，请在配置中设置 enable_graphrag=true")
+
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    full_text = doc.get("data", {}).get("full_text", "")
+    if not full_text or len(full_text) < 50:
+        raise HTTPException(status_code=400, detail="文档内容过短，无法构建知识图谱")
+
+    try:
+        body = await request.json()
+        api_key = body.get("api_key", "")
+        model = body.get("model", "")
+        provider = body.get("api_provider", "")
+        api_host = body.get("api_host", "")
+        embedding_model = body.get("embedding_model", "")
+        embedding_api_key = body.get("embedding_api_key", "")
+        embedding_api_host = body.get("embedding_api_host", "")
+
+        if not api_key or not model:
+            raise HTTPException(status_code=400, detail="GraphRAG 构建需要 api_key 和 model")
+
+        from services.graphrag import GraphRAG, GraphRAGConfig
+
+        # 解析 endpoint
+        endpoint = ""
+        if api_host:
+            host = api_host.strip().rstrip('/')
+            endpoint = f"{host}/chat/completions" if not host.endswith('/chat/completions') else host
+
+        # 解析 embedding endpoint
+        embed_endpoint = ""
+        if embedding_api_host:
+            host = embedding_api_host.strip().rstrip('/')
+            embed_endpoint = f"{host}/v1" if not host.endswith('/v1') else host
+
+        working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+
+        config = GraphRAGConfig(
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            embedding_api_key=embedding_api_key or api_key,
+            embedding_model=embedding_model or model,
+            embedding_provider=provider,
+            embedding_endpoint=embed_endpoint or endpoint.replace("/chat/completions", ""),
+        )
+
+        rag = GraphRAG(
+            working_dir=working_dir,
+            config=config,
+            chunk_token_size=settings.graphrag_chunk_token_size,
+            entity_extract_max_gleaning=settings.graphrag_max_gleaning,
+            best_model_max_async=settings.graphrag_max_async,
+            cheap_model_max_async=settings.graphrag_max_async,
+        )
+
+        await rag.ainsert(full_text)
+
+        stats = rag.stats()
+        # 缓存实例以便查询时复用
+        if not hasattr(router, "_graphrag_instances"):
+            router._graphrag_instances = {}
+        router._graphrag_instances[doc_id] = rag
+
+        return {
+            "message": "GraphRAG 索引构建完成",
+            "doc_id": doc_id,
+            "stats": stats,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[GraphRAG] 构建失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"GraphRAG 构建失败: {str(e)}")
+
+
+@router.get("/document/{doc_id}/graphrag/stats")
+async def get_graphrag_stats(doc_id: str):
+    """获取文档的 GraphRAG 索引统计信息"""
+    if not hasattr(router, "_graphrag_instances") or doc_id not in router._graphrag_instances:
+        raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
+    rag = router._graphrag_instances[doc_id]
+    return {"doc_id": doc_id, "stats": rag.stats()}
+
+
 @router.get("/api/ocr/status")
 async def get_ocr_status():
     """

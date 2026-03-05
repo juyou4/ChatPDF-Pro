@@ -17,14 +17,37 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 
+try:
+    import jieba
+    _HAS_JIEBA = True
+except ImportError:
+    _HAS_JIEBA = False
+
+# 运行时开关：由 config.settings.bm25_use_jieba 控制
+_use_jieba: Optional[bool] = None
+
+
+def _should_use_jieba() -> bool:
+    """判断是否使用 jieba 分词（每次从 settings 读取，支持运行时切换）"""
+    if not _HAS_JIEBA:
+        return False
+    try:
+        from config import settings
+        return settings.bm25_use_jieba
+    except Exception:
+        return _HAS_JIEBA
+
+
 def _tokenize(text: str) -> List[str]:
     """
-    混合分词：中文用字符级bigram+trigram，英文用空格分词
-    
-    参考paper-burner-x的BM25实现：
-    - 中文：unigram + bigram + trigram（trigram提高短语匹配精度）
+    混合分词：中文用 jieba 分词（可选）或字符级 n-gram，英文用空格分词
+
+    当 jieba 可用且配置启用时：
+    - 中文：jieba 分词结果 + bigram（兼顾词语和短语匹配）
     - 英文：整词 + 小写化
     - 数字：保留（用于匹配公式编号、年份等）
+
+    当 jieba 不可用时回退到字符级 unigram+bigram+trigram（零依赖）。
     """
     if not text:
         return []
@@ -35,15 +58,25 @@ def _tokenize(text: str) -> List[str]:
     # 分离中文和英文/数字片段
     segments = re.findall(r'[\u4e00-\u9fff]+|[a-z0-9]+', text)
 
+    use_jieba = _should_use_jieba()
+
     for seg in segments:
         if re.match(r'[\u4e00-\u9fff]', seg):
-            # 中文：unigram + bigram + trigram
-            for ch in seg:
-                tokens.append(ch)
-            for i in range(len(seg) - 1):
-                tokens.append(seg[i:i+2])
-            for i in range(len(seg) - 2):
-                tokens.append(seg[i:i+3])
+            if use_jieba:
+                # jieba 分词 + bigram 补充
+                words = list(jieba.cut(seg))
+                tokens.extend(w for w in words if w.strip())
+                # 补充 bigram 提升短语匹配
+                for i in range(len(words) - 1):
+                    tokens.append(words[i] + words[i + 1])
+            else:
+                # 回退：unigram + bigram + trigram
+                for ch in seg:
+                    tokens.append(ch)
+                for i in range(len(seg) - 1):
+                    tokens.append(seg[i:i+2])
+                for i in range(len(seg) - 2):
+                    tokens.append(seg[i:i+3])
         else:
             # 英文/数字：整词
             if len(seg) > 1:

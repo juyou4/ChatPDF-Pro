@@ -97,6 +97,54 @@ class AppSettings(BaseSettings):
         description="Mistral OCR API Base URL"
     )
 
+    # ==================== GraphRAG 配置 ====================
+    # 是否启用 GraphRAG 知识图谱增强检索
+    enable_graphrag: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("enable_graphrag", "CHATPDF_ENABLE_GRAPHRAG"),
+        description="是否启用 GraphRAG 知识图谱增强检索"
+    )
+    # GraphRAG 工作目录（相对于 data/）
+    graphrag_working_dir: str = Field(
+        default="data/graphrag",
+        validation_alias=AliasChoices("graphrag_working_dir", "CHATPDF_GRAPHRAG_WORKING_DIR"),
+        description="GraphRAG 持久化工作目录"
+    )
+    # GraphRAG 实体提取 gleaning 轮数（0=不做追加提取，1=追加一轮）
+    graphrag_max_gleaning: int = Field(
+        default=1,
+        validation_alias=AliasChoices("graphrag_max_gleaning", "CHATPDF_GRAPHRAG_MAX_GLEANING"),
+        description="实体提取 gleaning 轮数，范围 0-3"
+    )
+    # GraphRAG 分块 token 大小
+    graphrag_chunk_token_size: int = Field(
+        default=2000,
+        validation_alias=AliasChoices("graphrag_chunk_token_size", "CHATPDF_GRAPHRAG_CHUNK_TOKEN_SIZE"),
+        description="GraphRAG 分块 token 大小"
+    )
+    # GraphRAG LLM 最大并发数
+    graphrag_max_async: int = Field(
+        default=8,
+        validation_alias=AliasChoices("graphrag_max_async", "CHATPDF_GRAPHRAG_MAX_ASYNC"),
+        description="GraphRAG LLM 最大并发请求数"
+    )
+
+    # ==================== BM25 分词配置 ====================
+    # 是否使用 jieba 分词增强 BM25（中文检索质量更高）
+    bm25_use_jieba: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("bm25_use_jieba", "CHATPDF_BM25_USE_JIEBA"),
+        description="是否使用 jieba 分词增强 BM25 中文检索"
+    )
+
+    # ==================== 上下文扩展配置 ====================
+    # 命中 chunk 邻居扩展数（前后各扩展 N 个 chunk）
+    num_expand_context_chunk: int = Field(
+        default=1,
+        validation_alias=AliasChoices("num_expand_context_chunk", "CHATPDF_NUM_EXPAND_CONTEXT_CHUNK"),
+        description="命中 chunk 前后各扩展的邻居 chunk 数，0=不扩展"
+    )
+
     # ==================== 查询改写配置 ====================
     # 是否启用 LLM 查询改写（多轮对话指代消解）
     enable_llm_query_rewrite: bool = Field(
