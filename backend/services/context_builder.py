@@ -188,7 +188,7 @@ class ContextBuilder:
         if not text:
             return ""
         if not query or len(text) <= max_len:
-            return text[:max_len].strip()
+            return self._fallback_non_reference_snippet(text, max_len)
 
         # 合并 query 和 selected_text 的关键词
         combined_source = query
@@ -201,7 +201,7 @@ class ContextBuilder:
             if t and len(t) >= 2
         ]
         if not terms:
-            return text[:max_len].strip()
+            return self._fallback_non_reference_snippet(text, max_len)
 
         text_lower = text.lower()
 
@@ -218,7 +218,7 @@ class ContextBuilder:
 
         if not hit_positions:
             # 没有关键词命中，回退到前 max_len 字符
-            return text[:max_len].strip()
+            return self._fallback_non_reference_snippet(text, max_len)
 
         hit_positions.sort()
 
@@ -251,7 +251,74 @@ class ContextBuilder:
             best_start = best_boundary
 
         snippet = text[best_start:best_start + max_len].strip()
-        return snippet
+        if snippet and not self._is_reference_like_text(snippet):
+            return snippet
+
+        return self._fallback_non_reference_snippet(text, max_len)
+
+    @staticmethod
+    def _is_reference_like_text(text: str) -> bool:
+        """检测文本是否呈现参考文献列表风格。"""
+        if not text:
+            return False
+
+        sample = text[:1000]
+        sample_lower = sample.lower()
+
+        if "references" in sample_lower or "bibliography" in sample_lower or "参考文献" in sample:
+            return True
+
+        citation_markers = len(re.findall(r"\[[0-9]{1,3}\]", sample))
+        year_hits = len(re.findall(r"\b(?:19|20)\d{2}\b", sample))
+        et_al_hits = sample_lower.count("et al")
+        doi_hits = len(re.findall(r"\b(?:doi|arxiv)\b", sample_lower))
+        author_hits = len(re.findall(r"\b[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)", sample))
+
+        signal = 0
+        if citation_markers >= 2:
+            signal += 1
+        if year_hits >= 2:
+            signal += 1
+        if et_al_hits >= 1 or author_hits >= 2:
+            signal += 1
+        if doi_hits >= 1:
+            signal += 1
+
+        return signal >= 2
+
+    def _fallback_non_reference_snippet(self, text: str, max_len: int) -> str:
+        """无关键词命中时，优先返回非参考文献型片段。"""
+        if not text:
+            return ""
+
+        raw = text[:max_len].strip()
+        if len(text) <= max_len:
+            return raw
+
+        best_pos = 0
+        best_score = float("-inf")
+        for line_match in re.finditer(r"[^\n]+", text):
+            line = line_match.group(0).strip()
+            if not line:
+                continue
+
+            score = min(len(line), max_len) / max_len
+            if self._is_reference_like_text(line):
+                score -= 0.8
+            else:
+                score += 1.0
+            if re.search(r"[。！？.!?]", line):
+                score += 0.2
+
+            if score > best_score:
+                best_score = score
+                best_pos = line_match.start()
+
+        if best_score <= 0:
+            return raw
+
+        start = max(0, best_pos - max_len // 4)
+        return text[start:start + max_len].strip()
 
     @staticmethod
     def _reorder_lost_in_middle(selections: List[dict]) -> List[dict]:

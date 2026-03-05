@@ -16,6 +16,8 @@ from routes.chat_routes import (
     _build_fused_context,
     _build_selected_text_citation,
     _build_selected_text_fallback_citations,
+    _extract_inline_citation_refs,
+    _align_citations_with_answer,
 )
 
 
@@ -200,3 +202,40 @@ class TestSelectedTextFallbackCitation:
 
         assert "[1]用户选中的文本（页码: 2）" in fused
         assert "框选内容" in fused
+
+
+class TestCitationAlignment:
+    """正文引文与来源列表对齐测试"""
+
+    def test_extract_inline_refs_supports_half_and_full_width(self):
+        answer = "结论A[1]，结论B【2】，补充[1]。"
+        refs = _extract_inline_citation_refs(answer)
+        assert refs == [1, 2]
+
+    def test_align_citations_keeps_only_referenced_items(self):
+        answer = "根据文档可知[2][1]。"
+        citations = [
+            {"ref": 1, "group_id": "group-1", "page_range": [3, 3], "highlight_text": "A"},
+            {"ref": 2, "group_id": "group-2", "page_range": [7, 7], "highlight_text": "B"},
+            {"ref": 3, "group_id": "group-3", "page_range": [9, 9], "highlight_text": "C"},
+        ]
+
+        aligned = _align_citations_with_answer(answer, citations)
+        assert [c["ref"] for c in aligned] == [2, 1]
+        assert all(c["ref"] != 3 for c in aligned)
+
+    def test_align_citations_keeps_original_when_no_inline_ref(self):
+        answer = "这是一个没有编号引用的回答。"
+        citations = [{"ref": 1, "group_id": "group-1", "page_range": [1, 1], "highlight_text": "A"}]
+        aligned = _align_citations_with_answer(answer, citations)
+        assert len(aligned) == 1
+        assert aligned[0]["ref"] == 1
+
+    def test_align_citations_fallback_when_inline_refs_unmapped(self):
+        answer = "结论见[99]。"
+        citations = [
+            {"ref": 1, "group_id": "group-1", "page_range": [1, 1], "highlight_text": "A"},
+            {"ref": 2, "group_id": "group-2", "page_range": [2, 2], "highlight_text": "B"},
+        ]
+        aligned = _align_citations_with_answer(answer, citations)
+        assert [c["ref"] for c in aligned] == [1, 2]

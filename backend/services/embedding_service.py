@@ -1994,6 +1994,64 @@ def _is_table_fragment(text: str) -> bool:
     return False
 
 
+_REFERENCE_QUERY_HINTS = (
+    "参考文献",
+    "文献",
+    "引用",
+    "引文",
+    "相关工作",
+    "references",
+    "reference",
+    "bibliography",
+    "citation",
+    "citations",
+    "related work",
+)
+
+
+def _is_reference_query(query: str) -> bool:
+    """判断用户问题是否在询问文献/引用信息。"""
+    if not query:
+        return False
+    q = query.lower()
+    return any(hint in q for hint in _REFERENCE_QUERY_HINTS)
+
+
+def _is_reference_like_text(text: str) -> bool:
+    """检测文本是否呈现“参考文献列表”风格。"""
+    if not text:
+        return False
+
+    sample = text[:1200]
+    sample_lower = sample.lower()
+
+    if "references" in sample_lower or "bibliography" in sample_lower or "参考文献" in sample:
+        return True
+
+    citation_markers = len(re.findall(r"\[[0-9]{1,3}\]", sample))
+    year_hits = len(re.findall(r"\b(?:19|20)\d{2}\b", sample))
+    et_al_hits = sample_lower.count("et al")
+    doi_hits = len(re.findall(r"\b(?:doi|arxiv)\b", sample_lower))
+    author_hits = len(re.findall(r"\b[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)", sample))
+
+    lines = [ln.strip() for ln in sample.splitlines() if ln.strip()]
+    numbered_lines = sum(1 for ln in lines if re.match(r"^\[?\d{1,3}\]?[.)]?\s", ln))
+
+    signal = 0
+    if citation_markers >= 2:
+        signal += 1
+    if year_hits >= 2:
+        signal += 1
+    if et_al_hits >= 1 or author_hits >= 2:
+        signal += 1
+    if doi_hits >= 1:
+        signal += 1
+    if lines and (numbered_lines / len(lines)) >= 0.35 and year_hits >= 1:
+        signal += 1
+
+    return signal >= 2
+
+
 def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) -> List[dict]:
     """对包含完整查询短语的 chunk 进行相似度加权提升
 
@@ -2015,6 +2073,7 @@ def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) ->
         return results
 
     query_lower = query.lower().strip()
+    reference_query = _is_reference_query(query)
     # 将查询拆分为单词，用于计算覆盖率
     query_terms = [t for t in re.split(r"[\s,;，。；、]+", query_lower) if len(t) > 1]
 
@@ -2029,6 +2088,13 @@ def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) ->
             item["similarity"] = item.get("similarity", 0) * 0.5
             item["similarity_percent"] = round(item.get("similarity_percent", 0) * 0.5, 2)
             item["table_fragment"] = True
+            continue
+
+        # 非“文献查询”场景下，对参考文献型文本降权，避免其占据高位引用
+        if not reference_query and _is_reference_like_text(chunk_text):
+            item["similarity"] = item.get("similarity", 0) * 0.65
+            item["similarity_percent"] = round(item.get("similarity_percent", 0) * 0.65, 2)
+            item["reference_like"] = True
             continue
 
         # 完整短语匹配：最大提升

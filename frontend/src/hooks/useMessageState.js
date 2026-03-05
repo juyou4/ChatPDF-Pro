@@ -34,6 +34,8 @@ const tokenizeForCitation = (text = '') => {
   return tokens || [];
 };
 
+const INLINE_CITATION_REGEX = /(?<!!)(?:\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g;
+
 const calcTokenOverlap = (left, right) => {
   if (!left.length || !right.length) return 0;
   const rightSet = new Set(right);
@@ -44,11 +46,147 @@ const calcTokenOverlap = (left, right) => {
   return score;
 };
 
+const normalizeCitationRecords = (citations = []) => {
+  if (!Array.isArray(citations)) return [];
+  const normalized = [];
+  for (const c of citations) {
+    const ref = Number(c?.ref);
+    if (!Number.isFinite(ref)) continue;
+    normalized.push({ ...c, ref });
+  }
+  return normalized;
+};
+
+export const extractInlineCitationRefs = (content = '') => {
+  if (!content) return [];
+  const refs = [];
+  const seen = new Set();
+  for (const m of String(content).matchAll(INLINE_CITATION_REGEX)) {
+    const ref = Number(m[1] || m[2]);
+    if (!Number.isFinite(ref) || seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push(ref);
+  }
+  return refs;
+};
+
+const stripInlineCitations = (text = '') =>
+  String(text).replace(INLINE_CITATION_REGEX, '').replace(/[ \t]{2,}/g, ' ').trim();
+
+const attachRefsToSentence = (sentence, refs) => {
+  if (!sentence || !refs || refs.length === 0) return sentence;
+  const refText = refs.map((r) => `[${r}]`).join('');
+  const trimmed = sentence.trimEnd();
+  const tail = trimmed.match(/([。！？!?；;])$/);
+  if (tail) {
+    return `${trimmed.slice(0, -1)}${refText}${tail[1]}`;
+  }
+  return `${trimmed}${refText}`;
+};
+
+const calcCitationSupportScore = (sentence = '', citation = null) => {
+  if (!sentence || !citation) return 0;
+  const sentenceTokens = tokenizeForCitation(sentence);
+  if (sentenceTokens.length === 0) return 0;
+
+  const supportText = `${citation.highlight_text || ''} ${citation.group_id || ''}`.trim();
+  const citationTokens = tokenizeForCitation(supportText);
+  const overlap = calcTokenOverlap(sentenceTokens, citationTokens);
+  let score = overlap / Math.max(1, sentenceTokens.length);
+
+  const snippet = String(citation.highlight_text || '').replace(/\s+/g, '').slice(0, 24);
+  if (snippet.length >= 6) {
+    const compactSentence = String(sentence).replace(/\s+/g, '');
+    if (compactSentence.includes(snippet)) {
+      score += 0.25;
+    } else if (compactSentence.includes(snippet.slice(0, Math.min(10, snippet.length)))) {
+      score += 0.1;
+    }
+  }
+
+  return score;
+};
+
+const optimizeSentenceCitations = (sentence, citations) => {
+  const refsInSentence = [];
+  for (const m of String(sentence).matchAll(INLINE_CITATION_REGEX)) {
+    const ref = Number(m[1] || m[2]);
+    if (Number.isFinite(ref)) refsInSentence.push(ref);
+  }
+  if (refsInSentence.length === 0) return sentence;
+
+  const normalized = normalizeCitationRecords(citations);
+  if (normalized.length === 0) return stripInlineCitations(sentence);
+
+  const coreSentence = stripInlineCitations(sentence);
+  if (!coreSentence) return sentence;
+
+  const citationMap = new Map(normalized.map((c) => [c.ref, c]));
+  const scoredAll = normalized
+    .map((c) => ({ ref: c.ref, score: calcCitationSupportScore(coreSentence, c) }))
+    .sort((a, b) => b.score - a.score);
+
+  const scoredCurrent = [...new Set(refsInSentence)].map((ref) => ({
+    ref,
+    score: calcCitationSupportScore(coreSentence, citationMap.get(ref)),
+  })).sort((a, b) => b.score - a.score);
+
+  const MIN_SUPPORT = 0.08;
+  const MIN_REPLACE = 0.14;
+
+  let chosen = scoredCurrent.filter((x) => x.score >= MIN_SUPPORT).map((x) => x.ref);
+
+  if (chosen.length === 0) {
+    const better = scoredAll.filter((x) => x.score >= MIN_REPLACE).slice(0, 2).map((x) => x.ref);
+    if (better.length > 0) chosen = better;
+  }
+
+  if (chosen.length === 0 && scoredCurrent.length > 0 && scoredCurrent[0].score >= 0.02) {
+    chosen = [scoredCurrent[0].ref];
+  }
+
+  chosen = [...new Set(chosen)].slice(0, 2);
+  if (chosen.length === 0) {
+    // verifier: 句子没有可支撑来源时移除错误引用
+    return coreSentence;
+  }
+
+  return attachRefsToSentence(coreSentence, chosen);
+};
+
+export const optimizeAssistantInlineCitations = (content, citations) => {
+  if (!content || !Array.isArray(citations) || citations.length === 0) return content;
+
+  const lines = String(content).split('\n');
+  let inCodeFence = false;
+  const optimized = lines.map((line) => {
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      return line;
+    }
+    if (inCodeFence) return line;
+    return optimizeSentenceCitations(line, citations);
+  });
+
+  return optimized.join('\n');
+};
+
+export const filterCitationsByContentRefs = (content, citations) => {
+  const normalized = normalizeCitationRecords(citations);
+  if (normalized.length === 0) return [];
+
+  const refs = extractInlineCitationRefs(content);
+  if (refs.length === 0) return normalized;
+
+  const cmap = new Map(normalized.map((c) => [c.ref, c]));
+  return refs.filter((r) => cmap.has(r)).map((r) => cmap.get(r));
+};
+
 export const normalizeAssistantCitations = (content, citations) => {
   if (!content || !Array.isArray(citations) || citations.length <= 1) return content;
 
-  const refRegex = /\[(\d{1,3})\]/g;
-  const refsInText = [...String(content).matchAll(refRegex)].map(m => Number(m[1]));
+  const refRegex = /(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g;
+  const refsInText = [...String(content).matchAll(refRegex)].map(m => Number(m[2] || m[3]));
   const uniqueRefs = new Set(refsInText);
   if (uniqueRefs.size !== 1) return content;
 
@@ -77,6 +215,26 @@ export const normalizeAssistantCitations = (content, citations) => {
   });
 
   return normalized.join('\n\n');
+};
+
+export const ensureAssistantInlineCitationFallback = (content, citations) => {
+  if (!content || !Array.isArray(citations) || citations.length === 0) return content;
+
+  const hasInlineRefs = /(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/.test(String(content));
+  if (hasInlineRefs) return content;
+
+  const refs = [];
+  const seen = new Set();
+  for (const c of citations) {
+    const ref = Number(c?.ref);
+    if (!Number.isFinite(ref) || seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push(ref);
+  }
+  if (refs.length === 0) return content;
+
+  const tailRefs = refs.slice(0, 2).map((r) => `[${r}]`).join('');
+  return `${String(content).trimEnd()}\n\n参考来源：${tailRefs}`;
 };
 
 /**
@@ -441,9 +599,21 @@ export function useMessageState({
           ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
         const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
         const normalizedFinalContent = normalizeAssistantCitations(finalContent, streamCitationsRef.current);
+        const optimizedFinalContent = optimizeAssistantInlineCitations(
+          normalizedFinalContent,
+          streamCitationsRef.current
+        );
+        const finalContentWithInlineFallback = ensureAssistantInlineCitationFallback(
+          optimizedFinalContent,
+          streamCitationsRef.current
+        );
+        const finalCitations = filterCitationsByContentRefs(
+          finalContentWithInlineFallback,
+          streamCitationsRef.current
+        );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: normalizedFinalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: streamCitationsRef.current, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null }
+            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -468,10 +638,22 @@ export function useMessageState({
 
         const data = await response.json();
         const normalizedAnswer = normalizeAssistantCitations(data.answer, data.retrieval_meta?.citations);
+        const optimizedAnswer = optimizeAssistantInlineCitations(
+          normalizedAnswer,
+          data.retrieval_meta?.citations
+        );
+        const answerWithInlineFallback = ensureAssistantInlineCitationFallback(
+          optimizedAnswer,
+          data.retrieval_meta?.citations
+        );
+        const finalCitations = filterCitationsByContentRefs(
+          answerWithInlineFallback,
+          data.retrieval_meta?.citations
+        );
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: normalizedAnswer, thinking: data.reasoning_content || '', isStreaming: false, citations: data.retrieval_meta?.citations, webSearchSources: data.web_search_sources || null }
+            ? { ...m, content: answerWithInlineFallback, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null }
             : m
         ));
         setStreamingMessageId(null);

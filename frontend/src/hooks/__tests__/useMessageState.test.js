@@ -23,6 +23,9 @@ import {
   useMessageState,
   STREAM_FIRST_EVENT_TIMEOUT_MS,
   normalizeAssistantCitations,
+  ensureAssistantInlineCitationFallback,
+  optimizeAssistantInlineCitations,
+  filterCitationsByContentRefs,
 } from '../useMessageState';
 
 const encoder = new TextEncoder();
@@ -229,5 +232,60 @@ describe('normalizeAssistantCitations', () => {
     ];
 
     expect(normalizeAssistantCitations(content, citations)).toBe(content);
+  });
+});
+
+describe('ensureAssistantInlineCitationFallback', () => {
+  it('当正文没有任何编号且存在 citations 时，应在末尾补充参考来源编号', () => {
+    const content = '这是一个没有编号的回答。';
+    const citations = [{ ref: 1 }, { ref: 2 }];
+    const result = ensureAssistantInlineCitationFallback(content, citations);
+
+    expect(result).toContain('参考来源：[1][2]');
+  });
+
+  it('当正文已包含编号时，不应重复补充参考来源', () => {
+    const content = '这是一个已有引用的回答[1]。';
+    const citations = [{ ref: 1 }, { ref: 2 }];
+    const result = ensureAssistantInlineCitationFallback(content, citations);
+    expect(result).toBe(content);
+  });
+});
+
+describe('optimizeAssistantInlineCitations', () => {
+  it('句内引用与证据不相关时，应替换为更相关引用', () => {
+    const content = '该方法通过全局光照建模提升物理鲁棒性[1]。';
+    const citations = [
+      { ref: 1, highlight_text: '社交媒体账号信息', group_id: 'noise' },
+      { ref: 2, highlight_text: '全局光照建模 提升 物理 鲁棒性', group_id: 'group-2' },
+    ];
+
+    const optimized = optimizeAssistantInlineCitations(content, citations);
+    expect(optimized).toContain('[2]');
+    expect(optimized).not.toContain('[1]');
+  });
+
+  it('句内引用都无法支撑时，应移除该句引用', () => {
+    const content = '这是一句与来源都不相关的话[1][2]。';
+    const citations = [
+      { ref: 1, highlight_text: '苹果 香蕉 西瓜', group_id: 'g1' },
+      { ref: 2, highlight_text: '东京 旅游 酒店', group_id: 'g2' },
+    ];
+    const optimized = optimizeAssistantInlineCitations(content, citations);
+    expect(optimized).not.toContain('[1]');
+    expect(optimized).not.toContain('[2]');
+  });
+});
+
+describe('filterCitationsByContentRefs', () => {
+  it('应按正文引用顺序过滤 citations', () => {
+    const content = '结论[2]，补充[1]。';
+    const citations = [
+      { ref: 1, group_id: 'g1' },
+      { ref: 2, group_id: 'g2' },
+      { ref: 3, group_id: 'g3' },
+    ];
+    const filtered = filterCitationsByContentRefs(content, citations);
+    expect(filtered.map((c) => c.ref)).toEqual([2, 1]);
   });
 });

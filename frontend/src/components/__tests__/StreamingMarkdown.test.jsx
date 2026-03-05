@@ -228,6 +228,43 @@ describe('Feature: chatpdf-citation-fix, Property 4: processCitationRefs 正确�
     );
   });
 
+  it('全角引文 【N】 应被替换为 <cite data-ref="N">[N]</cite>', () => {
+    fc.assert(
+      fc.property(
+        refNumArb,
+        safeTextArb,
+        (ref, prefix) => {
+          const citations = [{ ref, group_id: 'g1', page_range: [1, 2], highlight_text: '' }];
+          const input = `${prefix}【${ref}】`;
+          const result = processCitationRefs(input, citations);
+          expect(result).toContain(`<cite data-ref="${ref}">[${ref}]</cite>`);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('混合全角与半角连续引文应被独立处理', () => {
+    fc.assert(
+      fc.property(
+        refNumArb,
+        refNumArb,
+        (refA, refB) => {
+          fc.pre(refA !== refB);
+          const citations = [
+            { ref: refA, group_id: 'g1', page_range: [1, 2], highlight_text: '' },
+            { ref: refB, group_id: 'g2', page_range: [3, 4], highlight_text: '' },
+          ];
+          const input = `混合引用【${refA}】[${refB}]`;
+          const result = processCitationRefs(input, citations);
+          expect(result).toContain(`<cite data-ref="${refA}">[${refA}]</cite>`);
+          expect(result).toContain(`<cite data-ref="${refB}">[${refB}]</cite>`);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
   it('Markdown 链接 [N](url) 不应被替换', () => {
     fc.assert(
       fc.property(refNumArb, (ref) => {
@@ -377,6 +414,25 @@ describe('集成测试：完整引文渲染链路', () => {
 
   it('连续引文 [1][2] 应渲染为两个独立的 CitationLink 按钮', async () => {
     const content = '连续引用[1][2]结尾。';
+
+    render(
+      <StreamingMarkdown
+        content={content}
+        isStreaming={false}
+        citations={mockCitations}
+      />
+    );
+
+    await waitFor(() => {
+      const btn1 = screen.getByRole('button', { name: '1' });
+      const btn2 = screen.getByRole('button', { name: '2' });
+      expect(btn1).toBeInTheDocument();
+      expect(btn2).toBeInTheDocument();
+    });
+  });
+
+  it('连续全角引文 【1】【2】 应渲染为两个独立的 CitationLink 按钮', async () => {
+    const content = '连续引用【1】【2】结尾。';
 
     render(
       <StreamingMarkdown
