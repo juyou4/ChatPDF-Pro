@@ -100,6 +100,26 @@ EMBEDDING_MODELS = {
         "price": "Paid",
         "description": "ChatGLM embedding"
     },
+    # SiliconFlow - BGE-Large-EN
+    "BAAI/bge-large-en-v1.5": {
+        "name": "SiliconFlow: BGE-Large-EN",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 512,
+        "price": "Free (Limited)",
+        "description": "English embedding model"
+    },
+    # SiliconFlow - BCE Embedding
+    "netease-youdao/bce-embedding-base_v1": {
+        "name": "SiliconFlow: BCE Embedding",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 768,
+        "max_tokens": 512,
+        "price": "Free (Limited)",
+        "description": "NetEase Youdao cross-lingual embedding"
+    },
     # SiliconFlow - Qwen embeddings (OpenAI兼容)
     "Qwen/Qwen3-Embedding-8B": {
         "name": "SiliconFlow: Qwen3-Embedding-8B",
@@ -109,6 +129,24 @@ EMBEDDING_MODELS = {
         "max_tokens": 8192,
         "price": "Free/Limited",
         "description": "Hosted Qwen3 embedding (SiliconFlow)"
+    },
+    "Qwen/Qwen3-Embedding-4B": {
+        "name": "SiliconFlow: Qwen3-Embedding-4B",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "Qwen3 embedding 4B, balanced performance"
+    },
+    "Qwen/Qwen3-Embedding-0.6B": {
+        "name": "SiliconFlow: Qwen3-Embedding-0.6B",
+        "provider": "openai",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "Paid",
+        "description": "Qwen3 embedding 0.6B, lightweight"
     },
     # SiliconFlow - Qwen Embedding 8B（历史兼容键名，实际请求自动映射到 Qwen3）
     "Qwen/Qwen-Embedding-8B": {
