@@ -30,6 +30,8 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     customParams: [],           // [{name: string, value: string|number|boolean, type: 'string'|'number'|'boolean'}]
     // 深度思考力度
     reasoningEffort: 'off',     // 'off' | 'low' | 'medium' | 'high'
+    // 回答详细度
+    answerDetailLevel: 'standard', // 'concise' | 'standard' | 'detailed'
     // 记忆功能
     enableMemory: true,         // 是否启用智能记忆系统
     // 思考过程自动折叠
@@ -66,6 +68,8 @@ export const ChatParamsProvider = ({ children }) => {
     const [customParams, setCustomParams] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.customParams);
     // 深度思考力度
     const [reasoningEffort, setReasoningEffort] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.reasoningEffort);
+    // 回答详细度
+    const [answerDetailLevel, setAnswerDetailLevel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.answerDetailLevel);
     // 记忆功能
     const [enableMemory, setEnableMemory] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
     // 思考过程自动折叠
@@ -107,6 +111,7 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.enableMaxTokens !== undefined) setEnableMaxTokens(settings.enableMaxTokens);
                 if (settings.customParams !== undefined) setCustomParams(settings.customParams);
                 if (settings.reasoningEffort !== undefined) setReasoningEffort(settings.reasoningEffort);
+                if (settings.answerDetailLevel !== undefined) setAnswerDetailLevel(settings.answerDetailLevel);
                 if (settings.enableMemory !== undefined) setEnableMemory(settings.enableMemory);
                 if (settings.thoughtAutoCollapse !== undefined) setThoughtAutoCollapse(settings.thoughtAutoCollapse);
                 if (settings.sendShortcut !== undefined) setSendShortcut(settings.sendShortcut);
@@ -134,6 +139,7 @@ export const ChatParamsProvider = ({ children }) => {
                     if (globalSettings.enableMaxTokens !== undefined) setEnableMaxTokens(globalSettings.enableMaxTokens);
                     if (globalSettings.customParams !== undefined) setCustomParams(globalSettings.customParams);
                     if (globalSettings.reasoningEffort !== undefined) setReasoningEffort(globalSettings.reasoningEffort);
+                    if (globalSettings.answerDetailLevel !== undefined) setAnswerDetailLevel(globalSettings.answerDetailLevel);
                     if (globalSettings.enableMemory !== undefined) setEnableMemory(globalSettings.enableMemory);
                     if (globalSettings.thoughtAutoCollapse !== undefined) setThoughtAutoCollapse(globalSettings.thoughtAutoCollapse);
                     if (globalSettings.sendShortcut !== undefined) setSendShortcut(globalSettings.sendShortcut);
@@ -189,6 +195,7 @@ export const ChatParamsProvider = ({ children }) => {
             enableMaxTokens,
             customParams,
             reasoningEffort,
+            answerDetailLevel,
             enableMemory,
             thoughtAutoCollapse,
             sendShortcut,
@@ -205,7 +212,7 @@ export const ChatParamsProvider = ({ children }) => {
         debouncedSave(settings);
     }, [maxTokens, temperature, topP, contextCount, streamOutput,
         enableTemperature, enableTopP, enableMaxTokens, customParams,
-        reasoningEffort, enableMemory, thoughtAutoCollapse, sendShortcut,
+        reasoningEffort, answerDetailLevel, enableMemory, thoughtAutoCollapse, sendShortcut,
         confirmDeleteMessage, confirmRegenerateMessage,
         codeCollapsible, codeWrappable, codeShowLineNumbers,
         mathEngine, mathEnableSingleDollar,
@@ -236,6 +243,7 @@ export const ChatParamsProvider = ({ children }) => {
         setEnableMaxTokens(CHAT_PARAMS_DEFAULT_SETTINGS.enableMaxTokens);
         setCustomParams(CHAT_PARAMS_DEFAULT_SETTINGS.customParams);
         setReasoningEffort(CHAT_PARAMS_DEFAULT_SETTINGS.reasoningEffort);
+        setAnswerDetailLevel(CHAT_PARAMS_DEFAULT_SETTINGS.answerDetailLevel);
         setEnableMemory(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
         setThoughtAutoCollapse(CHAT_PARAMS_DEFAULT_SETTINGS.thoughtAutoCollapse);
         setSendShortcut(CHAT_PARAMS_DEFAULT_SETTINGS.sendShortcut);
@@ -262,6 +270,7 @@ export const ChatParamsProvider = ({ children }) => {
         enableMaxTokens,
         customParams,
         reasoningEffort,
+        answerDetailLevel,
         enableMemory,
         thoughtAutoCollapse,
         sendShortcut,
@@ -286,6 +295,7 @@ export const ChatParamsProvider = ({ children }) => {
         setEnableMaxTokens,
         setCustomParams,
         setReasoningEffort,
+        setAnswerDetailLevel,
         setEnableMemory,
         setThoughtAutoCollapse,
         setSendShortcut,

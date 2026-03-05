@@ -80,6 +80,7 @@ const createOptions = () => ({
     enableMaxTokens: false,
     customParams: [],
     reasoningEffort: 'off',
+    answerDetailLevel: 'standard',
     enableMemory: false,
   },
 });

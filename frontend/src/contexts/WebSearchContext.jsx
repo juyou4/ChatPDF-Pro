@@ -8,9 +8,21 @@ const WebSearchContext = createContext();
 // 搜索引擎配置
 export const WEB_SEARCH_PROVIDERS = [
     {
+        id: 'auto',
+        name: '自动（推荐）',
+        description: '优先 Bing RSS，失败自动回退 DuckDuckGo',
+        requiresApiKey: false,
+    },
+    {
         id: 'duckduckgo',
         name: 'DuckDuckGo',
         description: '免费搜索，无需 API Key',
+        requiresApiKey: false,
+    },
+    {
+        id: 'bing',
+        name: 'Bing RSS',
+        description: '免费搜索，无需 API Key，国内网络更稳定',
         requiresApiKey: false,
     },
     {
@@ -68,7 +80,7 @@ export const WEB_SEARCH_PROVIDERS = [
 // 默认设置
 export const WEB_SEARCH_DEFAULT_SETTINGS = {
     enableWebSearch: false,
-    webSearchProvider: 'duckduckgo',
+    webSearchProvider: 'auto',
     webSearchApiKey: '',
 };
 

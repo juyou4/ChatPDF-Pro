@@ -327,7 +327,9 @@ const StreamingMarkdown = React.memo(
       }
     }, [content]);
 
-    const streamingClass = isStreaming ? 'streaming-active' : '';
+    const streamingClass = isStreaming
+      ? `streaming-active${enableBlurReveal ? ' blur-reveal-enabled' : ''}`
+      : '';
     const showWaitingDots = isStreaming && (
       isRefDirectWrite
         ? !hasDirectWriteContent
@@ -461,7 +463,7 @@ const StreamingMarkdown = React.memo(
           <div className="relative min-h-[20px]">
             <div
               ref={streamingRef}
-              className="whitespace-pre-wrap break-words"
+              className={`whitespace-pre-wrap break-words${enableBlurReveal ? ` blur-intensity-${blurIntensity}` : ''}`}
             />
             {showWaitingDots && (
               <div className="streaming-dots absolute left-0 top-0">

@@ -22,6 +22,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
         enableMaxTokens,
         customParams,
         thoughtAutoCollapse,
+        answerDetailLevel,
         sendShortcut,
         confirmDeleteMessage,
         confirmRegenerateMessage,
@@ -42,6 +43,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setEnableMaxTokens,
         setCustomParams,
         setThoughtAutoCollapse,
+        setAnswerDetailLevel,
         setSendShortcut,
         setConfirmDeleteMessage,
         setConfirmRegenerateMessage,
@@ -67,6 +69,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setEnableTopP(DEFAULT_SETTINGS.enableTopP);
         setEnableMaxTokens(DEFAULT_SETTINGS.enableMaxTokens);
         setCustomParams(DEFAULT_SETTINGS.customParams);
+        setAnswerDetailLevel(DEFAULT_SETTINGS.answerDetailLevel);
         setThoughtAutoCollapse(DEFAULT_SETTINGS.thoughtAutoCollapse);
         setSendShortcut(DEFAULT_SETTINGS.sendShortcut);
         setConfirmDeleteMessage(DEFAULT_SETTINGS.confirmDeleteMessage);
@@ -194,6 +197,35 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             precision={0}
                             color="emerald"
                         />
+
+                        <div className="border-t border-gray-100"></div>
+
+                        {/* 回答详细度 */}
+                        <div className="space-y-3">
+                            <div className="flex items-center gap-2">
+                                <span className="text-sm font-semibold text-gray-800">回答详细度</span>
+                                <Tooltip text="控制回答展开程度。建议与最大 Token 数配合使用：详细模式更容易产生长回答" />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                                {[
+                                    { value: 'concise', label: '简洁' },
+                                    { value: 'standard', label: '标准' },
+                                    { value: 'detailed', label: '详细' },
+                                ].map((item) => (
+                                    <button
+                                        key={item.value}
+                                        onClick={() => setAnswerDetailLevel(item.value)}
+                                        className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                                            answerDetailLevel === item.value
+                                                ? 'bg-gray-700 text-white'
+                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        }`}
+                                    >
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
 
                         <div className="border-t border-gray-100"></div>
 
