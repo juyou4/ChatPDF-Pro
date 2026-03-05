@@ -169,9 +169,15 @@ const remarkBlurRevealAST = (options) => {
 export const processCitationRefs = (text, citations) => {
   if (!text || !citations || citations.length === 0) return text;
 
-  const validRefs = new Set(citations.map((c) => c.ref));
+  const validRefs = new Set(
+    citations
+      .map((c) => Number(c?.ref))
+      .filter((ref) => Number.isFinite(ref))
+  );
 
-  return text.replace(/(?<!!)\[(\d{1,2})\](?!\()/g, (match, refStr) => {
+  // 同时支持半角 [1] 与全角 【1】 引文格式
+  return text.replace(/(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g, (match, _g0, halfWidthRef, fullWidthRef) => {
+    const refStr = halfWidthRef || fullWidthRef;
     const ref = parseInt(refStr, 10);
     if (validRefs.has(ref)) {
       return `<cite data-ref="${ref}">[${ref}]</cite>`;
@@ -364,7 +370,10 @@ const StreamingMarkdown = React.memo(
       if (!citations || citations.length === 0) return null;
       const map = {};
       citations.forEach((c) => {
-        map[c.ref] = c;
+        const ref = Number(c?.ref);
+        if (Number.isFinite(ref)) {
+          map[ref] = c;
+        }
       });
       return map;
     }, [citations]);

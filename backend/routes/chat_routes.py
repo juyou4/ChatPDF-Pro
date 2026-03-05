@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional, List
 import json
 import logging
+import re
 import threading
 
 from fastapi import APIRouter, HTTPException
@@ -52,6 +53,11 @@ _MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS = 30
 _MAX_WEB_SEARCH_RESULTS = 10
 _DEFAULT_ANSWER_DETAIL = "standard"
 _VALID_ANSWER_DETAILS = {"concise", "standard", "detailed"}
+_INLINE_CITATION_PATTERN = re.compile(r'(?<!!)(?:\[(\d{1,3})\](?!\()|【(\d{1,3})】)')
+_WEB_SEARCH_PRONOUN_HINTS = (
+    "这个", "该", "它", "上述", "此", "这种", "这些", "这项", "该项", "本方法",
+    "this", "that", "it", "they", "he", "she", "them",
+)
 
 
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
@@ -471,10 +477,122 @@ def _build_selected_text_fallback_citations(
     return [_build_selected_text_citation(selected_text, selected_page_info)]
 
 
+def _extract_inline_citation_refs(answer: str) -> list[int]:
+    """从回答正文中提取按出现顺序去重的引文编号。"""
+    if not answer:
+        return []
+
+    ordered_refs = []
+    seen = set()
+    for match in _INLINE_CITATION_PATTERN.finditer(answer):
+        ref_str = match.group(1) or match.group(2)
+        if not ref_str:
+            continue
+        ref = int(ref_str)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        ordered_refs.append(ref)
+    return ordered_refs
+
+
+def _align_citations_with_answer(answer: str, citations: list[dict]) -> list[dict]:
+    """将来源列表与回答正文中的实际引文编号对齐。"""
+    if not citations:
+        return []
+
+    refs_in_answer = _extract_inline_citation_refs(answer)
+    if not refs_in_answer:
+        logger.info(
+            "回答正文未检测到内联引用编号，保留原始 citations（count=%d）",
+            len(citations),
+        )
+        normalized = []
+        for c in citations:
+            if not isinstance(c, dict):
+                continue
+            try:
+                ref = int(c.get("ref"))
+            except (TypeError, ValueError):
+                continue
+            item = c.copy()
+            item["ref"] = ref
+            normalized.append(item)
+        return normalized
+
+    citation_map = {}
+    for c in citations:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ref = int(c.get("ref"))
+        except (TypeError, ValueError):
+            continue
+        normalized = c.copy()
+        normalized["ref"] = ref
+        citation_map[ref] = normalized
+
+    aligned = [citation_map[ref] for ref in refs_in_answer if ref in citation_map]
+    if not aligned:
+        logger.info(
+            "回答存在内联编号但未匹配到 citations，回退保留原始 citations（refs=%s, count=%d）",
+            refs_in_answer,
+            len(citations),
+        )
+        return list(citation_map.values())
+    return aligned
+
+
 def _normalize_web_search_max_results(value: Optional[int]) -> int:
     if value is None:
         return 5
     return max(1, min(int(value), _MAX_WEB_SEARCH_RESULTS))
+
+
+def _clean_query_text(text: str, max_len: int = 200) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    return cleaned[:max_len]
+
+
+def _normalize_doc_title(doc_title: str) -> str:
+    title = _clean_query_text(doc_title, max_len=80)
+    title = re.sub(r"\.(pdf|docx?|txt|md)$", "", title, flags=re.IGNORECASE)
+    return title
+
+
+def _contains_pronoun_like_reference(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(hint in lowered for hint in _WEB_SEARCH_PRONOUN_HINTS)
+
+
+def _build_web_search_query(
+    base_query: str,
+    original_question: str,
+    doc_title: str = "",
+    selected_text: str = "",
+) -> str:
+    """构建联网搜索查询，减少代词歧义与离题检索。"""
+    query = _clean_query_text(base_query or original_question, max_len=180)
+    if not query:
+        return ""
+
+    anchors: list[str] = []
+    title = _normalize_doc_title(doc_title)
+    if title and title.lower() not in query.lower():
+        anchors.append(title)
+
+    if selected_text and _contains_pronoun_like_reference(original_question or query):
+        selected_snippet = _context_builder._extract_relevant_snippet(
+            selected_text, original_question or query, max_len=80, selected_text=selected_text
+        )
+        selected_snippet = _clean_query_text(selected_snippet, max_len=80)
+        # 跳过明显“参考文献列表”风格文本，避免将无关人名注入 query
+        if selected_snippet and not _context_builder._is_reference_like_text(selected_snippet):
+            anchors.append(selected_snippet)
+
+    if anchors:
+        query = f"{query} {' '.join(anchors)}"
+    return _clean_query_text(query, max_len=260)
 
 
 def _normalize_answer_detail(value: Optional[str]) -> str:
@@ -493,13 +611,58 @@ def _build_answer_style_instruction(answer_detail: str) -> str:
         return "回答风格：简洁模式。优先给出结论，控制篇幅，避免冗长展开。"
     if detail == "detailed":
         return (
-            "回答风格：详细模式。请分点展开背景、依据、推理与结论，"
-            "在不偏离问题的前提下尽量完整，不要过度省略关键细节。"
+            "回答风格：详细模式。请严格遵循以下要求：\n"
+            "- 使用 Markdown 标题（##）和小标题（###）对回答进行结构化分段\n"
+            "- 从多个角度展开分析：背景介绍→核心内容→依据与推理→结论→局限性或注意事项\n"
+            "- 至少覆盖 3-5 个要点，每个要点充分展开而非一句话带过\n"
+            "- 直接引用文档原文作为论据佐证，不要仅概括\n"
+            "- 涉及数据、公式、表格时必须完整展示，不可省略\n"
+            "- 篇幅上不设上限，宁可详尽也不要遗漏重要信息\n"
+            "- 回答结尾可附上简要总结"
         )
-    return "回答风格：标准模式。结构清晰，覆盖关键点，必要时适度展开。"
+    return (
+        "回答风格：标准模式。结构清晰，使用分点或分段组织回答，"
+        "覆盖所有关键点并适度展开说明，引用文档原文佐证重要论述。"
+    )
 
 
-async def _maybe_perform_web_search(request: ChatRequest) -> tuple[list[dict], str]:
+_CITATION_TOKEN_OVERHEAD = 1024  # 结构化引文（CITATION LIST）输出的预估 token 开销
+_DETAILED_MIN_TOKENS = 4096     # 详细模式下 max_tokens 的最低保证值
+
+
+def _adjust_max_tokens(
+    max_tokens: Optional[int],
+    answer_detail: str,
+    has_structured_citations: bool,
+) -> Optional[int]:
+    """根据回答详细度和引文开销调整 max_tokens。
+
+    - 详细模式：保证 max_tokens >= _DETAILED_MIN_TOKENS
+    - 结构化引文：自动增加 _CITATION_TOKEN_OVERHEAD 补偿隐藏的 CITATION LIST 输出
+    - 不覆盖用户已设置的更大值
+    """
+    detail = _normalize_answer_detail(answer_detail)
+    effective = max_tokens
+
+    # Fix 4：详细模式下保证 max_tokens 下限
+    if detail == "detailed":
+        if effective is None or effective < _DETAILED_MIN_TOKENS:
+            effective = _DETAILED_MIN_TOKENS
+
+    # Fix 3：结构化引文开销补偿
+    if has_structured_citations and effective is not None:
+        effective += _CITATION_TOKEN_OVERHEAD
+
+    return effective
+
+
+async def _maybe_perform_web_search(
+    request: ChatRequest,
+    *,
+    query_override: str = "",
+    doc_title: str = "",
+    selected_text: str = "",
+) -> tuple[list[dict], str]:
     """按请求开关执行联网搜索，返回 (sources, formatted_context)。"""
     if not getattr(request, "enable_web_search", False):
         return [], ""
@@ -508,10 +671,19 @@ async def _maybe_perform_web_search(request: ChatRequest) -> tuple[list[dict], s
 
     provider = request.web_search_provider or "auto"
     max_results = _normalize_web_search_max_results(request.web_search_max_results)
+    search_query = _build_web_search_query(
+        base_query=query_override or request.question,
+        original_question=request.question,
+        doc_title=doc_title,
+        selected_text=selected_text,
+    )
+    if not search_query:
+        return [], ""
 
     try:
+        logger.info(f"联网搜索开始: provider={provider}, query='{search_query[:120]}'")
         sources = await SearchManager.search(
-            query=request.question,
+            query=search_query,
             provider=provider,
             api_key=request.web_search_api_key,
             max_results=max_results,
@@ -534,6 +706,7 @@ async def chat_with_pdf(request: ChatRequest):
     doc = store[request.doc_id]
     context = ""
     retrieval_meta = {}
+    citations: list[dict] = []
     web_search_sources: list[dict] = []
     web_search_context = ""
     use_memory = _should_use_memory(request)
@@ -554,9 +727,6 @@ async def chat_with_pdf(request: ChatRequest):
     if request.image_base64 and request.image_base64 not in image_list:
         image_list = [request.image_base64] + image_list
     image_list = [img for img in image_list if img]
-
-    if not image_list:
-        web_search_sources, web_search_context = await _maybe_perform_web_search(request)
 
     if image_list:
         print(f"[Chat] 📸 截图模式：处理 {len(image_list)} 张图")
@@ -586,6 +756,12 @@ async def chat_with_pdf(request: ChatRequest):
             model=request.model,
             provider=request.api_provider,
             endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+        )
+        web_search_sources, web_search_context = await _maybe_perform_web_search(
+            request,
+            query_override=search_query,
+            doc_title=doc.get("filename", ""),
+            selected_text=request.selected_text or "",
         )
 
         if request.selected_text and request.enable_vector_search:
@@ -704,11 +880,15 @@ async def chat_with_pdf(request: ChatRequest):
                 messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
     messages.append({"role": "user", "content": user_content})
 
+    has_citations_non_stream = bool(citations)
+    adjusted_max_tokens = _adjust_max_tokens(
+        request.max_tokens, request.answer_detail, has_citations_non_stream,
+    )
     try:
         response = await call_ai_api(
             messages, request.api_key, request.model, request.api_provider,
             endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
-            middlewares=build_chat_middlewares(), max_tokens=request.max_tokens,
+            middlewares=build_chat_middlewares(), max_tokens=adjusted_max_tokens,
             temperature=request.temperature, top_p=request.top_p,
             custom_params=request.custom_params, reasoning_effort=request.reasoning_effort,
         )
@@ -735,6 +915,10 @@ async def chat_with_pdf(request: ChatRequest):
             except Exception as e:
                 logger.warning(f"非流式引文后处理失败: {e}")
 
+        retrieval_meta["citations"] = _align_citations_with_answer(
+            answer, retrieval_meta.get("citations", [])
+        )
+
         if use_memory:
             threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
         return {
@@ -759,6 +943,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
     doc = store[request.doc_id]
     context = ""
     retrieval_meta = {}
+    has_structured_citations = False
     web_search_sources: list[dict] = []
     web_search_context = ""
     use_agent = False
@@ -777,9 +962,6 @@ async def chat_with_pdf_stream(request: ChatRequest):
     if request.image_base64 and request.image_base64 not in image_list:
         image_list = [request.image_base64] + image_list
     image_list = [img for img in image_list if img]
-
-    if not image_list:
-        web_search_sources, web_search_context = await _maybe_perform_web_search(request)
 
     if image_list:
         print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
@@ -814,6 +996,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
             model=request.model,
             provider=request.api_provider,
             endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+        )
+        web_search_sources, web_search_context = await _maybe_perform_web_search(
+            request,
+            query_override=search_query,
+            doc_title=doc.get("filename", ""),
+            selected_text=request.selected_text or "",
         )
 
         if request.selected_text and request.enable_vector_search:
@@ -928,12 +1116,19 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+文档总页数：{doc["data"]["total_pages"]}
+
 文档内容：
 {context}
 
 回答规则：
-1. 基于文档内容准确回答。"""
-        system_prompt += f"\n2. {answer_style_instruction}"
+1. 基于文档内容准确回答，学术准确、表达清晰。
+2. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容。
+3. 优先依据文档内容回答。"""
+        system_prompt += f"\n4. {answer_style_instruction}"
+        if request.enable_glossary:
+            glossary_instruction = build_glossary_prompt(context)
+            if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
         if web_search_context:
@@ -971,11 +1166,14 @@ async def chat_with_pdf_stream(request: ChatRequest):
             if not use_agent and not image_list:
                 yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'complete', 'message': '检索完成'}, ensure_ascii=False)}\n\n"
             # 使用 _buffered_stream 包装流式输出，合并高频小 chunk 减少 SSE 事件频率
+            adjusted_stream_max_tokens = _adjust_max_tokens(
+                request.max_tokens, request.answer_detail, has_structured_citations,
+            )
             raw_stream = call_ai_api_stream(
                 messages, request.api_key, request.model, request.api_provider,
                 endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                 middlewares=build_chat_middlewares(), enable_thinking=request.enable_thinking,
-                max_tokens=request.max_tokens, temperature=request.temperature,
+                max_tokens=adjusted_stream_max_tokens, temperature=request.temperature,
                 top_p=request.top_p, custom_params=request.custom_params,
                 reasoning_effort=request.reasoning_effort,
             )
@@ -1011,6 +1209,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                                 break
                         except Exception as e:
                             logger.warning(f"结构化引文后处理失败: {e}")
+
+                    final_answer_text = extract_final_answer(full_output) if full_output else ""
+                    retrieval_meta["citations"] = _align_citations_with_answer(
+                        final_answer_text, retrieval_meta.get("citations", [])
+                    )
 
                     # 移除内部 _chunks 字段（仅后端使用），避免发送大量原始数据
                     send_meta = {k: v for k, v in retrieval_meta.items() if not k.startswith("_")}

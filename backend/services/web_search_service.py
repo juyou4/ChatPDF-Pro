@@ -19,8 +19,10 @@
 
 import asyncio
 import logging
+import re
 from typing import Optional
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 
 import httpx
 
@@ -31,6 +33,13 @@ class SearchManager:
     """多引擎搜索管理器"""
 
     _logged_ddgs_missing = False
+    _TECH_QUERY_HINTS = (
+        "论文", "方法", "模型", "算法", "攻击", "防御", "鲁棒", "公式", "实验", "asr",
+        "adversarial", "model", "method", "algorithm", "benchmark", "loss", "dataset",
+    )
+    _NOISY_DOMAIN_HINTS = (
+        "instagram.com", "ameblo.jp", "weibo.com", "x.com", "twitter.com", "facebook.com",
+    )
 
     # 无需 API Key 的引擎
     _PROVIDERS_NO_KEY = {
@@ -82,7 +91,8 @@ class SearchManager:
                     logger.warning(f"{provider} 搜索需要 API Key，已回退到自动搜索")
                     return await SearchManager._auto_search(query, max_results)
                 method = getattr(SearchManager, key_method_name)
-                return await method(query, api_key, max_results)
+                raw_results = await method(query, api_key, max_results)
+                return SearchManager._postprocess_results(query, raw_results, max_results)
 
             no_key_method_name = SearchManager._PROVIDERS_NO_KEY.get(provider)
             if no_key_method_name:
@@ -90,16 +100,18 @@ class SearchManager:
                 results = await method(query, max_results=max_results)
                 if provider == "duckduckgo" and not results:
                     logger.warning("DuckDuckGo 返回空结果，已回退到 Bing RSS")
-                    return await SearchManager._bing_search(query, max_results=max_results)
-                return results
+                    results = await SearchManager._bing_search(query, max_results=max_results)
+                return SearchManager._postprocess_results(query, results, max_results)
 
             logger.warning(f"未知搜索 provider='{provider}'，已回退到自动搜索")
-            return await SearchManager._auto_search(query, max_results)
+            raw_results = await SearchManager._auto_search(query, max_results)
+            return SearchManager._postprocess_results(query, raw_results, max_results)
         except Exception as e:
             logger.error(f"搜索失败 (provider={provider}): {e}")
             if provider != "auto":
                 try:
-                    return await SearchManager._auto_search(query, max_results)
+                    raw_results = await SearchManager._auto_search(query, max_results)
+                    return SearchManager._postprocess_results(query, raw_results, max_results)
                 except Exception as fallback_error:
                     logger.error(f"自动回退搜索失败: {fallback_error}")
             return []
@@ -123,6 +135,122 @@ class SearchManager:
             logger.info(f"自动搜索 provider={name} 返回空结果，尝试下一个引擎")
         logger.warning("自动搜索未返回结果")
         return []
+
+    @staticmethod
+    def _postprocess_results(query: str, results: list[dict], max_results: int) -> list[dict]:
+        """对原始搜索结果做去重 + 相关性重排过滤。"""
+        deduped = SearchManager._deduplicate_results(results)
+        ranked = SearchManager._rerank_and_filter_results(query, deduped)
+        return ranked[:max_results]
+
+    @staticmethod
+    def _deduplicate_results(results: list[dict]) -> list[dict]:
+        if not results:
+            return []
+        deduped = []
+        seen = set()
+        for item in results:
+            title = (item.get("title") or "").strip()
+            url = (item.get("url") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            if not title and not url:
+                continue
+            key = (title.lower(), url.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"title": title, "url": url, "snippet": snippet})
+        return deduped
+
+    @staticmethod
+    def _tokenize_for_relevance(text: str) -> set[str]:
+        if not text:
+            return set()
+        lowered = text.lower()
+        tokens = set(re.findall(r"[a-z0-9]{2,}", lowered))
+        for seq in re.findall(r"[\u4e00-\u9fff]{2,}", lowered):
+            # 保留整词，并补充 2-gram 以提升中文召回
+            tokens.add(seq)
+            for i in range(len(seq) - 1):
+                tokens.add(seq[i:i + 2])
+        return tokens
+
+    @staticmethod
+    def _has_kana(text: str) -> bool:
+        return bool(re.search(r"[\u3040-\u30ff]", text or ""))
+
+    @staticmethod
+    def _has_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    @staticmethod
+    def _domain(url: str) -> str:
+        try:
+            return (urlparse(url).netloc or "").lower()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_technical_query(query: str) -> bool:
+        q = (query or "").lower()
+        return any(h in q for h in SearchManager._TECH_QUERY_HINTS)
+
+    @staticmethod
+    def _score_result(query: str, item: dict) -> float:
+        q_tokens = SearchManager._tokenize_for_relevance(query)
+        if not q_tokens:
+            return 0.0
+
+        title = item.get("title", "") or ""
+        snippet = item.get("snippet", "") or ""
+        url = item.get("url", "") or ""
+        title_tokens = SearchManager._tokenize_for_relevance(title)
+        body_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet} {url}")
+
+        overlap_title = len(q_tokens & title_tokens) / max(1, len(q_tokens))
+        overlap_body = len(q_tokens & body_tokens) / max(1, len(q_tokens))
+        score = overlap_title * 0.65 + overlap_body * 0.35
+
+        q_lower = (query or "").lower()
+        corpus_lower = f"{title} {snippet}".lower()
+        if q_lower and q_lower in corpus_lower:
+            score += 0.2
+
+        # 中文查询遇到大量假名结果时降权（典型日文娱乐站点误命中）
+        if SearchManager._has_cjk(query) and SearchManager._has_kana(f"{title} {snippet}"):
+            score *= 0.45
+
+        # 技术问题下，对社交/娱乐噪音域名降权
+        domain = SearchManager._domain(url)
+        if SearchManager._is_technical_query(query) and any(h in domain for h in SearchManager._NOISY_DOMAIN_HINTS):
+            score *= 0.5
+
+        return score
+
+    @staticmethod
+    def _rerank_and_filter_results(query: str, results: list[dict]) -> list[dict]:
+        if not results:
+            return []
+
+        scored = []
+        for item in results:
+            score = SearchManager._score_result(query, item)
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        max_score = scored[0][0] if scored else 0.0
+        if max_score <= 0.02:
+            return []
+
+        # 自适应阈值：保留与最佳结果接近的项，过滤明显离题项
+        threshold = max(0.08, max_score * 0.35)
+        filtered = [item for score, item in scored if score >= threshold]
+
+        # 至少保留 1 条最佳结果，避免全量过滤导致无来源
+        if not filtered:
+            filtered = [scored[0][1]]
+
+        return filtered
 
     @staticmethod
     async def _tavily_search(
@@ -224,6 +352,8 @@ class SearchManager:
     @staticmethod
     async def _bing_search(query: str, max_results: int = 5) -> list[dict]:
         """Bing RSS 免费搜索（无需 API Key）"""
+        has_cjk = bool(re.search(r"[\u4e00-\u9fff]", query or ""))
+        market = "zh-CN" if has_cjk else "en-US"
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(
                 "https://www.bing.com/search",
@@ -231,6 +361,7 @@ class SearchManager:
                     "q": query,
                     "format": "rss",
                     "count": min(max_results, 50),
+                    "mkt": market,
                 },
                 headers={
                     "User-Agent": (
