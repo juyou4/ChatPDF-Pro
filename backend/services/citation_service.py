@@ -228,9 +228,7 @@ def find_start_end_phrase(
             matches.append((match.b, match.b + match.size))
             matched_length += match.size
 
-    # 如果第二个匹配在第一个之前，只保留第一个
-    if len(matches) == 2 and matches[1][0] < matches[0][0]:
-        matches = [matches[0]]
+    # 保留两个匹配并用 min/max 扩展 span（即使 end_phrase 出现在 start_phrase 之前也正确处理）
 
     if matches:
         start_idx = min(s for s, _ in matches)
@@ -242,6 +240,30 @@ def find_start_end_phrase(
         return (start_idx, end_idx), matched_length
 
     return None, 0
+
+
+def merge_overlapping_spans(
+    spans: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """合并重叠或相邻的高亮区间（仿 kotaemon 实现）
+
+    Args:
+        spans: [(start, end), ...] 可能重叠的区间列表
+
+    Returns:
+        合并后的不重叠区间列表，按 start 升序排列
+    """
+    if not spans:
+        return []
+    sorted_spans = sorted(spans)
+    merged = [sorted_spans[0]]
+    for start, end in sorted_spans[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def match_citations_to_chunks(
@@ -259,20 +281,21 @@ def match_citations_to_chunks(
         chunks: 检索到的 chunk 列表，每个至少含 "text" 字段
             可选字段: "page", "group_id", "ref"
         context_segments: 意群级上下文段列表（可选）
-            [{"ref": int, "text": str}, ...]
+            [{"ref": int, "text": str, "page_range": [...], "group_id": str}, ...]
             每项的 text 是 LLM 实际看到的完整意群文本
 
     Returns:
         增强后的 citation 列表，每项新增:
         - highlight_text: 精确匹配到的原文片段
-        - matched_chunk_idx: 匹配到的 chunk 索引
+        - matched_chunk_idx: 匹配到的 chunk 索引（仅策略3时设置）
     """
-    # 构建 ref → context_segment 映射
-    segment_map = {}
+    # 构建 ref → segment 元数据映射（包含 text、page_range、group_id）
+    segment_map: dict[int, dict] = {}
     if context_segments:
         for seg in context_segments:
-            if seg.get("ref") is not None and seg.get("text"):
-                segment_map[seg["ref"]] = seg["text"]
+            ref = seg.get("ref")
+            if ref is not None and seg.get("text"):
+                segment_map[ref] = seg
 
     enhanced = []
 
@@ -284,10 +307,12 @@ def match_citations_to_chunks(
         best_length = 0
         best_text = ""
         best_chunk_idx = None
+        best_seg_ref = None
 
         # 策略 1：优先在对应 ref 的意群文本中精准匹配
         if evidence.idx and evidence.idx in segment_map:
-            segment_text = segment_map[evidence.idx]
+            seg = segment_map[evidence.idx]
+            segment_text = seg["text"]
             span, length = find_start_end_phrase(
                 evidence.start_phrase or "",
                 evidence.end_phrase or "",
@@ -298,10 +323,12 @@ def match_citations_to_chunks(
                 best_match = span
                 best_length = length
                 best_text = raw_text[span[0]:span[1]]
+                best_seg_ref = evidence.idx
 
         # 策略 2：意群匹配失败时，遍历所有意群文本搜索
         if not best_match and segment_map:
-            for seg_ref, seg_text in segment_map.items():
+            for seg_ref, seg in segment_map.items():
+                seg_text = seg["text"]
                 span, length = find_start_end_phrase(
                     evidence.start_phrase or "",
                     evidence.end_phrase or "",
@@ -312,6 +339,7 @@ def match_citations_to_chunks(
                     best_length = length
                     raw_text = seg_text.replace("\n", " ")
                     best_text = raw_text[span[0]:span[1]]
+                    best_seg_ref = seg_ref
 
         # 策略 3：回退到原始 chunk 级别匹配
         if not best_match:
@@ -340,8 +368,14 @@ def match_citations_to_chunks(
             "matched_chunk_idx": best_chunk_idx,
         }
 
-        # 从匹配的 chunk 中继承页码等信息
-        if best_chunk_idx is not None and best_chunk_idx < len(chunks):
+        # B4 修复：策略 1/2 成功时从 segment 继承 page_range / group_id
+        if best_seg_ref is not None and best_seg_ref in segment_map:
+            seg_meta = segment_map[best_seg_ref]
+            page_range = seg_meta.get("page_range")
+            if page_range and len(page_range) >= 1:
+                entry["page"] = page_range[0]
+            entry["group_id"] = seg_meta.get("group_id", "")
+        elif best_chunk_idx is not None and best_chunk_idx < len(chunks):
             matched = chunks[best_chunk_idx]
             entry["page"] = matched.get("page", 0)
             entry["group_id"] = matched.get("group_id", "")

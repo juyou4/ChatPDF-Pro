@@ -534,12 +534,15 @@ def _align_citations_with_answer(answer: str, citations: list[dict]) -> list[dic
 
     aligned = [citation_map[ref] for ref in refs_in_answer if ref in citation_map]
     if not aligned:
-        logger.info(
-            "回答存在内联编号但未匹配到 citations，回退保留原始 citations（refs=%s, count=%d）",
-            refs_in_answer,
-            len(citations),
+        # D5 修复：所有 ref 均越界时，说明 LLM 使用了不存在的编号，
+        # 返回空列表而非全部引文，避免展示与回答无关的引用
+        invalid_refs = [r for r in refs_in_answer if r not in citation_map]
+        logger.warning(
+            "回答中的引文编号全部越界，不返回无关引文（invalid_refs=%s, valid_refs=%s）",
+            invalid_refs,
+            list(citation_map.keys()),
         )
-        return list(citation_map.values())
+        return []
     return aligned
 
 
@@ -1181,6 +1184,20 @@ async def chat_with_pdf_stream(request: ChatRequest):
             full_output = ""
             reached_final_answer = False
             qa_score_val = None
+            # D1：并行引文匹配（仿 kotaemon）
+            # CITATION LIST 完整后立即在后台线程启动匹配，与 FINAL ANSWER 流式输出并行
+            _citation_match_thread: Optional[threading.Thread] = None
+            _citation_match_result: dict = {}  # 线程结果写入此 dict，避免共享状态竞争
+
+            def _run_citation_match(citation_list_text: str, chunks: list, segments: list, out: dict) -> None:
+                try:
+                    inline_cites = parse_citation_list(citation_list_text)
+                    if inline_cites and (chunks or segments):
+                        out["enhanced"] = match_citations_to_chunks(
+                            inline_cites, chunks, context_segments=segments
+                        )
+                except Exception as exc:
+                    logger.warning(f"并行引文匹配失败: {exc}")
 
             async for chunk in _buffered_stream(raw_stream):
                 if chunk.get("error"):
@@ -1192,23 +1209,31 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
                 if chunk.get("done"):
                     qa_score_val = chunk.get('qa_score')
-                    # 结构化引文后处理
-                    if has_structured_citations and full_output:
-                        try:
-                            inline_cites = parse_citation_list(full_output)
-                            _context_segments = retrieval_meta.get("_context_segments", [])
-                            if inline_cites and (_retrieval_chunks or _context_segments):
-                                enhanced = match_citations_to_chunks(inline_cites, _retrieval_chunks, context_segments=_context_segments)
-                                # 用增强的引文数据替换 retrieval_meta 中的 citations
-                                orig_citations = retrieval_meta.get("citations", [])
-                                for ec in enhanced:
-                                    if ec.get("highlight_text") and ec.get("idx") is not None:
-                                        for oc in orig_citations:
-                                            if oc.get("ref") == ec["idx"]:
-                                                oc["highlight_text"] = ec["highlight_text"]
-                                                break
-                        except Exception as e:
-                            logger.warning(f"结构化引文后处理失败: {e}")
+                    # 等待并行引文匹配线程完成（如已启动）
+                    if _citation_match_thread is not None:
+                        _citation_match_thread.join(timeout=5)
+                    # 将匹配结果写入 citations
+                    if has_structured_citations:
+                        enhanced = _citation_match_result.get("enhanced", [])
+                        if not enhanced and full_output:
+                            # 并行线程未启动或未匹配时，同步补跑（兜底）
+                            try:
+                                inline_cites = parse_citation_list(full_output)
+                                _context_segments = retrieval_meta.get("_context_segments", [])
+                                if inline_cites and (_retrieval_chunks or _context_segments):
+                                    enhanced = match_citations_to_chunks(
+                                        inline_cites, _retrieval_chunks, context_segments=_context_segments
+                                    )
+                            except Exception as e:
+                                logger.warning(f"结构化引文后处理失败: {e}")
+                        if enhanced:
+                            orig_citations = retrieval_meta.get("citations", [])
+                            for ec in enhanced:
+                                if ec.get("highlight_text") and ec.get("idx") is not None:
+                                    for oc in orig_citations:
+                                        if oc.get("ref") == ec["idx"]:
+                                            oc["highlight_text"] = ec["highlight_text"]
+                                            break
 
                     final_answer_text = extract_final_answer(full_output) if full_output else ""
                     retrieval_meta["citations"] = _align_citations_with_answer(
@@ -1287,7 +1312,21 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     if not reached_final_answer:
                         if START_ANSWER in full_output:
                             reached_final_answer = True
-                            # 提取 FINAL ANSWER 之后的内容
+                            # D1：CITATION LIST 已完整，立即在后台线程启动引文匹配
+                            citation_list_part = full_output.split(START_ANSWER, 1)[0]
+                            if citation_list_part and (_retrieval_chunks or retrieval_meta.get("_context_segments")):
+                                _citation_match_thread = threading.Thread(
+                                    target=_run_citation_match,
+                                    args=(
+                                        citation_list_part,
+                                        _retrieval_chunks,
+                                        retrieval_meta.get("_context_segments", []),
+                                        _citation_match_result,
+                                    ),
+                                    daemon=True,
+                                )
+                                _citation_match_thread.start()
+                            # 提取 FINAL ANSWER 之后的内容并发送
                             after_marker = full_output.split(START_ANSWER, 1)[1].lstrip()
                             if after_marker:
                                 yield f"data: {json.dumps({'content': after_marker, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
@@ -1295,8 +1334,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         continue
                     else:
                         # 已进入 FINAL ANSWER 区域，检查是否 CITATION LIST 再次出现（小模型重复）
+                        # 使用 continue 跳过脏块而非 break，确保 done 事件正常触发
                         if START_CITATION in content:
-                            break
+                            # 仅保留 CITATION LIST 之前的内容（如有），其余丢弃
+                            clean_part = content.split(START_CITATION, 1)[0]
+                            if clean_part:
+                                yield f"data: {json.dumps({'content': clean_part, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
+                            continue
 
                 chunk_data = {
                     'content': content, 'reasoning_content': reasoning,
