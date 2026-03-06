@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
+import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
 
 // API base URL
 const API_BASE_URL = '';
@@ -33,8 +34,6 @@ const tokenizeForCitation = (text = '') => {
   const tokens = lowered.match(/[a-z0-9]+|[\u4e00-\u9fff]/g);
   return tokens || [];
 };
-
-const INLINE_CITATION_REGEX = /(?<!!)(?:\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g;
 
 const calcTokenOverlap = (left, right) => {
   if (!left.length || !right.length) return 0;

@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -175,10 +176,9 @@ export const processCitationRefs = (text, citations) => {
       .filter((ref) => Number.isFinite(ref))
   );
 
-  // 同时支持半角 [1] 与全角 【1】 引文格式
-  return text.replace(/(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g, (match, _g0, halfWidthRef, fullWidthRef) => {
-    const refStr = halfWidthRef || fullWidthRef;
-    const ref = parseInt(refStr, 10);
+  // 使用共享正则，捕获组 1=半角数字，捕获组 2=全角数字
+  return text.replace(INLINE_CITATION_REGEX, (match, halfWidthRef, fullWidthRef) => {
+    const ref = parseInt(halfWidthRef ?? fullWidthRef, 10);
     if (validRefs.has(ref)) {
       return `<cite data-ref="${ref}">[${ref}]</cite>`;
     }
