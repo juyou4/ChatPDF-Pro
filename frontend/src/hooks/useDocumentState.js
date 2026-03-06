@@ -255,7 +255,11 @@ export function useDocumentState({
       if (res.ok) {
         setDocId(s.docId);
         setDocInfo(await res.json());
-        setMessages?.(s.messages || []);
+        // 恢复历史消息：确保不存在"永久流式中"的脏消息（页面关闭时可能残留 isStreaming:true）
+        const restoredMessages = (s.messages || []).map((m) =>
+          m.isStreaming ? { ...m, isStreaming: false } : m
+        );
+        setMessages?.(restoredMessages);
         setCurrentPage?.(1);
       }
     } catch (e) {

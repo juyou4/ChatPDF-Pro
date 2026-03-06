@@ -146,7 +146,11 @@ const optimizeSentenceCitations = (sentence, citations) => {
 
   chosen = [...new Set(chosen)].slice(0, 2);
   if (chosen.length === 0) {
-    // verifier: 句子没有可支撑来源时移除错误引用
+    // 最终兜底：保留 LLM 自身标注的、在 citationMap 中存在的有效 ref，
+    // 而非直接丢弃——跨语言场景（中文回答 + 英文文档）token 重叠为 0 但 ref 仍有效
+    const preserved = [...new Set(refsInSentence)].filter((r) => citationMap.has(r));
+    if (preserved.length > 0) return attachRefsToSentence(coreSentence, preserved.slice(0, 2));
+    // 所有 ref 不在 citations 中（如文档自身的参考文献编号），才真正剥离
     return coreSentence;
   }
 

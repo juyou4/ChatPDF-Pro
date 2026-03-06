@@ -714,6 +714,7 @@ const ChatPDF = () => {
     messageStyle, messageFontSize, confirmRegenerateMessage, reasoningEffort,
     activeCitationRef, setActiveCitationRef,
     dislikedMessages, setFeedbackTarget,
+    docId,
   ]);
 
   // ========== 反馈提交 ==========
