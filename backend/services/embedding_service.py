@@ -984,6 +984,120 @@ def _apply_rerank(
         return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
 
 
+# ---- Wide-net retrieval: expand candidate pool when reranking is enabled ----
+_WIDE_RETRIEVAL_MULTIPLIER = 5
+
+
+def _apply_mmr(
+    candidates: List[dict],
+    top_k: int,
+    mmr_lambda: float = 0.5,
+) -> List[dict]:
+    """Maximal Marginal Relevance: balance relevance with diversity.
+
+    Uses word-set Jaccard overlap as inter-document similarity approximation.
+    Greedy: select candidate maximizing mmr_lambda * relevance - (1-mmr_lambda) * max_sim_to_selected.
+    """
+    if len(candidates) <= top_k:
+        return candidates
+
+    selected: List[dict] = []
+    selected_word_sets: List[set] = []
+    remaining = list(candidates)
+
+    while len(selected) < top_k and remaining:
+        if not selected:
+            best = remaining[0]
+        else:
+            best = None
+            best_score = float('-inf')
+            for cand in remaining:
+                rel = cand.get('similarity', 0.0)
+                cand_words = set(cand.get('chunk', '')[:600].split())
+                if cand_words:
+                    sims = [
+                        len(cand_words & sw) / max(len(cand_words | sw), 1)
+                        for sw in selected_word_sets
+                    ]
+                    max_sim = max(sims) if sims else 0.0
+                else:
+                    max_sim = 0.0
+                score = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
+                if score > best_score:
+                    best_score = score
+                    best = cand
+        selected.append(best)
+        selected_word_sets.append(set(best.get('chunk', '')[:600].split()))
+        remaining.remove(best)
+
+    return selected
+
+
+def _is_likely_table(text: str) -> bool:
+    """Heuristic to detect table-like text chunks (markdown/ascii/tsv tables)."""
+    lines = text.strip().split('\n')
+    if len(lines) < 2:
+        return False
+    if text.count('|') >= 4:
+        return True
+    if text.count('\t') >= 4:
+        return True
+    numeric_lines = sum(1 for ln in lines if sum(1 for ch in ln if ch.isdigit()) >= 3)
+    if len(lines) >= 3 and numeric_lines >= len(lines) * 0.5:
+        return True
+    return False
+
+
+def _augment_with_table_chunks(
+    results: List[dict],
+    chunks: List[str],
+    pages: List[dict],
+    page_index: dict,
+    max_augment: int = 3,
+) -> List[dict]:
+    """Augment results with table-like chunks from the same pages as hit chunks.
+
+    Embedding models often fail to retrieve tables via semantic search; this
+    secondary pass adds table chunks that share a page with an already-retrieved
+    chunk, improving numeric/tabular question coverage.
+    """
+    if not results or not chunks:
+        return results
+
+    hit_pages = {item.get("page") for item in results if item.get("page")}
+    if not hit_pages:
+        return results
+
+    existing_texts = {item.get("chunk", "") for item in results}
+    augmented = []
+
+    for chunk_text in chunks:
+        if chunk_text in existing_texts:
+            continue
+        if not _is_likely_table(chunk_text):
+            continue
+        page = _find_page_for_chunk(chunk_text, pages, page_index=page_index)
+        if page not in hit_pages:
+            continue
+        augmented.append({
+            "chunk": chunk_text,
+            "page": page,
+            "similarity": 0.45,
+            "similarity_percent": 45.0,
+            "score": 0.0,
+            "snippet": chunk_text[:200],
+            "highlights": [],
+            "reranked": False,
+            "table_augmented": True,
+        })
+        if len(augmented) >= max_augment:
+            break
+
+    if augmented:
+        logger.info(f"[TableAugment] 补充 {len(augmented)} 个同页表格 chunk")
+    return results + augmented
+
+
 def structure_aware_split(
     text: str,
     chunk_size: int = 1200,
@@ -2162,6 +2276,13 @@ def search_document_chunks(
     candidate_k = max(candidate_k, dynamic_candidate_k_map.get(query_type, 20))
     logger.info(f"[{doc_id}] 查询类型: {query_type}, 动态 candidate_k: {candidate_k}")
 
+    # Wide-net: expand candidate pool when reranking, giving reranker more choices
+    if use_rerank:
+        wide_k = max(candidate_k, top_k * _WIDE_RETRIEVAL_MULTIPLIER)
+        if wide_k > candidate_k:
+            logger.info(f"[{doc_id}] Wide-net rerank: candidate_k {candidate_k} → {wide_k}")
+            candidate_k = wide_k
+
     # 检索耗时记录（需求 10.1）
     timings = {}
     t_total = time.perf_counter()
@@ -2424,6 +2545,13 @@ def search_document_chunks(
     # --- 短语匹配加权 + 表格碎片降权 ---
     vector_results = _phrase_boost(vector_results, query)
 
+    # MMR 多样性过滤（不使用 rerank 时）：去除语义重复 chunk，保留 top_k*3 供 BM25 融合
+    if not use_rerank and len(vector_results) > top_k:
+        pre_mmr = len(vector_results)
+        vector_results = _apply_mmr(vector_results, top_k=min(len(vector_results), top_k * 3))
+        if len(vector_results) < pre_mmr:
+            logger.info(f"[{doc_id}] MMR: {pre_mmr} → {len(vector_results)} 结果")
+
     # 向量检索计时结束（需求 10.1）
     timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -2505,6 +2633,9 @@ def search_document_chunks(
             except Exception as _expand_err:
                 logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
 
+            # 同页表格补充检索
+            results = _augment_with_table_chunks(results, chunks, pages, _page_index)
+
             # 总耗时记录（需求 10.1）
             timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
             logger.info(f"[{doc_id}] 检索耗时: {timings}")
@@ -2563,6 +2694,9 @@ def search_document_chunks(
             results = expand_context_chunks(results, chunks, expand_n=_expand_n)
     except Exception as _expand_err:
         logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
+
+    # 同页表格补充检索
+    results = _augment_with_table_chunks(results, chunks, pages, _page_index)
 
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)

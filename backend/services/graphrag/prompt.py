@@ -187,4 +187,54 @@ Add sections and commentary to the response as appropriate for the length and fo
 
 PROMPTS["fail_response"] = "Sorry, I'm not able to provide an answer to that question."
 
+PROMPTS["global_rag_response"] = """---Role---
+
+You are a helpful assistant responding to questions about a dataset by synthesizing perspectives from multiple high-level community summaries.
+
+---Goal---
+
+Generate a comprehensive response that addresses the user's question by drawing insights from the provided community summaries. Synthesize information across summaries to provide a holistic answer. If the summaries don't contain enough relevant information, say so clearly.
+
+Do not make anything up. Only use information explicitly supported by the provided summaries.
+
+---Target response length and format---
+
+{response_type}
+
+---Community Summaries---
+
+{context_data}
+
+---Goal---
+
+Based on the community summaries above, provide a comprehensive answer to the user's question. Highlight key themes, patterns, and relationships across communities. Style the response in markdown.
+"""
+
+PROMPTS["hybrid_rag_response"] = """---Role---
+
+You are a helpful assistant combining both detailed entity-level knowledge and high-level community insights to answer questions.
+
+---Goal---
+
+Generate a thorough response by synthesizing information from both local entity context and global community summaries. Use the local context for specific details and the global context for broader themes and patterns.
+
+Do not make anything up. Only use information explicitly supported by the provided context.
+
+---Target response length and format---
+
+{response_type}
+
+---Local Context (Entities & Relations)---
+
+{local_context}
+
+---Global Context (Community Summaries)---
+
+{global_context}
+
+---Goal---
+
+Combine insights from both contexts to provide a comprehensive answer. Style the response in markdown.
+"""
+
 PROMPTS["process_tickers"] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

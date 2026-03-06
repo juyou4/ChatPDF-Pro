@@ -117,370 +117,379 @@ const ChatSettings = ({ isOpen, onClose }) => {
                 onClick={onClose}
             >
                 <motion.div
-                    initial={{ scale: 0.9, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.9, opacity: 0 }}
-                    transition={{ type: 'spring', damping: 20 }}
-                    className="soft-panel rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-auto"
+                    initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                    animate={{ scale: 1, opacity: 1, y: 0 }}
+                    exit={{ scale: 0.95, opacity: 0, y: 10 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
+                    className="w-full max-w-2xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* 头部 */}
-                    <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-200 px-6 py-4 flex items-center justify-between z-10">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                         <div className="flex items-center gap-3">
-                            <div className="w-9 h-9 bg-gray-100 rounded-lg flex items-center justify-center">
-                                <SlidersHorizontal className="w-5 h-5 text-gray-600" />
+                            <div className="p-2 rounded-xl bg-purple-50 text-purple-700">
+                                <SlidersHorizontal className="w-5 h-5" />
                             </div>
                             <div>
-                                <h2 className="text-xl font-semibold text-gray-900">对话设置</h2>
-                                <p className="text-xs text-gray-500">调整模型生成参数</p>
+                                <div className="text-lg font-bold text-gray-900">对话设置</div>
+                                <div className="text-xs text-gray-500">调整模型生成参数</div>
                             </div>
                         </div>
-                        <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
-                            <X className="w-5 h-5 text-gray-500" />
+                        <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-100 transition-colors">
+                            <X className="w-5 h-5" />
                         </button>
                     </div>
 
-                    <div className="p-6 space-y-6">
-
-                        {/* 模型温度 — 带开关 + 滑块 + 数字输入框 */}
-                        <SettingToggleSlider
-                            label="模型温度"
-                            tooltip="控制回答的随机性。值越低越精确，值越高越有创造性"
-                            enabled={enableTemperature}
-                            onToggle={setEnableTemperature}
-                            value={temperature}
-                            onChange={setTemperature}
-                            min={0} max={2} step={0.1}
-                            precision={1}
-                            color="emerald"
-                        />
-
-                        <div className="border-t border-gray-200"></div>
-
-                        {/* Top-P — 带开关 + 滑块 + 数字输入框 */}
-                        <SettingToggleSlider
-                            label="Top-P"
-                            tooltip="核采样参数。控制候选词的概率范围，值越小回答越集中"
-                            enabled={enableTopP}
-                            onToggle={setEnableTopP}
-                            value={topP}
-                            onChange={setTopP}
-                            min={0} max={1} step={0.05}
-                            precision={2}
-                            color="emerald"
-                        />
-
-                        <div className="border-t border-gray-100"></div>
-
-                        {/* 上下文数 — 无开关，滑块 + 数字输入框 */}
-                        <SettingSliderWithInput
-                            label="上下文数"
-                            tooltip="发送给模型的历史消息轮数。值越大模型记忆越多，但消耗更多 Token"
-                            value={contextCount}
-                            onChange={(v) => setContextCount(Math.round(v))}
-                            min={0} max={50} step={1}
-                            precision={0}
-                            color="emerald"
-                        />
-
-                        <div className="border-t border-gray-100"></div>
-
-                        {/* 最大 Token 数 — 带开关 + 滑块 + 数字输入框 */}
-                        <SettingToggleSlider
-                            label="最大 Token 数"
-                            tooltip="限制模型单次回复的最大长度。关闭则由模型自行决定"
-                            enabled={enableMaxTokens}
-                            onToggle={setEnableMaxTokens}
-                            value={maxTokens}
-                            onChange={setMaxTokens}
-                            min={512} max={32768} step={512}
-                            precision={0}
-                            color="emerald"
-                        />
-
-                        <div className="border-t border-gray-100"></div>
-
-                        {/* 回答详细度 */}
-                        <div className="space-y-3">
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm font-semibold text-gray-800">回答详细度</span>
-                                <Tooltip text="控制回答展开程度。建议与最大 Token 数配合使用：详细模式更容易产生长回答" />
+                    <div className="flex-1 overflow-y-auto p-6 space-y-5">
+                        {/* ===== 生成参数 ===== */}
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center gap-2 mb-4">
+                                <SlidersHorizontal className="w-4 h-4 text-gray-500" />
+                                <span className="text-sm font-semibold text-gray-800">生成参数</span>
                             </div>
-                            <div className="grid grid-cols-3 gap-2">
-                                {[
-                                    { value: 'concise', label: '简洁' },
-                                    { value: 'standard', label: '标准' },
-                                    { value: 'detailed', label: '详细' },
-                                ].map((item) => (
-                                    <button
-                                        key={item.value}
-                                        onClick={() => setAnswerDetailLevel(item.value)}
-                                        className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
-                                            answerDetailLevel === item.value
-                                                ? 'bg-gray-700 text-white'
-                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                        }`}
-                                    >
-                                        {item.label}
-                                    </button>
-                                ))}
+                            <div className="space-y-4">
+                                {/* 模型温度 — 带开关 + 滑块 + 数字输入框 */}
+                                <SettingToggleSlider
+                                    label="模型温度"
+                                    tooltip="控制回答的随机性。值越低越精确，值越高越有创造性"
+                                    enabled={enableTemperature}
+                                    onToggle={setEnableTemperature}
+                                    value={temperature}
+                                    onChange={setTemperature}
+                                    min={0} max={2} step={0.1}
+                                    precision={1}
+                                    color="purple"
+                                />
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* Top-P — 带开关 + 滑块 + 数字输入框 */}
+                                <SettingToggleSlider
+                                    label="Top-P"
+                                    tooltip="核采样参数。控制候选词的概率范围，值越小回答越集中"
+                                    enabled={enableTopP}
+                                    onToggle={setEnableTopP}
+                                    value={topP}
+                                    onChange={setTopP}
+                                    min={0} max={1} step={0.05}
+                                    precision={2}
+                                    color="purple"
+                                />
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 上下文数 — 无开关，滑块 + 数字输入框 */}
+                                <SettingSliderWithInput
+                                    label="上下文数"
+                                    tooltip="发送给模型的历史消息轮数。值越大模型记忆越多，但消耗更多 Token"
+                                    value={contextCount}
+                                    onChange={(v) => setContextCount(Math.round(v))}
+                                    min={0} max={50} step={1}
+                                    precision={0}
+                                    color="purple"
+                                />
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 最大 Token 数 — 带开关 + 滑块 + 数字输入框 */}
+                                <SettingToggleSlider
+                                    label="最大 Token 数"
+                                    tooltip="限制模型单次回复的最大长度。关闭则由模型自行决定"
+                                    enabled={enableMaxTokens}
+                                    onToggle={setEnableMaxTokens}
+                                    value={maxTokens}
+                                    onChange={setMaxTokens}
+                                    min={512} max={32768} step={512}
+                                    precision={0}
+                                    color="purple"
+                                />
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 回答详细度 */}
+                                <div className="space-y-3">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">回答详细度</span>
+                                        <Tooltip text="控制回答展开程度。建议与最大 Token 数配合使用：详细模式更容易产生长回答" />
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[
+                                            { value: 'concise', label: '简洁' },
+                                            { value: 'standard', label: '标准' },
+                                            { value: 'detailed', label: '详细' },
+                                        ].map((item) => (
+                                            <button
+                                                key={item.value}
+                                                onClick={() => setAnswerDetailLevel(item.value)}
+                                                className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                                                    answerDetailLevel === item.value
+                                                        ? 'bg-purple-600 text-white shadow-sm'
+                                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                }`}
+                                            >
+                                                {item.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 流式输出 — 保持不变 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">流式输出</span>
+                                        <Tooltip text="开启后回答会逐字显示，关闭则等待完整回答后一次性显示" />
+                                    </div>
+                                    <ToggleSwitch checked={streamOutput} onChange={setStreamOutput} />
+                                </div>
                             </div>
                         </div>
 
-                        <div className="border-t border-gray-100"></div>
-
-                        {/* 流式输出 — 保持不变 */}
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm font-semibold text-gray-800">流式输出</span>
-                                <Tooltip text="开启后回答会逐字显示，关闭则等待完整回答后一次性显示" />
-                            </div>
-                            <ToggleSwitch checked={streamOutput} onChange={setStreamOutput} />
-                        </div>
-
-                        <div className="border-t border-gray-100"></div>
-
-                        {/* 自定义参数区域 */}
-                        <div className="space-y-3">
-                            <div className="flex items-center justify-between">
+                        {/* ===== 自定义参数 ===== */}
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
+                                    <Code className="w-4 h-4 text-gray-500" />
                                     <span className="text-sm font-semibold text-gray-800">自定义参数</span>
                                     <Tooltip text="添加任意 key-value 参数直接传给 API，如 DeepSeek 的 enable_search" />
                                 </div>
                                 <button
                                     onClick={addCustomParam}
-                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors"
+                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors border border-purple-200"
                                 >
                                     <Plus className="w-3.5 h-3.5" />
                                     添加参数
                                 </button>
                             </div>
 
-                            {/* 自定义参数列表 */}
-                            {customParams.length > 0 && (
-                                <div className="space-y-2">
-                                    {customParams.map((param, index) => (
-                                        <CustomParamRow
-                                            key={index}
-                                            param={param}
-                                            onChange={(field, val) => updateCustomParam(index, field, val)}
-                                            onRemove={() => removeCustomParam(index)}
-                                        />
-                                    ))}
-                                </div>
-                            )}
+                            <div className="space-y-3">
+                                {/* 自定义参数列表 */}
+                                {customParams.length > 0 && (
+                                    <div className="space-y-2">
+                                        {customParams.map((param, index) => (
+                                            <CustomParamRow
+                                                key={index}
+                                                param={param}
+                                                onChange={(field, val) => updateCustomParam(index, field, val)}
+                                                onRemove={() => removeCustomParam(index)}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
 
-                            {customParams.length === 0 && (
-                                <p className="text-xs text-gray-400 text-center py-2">暂无自定义参数</p>
-                            )}
+                                {customParams.length === 0 && (
+                                    <div className="text-xs text-gray-400 text-center py-4 bg-gray-50/50 rounded-xl border border-dashed border-gray-200">
+                                        暂无自定义参数
+                                    </div>
+                                )}
+                            </div>
                         </div>
-
-                        <div className="border-t border-gray-200"></div>
 
                         {/* ===== 行为设置 ===== */}
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-2 mb-1">
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center gap-2 mb-4">
                                 <SlidersHorizontal className="w-4 h-4 text-gray-500" />
-                                <span className="text-sm font-bold text-gray-700">行为设置</span>
+                                <span className="text-sm font-semibold text-gray-800">行为设置</span>
                             </div>
-
-                            {/* 思考完成后自动折叠 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">思考自动折叠</span>
-                                    <Tooltip text="开启后，深度思考完成时自动折叠思考过程内容" />
+                            
+                            <div className="space-y-4">
+                                {/* 思考完成后自动折叠 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">思考自动折叠</span>
+                                        <Tooltip text="开启后，深度思考完成时自动折叠思考过程内容" />
+                                    </div>
+                                    <ToggleSwitch checked={thoughtAutoCollapse} onChange={setThoughtAutoCollapse} />
                                 </div>
-                                <ToggleSwitch checked={thoughtAutoCollapse} onChange={setThoughtAutoCollapse} />
-                            </div>
 
-                            <div className="border-t border-gray-100"></div>
+                                <div className="border-t border-gray-100"></div>
 
-                            {/* 发送快捷键 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">发送快捷键</span>
-                                    <Tooltip text="选择发送消息的快捷键方式" />
+                                {/* 发送快捷键 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">发送快捷键</span>
+                                        <Tooltip text="选择发送消息的快捷键方式" />
+                                    </div>
+                                    <div className="flex gap-1">
+                                        {['Enter', 'Ctrl+Enter'].map((key) => (
+                                            <button
+                                                key={key}
+                                                onClick={() => setSendShortcut(key)}
+                                                className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+                                                    sendShortcut === key
+                                                        ? 'bg-purple-600 text-white shadow-sm'
+                                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                }`}
+                                            >
+                                                {key}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
-                                <div className="flex gap-1">
-                                    {['Enter', 'Ctrl+Enter'].map((key) => (
-                                        <button
-                                            key={key}
-                                            onClick={() => setSendShortcut(key)}
-                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                                                sendShortcut === key
-                                                    ? 'bg-gray-700 text-white'
-                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                            }`}
-                                        >
-                                            {key}
-                                        </button>
-                                    ))}
+
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 删除消息确认 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">删除消息确认</span>
+                                        <Tooltip text="删除消息前弹出确认对话框，防止误操作" />
+                                    </div>
+                                    <ToggleSwitch checked={confirmDeleteMessage} onChange={setConfirmDeleteMessage} />
                                 </div>
-                            </div>
 
-                            <div className="border-t border-gray-100"></div>
+                                <div className="border-t border-gray-100"></div>
 
-                            {/* 删除消息确认 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">删除消息确认</span>
-                                    <Tooltip text="删除消息前弹出确认对话框，防止误操作" />
+                                {/* 重新生成确认 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">重新生成确认</span>
+                                        <Tooltip text="重新生成回答前弹出确认对话框" />
+                                    </div>
+                                    <ToggleSwitch checked={confirmRegenerateMessage} onChange={setConfirmRegenerateMessage} />
                                 </div>
-                                <ToggleSwitch checked={confirmDeleteMessage} onChange={setConfirmDeleteMessage} />
-                            </div>
-
-                            <div className="border-t border-gray-100"></div>
-
-                            {/* 重新生成确认 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">重新生成确认</span>
-                                    <Tooltip text="重新生成回答前弹出确认对话框" />
-                                </div>
-                                <ToggleSwitch checked={confirmRegenerateMessage} onChange={setConfirmRegenerateMessage} />
                             </div>
                         </div>
-
-                        <div className="border-t border-gray-200"></div>
 
                         {/* ===== 代码块设置 ===== */}
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-2 mb-1">
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center gap-2 mb-4">
                                 <Code className="w-4 h-4 text-gray-500" />
-                                <span className="text-sm font-bold text-gray-700">代码块设置</span>
+                                <span className="text-sm font-semibold text-gray-800">代码块设置</span>
                             </div>
-
-                            {/* 代码块可折叠 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">代码块折叠</span>
-                                    <Tooltip text="允许折叠/展开代码块，方便浏览长回答" />
+                            
+                            <div className="space-y-4">
+                                {/* 代码块可折叠 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">代码块折叠</span>
+                                        <Tooltip text="允许折叠/展开代码块，方便浏览长回答" />
+                                    </div>
+                                    <ToggleSwitch checked={codeCollapsible} onChange={setCodeCollapsible} />
                                 </div>
-                                <ToggleSwitch checked={codeCollapsible} onChange={setCodeCollapsible} />
-                            </div>
 
-                            <div className="border-t border-gray-100"></div>
+                                <div className="border-t border-gray-100"></div>
 
-                            {/* 代码自动换行 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">代码自动换行</span>
-                                    <Tooltip text="代码块内容超出宽度时自动换行，而非水平滚动" />
+                                {/* 代码自动换行 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">代码自动换行</span>
+                                        <Tooltip text="代码块内容超出宽度时自动换行，而非水平滚动" />
+                                    </div>
+                                    <ToggleSwitch checked={codeWrappable} onChange={setCodeWrappable} />
                                 </div>
-                                <ToggleSwitch checked={codeWrappable} onChange={setCodeWrappable} />
-                            </div>
 
-                            <div className="border-t border-gray-100"></div>
+                                <div className="border-t border-gray-100"></div>
 
-                            {/* 代码行号 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">显示行号</span>
-                                    <Tooltip text="在代码块左侧显示行号" />
+                                {/* 代码行号 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">显示行号</span>
+                                        <Tooltip text="在代码块左侧显示行号" />
+                                    </div>
+                                    <ToggleSwitch checked={codeShowLineNumbers} onChange={setCodeShowLineNumbers} />
                                 </div>
-                                <ToggleSwitch checked={codeShowLineNumbers} onChange={setCodeShowLineNumbers} />
                             </div>
                         </div>
-
-                        <div className="border-t border-gray-200"></div>
 
                         {/* ===== 数学公式设置 ===== */}
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-2 mb-1">
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center gap-2 mb-4">
                                 <Sigma className="w-4 h-4 text-gray-500" />
-                                <span className="text-sm font-bold text-gray-700">数学公式</span>
+                                <span className="text-sm font-semibold text-gray-800">数学公式</span>
                             </div>
-
-                            {/* 数学引擎 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">渲染引擎</span>
-                                    <Tooltip text="选择数学公式渲染引擎。KaTeX 速度快，MathJax 兼容性好，关闭则不渲染公式" />
+                            
+                            <div className="space-y-4">
+                                {/* 数学引擎 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">渲染引擎</span>
+                                        <Tooltip text="选择数学公式渲染引擎。KaTeX 速度快，MathJax 兼容性好，关闭则不渲染公式" />
+                                    </div>
+                                    <div className="flex gap-1">
+                                        {[{ value: 'KaTeX', label: 'KaTeX' }, { value: 'MathJax', label: 'MathJax' }, { value: 'none', label: '关闭' }].map(({ value, label }) => (
+                                            <button
+                                                key={value}
+                                                onClick={() => setMathEngine(value)}
+                                                className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+                                                    mathEngine === value
+                                                        ? 'bg-purple-600 text-white shadow-sm'
+                                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                }`}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
-                                <div className="flex gap-1">
-                                    {[{ value: 'KaTeX', label: 'KaTeX' }, { value: 'MathJax', label: 'MathJax' }, { value: 'none', label: '关闭' }].map(({ value, label }) => (
-                                        <button
-                                            key={value}
-                                            onClick={() => setMathEngine(value)}
-                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                                                mathEngine === value
-                                                    ? 'bg-gray-700 text-white'
-                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                            }`}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
 
-                            <div className="border-t border-gray-100"></div>
+                                <div className="border-t border-gray-100"></div>
 
-                            {/* 单 $ 行内公式 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">单 $ 行内公式</span>
-                                    <Tooltip text="启用后，$...$ 会被识别为行内公式。关闭可避免与美元符号冲突" />
+                                {/* 单 $ 行内公式 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">单 $ 行内公式</span>
+                                        <Tooltip text="启用后，$...$ 会被识别为行内公式。关闭可避免与美元符号冲突" />
+                                    </div>
+                                    <ToggleSwitch checked={mathEnableSingleDollar} onChange={setMathEnableSingleDollar} />
                                 </div>
-                                <ToggleSwitch checked={mathEnableSingleDollar} onChange={setMathEnableSingleDollar} />
                             </div>
                         </div>
-
-                        <div className="border-t border-gray-200"></div>
 
                         {/* ===== 消息显示设置 ===== */}
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-2 mb-1">
+                        <div className="soft-card rounded-[24px] p-5">
+                            <div className="flex items-center gap-2 mb-4">
                                 <MessageSquare className="w-4 h-4 text-gray-500" />
-                                <span className="text-sm font-bold text-gray-700">消息显示</span>
+                                <span className="text-sm font-semibold text-gray-800">消息显示</span>
                             </div>
+                            
+                            <div className="space-y-4">
+                                {/* 消息样式 */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-gray-800">消息样式</span>
+                                        <Tooltip text="选择消息的显示风格" />
+                                    </div>
+                                    <div className="flex gap-1">
+                                        {[{ value: 'plain', label: '平铺' }, { value: 'bubble', label: '气泡' }].map(({ value, label }) => (
+                                            <button
+                                                key={value}
+                                                onClick={() => setMessageStyle(value)}
+                                                className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+                                                    messageStyle === value
+                                                        ? 'bg-purple-600 text-white shadow-sm'
+                                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                }`}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
 
-                            {/* 消息样式 */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-800">消息样式</span>
-                                    <Tooltip text="选择消息的显示风格" />
-                                </div>
-                                <div className="flex gap-1">
-                                    {[{ value: 'plain', label: '平铺' }, { value: 'bubble', label: '气泡' }].map(({ value, label }) => (
-                                        <button
-                                            key={value}
-                                            onClick={() => setMessageStyle(value)}
-                                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                                                messageStyle === value
-                                                    ? 'bg-gray-700 text-white'
-                                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                            }`}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
+                                <div className="border-t border-gray-100"></div>
+
+                                {/* 消息字体大小 */}
+                                <SettingSliderWithInput
+                                    label="消息字体大小"
+                                    tooltip="调整对话消息的字体大小（12-22px）"
+                                    value={messageFontSize}
+                                    onChange={(v) => setMessageFontSize(Math.round(v))}
+                                    min={12} max={22} step={1}
+                                    precision={0}
+                                    color="purple"
+                                />
                             </div>
-
-                            <div className="border-t border-gray-100"></div>
-
-                            {/* 消息字体大小 */}
-                            <SettingSliderWithInput
-                                label="消息字体大小"
-                                tooltip="调整对话消息的字体大小（12-22px）"
-                                value={messageFontSize}
-                                onChange={(v) => setMessageFontSize(Math.round(v))}
-                                min={12} max={22} step={1}
-                                precision={0}
-                                color="emerald"
-                            />
                         </div>
-
-                        <div className="border-t border-gray-200"></div>
 
                         {/* 重置按钮 */}
                         <button
                             onClick={() => { if (confirm('确定要重置所有对话参数为默认值吗？')) resetChatSettings(); }}
-                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200 rounded-md transition-colors"
+                            className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 rounded-xl transition-all"
                         >
                             <RotateCcw className="w-4 h-4" />
-                            <span className="font-medium">重置为默认值</span>
+                            <span>重置所有设置为默认值</span>
                         </button>
                     </div>
                 </motion.div>
@@ -506,7 +515,7 @@ const Tooltip = ({ text }) => (
 const ToggleSwitch = ({ checked, onChange }) => (
     <button
         onClick={() => onChange(!checked)}
-        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-gray-700' : 'bg-gray-300'}`}
+        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-purple-600' : 'bg-gray-300'}`}
     >
         <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${checked ? 'translate-x-5' : ''}`} />
     </button>
@@ -562,8 +571,8 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
  */
 const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, precision, color }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    // 简约风格：统一使用中性灰色
-    const gc = '#6B7280'; // gray-500
+    // 统一使用淡紫色
+    const gc = '#9333ea'; // purple-600
 
     return (
         <div className="space-y-3">
@@ -612,8 +621,8 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
  */
 const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, step, precision, color }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    // 简约风格：统一使用中性灰色
-    const gc = '#6B7280'; // gray-500
+    // 统一使用淡紫色
+    const gc = '#9333ea'; // purple-600
 
     return (
         <div className="space-y-3">
@@ -702,3 +711,6 @@ const CustomParamRow = ({ param, onChange, onRemove }) => {
 };
 
 export default ChatSettings;
+
+
+

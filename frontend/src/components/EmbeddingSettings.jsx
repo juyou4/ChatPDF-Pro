@@ -355,7 +355,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-              className={`w-full max-w-6xl max-h-[92vh] soft-panel shadow-[0_30px_80px_-35px_rgba(15,23,42,0.4)] ${RADIUS_CLASS} overflow-hidden flex flex-col`}
+              className={`w-full max-w-6xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col`}
             >
               {/* Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -734,3 +734,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     )
   }
 }
+
+
+
+
+
