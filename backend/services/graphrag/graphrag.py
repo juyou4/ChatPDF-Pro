@@ -18,6 +18,8 @@ from ._op import (
     extract_entities,
     generate_community_report,
     local_query,
+    global_query,
+    hybrid_query,
 )
 from ._storage import (
     JsonKVStorage,
@@ -329,35 +331,46 @@ class GraphRAG:
         return loop.run_until_complete(self.aquery(query, param))
 
     async def aquery(self, query: str, param: QueryParam = QueryParam()) -> str:
-        """异步查询"""
-        response = await local_query(
-            query,
-            self.chunk_entity_relation_graph,
-            self.entities_vdb,
-            self.community_reports,
-            self.text_chunks,
-            param,
-            self._global_config,
-        )
+        """异步查询，支持 local / global / hybrid 三种模式。"""
+        mode = getattr(param, "mode", "local")
+        if mode == "global":
+            response = await global_query(
+                query,
+                self.community_reports,
+                param,
+                self._global_config,
+            )
+        elif mode == "hybrid":
+            response = await hybrid_query(
+                query,
+                self.chunk_entity_relation_graph,
+                self.entities_vdb,
+                self.community_reports,
+                self.text_chunks,
+                param,
+                self._global_config,
+            )
+        else:
+            response = await local_query(
+                query,
+                self.chunk_entity_relation_graph,
+                self.entities_vdb,
+                self.community_reports,
+                self.text_chunks,
+                param,
+                self._global_config,
+            )
         await self._query_done()
         return response
 
     async def aquery_context(self, query: str, param: QueryParam = None) -> str:
-        """仅返回 GraphRAG 上下文（不调用 LLM 生成回答），用于融合到 RAG 管道"""
+        """仅返回 GraphRAG 上下文（不调用 LLM），用于融合到 RAG 管道。支持所有模式。"""
         if param is None:
             param = QueryParam(only_output_context=True)
         else:
             param.only_output_context = True
-        context = await local_query(
-            query,
-            self.chunk_entity_relation_graph,
-            self.entities_vdb,
-            self.community_reports,
-            self.text_chunks,
-            param,
-            self._global_config,
-        )
-        await self._query_done()
+        context = await self.aquery(query, param)
+        # aquery already calls _query_done; avoid double call
         return context
 
     async def ainsert(self, string_or_strings: Union[str, List[str]]):

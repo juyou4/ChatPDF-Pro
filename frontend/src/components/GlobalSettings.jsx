@@ -107,11 +107,11 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                 onClick={onClose}
             >
                 <motion.div
-                    initial={{ scale: 0.9, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.9, opacity: 0 }}
-                    transition={{ type: 'spring', damping: 20 }}
-                    className="soft-panel rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto"
+                    initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                    animate={{ scale: 1, opacity: 1, y: 0 }}
+                    exit={{ scale: 0.95, opacity: 0, y: 10 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
+                    className="w-full max-w-2xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
@@ -133,7 +133,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </button>
                     </div>
 
-                    <div className="p-6 space-y-6">
+                    <div className="flex-1 overflow-y-auto p-6 space-y-5">
                         {/* 字体设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
@@ -507,3 +507,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
 };
 
 export default GlobalSettings;
+
+
+
+
+
+
+
