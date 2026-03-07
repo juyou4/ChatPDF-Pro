@@ -48,6 +48,7 @@ vector_stores/
 *.pkl
 images/
 data/
+backend/data/
 
 # Logs
 *.log
