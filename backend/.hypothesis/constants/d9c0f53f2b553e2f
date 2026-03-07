@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\services\query_analyzer.py
-# hypothesis_version: 6.151.5
-
-['advantage', 'algorithm', 'analytical', 'analyze', 'code', 'compare', 'data', 'detail', 'difference', 'disadvantage', 'exact', 'explain', 'extraction', 'formula', 'how does', 'impact', 'main idea', 'number', 'outline', 'overview', 'procedure', 'query_type', 'reasoning', 'specific', 'step', 'summarize', 'summary', 'top_k', 'what does it cover', 'what is this about', 'why', '为什么', '主要内容', '介绍', '代码', '优势', '优缺点', '作用', '全文', '公式', '关于什么', '关系', '具体', '具体性问题：返回标准数量分块', '准确', '分析', '利弊', '劣势', '包括什么', '区别', '原因', '原文', '大意', '如何', '对比', '差异', '影响', '怎么', '总结', '数值', '数字', '数据', '整体', '方法', '有哪些', '概括', '概览性问题：返回更多分块以提供全面视角', '概述', '步骤', '比较', '流程', '涉及什么', '理由', '简述', '精确', '联系', '背景', '解释', '讲什么', '详细', '说明', '过程']

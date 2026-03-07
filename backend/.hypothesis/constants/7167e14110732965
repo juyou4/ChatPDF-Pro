@@ -1,4 +1,0 @@
-# file: E:\Project\Chatpdf\backend\providers\provider_ids.py
-# hypothesis_version: 6.151.5
-
-['aliyun', 'anthropic', 'deepseek', 'doubao', 'gemini', 'grok', 'minimax', 'moonshot', 'ollama', 'openai', 'qwen', 'silicon', 'zhipu']
