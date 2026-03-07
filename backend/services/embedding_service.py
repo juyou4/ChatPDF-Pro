@@ -7,6 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import faiss
 import httpx
@@ -605,6 +606,39 @@ def _embed_batch_with_auto_shrink(
         )
 
 
+def _normalize_remote_embedding_base_url(api_base: Optional[str]) -> str:
+    """归一化 OpenAI 兼容 embedding base_url。
+
+    规则：
+    - 去掉误传入的具体接口路径（如 /chat/completions、/embeddings）
+    - 仅当路径为空时补 /v1
+    - 已带有效路径前缀（如 /compatible-mode/v1、/api/paas/v4）时保持不变
+    """
+    raw = (api_base or "").strip()
+    if not raw:
+        return "https://api.openai.com/v1"
+
+    trimmed = raw.rstrip("/")
+    known_suffixes = (
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/completions",
+        "/v1/embeddings",
+        "/embeddings",
+    )
+    for suffix in known_suffixes:
+        if trimmed.endswith(suffix):
+            trimmed = trimmed[: -len(suffix)]
+            break
+
+    parsed = urlparse(trimmed)
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/v1"
+
+    return urlunparse(parsed._replace(path=path, params="", query="", fragment=""))
+
+
 def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
     """获取指定模型的 embedding 函数
 
@@ -671,9 +705,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
             # plain key，使用 model_detector 推断
             provider = get_model_provider(embedding_model_id)
             model_name = embedding_model_id
-            api_base = base_url or "https://api.openai.com/v1"
-            if not api_base.endswith('/embeddings') and not api_base.endswith('/v1'):
-                api_base = api_base.rstrip('/') + '/v1'
+            api_base = _normalize_remote_embedding_base_url(base_url or "https://api.openai.com/v1")
 
     # 验证模型类型
     if not is_embedding_model(embedding_model_id):
@@ -701,9 +733,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     if not actual_key:
         raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
-    api_base = api_base or "https://api.openai.com/v1"
-    if not api_base.endswith('/v1') and not api_base.endswith('/v1/'):
-        api_base = api_base.rstrip('/') + '/v1'
+    api_base = _normalize_remote_embedding_base_url(api_base)
 
     # 使用连接池复用 OpenAI client，避免每次创建新连接
     client = _get_openai_client(actual_key, api_base)

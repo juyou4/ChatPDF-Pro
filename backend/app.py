@@ -156,7 +156,7 @@ async def get_embedding_models(as_list: bool = False):
 
     items = []
     for key, cfg in merged_models.items():
-        provider = cfg.get("provider", "openai")
+        provider = cfg.get("provider_id") or cfg.get("provider", "openai")
         full_id = key if ":" in key else f"{provider}:{key}"
         items.append({
             "id": key,

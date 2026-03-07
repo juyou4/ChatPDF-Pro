@@ -297,3 +297,33 @@ def test_model_not_found_detection_with_structured_error(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as e:
         assert "Embedding模型" in str(e)
+
+
+def test_remote_embedding_preserves_versioned_base_url(monkeypatch):
+    """已带有效路径前缀的 provider base_url 不应再被强行追加 /v1。"""
+    fake_client = _FakeOpenAIClient()
+    captured = {}
+
+    monkeypatch.setattr(
+        embedding_service_module,
+        "resolve_model_id",
+        lambda _model_id: (
+            "embedding-3",
+            {
+                "provider": "openai",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "max_tokens": 8192,
+            },
+        ),
+    )
+    monkeypatch.setattr(embedding_service_module, "select_api_key", lambda _k: "sk-test")
+
+    def _capture_client(_api_key, api_base):
+        captured["api_base"] = api_base
+        return fake_client
+
+    monkeypatch.setattr(embedding_service_module, "_get_openai_client", _capture_client)
+
+    get_embedding_function("zhipu:embedding-3", api_key="sk-user")
+
+    assert captured["api_base"] == "https://open.bigmodel.cn/api/paas/v4"
