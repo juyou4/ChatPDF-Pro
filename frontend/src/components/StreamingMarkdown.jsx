@@ -21,6 +21,7 @@ import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { visit } from 'unist-util-visit';
 import CitationLink from './CitationLink';
+import WebCitationLink from './WebCitationLink';
 import { processLatexBrackets } from '../utils/processLatexBrackets.js';
 import { useChatParams } from '../contexts/ChatParamsContext';
 
@@ -187,6 +188,23 @@ export const processCitationRefs = (text, citations) => {
 };
 
 /**
+ * 将联网搜索来源引用 [N] 转换为 <wsource data-idx="N"> 标签
+ * 仅在 N 在 webSearchSources 范围内且未被 PDF citation 占用时生效。
+ */
+export const processWebSearchCitationRefs = (text, webSearchSources) => {
+  if (!text || !webSearchSources || webSearchSources.length === 0) return text;
+  const max = webSearchSources.length;
+  return text.replace(/\[(\d+)\]/g, (match, numStr, offset) => {
+    const n = parseInt(numStr, 10);
+    if (n < 1 || n > max) return match;
+    // 如果已被 processCitationRefs 替换为 <cite...> 则跳过
+    const before = text.slice(Math.max(0, offset - 20), offset);
+    if (before.includes('<cite')) return match;
+    return `<wsource data-idx="${n}">[${n}]</wsource>`;
+  });
+};
+
+/**
  * 可折叠的 pre 代码块组件
  * 超过 10 行的代码块默认折叠，显示前 5 行 + 展开按钮
  */
@@ -242,12 +260,13 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
     prevProps.content === nextProps.content &&
     prevProps.isStreaming === nextProps.isStreaming &&
     (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
-    prevProps.citations === nextProps.citations
+    prevProps.citations === nextProps.citations &&
+    prevProps.webSearchSources === nextProps.webSearchSources
   );
 };
 
 const StreamingMarkdown = React.memo(
-  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null }) => {
+  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null }) => {
     const containerRef = useRef(null);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
     const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
@@ -274,8 +293,11 @@ const StreamingMarkdown = React.memo(
       if (citations && citations.length > 0) {
         text = processCitationRefs(text, citations);
       }
+      if (webSearchSources && webSearchSources.length > 0) {
+        text = processWebSearchCitationRefs(text, webSearchSources);
+      }
       return text;
-    }, [content, citations, isStreaming, isRefDirectWrite, mathEngine]);
+    }, [content, citations, webSearchSources, isStreaming, isRefDirectWrite, mathEngine]);
 
     const shouldUseSingleDollarMath = React.useMemo(() => {
       if (mathEnableSingleDollar) return true;
@@ -378,6 +400,13 @@ const StreamingMarkdown = React.memo(
       return map;
     }, [citations]);
 
+    const webSearchMap = useMemo(() => {
+      if (!webSearchSources || webSearchSources.length === 0) return null;
+      const map = {};
+      webSearchSources.forEach((src, i) => { map[i + 1] = src; });
+      return map;
+    }, [webSearchSources]);
+
     const handleCitationClick = useCallback(
       (citation) => {
         if (onCitationClick) {
@@ -399,6 +428,15 @@ const StreamingMarkdown = React.memo(
             }
           }
           return <cite {...props}>{children}</cite>;
+        },
+        wsource({ node, children, ...props }) {
+          const idxStr = props['data-idx'];
+          if (idxStr && webSearchMap) {
+            const idx = parseInt(idxStr, 10);
+            const source = webSearchMap[idx];
+            return <WebCitationLink refNumber={idx} source={source} />;
+          }
+          return <span>{children}</span>;
         },
         code({ node, inline, className, children, ...props }) {
           const match = /language-(\w+)/.exec(className || '');
@@ -457,7 +495,7 @@ const StreamingMarkdown = React.memo(
           return <pre {...props} style={{ ...(codeWrappable ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } : {}) }}>{children}</pre>;
         }
       }),
-      [citationMap, handleCitationClick, isStreaming, codeCollapsible, codeWrappable, codeShowLineNumbers]
+      [citationMap, webSearchMap, handleCitationClick, isStreaming, codeCollapsible, codeWrappable, codeShowLineNumbers]
     );
 
     return (

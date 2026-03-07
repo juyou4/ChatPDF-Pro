@@ -26,6 +26,10 @@ export function useUIState() {
   // ========== 其他 UI 开关 ==========
   const [enableThinking, setEnableThinking] = useState(false);
 
+  // ========== 速览（Overview）功能 ==========
+  const [rightPanelMode, setRightPanelMode] = useState('chat'); // 'overview' | 'chat'
+  const [overviewDepth, setOverviewDepth] = useState('standard'); // 'brief' | 'standard' | 'detailed'
+
   // ========== 便捷方法 ==========
 
   /**
@@ -88,6 +92,12 @@ export function useUIState() {
     // 其他 UI 开关
     enableThinking,
     setEnableThinking,
+
+    // 速览（Overview）功能
+    rightPanelMode,
+    setRightPanelMode,
+    overviewDepth,
+    setOverviewDepth,
 
     // 便捷方法
     toggleSidebar,

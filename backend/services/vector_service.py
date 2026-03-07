@@ -141,6 +141,7 @@ async def vector_context(
     middlewares: Optional[List[BaseMiddleware]] = None,
     model_context_window: int = 0,
     selected_text: Optional[str] = None,  # 框选文本，用于融合检索
+    answer_max_tokens: int = 0,  # 期望的输出 Token 数，传入 RAG 预算感知
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -186,6 +187,7 @@ async def vector_context(
                 rerank_endpoint=rerank_endpoint,
                 model_context_window=model_context_window,
                 selected_text=selected_text,  # 透传框选文本
+                answer_max_tokens=answer_max_tokens,
             ),
             timeout=60.0  # 60 秒超时
         )

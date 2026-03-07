@@ -42,13 +42,16 @@ class OpenAICompatibleProvider(BaseProvider):
         if custom_params:
             body.update(custom_params)
 
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             response = await client.post(
                 self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
+                headers=headers,
                 json=body,
             )
 

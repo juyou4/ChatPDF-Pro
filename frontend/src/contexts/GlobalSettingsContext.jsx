@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useCallback } from 'react';
 import { FontSettingsProvider, useFontSettings, PRESET_FONTS, FONT_DEFAULT_SETTINGS } from './FontSettingsContext';
 import { ChatParamsProvider, useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from './ChatParamsContext';
+import { useWebSearch, WEB_SEARCH_DEFAULT_SETTINGS } from './WebSearchContext';
 
 // GlobalSettingsContext —— 聚合层
 // 组合 FontSettingsContext 和 ChatParamsContext，保持向后兼容（需求 2.1）
@@ -40,14 +41,16 @@ export const GlobalSettingsProvider = ({ children }) => (
 const GlobalSettingsBridge = ({ children }) => {
     const fontSettings = useFontSettings();
     const chatParams = useChatParams();
+    const webSearch = useWebSearch();
 
-    // 聚合重置：同时重置字体设置和对话参数
+    // 聚合重置：同时重置字体设置、对话参数和联网搜索
     const resetSettings = useCallback(() => {
         fontSettings.resetFontSettings();
         chatParams.resetChatParams();
-    }, [fontSettings.resetFontSettings, chatParams.resetChatParams]);
+        webSearch.resetWebSearch();
+    }, [fontSettings.resetFontSettings, chatParams.resetChatParams, webSearch.resetWebSearch]);
 
-    // 聚合导出：合并两个子 Context 的所有设置
+    // 聚合导出：合并所有子 Context 的设置（含联网搜索）
     const exportSettings = useCallback(() => {
         const settings = {
             // 字体设置
@@ -77,6 +80,11 @@ const GlobalSettingsBridge = ({ children }) => {
             codeShowLineNumbers: chatParams.codeShowLineNumbers,
             messageStyle: chatParams.messageStyle,
             messageFontSize: chatParams.messageFontSize,
+            // 联网搜索
+            enableWebSearch: webSearch.enableWebSearch,
+            webSearchProvider: webSearch.webSearchProvider,
+            webSearchApiKey: webSearch.webSearchApiKey,
+            webSearchBlacklist: webSearch.webSearchBlacklist,
             exportedAt: new Date().toISOString(),
         };
         return JSON.stringify(settings, null, 2);
@@ -90,6 +98,7 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.confirmDeleteMessage, chatParams.confirmRegenerateMessage,
         chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
         chatParams.messageStyle, chatParams.messageFontSize,
+        webSearch.enableWebSearch, webSearch.webSearchProvider, webSearch.webSearchApiKey, webSearch.webSearchBlacklist,
     ]);
 
     // 聚合导入：将设置分发到对应的子 Context
@@ -123,6 +132,11 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.codeShowLineNumbers !== undefined) chatParams.setCodeShowLineNumbers(settings.codeShowLineNumbers);
             if (settings.messageStyle !== undefined) chatParams.setMessageStyle(settings.messageStyle);
             if (settings.messageFontSize !== undefined) chatParams.setMessageFontSize(settings.messageFontSize);
+            // 联网搜索相关
+            if (settings.enableWebSearch !== undefined) webSearch.setEnableWebSearch(settings.enableWebSearch);
+            if (settings.webSearchProvider !== undefined) webSearch.setWebSearchProvider(settings.webSearchProvider);
+            if (settings.webSearchApiKey !== undefined) webSearch.setWebSearchApiKey(settings.webSearchApiKey);
+            if (settings.webSearchBlacklist !== undefined) webSearch.setWebSearchBlacklist(settings.webSearchBlacklist);
             return true;
         } catch (error) {
             console.error('导入设置失败:', error);
@@ -138,6 +152,7 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.setConfirmDeleteMessage, chatParams.setConfirmRegenerateMessage,
         chatParams.setCodeCollapsible, chatParams.setCodeWrappable, chatParams.setCodeShowLineNumbers,
         chatParams.setMessageStyle, chatParams.setMessageFontSize,
+        webSearch.setEnableWebSearch, webSearch.setWebSearchProvider, webSearch.setWebSearchApiKey, webSearch.setWebSearchBlacklist,
     ]);
 
     // 聚合 flushSave：同时 flush 两个子 Context

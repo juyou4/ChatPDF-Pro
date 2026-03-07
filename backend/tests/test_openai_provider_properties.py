@@ -207,3 +207,31 @@ class TestP3CustomParamsMerge:
                 assert body[key] == custom_params[key], (
                     f"body.update 应将 '{key}' 覆盖为 custom_params 的值"
                 )
+
+
+@pytest.mark.asyncio
+async def test_empty_api_key_does_not_send_invalid_bearer_header():
+    """空 API Key 时不应发送 `Authorization: Bearer ` 这种非法请求头。"""
+    provider = OpenAICompatibleProvider()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="",
+            model="gpt-4",
+        )
+
+    call_kwargs = mock_client.post.call_args.kwargs
+    headers = call_kwargs.get("headers", {})
+
+    assert "Authorization" not in headers
+    assert headers["Content-Type"] == "application/json"
