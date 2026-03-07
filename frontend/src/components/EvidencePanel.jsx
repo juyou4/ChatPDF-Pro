@@ -1,5 +1,5 @@
-import React, { useState, useCallback } from 'react';
-import { ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react';
+import React, { useState, useCallback, useRef } from 'react';
+import { ChevronDown, ChevronRight, FileText, ExternalLink, Image } from 'lucide-react';
 
 /**
  * 证据面板：展示每个检索到的文档块
@@ -7,13 +7,17 @@ import { ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react'
  *
  * Props:
  *   citations: Array - 引文列表 [{ref, group_id, page_range, highlight_text}, ...]
+ *   docId: string - 文档 ID，用于按需加载页面缩略图
  *   onCitationClick: Function - 点击引文跳转 PDF
  *   activeRef: number|null - 当前高亮的引文编号（双向联动）
  *   onRefHover: Function - 鼠标悬停引文编号时的回调
  */
-export default function EvidencePanel({ citations, onCitationClick, activeRef, onRefHover }) {
+export default function EvidencePanel({ citations, docId, onCitationClick, activeRef, onRefHover }) {
   const [expandedRefs, setExpandedRefs] = useState(new Set());
   const [panelCollapsed, setPanelCollapsed] = useState(false);
+  // thumbnail cache: page -> {url, loading, error}
+  const [thumbnails, setThumbnails] = useState({});
+  const fetchingRef = useRef(new Set());
 
   const toggleRef = useCallback((ref) => {
     setExpandedRefs(prev => {
@@ -23,6 +27,22 @@ export default function EvidencePanel({ citations, onCitationClick, activeRef, o
       return next;
     });
   }, []);
+
+  // Fetch thumbnail for a given page (lazy, cached)
+  const fetchThumbnail = useCallback((page) => {
+    if (!docId || !page || thumbnails[page] || fetchingRef.current.has(page)) return;
+    fetchingRef.current.add(page);
+    setThumbnails(prev => ({ ...prev, [page]: { loading: true } }));
+    fetch(`/api/document/${docId}/thumbnail/${page}`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        setThumbnails(prev => ({ ...prev, [page]: { url: data.thumbnail, loading: false } }));
+      })
+      .catch(() => {
+        setThumbnails(prev => ({ ...prev, [page]: { error: true, loading: false } }));
+        fetchingRef.current.delete(page);
+      });
+  }, [docId, thumbnails]);
 
   if (!citations || citations.length === 0) return null;
 
@@ -39,6 +59,9 @@ export default function EvidencePanel({ citations, onCitationClick, activeRef, o
         ? `P${c.page_range[0]}`
         : `P${c.page_range[0]}-${c.page_range[1]}`
       : '';
+    // Use the first page of the citation range for thumbnail
+    const thumbPage = c.page_range?.[0];
+    const thumb = thumbPage ? thumbnails[thumbPage] : null;
 
     return (
       <div
@@ -53,7 +76,11 @@ export default function EvidencePanel({ citations, onCitationClick, activeRef, o
       >
         {/* 头部 */}
         <button
-          onClick={() => toggleRef(ref)}
+          onClick={() => {
+            toggleRef(ref);
+            // Lazy-load thumbnail when expanding
+            if (!isExpanded && thumbPage) fetchThumbnail(thumbPage);
+          }}
           className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs"
         >
           {isExpanded
@@ -77,6 +104,26 @@ export default function EvidencePanel({ citations, onCitationClick, activeRef, o
         {/* 展开内容 */}
         {isExpanded && (
           <div className="px-3 pb-2.5 pt-0">
+            {/* 页面缩略图 */}
+            {thumbPage && docId && (
+              <div className="mb-2">
+                {thumb?.loading && (
+                  <div className="w-full h-20 bg-gray-100 rounded animate-pulse flex items-center justify-center">
+                    <Image className="w-4 h-4 text-gray-300" />
+                  </div>
+                )}
+                {thumb?.url && (
+                  <img
+                    src={thumb.url}
+                    alt={`页面 ${thumbPage} 预览`}
+                    className="w-full rounded border border-gray-100 cursor-pointer hover:opacity-90 transition-opacity"
+                    style={{ maxHeight: '120px', objectFit: 'contain', objectPosition: 'top' }}
+                    onClick={(e) => { e.stopPropagation(); onCitationClick?.(c); }}
+                    title={`点击跳转到 ${pageLabel}`}
+                  />
+                )}
+              </div>
+            )}
             {c.highlight_text ? (
               <div className="text-xs text-gray-700 leading-relaxed bg-yellow-50/60 border border-yellow-100 rounded px-2.5 py-2">
                 <mark className="bg-yellow-200/70 rounded px-0.5">{c.highlight_text}</mark>

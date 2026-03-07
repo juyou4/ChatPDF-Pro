@@ -856,3 +856,126 @@ async def local_query(
         system_prompt=sys_prompt,
     )
     return response
+
+
+async def _build_global_query_context(
+        community_reports: BaseKVStorage[CommunitySchema],
+        query_param: QueryParam,
+) -> str | None:
+    """构建 Global Query 上下文：使用社区报告而非实体级别检索。
+
+    按 occurrence（出现频率）和 level（层级）对社区报告排序，
+    选取最重要的 top_k 报告作为全局上下文。
+    """
+    try:
+        all_keys = await community_reports.all_keys()
+    except Exception:
+        return None
+
+    if not all_keys:
+        return None
+
+    all_values = await community_reports.get_by_ids(all_keys)
+    valid_reports = [r for r in all_values if r is not None]
+
+    if not valid_reports:
+        return None
+
+    # 按 level 升序（高层级），occurrence 降序（高频）排列
+    sorted_reports = sorted(
+        valid_reports,
+        key=lambda r: (r.get("level", 0), -r.get("occurrence", 0)),
+    )
+
+    # 截取 top_k_communities 报告
+    top_reports = sorted_reports[:query_param.global_top_k_communities]
+
+    # 将每个社区报告格式化为文本块
+    sections = []
+    total_tokens = 0
+    for idx, report in enumerate(top_reports):
+        report_text = report.get("report_string", "")
+        if not report_text:
+            continue
+        report_tokens = len(report_text) // 4  # rough token estimate
+        if total_tokens + report_tokens > query_param.global_max_token_for_community_report:
+            break
+        sections.append(f"## Community {idx + 1}\n{report_text}")
+        total_tokens += report_tokens
+
+    if not sections:
+        return None
+
+    return "\n\n".join(sections)
+
+
+async def global_query(
+        query,
+        community_reports: BaseKVStorage[CommunitySchema],
+        query_param: QueryParam,
+        global_config: dict,
+) -> str:
+    """执行 Global Query：基于社区报告的全局视角检索。
+
+    适用于需要跨文档宏观洞察的问题（如"整体趋势"、"所有相关实体"等）。
+    仿 LightRAG global 模式：直接使用社区报告作为上下文生成回答。
+    """
+    use_model_func = global_config["best_model_func"]
+
+    context = await _build_global_query_context(community_reports, query_param)
+    if query_param.only_output_context:
+        return context or ""
+    if not context:
+        return PROMPTS["fail_response"]
+
+    sys_prompt = PROMPTS["global_rag_response"].format(
+        context_data=context,
+        response_type=query_param.response_type,
+    )
+    logger.debug(f"[GraphRAG][global] query: {query}, context len: {len(context)}")
+    response = await use_model_func(query, system_prompt=sys_prompt)
+    return response
+
+
+async def hybrid_query(
+        query,
+        knowledge_graph_inst: BaseGraphStorage,
+        entities_vdb: BaseVectorStorage,
+        community_reports: BaseKVStorage[CommunitySchema],
+        text_chunks_db: BaseKVStorage[TextChunkSchema],
+        query_param: QueryParam,
+        global_config: dict,
+) -> str:
+    """执行 Hybrid Query：融合 Local（实体级别）和 Global（社区报告）两路上下文。
+
+    仿 LightRAG hybrid 模式：并行获取 local context 和 global context，
+    合并后用统一 prompt 生成更全面的回答。
+    """
+    use_model_func = global_config["best_model_func"]
+
+    # 并行获取两路上下文
+    local_context, global_context = await asyncio.gather(
+        _build_local_query_context(
+            query, knowledge_graph_inst, entities_vdb,
+            community_reports, text_chunks_db, query_param,
+        ),
+        _build_global_query_context(community_reports, query_param),
+    )
+
+    if query_param.only_output_context:
+        return f"[LOCAL]\n{local_context or ''}\n\n[GLOBAL]\n{global_context or ''}"
+
+    if not local_context and not global_context:
+        return PROMPTS["fail_response"]
+
+    sys_prompt = PROMPTS["hybrid_rag_response"].format(
+        local_context=local_context or "（无实体级别上下文）",
+        global_context=global_context or "（无社区报告上下文）",
+        response_type=query_param.response_type,
+    )
+    logger.debug(
+        f"[GraphRAG][hybrid] query: {query}, "
+        f"local_ctx={len(local_context or '')}, global_ctx={len(global_context or '')}"
+    )
+    response = await use_model_func(query, system_prompt=sys_prompt)
+    return response

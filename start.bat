@@ -11,7 +11,7 @@ cls
 echo.
 echo   ╔═══════════════════════════════════════╗
 echo   ║                                       ║
-echo   ║     ChatPDF Pro v3.0               ║
+echo   ║     ChatPDF Pro v3.0                  ║
 echo   ║     智能文档助手                      ║
 echo   ║                                       ║
 echo   ╚═══════════════════════════════════════╝

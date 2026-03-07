@@ -23,10 +23,11 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const { enableMemory, setEnableMemory, resetChatParams } = useChatParams();
     // 导入/导出需要聚合层（涉及所有设置）
     const { exportSettings, importSettings } = useGlobalSettings();
-    // 聚合重置
+    // 聚合重置（含联网搜索）
     const resetSettings = () => {
         resetFontSettings();
         resetChatParams();
+        resetWebSearch();
     };
 
     const [customFontInput, setCustomFontInput] = useState(customFont);
@@ -34,13 +35,21 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const [showImportDialog, setShowImportDialog] = useState(false);
     const [importText, setImportText] = useState('');
     const [showApiKey, setShowApiKey] = useState(false);
+    const [showBlacklist, setShowBlacklist] = useState(false);
 
     const {
-        enableWebSearch, webSearchProvider, webSearchApiKey,
-        setEnableWebSearch, setWebSearchProvider, setWebSearchApiKey,
+        enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
+        setEnableWebSearch, setWebSearchProvider, setWebSearchApiKey, setWebSearchBlacklist,
+        resetWebSearch,
     } = useWebSearch();
     const currentSearchProvider = WEB_SEARCH_PROVIDERS.find(p => p.id === webSearchProvider) || WEB_SEARCH_PROVIDERS[0];
     const needsApiKey = currentSearchProvider.requiresApiKey;
+
+    const blacklistText = (webSearchBlacklist || []).join('\n');
+    const handleBlacklistChange = (e) => {
+        const lines = e.target.value.split('\n').map(l => l.trim()).filter(Boolean);
+        setWebSearchBlacklist(lines);
+    };
 
     // 快捷缩放按钮
     const scalePresets = [
@@ -107,11 +116,11 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                 onClick={onClose}
             >
                 <motion.div
-                    initial={{ scale: 0.9, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.9, opacity: 0 }}
-                    transition={{ type: 'spring', damping: 20 }}
-                    className="soft-panel rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto"
+                    initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                    animate={{ scale: 1, opacity: 1, y: 0 }}
+                    exit={{ scale: 0.95, opacity: 0, y: 10 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
+                    className="w-full max-w-2xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
@@ -133,7 +142,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </button>
                     </div>
 
-                    <div className="p-6 space-y-6">
+                    <div className="flex-1 overflow-y-auto p-6 space-y-5">
                         {/* 字体设置 */}
                         <div className="space-y-4">
                             <div className="flex items-center gap-2">
@@ -402,6 +411,36 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 )}
                               </div>
                             )}
+
+                            {/* 域名黑名单 */}
+                            {enableWebSearch && (
+                                <div className="space-y-2 pt-2 border-t border-gray-100">
+                                    <button
+                                        onClick={() => setShowBlacklist(!showBlacklist)}
+                                        className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                                    >
+                                        <span className="font-medium">域名黑名单</span>
+                                        {webSearchBlacklist && webSearchBlacklist.length > 0 && (
+                                            <span className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-600">{webSearchBlacklist.length}</span>
+                                        )}
+                                        <span className="text-gray-400">{showBlacklist ? '▲' : '▼'}</span>
+                                    </button>
+                                    {showBlacklist && (
+                                        <div className="space-y-1.5">
+                                            <textarea
+                                                value={blacklistText}
+                                                onChange={handleBlacklistChange}
+                                                placeholder={'每行一个域名，例如：\ntwitter.com\ninstagram.com'}
+                                                rows={4}
+                                                className="w-full px-3 py-2 soft-input rounded-xl outline-none text-xs font-mono resize-none"
+                                            />
+                                            <p className="text-[11px] text-gray-400">
+                                                屏蔽的域名不会出现在搜索结果中，子域名也会被过滤。
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {/* 分割线 */}
@@ -507,3 +546,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
 };
 
 export default GlobalSettings;
+
+
+
+
+
+
+

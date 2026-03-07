@@ -146,7 +146,11 @@ const optimizeSentenceCitations = (sentence, citations) => {
 
   chosen = [...new Set(chosen)].slice(0, 2);
   if (chosen.length === 0) {
-    // verifier: 句子没有可支撑来源时移除错误引用
+    // 最终兜底：保留 LLM 自身标注的、在 citationMap 中存在的有效 ref，
+    // 而非直接丢弃——跨语言场景（中文回答 + 英文文档）token 重叠为 0 但 ref 仍有效
+    const preserved = [...new Set(refsInSentence)].filter((r) => citationMap.has(r));
+    if (preserved.length > 0) return attachRefsToSentence(coreSentence, preserved.slice(0, 2));
+    // 所有 ref 不在 citations 中（如文档自身的参考文献编号），才真正剥离
     return coreSentence;
   }
 
@@ -297,6 +301,7 @@ export function useMessageState({
   const streamConvNameRef = useRef(null);
   const streamMindmapRef = useRef(null);
   const streamWebSearchRef = useRef(null);
+  const streamWebSearchStatusRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -309,7 +314,7 @@ export function useMessageState({
     enableMemory,
   } = globalSettings;
 
-  const { enableWebSearch, webSearchProvider, webSearchApiKey } = useWebSearch();
+  const { enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist } = useWebSearch();
 
   // ========== 流式输出 Hook（ref 直写模式，需求 4.2） ==========
   // 流式输出期间不调用 setMessages，通过 contentRef 直接更新 DOM
@@ -409,6 +414,7 @@ export function useMessageState({
       enable_web_search: enableWebSearch,
       web_search_provider: webSearchProvider,
       web_search_api_key: webSearchApiKey || null,
+      web_search_blacklist: webSearchBlacklist && webSearchBlacklist.length > 0 ? webSearchBlacklist : null,
     };
 
     // 中止之前的请求
@@ -422,6 +428,7 @@ export function useMessageState({
     streamConvNameRef.current = null;
     streamMindmapRef.current = null;
     streamWebSearchRef.current = null;
+    streamWebSearchStatusRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -521,6 +528,15 @@ export function useMessageState({
               return;
             }
             if (p.type === 'retrieval_progress') return;
+            if (p.type === 'web_search_status') {
+              streamWebSearchStatusRef.current = { phase: p.phase, count: p.count ?? null };
+              setMessages(prev => prev.map(m =>
+                m.id === tempMsgId
+                  ? { ...m, webSearchStatus: streamWebSearchStatusRef.current }
+                  : m
+              ));
+              return;
+            }
             if (p.type === 'web_search') {
               streamWebSearchRef.current = p.sources || [];
               return;
@@ -612,7 +628,7 @@ export function useMessageState({
         );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null }
+            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null }
             : m
         ));
         activeStreamMsgIdRef.current = null;

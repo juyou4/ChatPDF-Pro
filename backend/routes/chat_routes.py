@@ -20,6 +20,7 @@ from services.query_analyzer import get_retrieval_strategy
 from services.preset_service import get_generation_prompt
 from services.context_builder import ContextBuilder
 from services.web_search_service import SearchManager, format_search_results
+from services.web_search_reranker import rerank_web_results
 from services.query_rewriter import QueryRewriter
 from services.followup_service import generate_followup_questions
 from services.conv_name_service import suggest_conversation_name
@@ -279,6 +280,7 @@ class ChatRequest(BaseModel):
     web_search_provider: Optional[str] = "auto"
     web_search_api_key: Optional[str] = None
     web_search_max_results: Optional[int] = 5
+    web_search_blacklist: Optional[list[str]] = None
     enable_graphrag: bool = False
     enable_jieba_bm25: bool = True
     num_expand_context_chunk: int = 1
@@ -552,6 +554,93 @@ def _normalize_web_search_max_results(value: Optional[int]) -> int:
     return max(1, min(int(value), _MAX_WEB_SEARCH_RESULTS))
 
 
+_WEB_SEARCH_INTENT_CACHE: dict[str, bool] = {}
+_WEB_SEARCH_INTENT_CACHE_MAX = 256
+
+_INTENT_YES_KEYWORDS = frozenset([
+    # 明确指向外部信息的词
+    "最新", "现在", "今", "近期", "当前", "实时", "更新", "新闻", "最近", "版本", "上市", "发布",
+    "latest", "current", "recent", "news", "now", "today", "update", "release", "2024", "2025", "2026",
+    "谁是", "谁当", "多少钱", "价格", "股价", "汇率", "天气",
+])
+_INTENT_NO_KEYWORDS = frozenset([
+    # 纯文档解读相关词
+    "摘要", "总结", "概括", "翻译", "解释", "分析图表", "本文", "文章", "文档", "此处", "这段", "图中",
+    "表格", "公式", "作者怎么", "文中", "怎么理解", "什么意思",
+    "summarize", "translate", "explain this", "what does this mean",
+])
+
+
+async def _should_perform_web_search(
+    question: str,
+    api_key: Optional[str],
+    model: Optional[str],
+    provider: Optional[str],
+    endpoint: Optional[str],
+) -> bool:
+    """用轻量关键词 + 可选 LLM 快速判断是否需要联网搜索。
+
+    优先使用启发式规则（零延迟），仅在无法判断时调用 LLM。
+    """
+    if not question or not question.strip():
+        return False
+
+    q = question.strip().lower()
+
+    # 快速命中：明确需要联网
+    if any(kw in q for kw in _INTENT_YES_KEYWORDS):
+        logger.debug("联网意图判断：命中 YES 关键词")
+        return True
+
+    # 快速命中：明确不需要联网（纯文档问题）
+    if any(kw in q for kw in _INTENT_NO_KEYWORDS):
+        logger.debug("联网意图判断：命中 NO 关键词")
+        return False
+
+    # 未命中规则：缓存检查
+    cache_key = q[:120]
+    if cache_key in _WEB_SEARCH_INTENT_CACHE:
+        return _WEB_SEARCH_INTENT_CACHE[cache_key]
+
+    # 无 API key 时无法调用 LLM，默认执行搜索
+    if not api_key:
+        return True
+
+    # LLM 轻量判断
+    try:
+        prompt = (
+            "判断以下问题是否需要联网搜索获取外部信息（最新数据、事件、人物等）。\n"
+            "若问题仅涉及文档内容解读、格式、摘要，回复 no。\n"
+            "若问题涉及外部事件、最新数据、人物、地点或文档中没有的信息，回复 yes。\n"
+            "只回复 yes 或 no，不要解释。\n"
+            f"问题：{question[:200]}"
+        )
+        result = await call_ai_api(
+            [{"role": "user", "content": prompt}],
+            api_key,
+            model or "gpt-4o-mini",
+            provider or "openai",
+            endpoint=endpoint or "",
+            max_tokens=5,
+            temperature=0,
+        )
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        raw = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
+        answer = raw.strip().lower()
+        decision = answer.startswith("yes")
+        logger.debug(f"联网意图 LLM 判断: '{answer[:20]}' → {decision}")
+
+        if len(_WEB_SEARCH_INTENT_CACHE) >= _WEB_SEARCH_INTENT_CACHE_MAX:
+            oldest = next(iter(_WEB_SEARCH_INTENT_CACHE))
+            del _WEB_SEARCH_INTENT_CACHE[oldest]
+        _WEB_SEARCH_INTENT_CACHE[cache_key] = decision
+        return decision
+    except Exception as e:
+        logger.debug(f"联网意图 LLM 判断失败，默认执行搜索: {e}")
+        return True
+
+
 def _clean_query_text(text: str, max_len: int = 200) -> str:
     cleaned = re.sub(r"\s+", " ", text or "").strip()
     return cleaned[:max_len]
@@ -617,11 +706,12 @@ def _build_answer_style_instruction(answer_detail: str) -> str:
             "回答风格：详细模式。请严格遵循以下要求：\n"
             "- 使用 Markdown 标题（##）和小标题（###）对回答进行结构化分段\n"
             "- 从多个角度展开分析：背景介绍→核心内容→依据与推理→结论→局限性或注意事项\n"
-            "- 至少覆盖 3-5 个要点，每个要点充分展开而非一句话带过\n"
-            "- 直接引用文档原文作为论据佐证，不要仅概括\n"
-            "- 涉及数据、公式、表格时必须完整展示，不可省略\n"
-            "- 篇幅上不设上限，宁可详尽也不要遗漏重要信息\n"
-            "- 回答结尾可附上简要总结"
+            "- 至少覆盖 3-5 个要点，每个要点用完整段落充分展开，严禁一句话带过\n"
+            "- 直接引用文档原文作为论据佐证，不要仅概括，需给出具体内容\n"
+            "- 涉及数据、公式、表格时必须完整展示，不可省略或以\u201c如表所示\u201d代替\n"
+            "- 目标回答长度不少于 600 字，复杂问题应达到 1000 字以上\n"
+            "- 绝对不得因\u201c篇幅限制\u201d或\u201c简洁起见\u201d而截断或省略任何重要信息\n"
+            "- 回答结尾附上简要总结段落"
         )
     return (
         "回答风格：标准模式。结构清晰，使用分点或分段组织回答，"
@@ -630,7 +720,8 @@ def _build_answer_style_instruction(answer_detail: str) -> str:
 
 
 _CITATION_TOKEN_OVERHEAD = 1024  # 结构化引文（CITATION LIST）输出的预估 token 开销
-_DETAILED_MIN_TOKENS = 4096     # 详细模式下 max_tokens 的最低保证值
+_DETAILED_MIN_TOKENS = 8192     # 详细模式下 max_tokens 的最低保证值
+_STANDARD_DEFAULT_TOKENS = 4096 # 标准模式下 max_tokens 未设置时的默认值
 
 
 def _adjust_max_tokens(
@@ -641,18 +732,22 @@ def _adjust_max_tokens(
     """根据回答详细度和引文开销调整 max_tokens。
 
     - 详细模式：保证 max_tokens >= _DETAILED_MIN_TOKENS
+    - 标准模式：max_tokens 未设置时使用 _STANDARD_DEFAULT_TOKENS 作为默认值
     - 结构化引文：自动增加 _CITATION_TOKEN_OVERHEAD 补偿隐藏的 CITATION LIST 输出
     - 不覆盖用户已设置的更大值
     """
     detail = _normalize_answer_detail(answer_detail)
     effective = max_tokens
 
-    # Fix 4：详细模式下保证 max_tokens 下限
     if detail == "detailed":
         if effective is None or effective < _DETAILED_MIN_TOKENS:
             effective = _DETAILED_MIN_TOKENS
+    elif detail == "standard":
+        # 标准模式：用户未设置 max_tokens 时使用默认值，避免依赖 Provider 默认（通常偏低）
+        if effective is None:
+            effective = _STANDARD_DEFAULT_TOKENS
 
-    # Fix 3：结构化引文开销补偿
+    # 结构化引文开销补偿
     if has_structured_citations and effective is not None:
         effective += _CITATION_TOKEN_OVERHEAD
 
@@ -665,6 +760,8 @@ async def _maybe_perform_web_search(
     query_override: str = "",
     doc_title: str = "",
     selected_text: str = "",
+    doc_id: str = "",
+    vector_store_dir: str = "",
 ) -> tuple[list[dict], str]:
     """按请求开关执行联网搜索，返回 (sources, formatted_context)。"""
     if not getattr(request, "enable_web_search", False):
@@ -683,16 +780,31 @@ async def _maybe_perform_web_search(
     if not search_query:
         return [], ""
 
+    blacklist = [b.strip() for b in (request.web_search_blacklist or []) if b.strip()]
     try:
         logger.info(f"联网搜索开始: provider={provider}, query='{search_query[:120]}'")
         sources = await SearchManager.search(
             query=search_query,
             provider=provider,
             api_key=request.web_search_api_key,
-            max_results=max_results,
+            max_results=max_results * 2,  # 多取几条供重排筛选
+            blacklist=blacklist or None,
         )
         if not sources:
             return [], ""
+
+        # 向量语义重排（提升相关性），降级时返回词法重排结果
+        sources = await rerank_web_results(
+            query=search_query,
+            results=sources,
+            doc_id=doc_id,
+            vector_store_dir=vector_store_dir,
+            api_key=request.api_key,
+            top_k=max_results,
+        )
+        if not sources:
+            return [], ""
+
         return sources, format_search_results(sources)
     except Exception as e:
         logger.warning(f"联网搜索失败，已降级为仅文档检索: {e}")
@@ -765,7 +877,12 @@ async def chat_with_pdf(request: ChatRequest):
             query_override=search_query,
             doc_title=doc.get("filename", ""),
             selected_text=request.selected_text or "",
+            doc_id=request.doc_id,
+            vector_store_dir=getattr(router, "vector_store_dir", ""),
         )
+
+        # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
+        _prelim_answer_tokens = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
 
         if request.selected_text and request.enable_vector_search:
             # 融合模式：selected_text + 向量检索
@@ -789,6 +906,7 @@ async def chat_with_pdf(request: ChatRequest):
                         ErrorCaptureMiddleware()
                     ],
                     selected_text=request.selected_text,
+                    answer_max_tokens=_prelim_answer_tokens,
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = context_result.get("retrieval_meta", {})
@@ -838,7 +956,8 @@ async def chat_with_pdf(request: ChatRequest):
                     *( [LoggingMiddleware()] if settings.enable_chat_logging else [] ),
                     RetryMiddleware(retries=settings.chat_retry_retries, delay=settings.chat_retry_delay),
                     ErrorCaptureMiddleware()
-                ]
+                ],
+                answer_max_tokens=_prelim_answer_tokens,
             )
             relevant_text = context_result.get("context", "")
             retrieval_meta = context_result.get("retrieval_meta", {})
@@ -865,7 +984,8 @@ async def chat_with_pdf(request: ChatRequest):
             system_prompt += (
                 "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
                 f"{web_search_context}\n"
-                "\n回答时可参考联网结果，但不得与文档事实冲突。"
+                "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
+                "\n不得与文档事实冲突。"
             )
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
@@ -1000,12 +1120,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
             provider=request.api_provider,
             endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
         )
-        web_search_sources, web_search_context = await _maybe_perform_web_search(
-            request,
-            query_override=search_query,
-            doc_title=doc.get("filename", ""),
-            selected_text=request.selected_text or "",
-        )
+        # 联网搜索移入 event_generator() 以便在客户端展示实时搜索状态
+        _web_search_query_for_stream = search_query
+        _web_search_doc_title_for_stream = doc.get("filename", "")
+
+        # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
+        _prelim_answer_tokens_stream = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
 
         if request.selected_text and request.enable_vector_search:
             # 融合模式：selected_text + 向量检索
@@ -1028,6 +1148,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
                     ],
                     selected_text=request.selected_text,
+                    answer_max_tokens=_prelim_answer_tokens_stream,
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = context_result.get("retrieval_meta", {})
@@ -1092,7 +1213,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     middlewares=[
                         *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
                         RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
-                    ]
+                    ],
+                    answer_max_tokens=_prelim_answer_tokens_stream,
                 )
                 rt = cr.get("context", "")
                 if rt:
@@ -1134,12 +1256,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
             if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
-        if web_search_context:
-            system_prompt += (
-                "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
-                f"{web_search_context}\n"
-                "\n回答时可参考联网结果，但不得与文档事实冲突。"
-            )
+        # 联网搜索上下文注入将在 event_generator() 中完成（需先发送状态事件）
         citations = retrieval_meta.get("citations", [])
         has_structured_citations = bool(citations)
         if citations:
@@ -1159,11 +1276,48 @@ async def chat_with_pdf_stream(request: ChatRequest):
     _retrieval_chunks = retrieval_meta.get("_chunks", [])
 
     async def event_generator():
-        nonlocal messages, system_prompt, retrieval_meta, web_search_sources
+        nonlocal messages, system_prompt, retrieval_meta, web_search_sources, web_search_context
         try:
             if use_agent:
                 # ... Agent 逻辑省略，保持原样 ...
                 pass
+
+            # 联网搜索（在此处执行以便向客户端实时发送状态事件）
+            if getattr(request, "enable_web_search", False) and not image_list:
+                # 意图分析：判断此问题是否真的需要联网
+                _do_web_search = await _should_perform_web_search(
+                    question=request.question,
+                    api_key=request.api_key,
+                    model=request.model,
+                    provider=request.api_provider,
+                    endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+                )
+                if _do_web_search:
+                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'searching'}, ensure_ascii=False)}\n\n"
+                    try:
+                        web_search_sources, web_search_context = await _maybe_perform_web_search(
+                            request,
+                            query_override=_web_search_query_for_stream,
+                            doc_title=_web_search_doc_title_for_stream,
+                            selected_text=request.selected_text or "",
+                            doc_id=request.doc_id,
+                            vector_store_dir=getattr(router, "vector_store_dir", ""),
+                        )
+                    except Exception as _ws_err:
+                        logger.warning(f"联网搜索（generator 内）失败: {_ws_err}")
+                        web_search_sources, web_search_context = [], ""
+
+                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources)}, ensure_ascii=False)}\n\n"
+
+                if web_search_context:
+                    system_prompt += (
+                        "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
+                        f"{web_search_context}\n"
+                        "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
+                        "\n不得与文档事实冲突。"
+                    )
+                    messages[0]["content"] = system_prompt
+
             if web_search_sources:
                 yield f"data: {json.dumps({'type': 'web_search', 'sources': web_search_sources}, ensure_ascii=False)}\n\n"
             if not use_agent and not image_list:
