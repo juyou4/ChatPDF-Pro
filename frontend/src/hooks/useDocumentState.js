@@ -215,12 +215,14 @@ export function useDocumentState({
       });
 
       setDocId(data.doc_id);
+      setUploadProgress(80);
 
       // 获取文档详细信息
       const dres = await fetch(`${API_BASE_URL}/document/${data.doc_id}?t=${Date.now()}`);
       const ddata = await dres.json();
       const full = { ...ddata, ...data };
       setDocInfo(full);
+      setUploadProgress(95);
 
       // 构建上传成功消息
       let uploadMsg = `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`;

@@ -425,7 +425,100 @@ def extract_text_from_pdf(
             "null_ratio": round(null_ratio, 3),
             "valid_ratio": round(valid_ratio, 3)
         }
-    
+
+    # ==================== Figure 标题检测 ====================
+    FIGURE_PATTERNS = [
+        r'^图\s*(\d+[a-zA-Z]?)',           # 图1, 图 1, 图1a
+        r'^Figure\s+(\d+[a-zA-Z]?)',        # Figure 1, Figure 1a
+        r'^Fig\.?\s+(\d+[a-zA-Z]?)',        # Fig.1, Fig 1, Fig.1a
+    ]
+
+    def _extract_figure_captions_from_dict(text_dict: dict, page_num: int) -> list:
+        """从 PyMuPDF 的 dict 格式中检测 figure 标题"""
+        if not text_dict or "blocks" not in text_dict:
+            return []
+
+        import re
+        figures = []
+
+        for block in text_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+
+            for line in block.get("lines", []):
+                line_text = ""
+                line_bbox = None
+
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    if text:
+                        line_text += text
+                        if line_bbox is None:
+                            line_bbox = span.get("bbox")
+                        else:
+                            cur_bbox = span.get("bbox", [0, 0, 0, 0])
+                            line_bbox = [
+                                min(line_bbox[0], cur_bbox[0]),
+                                min(line_bbox[1], cur_bbox[1]),
+                                max(line_bbox[2], cur_bbox[2]),
+                                max(line_bbox[3], cur_bbox[3])
+                            ]
+
+                line_text = line_text.strip()
+                if not line_text:
+                    continue
+
+                for pattern in FIGURE_PATTERNS:
+                    match = re.match(pattern, line_text, re.IGNORECASE)
+                    if match:
+                        figure_num = match.group(1)
+                        figures.append({
+                            "figure_number": figure_num,
+                            "label": line_text[:50],
+                            "page": page_num,
+                            "bbox": line_bbox or [0, 0, 0, 0]
+                        })
+                        break
+
+        return figures
+
+    def _match_figures_with_images(figures: list, images: list) -> list:
+        """将 figure 标题与同页的图片进行空间匹配，返回结构化的 figures 列表"""
+        if not figures or not images:
+            return []
+
+        result = []
+        page_to_images = {}
+        for img in images:
+            p = img.get("page", 1)
+            if p not in page_to_images:
+                page_to_images[p] = []
+            page_to_images[p].append(img)
+
+        for fig in figures:
+            fig_page = fig.get("page", 1)
+            fig_bbox = fig.get("bbox", [0, 0, 0, 0])
+            fig_y = fig_bbox[3]
+
+            matched_images = []
+            if fig_page in page_to_images:
+                for img in page_to_images[fig_page]:
+                    img_bbox = img.get("bbox", [0, 0, 0, 0])
+                    img_y0 = img_bbox[1]
+
+                    if img_y0 > fig_y - 10 and img_y0 < fig_y + 400:
+                        matched_images.append(img.get("id"))
+
+            result.append({
+                "figure_id": f"fig-{fig.get('figure_number', '')}",
+                "number": fig.get("figure_number", ""),
+                "label": fig.get("label", ""),
+                "page": fig_page,
+                "image_ids": matched_images
+            })
+
+        return result
+
     def extract_with_pymupdf(pdf_bytes: bytes, extract_images: bool = True) -> tuple:
         """
         使用 PyMuPDF 进行字符级文本提取，参考 paper-burner-x 实现
@@ -433,17 +526,20 @@ def extract_text_from_pdf(
         1. 使用 get_text("dict") 获取字符级坐标
         2. 按 Y 坐标检测换行，按 X 坐标间距添加空格
         3. 精确控制文本重建，避免空格丢失
+        4. 检测 figure 标题（图1 / Figure 1 等）并与图片关联
+        返回: (pages, full_text, page_qualities, all_images, figures, error)
         """
         try:
             import fitz  # PyMuPDF
         except ImportError:
-            return None, None, None, [], "PyMuPDF not installed"
+            return None, None, None, [], [], "PyMuPDF not installed"
         
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages = []
         full_text_parts = []
         page_qualities = []
         all_images = []  # 存储所有提取的图片
+        all_figures = []  # 存储所有检测到的 figure 标题
         
         total_pages = len(doc)
         total_batches = (total_pages + BATCH_SIZE - 1) // BATCH_SIZE
@@ -473,7 +569,11 @@ def extract_text_from_pdf(
                 
                 # 清理文本
                 page_text = clean_text(page_text)
-                
+
+                # ==================== Figure 标题检测 ====================
+                page_figures = _extract_figure_captions_from_dict(text_dict, page_num + 1)
+                all_figures.extend(page_figures)
+
                 # ==================== 图片提取 ====================
                 page_images = []
                 if extract_images:
@@ -523,13 +623,23 @@ def extract_text_from_pdf(
                                     
                                     img_id = f"page{page_num + 1}_img{img_idx + 1}"
                                     img_base64 = base64.b64encode(img_data).decode('utf-8')
-                                    
+
+                                    img_bbox = [0, 0, img_width, img_height]
+                                    try:
+                                        img_rects = page.get_image_rects(xref)
+                                        if img_rects:
+                                            rect = img_rects[0]
+                                            img_bbox = [rect.x0, rect.y0, rect.x1, rect.y1]
+                                    except Exception:
+                                        pass
+
                                     page_images.append({
                                         "id": img_id,
                                         "data": f"data:image/{img_ext};base64,{img_base64}",
                                         "width": img_width,
                                         "height": img_height,
-                                        "page": page_num + 1
+                                        "page": page_num + 1,
+                                        "bbox": img_bbox
                                     })
                                     
                                     # 不在文本中插入图片引用，避免干扰RAG检索
@@ -562,7 +672,11 @@ def extract_text_from_pdf(
                 time.sleep(BATCH_SLEEP)
         
         doc.close()
-        return pages, '\n\n'.join(full_text_parts), page_qualities, all_images, None
+
+        # 基于图片位置匹配 figure 标题，生成 figures 元数据
+        figures = _match_figures_with_images(all_figures, all_images)
+
+        return pages, '\n\n'.join(full_text_parts), page_qualities, all_images, figures, None
     
     def extract_with_pdfplumber(pdf_file) -> tuple:
         """使用 pdfplumber 的 chars 进行坐标级文本提取，带自适应阈值"""
@@ -764,17 +878,19 @@ def extract_text_from_pdf(
     extraction_method = None
     
     # 优先使用 PyMuPDF
+    figures = []
     if pdf_bytes:
-        pages, full_text, page_qualities, all_images, err = extract_with_pymupdf(pdf_bytes, extract_images)
+        pages, full_text, page_qualities, all_images, figures, err = extract_with_pymupdf(pdf_bytes, extract_images)
         if pages is not None:
             extraction_method = "pymupdf"
-            print(f"[PDF] Using PyMuPDF extraction, {len(pages)} pages, {len(all_images)} images")
-    
+            print(f"[PDF] Using PyMuPDF extraction, {len(pages)} pages, {len(all_images)} images, {len(figures)} figures")
+
     # 如果 PyMuPDF 失败，回退到 pdfplumber
     if pages is None:
         print(f"[PDF] PyMuPDF failed ({err}), falling back to pdfplumber")
         pages, full_text, page_qualities, all_images, err = extract_with_pdfplumber(pdf_file)
         extraction_method = "pdfplumber"
+        figures = []  # pdfplumber 暂不提取 figures
     
     # 检测语言并应用启发式重建
     is_cjk = detect_language(full_text) == "cjk"
@@ -796,6 +912,7 @@ def extract_text_from_pdf(
         "total_pages": total_pages,
         "pages": pages,
         "images": all_images,  # 新增：提取的图片列表
+        "figures": figures,  # 新增：检测到的 figure 标题列表
         "image_count": len(all_images),
         "ocr_used": False,
         "ocr_backend": None,

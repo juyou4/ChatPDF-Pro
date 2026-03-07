@@ -185,48 +185,87 @@ async def get_document_info(doc_id: str) -> Optional[Dict]:
 
 
 async def get_document_images_and_pages(doc_id: str) -> tuple:
-    """获取文档已提取的图片列表和页面文本。返回 (images, pages)，失败返回 ([], [])。"""
+    """获取文档已提取的图片列表、页面文本和figures元数据。返回 (images, pages, figures)，失败返回 ([], [], [])。"""
     from routes.document_routes import documents_store
-    
+
     if doc_id not in documents_store:
-        return [], []
-    
+        return [], [], []
+
     doc = documents_store[doc_id]
     data = doc.get("data", {})
     images = data.get("images") or []
     pages = data.get("pages") or []
-    return images, pages
+    figures = data.get("figures") or []
+    return images, pages, figures
 
 
 def _extract_figures_for_overview(
     images: List[Dict],
     pages: List[Dict],
     depth: str,
+    figures: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     """
-    从文档图片中选取前 N 张作为「关键图表」。
-    返回列表，每项为 {"figure_id", "image_data", "page_num", "page_content_snippet"}。
+    从文档中选取关键图表进行解读。
+    优先使用 figures 元数据（按 figure 标题分组），若无 figures 则回退到按单张图片选取。
+    返回列表，每项为 {"figure_id", "image_data_list", "page_num", "page_content_snippet"}。
     """
     figure_count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG[OverviewDepth.STANDARD]).get("figure_count", 3)
-    # 按页码排序，同页内保持顺序
+
+    # 构建 image_id -> image_data 的映射
+    image_map = {img.get("id", ""): img.get("data", "") for img in images if img.get("id") and img.get("data")}
+
+    # 如果有 figures 元数据，优先使用
+    if figures:
+        sorted_figures = sorted(figures, key=lambda x: (x.get("page", 0), str(x.get("number", ""))))
+        selected_figures = sorted_figures[:figure_count]
+
+        result = []
+        for fig in selected_figures:
+            page_num = fig.get("page", 1)
+            image_ids = fig.get("image_ids", [])
+
+            # 收集该 figure 下的所有图片数据
+            image_data_list = [image_map.get(img_id, "") for img_id in image_ids if image_map.get(img_id)]
+
+            if not image_data_list:
+                continue
+
+            # 页面文本片段
+            page_content = ""
+            if pages and 1 <= page_num <= len(pages):
+                p = pages[page_num - 1]
+                page_content = (p.get("content") or "")[:800]
+
+            result.append({
+                "figure_id": fig.get("figure_id", f"fig-{fig.get('number', '')}"),
+                "image_data_list": image_data_list,
+                "page_num": page_num,
+                "page_content_snippet": page_content,
+            })
+
+        if result:
+            return result
+
+    # 回退：按单张图片选取（旧策略）
     sorted_images = sorted(images, key=lambda x: (x.get("page", 0), x.get("id", "")))
     selected = sorted_images[:figure_count]
-    
+
     result = []
     for i, img in enumerate(selected):
         page_num = img.get("page", i + 1)
         data_url = img.get("data", "")
         if not data_url:
             continue
-        # 页面文本片段（供多模态模型上下文）
+
         page_content = ""
         if pages and 1 <= page_num <= len(pages):
             p = pages[page_num - 1]
             page_content = (p.get("content") or "")[:800]
-        
+
         result.append({
             "figure_id": img.get("id", f"fig-{i+1}"),
-            "image_data": data_url,
+            "image_data_list": [data_url],
             "page_num": page_num,
             "page_content_snippet": page_content,
         })
@@ -247,7 +286,7 @@ def _extract_content_from_response(response: dict) -> str:
 async def _generate_single_figure_analysis(
     figure_id: str,
     figure_index: int,
-    image_data_url: str,
+    image_data_list: List[str],
     page_content_snippet: str,
     api_key: str,
     model: str,
@@ -255,33 +294,40 @@ async def _generate_single_figure_analysis(
     endpoint: str = "",
 ) -> Optional[KeyFigureItem]:
     """
-    调用多模态 LLM 对单张图生成标题与解析。
+    调用多模态 LLM 对一个 figure（可能包含多张子图）生成标题与解析。
     返回 KeyFigureItem，失败返回 None。
     """
+    if not image_data_list:
+        return None
+
     from services.chat_service import call_ai_api
-    
-    prompt = f"""这是一篇学术论文中的第 {figure_index + 1} 张图。该图所在页面的部分文字如下：
+
+    # 构造图片数量描述
+    img_count = len(image_data_list)
+    subfig_hint = f"（共 {img_count} 张子图）" if img_count > 1 else ""
+
+    prompt = f"""这是一篇学术论文中的第 {figure_index + 1} 个图 {subfig_hint}。该图所在页面的部分文字如下：
 
 {page_content_snippet[:500] if page_content_snippet else "（无正文）"}
 
 请完成两件事（用中文）：
 1. 用一句话概括该图的标题（例如「图1: xxx」）。
-2. 写一段 2–4 句话的解析，说明该图在论文中的作用（如方法示意、实验对比、架构图等）。
+2. 写一段 2–4 句话的解析，说明该图在论文中的作用（如方法示意、实验对比、架构图等）。如果有多张子图，请整体解读它们之间的关系和各自的意义。
 
 请严格按以下 JSON 格式输出，不要包含其他文字：
 {{"caption": "图X: 标题", "analysis": "解析段落"}}
 """
-    
-    # 多模态消息：先文字后图片（与 chat vision 一致）
-    user_content = [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": image_data_url}},
-    ]
+
+    # 多模态消息：先文字后所有图片
+    user_content = [{"type": "text", "text": prompt}]
+    for img_data in image_data_list:
+        user_content.append({"type": "image_url", "image_url": {"url": img_data}})
+
     messages = [
         {"role": "system", "content": "你是学术论文图表分析助手。根据论文图片和上下文，输出指定 JSON 格式。"},
         {"role": "user", "content": user_content},
     ]
-    
+
     try:
         response = await call_ai_api(
             messages=messages,
@@ -292,14 +338,14 @@ async def _generate_single_figure_analysis(
             max_tokens=1024,
             temperature=0.3,
         )
-        
+
         if isinstance(response, dict) and response.get("error"):
             return None
-        
+
         content = _extract_content_from_response(response)
         if not content:
             return None
-        
+
         # 解析 JSON
         json_start = content.find("{")
         json_end = content.rfind("}") + 1
@@ -307,14 +353,15 @@ async def _generate_single_figure_analysis(
             data = json.loads(content[json_start:json_end])
         else:
             data = json.loads(content)
-        
+
         caption = data.get("caption", f"图{figure_index + 1}")
         analysis = data.get("analysis", "")
-        
+
+        # 返回第一张图片作为展示缩略图
         return KeyFigureItem(
             figure_id=figure_id,
             caption=caption,
-            image_base64=image_data_url,
+            image_base64=image_data_list[0],
             analysis=analysis,
         )
     except Exception as e:
@@ -439,15 +486,15 @@ async def generate_overview_content(
         
         # 关键图表解读：从文档提取图片并用多模态模型生成解析
         try:
-            images, pages = await get_document_images_and_pages(doc_id)
+            images, pages, figures = await get_document_images_and_pages(doc_id)
             if images:
-                figures_to_analyze = _extract_figures_for_overview(images, pages, depth)
+                figures_to_analyze = _extract_figures_for_overview(images, pages, depth, figures)
                 key_figures_list = []
                 for i, fig in enumerate(figures_to_analyze):
                     item = await _generate_single_figure_analysis(
                         figure_id=fig["figure_id"],
                         figure_index=i,
-                        image_data_url=fig["image_data"],
+                        image_data_list=fig.get("image_data_list", []),
                         page_content_snippet=fig.get("page_content_snippet", ""),
                         api_key=api_key,
                         model=model,
