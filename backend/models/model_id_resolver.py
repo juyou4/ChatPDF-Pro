@@ -10,6 +10,7 @@
 
 from typing import Optional, Tuple
 
+from models.dynamic_store import load_dynamic_models
 from models.model_registry import EMBEDDING_MODELS
 
 # 前端 providerId → 后端 provider 字段的映射
@@ -49,6 +50,87 @@ DEPRECATED_MODEL_ID_ALIASES = {
 }
 
 
+def _pick_first(*values):
+    """返回首个非空值。"""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+            continue
+        return value
+    return None
+
+
+def _normalize_dynamic_embedding_config(model_id: str, config: dict) -> Optional[dict]:
+    """将动态模型记录归一化为 embedding 调用链可直接消费的格式。"""
+    if not isinstance(config, dict):
+        return None
+
+    model_type = str(config.get("type") or "").lower()
+    capabilities = config.get("capabilities") or []
+    has_embedding_capability = any(
+        isinstance(cap, dict)
+        and cap.get("type") == "embedding"
+        and cap.get("isUserSelected") is not False
+        for cap in capabilities
+    )
+    if model_type and model_type != "embedding" and not has_embedding_capability:
+        return None
+
+    metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+    provider_id = _pick_first(
+        config.get("provider_id"),
+        config.get("providerId"),
+        metadata.get("provider_id"),
+        metadata.get("providerId"),
+        config.get("provider"),
+    )
+    provider_type = _pick_first(
+        config.get("provider_type"),
+        config.get("providerType"),
+        metadata.get("provider_type"),
+        metadata.get("providerType"),
+    )
+    if not provider_type and provider_id:
+        provider_type = PROVIDER_ALIAS_MAP.get(provider_id, [provider_id])[0]
+
+    normalized = dict(config)
+    normalized["provider_id"] = provider_id or normalized.get("provider_id")
+    normalized["provider"] = provider_type or normalized.get("provider") or "openai"
+
+    field_aliases = {
+        "base_url": ["base_url", "baseUrl", "api_host", "apiHost"],
+        "model_name": ["model_name", "modelName"],
+        "embedding_endpoint": ["embedding_endpoint", "embeddingEndpoint"],
+        "max_tokens": ["max_tokens", "maxTokens"],
+        "dimension": ["dimension"],
+        "description": ["description"],
+        "price": ["price"],
+    }
+    for target_field, aliases in field_aliases.items():
+        values = [normalized.get(alias) for alias in aliases]
+        values.extend(metadata.get(alias) for alias in aliases)
+        picked = _pick_first(*values)
+        if picked is not None:
+            normalized[target_field] = picked
+
+    normalized.setdefault("model_name", model_id)
+    return normalized
+
+
+def _load_embedding_models() -> dict:
+    """加载静态 + 动态 embedding 模型并做统一归一化。"""
+    merged = dict(EMBEDDING_MODELS)
+    for model_id, config in load_dynamic_models().items():
+        normalized = _normalize_dynamic_embedding_config(model_id, config)
+        if normalized is not None:
+            merged[model_id] = normalized
+    return merged
+
+
 def normalize_deprecated_model_id(raw_model_id: str) -> str:
     """将历史模型 ID 归一到当前可用模型 ID。
 
@@ -86,18 +168,19 @@ def resolve_model_id(
         return None, None
 
     raw_model_id = normalize_deprecated_model_id(raw_model_id)
+    embedding_models = _load_embedding_models()
 
     # 1. 直接匹配：纯 modelId 或旧格式（如 "local-minilm"）
-    if raw_model_id in EMBEDDING_MODELS:
-        return raw_model_id, EMBEDDING_MODELS[raw_model_id]
+    if raw_model_id in embedding_models:
+        return raw_model_id, embedding_models[raw_model_id]
 
     # 2. composite key 格式：provider:modelId
     if ":" in raw_model_id:
         provider_part, model_part = raw_model_id.split(":", 1)
 
         # 2a. model_part 直接匹配 EMBEDDING_MODELS 键
-        if model_part in EMBEDDING_MODELS:
-            config = EMBEDDING_MODELS[model_part]
+        if model_part in embedding_models:
+            config = embedding_models[model_part]
             # 验证 provider 兼容性（宽松模式：即使不匹配也返回结果）
             backend_provider = config.get("provider", "")
             expected_providers = PROVIDER_ALIAS_MAP.get(provider_part, [provider_part])
@@ -111,7 +194,7 @@ def resolve_model_id(
         # 例如本地模型：键名为 "local-minilm"，但 model_name 为 "all-MiniLM-L6-v2"
         expected_providers = PROVIDER_ALIAS_MAP.get(provider_part, [provider_part])
         base_url_hint = PROVIDER_BASE_URL_HINTS.get(provider_part, "")
-        for key, config in EMBEDDING_MODELS.items():
+        for key, config in embedding_models.items():
             model_name = config.get("model_name", key)
             backend_provider = config.get("provider", "")
             base_url = config.get("base_url", "")
@@ -136,4 +219,4 @@ def get_available_model_ids() -> list:
     Returns:
         EMBEDDING_MODELS 中所有注册的模型键名列表
     """
-    return list(EMBEDDING_MODELS.keys())
+    return list(_load_embedding_models().keys())

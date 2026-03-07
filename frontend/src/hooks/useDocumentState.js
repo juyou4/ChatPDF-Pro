@@ -74,6 +74,8 @@ const getUploadErrorMessage = (xhr) => {
  */
 export function useDocumentState({
   getEmbeddingConfig,
+  getChatCredentials,
+  getProviderById,
   setMessages,
   setCurrentPage,
   setScreenshots,
@@ -94,6 +96,11 @@ export function useDocumentState({
 
   // 存储信息
   const [storageInfo, setStorageInfo] = useState(null);
+
+  // 速览（Overview）状态
+  const [overview, setOverview] = useState(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewError, setOverviewError] = useState(null);
 
   // 文件输入引用
   const fileInputRef = useRef(null);
@@ -255,7 +262,11 @@ export function useDocumentState({
       if (res.ok) {
         setDocId(s.docId);
         setDocInfo(await res.json());
-        setMessages?.(s.messages || []);
+        // 恢复历史消息：确保不存在"永久流式中"的脏消息（页面关闭时可能残留 isStreaming:true）
+        const restoredMessages = (s.messages || []).map((m) =>
+          m.isStreaming ? { ...m, isStreaming: false } : m
+        );
+        setMessages?.(restoredMessages);
         setCurrentPage?.(1);
       }
     } catch (e) {
@@ -304,6 +315,63 @@ export function useDocumentState({
     setHistory(lim);
   }, [docId, docInfo]);
 
+  /**
+   * 获取速览数据
+   * @param {string} depth - 速览深度: brief(简介) / standard(标准) / detailed(详细)
+   */
+  const fetchOverview = useCallback(async (depth = 'standard') => {
+    if (!docId) {
+      setOverviewError('请先上传文档');
+      return;
+    }
+
+    const chatCredentials = getChatCredentials?.();
+    const chatProvider = chatCredentials?.providerId || 'openai';
+    const chatModel = chatCredentials?.modelId || 'gpt-4o';
+    const chatApiKey = chatCredentials?.apiKey || '';
+    const chatProviderFull = getProviderById?.(chatProvider);
+
+    if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
+      setOverviewError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
+      return;
+    }
+
+    setOverviewLoading(true);
+    setOverviewError(null);
+
+    try {
+      const params = new URLSearchParams({ depth });
+      const headers = {};
+      if (chatCredentials) {
+        headers['X-ChatPDF-Provider'] = chatProvider;
+        headers['X-ChatPDF-Model'] = chatModel;
+        if (chatApiKey) {
+          headers['X-ChatPDF-Api-Key'] = chatApiKey;
+        }
+        if (chatProviderFull?.apiHost) {
+          headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
+        }
+      }
+
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/overview?${params}`, {
+        headers,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ detail: '获取速览失败' }));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setOverview(data);
+    } catch (err) {
+      console.error('获取速览失败:', err);
+      setOverviewError(err.message || '获取速览失败');
+    } finally {
+      setOverviewLoading(false);
+    }
+  }, [docId, getChatCredentials, getProviderById]);
+
   // 初始化时加载历史
   useEffect(() => {
     loadHistory();
@@ -328,6 +396,13 @@ export function useDocumentState({
 
     // 存储信息
     storageInfo,
+
+    // 速览（Overview）状态
+    overview,
+    setOverview,
+    overviewLoading,
+    overviewError,
+    fetchOverview,
 
     // 引用
     fileInputRef,

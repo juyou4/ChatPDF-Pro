@@ -19,6 +19,11 @@ from utils.middleware import (
 )
 
 
+def _sanitize_api_key(api_key: Optional[str]) -> str:
+    """清理 API Key，兼容空值与多 Key 轮换池。"""
+    return select_api_key(api_key) or (api_key.strip() if api_key else "")
+
+
 def _extract_api_error_message(body: str, status_code: int) -> str:
     """从 API 错误响应体中提取用户友好的中文错误信息。
     兼容 OpenAI 兼容格式：{"error": {"code": "...", "message": "..."}}。
@@ -98,7 +103,7 @@ async def call_ai_api(
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
     # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
-    sanitized_key = select_api_key(api_key) or (api_key.strip() if api_key else "")
+    sanitized_key = _sanitize_api_key(api_key)
     payload = {
         "messages": messages,
         "api_key": sanitized_key,
@@ -202,11 +207,12 @@ async def call_ai_api_stream(
     # OpenAI 兼容流式
     if provider.lower() in OPENAI_LIKE and endpoint:
         # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
-        sanitized_key = select_api_key(api_key) or api_key.strip()
+        sanitized_key = _sanitize_api_key(api_key)
         headers = {
-            "Authorization": f"Bearer {sanitized_key}",
             "Content-Type": "application/json"
         }
+        if sanitized_key:
+            headers["Authorization"] = f"Bearer {sanitized_key}"
         body = {
             "model": model,
             "messages": messages,
@@ -358,7 +364,7 @@ async def call_ai_api_stream(
 
     # Anthropic 流式
     if provider.lower() in ANTHROPIC:
-        sanitized_key = select_api_key(api_key) or api_key.strip()
+        sanitized_key = _sanitize_api_key(api_key)
         headers = {
             "x-api-key": sanitized_key,
             "anthropic-version": "2023-06-01",
@@ -412,7 +418,7 @@ async def call_ai_api_stream(
 
     # Gemini 流式（简单版，若失败则回退）
     if provider.lower() in GEMINI:
-        sanitized_key = select_api_key(api_key) or api_key.strip()
+        sanitized_key = _sanitize_api_key(api_key)
         # Gemini 流式 endpoint：:streamGenerateContent
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={sanitized_key}"
         contents = []

@@ -66,6 +66,7 @@ class SearchManager:
         provider: str = "duckduckgo",
         api_key: Optional[str] = None,
         max_results: int = 5,
+        blacklist: Optional[list[str]] = None,
     ) -> list[dict]:
         """统一搜索接口，根据 provider 调度对应实现
 
@@ -89,10 +90,11 @@ class SearchManager:
             if key_method_name:
                 if not api_key:
                     logger.warning(f"{provider} 搜索需要 API Key，已回退到自动搜索")
-                    return await SearchManager._auto_search(query, max_results)
+                    raw_results = await SearchManager._auto_search(query, max_results)
+                    return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
                 method = getattr(SearchManager, key_method_name)
                 raw_results = await method(query, api_key, max_results)
-                return SearchManager._postprocess_results(query, raw_results, max_results)
+                return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
 
             no_key_method_name = SearchManager._PROVIDERS_NO_KEY.get(provider)
             if no_key_method_name:
@@ -101,17 +103,17 @@ class SearchManager:
                 if provider == "duckduckgo" and not results:
                     logger.warning("DuckDuckGo 返回空结果，已回退到 Bing RSS")
                     results = await SearchManager._bing_search(query, max_results=max_results)
-                return SearchManager._postprocess_results(query, results, max_results)
+                return SearchManager._postprocess_results(query, results, max_results, blacklist)
 
             logger.warning(f"未知搜索 provider='{provider}'，已回退到自动搜索")
             raw_results = await SearchManager._auto_search(query, max_results)
-            return SearchManager._postprocess_results(query, raw_results, max_results)
+            return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
         except Exception as e:
             logger.error(f"搜索失败 (provider={provider}): {e}")
             if provider != "auto":
                 try:
                     raw_results = await SearchManager._auto_search(query, max_results)
-                    return SearchManager._postprocess_results(query, raw_results, max_results)
+                    return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
                 except Exception as fallback_error:
                     logger.error(f"自动回退搜索失败: {fallback_error}")
             return []
@@ -137,11 +139,33 @@ class SearchManager:
         return []
 
     @staticmethod
-    def _postprocess_results(query: str, results: list[dict], max_results: int) -> list[dict]:
-        """对原始搜索结果做去重 + 相关性重排过滤。"""
+    def _postprocess_results(
+        query: str,
+        results: list[dict],
+        max_results: int,
+        blacklist: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """对原始搜索结果做去重 + 黑名单过滤 + 相关性重排过滤。"""
         deduped = SearchManager._deduplicate_results(results)
+        if blacklist:
+            deduped = SearchManager._filter_by_blacklist(deduped, blacklist)
         ranked = SearchManager._rerank_and_filter_results(query, deduped)
         return ranked[:max_results]
+
+    @staticmethod
+    def _filter_by_blacklist(results: list[dict], blacklist: list[str]) -> list[dict]:
+        """过滤黑名单域名，支持精确域名和子域名（例如 example.com 同时屏蔽 sub.example.com）"""
+        if not blacklist:
+            return results
+        filtered = []
+        for r in results:
+            domain = SearchManager._domain(r.get("url", ""))
+            if not any(domain == b or domain.endswith("." + b) for b in blacklist):
+                filtered.append(r)
+        removed = len(results) - len(filtered)
+        if removed:
+            logger.debug(f"黑名单过滤：移除 {removed} 条结果")
+        return filtered
 
     @staticmethod
     def _deduplicate_results(results: list[dict]) -> list[dict]:
@@ -205,7 +229,7 @@ class SearchManager:
         snippet = item.get("snippet", "") or ""
         url = item.get("url", "") or ""
         title_tokens = SearchManager._tokenize_for_relevance(title)
-        body_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet} {url}")
+        body_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet}")
 
         overlap_title = len(q_tokens & title_tokens) / max(1, len(q_tokens))
         overlap_body = len(q_tokens & body_tokens) / max(1, len(q_tokens))
@@ -220,9 +244,11 @@ class SearchManager:
         if SearchManager._has_cjk(query) and SearchManager._has_kana(f"{title} {snippet}"):
             score *= 0.45
 
-        # 技术问题下，对社交/娱乐噪音域名降权
+        # 技术问题下，对社交/娱乐噪音域名降权（精确后缀匹配避免误伤）
         domain = SearchManager._domain(url)
-        if SearchManager._is_technical_query(query) and any(h in domain for h in SearchManager._NOISY_DOMAIN_HINTS):
+        if SearchManager._is_technical_query(query) and any(
+            domain == h or domain.endswith("." + h) for h in SearchManager._NOISY_DOMAIN_HINTS
+        ):
             score *= 0.5
 
         return score
@@ -240,11 +266,16 @@ class SearchManager:
 
         max_score = scored[0][0] if scored else 0.0
         if max_score <= 0.02:
+            logger.debug(f"相关性重排：所有结果得分过低(max={max_score:.3f})，返回空")
             return []
 
         # 自适应阈值：保留与最佳结果接近的项，过滤明显离题项
         threshold = max(0.08, max_score * 0.35)
         filtered = [item for score, item in scored if score >= threshold]
+        logger.debug(
+            f"相关性重排：共 {len(scored)} 条 → 过滤后 {len(filtered)} 条 "
+            f"(max_score={max_score:.3f}, threshold={threshold:.3f})"
+        )
 
         # 至少保留 1 条最佳结果，避免全量过滤导致无来源
         if not filtered:
@@ -367,7 +398,7 @@ class SearchManager:
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
+                        "Chrome/131.0.0.0 Safari/537.36"
                     ),
                     "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
                 },
@@ -446,10 +477,9 @@ class SearchManager:
                 "https://api.exa.ai/search",
                 json={
                     "query": query,
-                    "num_results": max_results,
+                    "numResults": max_results,
                     "type": "neural",
-                    "use_autoprompt": True,
-                    "highlights": True,
+                    "highlights": {"numSentences": 3, "highlightsPerUrl": 1},
                 },
                 headers={
                     "x-api-key": api_key,
@@ -460,10 +490,8 @@ class SearchManager:
             data = resp.json()
             results = []
             for item in data.get("results", [])[:max_results]:
-                snippet = item.get("text", "")
-                if not snippet:
-                    highlights = item.get("highlights", [])
-                    snippet = highlights[0] if highlights else ""
+                highlights = item.get("highlights", [])
+                snippet = highlights[0] if highlights else item.get("text", "")
                 results.append(
                     {
                         "title": item.get("title", ""),
@@ -596,11 +624,15 @@ def format_search_results(results: list[dict]) -> str:
     if not results:
         return ""
 
+    _SNIPPET_MAX_LEN = 400
+
     parts = []
     for i, item in enumerate(results, 1):
         title = item.get("title", "未知标题")
         url = item.get("url", "")
         snippet = item.get("snippet", "")
+        if len(snippet) > _SNIPPET_MAX_LEN:
+            snippet = snippet[:_SNIPPET_MAX_LEN] + "…"
         entry = f"[{i}] {title}"
         if url:
             entry += f" - {url}"

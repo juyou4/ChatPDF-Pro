@@ -1861,3 +1861,211 @@ VECTOR_STORE_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR.mkdir(exist_ok=True)
 migrate_legacy_storage()
 load_documents()
+
+
+# ============ 速览（Overview）API ============
+
+from services.overview_service import (
+    get_or_create_overview,
+    create_overview_task,
+    get_task_status,
+    OverviewDepth,
+)
+from models.dynamic_store import load_dynamic_providers
+from models.provider_registry import PROVIDER_CONFIG
+
+
+def _get_overview_provider_endpoint(provider_id: str, api_host: str = "") -> str:
+    """按优先级解析速览使用的聊天端点。"""
+    if api_host and api_host.strip():
+        host = api_host.strip().rstrip("/")
+        if host.endswith("/chat/completions"):
+            return host
+        return f"{host}/chat/completions"
+
+    dynamic = load_dynamic_providers()
+    if provider_id in dynamic:
+        return dynamic[provider_id].get("endpoint", "")
+
+    return PROVIDER_CONFIG.get(provider_id, {}).get("endpoint", "")
+
+
+def _resolve_overview_runtime_params(
+    request: Request,
+    api_key: Optional[str],
+    model: Optional[str],
+    provider: Optional[str],
+    api_host: Optional[str],
+):
+    resolved_provider = (provider or request.headers.get("X-ChatPDF-Provider") or "openai").strip() or "openai"
+    resolved_model = (model or request.headers.get("X-ChatPDF-Model") or "gpt-4o").strip() or "gpt-4o"
+    resolved_api_key = (api_key or request.headers.get("X-ChatPDF-Api-Key") or "").strip()
+    resolved_api_host = (api_host or request.headers.get("X-ChatPDF-Api-Host") or "").strip()
+    return resolved_api_key, resolved_model, resolved_provider, resolved_api_host
+
+
+@router.post("/documents/{doc_id}/overview")
+async def create_overview(
+    request: Request,
+    doc_id: str,
+    depth: str = "standard",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+):
+    """
+    触发速览生成
+
+    Args:
+        doc_id: 文档 ID
+        depth: 速览深度 brief(简介) / standard(标准) / detailed(详细)
+        api_key: API Key（可选，默认使用配置）
+        model: 模型名称（可选，默认 gpt-4o）
+        provider: 模型提供商（可选，默认 openai）
+
+    Returns:
+        task_id: 任务 ID，用于轮询状态
+        status: 任务状态
+    """
+    # 验证文档存在
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    # 验证深度参数
+    valid_depths = [OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED]
+    if depth not in valid_depths:
+        depth = OverviewDepth.STANDARD
+
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    task = await create_overview_task(
+        doc_id,
+        depth,
+        api_key,
+        model,
+        provider,
+        _get_overview_provider_endpoint(provider, api_host),
+    )
+
+    return {
+        "task_id": task.task_id,
+        "doc_id": doc_id,
+        "depth": depth,
+        "status": task.status
+    }
+
+
+@router.get("/documents/{doc_id}/overview/tasks/{task_id}")
+async def get_overview_task_status(doc_id: str, task_id: str):
+    """
+    获取速览生成任务状态
+    
+    Args:
+        doc_id: 文档 ID
+        task_id: 任务 ID
+    
+    Returns:
+        status: 任务状态 (pending/processing/completed/failed)
+        result: 完成后返回速览数据
+        error: 失败时返回错误信息
+    """
+    task = await get_task_status(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    
+    if task.doc_id != doc_id:
+        raise HTTPException(status_code=400, detail="任务与文档不匹配")
+    
+    response = {
+        "task_id": task.task_id,
+        "doc_id": task.doc_id,
+        "depth": task.depth,
+        "status": task.status,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+    
+    if task.status == "completed" and task.result:
+        response["result"] = task.result.model_dump()
+    elif task.status == "failed":
+        response["error"] = task.error
+    
+    return response
+
+
+@router.get("/documents/{doc_id}/overview")
+async def get_overview(
+    request: Request,
+    doc_id: str,
+    depth: str = "standard",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+):
+    """
+    获取速览（同步接口）
+
+    如果速览未生成，会自动创建任务并等待完成。
+
+    Args:
+        doc_id: 文档 ID
+        depth: 速览深度 brief(简介) / standard(标准) / detailed(详细)
+        api_key: API Key（可选，默认使用配置）
+        model: 模型名称（可选，默认 gpt-4o）
+        provider: 模型提供商（可选，默认 openai）
+
+    Returns:
+        速览数据
+    """
+    # 验证文档存在
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    # 验证深度参数
+    valid_depths = [OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED]
+    if depth not in valid_depths:
+        depth = OverviewDepth.STANDARD
+
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+
+    # 如果没传 api_key，从当前模型配置中获取（和对话逻辑一致）
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    try:
+        overview = await get_or_create_overview(
+            doc_id,
+            depth,
+            api_key,
+            model,
+            provider,
+            _get_overview_provider_endpoint(provider, api_host),
+        )
+        return overview.model_dump()
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="速览生成超时，请稍后重试")
+    except Exception as e:
+        logger.error(f"获取速览失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取速览失败: {str(e)}")

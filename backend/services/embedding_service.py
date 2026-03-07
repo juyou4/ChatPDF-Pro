@@ -7,6 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import faiss
 import httpx
@@ -605,6 +606,39 @@ def _embed_batch_with_auto_shrink(
         )
 
 
+def _normalize_remote_embedding_base_url(api_base: Optional[str]) -> str:
+    """归一化 OpenAI 兼容 embedding base_url。
+
+    规则：
+    - 去掉误传入的具体接口路径（如 /chat/completions、/embeddings）
+    - 仅当路径为空时补 /v1
+    - 已带有效路径前缀（如 /compatible-mode/v1、/api/paas/v4）时保持不变
+    """
+    raw = (api_base or "").strip()
+    if not raw:
+        return "https://api.openai.com/v1"
+
+    trimmed = raw.rstrip("/")
+    known_suffixes = (
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/completions",
+        "/v1/embeddings",
+        "/embeddings",
+    )
+    for suffix in known_suffixes:
+        if trimmed.endswith(suffix):
+            trimmed = trimmed[: -len(suffix)]
+            break
+
+    parsed = urlparse(trimmed)
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/v1"
+
+    return urlunparse(parsed._replace(path=path, params="", query="", fragment=""))
+
+
 def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
     """获取指定模型的 embedding 函数
 
@@ -671,9 +705,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
             # plain key，使用 model_detector 推断
             provider = get_model_provider(embedding_model_id)
             model_name = embedding_model_id
-            api_base = base_url or "https://api.openai.com/v1"
-            if not api_base.endswith('/embeddings') and not api_base.endswith('/v1'):
-                api_base = api_base.rstrip('/') + '/v1'
+            api_base = _normalize_remote_embedding_base_url(base_url or "https://api.openai.com/v1")
 
     # 验证模型类型
     if not is_embedding_model(embedding_model_id):
@@ -701,9 +733,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     if not actual_key:
         raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
-    api_base = api_base or "https://api.openai.com/v1"
-    if not api_base.endswith('/v1') and not api_base.endswith('/v1/'):
-        api_base = api_base.rstrip('/') + '/v1'
+    api_base = _normalize_remote_embedding_base_url(api_base)
 
     # 使用连接池复用 OpenAI client，避免每次创建新连接
     client = _get_openai_client(actual_key, api_base)
@@ -982,6 +1012,120 @@ def _apply_rerank(
         logger.error(f"[Rerank] 重排序失败: {e}", exc_info=True)
         # 回退到相似度排序，不静默吞掉错误
         return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
+
+
+# ---- Wide-net retrieval: expand candidate pool when reranking is enabled ----
+_WIDE_RETRIEVAL_MULTIPLIER = 5
+
+
+def _apply_mmr(
+    candidates: List[dict],
+    top_k: int,
+    mmr_lambda: float = 0.5,
+) -> List[dict]:
+    """Maximal Marginal Relevance: balance relevance with diversity.
+
+    Uses word-set Jaccard overlap as inter-document similarity approximation.
+    Greedy: select candidate maximizing mmr_lambda * relevance - (1-mmr_lambda) * max_sim_to_selected.
+    """
+    if len(candidates) <= top_k:
+        return candidates
+
+    selected: List[dict] = []
+    selected_word_sets: List[set] = []
+    remaining = list(candidates)
+
+    while len(selected) < top_k and remaining:
+        if not selected:
+            best = remaining[0]
+        else:
+            best = None
+            best_score = float('-inf')
+            for cand in remaining:
+                rel = cand.get('similarity', 0.0)
+                cand_words = set(cand.get('chunk', '')[:600].split())
+                if cand_words:
+                    sims = [
+                        len(cand_words & sw) / max(len(cand_words | sw), 1)
+                        for sw in selected_word_sets
+                    ]
+                    max_sim = max(sims) if sims else 0.0
+                else:
+                    max_sim = 0.0
+                score = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
+                if score > best_score:
+                    best_score = score
+                    best = cand
+        selected.append(best)
+        selected_word_sets.append(set(best.get('chunk', '')[:600].split()))
+        remaining.remove(best)
+
+    return selected
+
+
+def _is_likely_table(text: str) -> bool:
+    """Heuristic to detect table-like text chunks (markdown/ascii/tsv tables)."""
+    lines = text.strip().split('\n')
+    if len(lines) < 2:
+        return False
+    if text.count('|') >= 4:
+        return True
+    if text.count('\t') >= 4:
+        return True
+    numeric_lines = sum(1 for ln in lines if sum(1 for ch in ln if ch.isdigit()) >= 3)
+    if len(lines) >= 3 and numeric_lines >= len(lines) * 0.5:
+        return True
+    return False
+
+
+def _augment_with_table_chunks(
+    results: List[dict],
+    chunks: List[str],
+    pages: List[dict],
+    page_index: dict,
+    max_augment: int = 3,
+) -> List[dict]:
+    """Augment results with table-like chunks from the same pages as hit chunks.
+
+    Embedding models often fail to retrieve tables via semantic search; this
+    secondary pass adds table chunks that share a page with an already-retrieved
+    chunk, improving numeric/tabular question coverage.
+    """
+    if not results or not chunks:
+        return results
+
+    hit_pages = {item.get("page") for item in results if item.get("page")}
+    if not hit_pages:
+        return results
+
+    existing_texts = {item.get("chunk", "") for item in results}
+    augmented = []
+
+    for chunk_text in chunks:
+        if chunk_text in existing_texts:
+            continue
+        if not _is_likely_table(chunk_text):
+            continue
+        page = _find_page_for_chunk(chunk_text, pages, page_index=page_index)
+        if page not in hit_pages:
+            continue
+        augmented.append({
+            "chunk": chunk_text,
+            "page": page,
+            "similarity": 0.45,
+            "similarity_percent": 45.0,
+            "score": 0.0,
+            "snippet": chunk_text[:200],
+            "highlights": [],
+            "reranked": False,
+            "table_augmented": True,
+        })
+        if len(augmented) >= max_augment:
+            break
+
+    if augmented:
+        logger.info(f"[TableAugment] 补充 {len(augmented)} 个同页表格 chunk")
+    return results + augmented
 
 
 def structure_aware_split(
@@ -2162,6 +2306,13 @@ def search_document_chunks(
     candidate_k = max(candidate_k, dynamic_candidate_k_map.get(query_type, 20))
     logger.info(f"[{doc_id}] 查询类型: {query_type}, 动态 candidate_k: {candidate_k}")
 
+    # Wide-net: expand candidate pool when reranking, giving reranker more choices
+    if use_rerank:
+        wide_k = max(candidate_k, top_k * _WIDE_RETRIEVAL_MULTIPLIER)
+        if wide_k > candidate_k:
+            logger.info(f"[{doc_id}] Wide-net rerank: candidate_k {candidate_k} → {wide_k}")
+            candidate_k = wide_k
+
     # 检索耗时记录（需求 10.1）
     timings = {}
     t_total = time.perf_counter()
@@ -2424,6 +2575,13 @@ def search_document_chunks(
     # --- 短语匹配加权 + 表格碎片降权 ---
     vector_results = _phrase_boost(vector_results, query)
 
+    # MMR 多样性过滤（不使用 rerank 时）：去除语义重复 chunk，保留 top_k*3 供 BM25 融合
+    if not use_rerank and len(vector_results) > top_k:
+        pre_mmr = len(vector_results)
+        vector_results = _apply_mmr(vector_results, top_k=min(len(vector_results), top_k * 3))
+        if len(vector_results) < pre_mmr:
+            logger.info(f"[{doc_id}] MMR: {pre_mmr} → {len(vector_results)} 结果")
+
     # 向量检索计时结束（需求 10.1）
     timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -2505,6 +2663,9 @@ def search_document_chunks(
             except Exception as _expand_err:
                 logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
 
+            # 同页表格补充检索
+            results = _augment_with_table_chunks(results, chunks, pages, _page_index)
+
             # 总耗时记录（需求 10.1）
             timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
             logger.info(f"[{doc_id}] 检索耗时: {timings}")
@@ -2563,6 +2724,9 @@ def search_document_chunks(
             results = expand_context_chunks(results, chunks, expand_n=_expand_n)
     except Exception as _expand_err:
         logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
+
+    # 同页表格补充检索
+    results = _augment_with_table_chunks(results, chunks, pages, _page_index)
 
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
@@ -2676,6 +2840,7 @@ def get_relevant_context(
     rerank_endpoint: Optional[str] = None,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
     model_context_window: int = 0,  # 动态 Token 预算：LLM 模型的上下文窗口大小
+    answer_max_tokens: int = 0,  # 期望的输出 Token 数，用于上下文预算感知
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -2727,14 +2892,17 @@ def get_relevant_context(
 
     config = _rag_config_singleton
 
-    # 动态 Token 预算：根据模型上下文窗口动态调整
+    # 动态 Token 预算：根据模型上下文窗口动态调整，同时扣除输出预留
     if config.token_budget_ratio > 0 and model_context_window > 0:
-        dynamic_budget = int(model_context_window * config.token_budget_ratio)
-        dynamic_budget = max(dynamic_budget, 2000)  # 最少 2000
+        raw_budget = int(model_context_window * config.token_budget_ratio)
+        # 若已知期望输出长度，从总预算中扣除，为输出留足空间
+        output_reserve = answer_max_tokens if answer_max_tokens > 0 else config.reserve_for_answer
+        dynamic_budget = max(raw_budget - output_reserve, 2000)  # 最少 2000
         if dynamic_budget != config.max_token_budget:
             logger.info(
                 f"[{doc_id}] 动态 Token 预算: {config.max_token_budget} → {dynamic_budget} "
-                f"(模型窗口={model_context_window}, 比例={config.token_budget_ratio})"
+                f"(模型窗口={model_context_window}, 比例={config.token_budget_ratio}, "
+                f"输出预留={output_reserve})"
             )
             config.max_token_budget = dynamic_budget
 

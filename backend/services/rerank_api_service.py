@@ -63,6 +63,24 @@ OPENAI_LIKE_RERANK_ENDPOINTS = {
 }
 
 
+def _resolve_openai_like_rerank_endpoint(provider: str, endpoint: Optional[str]) -> str:
+    """解析 OpenAI 兼容 rerank endpoint。
+
+    仅对已知 provider 提供默认 endpoint；其他 provider 必须显式传入
+    rerank_endpoint，避免请求误发到错误服务商。
+    """
+    if endpoint:
+        return endpoint
+
+    resolved = OPENAI_LIKE_RERANK_ENDPOINTS.get(provider)
+    if resolved:
+        return resolved
+
+    raise ValueError(
+        f"{provider} rerank 未配置默认 endpoint，请显式提供 rerank_endpoint"
+    )
+
+
 def openai_like_rerank(query: str, documents: List[str], model: str, api_key: str, endpoint: Optional[str] = None, provider: str = "silicon", timeout: float = 30.0):
     """调用 OpenAI 兼容的 rerank API（硅基流动、阿里云等）
 
@@ -82,7 +100,7 @@ def openai_like_rerank(query: str, documents: List[str], model: str, api_key: st
     Returns:
         (index, score) 元组列表
     """
-    url = endpoint or OPENAI_LIKE_RERANK_ENDPOINTS.get(provider, f"https://api.siliconflow.cn/v1/rerank")
+    url = _resolve_openai_like_rerank_endpoint(provider, endpoint)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

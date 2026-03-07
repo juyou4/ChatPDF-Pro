@@ -20,6 +20,48 @@ from models.api_key_selector import select_api_key
 router = APIRouter()
 
 
+def _pick_first(*values):
+    """返回首个非空值。"""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+            continue
+        return value
+    return None
+
+
+def _normalize_model_metadata(metadata: dict | None) -> dict:
+    """将前端 metadata 归一化为后端调用链使用的字段格式。"""
+    raw = dict(metadata or {})
+    normalized = dict(raw)
+    field_aliases = {
+        "base_url": ["base_url", "baseUrl", "api_host", "apiHost"],
+        "model_name": ["model_name", "modelName"],
+        "embedding_endpoint": ["embedding_endpoint", "embeddingEndpoint"],
+        "rerank_endpoint": ["rerank_endpoint", "rerankEndpoint"],
+        "max_tokens": ["max_tokens", "maxTokens"],
+        "context_window": ["context_window", "contextWindow"],
+        "dimension": ["dimension"],
+        "description": ["description"],
+        "price": ["price"],
+    }
+    for target_field, aliases in field_aliases.items():
+        picked = _pick_first(*(raw.get(alias) for alias in aliases))
+        if picked is not None:
+            normalized[target_field] = picked
+    return normalized
+
+
+def _get_provider_type(provider_id: str) -> str:
+    """获取 provider 的后端类型（如 silicon -> openai）。"""
+    merged_providers = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+    return merged_providers.get(provider_id, {}).get("type", provider_id)
+
+
 @router.get("/models")
 async def get_models():
     """获取可用模型/Provider列表（含静态+动态），按 provider 分组
@@ -135,6 +177,7 @@ async def get_models():
 
         for model_id, model_config in merged_models.items():
             model_provider_type = model_config.get("provider", "")
+            model_provider_id = model_config.get("provider_id") or model_config.get("providerId")
 
             # 本地模型只归属于 local provider
             if model_provider_type == "local":
@@ -142,8 +185,14 @@ async def get_models():
                     provider_models[model_id] = model_config.get("name", model_id)
                 continue
 
+            # 新格式动态模型：显式保存 provider_id，优先按 provider_id 归属
+            if model_provider_id:
+                if model_provider_id == provider_id:
+                    provider_models[model_id] = model_config.get("name", model_id)
+                continue
+
             # 非本地模型：先匹配 provider type，再通过 base_url 域名区分
-            if model_provider_type != provider_type:
+            if model_provider_type not in {provider_type, provider_id}:
                 continue
 
             model_base_url = model_config.get("base_url", "")
@@ -151,6 +200,9 @@ async def get_models():
 
             # 通过域名匹配区分同 type 的不同服务商
             if provider_domain and model_domain and provider_domain == model_domain:
+                provider_models[model_id] = model_config.get("name", model_id)
+            elif not model_domain and model_provider_type == provider_id:
+                # 兼容旧动态数据：未配置 base_url 时按 providerId 直接归属
                 provider_models[model_id] = model_config.get("name", model_id)
 
         # 合并 chat 模型
@@ -671,11 +723,15 @@ async def list_custom_models():
 @router.post("/api/models/custom")
 async def upsert_custom_model(req: ModelUpsertRequest):
     models = load_dynamic_models()
+    normalized_metadata = _normalize_model_metadata(req.metadata)
+    provider_type = _get_provider_type(req.providerId)
     model_data = {
         "name": req.name,
-        "provider": req.providerId,
+        "provider": provider_type,
+        "provider_id": req.providerId,
+        "provider_type": provider_type,
         "type": req.type,
-        **(req.metadata or {})
+        **normalized_metadata,
     }
     # 持久化 capabilities 和 tags 字段到动态存储
     if req.capabilities is not None:

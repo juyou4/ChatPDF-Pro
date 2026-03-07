@@ -14,7 +14,7 @@ from ._utils import EmbeddingFunc
 @dataclass
 class QueryParam:
     """GraphRAG 查询参数"""
-    mode: Literal["local"] = "local"
+    mode: Literal["local", "global", "hybrid"] = "local"
     only_output_context: bool = False
     response_type: str = "Multiple Paragraphs"
     level: int = 2
@@ -24,6 +24,9 @@ class QueryParam:
     local_max_token_for_local_context: int = 4800
     local_max_token_for_community_report: int = 3200
     local_community_single_one: bool = False
+    # global search 参数
+    global_max_token_for_community_report: int = 12000
+    global_top_k_communities: int = 10
 
 
 TextChunkSchema = TypedDict(

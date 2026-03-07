@@ -31,6 +31,7 @@ import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
+import OverviewPanel from './OverviewPanel';
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -65,6 +66,30 @@ const WebSearchSourcesBadge = ({ sources }) => {
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+const WebSearchStatusBadge = ({ status }) => {
+  if (!status) return null;
+  const { phase, count } = status;
+  const isSearching = phase === 'searching';
+  const isRag = phase === 'rag';
+  const text = isSearching
+    ? '正在联网搜索...'
+    : isRag
+    ? '正在提炼搜索结果...'
+    : count != null
+    ? `已获取 ${count} 条搜索结果`
+    : '搜索完成';
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-purple-500 mb-2">
+      {(isSearching || isRag) ? (
+        <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+      ) : (
+        <Globe className="w-3 h-3 flex-shrink-0" />
+      )}
+      <span>{text}</span>
     </div>
   );
 };
@@ -144,6 +169,8 @@ const ChatPDF = () => {
     showGlobalSettings, setShowGlobalSettings,
     showChatSettings, setShowChatSettings,
     enableThinking, setEnableThinking,
+    rightPanelMode, setRightPanelMode,
+    overviewDepth, setOverviewDepth,
   } = useUIState();
 
   // ========== 模型/凭证辅助函数 ==========
@@ -252,6 +279,8 @@ const ChatPDF = () => {
 
   const documentState = useDocumentState({
     getEmbeddingConfig,
+    getChatCredentials,
+    getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
     setScreenshots: (...args) => screenshotSettersRef.current.setScreenshots?.(...args),
@@ -266,6 +295,7 @@ const ChatPDF = () => {
     fileInputRef,
     handleFileUpload, startNewChat, loadSession, deleteSession,
     saveCurrentSession, fetchStorageInfo,
+    overview, setOverview, overviewLoading, overviewError, fetchOverview,
   } = documentState;
 
   // ========== PDF 状态 Hook（需求 1.1） ==========
@@ -627,6 +657,10 @@ const ChatPDF = () => {
               <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
             </div>
           )}
+          {/* 联网搜索状态指示器（流式进行中） */}
+          {msg.isStreaming && msg.webSearchStatus && (
+            <WebSearchStatusBadge status={msg.webSearchStatus} />
+          )}
           <StreamingMarkdown
             content={msg.content}
             isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
@@ -635,6 +669,7 @@ const ChatPDF = () => {
             citations={msg.citations || null}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
+            webSearchSources={msg.webSearchSources || null}
           />
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
@@ -645,6 +680,7 @@ const ChatPDF = () => {
         {msg.type === 'assistant' && !msg.isStreaming && msg.citations && msg.citations.length > 0 && (
           <EvidencePanel
             citations={msg.citations}
+            docId={docId}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             activeRef={activeCitationRef}
             onRefHover={setActiveCitationRef}
@@ -713,6 +749,7 @@ const ChatPDF = () => {
     messageStyle, messageFontSize, confirmRegenerateMessage, reasoningEffort,
     activeCitationRef, setActiveCitationRef,
     dislikedMessages, setFeedbackTarget,
+    docId,
   ]);
 
   // ========== 反馈提交 ==========
@@ -773,22 +810,22 @@ const ChatPDF = () => {
       {/* 侧边栏（历史记录） */}
       <motion.div
         initial={false}
-        animate={{ width: showSidebar ? 288 : 0, opacity: showSidebar ? 1 : 0 }}
+        animate={{ width: showSidebar ? 320 : 0, opacity: showSidebar ? 1 : 0 }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden rounded-[var(--radius-panel-lg)] ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150' : 'bg-white/80 border-white/50 backdrop-blur-3xl backdrop-saturate-150 border shadow-xl'}`}
+        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150 rounded-[40px]' : 'bg-white/80 backdrop-blur-2xl border border-white/70 rounded-[40px] shadow-2xl shadow-gray-300/40 shadow-[inset_0_1px_1px_rgba(255,255,255,0.8)]'}`}
       >
-        <div className="w-72 mx-auto flex flex-col h-full items-stretch relative">
+        <div className="w-[320px] mx-auto flex flex-col h-full items-stretch relative">
           <button
             onClick={() => setShowSidebar(false)}
-            className={`absolute top-3 right-3 p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}
+            className={`absolute top-4 right-4 p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}
             title="收起侧边栏"
           >
-            <ChevronLeft className="w-4 h-4" />
+            <ChevronLeft className="w-5 h-5" />
           </button>
 
-          <div className="px-6 py-8 flex items-center justify-between">
-            <div className="flex items-center gap-3 font-bold text-2xl text-purple-600 tracking-tight">
+          <div className="px-8 py-8 flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3 font-bold text-2xl text-purple-600 tracking-tight pl-2">
               <Bot className="w-9 h-9" />
               <span>ChatPDF</span>
             </div>
@@ -819,34 +856,51 @@ const ChatPDF = () => {
             <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
           </div>
 
-          <div className="flex-1 overflow-y-auto px-5 space-y-2 flex flex-col items-center">
-            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 px-2 w-full max-w-[260px]">History</div>
-            {history.map((item, idx) => (
-              <div
-                key={idx}
-                onClick={() => loadSession(item)}
-                className={`w-full max-w-[260px] p-3 rounded-xl cursor-pointer group flex items-center gap-3 transition-all duration-200 ${
-                  item.id === docId
-                    ? (darkMode ? 'bg-white/10 shadow-md scale-[1.02] text-white ring-1 ring-white/10' : 'bg-white shadow-md scale-[1.02]')
-                    : (darkMode ? 'text-gray-400 hover:bg-white/5 hover:text-gray-200' : 'hover:bg-white/40')
-                }`}
-              >
-                <MessageSquare className="w-5 h-5 text-purple-500" />
-                <div className="flex-1 truncate text-sm font-medium">{item.filename}</div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
+          <div className="flex-1 overflow-y-auto px-8">
+            <h2 className="text-[11px] font-bold text-gray-500 tracking-wider mb-4 pl-4">
+              HISTORY
+            </h2>
+            <ul className="space-y-2 relative">
+              {history.map((item, idx) => {
+                const isActive = item.id === docId;
+                return (
+                  <li key={idx}>
+                    <div
+                      onClick={() => loadSession(item)}
+                      className={`w-full flex items-center justify-between px-5 py-4 rounded-3xl cursor-pointer group transition-all duration-300 ${
+                        isActive
+                          ? (darkMode ? 'bg-white/10 backdrop-blur-md border border-white/10 text-white font-bold shadow-[0_10px_25px_rgba(0,0,0,0.2)]' : 'bg-white/80 backdrop-blur-md border border-white/80 text-gray-900 font-bold shadow-[0_10px_25px_rgba(0,0,0,0.06)]')
+                          : (darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40')
+                      }`}
+                    >
+                      <div className="flex items-center gap-4 overflow-hidden">
+                        <MessageSquare 
+                          size={22} 
+                          className={`${isActive ? 'text-[#9333ea]' : 'text-gray-500'} transition-colors flex-shrink-0`}
+                          strokeWidth={isActive ? 2.5 : 2}
+                        />
+                        <span className="text-[15px] truncate">{item.filename}</span>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
+                        className={`opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-red-50 hover:text-red-500 transition-all flex-shrink-0 ${isActive ? 'text-gray-400' : 'text-gray-400'}`}
+                      >
+                        <Trash2 size={18} strokeWidth={2} />
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
 
-          <div className="p-4 border-t border-white/20">
-            <button onClick={() => { setShowSettings(true); fetchStorageInfo(); }} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/50 transition-colors text-sm font-medium">
-              <Settings className="w-5 h-5" />
-              <span>设置 & API Key</span>
+          <div className="px-8 py-6">
+            <button 
+              onClick={() => { setShowSettings(true); fetchStorageInfo(); }} 
+              className={`w-full flex items-center gap-4 px-5 py-4 rounded-3xl transition-all duration-300 ${darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40'}`}
+            >
+              <Settings size={22} className="text-gray-500" strokeWidth={2} />
+              <span className="text-[15px]">设置 & API Key</span>
             </button>
           </div>
         </div>
@@ -1112,7 +1166,59 @@ const ChatPDF = () => {
             className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            {/* 消息列表 */}
+            {/* 速览/对话 Tab 切换 */}
+            <div className="flex items-center gap-1 p-4 pb-2 border-b border-black/5">
+              <div className="flex-1 flex items-center gap-1 bg-gray-100/50 p-1 rounded-xl">
+                <button
+                  onClick={() => setRightPanelMode('overview')}
+                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    rightPanelMode === 'overview'
+                      ? 'bg-white shadow-sm text-purple-600'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  速览
+                </button>
+                <button
+                  onClick={() => setRightPanelMode('chat')}
+                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    rightPanelMode === 'chat'
+                      ? 'bg-white shadow-sm text-purple-600'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  对话
+                </button>
+              </div>
+              {rightPanelMode === 'overview' && docId && (
+                <div className="flex items-center gap-1 ml-2">
+                  <select
+                    value={overviewDepth}
+                    onChange={(e) => setOverviewDepth(e.target.value)}
+                    className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-300"
+                  >
+                    <option value="brief">简介</option>
+                    <option value="standard">标准</option>
+                    <option value="detailed">详细</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* 内容区域：根据 rightPanelMode 切换 */}
+            {rightPanelMode === 'overview' ? (
+              <div className="flex-1 overflow-y-auto p-6">
+                <OverviewPanel
+                  overview={overview}
+                  loading={overviewLoading}
+                  error={overviewError}
+                  depth={overviewDepth}
+                  docId={docId}
+                  onFetch={fetchOverview}
+                />
+              </div>
+            ) : (
+            /* 对话模式 */
             <div className="flex-1 overflow-hidden flex flex-col min-w-0">
               {/* 搜索结果面板 - 固定在消息列表上方 */}
               {(searchResults.length > 0 || isSearching || searchHistory.length > 0) && (
@@ -1197,6 +1303,7 @@ const ChatPDF = () => {
                 className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0"
               />
             </div>
+            )}
 
             {/* 输入区域 */}
             <div className="p-6 pt-0 bg-transparent">
@@ -1340,14 +1447,22 @@ const ChatPDF = () => {
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
               onClick={(e) => e.stopPropagation()}
-              className="soft-panel w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl"
+              className={`w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/90 border border-white/5 backdrop-blur-3xl rounded-[32px] shadow-2xl' : 'bg-white/80 backdrop-blur-2xl border border-white/70 rounded-[32px] shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)]'}`}
             >
-              <div className="flex justify-between items-center p-8 pb-4 flex-shrink-0">
-                <h2 className="text-2xl font-bold text-gray-800">Settings</h2>
-                <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+              <div className="p-8 pb-4 flex-shrink-0 flex items-center justify-between mb-2">
+                <div className="flex items-center gap-4 pl-2">
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#e0c8ff] via-[#9333ea] to-[#6b21a8] shadow-[0_6px_15px_rgba(147,51,234,0.4)] relative overflow-hidden flex items-center justify-center">
+                    <div className="absolute top-1 left-1 w-3 h-3 bg-white/40 rounded-full blur-[2px]"></div>
+                    <Settings className="w-5 h-5 text-white relative z-10" />
+                  </div>
+                  <h2 className="text-2xl font-extrabold text-gray-800 tracking-tight">Settings</h2>
+                </div>
+                <button onClick={() => setShowSettings(false)} className={`p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}>
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <div className="space-y-4 px-8 overflow-y-auto flex-1">
+              <div className="space-y-4 px-8 overflow-y-auto flex-1 pb-4">
                 {/* 模型服务管理入口 */}
                 <div className="relative overflow-hidden rounded-[32px] border border-purple-100/50 bg-gradient-to-br from-white/40 to-purple-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
                   <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-purple-500/10 rounded-full blur-3xl"></div>
@@ -1411,7 +1526,7 @@ const ChatPDF = () => {
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-gray-100">
+                <div className="pt-2">
                   <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
                     <span className="font-medium">Vector Search</span>
                     <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-purple-600 w-5 h-5" />
@@ -1494,17 +1609,17 @@ const ChatPDF = () => {
                 </div>
 
                 {/* 全局设置入口 */}
-                <div className="pt-4 border-t border-gray-100">
+                <div className="pt-2">
                   <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
                     <Type className="w-4 h-4" /> 全局设置（字体、缩放）
                   </button>
                 </div>
-                <div className="pt-4 border-t border-gray-100">
+                <div className="pt-2">
                   <button onClick={() => { setShowSettings(false); setShowChatSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
                     <SlidersHorizontal className="w-4 h-4" /> 对话设置（温度、Token、流式）
                   </button>
                 </div>
-                <div className="pt-4 border-t border-gray-100">
+                <div className="pt-2">
                   <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
                     <ScanText className="w-4 h-4" /> OCR 设置（文字识别）
                   </button>
@@ -1548,7 +1663,7 @@ const ChatPDF = () => {
                 </div>
 
                 {/* 存储位置信息 */}
-                <div className="pt-4 border-t border-gray-100">
+                <div className="pt-2">
                   <h3 className="text-sm font-semibold text-gray-800 mb-3">文件存储位置</h3>
                   {storageInfo ? (
                     <div className="space-y-2">
@@ -1586,8 +1701,8 @@ const ChatPDF = () => {
                 </div>
               </div>
 
-              <div className="p-8 pt-4 flex-shrink-0 border-t border-gray-100">
-                <button onClick={() => setShowSettings(false)} className="w-full py-3 soft-button soft-button-primary rounded-xl font-medium hover:shadow-lg transition-all">
+              <div className="p-8 pt-4 flex-shrink-0">
+                <button onClick={() => setShowSettings(false)} className={`w-full py-4 rounded-3xl font-bold shadow-lg hover:shadow-xl hover:-translate-y-0.5 active:scale-95 transition-all duration-300 ${darkMode ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>
                   Save Changes
                 </button>
               </div>
@@ -1746,3 +1861,37 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
