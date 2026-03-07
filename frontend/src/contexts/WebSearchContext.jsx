@@ -82,12 +82,14 @@ export const WEB_SEARCH_DEFAULT_SETTINGS = {
     enableWebSearch: false,
     webSearchProvider: 'auto',
     webSearchApiKey: '',
+    webSearchBlacklist: [],
 };
 
 export const WebSearchProvider = ({ children }) => {
     const [enableWebSearch, setEnableWebSearch] = useState(WEB_SEARCH_DEFAULT_SETTINGS.enableWebSearch);
     const [webSearchProvider, setWebSearchProvider] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchProvider);
     const [webSearchApiKey, setWebSearchApiKey] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchApiKey);
+    const [webSearchBlacklist, setWebSearchBlacklist] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchBlacklist);
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
@@ -102,6 +104,7 @@ export const WebSearchProvider = ({ children }) => {
                 if (settings.enableWebSearch !== undefined) setEnableWebSearch(settings.enableWebSearch);
                 if (settings.webSearchProvider !== undefined) setWebSearchProvider(settings.webSearchProvider);
                 if (settings.webSearchApiKey !== undefined) setWebSearchApiKey(settings.webSearchApiKey);
+                if (settings.webSearchBlacklist !== undefined) setWebSearchBlacklist(settings.webSearchBlacklist);
             }
         } catch (error) {
             console.error('加载联网搜索设置失败:', error);
@@ -137,9 +140,10 @@ export const WebSearchProvider = ({ children }) => {
             enableWebSearch,
             webSearchProvider,
             webSearchApiKey,
+            webSearchBlacklist,
         };
         debouncedSave(settings);
-    }, [enableWebSearch, webSearchProvider, webSearchApiKey, debouncedSave]);
+    }, [enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist, debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
     useEffect(() => {
@@ -164,6 +168,7 @@ export const WebSearchProvider = ({ children }) => {
         setEnableWebSearch(WEB_SEARCH_DEFAULT_SETTINGS.enableWebSearch);
         setWebSearchProvider(WEB_SEARCH_DEFAULT_SETTINGS.webSearchProvider);
         setWebSearchApiKey(WEB_SEARCH_DEFAULT_SETTINGS.webSearchApiKey);
+        setWebSearchBlacklist(WEB_SEARCH_DEFAULT_SETTINGS.webSearchBlacklist);
     }, []);
 
     // 获取当前 provider 配置
@@ -176,11 +181,13 @@ export const WebSearchProvider = ({ children }) => {
         enableWebSearch,
         webSearchProvider,
         webSearchApiKey,
+        webSearchBlacklist,
 
         // 设置方法
         setEnableWebSearch,
         setWebSearchProvider,
         setWebSearchApiKey,
+        setWebSearchBlacklist,
 
         // 工具方法
         toggleWebSearch,

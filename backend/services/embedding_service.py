@@ -2840,6 +2840,7 @@ def get_relevant_context(
     rerank_endpoint: Optional[str] = None,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
     model_context_window: int = 0,  # 动态 Token 预算：LLM 模型的上下文窗口大小
+    answer_max_tokens: int = 0,  # 期望的输出 Token 数，用于上下文预算感知
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -2891,14 +2892,17 @@ def get_relevant_context(
 
     config = _rag_config_singleton
 
-    # 动态 Token 预算：根据模型上下文窗口动态调整
+    # 动态 Token 预算：根据模型上下文窗口动态调整，同时扣除输出预留
     if config.token_budget_ratio > 0 and model_context_window > 0:
-        dynamic_budget = int(model_context_window * config.token_budget_ratio)
-        dynamic_budget = max(dynamic_budget, 2000)  # 最少 2000
+        raw_budget = int(model_context_window * config.token_budget_ratio)
+        # 若已知期望输出长度，从总预算中扣除，为输出留足空间
+        output_reserve = answer_max_tokens if answer_max_tokens > 0 else config.reserve_for_answer
+        dynamic_budget = max(raw_budget - output_reserve, 2000)  # 最少 2000
         if dynamic_budget != config.max_token_budget:
             logger.info(
                 f"[{doc_id}] 动态 Token 预算: {config.max_token_budget} → {dynamic_budget} "
-                f"(模型窗口={model_context_window}, 比例={config.token_budget_ratio})"
+                f"(模型窗口={model_context_window}, 比例={config.token_budget_ratio}, "
+                f"输出预留={output_reserve})"
             )
             config.max_token_budget = dynamic_budget
 

@@ -18,6 +18,8 @@ describe('useDocumentState', () => {
   let mockSetIsLoading;
   let mockSetSelectedText;
   let mockGetEmbeddingConfig;
+  let mockGetChatCredentials;
+  let mockGetProviderById;
 
   beforeEach(() => {
     localStorage.clear();
@@ -31,6 +33,8 @@ describe('useDocumentState', () => {
     mockSetIsLoading = vi.fn();
     mockSetSelectedText = vi.fn();
     mockGetEmbeddingConfig = vi.fn(() => null);
+    mockGetChatCredentials = vi.fn(() => null);
+    mockGetProviderById = vi.fn(() => null);
 
     // 默认 fetch 返回空响应
     mockFetch.mockResolvedValue({
@@ -41,6 +45,8 @@ describe('useDocumentState', () => {
 
   const defaultOptions = () => ({
     getEmbeddingConfig: mockGetEmbeddingConfig,
+    getChatCredentials: mockGetChatCredentials,
+    getProviderById: mockGetProviderById,
     setMessages: mockSetMessages,
     setCurrentPage: mockSetCurrentPage,
     setScreenshots: mockSetScreenshots,
@@ -279,6 +285,74 @@ describe('useDocumentState', () => {
     });
 
     expect(result.current.storageInfo).toEqual(storageData);
+  });
+
+  it('fetchOverview 透传当前对话模型的 provider、model 和凭证', async () => {
+    mockGetChatCredentials.mockReturnValue({
+      providerId: 'deepseek',
+      modelId: 'deepseek-chat',
+      apiKey: 'sk-overview-test',
+    });
+    mockGetProviderById.mockReturnValue({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      apiHost: 'https://api.deepseek.com/v1',
+    });
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ full_text_summary: 'ok' }),
+    });
+
+    const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await act(async () => {});
+
+    act(() => {
+      result.current.setDocId('doc-overview');
+    });
+
+    await act(async () => {
+      await result.current.fetchOverview('standard');
+    });
+
+    const [url, options] = mockFetch.mock.calls.at(-1);
+    expect(url).toBe('/documents/doc-overview/overview?depth=standard');
+    expect(options.headers).toMatchObject({
+      'X-ChatPDF-Provider': 'deepseek',
+      'X-ChatPDF-Model': 'deepseek-chat',
+      'X-ChatPDF-Api-Key': 'sk-overview-test',
+      'X-ChatPDF-Api-Host': 'https://api.deepseek.com/v1',
+    });
+    expect(result.current.overview).toEqual({ full_text_summary: 'ok' });
+  });
+
+  it('fetchOverview 在远程 provider 缺少 API Key 时直接给出提示', async () => {
+    mockGetChatCredentials.mockReturnValue({
+      providerId: 'deepseek',
+      modelId: 'deepseek-chat',
+      apiKey: '',
+    });
+    mockGetProviderById.mockReturnValue({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      apiHost: 'https://api.deepseek.com/v1',
+    });
+
+    const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await act(async () => {});
+
+    act(() => {
+      result.current.setDocId('doc-overview');
+    });
+
+    await act(async () => {
+      await result.current.fetchOverview('standard');
+    });
+
+    expect(result.current.overviewError).toBe('请先为 DeepSeek 配置 API Key');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   // --- 无回调时不崩溃 ---

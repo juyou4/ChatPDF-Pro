@@ -31,6 +31,7 @@ import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
+import OverviewPanel from './OverviewPanel';
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -65,6 +66,30 @@ const WebSearchSourcesBadge = ({ sources }) => {
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+const WebSearchStatusBadge = ({ status }) => {
+  if (!status) return null;
+  const { phase, count } = status;
+  const isSearching = phase === 'searching';
+  const isRag = phase === 'rag';
+  const text = isSearching
+    ? '正在联网搜索...'
+    : isRag
+    ? '正在提炼搜索结果...'
+    : count != null
+    ? `已获取 ${count} 条搜索结果`
+    : '搜索完成';
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-purple-500 mb-2">
+      {(isSearching || isRag) ? (
+        <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+      ) : (
+        <Globe className="w-3 h-3 flex-shrink-0" />
+      )}
+      <span>{text}</span>
     </div>
   );
 };
@@ -144,6 +169,8 @@ const ChatPDF = () => {
     showGlobalSettings, setShowGlobalSettings,
     showChatSettings, setShowChatSettings,
     enableThinking, setEnableThinking,
+    rightPanelMode, setRightPanelMode,
+    overviewDepth, setOverviewDepth,
   } = useUIState();
 
   // ========== 模型/凭证辅助函数 ==========
@@ -252,6 +279,8 @@ const ChatPDF = () => {
 
   const documentState = useDocumentState({
     getEmbeddingConfig,
+    getChatCredentials,
+    getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
     setScreenshots: (...args) => screenshotSettersRef.current.setScreenshots?.(...args),
@@ -266,6 +295,7 @@ const ChatPDF = () => {
     fileInputRef,
     handleFileUpload, startNewChat, loadSession, deleteSession,
     saveCurrentSession, fetchStorageInfo,
+    overview, setOverview, overviewLoading, overviewError, fetchOverview,
   } = documentState;
 
   // ========== PDF 状态 Hook（需求 1.1） ==========
@@ -627,6 +657,10 @@ const ChatPDF = () => {
               <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
             </div>
           )}
+          {/* 联网搜索状态指示器（流式进行中） */}
+          {msg.isStreaming && msg.webSearchStatus && (
+            <WebSearchStatusBadge status={msg.webSearchStatus} />
+          )}
           <StreamingMarkdown
             content={msg.content}
             isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
@@ -635,6 +669,7 @@ const ChatPDF = () => {
             citations={msg.citations || null}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
+            webSearchSources={msg.webSearchSources || null}
           />
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
@@ -1131,7 +1166,59 @@ const ChatPDF = () => {
             className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            {/* 消息列表 */}
+            {/* 速览/对话 Tab 切换 */}
+            <div className="flex items-center gap-1 p-4 pb-2 border-b border-black/5">
+              <div className="flex-1 flex items-center gap-1 bg-gray-100/50 p-1 rounded-xl">
+                <button
+                  onClick={() => setRightPanelMode('overview')}
+                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    rightPanelMode === 'overview'
+                      ? 'bg-white shadow-sm text-purple-600'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  速览
+                </button>
+                <button
+                  onClick={() => setRightPanelMode('chat')}
+                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    rightPanelMode === 'chat'
+                      ? 'bg-white shadow-sm text-purple-600'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  对话
+                </button>
+              </div>
+              {rightPanelMode === 'overview' && docId && (
+                <div className="flex items-center gap-1 ml-2">
+                  <select
+                    value={overviewDepth}
+                    onChange={(e) => setOverviewDepth(e.target.value)}
+                    className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-300"
+                  >
+                    <option value="brief">简介</option>
+                    <option value="standard">标准</option>
+                    <option value="detailed">详细</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* 内容区域：根据 rightPanelMode 切换 */}
+            {rightPanelMode === 'overview' ? (
+              <div className="flex-1 overflow-y-auto p-6">
+                <OverviewPanel
+                  overview={overview}
+                  loading={overviewLoading}
+                  error={overviewError}
+                  depth={overviewDepth}
+                  docId={docId}
+                  onFetch={fetchOverview}
+                />
+              </div>
+            ) : (
+            /* 对话模式 */
             <div className="flex-1 overflow-hidden flex flex-col min-w-0">
               {/* 搜索结果面板 - 固定在消息列表上方 */}
               {(searchResults.length > 0 || isSearching || searchHistory.length > 0) && (
@@ -1216,6 +1303,7 @@ const ChatPDF = () => {
                 className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0"
               />
             </div>
+            )}
 
             {/* 输入区域 */}
             <div className="p-6 pt-0 bg-transparent">
@@ -1773,7 +1861,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
 
 
 
