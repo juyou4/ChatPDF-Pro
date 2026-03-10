@@ -309,8 +309,9 @@ def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = N
     if memory_service is None:
         return ""
     try:
+        filter_by_doc = bool(doc_id)
         return memory_service.retrieve_memories(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=False
+            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc
         )
     except Exception as e:
         logger.error(f"记忆检索失败: {e}")
@@ -322,8 +323,9 @@ def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = Non
     if memory_service is None:
         return []
     try:
+        filter_by_doc = bool(doc_id)
         return memory_service.retrieve_memories_raw(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=False
+            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc
         )
     except Exception as e:
         logger.error(f"记忆原始检索失败: {e}")

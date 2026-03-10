@@ -240,6 +240,20 @@ export const ensureAssistantInlineCitationFallback = (content, citations) => {
   return `${String(content).trimEnd()}\n\n参考来源：${tailRefs}`;
 };
 
+export const finalizeThinkingDurationMs = ({
+  thinkingStartTime,
+  thinkingLastUpdateTime,
+  contentStartTime,
+}) => {
+  if (!Number.isFinite(thinkingStartTime)) return 0;
+
+  const endCandidates = [thinkingLastUpdateTime, contentStartTime]
+    .filter((value) => Number.isFinite(value) && value >= thinkingStartTime);
+
+  if (endCandidates.length === 0) return 0;
+  return Math.max(...endCandidates) - thinkingStartTime;
+};
+
 /**
  * 消息状态管理 Hook
  * 管理消息列表、流式输出、历史记录等状态和逻辑
@@ -493,7 +507,8 @@ export function useMessageState({
         let currentText = '';
         let currentThinking = '';
         let thinkingStartTime = null;
-        let thinkingEndTime = null;
+        let thinkingLastUpdateTime = null;
+        let contentStartTime = null;
         let sseBuffer = '';
         let sseDone = false;
 
@@ -560,10 +575,12 @@ export function useMessageState({
               if (cc) {
                 currentText += cc;
                 contentStream.addChunk(cc);
-                if (thinkingStartTime && !thinkingEndTime) thinkingEndTime = Date.now();
+                if (!contentStartTime) contentStartTime = Date.now();
               }
               if (ct) {
-                if (!thinkingStartTime) thinkingStartTime = Date.now();
+                const now = Date.now();
+                if (!thinkingStartTime) thinkingStartTime = now;
+                thinkingLastUpdateTime = now;
                 currentThinking += ct;
                 thinkingStream.addChunk(ct);
               }
@@ -572,7 +589,13 @@ export function useMessageState({
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
-              if (ct) { currentThinking += ct; thinkingStream.addChunk(ct); }
+              if (ct) {
+                const now = Date.now();
+                if (!thinkingStartTime) thinkingStartTime = now;
+                thinkingLastUpdateTime = now;
+                currentThinking += ct;
+                thinkingStream.addChunk(ct);
+              }
               sseDone = true;
             }
           } catch (e) {
@@ -610,8 +633,11 @@ export function useMessageState({
         await new Promise(r => requestAnimationFrame(r));
         setContentStreamDone(true);
         setThinkingStreamDone(true);
-        const finalThinkingMs = thinkingStartTime
-          ? (thinkingEndTime || Date.now()) - thinkingStartTime : 0;
+        const finalThinkingMs = finalizeThinkingDurationMs({
+          thinkingStartTime,
+          thinkingLastUpdateTime,
+          contentStartTime,
+        });
         const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
         const normalizedFinalContent = normalizeAssistantCitations(finalContent, streamCitationsRef.current);
         const optimizedFinalContent = optimizeAssistantInlineCitations(

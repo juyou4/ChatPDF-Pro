@@ -22,6 +22,7 @@ vi.mock('../../contexts/WebSearchContext', () => ({
 import {
   useMessageState,
   STREAM_FIRST_EVENT_TIMEOUT_MS,
+  finalizeThinkingDurationMs,
   normalizeAssistantCitations,
   ensureAssistantInlineCitationFallback,
   optimizeAssistantInlineCitations,
@@ -287,5 +288,27 @@ describe('filterCitationsByContentRefs', () => {
     ];
     const filtered = filterCitationsByContentRefs(content, citations);
     expect(filtered.map((c) => c.ref)).toEqual([2, 1]);
+  });
+});
+
+describe('finalizeThinkingDurationMs', () => {
+  it('应统计到最后一个思考 chunk，而不是首个正文 chunk', () => {
+    const duration = finalizeThinkingDurationMs({
+      thinkingStartTime: 1000,
+      thinkingLastUpdateTime: 2800,
+      contentStartTime: 1800,
+    });
+
+    expect(duration).toBe(1800);
+  });
+
+  it('只有正文开始时间时，应回退到正文开始时间', () => {
+    const duration = finalizeThinkingDurationMs({
+      thinkingStartTime: 1000,
+      thinkingLastUpdateTime: null,
+      contentStartTime: 1600,
+    });
+
+    expect(duration).toBe(600);
   });
 });

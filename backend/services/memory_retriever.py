@@ -36,7 +36,7 @@ class MemoryRetriever:
         self.memory_index = memory_index
         self.active_pool = active_pool
 
-    def retrieve(self, query: str, top_k: int = 3, api_key: str = None, 
+    def retrieve(self, query: str, top_k: int = 3, api_key: str = None,
                  doc_id: Optional[str] = None, filter_by_doc: bool = False,
                  filter_tags: Optional[list[str]] = None) -> list[dict]:
         """混合检索相关记忆
@@ -53,7 +53,9 @@ class MemoryRetriever:
             top_k: 返回的最大结果数，默认 3
             api_key: API 密钥（远程 embedding 模型需要）
             doc_id: 当前文档 ID，用于文档相关性加权（可选）
-            filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
+            filter_by_doc: 是否限制为当前文档作用域。
+                为 True 且提供 doc_id 时，仅保留当前文档记忆和全局画像记忆
+                （doc_id=None），排除其他文档会话记忆。
             filter_tags: 标签过滤列表，仅返回包含指定标签的记忆（可选）
 
         Returns:
@@ -67,9 +69,10 @@ class MemoryRetriever:
         if not all_entries:
             return []
 
-        # 如果启用文档过滤，只保留当前文档的记忆
+        # 如果启用文档过滤，仅保留当前文档记忆和全局画像记忆。
+        # 这样既能阻断跨文档串记忆，又不会丢掉用户级偏好/画像。
         if filter_by_doc and doc_id:
-            all_entries = [e for e in all_entries if e.doc_id == doc_id]
+            all_entries = [e for e in all_entries if e.doc_id in (None, doc_id)]
             if not all_entries:
                 return []
 

@@ -171,6 +171,26 @@ class TestHybridRetrieval:
         results = retriever.retrieve("记忆", top_k=5)
         assert len(results) <= 1
 
+    def test_filter_by_doc_keeps_current_doc_and_profile_only(self, retriever, memory_store, memory_index):
+        """文档过滤时应保留当前文档和全局画像记忆，排除其他文档会话记忆"""
+        entries = [
+            _make_entry("当前文档中的结论", doc_id="doc-current"),
+            _make_entry("用户偏好中文回答", doc_id=None),
+            _make_entry("另一篇论文的攻击框架", doc_id="doc-other"),
+        ]
+        self._add_entries(memory_store, memory_index, entries)
+
+        results = retriever.retrieve(
+            "攻击框架",
+            top_k=5,
+            doc_id="doc-current",
+            filter_by_doc=True,
+        )
+
+        doc_ids = {item["doc_id"] for item in results}
+        assert "doc-other" not in doc_ids
+        assert doc_ids.issubset({"doc-current", None})
+
 
 # ==================== BM25 检索测试 ====================
 
