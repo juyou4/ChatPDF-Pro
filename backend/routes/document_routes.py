@@ -426,14 +426,51 @@ def extract_text_from_pdf(
             "valid_ratio": round(valid_ratio, 3)
         }
 
-    # ==================== Figure 标题检测 ====================
     FIGURE_PATTERNS = [
-        r'^图\s*(\d+[a-zA-Z]?)',           # 图1, 图 1, 图1a
-        r'^Figure\s+(\d+[a-zA-Z]?)',        # Figure 1, Figure 1a
-        r'^Fig\.?\s+(\d+[a-zA-Z]?)',        # Fig.1, Fig 1, Fig.1a
+        r'^图\s*(\d+)([a-zA-Z]?)',
+        r'^Figure\s+(\d+)([a-zA-Z]?)',
+        r'^Fig\.?\s+(\d+)([a-zA-Z]?)',
     ]
 
-    def _extract_figure_captions_from_dict(text_dict: dict, page_num: int) -> list:
+    FIGURE_CAPTION_PATTERNS = [
+        r'(图\s*\d+[a-zA-Z]?)',
+        r'(Figure\s+\d+[a-zA-Z]?)',
+        r'(Fig\.?\s+\d+[a-zA-Z]?)',
+    ]
+
+    def _parse_figure_number(figure_num: str) -> tuple:
+        """
+        解析 figure 编号，返回 (base_number, sub_id)
+        例如:
+            "1" -> ("1", None)
+            "1a" -> ("1", "a")
+            "1A" -> ("1", "A")
+        """
+        if not figure_num:
+            return ("", None)
+
+        import re
+        # 支持 "1a", "1A", "1.1" 等格式
+        match = re.match(r'^(\d+)([a-zA-Z]?)$', figure_num.strip())
+        if match:
+            base = match.group(1)
+            sub = match.group(2) if match.group(2) else None
+            if sub:
+                sub = sub.lower()
+            return (base, sub)
+
+        # 尝试直接解析纯数字
+        try:
+            return (str(int(figure_num)), None)
+        except (ValueError, TypeError):
+            return (figure_num, None)
+
+    def _extract_figure_captions_from_dict(
+        text_dict: dict,
+        page_num: int,
+        page_width: float = 0,
+        page_height: float = 0,
+    ) -> list:
         """从 PyMuPDF 的 dict 格式中检测 figure 标题"""
         if not text_dict or "blocks" not in text_dict:
             return []
@@ -471,21 +508,173 @@ def extract_text_from_pdf(
                 for pattern in FIGURE_PATTERNS:
                     match = re.match(pattern, line_text, re.IGNORECASE)
                     if match:
-                        figure_num = match.group(1)
+                        # 解析 base_number 和 sub_id
+                        raw_num = match.group(1)
+                        sub_id_raw = match.group(2) if match.group(2) else ""
+                        base_number, sub_id = _parse_figure_number(raw_num + sub_id_raw)
+
+                        # 构建 display_label
+                        if sub_id:
+                            display_label = f"Figure {base_number}{sub_id}"
+                        else:
+                            display_label = f"Figure {base_number}"
+
                         figures.append({
-                            "figure_number": figure_num,
+                            "figure_number": base_number,  # 主编号，用于分组
+                            "raw_number": raw_num + sub_id_raw,  # 原始编号，如 "1a"
+                            "base_number": base_number,  # 主编号 "1"
+                            "sub_id": sub_id,  # 子图标识 "a" or None
+                            "display_label": display_label,
                             "label": line_text[:50],
+                            "caption": line_text[:100],  # 保存完整caption
                             "page": page_num,
-                            "bbox": line_bbox or [0, 0, 0, 0]
+                            "bbox": line_bbox or [0, 0, 0, 0],
+                            "caption_bbox": line_bbox or [0, 0, 0, 0],
+                            "page_width": page_width,
+                            "page_height": page_height,
                         })
                         break
 
         return figures
 
+    def _normalize_bbox(bbox):
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+        try:
+            x0, y0, x1, y1 = [float(v) for v in bbox]
+        except (TypeError, ValueError):
+            return None
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return [x0, y0, x1, y1]
+
+    def _merge_bboxes(bboxes):
+        valid = [_normalize_bbox(b) for b in bboxes]
+        valid = [b for b in valid if b]
+        if not valid:
+            return None
+        return [
+            min(b[0] for b in valid),
+            min(b[1] for b in valid),
+            max(b[2] for b in valid),
+            max(b[3] for b in valid),
+        ]
+
+    def _expand_bbox(bbox, page_width, page_height, x_ratio=0.04, y_ratio=0.03):
+        normalized = _normalize_bbox(bbox)
+        if not normalized:
+            return None
+        x0, y0, x1, y1 = normalized
+        x_pad = max(12.0, page_width * x_ratio)
+        y_pad = max(10.0, page_height * y_ratio)
+        return [
+            max(0.0, x0 - x_pad),
+            max(0.0, y0 - y_pad),
+            min(page_width, x1 + x_pad),
+            min(page_height, y1 + y_pad),
+        ]
+
+    def _build_band_bbox(page_width, page_height, upper_bound, lower_bound):
+        if page_width <= 0 or page_height <= 0:
+            return None
+        y0 = max(0.0, upper_bound)
+        y1 = min(page_height, lower_bound)
+        if y1 <= y0:
+            return None
+        min_height = min(page_height, max(page_height * 0.16, 120.0))
+        if y1 - y0 < min_height:
+            y0 = max(0.0, y1 - min_height)
+        return [
+            max(0.0, page_width * 0.04),
+            y0,
+            min(page_width, page_width * 0.96),
+            y1,
+        ]
+
+    def _group_figures_by_base_number(figures: list) -> list:
+        """
+        将 figures 按 (page, base_number) 分组
+        支持 synthetic parent：当只有子图(1a,1b)没有主图(1)时，自动生成 group
+
+        返回: list of FigureGroup dicts
+        """
+        from collections import defaultdict
+
+        # 按 (page, base_number) 分组
+        groups = defaultdict(lambda: {
+            "sub_figures": [],
+            "has_parent": False,
+            "parent_figure": None
+        })
+
+        for fig in figures:
+            base = fig.get("base_number", "")
+            page = fig.get("page", 1)
+            key = (page, base)
+
+            if fig.get("sub_id"):  # 子图，如 "1a" 中的 "a"
+                groups[key]["sub_figures"].append(fig)
+            else:  # 主图，如 "Figure 1"
+                groups[key]["has_parent"] = True
+                groups[key]["parent_figure"] = fig
+
+        # 构建最终 group 列表
+        result = []
+        for (page, base), data in sorted(groups.items()):
+            sub_figures = data["sub_figures"]
+
+            if data["has_parent"]:
+                # 有主图
+                parent = data["parent_figure"]
+                group = {
+                    "group_id": f"fig-{base}",
+                    "base_number": base,
+                    "page": page,
+                    "caption": parent.get("caption"),
+                    "label": parent.get("display_label", f"Figure {base}"),
+                    "sub_figures": sub_figures,
+                    "is_synthetic": False,
+                }
+            else:
+                # 无显式主图，synthetic parent
+                # 合并所有子图的 caption
+                merged_caption = "; ".join(
+                    s.get("caption", "") for s in sub_figures if s.get("caption")
+                )
+                # 构建显示标签
+                if sub_figures:
+                    labels = [s.get("display_label", "") for s in sub_figures]
+                    display_label = ", ".join(filter(None, labels))
+                else:
+                    display_label = f"Figure {base}"
+
+                group = {
+                    "group_id": f"fig-{base}",
+                    "base_number": base,
+                    "page": page,
+                    "caption": merged_caption if merged_caption else None,
+                    "label": display_label,
+                    "sub_figures": sub_figures,
+                    "is_synthetic": True,
+                }
+            result.append(group)
+
+        return result
+
     def _match_figures_with_images(figures: list, images: list) -> list:
-        """将 figure 标题与同页的图片进行空间匹配，返回结构化的 figures 列表"""
-        if not figures or not images:
+        """
+        将 figure 标题与同页的图片进行空间匹配，返回结构化的 figures 列表。
+
+        改进版：采用 group-first 策略
+        1. 先将 figures 按 base_number 分组（支持子图 1a,1b 合并到主图 1）
+        2. 按 group 匹配图片
+        3. 返回增强的 figure 数据（包含 sub_figures, is_synthetic 等）
+        """
+        if not figures:
             return []
+
+        # Step 1: 将 figures 按 base_number 分组
+        figure_groups = _group_figures_by_base_number(figures)
 
         result = []
         page_to_images = {}
@@ -495,27 +684,169 @@ def extract_text_from_pdf(
                 page_to_images[p] = []
             page_to_images[p].append(img)
 
-        for fig in figures:
-            fig_page = fig.get("page", 1)
-            fig_bbox = fig.get("bbox", [0, 0, 0, 0])
-            fig_y = fig_bbox[3]
+        for page_num in page_to_images:
+            page_to_images[page_num] = sorted(
+                page_to_images[page_num],
+                key=lambda img: (
+                    (_normalize_bbox(img.get("bbox")) or [0, 0, 0, 0])[1],
+                    (_normalize_bbox(img.get("bbox")) or [0, 0, 0, 0])[0],
+                    img.get("id", ""),
+                )
+            )
 
-            matched_images = []
-            if fig_page in page_to_images:
-                for img in page_to_images[fig_page]:
-                    img_bbox = img.get("bbox", [0, 0, 0, 0])
+        # region agent log: debug figure-image matching
+        debug_entries = []
+        # endregion agent log
+
+        # Step 2: 按 group 处理
+        for group in figure_groups:
+            page = group["page"]
+            base_number = group["base_number"]
+            page_images = page_to_images.get(page, [])
+
+            # 用于跟踪本页面已经分配给前面 group 的图片，避免重复分配
+            already_matched_image_ids = set()
+
+            # 获取该页所有 figure（包括子图）对应的 caption bboxes
+            all_captions = []
+
+            # 主图的 caption
+            if group.get("caption"):
+                # 从原始 figures 中找对应的 caption bbox
+                for fig in figures:
+                    if fig.get("page") == page and fig.get("base_number") == base_number and not fig.get("sub_id"):
+                        all_captions.append(fig)
+                        break
+
+            # 子图的 captions
+            for sf in group.get("sub_figures", []):
+                if sf.get("page") == page:
+                    all_captions.append(sf)
+
+            # 按 caption 位置排序
+            all_captions = sorted(
+                all_captions,
+                key=lambda f: (_normalize_bbox(f.get("caption_bbox") or f.get("bbox")) or [0, 0, 0, 0])[1]
+            )
+
+            # 遍历每个 caption，收集匹配的 image_ids
+            group_image_ids = []
+            group_bboxes = []
+
+            for idx, caption_fig in enumerate(all_captions):
+                fig_bbox = _normalize_bbox(caption_fig.get("caption_bbox") or caption_fig.get("bbox")) or [0, 0, 0, 0]
+                caption_top = fig_bbox[1]
+                caption_bottom = fig_bbox[3]
+                page_width = caption_fig.get("page_width", 0) or 612
+                page_height = caption_fig.get("page_height", 0) or 792
+
+                # 确定搜索窗口
+                prev_bottom = 0.0
+                if idx > 0:
+                    prev_bbox = _normalize_bbox(all_captions[idx - 1].get("caption_bbox") or all_captions[idx - 1].get("bbox"))
+                    if prev_bbox:
+                        prev_bottom = prev_bbox[3]
+
+                band_top = max(0.0, prev_bottom + 6.0)
+                band_bottom = max(band_top + 1.0, caption_top - 4.0)
+
+                matched_images = []
+                matched_bboxes = []
+
+                for img in page_images:
+                    img_id = img.get("id")
+                    if img_id in already_matched_image_ids:
+                        continue
+
+                    img_bbox = _normalize_bbox(img.get("bbox")) or [0, 0, 0, 0]
                     img_y0 = img_bbox[1]
+                    img_y1 = img_bbox[3]
+                    img_center_y = (img_y0 + img_y1) / 2 if img_y1 > img_y0 else img_y0
 
-                    if img_y0 > fig_y - 10 and img_y0 < fig_y + 400:
-                        matched_images.append(img.get("id"))
+                    in_window = (
+                        img_center_y >= band_top and
+                        img_center_y <= caption_bottom + 8.0 and
+                        img_y0 <= caption_bottom + 24.0
+                    )
+                    if in_window:
+                        matched_images.append(img_id)
+                        matched_bboxes.append(img_bbox)
 
+                    already_matched_image_ids.update(matched_images)
+
+                group_image_ids.extend(matched_images)
+                group_bboxes.extend(matched_bboxes)
+
+            # 去重 image_ids
+            unique_image_ids = list(dict.fromkeys(group_image_ids))
+
+            # 合并 group_bboxes 生成 group_bbox
+            group_bbox = _merge_bboxes(group_bboxes)
+            if group_bbox:
+                group_bbox = _expand_bbox(group_bbox, page_width or 612, page_height or 792, x_ratio=0.05, y_ratio=0.04)
+
+            # 获取 caption bbox（使用第一个 caption 的位置）
+            primary_caption_bbox = None
+            if all_captions:
+                primary_caption_bbox = all_captions[0].get("caption_bbox") or all_captions[0].get("bbox")
+
+            # 构建返回结果
             result.append({
-                "figure_id": f"fig-{fig.get('figure_number', '')}",
-                "number": fig.get("figure_number", ""),
-                "label": fig.get("label", ""),
-                "page": fig_page,
-                "image_ids": matched_images
+                "figure_id": group["group_id"],
+                "number": base_number,
+                "label": group.get("label", f"Figure {base_number}"),
+                "caption": group.get("caption"),
+                "page": page,
+                "image_ids": unique_image_ids,
+                "group_bbox": group_bbox,  # 联合 bbox
+                "caption_bbox": primary_caption_bbox,
+                "sub_figures": group.get("sub_figures", []),
+                "is_synthetic": group.get("is_synthetic", False),
+                "page_width": page_width or 612,
+                "page_height": page_height or 792,
             })
+
+            # region agent log
+            try:
+                debug_entries.append({
+                    "group_id": group["group_id"],
+                    "base_number": base_number,
+                    "page": page,
+                    "is_synthetic": group.get("is_synthetic", False),
+                    "sub_figures_count": len(group.get("sub_figures", [])),
+                    "matched_image_ids": unique_image_ids,
+                    "group_bbox": group_bbox,
+                })
+            except Exception:
+                pass
+            # endregion agent log
+
+        # region agent log: write debug log to NDJSON file
+        if debug_entries:
+            try:
+                import json as _json
+                import time as _time
+
+                log_record = {
+                    "id": f"log_{int(_time.time() * 1000)}",
+                    "timestamp": int(_time.time() * 1000),
+                    "location": "routes/document_routes.py:_match_figures_with_images",
+                    "message": "figure-group matching debug (enhanced)",
+                    "data": {
+                        "figures_count": len(figures),
+                        "images_count": len(images),
+                        "groups_count": len(figure_groups),
+                        "entries": debug_entries,
+                    },
+                    "runId": "initial",
+                    "hypothesisId": "H1-H3",
+                }
+
+                with open(r"e:\Project\.cursor\debug.log", "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps(log_record, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        # endregion agent log
 
         return result
 
@@ -571,7 +902,12 @@ def extract_text_from_pdf(
                 page_text = clean_text(page_text)
 
                 # ==================== Figure 标题检测 ====================
-                page_figures = _extract_figure_captions_from_dict(text_dict, page_num + 1)
+                page_figures = _extract_figure_captions_from_dict(
+                    text_dict,
+                    page_num + 1,
+                    page_width,
+                    page_height,
+                )
                 all_figures.extend(page_figures)
 
                 # ==================== 图片提取 ====================
@@ -624,7 +960,7 @@ def extract_text_from_pdf(
                                     img_id = f"page{page_num + 1}_img{img_idx + 1}"
                                     img_base64 = base64.b64encode(img_data).decode('utf-8')
 
-                                    img_bbox = [0, 0, img_width, img_height]
+                                    img_bbox = None
                                     try:
                                         img_rects = page.get_image_rects(xref)
                                         if img_rects:

@@ -101,9 +101,17 @@ export function useDocumentState({
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewError, setOverviewError] = useState(null);
+  const overviewCacheRef = useRef(new Map());
+  const overviewInflightRef = useRef(new Map());
+  const currentOverviewKeyRef = useRef('');
 
   // 文件输入引用
   const fileInputRef = useRef(null);
+
+  const buildOverviewKey = useCallback((currentDocId, depth) => {
+    if (!currentDocId) return '';
+    return `${currentDocId}:${depth}`;
+  }, []);
 
   /**
    * 获取存储信息
@@ -135,6 +143,10 @@ export function useDocumentState({
     setIsUploading(true);
     setUploadProgress(0);
     setUploadStatus('uploading');
+    setOverview(null);
+    setOverviewError(null);
+    setOverviewLoading(false);
+    currentOverviewKeyRef.current = '';
 
     const formData = new FormData();
     formData.append('file', file);
@@ -248,6 +260,10 @@ export function useDocumentState({
   const startNewChat = useCallback(() => {
     setDocId(null);
     setDocInfo(null);
+    setOverview(null);
+    setOverviewError(null);
+    setOverviewLoading(false);
+    currentOverviewKeyRef.current = '';
     setMessages?.([]);
     setCurrentPage?.(1);
     setSelectedText?.('');
@@ -264,6 +280,10 @@ export function useDocumentState({
       if (res.ok) {
         setDocId(s.docId);
         setDocInfo(await res.json());
+        setOverview(null);
+        setOverviewError(null);
+        setOverviewLoading(false);
+        currentOverviewKeyRef.current = '';
         // 恢复历史消息：确保不存在"永久流式中"的脏消息（页面关闭时可能残留 isStreaming:true）
         const restoredMessages = (s.messages || []).map((m) =>
           m.isStreaming ? { ...m, isStreaming: false } : m
@@ -290,6 +310,10 @@ export function useDocumentState({
     if (sid === docId) {
       setDocId(null);
       setDocInfo(null);
+      setOverview(null);
+      setOverviewError(null);
+      setOverviewLoading(false);
+      currentOverviewKeyRef.current = '';
       setMessages?.([]);
     }
   }, [docId, setMessages]);
@@ -327,6 +351,24 @@ export function useDocumentState({
       return;
     }
 
+    const overviewKey = buildOverviewKey(docId, depth);
+    if (currentOverviewKeyRef.current === overviewKey && overview) {
+      return overview;
+    }
+
+    const cachedOverview = overviewCacheRef.current.get(overviewKey);
+    if (cachedOverview) {
+      currentOverviewKeyRef.current = overviewKey;
+      setOverview(cachedOverview);
+      setOverviewError(null);
+      return cachedOverview;
+    }
+
+    const inflightRequest = overviewInflightRef.current.get(overviewKey);
+    if (inflightRequest) {
+      return inflightRequest;
+    }
+
     const chatCredentials = getChatCredentials?.();
     const chatProvider = chatCredentials?.providerId || 'openai';
     const chatModel = chatCredentials?.modelId || 'gpt-4o';
@@ -341,7 +383,7 @@ export function useDocumentState({
     setOverviewLoading(true);
     setOverviewError(null);
 
-    try {
+    const requestPromise = (async () => {
       const params = new URLSearchParams({ depth });
       const headers = {};
       if (chatCredentials) {
@@ -365,14 +407,32 @@ export function useDocumentState({
       }
 
       const data = await res.json();
+      overviewCacheRef.current.set(overviewKey, data);
+      currentOverviewKeyRef.current = overviewKey;
       setOverview(data);
+      return data;
+    })();
+
+    overviewInflightRef.current.set(overviewKey, requestPromise);
+
+    try {
+      return await requestPromise;
     } catch (err) {
       console.error('获取速览失败:', err);
       setOverviewError(err.message || '获取速览失败');
+      throw err;
     } finally {
+      overviewInflightRef.current.delete(overviewKey);
       setOverviewLoading(false);
     }
-  }, [docId, getChatCredentials, getProviderById]);
+  }, [buildOverviewKey, docId, getChatCredentials, getProviderById, overview]);
+
+  useEffect(() => {
+    setOverview(null);
+    setOverviewError(null);
+    setOverviewLoading(false);
+    currentOverviewKeyRef.current = '';
+  }, [docId]);
 
   // 初始化时加载历史
   useEffect(() => {

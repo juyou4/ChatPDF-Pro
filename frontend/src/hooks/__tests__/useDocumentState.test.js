@@ -355,6 +355,102 @@ describe('useDocumentState', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('fetchOverview 对同一 docId 和 depth 命中本地缓存，不重复请求后端', async () => {
+    mockGetChatCredentials.mockReturnValue({
+      providerId: 'local',
+      modelId: 'qwen-local',
+      apiKey: '',
+    });
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ doc_id: 'doc-overview', depth: 'standard', full_text_summary: 'ok' }),
+    });
+
+    const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await act(async () => {});
+
+    act(() => {
+      result.current.setDocId('doc-overview');
+    });
+
+    await act(async () => {});
+
+    const beforeCalls = mockFetch.mock.calls.length;
+
+    await act(async () => {
+      await result.current.fetchOverview('standard');
+    });
+
+    const afterFirstFetchCalls = mockFetch.mock.calls.length;
+
+    await act(async () => {
+      await result.current.fetchOverview('standard');
+    });
+
+    expect(afterFirstFetchCalls - beforeCalls).toBe(1);
+    expect(mockFetch.mock.calls.length).toBe(afterFirstFetchCalls);
+  });
+
+  it('fetchOverview 对同一 docId 和 depth 的并发请求只发送一次', async () => {
+    mockGetChatCredentials.mockReturnValue({
+      providerId: 'local',
+      modelId: 'qwen-local',
+      apiKey: '',
+    });
+
+    let resolveOverview;
+    mockFetch.mockImplementation((url) => {
+      if (url === '/storage_info') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({}),
+        });
+      }
+
+      return new Promise((resolve) => {
+        resolveOverview = resolve;
+      });
+    });
+
+    const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await act(async () => {});
+
+    act(() => {
+      result.current.setDocId('doc-overview');
+    });
+
+    await act(async () => {});
+
+    let req1;
+    let req2;
+    await act(async () => {
+      req1 = result.current.fetchOverview('standard');
+      req2 = result.current.fetchOverview('standard');
+    });
+
+    const overviewCalls = mockFetch.mock.calls.filter(([url]) => String(url).includes('/documents/doc-overview/overview'));
+    expect(overviewCalls).toHaveLength(1);
+
+    resolveOverview({
+      ok: true,
+      json: async () => ({ doc_id: 'doc-overview', depth: 'standard', full_text_summary: 'ok' }),
+    });
+
+    let responses;
+    await act(async () => {
+      responses = await Promise.all([req1, req2]);
+    });
+
+    expect(responses).toEqual([
+      { doc_id: 'doc-overview', depth: 'standard', full_text_summary: 'ok' },
+      { doc_id: 'doc-overview', depth: 'standard', full_text_summary: 'ok' },
+    ]);
+    expect(result.current.overview?.full_text_summary).toBe('ok');
+  });
+
   // --- 无回调时不崩溃 ---
 
   it('不传跨域回调时 startNewChat 不崩溃', () => {

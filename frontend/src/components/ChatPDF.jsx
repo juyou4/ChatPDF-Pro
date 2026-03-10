@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, FileText, Settings, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, ChevronUp, ChevronDown, Search, Loader2, Wand2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe } from 'lucide-react';
+import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
@@ -16,6 +16,7 @@ const EmbeddingSettings = lazy(() => import('./EmbeddingSettings'));
 const OCRSettingsPanel = lazy(() => import('./OCRSettingsPanel'));
 const GlobalSettings = lazy(() => import('./GlobalSettings'));
 const ChatSettings = lazy(() => import('./ChatSettings'));
+const OverviewPanel = lazy(() => import('./OverviewPanel'));
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useDebouncedLocalStorage } from '../hooks/useDebouncedLocalStorage';
@@ -31,7 +32,6 @@ import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
-import OverviewPanel from './OverviewPanel';
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -66,30 +66,6 @@ const WebSearchSourcesBadge = ({ sources }) => {
           ))}
         </div>
       )}
-    </div>
-  );
-};
-
-const WebSearchStatusBadge = ({ status }) => {
-  if (!status) return null;
-  const { phase, count } = status;
-  const isSearching = phase === 'searching';
-  const isRag = phase === 'rag';
-  const text = isSearching
-    ? '正在联网搜索...'
-    : isRag
-    ? '正在提炼搜索结果...'
-    : count != null
-    ? `已获取 ${count} 条搜索结果`
-    : '搜索完成';
-  return (
-    <div className="flex items-center gap-1.5 text-xs text-purple-500 mb-2">
-      {(isSearching || isRag) ? (
-        <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-      ) : (
-        <Globe className="w-3 h-3 flex-shrink-0" />
-      )}
-      <span>{text}</span>
     </div>
   );
 };
@@ -279,8 +255,6 @@ const ChatPDF = () => {
 
   const documentState = useDocumentState({
     getEmbeddingConfig,
-    getChatCredentials,
-    getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
     setScreenshots: (...args) => screenshotSettersRef.current.setScreenshots?.(...args),
@@ -295,7 +269,7 @@ const ChatPDF = () => {
     fileInputRef,
     handleFileUpload, startNewChat, loadSession, deleteSession,
     saveCurrentSession, fetchStorageInfo,
-    overview, setOverview, overviewLoading, overviewError, fetchOverview,
+    overview, overviewLoading, overviewError, fetchOverview,
   } = documentState;
 
   // ========== PDF 状态 Hook（需求 1.1） ==========
@@ -392,8 +366,6 @@ const ChatPDF = () => {
 
   // ========== Refs ==========
   const chatPaneRef = useRef(null);
-  const headerContentRef = useRef(null);
-  const [headerHeight, setHeaderHeight] = useState(null);
 
   // ========== 副作用 ==========
   useEffect(() => {
@@ -420,19 +392,6 @@ const ChatPDF = () => {
   useEffect(() => {
     if (docId && docInfo) saveCurrentSession(messages);
   }, [docId, docInfo, messages]);
-
-  // 顶栏高度测量
-  useEffect(() => {
-    const el = headerContentRef.current;
-    if (!el) return;
-    const measure = () => setHeaderHeight(el.getBoundingClientRect().height);
-    measure();
-    if (typeof ResizeObserver !== 'undefined') {
-      const observer = new ResizeObserver(measure);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }
-  }, [docId, docInfo, searchResults.length, useRerankSetting, darkMode]);
 
   // ========== 数据获取函数（useCallback 包裹，稳定引用） ==========
   const fetchAvailableModels = useCallback(async () => {
@@ -657,10 +616,6 @@ const ChatPDF = () => {
               <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
             </div>
           )}
-          {/* 联网搜索状态指示器（流式进行中） */}
-          {msg.isStreaming && msg.webSearchStatus && (
-            <WebSearchStatusBadge status={msg.webSearchStatus} />
-          )}
           <StreamingMarkdown
             content={msg.content}
             isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
@@ -669,7 +624,6 @@ const ChatPDF = () => {
             citations={msg.citations || null}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
-            webSearchSources={msg.webSearchSources || null}
           />
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
@@ -830,15 +784,6 @@ const ChatPDF = () => {
               <span>ChatPDF</span>
             </div>
             <div className="flex items-center gap-1">
-              {!isHeaderExpanded && (
-                <button
-                  onClick={() => setIsHeaderExpanded(true)}
-                  className={`p-2 rounded-full transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400 hover:text-gray-200' : 'hover:bg-black/5 text-gray-500 hover:text-gray-800'}`}
-                  title="展开顶栏"
-                >
-                  <ChevronDown className="w-4 h-4" />
-                </button>
-              )}
               <button onClick={() => setDarkMode(!darkMode)} className={`p-2 rounded-full transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400 hover:text-yellow-400' : 'hover:bg-black/5'}`}>
                 {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
@@ -908,157 +853,16 @@ const ChatPDF = () => {
 
       {/* 主内容区域 */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
-        {/* 顶栏 - 可折叠 */}
-        <motion.header
-          layout
-          initial={false}
-          animate={{
-            height: isHeaderExpanded ? (headerHeight ?? 'auto') : 0,
-            opacity: isHeaderExpanded ? 1 : 0,
-            marginBottom: isHeaderExpanded ? 16 : 0,
-            marginTop: isHeaderExpanded ? 24 : 0,
-            pointerEvents: isHeaderExpanded ? 'auto' : 'none'
-          }}
-          transition={{ duration: 0.28, ease: [0.4, 0, 0.2, 1] }}
-          style={{ overflow: 'hidden' }}
-          className="px-8 soft-panel mx-8 sticky top-4 z-10 flex flex-col justify-center rounded-[var(--radius-panel-lg)]"
-        >
-          <motion.div
-            ref={headerContentRef}
-            initial={false}
-            animate={{ opacity: isHeaderExpanded ? 1 : 0, y: isHeaderExpanded ? 0 : -6 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+        {/* 侧边栏展开按钮 */}
+        {!showSidebar && (
+          <button
+            onClick={() => setShowSidebar(true)}
+            className={`absolute top-4 left-4 z-20 p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${darkMode ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20' : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'}`}
+            title="显示侧边栏"
           >
-            <div className="flex items-center justify-between w-full py-3">
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => setShowSidebar(!showSidebar)}
-                  className="p-2 hover:bg-black/5 rounded-lg transition-colors"
-                  title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
-                >
-                  <Menu className="w-6 h-6" />
-                </button>
-                <div className="flex items-center gap-4">
-                  <div className="bg-purple-600 text-white p-2.5 rounded-xl shadow-sm">
-                    <FileText className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h1 className="text-2xl font-bold text-[var(--color-text-main)]">
-                      ChatPDF Pro <span className="text-xs bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full ml-2 align-middle">v2.0.2</span>
-                    </h1>
-                    <p className="text-xs text-gray-500 font-medium mt-0.5">智能文档助手</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* 搜索框 */}
-              {docId && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
-                  transition={{ duration: 0.3 }}
-                  className="flex-1 max-w-2xl mx-4 flex items-center gap-2"
-                >
-                  <div className="relative flex-1">
-                    <input
-                      type="search"
-                      placeholder="搜索文档内容..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' && !isSearching) handleSearch(); }}
-                      className="w-full px-4 py-2 pl-11 pr-4 rounded-full soft-input text-sm transition-all focus:ring-2 focus:ring-purple-400"
-                      disabled={isSearching}
-                    />
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-                  </div>
-                  <motion.button
-                    whileHover={{ scale: isSearching ? 1 : 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={() => handleSearch()}
-                    disabled={isSearching}
-                    className={`px-3 py-2 rounded-full text-sm font-medium shadow-sm flex items-center gap-2 transition-all ${isSearching ? 'bg-purple-200 text-purple-700 cursor-wait' : 'bg-purple-600 text-white hover:shadow-md hover:bg-purple-700'}`}
-                  >
-                    {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                    <span>{isSearching ? '搜索中...' : '搜索'}</span>
-                  </motion.button>
-                  <button
-                    onClick={() => setUseRerankSetting(v => !v)}
-                    className={`px-3 py-2 rounded-full border text-sm font-medium flex items-center gap-1 transition-colors ${useRerankSetting ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200'}`}
-                    title="使用重排模型提高结果质量"
-                  >
-                    <Wand2 className="w-4 h-4" />
-                    <span>重排</span>
-                  </button>
-                  <AnimatePresence>
-                    {searchResults.length > 0 && (
-                      <motion.div
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.8 }}
-                        transition={{ duration: 0.2 }}
-                        className="flex items-center gap-1"
-                      >
-                        <span className="text-xs text-gray-500 px-2 font-medium">
-                          {currentResultIndex + 1}/{searchResults.length}
-                        </span>
-                        <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={goToPrevResult} className="p-1.5 hover:bg-black/5 rounded-lg transition-colors" title="上一个结果">
-                          <ChevronUp className="w-4 h-4" />
-                        </motion.button>
-                        <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={goToNextResult} className="p-1.5 hover:bg-black/5 rounded-lg transition-colors" title="下一个结果">
-                          <ChevronDown className="w-4 h-4" />
-                        </motion.button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
-              )}
-
-              <div className="flex items-center gap-4">
-                {docInfo && (
-                  <div className="font-medium text-sm glass-panel px-4 py-1 rounded-full truncate max-w-[200px]">
-                    {docInfo.filename}
-                  </div>
-                )}
-                <button
-                  onClick={() => setIsHeaderExpanded(false)}
-                  className="p-2 hover:bg-black/5 rounded-full transition-colors text-gray-500 hover:text-gray-800"
-                  title="收起顶栏"
-                >
-                  <ChevronUp className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        </motion.header>
-
-        {/* 浮动控制按钮：顶栏收起 + 侧边栏隐藏时显示 */}
-        <AnimatePresence>
-          {!isHeaderExpanded && !showSidebar && (
-            <motion.div
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              transition={{ duration: 0.3, ease: "easeOut" }}
-              className="absolute top-4 left-2 z-20 flex flex-col gap-1.5"
-            >
-              <button
-                onClick={() => setIsHeaderExpanded(true)}
-                className={`p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${darkMode ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20' : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'}`}
-                title="展开顶栏"
-              >
-                <ChevronDown className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setShowSidebar(v => !v)}
-                className={`p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${darkMode ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20' : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'}`}
-                title={showSidebar ? '收起侧边栏' : '显示侧边栏'}
-              >
-                <Menu className="w-4 h-4" />
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            <Menu className="w-5 h-5" />
+          </button>
+        )}
 
         {/* 内容区域 */}
         <div className="flex-1 flex overflow-hidden px-8 pb-8 gap-4 pt-2">
@@ -1159,151 +963,75 @@ const ChatPDF = () => {
             <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-purple-500/50 transition-colors duration-200" />
           </div>
 
-          {/* 右侧：聊天区域 */}
+          {/* 右侧：聊天/速览区域 */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            {/* 速览/对话 Tab 切换 */}
-            <div className="flex items-center gap-1 p-4 pb-2 border-b border-black/5">
-              <div className="flex-1 flex items-center gap-1 bg-gray-100/50 p-1 rounded-xl">
-                <button
-                  onClick={() => setRightPanelMode('overview')}
-                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                    rightPanelMode === 'overview'
-                      ? 'bg-white shadow-sm text-purple-600'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  速览
-                </button>
-                <button
-                  onClick={() => setRightPanelMode('chat')}
-                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                    rightPanelMode === 'chat'
-                      ? 'bg-white shadow-sm text-purple-600'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  对话
-                </button>
-              </div>
-              {rightPanelMode === 'overview' && docId && (
-                <div className="flex items-center gap-1 ml-2">
-                  <select
-                    value={overviewDepth}
-                    onChange={(e) => setOverviewDepth(e.target.value)}
-                    className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-300"
-                  >
-                    <option value="brief">简介</option>
-                    <option value="standard">标准</option>
-                    <option value="detailed">详细</option>
-                  </select>
-                </div>
-              )}
+            {/* 切换按钮：速览 / 对话 */}
+            <div className="flex items-center gap-1 px-6 pt-4 pb-2 border-b border-gray-100/50">
+              <button
+                onClick={() => setRightPanelMode('overview')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                  rightPanelMode === 'overview'
+                    ? 'bg-purple-100 text-purple-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                速览
+              </button>
+              <button
+                onClick={() => setRightPanelMode('chat')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                  rightPanelMode === 'chat'
+                    ? 'bg-purple-100 text-purple-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                对话
+              </button>
             </div>
 
-            {/* 内容区域：根据 rightPanelMode 切换 */}
-            {rightPanelMode === 'overview' ? (
-              <div className="flex-1 overflow-y-auto p-6">
-                <OverviewPanel
-                  overview={overview}
-                  loading={overviewLoading}
-                  error={overviewError}
-                  depth={overviewDepth}
-                  docId={docId}
-                  onFetch={fetchOverview}
-                />
-              </div>
-            ) : (
-            /* 对话模式 */
+            {/* 内容区域：根据模式显示速览或对话 */}
             <div className="flex-1 overflow-hidden flex flex-col min-w-0">
-              {/* 搜索结果面板 - 固定在消息列表上方 */}
-              {(searchResults.length > 0 || isSearching || searchHistory.length > 0) && (
-                <div className="p-6 pb-0">
-                  <div className="rounded-3xl border border-black/5 bg-white/70 backdrop-blur-sm p-4 space-y-3 shadow-sm">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Search className="w-4 h-4 text-purple-500" />
-                        <span className="font-semibold text-sm text-gray-800">文档搜索</span>
-                        {useRerankSetting && (
-                          <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">已开启重排</span>
-                        )}
-                        {isSearching && <Loader2 className="w-4 h-4 animate-spin text-purple-500" />}
-                      </div>
-                      {searchResults.length > 0 && (
-                        <span className="text-xs text-gray-500">找到 {searchResults.length} 个候选</span>
-                      )}
-                    </div>
-
-                    {searchHistory.length > 0 && (
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs text-gray-500">历史:</span>
-                        {searchHistory.map((item, idx) => (
-                          <button key={`history-${idx}`} onClick={() => handleSearch(item)} className="text-xs px-2 py-1 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors">
-                            {item}
-                          </button>
-                        ))}
-                        <button onClick={clearSearchHistory} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded-full hover:bg-black/5 transition-colors">
-                          清除
-                        </button>
-                      </div>
-                    )}
-
-                    <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                      {isSearching && (
-                        <div className="text-sm text-gray-500 flex items-center gap-2 px-2">
-                          <Loader2 className="w-4 h-4 animate-spin" /> 正在检索匹配片段...
-                        </div>
-                      )}
-                      {!isSearching && !searchResults.length && (
-                        <p className="text-sm text-gray-500 px-2">输入查询并点击"搜索"查看匹配片段，支持关键词上下文和匹配度展示。</p>
-                      )}
-                      {searchResults.map((result, idx) => (
-                        <button
-                          key={`result-${idx}`}
-                          onClick={() => focusResult(idx)}
-                          className="w-full text-left p-3 rounded-2xl border border-gray-100 hover:border-purple-200 hover:bg-purple-50/40 transition-all relative"
-                        >
-                          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                            <div className="flex items-center gap-1.5">
-                              <span>第 {result.page || 1} 页 · #{idx + 1}</span>
-                              {result.reranked && (
-                                <span className="text-[10px] text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded-full border border-purple-100">Rerank</span>
-                              )}
-                            </div>
-                            <span className={`font-semibold ${formatSimilarity(result) >= 80 ? 'text-green-600' : 'text-purple-600'}`}>
-                              匹配度 {formatSimilarity(result)}%
-                            </span>
-                          </div>
-                          <div className="text-sm text-gray-800 leading-relaxed max-h-20 overflow-hidden">
-                            {renderHighlightedSnippet(result.snippet || result.chunk || '', result.highlights || [])}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+              {rightPanelMode === 'overview' ? (
+                <Suspense fallback={
+                  <div className="flex-1 flex items-center justify-center text-gray-400">
+                    <Loader2 className="w-6 h-6 animate-spin mr-2" />
+                    加载中...
                   </div>
-                </div>
-              )}
+                }>
+                  <OverviewPanel
+                    docId={docId}
+                    overview={overview}
+                    loading={overviewLoading}
+                    error={overviewError}
+                    depth={overviewDepth}
+                    onDepthChange={setOverviewDepth}
+                    onFetch={fetchOverview}
+                  />
+                </Suspense>
+              ) : (
+                <>
+                  {/* 预设问题 */}
+                  {showPresetQuestions && (
+                    <div className="p-6 pb-0">
+                      <PresetQuestions onSelect={handlePresetSelect} disabled={isLoading} />
+                    </div>
+                  )}
 
-              {/* 预设问题 */}
-              {showPresetQuestions && (
-                <div className="p-6 pb-0">
-                  <PresetQuestions onSelect={handlePresetSelect} disabled={isLoading} />
-                </div>
+                  {/* 虚拟消息列表 - 替代原有的 messages.map 渲染（需求 3.1） */}
+                  <VirtualMessageList
+                    messages={messages}
+                    renderMessage={renderMessage}
+                    streamingMessageId={streamingMessageId}
+                    className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0"
+                  />
+                </>
               )}
-
-              {/* 虚拟消息列表 - 替代原有的 messages.map 渲染（需求 3.1） */}
-              <VirtualMessageList
-                messages={messages}
-                renderMessage={renderMessage}
-                streamingMessageId={streamingMessageId}
-                className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0"
-              />
             </div>
-            )}
 
             {/* 输入区域 */}
             <div className="p-6 pt-0 bg-transparent">
@@ -1861,6 +1589,7 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
+
 
 
 
