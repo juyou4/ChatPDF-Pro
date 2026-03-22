@@ -64,7 +64,7 @@ const OverviewPanel = ({
   }
 
   return (
-    <div className="space-y-6 pb-4">
+    <div className="space-y-6 pb-4 overflow-y-auto h-full custom-scrollbar px-2">
       {/* 全文概述卡片 */}
       <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
         <div className="flex items-center gap-2 mb-3">
