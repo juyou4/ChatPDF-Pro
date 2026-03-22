@@ -1216,7 +1216,7 @@ const ChatPDF = () => {
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
               onClick={(e) => e.stopPropagation()}
-              className={`w-[460px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/90 border border-white/5 backdrop-blur-3xl rounded-[36px] shadow-2xl' : 'bg-white/40 backdrop-blur-2xl border border-white/70 rounded-[36px] shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] relative'}`}
+              className={`w-[460px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/95 border border-white/5 backdrop-blur-md rounded-[36px] shadow-2xl' : 'bg-white/90 backdrop-blur-md border border-white/60 rounded-[36px] shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] relative'}`}
             >
               <div className="p-6 pb-2 flex-shrink-0 flex items-center justify-between mt-1 px-7">
                 <div className="flex items-center gap-3">
@@ -1286,7 +1286,7 @@ const ChatPDF = () => {
                 </div>
 
                 {/* Features Section - Glass Inner Panel */}
-                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-3 mt-2 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-3 mt-2 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                   
                   <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
                     <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
@@ -1365,7 +1365,7 @@ const ChatPDF = () => {
                 </div>
 
                 {/* Toolbar and Storage Settings Area */}
-                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                   {/* Toolbar Settings */}
                   <div className="space-y-3">
                     <h3 className={`text-[13px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>工具栏配置</h3>
@@ -1447,7 +1447,7 @@ const ChatPDF = () => {
                 </div>
 
                 {/* Advanced Configuration Section */}
-                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                   <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>高级配置</h3>
                   
                   <div className="space-y-3">
