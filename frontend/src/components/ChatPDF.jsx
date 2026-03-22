@@ -1240,7 +1240,7 @@ const ChatPDF = () => {
                 
                 <div className="space-y-3.5 px-1">
                   {/* Chat Model Card */}
-                  <div onClick={() => setShowChatSettings(true)} className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                     <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
                       <MessageSquare size={22} />
                     </div>
@@ -1255,7 +1255,7 @@ const ChatPDF = () => {
                   </div>
 
                   {/* Embedding Model Card */}
-                  <div onClick={() => setShowEmbeddingSettings(true)} className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                     <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
                       <Database size={22} />
                     </div>
@@ -1270,7 +1270,7 @@ const ChatPDF = () => {
                   </div>
 
                   {/* Rerank Model Card */}
-                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
                     <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
                       <ArrowUpDown size={22} />
                     </div>
