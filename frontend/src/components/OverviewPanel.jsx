@@ -66,7 +66,7 @@ const OverviewPanel = ({
   return (
     <div className="space-y-6 pb-4 overflow-y-auto h-full custom-scrollbar px-2">
       {/* 全文概述卡片 */}
-      <div className="bg-white rounded-3xl p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.08),0_1px_4px_rgba(0,0,0,0.04)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
+      <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-3">
           <FileText className="w-5 h-5 text-gray-700" strokeWidth={2} />
           <h3 className="text-lg font-semibold text-gray-900">全文概述</h3>
@@ -77,7 +77,7 @@ const OverviewPanel = ({
       </div>
 
       {/* 术语解释卡片 */}
-      <div className="bg-white rounded-3xl p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.08),0_1px_4px_rgba(0,0,0,0.04)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
+      <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-5">
           <BookOpen className="w-5 h-5 text-gray-700" strokeWidth={2} />
           <h3 className="text-lg font-semibold text-gray-900">术语解释</h3>
@@ -101,7 +101,7 @@ const OverviewPanel = ({
       </div>
 
       {/* 论文速读卡片 */}
-      <div className="bg-white rounded-3xl p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.08),0_1px_4px_rgba(0,0,0,0.04)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
+      <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-4">
           <FlaskConical className="w-5 h-5 text-gray-700" strokeWidth={2} />
           <h3 className="text-lg font-semibold text-gray-900">论文速读</h3>
@@ -125,7 +125,7 @@ const OverviewPanel = ({
       </div>
 
       {/* 关键图表解读卡片 */}
-      <div className="bg-white rounded-3xl p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.08),0_1px_4px_rgba(0,0,0,0.04)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
+      <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Image className="w-5 h-5 text-gray-700" strokeWidth={2} />
@@ -164,7 +164,7 @@ const OverviewPanel = ({
       </div>
 
       {/* 论文总结卡片 */}
-      <div className="bg-white rounded-3xl p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.08),0_1px_4px_rgba(0,0,0,0.04)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
+      <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-4">
           <Award className="w-5 h-5 text-gray-700" strokeWidth={2} />
           <h3 className="text-lg font-semibold text-gray-900">论文总结</h3>
