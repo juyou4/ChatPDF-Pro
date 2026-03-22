@@ -1364,6 +1364,159 @@ const ChatPDF = () => {
                   </label>
                 </div>
 
+                {/* Toolbar and Storage Settings Area */}
+                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                  {/* Toolbar Settings */}
+                  <div className="space-y-3">
+                    <h3 className={`text-[13px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>工具栏配置</h3>
+                    <div className="space-y-3">
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>默认搜索引擎</label>
+                        <CustomSelect
+                          value={searchEngine}
+                          onChange={setSearchEngine}
+                          options={[
+                            { value: 'google', label: 'Google' },
+                            { value: 'bing', label: 'Bing' },
+                            { value: 'baidu', label: '百度' },
+                            { value: 'sogou', label: '搜狗' },
+                            { value: 'custom', label: '自定义' }
+                          ]}
+                        />
+                        {searchEngine === 'custom' && (
+                          <div className="mt-1">
+                            <input type="text" value={searchEngineUrl} onChange={(e) => setSearchEngineUrl(e.target.value)} className={`w-full p-2.5 rounded-[12px] border text-sm outline-none transition-all ${darkMode ? 'bg-black/20 border-white/10 text-white focus:border-[#7c4dff]/50' : 'bg-white/50 border-gray-200 focus:border-[#7c4dff]/50'}`} placeholder="例如：https://www.google.com/search?q={query}" />
+                            <p className="text-[11px] text-gray-500 mt-1">使用 <code className="font-mono bg-black/5 px-1 rounded">{'<query>'}</code> 作为搜索词占位符</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1.5 pt-1">
+                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>工具栏尺寸</label>
+                        <CustomSelect
+                          value={toolbarSize}
+                          onChange={setToolbarSize}
+                          options={[
+                            { value: 'compact', label: '紧凑' },
+                            { value: 'normal', label: '常规' },
+                            { value: 'large', label: '大号' }
+                          ]}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Storage Info */}
+                  <div className="pt-4 border-t border-gray-200/50">
+                    <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>存储信息</h3>
+                    {storageInfo ? (
+                      <div className="space-y-2">
+                        <div className={`p-3 rounded-[16px] transition-colors ${darkMode ? 'bg-black/20 hover:bg-black/30' : 'bg-white/50 hover:bg-white/80'}`}>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>PDF文件 ({storageInfo.pdf_count})</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className={`flex-1 text-[11px] px-2.5 py-1.5 rounded-[8px] overflow-x-auto whitespace-nowrap font-mono border ${darkMode ? 'bg-black/40 border-white/5 text-gray-400' : 'bg-white border-gray-100 text-gray-500'}`}>
+                              {storageInfo.uploads_dir}
+                            </div>
+                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.uploads_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#7c4dff]/10 text-[#7c4dff] hover:bg-[#7c4dff]/20 transition-colors shrink-0" title="复制路径">
+                              <Copy size={14} />
+                            </button>
+                          </div>
+                        </div>
+                        <div className={`p-3 rounded-[16px] transition-colors ${darkMode ? 'bg-black/20 hover:bg-black/30' : 'bg-white/50 hover:bg-white/80'}`}>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>对话历史 ({storageInfo.doc_count})</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className={`flex-1 text-[11px] px-2.5 py-1.5 rounded-[8px] overflow-x-auto whitespace-nowrap font-mono border ${darkMode ? 'bg-black/40 border-white/5 text-gray-400' : 'bg-white border-gray-100 text-gray-500'}`}>
+                              {storageInfo.data_dir}
+                            </div>
+                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.data_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#7c4dff]/10 text-[#7c4dff] hover:bg-[#7c4dff]/20 transition-colors shrink-0" title="复制路径">
+                              <Copy size={14} />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-2 px-1">
+                          在 {storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'} 中打开以管理文件
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="text-[12px] text-gray-500 py-2">加载中...</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Advanced Configuration Section */}
+                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                  <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>高级配置</h3>
+                  
+                  <div className="space-y-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>邻居上下文扩展</label>
+                      <CustomSelect
+                        value={numExpandContextChunk}
+                        onChange={setNumExpandContextChunk}
+                        options={[
+                          { value: 0, label: '关闭' },
+                          { value: 1, label: '±1 块（前后各 1 个）' },
+                          { value: 2, label: '±2 块（前后各 2 个）' },
+                          { value: 3, label: '±3 块（前后各 3 个）' },
+                        ]}
+                      />
+                      <p className="text-[11px] text-gray-500 mt-0.5">命中 chunk 前后各扩展 N 个邻居块作为上下文</p>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
+                      <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>流式输出速度</label>
+                      <CustomSelect
+                        value={streamSpeed}
+                        onChange={setStreamSpeed}
+                        options={[
+                          { value: 'fast', label: '快速 (3字符/次, ~20ms)' },
+                          { value: 'normal', label: '正常 (2字符/次, ~30ms)' },
+                          { value: 'slow', label: '慢速 (1字符/次, ~60ms)' },
+                          { value: 'off', label: '关闭流式（直接显示）' }
+                        ]}
+                      />
+                      <p className="text-[11px] text-gray-500 mt-0.5">调整AI回复的打字机效果速度</p>
+                    </div>
+
+                    {enableBlurReveal && (
+                      <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
+                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>模糊效果强度</label>
+                        <CustomSelect
+                          value={blurIntensity}
+                          onChange={setBlurIntensity}
+                          options={[
+                            { value: 'light', label: '轻度 (3px blur, 0.2s)' },
+                            { value: 'medium', label: '中度 (5px blur, 0.25s)' },
+                            { value: 'strong', label: '强烈 (8px blur, 0.3s)' }
+                          ]}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {lastCallInfo && (
+                    <div className={`mt-4 p-3.5 rounded-[16px] border text-[12px] ${darkMode ? 'bg-black/20 border-white/5' : 'bg-white/50 border-gray-100'}`}>
+                      <div className="flex justify-between items-center mb-1.5">
+                        <span className="text-gray-500">调用来源</span>
+                        <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.provider || '未知'}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-500">模型</span>
+                        <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.model || '未返回'}</strong>
+                      </div>
+                      {lastCallInfo.fallback && (
+                        <div className="mt-2 pt-2 border-t border-gray-200/50 text-amber-600 font-medium flex items-center justify-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                          已切换备用模型
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Other Settings Access */}
                 <div className="grid grid-cols-2 gap-3 px-1 mt-4">
                   <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
