@@ -1,38 +1,51 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { X, Brain, Trash2, Edit3, Save, Clock, Tag, AlertTriangle, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  X, Brain, Trash2, Edit3, Save, Clock, AlertTriangle, Loader2,
+  ChevronDown, ChevronUp, GitBranch, Database, Network,
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-// API 基础路径（使用 Vite 代理）
 const API_BASE_URL = '';
 
-// 来源类型标签映射
+const TAB_CONFIGS = [
+  { id: 'profile', label: '全局画像', kind: 'profile', icon: Brain },
+  { id: 'doc_fact', label: '文档事实', kind: 'doc_fact', icon: Database },
+  { id: 'consolidated', label: '压缩事实', kind: 'consolidated', icon: GitBranch },
+  { id: 'graph', label: '图谱摘要', kind: 'graph', icon: Network },
+];
+
 const SOURCE_TYPE_LABELS = {
   auto_qa: '自动摘要',
   manual: '手动记忆',
   liked: '点赞记忆',
   keyword: '关键词',
+  llm_distilled: '提炼事实',
+  compressed: '压缩记忆',
 };
 
-// 来源类型对应的颜色样式
-const SOURCE_TYPE_COLORS = {
-  auto_qa: 'bg-purple-100 text-purple-700',
-  manual: 'bg-green-100 text-green-700',
-  liked: 'bg-pink-100 text-pink-700',
-  keyword: 'bg-purple-100 text-purple-700',
+const MEMORY_KIND_LABELS = {
+  working: '工作记忆',
+  profile: '画像',
+  doc_fact: '文档事实',
+  episodic: '对话摘要',
+  consolidated: '压缩事实',
+  graph: '图谱',
 };
 
-// 截取内容摘要（最多 50 字符）
-const truncateContent = (content, maxLen = 50) => {
+const STATUS_LABELS = {
+  active: '生效中',
+  archived_raw: '原始归档',
+};
+
+const truncateContent = (content, maxLen = 64) => {
   if (!content) return '';
-  return content.length > maxLen ? content.slice(0, maxLen) + '...' : content;
+  return content.length > maxLen ? `${content.slice(0, maxLen)}...` : content;
 };
 
-// 格式化时间显示
 const formatTime = (isoStr) => {
   if (!isoStr) return '';
   try {
-    const date = new Date(isoStr);
-    return date.toLocaleString('zh-CN', {
+    return new Date(isoStr).toLocaleString('zh-CN', {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -43,58 +56,175 @@ const formatTime = (isoStr) => {
   }
 };
 
-const MemoryPanel = ({ isOpen, onClose }) => {
-  // 记忆条目列表
-  const [entries, setEntries] = useState([]);
-  // 加载状态
-  const [loading, setLoading] = useState(false);
-  // 当前展开的条目 ID
-  const [expandedId, setExpandedId] = useState(null);
-  // 当前编辑的条目 ID
-  const [editingId, setEditingId] = useState(null);
-  // 编辑内容
-  const [editContent, setEditContent] = useState('');
-  // 清空确认对话框
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  // 操作中的条目 ID（用于显示 loading）
-  const [operatingId, setOperatingId] = useState(null);
+const KindBadge = ({ label, tone = 'purple' }) => {
+  const palette = {
+    purple: 'bg-purple-100 text-purple-700',
+    emerald: 'bg-emerald-100 text-emerald-700',
+    amber: 'bg-amber-100 text-amber-700',
+    slate: 'bg-slate-100 text-slate-700',
+    rose: 'bg-rose-100 text-rose-700',
+  };
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${palette[tone] || palette.slate}`}>
+      {label}
+    </span>
+  );
+};
 
-  // 获取记忆列表
-  const fetchEntries = useCallback(async () => {
+const MemoryPanel = ({ isOpen, onClose }) => {
+  const [allEntries, setAllEntries] = useState([]);
+  const [focusAreas, setFocusAreas] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('profile');
+  const [selectedDocId, setSelectedDocId] = useState('');
+  const [expandedId, setExpandedId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editContent, setEditContent] = useState('');
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [operatingId, setOperatingId] = useState(null);
+  const [traceById, setTraceById] = useState({});
+  const [traceLoadingId, setTraceLoadingId] = useState(null);
+  const [graphData, setGraphData] = useState(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [statusData, setStatusData] = useState(null);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [rebuilding, setRebuilding] = useState(false);
+
+  const fetchAllData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/memory/profile`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      // entries 来自用户画像
-      setEntries(data.entries || []);
+      const [profileRes, entriesRes, statusRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/memory/profile`),
+        fetch(`${API_BASE_URL}/api/memory/entries`),
+        fetch(`${API_BASE_URL}/api/memory/status`),
+      ]);
+      if (!profileRes.ok || !entriesRes.ok || !statusRes.ok) {
+        throw new Error(`HTTP ${profileRes.status}/${entriesRes.status}/${statusRes.status}`);
+      }
+      const profileData = await profileRes.json();
+      const entriesData = await entriesRes.json();
+      const status = await statusRes.json();
+      const nextEntries = entriesData.entries || [];
+      setFocusAreas(profileData.focus_areas || []);
+      setAllEntries(nextEntries);
+      setStatusData(status);
+
+      const docIds = [...new Set(nextEntries.map((entry) => entry.doc_id).filter(Boolean))];
+      setSelectedDocId((prev) => (prev && docIds.includes(prev) ? prev : (docIds[0] || '')));
     } catch (err) {
-      console.error('获取记忆列表失败:', err);
-      setEntries([]);
+      console.error('获取记忆数据失败:', err);
+      setFocusAreas([]);
+      setAllEntries([]);
+      setStatusData(null);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 面板打开时加载数据
-  useEffect(() => {
-    if (isOpen) {
-      fetchEntries();
-      // 重置状态
-      setExpandedId(null);
-      setEditingId(null);
-      setShowClearConfirm(false);
-    }
-  }, [isOpen, fetchEntries]);
+  const docOptions = useMemo(
+    () => [...new Set(allEntries.map((entry) => entry.doc_id).filter(Boolean))],
+    [allEntries]
+  );
 
-  // 编辑记忆条目
+  const filteredEntries = useMemo(() => {
+    const matchesTab = (entry) => {
+      if (activeTab === 'profile') return entry.memory_scope === 'profile';
+      if (activeTab === 'doc_fact') return entry.memory_kind === 'doc_fact';
+      if (activeTab === 'consolidated') return entry.memory_kind === 'consolidated';
+      return false;
+    };
+
+    return allEntries.filter((entry) => {
+      if (!matchesTab(entry)) return false;
+      if (!selectedDocId || activeTab === 'profile') return true;
+      return entry.doc_id === selectedDocId;
+    });
+  }, [activeTab, allEntries, selectedDocId]);
+
+  const tabCounts = useMemo(() => ({
+    profile: allEntries.filter((entry) => entry.memory_scope === 'profile').length,
+    doc_fact: allEntries.filter((entry) => entry.memory_kind === 'doc_fact').length,
+    consolidated: allEntries.filter((entry) => entry.memory_kind === 'consolidated').length,
+    graph: docOptions.length,
+  }), [allEntries, docOptions.length]);
+
+  const fetchTrace = useCallback(async (entryId) => {
+    if (traceById[entryId]) return;
+    setTraceLoadingId(entryId);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries/${entryId}/trace`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTraceById((prev) => ({ ...prev, [entryId]: data }));
+    } catch (err) {
+      console.error('获取记忆来源链失败:', err);
+    } finally {
+      setTraceLoadingId(null);
+    }
+  }, [traceById]);
+
+  const fetchGraph = useCallback(async (docId) => {
+    if (!docId) {
+      setGraphData(null);
+      return;
+    }
+    setGraphLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/graph/${docId}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setGraphData(await res.json());
+    } catch (err) {
+      console.error('获取图谱摘要失败:', err);
+      setGraphData(null);
+    } finally {
+      setGraphLoading(false);
+    }
+  }, []);
+
+  const handleRebuildFromEvents = useCallback(async () => {
+    setRebuilding(true);
+    setStatusMessage('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/rebuild-from-events`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setStatusMessage(`已从事件恢复：画像 ${data.profile_entries || 0} 条，文档 ${data.session_count || 0} 个，索引 ${data.indexed_entries || 0} 条。`);
+      await fetchAllData();
+      if (activeTab === 'graph' && selectedDocId) {
+        fetchGraph(selectedDocId);
+      }
+    } catch (err) {
+      console.error('从事件恢复记忆失败:', err);
+      setStatusMessage('从事件恢复失败，请检查后端日志。');
+    } finally {
+      setRebuilding(false);
+    }
+  }, [activeTab, fetchAllData, fetchGraph, selectedDocId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchAllData();
+    setExpandedId(null);
+    setEditingId(null);
+    setTraceById({});
+    setGraphData(null);
+    setShowClearConfirm(false);
+    setStatusMessage('');
+  }, [isOpen, fetchAllData]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'graph') return;
+    fetchGraph(selectedDocId);
+  }, [isOpen, activeTab, selectedDocId, fetchGraph]);
+
   const handleEdit = (entry) => {
     setEditingId(entry.id);
     setEditContent(entry.content);
     setExpandedId(entry.id);
   };
 
-  // 保存编辑
   const handleSave = async (entryId) => {
     setOperatingId(entryId);
     try {
@@ -104,10 +234,20 @@ const MemoryPanel = ({ isOpen, onClose }) => {
         body: JSON.stringify({ content: editContent }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // 更新本地状态
-      setEntries((prev) =>
-        prev.map((e) => (e.id === entryId ? { ...e, content: editContent } : e))
-      );
+      const updated = await res.json();
+      setAllEntries((prev) => prev.map((entry) => (
+        entry.id === entryId ? { ...entry, ...updated } : entry
+      )));
+      setTraceById((prev) => {
+        if (!prev[entryId]) return prev;
+        return {
+          ...prev,
+          [entryId]: {
+            ...prev[entryId],
+            entry: { ...prev[entryId].entry, ...updated },
+          },
+        };
+      });
       setEditingId(null);
     } catch (err) {
       console.error('编辑记忆失败:', err);
@@ -116,7 +256,6 @@ const MemoryPanel = ({ isOpen, onClose }) => {
     }
   };
 
-  // 删除单条记忆
   const handleDelete = async (entryId) => {
     if (!confirm('确定要删除这条记忆吗？')) return;
     setOperatingId(entryId);
@@ -125,7 +264,12 @@ const MemoryPanel = ({ isOpen, onClose }) => {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setEntries((prev) => prev.filter((e) => e.id !== entryId));
+      setAllEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+      setTraceById((prev) => {
+        const next = { ...prev };
+        delete next[entryId];
+        return next;
+      });
       if (expandedId === entryId) setExpandedId(null);
       if (editingId === entryId) setEditingId(null);
     } catch (err) {
@@ -135,27 +279,25 @@ const MemoryPanel = ({ isOpen, onClose }) => {
     }
   };
 
-  // 清空所有记忆
   const handleClearAll = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/api/memory/all`, {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setEntries([]);
+      setAllEntries([]);
+      setFocusAreas([]);
       setExpandedId(null);
       setEditingId(null);
+      setTraceById({});
+      setGraphData(null);
+      setStatusMessage('');
+      await fetchAllData();
     } catch (err) {
       console.error('清空记忆失败:', err);
     } finally {
       setShowClearConfirm(false);
     }
-  };
-
-  // 切换展开/收起
-  const toggleExpand = (entryId) => {
-    if (editingId === entryId) return; // 编辑中不允许收起
-    setExpandedId((prev) => (prev === entryId ? null : entryId));
   };
 
   if (!isOpen) return null;
@@ -166,166 +308,313 @@ const MemoryPanel = ({ isOpen, onClose }) => {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
         onClick={onClose}
       >
         <motion.div
-          initial={{ scale: 0.9, opacity: 0 }}
+          initial={{ scale: 0.92, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.9, opacity: 0 }}
-          transition={{ type: 'spring', damping: 20 }}
-          className="soft-panel rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto"
+          exit={{ scale: 0.92, opacity: 0 }}
+          transition={{ type: 'spring', damping: 22 }}
+          className="soft-panel max-h-[90vh] w-full max-w-4xl overflow-auto rounded-2xl shadow-2xl"
           onClick={(e) => e.stopPropagation()}
         >
-          {/* 头部 */}
-          <div className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-gray-100 p-6 flex items-center justify-between z-10">
+          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-100 bg-white/90 p-6 backdrop-blur-md">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-600 rounded-xl flex items-center justify-center">
-                <Brain className="w-5 h-5 text-white" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-600">
+                <Brain className="h-5 w-5 text-white" />
               </div>
               <div>
                 <h2 className="text-2xl font-bold">记忆管理</h2>
-                <p className="text-sm text-gray-500">
-                  共 {entries.length} 条记忆
-                </p>
+                <p className="text-sm text-gray-500">当前共 {allEntries.length} 条记忆</p>
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="p-2 hover:bg-black/5 rounded-full transition-colors"
-            >
-              <X className="w-6 h-6" />
+            <button onClick={onClose} className="rounded-full p-2 transition-colors hover:bg-black/5">
+              <X className="h-6 w-6" />
             </button>
           </div>
 
-          <div className="p-6 space-y-4">
-            {/* 加载状态 */}
+          <div className="space-y-4 p-6">
+            <div className="flex flex-wrap gap-2">
+              {TAB_CONFIGS.map((tab) => {
+                const Icon = tab.icon;
+                const active = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                      active ? 'bg-purple-600 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {tab.label}
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${active ? 'bg-white/15 text-white' : 'bg-white text-gray-500'}`}>
+                      {tabCounts[tab.id]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="rounded-2xl border border-gray-100 bg-white/80 p-4 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-gray-800">存储状态</div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    当前为事件快照优先读取，旧 JSON 仅作兼容兜底。
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={fetchAllData}
+                    disabled={loading || rebuilding}
+                    className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                    刷新状态
+                  </button>
+                  <button
+                    onClick={handleRebuildFromEvents}
+                    disabled={rebuilding || !statusData?.event_log_files}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {rebuilding ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitBranch className="h-4 w-4" />}
+                    从事件恢复
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-gray-400">索引同步</div>
+                  <div className={`mt-1 text-sm font-semibold ${statusData?.rebuild_required ? 'text-rose-600' : statusData?.dirty ? 'text-amber-600' : 'text-emerald-700'}`}>
+                    {statusData?.rebuild_required ? '需要安全重建' : statusData?.dirty ? '待落盘' : '已同步'}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {statusData?.rebuild_required
+                      ? `原因：${statusData?.rebuild_reason || '索引参数变化'}`
+                      : statusData?.pending_sync ? '仍有防抖中的写入' : '当前无挂起同步'}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-gray-400">快照文件</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-800">
+                    {statusData?.profile_snapshot_exists ? '画像已就绪' : '画像未生成'}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500">文档快照 {statusData?.session_snapshot_count ?? 0} 个</div>
+                </div>
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-gray-400">事件日志</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-800">{statusData?.event_log_files ?? 0} 个文件</div>
+                  <div className="mt-1 text-xs text-gray-500">{statusData?.last_event_at ? `最后事件 ${formatTime(statusData.last_event_at)}` : '暂无事件日志'}</div>
+                </div>
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-gray-400">索引落盘</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-800">{statusData?.last_sync_at ? formatTime(statusData.last_sync_at) : '尚未落盘'}</div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    重建 {statusData?.last_reindex_at ? formatTime(statusData.last_reindex_at) : '暂无'}
+                    {statusData?.last_reindex_reason ? ` / ${statusData.last_reindex_reason}` : ''}
+                  </div>
+                </div>
+              </div>
+
+              {statusMessage && (
+                <div className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                  {statusMessage}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-100 bg-gray-50/70 p-3">
+              <div className="text-sm text-gray-600">
+                关注领域：
+                {focusAreas.length > 0 ? (
+                  <span className="ml-2 inline-flex flex-wrap gap-1.5">
+                    {focusAreas.slice(0, 6).map((area) => <KindBadge key={area} label={area} tone="emerald" />)}
+                  </span>
+                ) : (
+                  <span className="ml-2 text-gray-400">暂无</span>
+                )}
+              </div>
+              {activeTab !== 'profile' && docOptions.length > 0 && (
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-sm text-gray-500">文档</span>
+                  <select
+                    value={selectedDocId}
+                    onChange={(e) => setSelectedDocId(e.target.value)}
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm outline-none"
+                  >
+                    <option value="">全部文档</option>
+                    {docOptions.map((docId) => (
+                      <option key={docId} value={docId}>{docId}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
             {loading && (
               <div className="flex items-center justify-center py-12 text-gray-400">
-                <Loader2 className="w-6 h-6 animate-spin mr-2" />
+                <Loader2 className="mr-2 h-6 w-6 animate-spin" />
                 <span>加载中...</span>
               </div>
             )}
 
-            {/* 空状态 */}
-            {!loading && entries.length === 0 && (
-              <div className="text-center py-12 text-gray-400">
-                <Brain className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                <p>暂无记忆条目</p>
-                <p className="text-sm mt-1">对话中点击"记住这个"或点赞即可保存记忆</p>
+            {!loading && activeTab === 'graph' && (
+              <div className="space-y-4">
+                {graphLoading && (
+                  <div className="flex items-center justify-center py-10 text-gray-400">
+                    <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+                    <span>图谱摘要生成中...</span>
+                  </div>
+                )}
+                {!graphLoading && !selectedDocId && (
+                  <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center text-sm text-gray-400">
+                    暂无可用于图谱摘要的文档记忆
+                  </div>
+                )}
+                {!graphLoading && selectedDocId && graphData && (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-xl border border-gray-100 bg-white/70 p-4">
+                        <div className="text-xs uppercase tracking-wider text-gray-400">文档</div>
+                        <div className="mt-1 text-sm font-semibold text-gray-800">{selectedDocId}</div>
+                      </div>
+                      <div className="rounded-xl border border-gray-100 bg-white/70 p-4">
+                        <div className="text-xs uppercase tracking-wider text-gray-400">节点数</div>
+                        <div className="mt-1 text-sm font-semibold text-gray-800">{graphData.node_count}</div>
+                      </div>
+                      <div className="rounded-xl border border-gray-100 bg-white/70 p-4">
+                        <div className="text-xs uppercase tracking-wider text-gray-400">边数</div>
+                        <div className="mt-1 text-sm font-semibold text-gray-800">{graphData.edge_count}</div>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-gray-100 bg-white/70 p-4">
+                      <div className="mb-3 text-sm font-semibold text-gray-800">节点预览</div>
+                      {graphData.nodes && graphData.nodes.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                          {graphData.nodes.map((node) => (
+                            <KindBadge key={node.id} label={`${node.type}: ${node.label}`} tone={node.type === 'figure' ? 'amber' : node.type === 'table' ? 'rose' : 'purple'} />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-400">暂无节点</div>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
-            {/* 记忆列表 */}
-            {!loading && entries.length > 0 && (
-              <div className="space-y-2">
-                {entries.map((entry) => {
+            {!loading && activeTab !== 'graph' && filteredEntries.length === 0 && (
+              <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center text-gray-400">
+                <Brain className="mx-auto mb-3 h-12 w-12 opacity-30" />
+                <p>当前视图暂无记忆</p>
+              </div>
+            )}
+
+            {!loading && activeTab !== 'graph' && filteredEntries.length > 0 && (
+              <div className="space-y-3">
+                {filteredEntries.map((entry) => {
                   const isExpanded = expandedId === entry.id;
                   const isEditing = editingId === entry.id;
                   const isOperating = operatingId === entry.id;
-
+                  const trace = traceById[entry.id];
                   return (
-                    <div
-                      key={entry.id}
-                      className="soft-card rounded-xl p-4 transition-all hover:shadow-md"
-                    >
-                      {/* 条目头部：摘要 + 标签 + 时间 */}
-                      <div
-                        className="flex items-start gap-3 cursor-pointer"
-                        onClick={() => toggleExpand(entry.id)}
-                      >
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            {/* 来源类型标签 */}
-                            <span
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${SOURCE_TYPE_COLORS[entry.source_type] || 'bg-gray-100 text-gray-600'}`}
-                            >
-                              <Tag className="w-3 h-3" />
-                              {SOURCE_TYPE_LABELS[entry.source_type] || entry.source_type}
-                            </span>
-                            {/* 创建时间 */}
+                    <div key={entry.id} className="rounded-xl border border-gray-100 bg-white/70 p-4 shadow-sm transition-all hover:shadow-md">
+                      <div className="flex cursor-pointer items-start gap-3" onClick={() => setExpandedId((prev) => (prev === entry.id ? null : entry.id))}>
+                        <div className="min-w-0 flex-1">
+                          <div className="mb-1 flex flex-wrap items-center gap-2">
+                            <KindBadge label={MEMORY_KIND_LABELS[entry.memory_kind] || entry.memory_kind || '记忆'} tone={entry.memory_kind === 'consolidated' ? 'amber' : entry.memory_scope === 'profile' ? 'emerald' : 'purple'} />
+                            <KindBadge label={SOURCE_TYPE_LABELS[entry.source_type] || entry.source_type} tone="slate" />
+                            <KindBadge label={STATUS_LABELS[entry.status] || entry.status || 'active'} tone={entry.status === 'archived_raw' ? 'rose' : 'emerald'} />
+                            {entry.doc_id && <KindBadge label={entry.doc_id} tone="slate" />}
                             <span className="inline-flex items-center gap-1 text-xs text-gray-400">
-                              <Clock className="w-3 h-3" />
+                              <Clock className="h-3 w-3" />
                               {formatTime(entry.created_at)}
                             </span>
                           </div>
-                          {/* 内容摘要 */}
+                          <div className="text-sm font-semibold text-gray-800">{entry.title || '记忆条目'}</div>
                           {!isExpanded && (
-                            <p className="text-sm text-gray-700 truncate">
-                              {truncateContent(entry.content)}
-                            </p>
+                            <p className="mt-1 text-sm text-gray-600">{truncateContent(entry.summary || entry.content)}</p>
                           )}
                         </div>
-                        {/* 展开/收起图标 */}
-                        <div className="text-gray-400 mt-1">
-                          {isExpanded ? (
-                            <ChevronUp className="w-4 h-4" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4" />
-                          )}
+                        <div className="mt-1 text-gray-400">
+                          {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                         </div>
                       </div>
 
-                      {/* 展开区域：完整内容 + 操作按钮 */}
                       {isExpanded && (
-                        <div className="mt-3 pt-3 border-t border-gray-100">
+                        <div className="mt-3 border-t border-gray-100 pt-3">
                           {isEditing ? (
-                            /* 编辑模式 */
                             <div className="space-y-3">
                               <textarea
                                 value={editContent}
                                 onChange={(e) => setEditContent(e.target.value)}
-                                className="w-full px-3 py-2 soft-input rounded-lg outline-none text-sm resize-none min-h-[100px]"
+                                className="min-h-[120px] w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none"
                                 autoFocus
                               />
-                              <div className="flex gap-2 justify-end">
-                                <button
-                                  onClick={() => setEditingId(null)}
-                                  className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                                >
-                                  取消
-                                </button>
+                              <div className="flex justify-end gap-2">
+                                <button onClick={() => setEditingId(null)} className="rounded-lg px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-gray-100">取消</button>
                                 <button
                                   onClick={() => handleSave(entry.id)}
                                   disabled={isOperating}
-                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                                  className="inline-flex items-center gap-1 rounded-lg bg-purple-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-purple-700 disabled:opacity-50"
                                 >
-                                  {isOperating ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Save className="w-3.5 h-3.5" />
-                                  )}
+                                  {isOperating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                                   保存
                                 </button>
                               </div>
                             </div>
                           ) : (
-                            /* 查看模式 */
-                            <div>
-                              <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">
-                                {entry.content}
-                              </p>
-                              <div className="flex gap-2 justify-end mt-3">
+                            <>
+                              <p className="whitespace-pre-wrap break-words text-sm text-gray-700">{entry.content}</p>
+                              <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+                                <div>摘要：{entry.summary || '暂无'}</div>
+                                <div className="mt-1">作用域：{entry.memory_scope === 'profile' ? '全局画像' : '当前文档'}</div>
+                                {entry.derived_from && entry.derived_from.length > 0 && (
+                                  <div className="mt-1">来源条目：{entry.derived_from.length} 条</div>
+                                )}
+                              </div>
+                              <div className="mt-3 flex flex-wrap justify-end gap-2">
                                 <button
-                                  onClick={() => handleEdit(entry)}
-                                  disabled={isOperating}
-                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                                  onClick={() => fetchTrace(entry.id)}
+                                  disabled={traceLoadingId === entry.id}
+                                  className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-emerald-700 transition-colors hover:bg-emerald-50"
                                 >
-                                  <Edit3 className="w-3.5 h-3.5" />
+                                  {traceLoadingId === entry.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+                                  来源链
+                                </button>
+                                <button onClick={() => handleEdit(entry)} disabled={isOperating} className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-gray-100">
+                                  <Edit3 className="h-3.5 w-3.5" />
                                   编辑
                                 </button>
-                                <button
-                                  onClick={() => handleDelete(entry.id)}
-                                  disabled={isOperating}
-                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                >
-                                  {isOperating ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  )}
+                                <button onClick={() => handleDelete(entry.id)} disabled={isOperating} className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-red-600 transition-colors hover:bg-red-50">
+                                  {isOperating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                                   删除
                                 </button>
+                              </div>
+                            </>
+                          )}
+
+                          {trace && (
+                            <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50/60 p-4">
+                              <div className="mb-2 text-sm font-semibold text-emerald-800">来源链</div>
+                              <div className="space-y-2 text-xs text-gray-700">
+                                <div>Trace: {trace.trace && Object.keys(trace.trace).length > 0 ? JSON.stringify(trace.trace, null, 2) : '暂无'}</div>
+                                <div>上游来源：{trace.parents?.length || 0} 条</div>
+                                {trace.parents?.length > 0 && (
+                                  <div className="space-y-1">
+                                    {trace.parents.map((parent) => (
+                                      <div key={parent.id} className="rounded-lg bg-white/80 px-3 py-2">
+                                        <div className="font-medium text-gray-800">{parent.title || '来源记忆'}</div>
+                                        <div className="mt-1 text-gray-600">{truncateContent(parent.summary || parent.content, 120)}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div>下游派生：{trace.children?.length || 0} 条</div>
                               </div>
                             </div>
                           )}
@@ -337,14 +626,13 @@ const MemoryPanel = ({ isOpen, onClose }) => {
               </div>
             )}
 
-            {/* 清空所有记忆按钮 */}
-            {!loading && entries.length > 0 && (
-              <div className="pt-4 border-t border-gray-200">
+            {!loading && allEntries.length > 0 && activeTab !== 'graph' && (
+              <div className="border-t border-gray-200 pt-4">
                 <button
                   onClick={() => setShowClearConfirm(true)}
-                  className="w-full soft-card flex items-center justify-center gap-2 px-4 py-3 text-red-600 hover:bg-red-50/50 rounded-xl transition-all"
+                  className="soft-card flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-red-600 transition-all hover:bg-red-50/50"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <Trash2 className="h-4 w-4" />
                   <span className="font-medium">清空所有记忆</span>
                 </button>
               </div>
@@ -352,40 +640,24 @@ const MemoryPanel = ({ isOpen, onClose }) => {
           </div>
         </motion.div>
 
-        {/* 清空确认对话框 */}
         {showClearConfirm && (
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
             onClick={() => setShowClearConfirm(false)}
           >
-            <div
-              className="soft-panel rounded-2xl p-6 max-w-sm w-full"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-                  <AlertTriangle className="w-5 h-5 text-red-600" />
+            <div className="soft-panel w-full max-w-sm rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
+                  <AlertTriangle className="h-5 w-5 text-red-600" />
                 </div>
                 <h3 className="text-lg font-bold">确认清空</h3>
               </div>
-              <p className="text-sm text-gray-600 mb-6">
-                此操作将删除所有记忆条目，且无法恢复。确定要继续吗？
-              </p>
+              <p className="mb-6 text-sm text-gray-600">此操作将删除所有记忆条目，且无法恢复。确定要继续吗？</p>
               <div className="flex gap-3">
-                <button
-                  onClick={handleClearAll}
-                  className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl transition-colors font-medium"
-                >
-                  确认清空
-                </button>
-                <button
-                  onClick={() => setShowClearConfirm(false)}
-                  className="flex-1 py-3 bg-gray-200 hover:bg-gray-300 rounded-xl transition-colors font-medium"
-                >
-                  取消
-                </button>
+                <button onClick={handleClearAll} className="flex-1 rounded-xl bg-red-600 py-3 font-medium text-white transition-colors hover:bg-red-700">确认清空</button>
+                <button onClick={() => setShowClearConfirm(false)} className="flex-1 rounded-xl bg-gray-200 py-3 font-medium transition-colors hover:bg-gray-300">取消</button>
               </div>
             </div>
           </motion.div>

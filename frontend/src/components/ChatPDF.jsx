@@ -70,6 +70,49 @@ const WebSearchSourcesBadge = ({ sources }) => {
   );
 };
 
+const MEMORY_KIND_LABELS = {
+  working: '工作记忆',
+  profile: '画像',
+  doc_fact: '文档事实',
+  episodic: '对话摘要',
+  consolidated: '压缩事实',
+  graph: '图谱',
+};
+
+const MemoryHitsBadge = ({ hits, meta }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!Array.isArray(hits) || hits.length === 0) return null;
+
+  return (
+    <div className="mt-3 border-t border-gray-100 pt-2">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 text-xs text-emerald-600 hover:text-emerald-800 transition-colors font-medium"
+      >
+        <Brain className="w-3.5 h-3.5" />
+        <span>记忆命中 ({hits.length})</span>
+        {meta?.truncated && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">已截断</span>}
+        <ChevronDown className={`w-3 h-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          {hits.map((hit, i) => (
+            <div key={hit.id || `${hit.memory_kind}-${i}`} className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-2.5">
+              <div className="flex items-center gap-2 text-[11px] text-emerald-700">
+                <span className="rounded-full bg-white px-1.5 py-0.5 font-semibold">{MEMORY_KIND_LABELS[hit.memory_kind] || hit.memory_kind || '记忆'}</span>
+                {hit.memory_scope && <span>{hit.memory_scope === 'profile' ? '全局' : '当前文档'}</span>}
+                {typeof hit.score === 'number' && <span>score {hit.score.toFixed(2)}</span>}
+              </div>
+              <div className="mt-1 text-xs font-medium text-gray-800">{hit.title || '记忆条目'}</div>
+              <div className="mt-1 text-xs leading-5 text-gray-600">{hit.summary || hit.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SendIcon = () => (
   <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
@@ -255,6 +298,8 @@ const ChatPDF = () => {
 
   const documentState = useDocumentState({
     getEmbeddingConfig,
+    getChatCredentials,
+    getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
     setScreenshots: (...args) => screenshotSettersRef.current.setScreenshots?.(...args),
@@ -628,6 +673,9 @@ const ChatPDF = () => {
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
             <WebSearchSourcesBadge sources={msg.webSearchSources} />
+          )}
+          {msg.type === 'assistant' && !msg.isStreaming && msg.memoryHits && msg.memoryHits.length > 0 && (
+            <MemoryHitsBadge hits={msg.memoryHits} meta={msg.memoryMeta} />
           )}
         </div>
         {/* 证据面板 */}
@@ -1589,9 +1637,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
-
-
 
 
 

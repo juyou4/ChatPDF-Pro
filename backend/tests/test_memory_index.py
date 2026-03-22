@@ -48,6 +48,7 @@ def memory_index(index_dir, monkeypatch):
     mi = MemoryIndex(index_dir, embedding_model_id="test-model")
     # mock _embed_texts 避免加载真实模型
     monkeypatch.setattr(mi, "_embed_texts", _fake_embed_fn)
+    mi._sync_debounce_seconds = 0
     return mi
 
 
@@ -122,6 +123,13 @@ class TestMemoryIndexBasic:
         for r in results:
             assert 0 < r["similarity"] <= 1.0
 
+    def test_get_status_reflects_sync_state(self, memory_index):
+        memory_index.add_entry("id-1", "测试内容")
+        status = memory_index.get_status()
+        assert status["dirty"] is False
+        assert status["index_version"] == 1
+        assert status["rebuild_required"] is False
+
 
 # ==================== 移除条目测试 ====================
 
@@ -183,9 +191,11 @@ class TestMemoryIndexPersistence:
         """保存后重新加载应恢复索引状态"""
         mi1 = MemoryIndex(index_dir, embedding_model_id="test-model")
         monkeypatch.setattr(mi1, "_embed_texts", _fake_embed_fn)
+        mi1._sync_debounce_seconds = 0
 
         mi1.add_entry("id-1", "记忆一")
         mi1.add_entry("id-2", "记忆二")
+        mi1.flush_sync(reason="manual")
 
         # 创建新实例并加载
         mi2 = MemoryIndex(index_dir, embedding_model_id="test-model")
@@ -210,13 +220,17 @@ class TestMemoryIndexPersistence:
         """embedding 模型不一致时加载应返回 False"""
         mi1 = MemoryIndex(index_dir, embedding_model_id="model-a")
         monkeypatch.setattr(mi1, "_embed_texts", _fake_embed_fn)
+        mi1._sync_debounce_seconds = 0
         mi1.add_entry("id-1", "记忆一")
+        mi1.flush_sync(reason="manual")
 
         mi2 = MemoryIndex(index_dir, embedding_model_id="model-b")
         success = mi2.load()
 
         assert success is False
         assert mi2.index is None
+        assert mi2.get_status()["rebuild_required"] is True
+        assert mi2.get_status()["rebuild_reason"] == "embedding_model_changed"
 
     def test_save_empty_index(self, index_dir):
         """保存空索引应正常工作"""
@@ -312,6 +326,31 @@ class TestMemoryIndexRebuild:
         assert memory_index.index is None
         assert memory_index.entry_ids == []
         assert memory_index.texts == []
+
+    def test_safe_reindex_preserves_old_index_when_embedding_fails(self, memory_index, monkeypatch):
+        """安全重建失败时应保留旧索引。"""
+        memory_index.add_entry("id-1", "旧记忆")
+        old_ids = list(memory_index.entry_ids)
+        old_texts = list(memory_index.texts)
+        old_total = memory_index.index.ntotal
+
+        def _raise_embed(*args, **kwargs):
+            raise RuntimeError("embedding unavailable")
+
+        monkeypatch.setattr(memory_index, "_embed_texts", _raise_embed)
+
+        with pytest.raises(RuntimeError):
+            memory_index.rebuild([
+                MemoryEntry(id="id-1", content="旧记忆"),
+                MemoryEntry(id="id-2", content="新记忆"),
+            ])
+
+        assert memory_index.entry_ids == old_ids
+        assert memory_index.texts == old_texts
+        assert memory_index.index.ntotal == old_total
+        status = memory_index.get_status()
+        assert status["rebuild_required"] is True
+        assert status["rebuild_reason"] == "rebuild_failed"
 
     def test_rebuild_replaces_existing(self, memory_index):
         """重建应替换现有索引"""

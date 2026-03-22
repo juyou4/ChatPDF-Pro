@@ -91,7 +91,7 @@ class MemoryFileHandler(FileSystemEventHandler):
             all_entries = self.memory_service.store.get_all_entries()
             
             # 重建向量索引
-            self.memory_service.index.rebuild(all_entries)
+            self.memory_service.index.safe_reindex(all_entries, reason="file_sync")
             
             logger.info(f"索引重建完成，共 {len(all_entries)} 条记忆")
         except Exception as e:

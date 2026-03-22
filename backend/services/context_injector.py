@@ -1,87 +1,61 @@
 """智能记忆上下文注入模块
 
-根据记忆的 memory_tier 和 tags 将记忆分组注入到 system prompt 的不同区域。
-支持 token 预算截断、记忆摘要和来源标注。
+按照记忆层级配额选择真正值得注入的记忆，避免普通 QA 噪声挤占预算。
 """
 import logging
 
 logger = logging.getLogger(__name__)
 
-# 记忆层级显示顺序（长期记忆优先）
-TIER_ORDER = ["long_term", "short_term", "working", "archived"]
+KIND_ORDER = ["working", "profile", "doc_fact", "consolidated", "graph", "episodic"]
 
-# 记忆层级 → 来源标注映射
-TIER_LABELS = {
-    "long_term": "[长期记忆]",
-    "short_term": "[文档记忆]",
+KIND_LABELS = {
     "working": "[工作记忆]",
-    "archived": "[归档记忆]",
+    "profile": "[全局画像]",
+    "doc_fact": "[文档事实]",
+    "consolidated": "[压缩事实]",
+    "graph": "[论文图谱]",
+    "episodic": "[对话摘要]",
+}
+
+DEFAULT_KIND_BUDGETS = {
+    "working": 160,
+    "profile": 120,
+    "doc_fact": 220,
+    "consolidated": 160,
+    "graph": 100,
+    "episodic": 40,
 }
 
 
 def _estimate_tokens(text: str) -> int:
-    """简单 token 估算：中文文本长度 // 2"""
+    """简单 token 估算：中文文本长度 // 2。"""
     return max(len(text) // 2, 1) if text else 0
 
 
 class ContextInjector:
-    """智能记忆上下文注入器
+    """分层记忆上下文注入器。
 
-    将记忆按 memory_tier 分组，按 importance 截断到 token 预算内，
-    格式化为 Markdown 文本注入到 system prompt 中。
+    注入顺序固定为：
+    working -> profile -> doc_fact -> consolidated -> graph -> episodic
     """
 
-    def __init__(self, token_budget: int = 800):
-        """初始化注入器
-
-        Args:
-            token_budget: 默认 token 预算，默认 800
-        """
+    def __init__(self, token_budget: int = 800, kind_budgets: dict[str, int] | None = None):
         self.token_budget = token_budget
+        self.kind_budgets = {**DEFAULT_KIND_BUDGETS, **(kind_budgets or {})}
 
-    def inject(self, system_prompt: str, memories: list[dict],
-               token_budget: int = None) -> str:
-        """将记忆按类型分组注入到 system prompt
-
-        注入策略：
-        1. 按 importance 降序截断到 token 预算内
-        2. 超过 10 条时生成摘要
-        3. 按 memory_tier 分组，长期记忆在前
-        4. 每条记忆添加来源标注
-
-        Args:
-            system_prompt: 原始 system prompt
-            memories: 记忆字典列表，每条包含 content, memory_tier, importance 等
-            token_budget: 可选的 token 预算覆盖值
-
-        Returns:
-            注入记忆后的 system prompt
-        """
+    def inject(self, system_prompt: str, memories: list[dict], token_budget: int = None) -> str:
         if not memories:
             return system_prompt
 
-        budget = token_budget if token_budget is not None else self.token_budget
-
-        # 按 importance 降序截断到 token 预算内
-        truncated = self._truncate_by_budget(memories, budget)
-
-        if not truncated:
+        selected = self.prepare_memories(memories, token_budget=token_budget)
+        if not selected:
             return system_prompt
 
-        # 超过 10 条时生成摘要
-        if len(truncated) > 10:
-            summary = self._summarize_memories(truncated)
-            return f"{system_prompt}\n\n---\n## 记忆摘要\n{summary}"
-
-        # 按 memory_tier 分组
-        grouped = self._group_memories(truncated)
-
-        # 按层级顺序格式化各分组
+        grouped = self._group_memories(selected)
         blocks = []
-        for tier in TIER_ORDER:
-            if tier in grouped and grouped[tier]:
-                block = self._format_memory_block(tier, grouped[tier])
-                blocks.append(block)
+        for kind in KIND_ORDER:
+            if kind in grouped and grouped[kind]:
+                blocks.append(self._format_memory_block(kind, grouped[kind]))
 
         if not blocks:
             return system_prompt
@@ -89,102 +63,101 @@ class ContextInjector:
         memory_text = "\n\n".join(blocks)
         return f"{system_prompt}\n\n---\n{memory_text}"
 
-    def _group_memories(self, memories: list[dict]) -> dict[str, list[dict]]:
-        """按 memory_tier 分组
-
-        Args:
-            memories: 记忆字典列表
-
-        Returns:
-            tier -> 记忆列表的映射
-        """
-        groups: dict[str, list[dict]] = {}
-        for mem in memories:
-            tier = mem.get("memory_tier", "short_term")
-            if tier not in groups:
-                groups[tier] = []
-            groups[tier].append(mem)
-        return groups
-
-    def _truncate_by_budget(self, memories: list[dict],
-                            budget: int) -> list[dict]:
-        """按 importance 降序截断到 token 预算内
-
-        优先保留 importance 最高的记忆，逐条累加 token 直到超出预算。
-
-        Args:
-            memories: 记忆字典列表
-            budget: token 预算
-
-        Returns:
-            截断后的记忆列表（按 importance 降序）
-        """
-        if budget <= 0:
+    def prepare_memories(self, memories: list[dict], token_budget: int = None) -> list[dict]:
+        """按层级预算和整体预算筛选真正要注入的记忆。"""
+        if not memories:
             return []
 
-        # 按 importance 降序排序
-        sorted_mems = sorted(
-            memories,
-            key=lambda m: m.get("importance", 0.0),
-            reverse=True,
+        total_budget = token_budget if token_budget is not None else self.token_budget
+        if total_budget <= 0:
+            return []
+
+        grouped = self._group_memories(memories)
+        selected: list[dict] = []
+        used_tokens = 0
+
+        for kind in KIND_ORDER:
+            kind_memories = grouped.get(kind, [])
+            if not kind_memories:
+                continue
+
+            remaining_total = total_budget - used_tokens
+            if remaining_total <= 0:
+                break
+
+            kind_budget = min(self.kind_budgets.get(kind, remaining_total), remaining_total)
+            picked = self._pick_by_budget(kind_memories, kind_budget)
+            picked_tokens = sum(_estimate_tokens(item.get("content", "")) for item in picked)
+            if picked_tokens <= 0:
+                continue
+            if picked_tokens > remaining_total:
+                picked = self._pick_by_budget(picked, remaining_total)
+                picked_tokens = sum(_estimate_tokens(item.get("content", "")) for item in picked)
+            if not picked:
+                continue
+
+            selected.extend(picked)
+            used_tokens += picked_tokens
+
+        return selected
+
+    def _group_memories(self, memories: list[dict]) -> dict[str, list[dict]]:
+        groups: dict[str, list[dict]] = {}
+        for mem in memories:
+            kind = mem.get("memory_kind") or self._infer_memory_kind(mem)
+            groups.setdefault(kind, []).append(mem)
+        for kind, items in groups.items():
+            items.sort(key=self._score_key, reverse=True)
+        return groups
+
+    @staticmethod
+    def _infer_memory_kind(mem: dict) -> str:
+        memory_tier = mem.get("memory_tier")
+        source_type = mem.get("source_type")
+        if memory_tier == "working":
+            return "working"
+        if source_type == "compressed":
+            return "consolidated"
+        if source_type in {"manual", "liked", "keyword"} and mem.get("memory_scope") == "profile":
+            return "profile"
+        if source_type == "llm_distilled":
+            return "doc_fact"
+        return "episodic"
+
+    @staticmethod
+    def _score_key(mem: dict) -> tuple:
+        return (
+            mem.get("score", mem.get("rrf_score", 0.0)),
+            mem.get("importance", 0.0),
+            mem.get("hit_count", 0),
         )
 
-        result = []
+    def _pick_by_budget(self, memories: list[dict], budget: int) -> list[dict]:
+        if budget <= 0:
+            return []
+        picked: list[dict] = []
         used_tokens = 0
-        for mem in sorted_mems:
+        for mem in memories:
             content = mem.get("content", "")
             tokens = _estimate_tokens(content)
             if used_tokens + tokens > budget:
-                break
-            result.append(mem)
+                continue
+            picked.append(mem)
             used_tokens += tokens
+        return picked
 
-        return result
-
-    def _summarize_memories(self, memories: list[dict]) -> str:
-        """当记忆过多时生成一句话摘要
-
-        将所有记忆内容截取前 20 字拼接为摘要。
-
-        Args:
-            memories: 记忆字典列表
-
-        Returns:
-            摘要文本
-        """
-        snippets = []
+    def _format_memory_block(self, kind: str, memories: list[dict]) -> str:
+        label = KIND_LABELS.get(kind, f"[{kind}]")
+        lines = [f"## {label}"]
         for mem in memories:
             content = mem.get("content", "").strip()
-            if content:
-                snippet = content[:20] + ("..." if len(content) > 20 else "")
-                snippets.append(snippet)
-
-        if not snippets:
-            return "无可用记忆"
-
-        return f"共 {len(memories)} 条记忆，涵盖：{'；'.join(snippets[:5])}" + (
-            f" 等 {len(snippets)} 项" if len(snippets) > 5 else ""
-        )
-
-    def _format_memory_block(self, tier: str, memories: list[dict]) -> str:
-        """格式化单个记忆分组为 Markdown 文本
-
-        每条记忆添加来源标注（如 "[长期记忆]"），输出为 Markdown 列表。
-
-        Args:
-            tier: 记忆层级
-            memories: 该层级的记忆列表
-
-        Returns:
-            格式化的 Markdown 文本
-        """
-        label = TIER_LABELS.get(tier, f"[{tier}]")
-        title = f"## {label}"
-
-        lines = [title]
-        for mem in memories:
-            content = mem.get("content", "").strip()
-            if content:
-                lines.append(f"- {label} {content}")
-
+            if not content:
+                continue
+            title = mem.get("title", "").strip()
+            source_ref = mem.get("source_ref") or {}
+            prefix = f"{title}: " if title and title not in content[: len(title) + 2] else ""
+            suffix = ""
+            if source_ref.get("question"):
+                suffix = f"（来源问题：{source_ref['question'][:40]}）"
+            lines.append(f"- {label} {prefix}{content}{suffix}")
         return "\n".join(lines)

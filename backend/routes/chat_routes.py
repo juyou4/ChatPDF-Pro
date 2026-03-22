@@ -318,21 +318,21 @@ def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = N
         return ""
 
 
-def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = None) -> list[dict]:
+def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = None, chat_history: list[dict] | None = None) -> list[dict]:
     """检索原始记忆列表（供 ContextInjector 使用）"""
     if memory_service is None:
         return []
     try:
         filter_by_doc = bool(doc_id)
         return memory_service.retrieve_memories_raw(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc
+            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc, chat_history=chat_history
         )
     except Exception as e:
         logger.error(f"记忆原始检索失败: {e}")
         return []
 
 
-def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: list[dict] = None) -> str:
+def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: list[dict] = None) -> tuple[str, list[dict], dict]:
     """智能注入记忆上下文：优先使用 ContextInjector，失败时回退到简单注入
 
     Args:
@@ -341,16 +341,42 @@ def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: 
         raw_memories: 原始记忆列表（供 ContextInjector 使用）
 
     Returns:
-        注入记忆后的 system prompt
+        (注入记忆后的 prompt, 实际命中的记忆列表, 注入元数据)
     """
     # 优先使用 ContextInjector
     if raw_memories and memory_service and hasattr(memory_service, 'context_injector') and memory_service.context_injector:
         try:
-            return memory_service.context_injector.inject(system_prompt, raw_memories)
+            injector = memory_service.context_injector
+            selected_memories = injector.prepare_memories(raw_memories)
+            return (
+                injector.inject(system_prompt, selected_memories),
+                selected_memories,
+                {
+                    "enabled": True,
+                    "strategy": "context_injector",
+                    "retrieved_count": len(raw_memories),
+                    "selected_count": len(selected_memories),
+                    "truncated": len(selected_memories) < len(raw_memories),
+                    "token_budget": getattr(injector, "token_budget", None),
+                    "selected_kinds": [mem.get("memory_kind", "episodic") for mem in selected_memories],
+                },
+            )
         except Exception as e:
             logger.warning(f"ContextInjector 注入失败，回退到简单注入: {e}")
     # 降级为原有简单注入
-    return _inject_memory_context(system_prompt, memory_context)
+    return (
+        _inject_memory_context(system_prompt, memory_context),
+        list(raw_memories or []),
+        {
+            "enabled": bool(memory_context or raw_memories),
+            "strategy": "simple",
+            "retrieved_count": len(raw_memories or []),
+            "selected_count": len(raw_memories or []),
+            "truncated": False,
+            "token_budget": None,
+            "selected_kinds": [mem.get("memory_kind", "episodic") for mem in (raw_memories or [])],
+        },
+    )
 
 
 def _async_memory_write(svc, request):
@@ -831,12 +857,22 @@ async def chat_with_pdf(request: ChatRequest):
         _maybe_flush_memory(request)
     memory_context = ""
     raw_memories = []
+    memory_hits: list[dict] = []
+    memory_meta: dict = {
+        "enabled": use_memory,
+        "strategy": None,
+        "retrieved_count": 0,
+        "selected_count": 0,
+        "truncated": False,
+        "token_budget": None,
+        "selected_kinds": [],
+    }
     if use_memory:
         memory_context = _retrieve_memory_context(
             request.question, api_key=request.api_key, doc_id=request.doc_id
         )
         raw_memories = _retrieve_raw_memories(
-            request.question, api_key=request.api_key, doc_id=request.doc_id
+            request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
         )
 
     # 支持多图逻辑
@@ -858,7 +894,7 @@ async def chat_with_pdf(request: ChatRequest):
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 学术准确、表达清晰。
 6. {answer_style_instruction}"""
-        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
             mime = _detect_mime_type(img_b64)
@@ -995,7 +1031,7 @@ async def chat_with_pdf(request: ChatRequest):
         if citations:
             citation_prompt = build_structured_citation_prompt(citations)
             if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
-        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = request.question
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1053,6 +1089,8 @@ async def chat_with_pdf(request: ChatRequest):
             "used_model": response.get("_used_model"), "fallback_used": response.get("_fallback_used", False),
             "retrieval_meta": {k: v for k, v in retrieval_meta.items() if not k.startswith("_")},
             "web_search_sources": web_search_sources,
+            "memory_hits": memory_hits,
+            "memory_meta": memory_meta,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI调用失败: {str(e)}")
@@ -1075,12 +1113,22 @@ async def chat_with_pdf_stream(request: ChatRequest):
     use_memory = _should_use_memory(request)
     memory_context = ""
     raw_memories = []
+    memory_hits: list[dict] = []
+    memory_meta: dict = {
+        "enabled": use_memory,
+        "strategy": None,
+        "retrieved_count": 0,
+        "selected_count": 0,
+        "truncated": False,
+        "token_budget": None,
+        "selected_kinds": [],
+    }
     if use_memory:
         memory_context = _retrieve_memory_context(
             request.question, api_key=request.api_key, doc_id=request.doc_id
         )
         raw_memories = _retrieve_raw_memories(
-            request.question, api_key=request.api_key, doc_id=request.doc_id
+            request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
         )
 
     image_list = (request.image_base64_list or [])
@@ -1101,7 +1149,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 学术准确、表达清晰。
 6. {answer_style_instruction}"""
-        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
         for img_b64 in image_list:
             mime = _detect_mime_type(img_b64)
@@ -1264,7 +1312,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
         if citations:
             citation_prompt = build_structured_citation_prompt(citations)
             if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
-        system_prompt = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = request.question
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1404,6 +1452,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used'),
                         'retrieval_meta': send_meta,
                         'web_search_sources': web_search_sources,
+                        'memory_hits': memory_hits,
+                        'memory_meta': memory_meta,
                     }
                     if qa_score_val is not None:
                         chunk_data['qa_score'] = qa_score_val

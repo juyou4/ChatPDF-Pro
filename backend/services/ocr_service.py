@@ -33,6 +33,7 @@ class OCRResult:
     failed_pages: List[int] = field(default_factory=list)     # 失败页码列表
     errors: Dict[int, str] = field(default_factory=dict)      # 页码 -> 错误信息
     backend: str = ""                                         # 使用的后端名称
+    layout_figures: List[Dict] = field(default_factory=list)  # MinerU 版面分析提取的 figure 数据
 
 
 class BaseOCRAdapter(ABC):
@@ -827,9 +828,9 @@ class MinerUAdapter(WorkerOCRAdapter):
                 full_zip_url = self._poll_result(client, batch_id)
                 logger.info("MinerU OCR: 处理完成，开始下载结果...")
 
-                # 步骤 3：下载 ZIP 并解压提取 full.md
-                markdown_content = self._download_and_extract(client, full_zip_url)
-                logger.info("MinerU OCR: 结果下载并解压成功")
+                # 步骤 3：下载 ZIP 并解压提取 full.md + 版面分析数据
+                markdown_content, layout_figures = self._download_and_extract(client, full_zip_url)
+                logger.info(f"MinerU OCR: 结果下载并解压成功，提取到 {len(layout_figures)} 个 figure 区域")
 
                 # 步骤 4：将 Markdown 转换为纯文本
                 text = _markdown_to_text(markdown_content)
@@ -850,6 +851,7 @@ class MinerUAdapter(WorkerOCRAdapter):
                     failed_pages=[],
                     errors={},
                     backend=self.name,
+                    layout_figures=layout_figures,
                 )
 
         except httpx.TimeoutException as e:
@@ -959,15 +961,15 @@ class MinerUAdapter(WorkerOCRAdapter):
             f"MinerU 处理超时: 已轮询 {max_attempts} 次（共 {max_attempts * poll_interval} 秒）"
         )
 
-    def _download_and_extract(self, client, zip_url: str) -> str:
+    def _download_and_extract(self, client, zip_url: str) -> Tuple[str, List[Dict]]:
         """
-        下载 ZIP 文件并解压提取 full.md 内容
+        下载 ZIP 文件并解压提取 full.md 内容和 middle.json 版面分析数据
 
         参数:
             client: httpx.Client 实例
             zip_url: ZIP 文件下载地址
         返回:
-            full.md 文件的文本内容
+            (full.md 文本内容, 版面分析提取的 figure 列表)
         异常:
             RuntimeError: 下载失败、解压失败或未找到 full.md 时抛出
         """
@@ -980,10 +982,15 @@ class MinerUAdapter(WorkerOCRAdapter):
             with zipfile.ZipFile(zip_data, "r") as zf:
                 # 查找 full.md 文件
                 full_md_path = None
+                middle_json_path = None
+                content_list_path = None
                 for name in zf.namelist():
                     if name.endswith("full.md"):
                         full_md_path = name
-                        break
+                    elif name.endswith("middle.json"):
+                        middle_json_path = name
+                    elif name.endswith("content_list.json"):
+                        content_list_path = name
 
                 if full_md_path is None:
                     raise RuntimeError(
@@ -992,9 +999,140 @@ class MinerUAdapter(WorkerOCRAdapter):
                     )
 
                 content = zf.read(full_md_path).decode("utf-8")
-                return content
+
+                # 提取版面分析中的 figure 数据
+                layout_figures = []
+                layout_json_path = middle_json_path or content_list_path
+                if layout_json_path:
+                    try:
+                        layout_raw = zf.read(layout_json_path).decode("utf-8")
+                        layout_figures = self._parse_layout_figures(layout_raw)
+                        logger.info(
+                            f"MinerU: 从 {layout_json_path} 提取到 "
+                            f"{len(layout_figures)} 个 figure 区域"
+                        )
+                    except Exception as e:
+                        logger.warning(f"MinerU: 解析版面 figure 数据失败: {e}")
+                else:
+                    logger.info(
+                        f"MinerU ZIP 中未找到 middle.json 或 content_list.json，"
+                        f"跳过版面分析。ZIP 包含: {zf.namelist()}"
+                    )
+
+                return content, layout_figures
         except zipfile.BadZipFile as e:
             raise RuntimeError(f"MinerU ZIP 文件解压失败: {e}")
+
+    @staticmethod
+    def _parse_layout_figures(layout_json_str: str) -> List[Dict]:
+        """
+        从 MinerU middle.json / content_list.json 中提取 figure 区域
+
+        MinerU middle.json 格式示例:
+        [
+            {
+                "type": "image",
+                "bbox": [x0, y0, x1, y1],
+                "page_idx": 0,
+                "img_caption": "Figure 1. ...",
+                ...
+            },
+            ...
+        ]
+
+        也兼容 pdf_info_dict 格式:
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "preproc_blocks": [
+                        {"type": "image", "bbox": [...], ...}
+                    ]
+                }
+            ]
+        }
+
+        返回标准化的 figure 列表，每项包含:
+        - page_idx (0-indexed)
+        - bbox [x0, y0, x1, y1] (PDF points)
+        - caption
+        - figure_index (如 "Figure 1")
+        - confidence
+        """
+        import re as _re
+
+        data = json.loads(layout_json_str)
+        figures = []
+
+        # 模式 1: content_list.json — 顶层列表
+        if isinstance(data, list):
+            for item in data:
+                item_type = item.get("type", "")
+                if item_type in ("image", "figure"):
+                    fig = MinerUAdapter._normalize_layout_item(item)
+                    if fig:
+                        figures.append(fig)
+            return figures
+
+        # 模式 2: middle.json — pdf_info_dict 格式
+        pdf_info = data.get("pdf_info", [])
+        if isinstance(pdf_info, list):
+            for page_info in pdf_info:
+                page_idx = page_info.get("page_idx", 0)
+                for block in page_info.get("preproc_blocks", []):
+                    block_type = block.get("type", "")
+                    if block_type in ("image", "figure"):
+                        block["page_idx"] = page_idx
+                        fig = MinerUAdapter._normalize_layout_item(block)
+                        if fig:
+                            figures.append(fig)
+
+        return figures
+
+    @staticmethod
+    def _normalize_layout_item(item: dict) -> Optional[Dict]:
+        """将 MinerU 版面分析的单个 item 标准化为 figure dict"""
+        import re as _re
+
+        bbox = item.get("bbox") or item.get("img_body_bbox")
+        if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+
+        page_idx = item.get("page_idx", 0)
+        if isinstance(page_idx, str):
+            try:
+                page_idx = int(page_idx)
+            except (ValueError, TypeError):
+                page_idx = 0
+
+        # 提取 caption
+        caption = (
+            item.get("img_caption", "")
+            or item.get("caption", "")
+            or item.get("text", "")
+            or ""
+        )
+
+        # 从 caption 提取 figure index
+        figure_index = None
+        for pattern in [
+            r'(Figure\s+\d+[a-zA-Z]?)',
+            r'(Fig\.?\s+\d+[a-zA-Z]?)',
+            r'(图\s*\d+[a-zA-Z]?)',
+        ]:
+            m = _re.search(pattern, caption, _re.IGNORECASE)
+            if m:
+                figure_index = m.group(1)
+                break
+
+        return {
+            "page": page_idx,
+            "bbox": [float(v) for v in bbox],
+            "caption": caption.strip(),
+            "label": figure_index or "",
+            "figure_id": f"mineru_fig_p{page_idx}_{id(item) % 10000}",
+            "confidence": item.get("score", 0.8),
+        }
 
 
 # ============================================================

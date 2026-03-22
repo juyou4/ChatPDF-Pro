@@ -7,6 +7,7 @@
 """
 
 import logging
+import re
 from collections import OrderedDict
 from typing import Optional
 
@@ -32,6 +33,21 @@ class ActivePool:
         """
         self.capacity = max(1, capacity)  # 至少容纳 1 条
         self._pool: OrderedDict[str, MemoryEntry] = OrderedDict()
+
+    @staticmethod
+    def is_cacheable(entry: MemoryEntry) -> bool:
+        """仅缓存高价值长期记忆，避免普通 QA 摘要挤占热缓存。"""
+        if not entry or getattr(entry, "status", "active") == "archived_raw":
+            return False
+        return getattr(entry, "memory_kind", "") in {"profile", "doc_fact", "consolidated"}
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        return [token for token in re.findall(r"[\w\u4e00-\u9fff]+", (text or "").lower()) if token]
+
+    def entries(self) -> list[MemoryEntry]:
+        """返回当前池中的条目快照，按最近使用优先。"""
+        return list(reversed(list(self._pool.values())))
 
     def get(self, entry_id: str) -> Optional[MemoryEntry]:
         """获取记忆条目（命中时移到最近使用位置）
@@ -63,6 +79,8 @@ class ActivePool:
         Returns:
             被淘汰的 MemoryEntry，如果没有淘汰则返回 None
         """
+        if not self.is_cacheable(entry):
+            return None
         evicted = None
 
         # 如果已存在，先移除旧条目（不算淘汰）
@@ -98,6 +116,65 @@ class ActivePool:
                 results.append(self._pool[eid])
         return results
 
+    def query(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        doc_id: str | None = None,
+        filter_by_doc: bool = False,
+        filter_tags: list[str] | None = None,
+        allowed_ids: set[str] | None = None,
+    ) -> list[dict]:
+        """在热缓存中执行轻量关键词检索，并把命中条目标记为最近使用。"""
+        query_tokens = self._tokenize(query)
+        if not query_tokens:
+            return []
+
+        filter_set = set(filter_tags or [])
+        scored: list[tuple[float, str, MemoryEntry]] = []
+
+        for entry_id, entry in list(self._pool.items()):
+            if allowed_ids is not None and entry_id not in allowed_ids:
+                continue
+            if filter_by_doc and doc_id and entry.doc_id not in (None, doc_id):
+                continue
+            if filter_set and not filter_set.intersection(entry.tags or []):
+                continue
+
+            haystack_parts = [
+                entry.title or "",
+                entry.summary or "",
+                entry.content or "",
+                " ".join(entry.tags or []),
+            ]
+            haystack = " ".join(haystack_parts).lower()
+            overlap = 0.0
+            exact_boost = 0.0
+            for token in query_tokens:
+                if token not in haystack:
+                    continue
+                overlap += min(len(token), 8)
+                if (entry.title or "").lower().find(token) >= 0:
+                    exact_boost += 1.0
+            if overlap <= 0:
+                continue
+
+            score = overlap + exact_boost + min(0.5, entry.importance) + min(1.0, entry.hit_count * 0.05)
+            scored.append((score, entry_id, entry))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        results: list[dict] = []
+        for score, entry_id, entry in scored[:top_k]:
+            self.get(entry_id)
+            results.append({
+                "chunk": entry.content,
+                "entry_id": entry.id,
+                "similarity": score,
+                "from_active_pool": True,
+            })
+        return results
+
     def preload(self, entries: list[MemoryEntry]) -> None:
         """预加载记忆条目（服务启动时调用）
 
@@ -108,6 +185,8 @@ class ActivePool:
             entries: 要预加载的记忆条目列表（应按 last_hit_at 降序排列）
         """
         for entry in entries:
+            if not self.is_cacheable(entry):
+                continue
             if len(self._pool) >= self.capacity and entry.id not in self._pool:
                 # 池已满且不是更新已有条目，跳过
                 break

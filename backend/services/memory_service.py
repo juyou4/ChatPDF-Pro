@@ -13,9 +13,10 @@
 import asyncio
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from services.keyword_extractor import KeywordExtractor
 from services.memory_index import MemoryIndex
@@ -102,7 +103,9 @@ class MemoryService:
         self.retriever = MemoryRetriever(self.store, self.index, active_pool=self.active_pool)
 
         # 尝试加载已有的向量索引
-        self.index.load()
+        loaded = self.index.load()
+        if not loaded:
+            self._safe_execute("MemoryIndex.recover", self._recover_index_from_store)
 
         # 预加载活跃记忆池
         self._safe_execute("ActivePool.preload", self._preload_active_pool)
@@ -145,6 +148,214 @@ class MemoryService:
         except Exception as e:
             logger.warning(f"[ActivePool] 预加载失败: {e}")
 
+    def _recover_index_from_store(self) -> None:
+        """当索引缺失或损坏时，从存储快照/事件回放结果重建索引。"""
+        entries = [
+            entry for entry in self.store.get_all_entries()
+            if entry.status != "archived_raw"
+        ]
+        if not entries:
+            logger.info("[MemoryIndex] 无可恢复条目，跳过索引重建")
+            return
+        self.index.safe_reindex(entries, reason="recover")
+        self.index.flush_sync(reason="manual")
+        logger.info(f"[MemoryIndex] 已从存储恢复并重建索引，共 {len(entries)} 条")
+
+    def _page_in_active_pool(self, entry: MemoryEntry | None) -> None:
+        """将可缓存记忆放入热池，供后续检索快路径复用。"""
+        if not self.active_pool or entry is None:
+            return
+        try:
+            self.active_pool.put(entry)
+        except Exception as exc:
+            logger.debug(f"Active_Pool Page-In 失败: {exc}")
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 180) -> str:
+        normalized = " ".join((text or "").split())
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit] + "..."
+
+    def _build_memory_title(self, entry: MemoryEntry) -> str:
+        if entry.title:
+            return entry.title
+        if entry.memory_kind == "consolidated":
+            return "压缩记忆"
+        if entry.memory_kind == "doc_fact":
+            return "文档事实"
+        if entry.memory_scope == "profile":
+            return "用户画像"
+        first_line = (entry.content or "").splitlines()[0].strip()
+        return first_line[:60] if first_line else "记忆条目"
+
+    def _build_memory_hit(
+        self,
+        entry: MemoryEntry,
+        *,
+        score: float = 0.0,
+        query: str = "",
+        content_override: str = "",
+    ) -> dict[str, Any]:
+        trace = dict(entry.trace or {})
+        if query and "query" not in trace:
+            trace["query"] = query
+        summary = entry.summary or self._truncate_text(content_override or entry.content)
+        return {
+            "id": entry.id,
+            "entry_id": entry.id,
+            "content": content_override or entry.content,
+            "source_type": entry.source_type,
+            "doc_id": entry.doc_id,
+            "score": score,
+            "rrf_score": score,
+            "importance": entry.importance,
+            "memory_tier": entry.memory_tier,
+            "memory_kind": entry.memory_kind,
+            "memory_scope": entry.memory_scope,
+            "status": entry.status,
+            "title": self._build_memory_title(entry),
+            "summary": summary,
+            "created_at": entry.created_at,
+            "tags": list(entry.tags or []),
+            "source_ref": dict(entry.source_ref or {}),
+            "derived_from": list(entry.derived_from or []),
+            "trace": trace,
+            "last_used_query": entry.last_used_query or query or "",
+        }
+
+    def _serialize_entry(self, entry: MemoryEntry, include_content: bool = True) -> dict[str, Any]:
+        payload = self._build_memory_hit(entry, score=0.0, query=entry.last_used_query or "")
+        if not include_content:
+            payload.pop("content", None)
+        return payload
+
+    def _entry_sort_key(self, entry: MemoryEntry) -> tuple:
+        return (entry.created_at or "", entry.id)
+
+    def _get_entry_map(self) -> dict[str, MemoryEntry]:
+        return {entry.id: entry for entry in self.store.get_all_entries()}
+
+    def _find_entry(self, entry_id: str) -> Optional[MemoryEntry]:
+        return self._get_entry_map().get(entry_id)
+
+    def _build_working_memory_hits(self, chat_history: list[dict] | None, doc_id: str | None = None) -> list[dict[str, Any]]:
+        """将最近两轮对话转成工作记忆命中。"""
+        if not chat_history:
+            return []
+        working_messages = self.get_working_memory(chat_history, window_size=2)
+        if not working_messages:
+            return []
+
+        rounds: list[tuple[dict, dict | None]] = []
+        idx = 0
+        while idx < len(working_messages):
+            user_msg = working_messages[idx]
+            assistant_msg = working_messages[idx + 1] if idx + 1 < len(working_messages) else None
+            if user_msg.get("role") == "user":
+                rounds.append((user_msg, assistant_msg if assistant_msg and assistant_msg.get("role") == "assistant" else None))
+            idx += 2
+
+        hits: list[dict[str, Any]] = []
+        for round_idx, (user_msg, assistant_msg) in enumerate(rounds[-2:]):
+            question = (user_msg or {}).get("content", "").strip()
+            answer = (assistant_msg or {}).get("content", "").strip()
+            content = f"Q: {question}\nA: {answer}".strip()
+            if not content:
+                continue
+            synthetic = MemoryEntry(
+                id=f"working-{round_idx}-{abs(hash(content))}",
+                content=content,
+                source_type="working_memory",
+                doc_id=doc_id,
+                importance=1.0,
+                memory_tier="working",
+                memory_kind="working",
+                memory_scope="document" if doc_id else "profile",
+                title=question[:60] or "最近对话",
+                summary=self._truncate_text(content),
+                source_ref={"question": question[:200]} if question else {},
+                trace={"kind": "working_memory", "round": round_idx},
+            )
+            hits.append(self._build_memory_hit(synthetic, score=1.0, query=question))
+        return hits
+
+    @staticmethod
+    def _detect_graph_memory_needed(query: str) -> bool:
+        lowered = (query or "").lower()
+        keywords = (
+            "图", "figure", "fig", "表", "table", "方法", "framework", "pipeline",
+            "dataset", "数据集", "metric", "指标", "结论", "compare", "对比",
+        )
+        return any(keyword in lowered for keyword in keywords)
+
+    def _build_graph_memory_hits(self, doc_id: str | None, query: str) -> list[dict[str, Any]]:
+        """根据论文图谱摘要生成轻量 graph memory 命中。"""
+        if not doc_id or not self._detect_graph_memory_needed(query):
+            return []
+
+        graph = self.get_graph_summary(doc_id)
+        nodes = graph.get("nodes", [])
+        edges = graph.get("edges", [])
+        if not nodes:
+            return []
+
+        lowered_query = (query or "").lower()
+        matched_nodes = [
+            node for node in nodes
+            if node.get("label", "").lower() in lowered_query or any(token and token in lowered_query for token in node.get("label", "").lower().split())
+        ]
+        if not matched_nodes:
+            matched_nodes = nodes[:3]
+
+        matched_ids = {node["id"] for node in matched_nodes}
+        matched_edges = [
+            edge for edge in edges
+            if edge.get("source") in matched_ids or edge.get("target") in matched_ids
+        ][:4]
+
+        summary_lines = [
+            "图谱节点：" + "；".join(f"{node['type']}={node['label']}" for node in matched_nodes[:4]),
+        ]
+        if matched_edges:
+            summary_lines.append(
+                "图谱关系：" + "；".join(
+                    f"{edge['source']} -{edge['type']}-> {edge['target']}" for edge in matched_edges
+                )
+            )
+        content = "\n".join(summary_lines)
+        synthetic = MemoryEntry(
+            id=f"graph-{doc_id}-{abs(hash(content))}",
+            content=content,
+            source_type="graph_summary",
+            doc_id=doc_id,
+            importance=0.8,
+            memory_tier="long_term",
+            memory_kind="graph",
+            memory_scope="document",
+            title="论文图谱摘要",
+            summary=self._truncate_text(content),
+            trace={"kind": "graph_summary", "doc_id": doc_id},
+        )
+        hit = self._build_memory_hit(synthetic, score=0.75, query=query)
+        hit["graph"] = {
+            "matched_nodes": matched_nodes,
+            "matched_edges": matched_edges,
+        }
+        return [hit]
+
+    @staticmethod
+    def _dedupe_memory_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for hit in hits:
+            hit_id = hit.get("id") or hit.get("entry_id")
+            if not hit_id or hit_id in seen:
+                continue
+            seen.add(hit_id)
+            ordered.append(hit)
+        return ordered
+
     # ==================== 记忆检索 ====================
 
     def retrieve_memories(
@@ -176,12 +387,14 @@ class MemoryService:
                 query, top_k=top_k, api_key=api_key, 
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
+            entry_map = {e.id: e for e in self.store.get_all_entries()}
             
             # 检索后触发晋升检查
             for mem in memories:
                 try:
-                    entry = MemoryEntry.from_dict(mem) if isinstance(mem, dict) else mem
-                    self.check_and_promote(entry)
+                    entry = entry_map.get(mem.get("entry_id", "")) if isinstance(mem, dict) else mem
+                    if entry:
+                        self.check_and_promote(entry)
                 except Exception as e:
                     logger.debug(f"晋升检查失败（不影响检索）: {e}")
 
@@ -189,8 +402,9 @@ class MemoryService:
             if self.active_pool and memories:
                 for mem in memories:
                     try:
-                        entry = MemoryEntry.from_dict(mem) if isinstance(mem, dict) else mem
-                        self.active_pool.put(entry)
+                        entry = entry_map.get(mem.get("entry_id", "")) if isinstance(mem, dict) else mem
+                        if entry:
+                            self.active_pool.put(entry)
                     except Exception as e:
                         logger.debug(f"Active_Pool Page-In 失败: {e}")
             
@@ -201,7 +415,7 @@ class MemoryService:
 
     def retrieve_memories_raw(
         self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
-        doc_id: str = None, filter_by_doc: bool = False
+        doc_id: str = None, filter_by_doc: bool = False, chat_history: list[dict] | None = None
     ) -> list[dict]:
         """检索相关记忆并返回原始记忆列表（供 ContextInjector 使用）
 
@@ -216,30 +430,40 @@ class MemoryService:
             记忆字典列表，每条包含 content, memory_tier, importance 等字段
         """
         try:
+            working_hits = self._build_working_memory_hits(chat_history, doc_id=doc_id)
             memories = self.retriever.retrieve(
                 query, top_k=top_k, api_key=api_key,
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
-            # 补充 memory_tier 和 tags 信息
             all_entries = self.store.get_all_entries()
             entry_map = {e.id: e for e in all_entries}
             enriched = []
             for mem in memories:
                 entry_id = mem.get("entry_id", "")
                 entry = entry_map.get(entry_id)
-                enriched_mem = dict(mem)
                 if entry:
-                    enriched_mem["content"] = mem.get("text", entry.content)
-                    enriched_mem["memory_tier"] = entry.memory_tier
-                    enriched_mem["importance"] = entry.importance
-                    enriched_mem["tags"] = entry.tags
+                    enriched_mem = self._build_memory_hit(
+                        entry,
+                        score=mem.get("rrf_score", 0.0),
+                        query=query,
+                        content_override=mem.get("text", entry.content),
+                    )
                 else:
-                    enriched_mem.setdefault("content", mem.get("text", ""))
-                    enriched_mem.setdefault("memory_tier", "short_term")
-                    enriched_mem.setdefault("importance", 0.5)
-                    enriched_mem.setdefault("tags", [])
+                    fallback_entry = MemoryEntry(
+                        id=entry_id or str(uuid.uuid4()),
+                        content=mem.get("text", ""),
+                        source_type=mem.get("source_type", "manual"),
+                        doc_id=mem.get("doc_id"),
+                    )
+                    enriched_mem = self._build_memory_hit(
+                        fallback_entry,
+                        score=mem.get("rrf_score", 0.0),
+                        query=query,
+                        content_override=mem.get("text", ""),
+                    )
                 enriched.append(enriched_mem)
-            return enriched
+            graph_hits = self._build_graph_memory_hits(doc_id, query)
+            return self._dedupe_memory_hits([*working_hits, *graph_hits, *enriched])
         except Exception as e:
             logger.error(f"记忆原始检索失败: {e}")
             return []
@@ -452,6 +676,7 @@ class MemoryService:
 
         # 加载当前 session
         session = self.store.load_session(doc_id)
+        created_entries: list[MemoryEntry] = []
 
         # 尝试 LLM 提炼
         distilled_facts = None
@@ -463,34 +688,82 @@ class MemoryService:
         if distilled_facts:
             # LLM 提炼成功：每条事实作为一个高质量摘要
             for fact in distilled_facts:
+                entry_id = str(uuid.uuid4())
                 summary = {
-                    "id": str(uuid.uuid4()),
+                    "id": entry_id,
                     "question": fact,
                     "answer": "",
                     "source_type": "llm_distilled",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "importance": 0.7,
+                    "memory_kind": "doc_fact",
+                    "memory_scope": "document",
+                    "status": "active",
+                    "title": "文档事实",
+                    "summary": self._truncate_text(fact),
+                    "trace": {
+                        "kind": "distilled_fact",
+                        "source": "qa_history",
+                    },
                 }
                 session["qa_summaries"].append(summary)
+                created_entries.append(MemoryEntry(
+                    id=entry_id,
+                    content=fact,
+                    source_type="llm_distilled",
+                    created_at=summary["created_at"],
+                    doc_id=doc_id,
+                    importance=0.7,
+                    memory_kind="doc_fact",
+                    memory_scope="document",
+                    title="文档事实",
+                    summary=summary["summary"],
+                    trace=dict(summary["trace"]),
+                ))
             logger.info(f"LLM 记忆提炼: {len(distilled_facts)} 条事实")
         else:
             # 降级：截断摘要
             for question, answer in recent_pairs:
                 truncated_q = question[:QUESTION_MAX_LEN]
                 truncated_a = answer[:ANSWER_MAX_LEN]
+                entry_id = str(uuid.uuid4())
 
                 summary = {
-                    "id": str(uuid.uuid4()),
+                    "id": entry_id,
                     "question": truncated_q,
                     "answer": truncated_a,
                     "source_type": "auto_qa",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "importance": 0.5,
+                    "memory_kind": "episodic",
+                    "memory_scope": "document",
+                    "status": "active",
+                    "title": truncated_q[:60] or "对话摘要",
+                    "summary": self._truncate_text(f"Q: {truncated_q}\nA: {truncated_a}"),
+                    "trace": {
+                        "kind": "qa_summary",
+                        "source": "chat_history",
+                    },
                 }
                 session["qa_summaries"].append(summary)
+                created_entries.append(MemoryEntry(
+                    id=entry_id,
+                    content=f"Q: {truncated_q}\nA: {truncated_a}",
+                    source_type="auto_qa",
+                    created_at=summary["created_at"],
+                    doc_id=doc_id,
+                    importance=0.5,
+                    memory_kind="episodic",
+                    memory_scope="document",
+                    title=summary["title"],
+                    summary=summary["summary"],
+                    trace=dict(summary["trace"]),
+                ))
 
         # 摘要数量上限控制
         self._enforce_summary_limit(session)
+        retained_ids = {item.get("id") for item in session.get("qa_summaries", [])}
+        created_entries = [entry for entry in created_entries if entry.id in retained_ids]
 
         # 更新最后访问时间并保存
         session["last_accessed"] = datetime.now(timezone.utc).isoformat()
@@ -498,20 +771,17 @@ class MemoryService:
         
         # 同步写入 Markdown 源文件（每日日志）
         try:
-            from services.memory_store import MemoryEntry
-            for summary in session["qa_summaries"][-len(recent_pairs):]:
-                # 只写入新添加的摘要
-                entry = MemoryEntry(
-                    id=summary.get("id", ""),
-                    content=f"Q: {summary.get('question', '')}\nA: {summary.get('answer', '')}",
-                    source_type=summary.get("source_type", "auto_qa"),
-                    created_at=summary.get("created_at", ""),
-                    doc_id=doc_id,
-                    importance=summary.get("importance", 0.5),
-                )
+            for entry in created_entries:
                 self.store._write_memory_markdown(entry, is_long_term=False)
+                self.store._append_event("add", {"entry": entry.to_dict(), "scope": "qa_summary"})
         except Exception as e:
             logger.warning(f"同步写入 Markdown 失败: {e}")
+
+        for entry in created_entries:
+            try:
+                self.index.add_entry(entry.id, entry.content)
+            except Exception as e:
+                logger.error(f"添加 QA 摘要到向量索引失败: {e}")
 
         # 保存完成后检查是否需要压缩（安全执行）
         self._safe_execute("MemoryCompressor.check", self._check_and_compress, doc_id, api_key, model, api_provider)
@@ -530,17 +800,41 @@ class MemoryService:
         if not self.compressor or not doc_id:
             return
         all_entries = self.store.get_all_entries()
-        if not self.compressor.should_compress(doc_id, all_entries):
+        doc_entries = [
+            e for e in all_entries
+            if e.doc_id == doc_id
+            and e.status == "active"
+            and e.source_type in {"auto_qa", "llm_distilled"}
+            and e.memory_kind != "consolidated"
+        ]
+        if not self.compressor.should_compress(doc_id, doc_entries):
             return
-        # 筛选该文档的记忆条目
-        doc_entries = [e for e in all_entries if e.doc_id == doc_id]
         compressed = self.compressor.compress(doc_entries, api_key=api_key, model=model, api_provider=api_provider)
         if compressed:
-            # 删除原始条目，写入压缩后的条目
+            compressed_ids = [c.id for c in compressed]
             for e in doc_entries:
-                self.store.delete_entry(e.id)
+                archived_trace = dict(e.trace or {})
+                archived_trace["archived_into"] = compressed_ids
+                archived_trace["archived_reason"] = "compressed"
+                self.store.update_entry_fields(
+                    e.id,
+                    {
+                        "status": "archived_raw",
+                        "memory_tier": "archived",
+                        "trace": archived_trace,
+                    },
+                )
+                try:
+                    self.index.remove_entry(e.id)
+                except Exception as exc:
+                    logger.debug(f"[MemoryCompressor] 移除原始记忆索引失败 {e.id}: {exc}")
+            self.store.batch_add_entries(compressed)
             for c in compressed:
-                self.store.add_entry(c)
+                try:
+                    self.index.add_entry(c.id, c.content)
+                except Exception as exc:
+                    logger.debug(f"[MemoryCompressor] 添加压缩记忆索引失败 {c.id}: {exc}")
+                self._page_in_active_pool(c)
             logger.info(f"[MemoryCompressor] 文档 {doc_id} 压缩完成: {len(doc_entries)} -> {len(compressed)}")
 
     def _distill_facts(
@@ -695,7 +989,17 @@ class MemoryService:
             removed = False
             for i, s in enumerate(summaries):
                 if s.get("importance", 0.5) < 1.0:
-                    summaries.pop(i)
+                    removed_summary = summaries.pop(i)
+                    removed_id = removed_summary.get("id")
+                    if removed_id:
+                        try:
+                            self.index.remove_entry(removed_id)
+                        except Exception as e:
+                            logger.debug(f"移除超限摘要索引失败 {removed_id}: {e}")
+                        try:
+                            self.store._append_event("delete", {"entry_id": removed_id, "scope": "qa_summary_limit"})
+                        except Exception:
+                            pass
                     removed = True
                     break
             if not removed:
@@ -730,15 +1034,18 @@ class MemoryService:
             source_type=source_type,
             created_at=datetime.now(timezone.utc).isoformat(),
             doc_id=doc_id,
-            importance=1.0,  # 重要记忆默认 1.0
-            memory_tier="long_term",  # 手动标记直接进入长期记忆
+            importance=1.0,
+            memory_tier="long_term",
+            memory_kind="doc_fact" if doc_id else "profile",
+            memory_scope="document" if doc_id else "profile",
+            title=question[:60] or "重要记忆",
+            summary=self._truncate_text(content),
+            source_ref={"question": question[:200]},
+            trace={"kind": "important_memory", "source": source_type},
         )
 
-        # 保存到 session 的 important_memories
-        session = self.store.load_session(doc_id)
-        session["important_memories"].append(entry.to_dict())
-        session["last_accessed"] = datetime.now(timezone.utc).isoformat()
-        self.store.save_session(doc_id, session)
+        # 保存到存储层
+        self.store.add_entry(entry)
         
         # 同步写入 Markdown 源文件（每日日志）
         try:
@@ -751,6 +1058,7 @@ class MemoryService:
             self.index.add_entry(entry.id, content)
         except Exception as e:
             logger.error(f"添加重要记忆到向量索引失败: {e}")
+        self._page_in_active_pool(entry)
 
         return entry
 
@@ -778,16 +1086,129 @@ class MemoryService:
         )
 
         self.store.save_profile(profile)
+        self.store.record_profile_state(profile, reason="keyword_update")
 
     # ==================== CRUD 操作 ====================
 
     def get_profile(self) -> dict:
         """获取用户画像数据"""
-        return self.store.load_profile()
+        profile = self.store.load_profile()
+        profile_entries = sorted(
+            [e for e in self.store.get_all_entries() if e.memory_scope == "profile"],
+            key=self._entry_sort_key,
+            reverse=True,
+        )
+        return {
+            **profile,
+            "entries": [self._serialize_entry(entry) for entry in profile_entries],
+        }
 
     def get_session(self, doc_id: str) -> dict:
         """获取指定文档的会话记忆"""
-        return self.store.load_session(doc_id)
+        session = self.store.load_session(doc_id)
+        entries = sorted(
+            [e for e in self.store.get_all_entries() if e.doc_id == doc_id],
+            key=self._entry_sort_key,
+            reverse=True,
+        )
+        session["entries"] = [self._serialize_entry(entry) for entry in entries]
+        return session
+
+    def list_entries(
+        self,
+        *,
+        doc_id: str | None = None,
+        memory_kind: str | None = None,
+        memory_scope: str | None = None,
+        status: str | None = None,
+        include_content: bool = True,
+    ) -> list[dict[str, Any]]:
+        """列出记忆条目，支持按层级/作用域/状态筛选。"""
+        entries = self.store.get_all_entries()
+        filtered = []
+        for entry in entries:
+            if doc_id is not None and entry.doc_id != doc_id:
+                continue
+            if memory_kind and entry.memory_kind != memory_kind:
+                continue
+            if memory_scope and entry.memory_scope != memory_scope:
+                continue
+            if status and entry.status != status:
+                continue
+            filtered.append(entry)
+        filtered.sort(key=self._entry_sort_key, reverse=True)
+        return [self._serialize_entry(entry, include_content=include_content) for entry in filtered]
+
+    def get_entry_trace(self, entry_id: str) -> dict[str, Any]:
+        """返回指定记忆的来源链与派生关系。"""
+        entry_map = self._get_entry_map()
+        entry = entry_map.get(entry_id)
+        if not entry:
+            raise KeyError(entry_id)
+
+        parent_entries = [
+            self._serialize_entry(entry_map[parent_id])
+            for parent_id in entry.derived_from
+            if parent_id in entry_map
+        ]
+        child_entries = [
+            self._serialize_entry(candidate)
+            for candidate in entry_map.values()
+            if entry.id in (candidate.derived_from or [])
+        ]
+
+        return {
+            "entry": self._serialize_entry(entry),
+            "parents": parent_entries,
+            "children": sorted(child_entries, key=lambda item: (item.get("created_at", ""), item.get("id", "")), reverse=True),
+            "trace": dict(entry.trace or {}),
+            "source_ref": dict(entry.source_ref or {}),
+        }
+
+    def get_graph_summary(self, doc_id: str | None = None) -> dict[str, Any]:
+        """基于文档事实/压缩记忆生成轻量图谱摘要。"""
+        entries = [
+            entry for entry in self.store.get_all_entries()
+            if entry.doc_id == doc_id and entry.memory_kind in {"doc_fact", "consolidated", "graph"}
+        ] if doc_id else [
+            entry for entry in self.store.get_all_entries()
+            if entry.memory_kind in {"doc_fact", "consolidated", "graph"}
+        ]
+
+        node_map: dict[tuple[str, str], dict[str, Any]] = {}
+        edges: list[dict[str, Any]] = []
+
+        def upsert_node(node_type: str, label: str) -> str:
+            key = (node_type, label)
+            if key not in node_map:
+                node_id = f"{node_type}:{len(node_map) + 1}"
+                node_map[key] = {"id": node_id, "type": node_type, "label": label}
+            return node_map[key]["id"]
+
+        figure_pattern = re.compile(r"(?:图|Fig(?:ure)?\.?)\s*(\d+)", re.IGNORECASE)
+        table_pattern = re.compile(r"(?:表|Table)\s*(\d+)", re.IGNORECASE)
+
+        for entry in entries:
+            entry_label = entry.title or self._truncate_text(entry.summary or entry.content, limit=50) or "记忆"
+            entry_node_id = upsert_node("fact", entry_label)
+            for match in figure_pattern.finditer(entry.content or ""):
+                figure_node_id = upsert_node("figure", f"Figure {match.group(1)}")
+                edges.append({"source": entry_node_id, "target": figure_node_id, "type": "shown_in"})
+            for match in table_pattern.finditer(entry.content or ""):
+                table_node_id = upsert_node("table", f"Table {match.group(1)}")
+                edges.append({"source": entry_node_id, "target": table_node_id, "type": "supports"})
+            for tag in entry.tags or []:
+                tag_node_id = upsert_node("entity", tag)
+                edges.append({"source": entry_node_id, "target": tag_node_id, "type": "derived_from"})
+
+        nodes = list(node_map.values())
+        return {
+            "doc_id": doc_id,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "nodes": nodes[:40],
+            "edges": edges[:80],
+        }
 
     def add_entry(
         self, content: str, source_type: str, doc_id: str = None
@@ -812,6 +1233,11 @@ class MemoryService:
             created_at=datetime.now(timezone.utc).isoformat(),
             doc_id=doc_id,
             importance=importance,
+            memory_kind="profile" if doc_id is None else "episodic",
+            memory_scope="profile" if doc_id is None else "document",
+            title=(content.splitlines()[0][:60] if content else "记忆条目"),
+            summary=self._truncate_text(content),
+            trace={"kind": "manual_add"},
         )
 
         # 自动打标签（安全执行，失败不影响写入）
@@ -828,6 +1254,7 @@ class MemoryService:
             self.index.add_entry(entry.id, content)
         except Exception as e:
             logger.error(f"添加记忆条目到向量索引失败: {e}")
+        self._page_in_active_pool(entry)
 
         return entry
 
@@ -882,6 +1309,23 @@ class MemoryService:
             self.index.rebuild([])
         except Exception as e:
             logger.error(f"清空向量索引失败: {e}")
+
+    def rebuild_from_events(self) -> dict[str, Any]:
+        """从事件日志重建 JSON 快照和向量索引。"""
+        state = self.store.rebuild_snapshots_from_events()
+        entries = [
+            entry for entry in self.store.get_all_entries()
+            if entry.status != "archived_raw"
+        ]
+        self.index.safe_reindex(entries, reason="events_restore")
+        self.index.flush_sync(reason="manual")
+        storage_status = self.store.get_storage_status()
+        return {
+            "profile_entries": len(state.get("profile", {}).get("entries", [])),
+            "session_count": len(state.get("sessions", {})),
+            "indexed_entries": len(entries),
+            **storage_status,
+        }
 
     def evaluate_and_update_importance(self) -> None:
         """自动评估并更新记忆重要性
@@ -1010,4 +1454,6 @@ class MemoryService:
             "total_entries": total_entries,
             "index_size": index_size,
             "profile_focus_areas": focus_areas,
+            **self.store.get_storage_status(),
+            **self.index.get_status(),
         }

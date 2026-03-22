@@ -89,6 +89,66 @@ class TestGetSession:
         mock_service.get_session.assert_called_once_with("doc123")
 
 
+class TestListEntries:
+    def test_returns_filtered_entries(self, client, mock_service):
+        mock_service.list_entries.return_value = [
+            {
+                "id": "mem-1",
+                "content": "用户偏好中文回答",
+                "memory_kind": "profile",
+            }
+        ]
+
+        resp = client.get("/api/memory/entries?memory_scope=profile&status=active")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entries"][0]["id"] == "mem-1"
+        mock_service.list_entries.assert_called_once_with(
+            doc_id=None,
+            memory_kind=None,
+            memory_scope="profile",
+            status="active",
+        )
+
+
+class TestEntryTrace:
+    def test_returns_trace_payload(self, client, mock_service):
+        mock_service.get_entry_trace.return_value = {
+            "entry": {"id": "mem-1"},
+            "parents": [],
+            "children": [],
+            "trace": {"kind": "compression"},
+            "source_ref": {},
+        }
+
+        resp = client.get("/api/memory/entries/mem-1/trace")
+        assert resp.status_code == 200
+        assert resp.json()["trace"]["kind"] == "compression"
+        mock_service.get_entry_trace.assert_called_once_with("mem-1")
+
+    def test_returns_404_when_trace_entry_missing(self, client, mock_service):
+        mock_service.get_entry_trace.side_effect = KeyError("missing")
+
+        resp = client.get("/api/memory/entries/missing/trace")
+        assert resp.status_code == 404
+
+
+class TestGraphSummary:
+    def test_returns_graph_summary(self, client, mock_service):
+        mock_service.get_graph_summary.return_value = {
+            "doc_id": "doc-1",
+            "node_count": 3,
+            "edge_count": 2,
+            "nodes": [],
+            "edges": [],
+        }
+
+        resp = client.get("/api/memory/graph/doc-1")
+        assert resp.status_code == 200
+        assert resp.json()["node_count"] == 3
+        mock_service.get_graph_summary.assert_called_once_with("doc-1")
+
+
 # ==================== GET /api/memory/status ====================
 
 class TestGetStatus:
@@ -101,6 +161,11 @@ class TestGetStatus:
             "total_entries": 10,
             "index_size": 8,
             "profile_focus_areas": ["transformer"],
+            "snapshot_primary": True,
+            "profile_snapshot_exists": True,
+            "session_snapshot_count": 2,
+            "event_log_files": 1,
+            "last_event_at": "2026-03-11T00:00:00+00:00",
         }
         resp = client.get("/api/memory/status")
         assert resp.status_code == 200
@@ -109,6 +174,8 @@ class TestGetStatus:
         assert data["total_entries"] == 10
         assert data["index_size"] == 8
         assert data["profile_focus_areas"] == ["transformer"]
+        assert data["snapshot_primary"] is True
+        assert data["session_snapshot_count"] == 2
 
 
 # ==================== POST /api/memory/entries ====================
@@ -239,6 +306,22 @@ class TestClearAll:
         assert resp.status_code == 200
         assert "已清空" in resp.json()["message"]
         mock_service.clear_all.assert_called_once()
+
+
+class TestRebuildFromEvents:
+    def test_rebuild_from_events(self, client, mock_service):
+        mock_service.rebuild_from_events.return_value = {
+            "profile_entries": 2,
+            "session_count": 1,
+            "indexed_entries": 3,
+            "snapshot_primary": True,
+        }
+
+        resp = client.post("/api/memory/rebuild-from-events")
+        assert resp.status_code == 200
+        assert resp.json()["indexed_entries"] == 3
+        assert resp.json()["snapshot_primary"] is True
+        mock_service.rebuild_from_events.assert_called_once()
 
 
 # ==================== 服务未初始化 ====================

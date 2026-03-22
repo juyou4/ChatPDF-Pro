@@ -82,8 +82,18 @@ backend/build/
 *.bak
 *.swp
 _fix_*.py
+_check_*.py
 test_*.mjs
 .tmp-smoke-data/
+
+# ML model weights
+backend/models/*.pt
+
+# Claude/AI config
+.claude/
+
+# Task docs
+chatpdf_*.md
 
 # Dev test dependencies (not needed in repo)
 rehype-stringify/

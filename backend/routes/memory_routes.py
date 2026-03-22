@@ -8,7 +8,7 @@
 - 记忆系统状态查询
 - 清空所有记忆
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/memory")
@@ -39,6 +39,11 @@ class MemoryEntryResponse(BaseModel):
     created_at: str
     doc_id: str | None
     importance: float
+    memory_kind: str | None = None
+    memory_scope: str | None = None
+    status: str | None = None
+    title: str | None = None
+    summary: str | None = None
 
 
 class MemoryStatusResponse(BaseModel):
@@ -47,6 +52,20 @@ class MemoryStatusResponse(BaseModel):
     total_entries: int
     index_size: int
     profile_focus_areas: list[str]
+    snapshot_primary: bool = True
+    profile_snapshot_exists: bool = False
+    session_snapshot_count: int = 0
+    event_log_files: int = 0
+    last_event_at: str = ""
+    dirty: bool = False
+    last_sync_at: str = ""
+    last_reindex_at: str = ""
+    last_reindex_reason: str = ""
+    index_version: int = 1
+    pending_sync: bool = False
+    stored_embedding_model: str = ""
+    rebuild_required: bool = False
+    rebuild_reason: str = ""
 
 
 # ==================== 辅助函数 ====================
@@ -74,6 +93,42 @@ async def get_session(doc_id: str):
     return svc.get_session(doc_id)
 
 
+@router.get("/entries")
+async def list_entries(
+    doc_id: str | None = Query(default=None),
+    memory_kind: str | None = Query(default=None),
+    memory_scope: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+):
+    """按条件列出记忆条目。"""
+    svc = _get_service()
+    return {
+        "entries": svc.list_entries(
+            doc_id=doc_id,
+            memory_kind=memory_kind,
+            memory_scope=memory_scope,
+            status=status,
+        )
+    }
+
+
+@router.get("/entries/{entry_id}/trace")
+async def get_entry_trace(entry_id: str):
+    """返回指定记忆的来源链。"""
+    svc = _get_service()
+    try:
+        return svc.get_entry_trace(entry_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
+
+
+@router.get("/graph/{doc_id}")
+async def get_graph_summary(doc_id: str):
+    """返回指定文档的轻量图谱摘要。"""
+    svc = _get_service()
+    return svc.get_graph_summary(doc_id)
+
+
 @router.get("/status", response_model=MemoryStatusResponse)
 async def get_status():
     """获取记忆系统状态"""
@@ -97,6 +152,11 @@ async def add_entry(body: MemoryEntryCreate):
         created_at=entry.created_at,
         doc_id=entry.doc_id,
         importance=entry.importance,
+        memory_kind=entry.memory_kind,
+        memory_scope=entry.memory_scope,
+        status=entry.status,
+        title=entry.title,
+        summary=entry.summary,
     )
 
 
@@ -119,6 +179,11 @@ async def update_entry(entry_id: str, body: MemoryEntryUpdate):
                 created_at=e.created_at,
                 doc_id=e.doc_id,
                 importance=e.importance,
+                memory_kind=e.memory_kind,
+                memory_scope=e.memory_scope,
+                status=e.status,
+                title=e.title,
+                summary=e.summary,
             )
     # 理论上不会到这里，因为 update 成功了
     raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
@@ -140,3 +205,10 @@ async def clear_all():
     svc = _get_service()
     svc.clear_all()
     return {"message": "所有记忆数据已清空"}
+
+
+@router.post("/rebuild-from-events")
+async def rebuild_from_events():
+    """从事件日志重建快照与索引。"""
+    svc = _get_service()
+    return svc.rebuild_from_events()

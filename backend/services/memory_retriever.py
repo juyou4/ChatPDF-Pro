@@ -10,7 +10,7 @@ import math
 from datetime import datetime, timezone
 from typing import Optional
 
-from services.hybrid_search import hybrid_search_merge
+from services.hybrid_search import hybrid_search_merge, reciprocal_rank_fusion
 from services.memory_index import MemoryIndex
 from services.memory_store import MemoryStore
 
@@ -69,6 +69,11 @@ class MemoryRetriever:
         if not all_entries:
             return []
 
+        # 非破坏压缩后，归档原始记忆仅用于追溯，不参与默认检索。
+        all_entries = [e for e in all_entries if getattr(e, "status", "active") != "archived_raw"]
+        if not all_entries:
+            return []
+
         # 如果启用文档过滤，仅保留当前文档记忆和全局画像记忆。
         # 这样既能阻断跨文档串记忆，又不会丢掉用户级偏好/画像。
         if filter_by_doc and doc_id:
@@ -85,19 +90,40 @@ class MemoryRetriever:
 
         # 构建 entry_id -> entry 的映射，方便后续查找
         entry_map = {entry.id: entry for entry in all_entries}
+        allowed_ids = set(entry_map.keys())
         # 构建 entry_id -> doc_id 索引，用于优化 _record_hits
         self._entry_doc_index = {entry.id: entry.doc_id for entry in all_entries}
 
-        # 1. 向量检索
-        vector_results = self._vector_search(query, top_k=top_k, api_key=api_key)
-
-        # 2. BM25 检索
-        bm25_results = self._bm25_search(query, all_entries, top_k=top_k)
-
-        # 3. RRF 融合
-        merged = hybrid_search_merge(
-            vector_results, bm25_results, top_k=top_k
+        # 1. 热缓存检索
+        active_results = self._active_pool_search(
+            query,
+            top_k=top_k,
+            doc_id=doc_id,
+            filter_by_doc=filter_by_doc,
+            filter_tags=filter_tags,
+            allowed_ids=allowed_ids,
         )
+
+        # 2. 向量检索
+        vector_results = self._vector_search(query, top_k=max(top_k, top_k * 2), api_key=api_key)
+        vector_results = [item for item in vector_results if item.get("entry_id") in allowed_ids]
+
+        # 3. BM25 检索
+        bm25_results = self._bm25_search(query, all_entries, top_k=max(top_k, top_k * 2))
+        bm25_results = [item for item in bm25_results if item.get("entry_id") in allowed_ids]
+
+        # 4. RRF 融合，热缓存命中优先纳入同一候选池
+        if active_results:
+            merged = reciprocal_rank_fusion(
+                active_results,
+                vector_results,
+                bm25_results,
+                top_k=max(top_k, top_k * 2),
+            )
+        else:
+            merged = hybrid_search_merge(
+                vector_results, bm25_results, top_k=max(top_k, top_k * 2)
+            )
 
         # 将融合结果转换为统一的输出格式，并应用时间衰减 + 动态重要性
         now = datetime.now(timezone.utc)
@@ -107,22 +133,25 @@ class MemoryRetriever:
         for item in merged:
             entry_id = item.get("entry_id", "")
             entry = entry_map.get(entry_id)
+            if not entry:
+                continue
             rrf_score = item.get("rrf_score", 0.0)
 
             # 动态评分：基础重要性 × 时间衰减 × 命中次数加成 × 文档相关性
-            dynamic_score = rrf_score
-            if entry:
-                dynamic_score = self._compute_dynamic_score(
-                    rrf_score, entry, now, doc_id=doc_id
-                )
-                hit_entry_ids.append(entry_id)
+            dynamic_score = self._compute_dynamic_score(
+                rrf_score, entry, now, doc_id=doc_id
+            )
+            if item.get("from_active_pool"):
+                dynamic_score *= 1.15
+            hit_entry_ids.append(entry_id)
 
             results.append({
                 "entry_id": entry_id,
                 "text": item.get("chunk", ""),
-                "source_type": entry.source_type if entry else "unknown",
-                "doc_id": entry.doc_id if entry else None,
+                "source_type": entry.source_type,
+                "doc_id": entry.doc_id,
                 "rrf_score": dynamic_score,
+                "from_active_pool": bool(item.get("from_active_pool")),
             })
 
         # 按动态评分重新排序
@@ -131,8 +160,39 @@ class MemoryRetriever:
         # 异步更新命中统计（不阻塞检索）
         if hit_entry_ids:
             self._record_hits(hit_entry_ids, entry_map, now)
+            if self.active_pool:
+                for entry_id in hit_entry_ids:
+                    entry = entry_map.get(entry_id)
+                    if entry is not None:
+                        self.active_pool.put(entry)
 
         return results[:top_k]
+
+    def _active_pool_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        doc_id: Optional[str],
+        filter_by_doc: bool,
+        filter_tags: Optional[list[str]],
+        allowed_ids: set[str],
+    ) -> list[dict]:
+        """优先在热缓存中做轻量检索，命中的结果直接进入融合池。"""
+        if not self.active_pool:
+            return []
+        try:
+            return self.active_pool.query(
+                query,
+                top_k=top_k,
+                doc_id=doc_id,
+                filter_by_doc=filter_by_doc,
+                filter_tags=filter_tags,
+                allowed_ids=allowed_ids,
+            )
+        except Exception as e:
+            logger.debug(f"Active_Pool 检索失败，降级到索引检索: {e}")
+            return []
 
     def _vector_search(self, query: str, top_k: int = 3, api_key: str = None) -> list[dict]:
         """向量检索，将结果转换为 hybrid_search_merge 期望的格式

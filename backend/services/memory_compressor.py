@@ -91,6 +91,16 @@ class MemoryCompressor:
                             created_at=datetime.now(timezone.utc).isoformat(),
                             doc_id=entries[0].doc_id if entries else None,
                             importance=max_importance,
+                            memory_kind="consolidated",
+                            memory_scope="document" if entries and entries[0].doc_id else "profile",
+                            title="压缩记忆",
+                            summary=text[:180] + ("..." if len(text) > 180 else ""),
+                            derived_from=[e.id for e in entries],
+                            trace={
+                                "kind": "compression",
+                                "source_type": "llm",
+                                "source_entry_ids": [e.id for e in entries],
+                            },
                         )
                         compressed.append(entry)
                     logger.info(
@@ -195,6 +205,16 @@ class MemoryCompressor:
                     importance=max_importance,
                     memory_tier=e.memory_tier,
                     tags=list(e.tags),
+                    memory_kind="consolidated",
+                    memory_scope="document" if e.doc_id else "profile",
+                    title="压缩记忆",
+                    summary=e.summary or e.content[:180],
+                    derived_from=[e.id],
+                    trace={
+                        "kind": "compression",
+                        "source_type": "fallback",
+                        "source_entry_ids": [e.id],
+                    },
                 )
                 result.append(compressed_entry)
             return result
@@ -228,6 +248,16 @@ class MemoryCompressor:
                 created_at=datetime.now(timezone.utc).isoformat(),
                 doc_id=doc_id,
                 importance=max_importance,
+                memory_kind="consolidated",
+                memory_scope="document" if doc_id else "profile",
+                title="压缩记忆",
+                summary=merged_content[:180] + ("..." if len(merged_content) > 180 else ""),
+                derived_from=[e.id for e in chunk],
+                trace={
+                    "kind": "compression",
+                    "source_type": "fallback",
+                    "source_entry_ids": [e.id for e in chunk],
+                },
             )
             result.append(compressed_entry)
 

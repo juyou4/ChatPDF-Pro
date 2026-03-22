@@ -316,6 +316,8 @@ export function useMessageState({
   const streamMindmapRef = useRef(null);
   const streamWebSearchRef = useRef(null);
   const streamWebSearchStatusRef = useRef(null);
+  const streamMemoryHitsRef = useRef(null);
+  const streamMemoryMetaRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -443,6 +445,8 @@ export function useMessageState({
     streamMindmapRef.current = null;
     streamWebSearchRef.current = null;
     streamWebSearchStatusRef.current = null;
+    streamMemoryHitsRef.current = null;
+    streamMemoryMetaRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -589,6 +593,8 @@ export function useMessageState({
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
+              if (Object.prototype.hasOwnProperty.call(p, 'memory_hits')) streamMemoryHitsRef.current = p.memory_hits;
+              if (Object.prototype.hasOwnProperty.call(p, 'memory_meta')) streamMemoryMetaRef.current = p.memory_meta;
               if (ct) {
                 const now = Date.now();
                 if (!thinkingStartTime) thinkingStartTime = now;
@@ -654,7 +660,7 @@ export function useMessageState({
         );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null }
+            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -694,7 +700,7 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: answerWithInlineFallback, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null }
+            ? { ...m, content: answerWithInlineFallback, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
             : m
         ));
         setStreamingMessageId(null);

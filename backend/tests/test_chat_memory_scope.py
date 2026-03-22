@@ -69,4 +69,35 @@ class TestChatMemoryScope:
             api_key="test-key",
             doc_id="doc-2",
             filter_by_doc=True,
+            chat_history=None,
         )
+
+    def test_smart_inject_memory_returns_selected_hits(self):
+        mock_service = MagicMock()
+        mock_injector = MagicMock()
+        mock_injector.token_budget = 800
+        mock_injector.prepare_memories.return_value = [{"id": "mem-1", "summary": "当前文档记忆"}]
+        mock_injector.inject.return_value = "system with memory"
+        mock_service.context_injector = mock_injector
+        original = chat_routes.memory_service
+        chat_routes.memory_service = mock_service
+        try:
+            prompt, hits, meta = chat_routes._smart_inject_memory(
+                "system",
+                "用户历史记忆",
+                [{"id": "mem-1", "summary": "当前文档记忆"}],
+            )
+        finally:
+            chat_routes.memory_service = original
+
+        assert prompt == "system with memory"
+        assert hits == [{"id": "mem-1", "summary": "当前文档记忆"}]
+        assert meta == {
+            "enabled": True,
+            "strategy": "context_injector",
+            "retrieved_count": 1,
+            "selected_count": 1,
+            "truncated": False,
+            "token_budget": 800,
+            "selected_kinds": ["episodic"],
+        }

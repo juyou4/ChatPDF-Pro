@@ -204,6 +204,26 @@ class TestMemoryStoreProfile:
         assert loaded["focus_areas"] == ["机器学习"]
         assert loaded["keyword_frequencies"]["机器学习"] == 5
 
+    def test_load_profile_prefers_snapshot(self, store):
+        """画像读取应优先走快照而不是旧 JSON。"""
+        profile = {
+            "focus_areas": ["快照领域"],
+            "keyword_frequencies": {"快照领域": 2},
+            "entries": [],
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+        store.save_profile(profile)
+        store._write_json(store.profile_path, {
+            "focus_areas": ["旧 JSON"],
+            "keyword_frequencies": {},
+            "entries": [],
+            "updated_at": "",
+        })
+
+        loaded = store.load_profile()
+
+        assert loaded["focus_areas"] == ["快照领域"]
+
     def test_load_corrupted_profile(self, store):
         """损坏的 JSON 文件应返回默认结构"""
         with open(store.profile_path, "w") as f:
@@ -239,6 +259,26 @@ class TestMemoryStoreSession:
         loaded = store.load_session("doc-123")
         assert loaded["doc_id"] == "doc-123"
         assert len(loaded["qa_summaries"]) == 1
+
+    def test_load_session_prefers_snapshot(self, store):
+        """会话读取应优先走快照而不是旧 JSON。"""
+        session = {
+            "doc_id": "doc-123",
+            "qa_summaries": [{"id": "q1", "question": "快照问题", "answer": "快照回答"}],
+            "important_memories": [],
+            "last_accessed": "2026-03-11T01:00:00+00:00",
+        }
+        store.save_session("doc-123", session)
+        store._write_json(store._session_path("doc-123"), {
+            "doc_id": "doc-123",
+            "qa_summaries": [{"id": "q2", "question": "旧 JSON", "answer": "旧 JSON"}],
+            "important_memories": [],
+            "last_accessed": "",
+        })
+
+        loaded = store.load_session("doc-123")
+
+        assert loaded["qa_summaries"][0]["question"] == "快照问题"
 
     def test_session_file_path(self, store):
         """session 文件路径应正确"""
@@ -359,6 +399,120 @@ class TestMemoryStoreCRUD:
             store.add_entry(entry)
         profile = store.load_profile()
         assert len(profile["entries"]) == 5
+
+    def test_rebuild_snapshots_from_events_recovers_profile_and_session(self, store):
+        profile_entry = MemoryEntry(id="profile-1", content="用户偏好中文回答", source_type="manual")
+        session_entry = MemoryEntry(id="session-1", content="重要结论", source_type="liked", doc_id="doc-1")
+        store.add_entry(profile_entry)
+        store.add_entry(session_entry)
+        profile = store.load_profile()
+        profile["focus_areas"] = ["transformer"]
+        profile["keyword_frequencies"] = {"transformer": 3}
+        profile["updated_at"] = "2026-03-11T00:00:00+00:00"
+        store.save_profile(profile)
+        store.record_profile_state(profile, reason="test")
+
+        os.remove(store.profile_path)
+        os.remove(store._session_path("doc-1"))
+        os.remove(store._snapshot_profile_path())
+        os.remove(store._snapshot_session_path("doc-1"))
+
+        recovered_profile = store.load_profile()
+        recovered_session = store.load_session("doc-1")
+
+        assert recovered_profile["focus_areas"] == ["transformer"]
+        assert recovered_profile["entries"][0]["id"] == "profile-1"
+        assert recovered_session["important_memories"][0]["id"] == "session-1"
+        assert os.path.exists(store._snapshot_profile_path())
+        assert os.path.exists(store._snapshot_session_path("doc-1"))
+
+    def test_replay_events_respects_clear_all(self, store):
+        store.add_entry(MemoryEntry(id="before-clear", content="内容", source_type="manual"))
+        store.clear_all()
+
+        state = store.replay_events()
+
+        assert state["profile"]["entries"] == []
+        assert state["sessions"] == {}
+
+    def test_get_storage_status_reports_snapshot_and_events(self, store):
+        store.add_entry(MemoryEntry(id="profile-1", content="用户偏好中文回答", source_type="manual"))
+
+        status = store.get_storage_status()
+
+        assert status["snapshot_primary"] is True
+        assert status["profile_snapshot_exists"] is True
+        assert status["event_log_files"] >= 1
+
+    def test_legacy_json_auto_migrates_to_seed_events(self, tmp_path):
+        data_dir = tmp_path / "memory"
+        sessions_dir = data_dir / "sessions"
+        sessions_dir.mkdir(parents=True)
+        profile_payload = {
+            "focus_areas": ["自动驾驶"],
+            "keyword_frequencies": {"自动驾驶": 4},
+            "entries": [{
+                "id": "legacy-profile-entry",
+                "content": "用户偏好中文回答",
+                "source_type": "manual",
+                "created_at": "2026-03-11T00:00:00+00:00",
+            }],
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+        session_payload = {
+            "doc_id": "doc-legacy",
+            "qa_summaries": [{
+                "id": "legacy-summary",
+                "question": "旧问题",
+                "answer": "旧回答",
+                "source_type": "auto_qa",
+                "created_at": "2026-03-11T00:00:00+00:00",
+            }],
+            "important_memories": [],
+            "last_accessed": "2026-03-11T00:00:00+00:00",
+        }
+        with open(data_dir / "user_profile.json", "w", encoding="utf-8") as f:
+            json.dump(profile_payload, f, ensure_ascii=False)
+        with open(sessions_dir / "doc-legacy_session.json", "w", encoding="utf-8") as f:
+            json.dump(session_payload, f, ensure_ascii=False)
+
+        store = MemoryStore(str(data_dir))
+        event_types = [record.get("event_type") for record in store._iter_event_records()]
+
+        assert "legacy_profile_seed" in event_types
+        assert "legacy_session_seed" in event_types
+
+        os.remove(store.profile_path)
+        os.remove(store._session_path("doc-legacy"))
+
+        recovered_profile = store.load_profile()
+        recovered_session = store.load_session("doc-legacy")
+
+        assert recovered_profile["entries"][0]["id"] == "legacy-profile-entry"
+        assert recovered_session["qa_summaries"][0]["id"] == "legacy-summary"
+
+    def test_legacy_seed_replay_does_not_resurrect_deleted_entry(self, tmp_path):
+        data_dir = tmp_path / "memory"
+        data_dir.mkdir(parents=True)
+        with open(data_dir / "user_profile.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "focus_areas": [],
+                "keyword_frequencies": {},
+                "entries": [{
+                    "id": "legacy-profile-entry",
+                    "content": "旧画像记忆",
+                    "source_type": "manual",
+                    "created_at": "2026-03-11T00:00:00+00:00",
+                }],
+                "updated_at": "2026-03-11T00:00:00+00:00",
+            }, f, ensure_ascii=False)
+
+        store = MemoryStore(str(data_dir))
+        assert store.delete_entry("legacy-profile-entry") is True
+
+        replayed = store.replay_events()
+
+        assert replayed["profile"]["entries"] == []
 
 
 # ==================== 属性测试（Property-Based Testing） ====================

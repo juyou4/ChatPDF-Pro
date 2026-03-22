@@ -121,7 +121,7 @@ export function loadOCRSettings() {
     const raw = localStorage.getItem(OCR_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      const result = { mode: 'auto', backend: 'auto' }
+      const result = { mode: 'auto', backend: 'auto', mineruFigureEnhance: true }
       // 校验 mode 值是否合法
       if (VALID_MODES.includes(parsed.mode)) {
         result.mode = parsed.mode
@@ -130,12 +130,16 @@ export function loadOCRSettings() {
       if (VALID_BACKENDS.includes(parsed.backend)) {
         result.backend = parsed.backend
       }
+      // 图表增强识别开关
+      if (typeof parsed.mineruFigureEnhance === 'boolean') {
+        result.mineruFigureEnhance = parsed.mineruFigureEnhance
+      }
       return result
     }
   } catch (err) {
     console.error('读取 OCR 设置失败:', err)
   }
-  return { mode: 'auto', backend: 'auto' }
+  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true }
 }
 
 /**
@@ -215,6 +219,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [mineruSaveMessage, setMineruSaveMessage] = useState('')
   // MinerU 配置卡片展开/折叠状态
   const [mineruExpanded, setMineruExpanded] = useState(false)
+  // MinerU 图表增强识别开关
+  const [mineruFigureEnhance, setMineruFigureEnhance] = useState(true)
 
   // ---- Doc2X OCR 配置状态 ----
   // Doc2X Worker URL
@@ -248,6 +254,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       const settings = loadOCRSettings()
       setMode(settings.mode)
       setBackend(settings.backend)
+      setMineruFigureEnhance(settings.mineruFigureEnhance !== false)
     }
   }, [isOpen])
 
@@ -427,7 +434,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     } finally {
       setMineruValidating(false)
     }
-  }, [mineruWorkerUrl, mineruAuthKey])
+  }, [mineruWorkerUrl, mineruAuthKey, mineruToken, mineruTokenMode])
 
   /**
    * 保存 MinerU OCR 配置
@@ -1314,6 +1321,31 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     </div>
                   </div>
                 )}
+
+                {/* 图表增强识别开关（始终可见，不受展开/折叠影响） */}
+                <div className="mt-3 flex items-center justify-between px-1">
+                  <div className="flex-1 mr-3">
+                    <span className="text-xs font-medium text-gray-700">速览图表增强识别</span>
+                    <p className="text-[11px] text-gray-400 mt-0.5">使用 MinerU 版面分析精确识别完整 Figure 区域</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !mineruFigureEnhance
+                      setMineruFigureEnhance(next)
+                      const settings = loadOCRSettings()
+                      saveOCRSettings({ ...settings, mineruFigureEnhance: next })
+                    }}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                      mineruFigureEnhance ? 'bg-purple-500' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform ring-0 transition duration-200 ease-in-out ${
+                        mineruFigureEnhance ? 'translate-x-4' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
 
               {/* Doc2X OCR 配置卡片（可折叠） */}

@@ -97,6 +97,14 @@ class AppSettings(BaseSettings):
         description="Mistral OCR API Base URL"
     )
 
+    # ==================== Figure Extraction 配置 ====================
+    # Figure Extraction 超时配置（秒）
+    figure_extraction_timeout_sec: int = Field(
+        default=15,
+        validation_alias=AliasChoices("figure_extraction_timeout_sec", "CHATPDF_FIGURE_EXTRACTION_TIMEOUT"),
+        description="Figure Extraction 超时时间（秒）"
+    )
+
     # ==================== GraphRAG 配置 ====================
     # 是否启用 GraphRAG 知识图谱增强检索
     enable_graphrag: bool = Field(

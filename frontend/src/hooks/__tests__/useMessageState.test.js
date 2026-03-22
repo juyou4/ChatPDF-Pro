@@ -209,6 +209,35 @@ describe('useMessageState streaming regressions', () => {
     expect(latestAssistant.content).toContain('第二次请求成功');
     expect(latestAssistant.isStreaming).toBe(false);
   });
+
+  it('流式完成事件应保存 memory hits 与 meta', async () => {
+    const events = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '回答正文' } }] })}\n\n`,
+      `data: ${JSON.stringify({ done: true, memory_hits: [{ id: 'mem-1', memory_kind: 'doc_fact', title: '文档事实', summary: '当前文档的重要结论' }], memory_meta: { enabled: true, strategy: 'context_injector', selected_count: 1 } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('测试记忆命中');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.memoryHits).toEqual([
+      expect.objectContaining({ id: 'mem-1', memory_kind: 'doc_fact' }),
+    ]);
+    expect(assistant.memoryMeta).toEqual(
+      expect.objectContaining({ enabled: true, selected_count: 1 })
+    );
+  });
 });
 
 describe('normalizeAssistantCitations', () => {
@@ -310,5 +339,44 @@ describe('finalizeThinkingDurationMs', () => {
     });
 
     expect(duration).toBe(600);
+  });
+});
+
+describe('useMessageState non-stream memory hits', () => {
+  it('非流式响应应保存 memory hits 与 meta', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: '回答正文',
+        reasoning_content: '',
+        retrieval_meta: { citations: [] },
+        memory_hits: [{ id: 'mem-2', memory_kind: 'profile', title: '用户画像', summary: '偏好中文回答' }],
+        memory_meta: { enabled: true, strategy: 'simple', selected_count: 1 },
+      }),
+    });
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      globalSettings: {
+        ...createOptions().globalSettings,
+        streamOutput: false,
+      },
+    }));
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('非流式测试');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.memoryHits).toEqual([
+      expect.objectContaining({ id: 'mem-2', memory_kind: 'profile' }),
+    ]);
+    expect(assistant.memoryMeta).toEqual(
+      expect.objectContaining({ enabled: true, selected_count: 1 })
+    );
   });
 });

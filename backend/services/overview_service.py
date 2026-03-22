@@ -1,5 +1,11 @@
 """
 速览（Overview）服务 - 生成结构化 AI 学术导读
+
+新增 Figure Pipeline 集成：
+- 使用 figure_adapter 进行输入源适配
+- 使用 figure_builder 进行 Figure 构建与合并
+- 使用 figure_render 进行图像裁剪渲染
+- 使用 figure_validation 进行质量门校验
 """
 import asyncio
 import base64
@@ -14,6 +20,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from pydantic import BaseModel
+import fitz
+
+# 新增：Figure Pipeline 模块
+from services.figure_adapter import FigureAdapterFactory, FigureSource
+from services.figure_builder import build_logical_figures, select_top_figures
+from services.figure_render import render_figure
+from services.figure_validation import validate_and_fallback
+from schemas.figure_schema import LogicalFigureSchema, OverviewFigureItem
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +79,7 @@ class OverviewData(BaseModel):
     key_figures: List[KeyFigureItem]
     paper_summary: PaperSummary
     created_at: float
+    figure_meta: Optional[dict] = None
 
 
 class OverviewTask(BaseModel):
@@ -81,6 +96,7 @@ class OverviewTask(BaseModel):
     error: Optional[str] = None
     created_at: float
     updated_at: float
+    use_mineru_figures: bool = False
 
 
 # ============ 配置 ============
@@ -88,7 +104,7 @@ class OverviewTask(BaseModel):
 # 缓存目录
 CACHE_DIR = Path(__file__).parent.parent / "data" / "overviews"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v4"
+OVERVIEW_CACHE_VERSION = "v8"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -346,6 +362,10 @@ def _calculate_image_quality_score(image_data: str) -> dict:
         import math
 
         # 1. 尺寸评分
+        # 去掉 data:image/...;base64, 前缀（如果有）
+        b64data = image_data
+        if "," in b64data:
+            b64data = b64data.split(",", 1)[1]
         img_bytes = base64.b64decode(b64data)
         img = Image.open(io.BytesIO(img_bytes))
         width, height = img.size
@@ -571,6 +591,8 @@ def _select_best_figures(
         if len(selected) >= max_count:
             break
 
+    # 恢复文档顺序
+    selected.sort(key=lambda x: (x.get("page", 0), str(x.get("number", ""))))
     return selected
 
 
@@ -664,8 +686,8 @@ def _build_figure_clip_bbox(
 
     # 多子图往往只覆盖 figure 里的位图局部，需要扩大到更接近整张图的尺度。
     if multi_image:
-        min_width = page_width * 0.68
-        min_height = page_height * 0.26
+        min_width = page_width * 0.50
+        min_height = page_height * 0.20
         cur_width = clip_x1 - clip_x0
         cur_height = clip_y1 - clip_y0
 
@@ -728,7 +750,12 @@ def _build_caption_band_bbox(
         return None
 
     prev = _normalize_bbox(previous_caption_bbox)
-    band_top = max(0.0, (prev[3] + 6.0) if prev else 0.0)
+    if prev:
+        band_top = max(0.0, prev[3] + 6.0)
+    else:
+        # 无前一个 caption 时，向上回溯合理高度（页面 35% 或 280pt），而非从页顶开始
+        default_height = min(page_height * 0.35, 280.0)
+        band_top = max(0.0, current[1] - default_height)
     band_bottom = min(page_height, max(band_top + 1.0, current[1] - 4.0))
     if band_bottom <= band_top:
         return None
@@ -973,6 +1000,15 @@ def _render_figure_crop_from_pdf(
         if not clip_bbox:
             return None
 
+        # 使用 DocLayout-YOLO 收紧到纯图像区域（与 figure_render 一致）
+        try:
+            from services.figure_render import _tighten_bbox_to_images
+            tight = _tighten_bbox_to_images(page, list(clip_bbox))
+            if tight:
+                clip_bbox = tight
+        except Exception as e:
+            logger.debug(f"YOLO tighten failed in old path: {e}")
+
         clip = fitz.Rect(*clip_bbox)
         pix = page.get_pixmap(dpi=FIGURE_RENDER_DPI, clip=clip, annots=False)
         if pix.width <= 10 or pix.height <= 10:
@@ -1101,6 +1137,194 @@ def _extract_figures_for_overview(
         })
     return result
 
+
+# ============ 新增：Figure Pipeline 集成函数 ============
+
+def _extract_figures_via_pipeline(
+    pdf_doc,
+    doc_data: dict,
+    depth: str,
+    page_width: float = 612,
+    page_height: float = 792
+) -> List[LogicalFigureSchema]:
+    """
+    使用新的 Figure Pipeline 提取 figures
+    
+    流程：
+    1. 获取 OCR 结果 (figures + images)
+    2. 尝试 MinerU Adapter
+    3. 尝试 PDF Native Adapter
+    4. Fallback to image list
+    
+    Returns:
+        List[LogicalFigureSchema]: 标准化的 Figure 列表
+    """
+    # 获取文档数据
+    ocr_result = doc_data.get("ocr_result", {})
+    figures = ocr_result.get("figures", [])
+    images = ocr_result.get("images", [])
+    
+    if not figures and not images:
+        logger.info("No figures or images found in document")
+        return []
+    
+    # 尝试不同 Adapter
+    adapter_results: List = []
+    
+    # 1. 尝试 MinerU Adapter
+    if figures:
+        try:
+            mineru_adapter = FigureAdapterFactory.get_adapter(FigureSource.MINERU)
+            mineru_blocks = mineru_adapter.parse(
+                "",  # pdf_path not needed for this adapter
+                {"figures": figures, "images": images},
+                page_width,
+                page_height
+            )
+            if mineru_blocks:
+                adapter_results.extend(mineru_blocks)
+                logger.info(f"MineruAdapter: got {len(mineru_blocks)} blocks")
+        except Exception as e:
+            logger.warning(f"MineruAdapter failed: {e}")
+    
+    # 2. 如果 MinerU 没有结果，尝试 PDF Native Adapter
+    if not adapter_results and figures:
+        try:
+            pdf_adapter = FigureAdapterFactory.get_adapter(FigureSource.PDF_NATIVE)
+            pdf_blocks = pdf_adapter.parse(
+                "",
+                {"figures": figures, "images": images},
+                page_width,
+                page_height
+            )
+            if pdf_blocks:
+                adapter_results.extend(pdf_blocks)
+                logger.info(f"PDFFigureAdapter: got {len(pdf_blocks)} blocks")
+        except Exception as e:
+            logger.warning(f"PDFFigureAdapter failed: {e}")
+    
+    # 3. 如果都没有结果，使用 Fallback Adapter
+    if not adapter_results and images:
+        try:
+            fallback_adapter = FigureAdapterFactory.get_adapter(FigureSource.FALLBACK)
+            fallback_blocks = fallback_adapter.parse(
+                "",
+                {"figures": figures, "images": images},
+                page_width,
+                page_height
+            )
+            if fallback_blocks:
+                adapter_results.extend(fallback_blocks)
+                logger.info(f"FallbackFigureAdapter: got {len(fallback_blocks)} blocks")
+        except Exception as e:
+            logger.warning(f"FallbackFigureAdapter failed: {e}")
+    
+    if not adapter_results:
+        return []
+    
+    # 4. 使用 Figure Builder 构建 Logical Figures
+    logical_figures = build_logical_figures(
+        adapter_results,
+        page_width,
+        page_height
+    )
+    
+    # 5. 选取 top N
+    selected = select_top_figures(logical_figures, depth)
+    
+    return selected
+
+
+def _render_figures_with_pipeline(
+    pdf_doc,
+    figures: List[LogicalFigureSchema]
+) -> List[Dict]:
+    """
+    使用 Figure Render + Validation 渲染 figures
+    
+    Returns:
+        List[Dict]: 包含 image_base64 和渲染结果的 dict 列表
+    """
+    results = []
+    
+    for figure in figures:
+        # 渲染
+        render_result = validate_and_fallback(
+            figure,
+            pdf_doc,
+            render_figure
+        )
+        
+        results.append({
+            "figure": figure,
+            "render_result": render_result,
+            "display_image_base64": render_result.display_image_base64 if render_result.success else None,
+            "model_image_base64": render_result.model_image_base64 if render_result.success else None,
+        })
+    
+    return results
+
+
+async def _generate_figure_analysis_via_pipeline(
+    figure_data: Dict,
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str = "",
+) -> Optional[KeyFigureItem]:
+    """
+    使用新 pipeline 生成的 figure 数据进行 LLM 分析
+    
+    Args:
+        figure_data: _render_figures_with_pipeline 返回的 dict
+        api_key, model, provider, endpoint: LLM 调用参数
+        
+    Returns:
+        KeyFigureItem: 分析结果
+    """
+    figure = figure_data.get("figure")
+    render_result = figure_data.get("render_result")
+    
+    if not figure or not render_result or not render_result.success:
+        return None
+    
+    # display_image = YOLO 收紧后的纯图像裁切（给用户看）
+    # model_image  = 完整区域（给 LLM 分析，包含上下文）
+    display_b64 = render_result.display_image_base64
+    model_b64 = render_result.model_image_base64 or display_b64
+    if not display_b64 and not model_b64:
+        return None
+    
+    # 准备数据给 _generate_single_figure_analysis
+    figure_info = {
+        "figure_id": figure.figure_id,
+        "figure_index": figure.page_idx,
+        "image_data_list": [f"data:image/png;base64,{model_b64}"],
+        "figure_label": figure.figure_index or "",
+        "page_content_snippet": "",
+        "display_image_data": f"data:image/png;base64,{display_b64 or model_b64}",
+        "caption": figure.caption_text,
+    }
+    
+    # 调用现有的分析函数
+    result = await _generate_single_figure_analysis(
+        figure_id=figure_info["figure_id"],
+        figure_index=figure_info["figure_index"],
+        image_data_list=figure_info["image_data_list"],
+        figure_label=figure_info["figure_label"],
+        page_content_snippet=figure_info.get("page_content_snippet", ""),
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+        display_image_data=figure_info.get("display_image_data"),
+        caption=figure_info.get("caption"),
+    )
+    
+    return result
+
+
+# ============ 原有函数保留，标记为旧版 ============
 
 def _extract_content_from_response(response: dict) -> str:
     """从 call_ai_api 返回的原始响应中提取文本 content。"""
@@ -1289,6 +1513,7 @@ async def generate_overview_content(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    use_mineru_figures: bool = False,
 ) -> OverviewData:
     """生成速览内容（调用 LLM）"""
     from services.chat_service import call_ai_api
@@ -1352,10 +1577,67 @@ async def generate_overview_content(
         )
         
         # 关键图表解读：从文档提取图片并用多模态模型生成解析
+        # [T2] 优先使用 figure_extraction 服务的缓存结果
         try:
-            images, pages, figures, pdf_url = await get_document_images_and_pages(doc_id)
-            figures = _enrich_figures_with_pdf_geometry(pdf_url, figures)
-            if images:
+            from services.figure_extraction import build_logical_figures_for_overview, get_figure_extraction_status
+            from routes.document_routes import documents_store
+
+            # 检查文档是否存在
+            key_figures_list = []
+            pdf_doc = None
+
+            if doc_id in documents_store:
+                doc = documents_store[doc_id]
+                doc_data = doc.get("data", {})
+                pdf_url = doc.get("pdf_url", "")
+
+                # 检查是否需要强制重建 figure extraction 缓存
+                cache_status = get_figure_extraction_status(doc_data)
+                force_rebuild = not cache_status.get("has_cache", False)
+                # 如果已有 MinerU 数据（上传阶段产生）但缓存来源不匹配，强制重建
+                has_mineru_data = bool(doc_data.get("ocr_result", {}).get("figures"))
+                if has_mineru_data and cache_status.get("source") != "mineru":
+                    force_rebuild = True
+                    logger.info("[Overview] 已有 MinerU 数据，强制重建 figure extraction")
+
+                logical_figures = build_logical_figures_for_overview(
+                    doc_id, doc, depth, force_rebuild=force_rebuild
+                )
+                if logical_figures and pdf_url:
+                    try:
+                        # 解析 pdf_url 为本地文件路径（使用与 document_routes 一致的 UPLOAD_DIR）
+                        from routes.document_routes import UPLOAD_DIR as _upload_dir2
+                        _pdf_path = _upload_dir2 / pdf_url.split("/")[-1]
+                        pdf_doc = fitz.open(str(_pdf_path))
+                        rendered_figures = _render_figures_with_pipeline(pdf_doc, logical_figures)
+
+                        analysis_tasks = [
+                            _generate_figure_analysis_via_pipeline(
+                                fig_data, api_key, model, provider, endpoint
+                            )
+                            for fig_data in rendered_figures
+                        ]
+
+                        analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+                        for result in analysis_results:
+                            if isinstance(result, KeyFigureItem):
+                                key_figures_list.append(result)
+                            elif isinstance(result, Exception):
+                                logger.warning(f"Figure analysis failed: {result}")
+                    except Exception as e:
+                        logger.warning(f"New figure pipeline failed: {e}")
+                    finally:
+                        if pdf_doc:
+                            pdf_doc.close()
+                            pdf_doc = None
+
+            # 如果新 pipeline 没有产生结果，回退到旧逻辑
+            if not key_figures_list:
+                # 获取 images, pages, figures 供旧逻辑使用
+                images, pages, figures, pdf_url = await get_document_images_and_pages(doc_id)
+
+                figures = _enrich_figures_with_pdf_geometry(pdf_url, figures)
                 figures_to_analyze = _extract_figures_for_overview(images, pages, depth, figures)
                 logger.info(
                     "速览生成: doc=%s depth=%s excerpt_chars=%s figure_count=%s sub_images=%s",
@@ -1365,7 +1647,7 @@ async def generate_overview_content(
                     len(figures_to_analyze),
                     [len(fig.get("image_data_list", [])) for fig in figures_to_analyze],
                 )
-                key_figures_list = []
+                
                 for i, fig in enumerate(figures_to_analyze):
                     display_image_data = _render_figure_crop_from_pdf(
                         pdf_url=pdf_url,
@@ -1391,8 +1673,22 @@ async def generate_overview_content(
                     )
                     if item:
                         key_figures_list.append(item)
-                if key_figures_list:
-                    overview.key_figures = key_figures_list
+            
+            if key_figures_list:
+                overview.key_figures = key_figures_list
+
+            # 写入 figure_meta
+            figure_source = "unknown"
+            if doc_id in documents_store:
+                meta = documents_store[doc_id].get("data", {}).get("logical_figures_meta", {})
+                figure_source = meta.get("source", "unknown")
+            if not key_figures_list:
+                figure_source = "none"
+            overview.figure_meta = {
+                "source": figure_source,
+                "count": len(key_figures_list),
+            }
+                
         except Exception as e:
             logger.warning(f"关键图表解读跳过: {e}")
         
@@ -1413,6 +1709,7 @@ async def create_overview_task(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    use_mineru_figures: bool = False,
 ) -> OverviewTask:
     """创建异步任务"""
     task_id = str(uuid.uuid4())
@@ -1427,7 +1724,8 @@ async def create_overview_task(
         endpoint=endpoint,
         status="pending",
         created_at=time.time(),
-        updated_at=time.time()
+        updated_at=time.time(),
+        use_mineru_figures=use_mineru_figures,
     )
     
     overview_tasks[task_id] = task
@@ -1451,12 +1749,16 @@ async def _process_overview_task(task_id: str):
         task.updated_at = time.time()
         
         # 检查缓存
+        _use_mineru = getattr(task, 'use_mineru_figures', False)
         cached = await get_cached_overview(task.doc_id, task.depth)
         if cached:
-            task.result = cached
-            task.status = "completed"
-            task.updated_at = time.time()
-            return
+            if _use_mineru and (cached.figure_meta or {}).get("source") != "mineru":
+                logger.info(f"[Overview] task: 缓存非 MinerU，跳过")
+            else:
+                task.result = cached
+                task.status = "completed"
+                task.updated_at = time.time()
+                return
         
         result = await _generate_or_wait_overview(
             task.doc_id,
@@ -1465,6 +1767,7 @@ async def _process_overview_task(task_id: str):
             model=task.model,
             provider=task.provider,
             endpoint=task.endpoint,
+            use_mineru_figures=getattr(task, 'use_mineru_figures', False),
         )
         
         task.result = result
@@ -1492,13 +1795,17 @@ async def _generate_or_wait_overview(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    use_mineru_figures: bool = False,
 ) -> OverviewData:
     """相同 doc/depth 的 overview 只生成一次，其余请求直接复用。"""
     cache_key = _get_cache_key(doc_id, depth)
 
     cached = await get_cached_overview(doc_id, depth)
     if cached:
-        return cached
+        if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
+            logger.info(f"[Overview] _generate_or_wait: 缓存非 MinerU，跳过")
+        else:
+            return cached
 
     inflight = overview_inflight.get(cache_key)
     if inflight:
@@ -1517,6 +1824,7 @@ async def _generate_or_wait_overview(
             model=model,
             provider=provider,
             endpoint=endpoint,
+            use_mineru_figures=use_mineru_figures,
         )
 
     task = asyncio.create_task(_runner())
@@ -1535,6 +1843,7 @@ async def get_or_create_overview(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    use_mineru_figures: bool = False,
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
     # 先检查缓存
@@ -1551,8 +1860,9 @@ async def get_or_create_overview(
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
+                use_mineru_figures=use_mineru_figures,
             ),
-            timeout=120,
+            timeout=180,
         )
     except asyncio.TimeoutError as e:
         raise TimeoutError("速览生成超时") from e

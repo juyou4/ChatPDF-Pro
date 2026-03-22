@@ -30,6 +30,8 @@ def service(tmp_path):
         mock_index = MagicMock()
         mock_index.index = None
         mock_index.load.return_value = False
+        mock_index.get_status.return_value = {}
+        mock_index.safe_reindex.return_value = None
         MockIndex.return_value = mock_index
 
         with patch("services.memory_service.MemoryRetriever") as MockRetriever:
@@ -150,6 +152,24 @@ class TestSaveQaSummary:
         assert session["qa_summaries"][0]["source_type"] == "auto_qa"
         assert session["qa_summaries"][0]["importance"] == 0.5
 
+    def test_summary_records_memory_metadata(self, service):
+        """QA 摘要应写入分层元数据，供后续命中解释使用"""
+        chat_history = [
+            {"role": "user", "content": "请总结贡献"},
+            {"role": "assistant", "content": "主要贡献是提出一套鲁棒攻击框架"},
+        ]
+
+        service.save_qa_summary("doc-1", chat_history, n=1)
+
+        session = service.store.load_session("doc-1")
+        summary = session["qa_summaries"][0]
+        assert summary["memory_kind"] == "episodic"
+        assert summary["memory_scope"] == "document"
+        assert summary["status"] == "active"
+        assert summary["title"] == "请总结贡献"
+        assert "trace" in summary
+        service._mock_index.add_entry.assert_called()
+
 
 # ==================== 摘要上限控制测试 ====================
 
@@ -256,6 +276,97 @@ class TestSaveImportantMemory:
         """重要记忆应同时添加到向量索引"""
         service.save_important_memory("doc-1", "问题", "回答")
         service._mock_index.add_entry.assert_called_once()
+
+    def test_important_memory_has_traceable_metadata(self, service):
+        entry = service.save_important_memory("doc-1", "这个方法的核心是什么？", "核心是多视图一致性伪装")
+        assert entry.memory_kind == "doc_fact"
+        assert entry.memory_scope == "document"
+        assert entry.title == "这个方法的核心是什么？"
+        assert entry.trace["kind"] == "important_memory"
+
+
+class TestCompressionAndHits:
+    def test_compression_is_non_destructive(self, service):
+        service.compressor.compression_threshold = 2
+        for idx in range(3):
+            service.add_entry(f"Q: 问题{idx}\nA: 回答{idx}", "auto_qa", doc_id="doc-1")
+
+        service._check_and_compress("doc-1")
+
+        entries = [e for e in service.store.get_all_entries() if e.doc_id == "doc-1"]
+        archived = [e for e in entries if e.status == "archived_raw"]
+        consolidated = [e for e in entries if e.memory_kind == "consolidated"]
+
+        assert len(archived) == 3
+        assert len(consolidated) >= 1
+        assert all(c.derived_from for c in consolidated)
+        assert service._mock_index.remove_entry.call_count >= 3
+
+    def test_retrieve_memories_raw_returns_enriched_hits(self, service):
+        entry = service.add_entry("用户偏好中文回答", "manual")
+        service._mock_retriever.retrieve.return_value = [
+            {
+                "entry_id": entry.id,
+                "text": entry.content,
+                "source_type": entry.source_type,
+                "doc_id": entry.doc_id,
+                "rrf_score": 0.83,
+            }
+        ]
+
+        hits = service.retrieve_memories_raw("偏好", doc_id=None, filter_by_doc=False)
+
+        assert hits == [
+            {
+                "id": entry.id,
+                "entry_id": entry.id,
+                "content": "用户偏好中文回答",
+                "source_type": "manual",
+                "doc_id": None,
+                "score": 0.83,
+                "rrf_score": 0.83,
+                "importance": 1.0,
+                "memory_tier": "short_term",
+                "memory_kind": "profile",
+                "memory_scope": "profile",
+                "status": "active",
+                "title": "用户偏好中文回答",
+                "summary": "用户偏好中文回答",
+                "created_at": entry.created_at,
+                "tags": entry.tags,
+                "source_ref": {},
+                "derived_from": [],
+                "trace": {"kind": "manual_add", "query": "偏好"},
+                "last_used_query": "偏好",
+            }
+        ]
+
+    def test_retrieve_memories_raw_includes_working_and_graph_hits(self, service):
+        fact = MemoryEntry(
+            content="Figure 2 展示了方法框架，并与数据集结果相关。",
+            source_type="llm_distilled",
+            doc_id="doc-1",
+            memory_kind="doc_fact",
+            memory_scope="document",
+            title="图2方法框架",
+            tags=["method", "dataset"],
+        )
+        service.store.add_entry(fact)
+        service._mock_retriever.retrieve.return_value = []
+
+        hits = service.retrieve_memories_raw(
+            "请解释图2的方法框架",
+            doc_id="doc-1",
+            filter_by_doc=True,
+            chat_history=[
+                {"role": "user", "content": "上一轮问题"},
+                {"role": "assistant", "content": "上一轮回答"},
+            ],
+        )
+
+        kinds = [hit["memory_kind"] for hit in hits]
+        assert "working" in kinds
+        assert "graph" in kinds
 
 
 # ==================== update_keywords 测试 ====================
@@ -371,5 +482,21 @@ class TestCRUDOperations:
         assert "total_entries" in status
         assert "index_size" in status
         assert "profile_focus_areas" in status
+        assert "snapshot_primary" in status
         assert status["enabled"] is True
         assert status["total_entries"] >= 1
+        assert status["snapshot_primary"] is True
+
+
+class TestRecovery:
+    def test_rebuild_from_events_rebuilds_index(self, service):
+        service.add_entry("用户偏好中文", "manual")
+        service._mock_index.safe_reindex.reset_mock()
+        service._mock_index.flush_sync.reset_mock()
+
+        result = service.rebuild_from_events()
+
+        assert result["profile_entries"] == 1
+        assert result["snapshot_primary"] is True
+        service._mock_index.safe_reindex.assert_called_once()
+        service._mock_index.flush_sync.assert_called_once_with(reason="manual")

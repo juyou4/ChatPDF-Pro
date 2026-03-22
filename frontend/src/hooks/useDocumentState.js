@@ -14,10 +14,11 @@ const loadOCRSettings = () => {
       return {
         mode: validModes.includes(parsed.mode) ? parsed.mode : 'auto',
         backend: validBackends.includes(parsed.backend) ? parsed.backend : 'auto',
+        mineruFigureEnhance: typeof parsed.mineruFigureEnhance === 'boolean' ? parsed.mineruFigureEnhance : true,
       };
     }
   } catch { /* ignore */ }
-  return { mode: 'auto', backend: 'auto' };
+  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true };
 };
 
 // API base URL
@@ -110,7 +111,9 @@ export function useDocumentState({
 
   const buildOverviewKey = useCallback((currentDocId, depth) => {
     if (!currentDocId) return '';
-    return `${currentDocId}:${depth}`;
+    const ocrCfg = loadOCRSettings();
+    const mineruFlag = ocrCfg.mineruFigureEnhance ? '1' : '0';
+    return `${currentDocId}:${depth}:m${mineruFlag}`;
   }, []);
 
   /**
@@ -384,7 +387,11 @@ export function useDocumentState({
     setOverviewError(null);
 
     const requestPromise = (async () => {
+      const ocrSettings = loadOCRSettings();
       const params = new URLSearchParams({ depth });
+      if (ocrSettings.mineruFigureEnhance) {
+        params.set('use_mineru_figures', 'true');
+      }
       const headers = {};
       if (chatCredentials) {
         headers['X-ChatPDF-Provider'] = chatProvider;

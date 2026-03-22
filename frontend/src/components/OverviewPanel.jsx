@@ -139,6 +139,7 @@ const OverviewPanel = ({
         icon={<Image className="w-5 h-5" />}
         title="关键图表解读"
         color="purple"
+        badge={overview.figure_meta?.source === 'mineru' ? 'MinerU 增强' : overview.figure_meta?.source === 'pdf_native' ? 'PDF 原生' : null}
       >
         {overview.key_figures && overview.key_figures.length > 0 ? (
           <div className="space-y-3">
@@ -201,7 +202,7 @@ const OverviewPanel = ({
 /**
  * 速览卡片组件
  */
-const OverviewCard = ({ icon, title, color, children }) => {
+const OverviewCard = ({ icon, title, color, badge, children }) => {
   const colorClasses = {
     blue: 'bg-blue-50 border-blue-100 text-blue-600',
     green: 'bg-green-50 border-green-100 text-green-600',
@@ -223,6 +224,11 @@ const OverviewCard = ({ icon, title, color, children }) => {
       <div className={`flex items-center gap-2 px-4 py-3 border-b border-gray-100 ${colorClasses[color] || ''}`}>
         {icon}
         <h3 className="font-semibold text-sm">{title}</h3>
+        {badge && (
+          <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-white/60 text-purple-500 font-medium">
+            {badge}
+          </span>
+        )}
       </div>
       <div className="p-4">{children}</div>
     </div>

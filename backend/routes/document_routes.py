@@ -1342,6 +1342,14 @@ def extract_text_from_pdf(
         
         print(f"[PDF] OCR 完成。已使用: {result['ocr_used']}，目标页面: {ocr_target_pages}，后端: {ocr_result.backend}")
         
+        # 存储 MinerU 版面分析提取的 figure 数据（供速览 Figure Pipeline 使用）
+        if hasattr(ocr_result, 'layout_figures') and ocr_result.layout_figures:
+            result["ocr_result"] = {
+                "figures": ocr_result.layout_figures,
+                "backend": ocr_result.backend,
+            }
+            print(f"[PDF] MinerU 版面分析: 存储 {len(ocr_result.layout_figures)} 个 figure 区域")
+        
     except Exception as e:
         # 在线 OCR 失败时，尝试回退到本地 OCR 引擎
         if adapter.name in _ocr_registry._ONLINE_ADAPTERS:
@@ -1908,6 +1916,12 @@ async def get_ocr_status():
         "config": config,
         "online_services": online_services,
         "install_instructions": install_instructions,
+        # [T3] Figure Extraction 能力
+        "figure_extraction": {
+            "configured": online_services.get("mineru", {}).get("configured", False),
+            "can_extract_figures": online_services.get("mineru", {}).get("available", False),
+            "timeout_sec": settings.figure_extraction_timeout_sec,
+        },
     }
 
 
@@ -2235,7 +2249,7 @@ async def validate_ocr_key(request: Request):
             return {"valid": False, "message": "网络连接失败，请检查网络设置"}
 
     elif provider in ("mineru", "doc2x"):
-        # Worker 代理模式验证：测试 Worker 可达性和认证有效性
+        # Worker 代理模式验证：分两步——先测试 Worker 可达性，再测试 Token 有效性
         worker_url = body.get("worker_url", "").strip()
         auth_key = body.get("auth_key", "").strip()
         token = body.get("token", "").strip()
@@ -2245,53 +2259,58 @@ async def validate_ocr_key(request: Request):
         if not worker_url:
             raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
 
-        # 构建请求头（包含 Auth Key 和 Token）
-        headers = {}
-        if auth_key:
-            headers["X-Auth-Key"] = auth_key
-
-        # 前端透传模式下，将 Token 加入请求头
-        if token_mode == "frontend" and token:
-            if provider == "mineru":
-                headers["X-MinerU-Key"] = token
-            else:
-                headers["X-Doc2X-Key"] = token
-
-        # 根据 provider 构建测试 URL
-        # MinerU: GET {worker_url}/mineru/result/test-ping（预期 404 但 Worker 可达）
-        # Doc2X: GET {worker_url}/doc2x/status/test-ping（预期 404 但 Worker 可达）
         worker_url_clean = worker_url.rstrip("/")
-        if provider == "mineru":
-            test_url = f"{worker_url_clean}/mineru/result/test-ping"
-        else:
-            test_url = f"{worker_url_clean}/doc2x/status/test-ping"
-
         provider_label = "MinerU" if provider == "mineru" else "Doc2X"
 
         try:
             with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
-                resp = client.get(test_url, headers=headers)
+                # 第一步：测试 Worker 可达性（GET /health，仅带 Auth Key）
+                health_headers = {}
+                if auth_key:
+                    health_headers["X-Auth-Key"] = auth_key
 
-            # Worker 可达：200、404、500 都表示 Worker 正常运行
-            # 404 是预期的，因为 test-ping 不是真实的 batch_id/uid
-            # 500 也可能是 Worker 将请求转发给了上游 API，上游返回错误（如 batch_id 不存在）
-            if resp.status_code in (200, 404, 500):
-                logger.info(f"{provider_label} Worker 验证成功 (HTTP {resp.status_code})")
-                return {"valid": True, "message": f"{provider_label} Worker 可达且 Token 有效"}
-            elif resp.status_code in (401, 403):
-                logger.warning(f"{provider_label} Worker 认证失败: HTTP {resp.status_code}")
-                # 尝试从响应体获取更具体的错误信息
-                try:
-                    error_body = resp.json()
-                    error_msg = error_body.get("error", "")
-                except Exception:
-                    error_msg = ""
-                if "token" in error_msg.lower():
-                    return {"valid": False, "message": f"Token 无效或缺失，请检查 Token 是否正确"}
-                return {"valid": False, "message": f"认证失败，请检查 Auth Key 或 Token 是否正确"}
-            else:
-                logger.warning(f"{provider_label} Worker 验证异常: HTTP {resp.status_code}")
-                return {"valid": False, "message": f"验证失败，Worker 返回 HTTP {resp.status_code}"}
+                health_resp = client.get(f"{worker_url_clean}/health", headers=health_headers)
+
+                if health_resp.status_code in (401, 403):
+                    return {"valid": False, "message": "Auth Key 无效，请检查 Auth Key 是否正确"}
+                if not health_resp.is_success:
+                    return {"valid": False, "message": f"Worker 不可达 (HTTP {health_resp.status_code})"}
+
+                # 第二步：测试 Token 有效性（前端透传模式下）
+                if token_mode == "frontend":
+                    if not token:
+                        return {"valid": False, "message": "前端透传模式下必须提供 Token"}
+
+                    token_headers = dict(health_headers)
+                    if provider == "mineru":
+                        token_headers["X-MinerU-Key"] = token
+                        token_test_url = f"{worker_url_clean}/mineru/result/__health__"
+                    else:
+                        token_headers["X-Doc2X-Key"] = token
+                        token_test_url = f"{worker_url_clean}/doc2x/status/__health__"
+
+                    token_resp = client.get(token_test_url, headers=token_headers)
+
+                    if token_resp.status_code in (401, 403):
+                        return {"valid": False, "message": "Token 无效或缺失，请检查 Token 是否正确"}
+
+                    # 尝试解析 JSON 响应
+                    try:
+                        token_data = token_resp.json()
+                        if not token_resp.is_success or not token_data.get("success", True):
+                            err_msg = token_data.get("message") or token_data.get("error") or "未知错误"
+                            return {"valid": False, "message": f"Token 验证失败: {err_msg}"}
+                    except Exception:
+                        # 非 JSON 响应但状态码正常也视为通过
+                        if not token_resp.is_success:
+                            return {"valid": False, "message": f"Token 验证失败 (HTTP {token_resp.status_code})"}
+
+                    logger.info(f"{provider_label} Worker + Token 验证成功")
+                    return {"valid": True, "message": f"{provider_label} Worker 可达且 Token 有效"}
+                else:
+                    # Worker 模式：只需验证 Worker 可达性
+                    logger.info(f"{provider_label} Worker 验证成功（Worker 模式）")
+                    return {"valid": True, "message": f"{provider_label} Worker 可达（Token 由 Worker 配置）"}
 
         except httpx.TimeoutException:
             logger.warning(f"{provider_label} Worker 验证超时")
@@ -2468,6 +2487,7 @@ async def get_overview(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
+    use_mineru_figures: bool = False,
 ):
     """
     获取速览（同步接口）
@@ -2507,6 +2527,7 @@ async def get_overview(
         prov = merged.get(provider, {})
         api_key = (prov.get("api_key") or "").strip()
 
+    logger.info(f"[Overview-Route] doc={doc_id} depth={depth} use_mineru_figures={use_mineru_figures}")
     try:
         overview = await get_or_create_overview(
             doc_id,
@@ -2515,6 +2536,7 @@ async def get_overview(
             model,
             provider,
             _get_overview_provider_endpoint(provider, api_host),
+            use_mineru_figures=use_mineru_figures,
         )
         return overview.model_dump()
     except TimeoutError:

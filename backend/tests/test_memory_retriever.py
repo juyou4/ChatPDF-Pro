@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from services.memory_store import MemoryStore, MemoryEntry
 from services.memory_index import MemoryIndex
 from services.memory_retriever import MemoryRetriever
+from services.active_pool import ActivePool
 
 
 # ==================== 辅助工具 ====================
@@ -63,6 +64,7 @@ def memory_index(data_dir, monkeypatch):
     os.makedirs(index_dir, exist_ok=True)
     mi = MemoryIndex(index_dir, embedding_model_id="test-model")
     monkeypatch.setattr(mi, "_embed_texts", _fake_embed_fn)
+    mi._sync_debounce_seconds = 0
     return mi
 
 
@@ -190,6 +192,44 @@ class TestHybridRetrieval:
         doc_ids = {item["doc_id"] for item in results}
         assert "doc-other" not in doc_ids
         assert doc_ids.issubset({"doc-current", None})
+
+    def test_archived_raw_entries_are_excluded(self, retriever, memory_store, memory_index):
+        active = _make_entry("当前有效记忆", doc_id="doc-1")
+        archived = _make_entry("已归档的旧摘要", doc_id="doc-1")
+        archived.status = "archived_raw"
+        self._add_entries(memory_store, memory_index, [active, archived])
+
+        results = retriever.retrieve("摘要", top_k=5, doc_id="doc-1", filter_by_doc=True)
+
+        entry_ids = {item["entry_id"] for item in results}
+        assert archived.id not in entry_ids
+
+    def test_active_pool_can_answer_before_index(self, memory_store, memory_index):
+        """热缓存命中时，即使索引为空也应返回结果。"""
+        active_pool = ActivePool(capacity=10)
+        retriever = MemoryRetriever(memory_store, memory_index, active_pool=active_pool)
+        entry = _make_entry("用户偏好中文回答并关注自动驾驶", source_type="manual")
+        memory_store.add_entry(entry)
+        active_pool.put(entry)
+
+        results = retriever.retrieve("中文回答", top_k=3)
+
+        assert len(results) == 1
+        assert results[0]["entry_id"] == entry.id
+        assert results[0]["from_active_pool"] is True
+
+    def test_cold_hit_pages_into_active_pool(self, memory_store, memory_index):
+        """冷记忆命中后应回灌到热缓存。"""
+        active_pool = ActivePool(capacity=10)
+        retriever = MemoryRetriever(memory_store, memory_index, active_pool=active_pool)
+        entry = _make_entry("Transformer 架构改变了 NLP", source_type="manual")
+        memory_store.add_entry(entry)
+        memory_index.add_entry(entry.id, entry.content)
+
+        results = retriever.retrieve("Transformer", top_k=3)
+
+        assert any(item["entry_id"] == entry.id for item in results)
+        assert active_pool.get(entry.id) is not None
 
 
 # ==================== BM25 检索测试 ====================
