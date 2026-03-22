@@ -41,6 +41,7 @@ _model_instance = None
 _model_device = None
 
 
+
 def _get_device() -> str:
     """检测可用设备
     

@@ -16,17 +16,22 @@ from schemas.figure_schema import LogicalFigureSchema, RenderResult, FigureImage
 
 logger = logging.getLogger(__name__)
 
+# 页级 YOLO 缓存: key=page_number → List[fitz.Rect] (ImageBody bboxes in page pts)
+# 避免同页多 figure 重复跑 YOLO（CPU ~2-5s/次）
+_yolo_page_cache: dict = {}
+
 
 # 渲染配置
 RENDER_CONFIG = {
-    # 展示图：PNG, 高分辨率
-    "display_dpi": 300,
-    "display_format": "png",
+    # 展示图：JPEG, 中等分辨率（web 显示 ~600px 宽，150 DPI 足够）
+    "display_dpi": 150,
+    "display_format": "jpeg",
+    "display_jpg_quality": 90,
     
-    # 分析图：JPEG, 中等分辨率
-    "model_dpi": 150,
+    # 分析图：JPEG, 低分辨率（给 LLM，detail:low 只用 512px）
+    "model_dpi": 120,
     "model_format": "jpeg",
-    "model_jpg_quality": 85,
+    "model_jpg_quality": 65,
     
     # 裁剪边距 (points)
     "padding": 5,
@@ -210,7 +215,8 @@ def render_figure(
             page_idx,
             padded_bbox,
             dpi=cfg["display_dpi"],
-            output_format=cfg["display_format"]
+            output_format=cfg["display_format"],
+            jpg_quality=cfg.get("display_jpg_quality", 90)
         )
     except Exception as e:
         return RenderResult(
@@ -281,18 +287,17 @@ def _tighten_bbox_to_images(
     return _tighten_bbox_with_image_info(page, bbox_page_pts, min_coverage)
 
 
-def _tighten_bbox_with_layout_model(
-    page,
-    bbox_page_pts: List[float],
-) -> Optional[List[float]]:
-    """使用 DocLayout-YOLO 检测 ImageBody 区域（与 MinerU 同源模型）
+def _get_page_body_rects(page) -> Optional[List]:
+    """获取页面所有 ImageBody 的 fitz.Rect 列表（带页级缓存）
 
-    将 PDF 页面渲染为图片 → YOLO 检测 → 筛选 ImageBody → 转换回 page points
-
-    采用 y-band 聚类策略：先找与 figure bbox 重叠的 ImageBody，
-    再扩展到同一水平带（y-range 重叠）的所有 ImageBody，
-    从而正确处理多子图并排的 Figure（如 Figure 1 的 a/b/c）。
+    首次调用渲染页面 + YOLO 推理，后续同页直接返回缓存。
     """
+    global _yolo_page_cache
+
+    page_num = page.number
+    if page_num in _yolo_page_cache:
+        return _yolo_page_cache[page_num]
+
     try:
         from services.layout_service import is_available, get_image_body_bboxes, pixel_bbox_to_page_pts
         if not is_available():
@@ -300,12 +305,7 @@ def _tighten_bbox_with_layout_model(
     except ImportError:
         return None
 
-    fig_rect = fitz.Rect(bbox_page_pts)
-    if fig_rect.is_empty:
-        return None
-
     try:
-        # 渲染页面为图片（用于 YOLO 推理）
         pix = page.get_pixmap(dpi=144)
         img_data = pix.tobytes("png")
 
@@ -317,65 +317,88 @@ def _tighten_bbox_with_layout_model(
         page_w_pts = page.rect.width
         page_h_pts = page.rect.height
 
-        # YOLO 检测 ImageBody
         body_bboxes_px = get_image_body_bboxes(page_image, conf=0.15)
         if not body_bboxes_px:
-            logger.debug("[LayoutModel] No ImageBody detected on page")
-            return None
+            _yolo_page_cache[page_num] = []
+            return []
 
-        # 转换为 page points
-        all_body_rects = []
+        rects = []
         for bbox_px in body_bboxes_px:
             bbox_pts = pixel_bbox_to_page_pts(
                 bbox_px, page_w_px, page_h_px, page_w_pts, page_h_pts
             )
-            all_body_rects.append(fitz.Rect(bbox_pts))
+            rects.append(fitz.Rect(bbox_pts))
 
-        # 第一步：找与 figure bbox 直接重叠的 ImageBody
-        seed_rects = []
-        for body_rect in all_body_rects:
-            isect = fig_rect.intersect(body_rect)
-            if isect.is_empty:
-                continue
-            body_area = body_rect.width * body_rect.height
-            if body_area > 0 and (isect.width * isect.height) / body_area >= 0.05:
-                seed_rects.append(body_rect)
-
-        if not seed_rects:
-            logger.debug("[LayoutModel] No ImageBody overlaps figure bbox")
-            return None
-
-        # 第二步：y-band 扩展 —— 找同一水平带的其他 ImageBody（处理并排子图）
-        seed_y0 = min(r.y0 for r in seed_rects)
-        seed_y1 = max(r.y1 for r in seed_rects)
-        y_tolerance = (seed_y1 - seed_y0) * 0.3  # 30% 容差
-
-        matched_rects = list(seed_rects)
-        for body_rect in all_body_rects:
-            if body_rect in seed_rects:
-                continue
-            # 检查 y-range 是否重叠（在容差范围内）
-            if body_rect.y1 >= seed_y0 - y_tolerance and body_rect.y0 <= seed_y1 + y_tolerance:
-                matched_rects.append(body_rect)
-
-        # 合并所有匹配的 ImageBody bbox
-        union = matched_rects[0]
-        for r in matched_rects[1:]:
-            union = union | r
-
-        union = union.intersect(page.rect)
-        if union.is_empty:
-            return None
-
-        logger.info(
-            f"[LayoutModel] Tightened bbox: {[round(v,1) for v in [union.x0, union.y0, union.x1, union.y1]]} "
-            f"({len(seed_rects)} seed + {len(matched_rects) - len(seed_rects)} expanded)"
-        )
-        return [union.x0, union.y0, union.x1, union.y1]
+        # 缓存上限
+        if len(_yolo_page_cache) >= 30:
+            _yolo_page_cache.clear()
+        _yolo_page_cache[page_num] = rects
+        return rects
 
     except Exception as e:
-        logger.warning(f"[LayoutModel] Detection failed, falling back: {e}")
+        logger.warning(f"[LayoutModel] Page detection failed: {e}")
         return None
+
+
+def _tighten_bbox_with_layout_model(
+    page,
+    bbox_page_pts: List[float],
+) -> Optional[List[float]]:
+    """使用 DocLayout-YOLO 检测 ImageBody 区域（与 MinerU 同源模型）
+
+    采用 y-band 聚类策略：先找与 figure bbox 重叠的 ImageBody，
+    再扩展到同一水平带（y-range 重叠）的所有 ImageBody，
+    从而正确处理多子图并排的 Figure（如 Figure 1 的 a/b/c）。
+
+    使用页级缓存，同页多 figure 只推理一次。
+    """
+    fig_rect = fitz.Rect(bbox_page_pts)
+    if fig_rect.is_empty:
+        return None
+
+    all_body_rects = _get_page_body_rects(page)
+    if not all_body_rects:
+        return None
+
+    # 第一步：找与 figure bbox 直接重叠的 ImageBody
+    seed_rects = []
+    for body_rect in all_body_rects:
+        isect = fig_rect.intersect(body_rect)
+        if isect.is_empty:
+            continue
+        body_area = body_rect.width * body_rect.height
+        if body_area > 0 and (isect.width * isect.height) / body_area >= 0.05:
+            seed_rects.append(body_rect)
+
+    if not seed_rects:
+        return None
+
+    # 第二步：y-band 扩展 —— 找同一水平带的其他 ImageBody（处理并排子图）
+    seed_y0 = min(r.y0 for r in seed_rects)
+    seed_y1 = max(r.y1 for r in seed_rects)
+    y_tolerance = (seed_y1 - seed_y0) * 0.3
+
+    matched_rects = list(seed_rects)
+    for body_rect in all_body_rects:
+        if body_rect in seed_rects:
+            continue
+        if body_rect.y1 >= seed_y0 - y_tolerance and body_rect.y0 <= seed_y1 + y_tolerance:
+            matched_rects.append(body_rect)
+
+    # 合并所有匹配的 ImageBody bbox
+    union = matched_rects[0]
+    for r in matched_rects[1:]:
+        union = union | r
+
+    union = union.intersect(page.rect)
+    if union.is_empty:
+        return None
+
+    logger.info(
+        f"[LayoutModel] Tightened bbox: {[round(v,1) for v in [union.x0, union.y0, union.x1, union.y1]]} "
+        f"({len(seed_rects)} seed + {len(matched_rects) - len(seed_rects)} expanded)"
+    )
+    return [union.x0, union.y0, union.x1, union.y1]
 
 
 def _tighten_bbox_with_image_info(

@@ -104,7 +104,7 @@ class OverviewTask(BaseModel):
 # 缓存目录
 CACHE_DIR = Path(__file__).parent.parent / "data" / "overviews"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v8"
+OVERVIEW_CACHE_VERSION = "v11"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -1295,15 +1295,18 @@ async def _generate_figure_analysis_via_pipeline(
     if not display_b64 and not model_b64:
         return None
     
+    display_data = f"data:image/jpeg;base64,{display_b64 or model_b64}"
+    caption_text = (figure.caption_text or "").strip()
+    
     # 准备数据给 _generate_single_figure_analysis
     figure_info = {
         "figure_id": figure.figure_id,
         "figure_index": figure.page_idx,
-        "image_data_list": [f"data:image/png;base64,{model_b64}"],
+        "image_data_list": [f"data:image/jpeg;base64,{model_b64}"],
         "figure_label": figure.figure_index or "",
         "page_content_snippet": "",
-        "display_image_data": f"data:image/png;base64,{display_b64 or model_b64}",
-        "caption": figure.caption_text,
+        "display_image_data": display_data,
+        "caption": caption_text,
     }
     
     # 调用现有的分析函数
@@ -1379,35 +1382,20 @@ async def _generate_single_figure_analysis(
     # Phase 5 增强：子图整体解读提示
     subfigure_group_hint = ""
     if sub_figures and len(sub_figures) > 1:
-        subfigure_group_hint = """
-【重要】这些图片属于同一个 Figure group（可能包含 a, b, c 等子图）。
-请先分别简述各子图的内容，再总结它们共同说明的整体结论。
-不要把它们视为互不相关的独立图片。"""
+        subfigure_group_hint = " 注意：这些子图属于同一Figure，请整体解读。"
 
-    prompt = f"""这是一篇学术论文中的第 {figure_index + 1} 个关键图表{subfig_hint}。
-{label_hint}{caption_context}{subfigure_group_hint}
-本次实际提供给你分析的视觉输入数量：{sent_image_count}。
+    page_hint = f"\n页面文字：{page_content_snippet[:200]}" if page_content_snippet else ""
+    prompt = f"""论文第{figure_index + 1}个图表。{label_hint}{caption_context}{page_hint}
 
-该图所在页面的部分文字如下：
+请用中文输出JSON：1)caption:一句话标题(图X:xxx格式) 2)analysis:2-3句解析(图表类型、关键内容、趋势结论，看不清说"部分细节不可辨认")
+{{"caption":"...","analysis":"..."}}
 
-{page_content_snippet[:FIGURE_PAGE_TEXT_LIMIT] if page_content_snippet else "（无正文）"}
-
-请完成两件事（用中文）：
-1. 用一句话概括该图标题；如果能识别图号，请保持为「图X: xxx」格式。
-2. 写一段 2-4 句话的解析，优先说明：
-   - 这是架构图、流程图、实验对比图、可视化结果图还是别的图表；
-   - 图中的关键模块、子图关系、输入输出或对比对象；
-   - 如果是曲线图/柱状图/统计图，请指出坐标轴、图例、主要趋势和论文结论；
-   - 如果局部文字看不清，请明确说“部分细节不可辨认”，不要臆测。
-
-请严格按以下 JSON 格式输出，不要包含其他文字：
-{{"caption": "图X: 标题", "analysis": "解析段落"}}
 """
 
     # 多模态消息：先文字后图片
     user_content = [{"type": "text", "text": prompt}]
     for img_data in visual_inputs:
-        user_content.append({"type": "image_url", "image_url": {"url": img_data}})
+        user_content.append({"type": "image_url", "image_url": {"url": img_data, "detail": "low"}})
 
     messages = [
         {"role": "system", "content": "你是学术论文图表分析助手。根据论文图片和上下文，输出指定 JSON 格式。"},
