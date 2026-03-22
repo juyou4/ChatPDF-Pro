@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, forwardRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Sidebar, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import SelectionOverlay from './SelectionOverlay';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -12,7 +12,7 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 // Configure worker - 直接指定版本以确保匹配
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false }, ref) => {
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -531,31 +531,52 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     }, [highlightInfo, pageNumber, scale, numPages]);
 
     return (
-        <div className={`relative h-full flex flex-col rounded-2xl overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[var(--color-bg-base)]'}`}>
-            <div className={`flex items-center justify-between p-4 border-b transition-colors duration-200 ${darkMode ? 'bg-[#1a1d21] border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}>
-                <div className="flex items-center gap-2">
-                    <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className={`p-2 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
-                        <ChevronLeft className="w-5 h-5" />
-                    </button>
-                    <span className="text-sm font-medium px-3">{pageNumber} / {numPages || '--'}</span>
-                    <button onClick={() => changePage(1)} disabled={pageNumber >= (numPages || 1)} className={`p-2 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
-                        <ChevronRight className="w-5 h-5" />
-                    </button>
-                </div>
-                <div className="flex items-center gap-2">
-                    <button onClick={zoomOut} className={`p-2 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
-                        <ZoomOut className="w-5 h-5" />
-                    </button>
-                    <span className="text-sm font-medium px-2">{Math.round(scale * 100)}%</span>
-                    <button onClick={zoomIn} className={`p-2 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
-                        <ZoomIn className="w-5 h-5" />
-                    </button>
+        <div className={`relative h-full flex flex-col rounded-2xl overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
+            {/* Toolbar Area */}
+            <div className={`pt-4 px-4 pb-2 z-10 transition-colors duration-200 flex-shrink-0 ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
+                <div className={`flex items-center justify-between border shadow-sm rounded-xl px-4 py-2 transition-colors duration-200 ${darkMode ? 'bg-[#2a2d31] border-white/10 text-gray-200' : 'bg-white border-gray-200 text-gray-600'}`}>
+                    {/* Left Controls */}
+                    <div className="flex items-center gap-1">
+                        {onToggleSidebar && (
+                            <button onClick={onToggleSidebar} className={`p-1.5 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="切换侧边栏">
+                                <Sidebar size={18} strokeWidth={2} />
+                            </button>
+                        )}
+                        <div className={`w-[1px] h-4 mx-1 ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`}></div>
+                        <button className={`p-1.5 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="文档信息">
+                            <FileText size={18} strokeWidth={2} />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
+                            <ChevronLeft className="w-5 h-5" />
+                        </button>
+                        <div className={`flex items-center border rounded-md px-2 py-1 text-sm ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
+                            <span className="text-center font-medium min-w-[1.5rem]">{pageNumber}</span>
+                        </div>
+                        <span className="text-sm text-gray-400 font-medium">/ {numPages || '--'}</span>
+                        <button onClick={() => changePage(1)} disabled={pageNumber >= (numPages || 1)} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}>
+                            <ChevronRight className="w-5 h-5" />
+                        </button>
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <div className={`flex items-center border rounded-lg p-0.5 ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
+                            <button onClick={zoomOut} className={`p-1 rounded-md transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-white text-gray-500'}`}>
+                                <ZoomOut className="w-4 h-4" />
+                            </button>
+                            <span className="text-sm font-medium px-2 w-14 text-center">{Math.round(scale * 100)}%</span>
+                            <button onClick={zoomIn} className={`p-1 rounded-md transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-white text-gray-500'}`}>
+                                <ZoomIn className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div className="relative flex-1 min-h-0">
             <div
                 ref={pdfScrollRef}
-                className={`absolute inset-0 overflow-auto p-6 flex items-start justify-center pdf-scroll ${darkMode ? 'bg-[#0f1115]' : 'bg-[var(--color-bg-base)]'}`}
+                className={`absolute inset-0 overflow-auto p-4 md:p-8 flex items-start justify-center pdf-scroll ${darkMode ? 'bg-[#0f1115]' : 'bg-[#F8F8FA]'}`}
                 style={{ scrollbarWidth: 'none' }}
                 onMouseUp={handleTextSelection}
                 onScroll={updateThumbs}
@@ -564,7 +585,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     <div className="flex items-center justify-center h-full">
                         <div className="text-center">
                             <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
-                            <div className="text-gray-500">文档加载中...</div>
+                            <div className="text-gray-500">加载PDF中...</div>
                         </div>
                     </div>
                 ) : error ? (
@@ -590,7 +611,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             </div>
                         }
                     >
-                        <div ref={ref} className="relative" style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
+                        <div ref={ref} className={`relative shadow-[0_2px_15px_rgba(0,0,0,0.06)] bg-white rounded-sm ${darkMode ? 'shadow-none !bg-transparent' : ''}`} style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
                             {/* 缩放过渡期间使用 CSS transform 即时缩放缓存画面，避免白屏 */}
                             <div style={scale !== debouncedScale ? {
                                 transform: `scale(${scale / debouncedScale})`,

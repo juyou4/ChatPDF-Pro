@@ -818,14 +818,6 @@ const ChatPDF = () => {
         className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150 rounded-[40px]' : 'bg-white/80 backdrop-blur-2xl border border-white/70 rounded-[40px] shadow-2xl shadow-gray-300/40 shadow-[inset_0_1px_1px_rgba(255,255,255,0.8)]'}`}
       >
         <div className="w-[320px] mx-auto flex flex-col h-full items-stretch relative">
-          <button
-            onClick={() => setShowSidebar(false)}
-            className={`absolute top-4 right-4 p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}
-            title="收起侧边栏"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-
           <div className="px-8 py-8 flex items-center justify-between mb-2">
             <div className="flex items-center gap-3 font-bold text-2xl text-purple-600 tracking-tight pl-2">
               <Bot className="w-9 h-9" />
@@ -901,8 +893,8 @@ const ChatPDF = () => {
 
       {/* 主内容区域 */}
       <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
-        {/* 侧边栏展开按钮 */}
-        {!showSidebar && (
+        {/* 侧边栏展开按钮 (未打开文档时显示) */}
+        {!showSidebar && !docId && (
           <button
             onClick={() => setShowSidebar(true)}
             className={`absolute top-4 left-4 z-20 p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${darkMode ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20' : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'}`}
@@ -935,6 +927,7 @@ const ChatPDF = () => {
                     onSelectionCancel={handleSelectionCancel}
                     darkMode={darkMode}
                     onTextSelect={handlePdfTextSelect}
+                    onToggleSidebar={() => setShowSidebar(prev => !prev)}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
                   <>
