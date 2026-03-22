@@ -64,173 +64,124 @@ const OverviewPanel = ({
   }
 
   return (
-    <div className="space-y-4 overflow-y-auto pb-4">
-      {/* 全文概述 */}
-      <OverviewCard
-        icon={<FileText className="w-5 h-5" />}
-        title="全文概述"
-        color="blue"
-      >
-        <p className="text-gray-700 leading-relaxed">
+    <div className="space-y-6 pb-4">
+      {/* 全文概述卡片 */}
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 mb-3">
+          <FileText className="w-5 h-5 text-gray-700" strokeWidth={2} />
+          <h3 className="text-lg font-semibold text-gray-900">全文概述</h3>
+        </div>
+        <p className="text-gray-600 leading-relaxed text-[15px]">
           {overview.full_text_summary}
         </p>
-      </OverviewCard>
+      </div>
 
-      {/* 术语解释 */}
-      <OverviewCard
-        icon={<BookOpen className="w-5 h-5" />}
-        title="术语解释"
-        color="green"
-      >
+      {/* 术语解释卡片 */}
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 mb-5">
+          <BookOpen className="w-5 h-5 text-gray-700" strokeWidth={2} />
+          <h3 className="text-lg font-semibold text-gray-900">术语解释</h3>
+        </div>
         {overview.terminology && overview.terminology.length > 0 ? (
-          <div className="space-y-2">
+          <div className="space-y-4">
             {overview.terminology.map((item, idx) => (
-              <div key={idx} className="flex items-start gap-2">
-                <span className="font-medium text-purple-600 bg-purple-50 px-2 py-0.5 rounded text-sm whitespace-nowrap">
+              <div key={idx} className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4">
+                <span className="inline-flex w-fit bg-[#F3E8FF] text-[#6B21A8] px-2.5 py-1 rounded-md text-sm font-medium shrink-0">
                   {item.term}
                 </span>
-                <span className="text-gray-600 text-sm">{item.explanation}</span>
+                <span className="text-gray-600 text-[15px] leading-relaxed sm:pt-1">
+                  {item.explanation}
+                </span>
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-gray-400 text-sm">暂无术语解释</p>
+          <p className="text-gray-400 text-[15px]">暂无术语解释</p>
         )}
-      </OverviewCard>
+      </div>
 
-      {/* 论文速读 */}
-      <OverviewCard
-        icon={<FlaskConical className="w-5 h-5" />}
-        title="论文速读"
-        color="orange"
-      >
+      {/* 论文速读卡片 */}
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 mb-4">
+          <FlaskConical className="w-5 h-5 text-gray-700" strokeWidth={2} />
+          <h3 className="text-lg font-semibold text-gray-900">论文速读</h3>
+        </div>
         {overview.speed_read && (
-          <div className="space-y-3">
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                论文方法
-              </h4>
-              <p className="text-gray-700 text-sm leading-relaxed">
-                {overview.speed_read.method}
-              </p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                实验设计
-              </h4>
-              <p className="text-gray-700 text-sm leading-relaxed">
-                {overview.speed_read.experiment_design}
-              </p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                解决的问题
-              </h4>
-              <p className="text-gray-700 text-sm leading-relaxed">
-                {overview.speed_read.problems_solved}
-              </p>
-            </div>
+          <div className="space-y-4 text-[15px] text-gray-600 leading-relaxed">
+            <p>
+              <strong className="text-gray-900 font-semibold">论文方法：</strong>
+              {overview.speed_read.method}
+            </p>
+            <p>
+              <strong className="text-gray-900 font-semibold">实验设计：</strong>
+              {overview.speed_read.experiment_design}
+            </p>
+            <p>
+              <strong className="text-gray-900 font-semibold">解决的问题：</strong>
+              {overview.speed_read.problems_solved}
+            </p>
           </div>
         )}
-      </OverviewCard>
+      </div>
 
-      {/* 关键图表解读 */}
-      <OverviewCard
-        icon={<Image className="w-5 h-5" />}
-        title="关键图表解读"
-        color="purple"
-        badge={overview.figure_meta?.source === 'mineru' ? 'MinerU 增强' : overview.figure_meta?.source === 'pdf_native' ? 'PDF 原生' : null}
-      >
+      {/* 关键图表解读卡片 */}
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Image className="w-5 h-5 text-gray-700" strokeWidth={2} />
+            <h3 className="text-lg font-semibold text-gray-900">关键图表解读</h3>
+          </div>
+          {(overview.figure_meta?.source === 'mineru' || overview.figure_meta?.source === 'pdf_native') && (
+            <span className="bg-[#EEF2FF] text-[#4F46E5] px-3 py-1 rounded-full text-xs font-semibold tracking-wide">
+              {overview.figure_meta?.source === 'mineru' ? 'MinerU 增强' : 'PDF 原生'}
+            </span>
+          )}
+        </div>
+        
         {overview.key_figures && overview.key_figures.length > 0 ? (
-          <div className="space-y-3">
+          <div className="space-y-6">
             {overview.key_figures.map((figure, idx) => (
-              <div key={idx} className="border border-gray-100 rounded-lg overflow-hidden">
-                {figure.image_base64 && (
-                  <img
-                    src={figure.image_base64}
-                    alt={figure.caption}
-                    className="w-full h-auto"
-                  />
-                )}
-                <div className="p-3 bg-gray-50">
-                  <p className="text-xs font-medium text-gray-500 mb-1">
-                    {figure.caption}
-                  </p>
-                  <p className="text-gray-700 text-sm">{figure.analysis}</p>
+              <div key={idx}>
+                <p className="text-center font-medium text-gray-800 mb-3">{figure.caption}</p>
+                <div className="rounded-lg overflow-hidden border border-gray-200 bg-gray-100 mb-3">
+                  {figure.image_base64 && (
+                    <img
+                      src={figure.image_base64}
+                      alt={figure.caption}
+                      className="w-full h-auto opacity-90"
+                    />
+                  )}
                 </div>
+                <p className="text-[15px] text-gray-600 leading-relaxed">{figure.analysis}</p>
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-gray-400 text-sm">
+          <p className="text-gray-400 text-[15px]">
             暂无图表解读（可通过切换到「详细」模式获取）
           </p>
         )}
-      </OverviewCard>
+      </div>
 
-      {/* 论文总结 */}
-      <OverviewCard
-        icon={<Award className="w-5 h-5" />}
-        title="论文总结"
-        color="yellow"
-      >
+      {/* 论文总结卡片 */}
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 mb-4">
+          <Award className="w-5 h-5 text-gray-700" strokeWidth={2} />
+          <h3 className="text-lg font-semibold text-gray-900">论文总结</h3>
+        </div>
         {overview.paper_summary && (
-          <div className="space-y-3">
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                优点与创新
-              </h4>
-              <p className="text-gray-700 text-sm leading-relaxed">
-                {overview.paper_summary.strengths || overview.paper_summary.innovations}
-              </p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                未来展望
-              </h4>
-              <p className="text-gray-700 text-sm leading-relaxed">
-                {overview.paper_summary.future_work}
-              </p>
-            </div>
+          <div className="space-y-4 text-[15px] text-gray-600 leading-relaxed">
+            <p>
+              <strong className="text-gray-900 font-semibold">优点与创新：</strong>
+              {overview.paper_summary.strengths || overview.paper_summary.innovations}
+            </p>
+            <p>
+              <strong className="text-gray-900 font-semibold">未来展望：</strong>
+              {overview.paper_summary.future_work}
+            </p>
           </div>
         )}
-      </OverviewCard>
-    </div>
-  );
-};
-
-/**
- * 速览卡片组件
- */
-const OverviewCard = ({ icon, title, color, badge, children }) => {
-  const colorClasses = {
-    blue: 'bg-blue-50 border-blue-100 text-blue-600',
-    green: 'bg-green-50 border-green-100 text-green-600',
-    orange: 'bg-orange-50 border-orange-100 text-orange-600',
-    purple: 'bg-purple-50 border-purple-100 text-purple-600',
-    yellow: 'bg-yellow-50 border-yellow-100 text-yellow-600',
-  };
-
-  const bgClasses = {
-    blue: 'bg-white',
-    green: 'bg-white',
-    orange: 'bg-white',
-    purple: 'bg-white',
-    yellow: 'bg-white',
-  };
-
-  return (
-    <div className={`rounded-xl border border-gray-100 overflow-hidden ${bgClasses[color] || 'bg-white'}`}>
-      <div className={`flex items-center gap-2 px-4 py-3 border-b border-gray-100 ${colorClasses[color] || ''}`}>
-        {icon}
-        <h3 className="font-semibold text-sm">{title}</h3>
-        {badge && (
-          <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-white/60 text-purple-500 font-medium">
-            {badge}
-          </span>
-        )}
       </div>
-      <div className="p-4">{children}</div>
     </div>
   );
 };
