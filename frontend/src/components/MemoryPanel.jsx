@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  X, Brain, Trash2, Edit3, Save, Clock, AlertTriangle, Loader2,
-  ChevronDown, ChevronUp, GitBranch, Database, Network,
+  BookOpen, AlertCircle, Bot, X, Trash2, Edit2, Check, RefreshCw, MessageSquare, Tag, AlignLeft, Brain, Cpu, Database, Hash, GitCommit, GitPullRequest, Search, FileText, Globe, Clock, Copy, Plus, Activity, AlertTriangle, Layers, Type, Sparkles, Image as ImageIcon, MessageCircle, ExternalLink, Download, FileUp, FolderOpen, Box, Hash as HashIcon, Archive, Folder, RotateCcw, ChevronDown, ChevronUp, GitBranch, Network, Loader2, Save, Edit3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 

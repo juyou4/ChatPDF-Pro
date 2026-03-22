@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe } from 'lucide-react';
+import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
@@ -1216,263 +1216,171 @@ const ChatPDF = () => {
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
               onClick={(e) => e.stopPropagation()}
-              className={`w-[500px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/90 border border-white/5 backdrop-blur-3xl rounded-[32px] shadow-2xl' : 'bg-white/80 backdrop-blur-2xl border border-white/70 rounded-[32px] shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)]'}`}
+              className={`w-[460px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/90 border border-white/5 backdrop-blur-3xl rounded-[36px] shadow-2xl' : 'bg-white/40 backdrop-blur-2xl border border-white/70 rounded-[36px] shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] relative'}`}
             >
-              <div className="p-8 pb-4 flex-shrink-0 flex items-center justify-between mb-2">
-                <div className="flex items-center gap-4 pl-2">
-                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#e0c8ff] via-[#9333ea] to-[#6b21a8] shadow-[0_6px_15px_rgba(147,51,234,0.4)] relative overflow-hidden flex items-center justify-center">
-                    <div className="absolute top-1 left-1 w-3 h-3 bg-white/40 rounded-full blur-[2px]"></div>
-                    <Settings className="w-5 h-5 text-white relative z-10" />
+              <div className="p-6 pb-2 flex-shrink-0 flex items-center justify-between mt-1 px-7">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-2xl shadow-sm border ${darkMode ? 'bg-white/10 border-white/10' : 'bg-white/60 border-white/50'}`}>
+                    <Settings className="text-[#7c4dff]" size={22} />
                   </div>
-                  <h2 className="text-2xl font-extrabold text-gray-800 tracking-tight">Settings</h2>
+                  <h2 className={`text-xl font-bold tracking-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Settings</h2>
                 </div>
                 <button onClick={() => setShowSettings(false)} className={`p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}>
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <div className="space-y-4 px-8 overflow-y-auto flex-1 pb-4">
+              <div className="space-y-5 px-6 overflow-y-auto flex-1 pb-6 custom-scrollbar">
                 {/* 模型服务管理入口 */}
-                <div className="relative overflow-hidden rounded-[32px] border border-purple-100/50 bg-gradient-to-br from-white/40 to-purple-50/10 p-1 shadow-sm transition-all hover:shadow-md backdrop-blur-md">
-                  <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-purple-500/10 rounded-full blur-3xl"></div>
-                  <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-20 h-20 bg-purple-500/10 rounded-full blur-2xl"></div>
-                  <div className="relative bg-white/30 backdrop-blur-sm rounded-[28px] p-5 border border-white/50">
-                    <div className="flex flex-col gap-5">
-                      <div className="flex items-center justify-between gap-4">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-[20px] bg-gradient-to-br from-purple-500/90 to-indigo-600/90 shadow-lg shadow-purple-500/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm">
-                            <Server className="w-6 h-6" />
-                          </div>
-                          <div className="space-y-0.5">
-                            <h3 className="text-lg font-bold text-gray-900 tracking-tight">模型服务</h3>
-                            <p className="text-xs text-gray-500 font-medium">统一管理 Chat / Embedding / Rerank</p>
-                          </div>
-                        </div>
-                        <button onClick={() => setShowEmbeddingSettings(true)} className="group relative overflow-hidden rounded-[18px] bg-gray-900/90 px-5 py-2.5 text-white shadow-lg transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:scale-95 shrink-0 backdrop-blur-sm">
-                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-in-out" />
-                          <div className="relative flex items-center gap-2 font-medium text-sm">
-                            <span>管理模型</span>
-                            <Settings className="w-4 h-4 transition-transform duration-500 group-hover:rotate-180" />
-                          </div>
-                        </button>
-                      </div>
-                      <div className="flex flex-col gap-3">
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-purple-300 hover:bg-white/90 shadow-md hover:shadow-xl hover:-translate-y-1 active:scale-[0.98] backdrop-blur-sm cursor-pointer">
-                          <div className="flex items-center gap-4">
-                            <MessageCircle className="w-5 h-5 text-gray-400 group-hover:text-purple-500 transition-colors" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Chat Model</div>
-                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
-                                {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-purple-300 hover:bg-white/90 shadow-md hover:shadow-xl hover:-translate-y-1 active:scale-[0.98] backdrop-blur-sm cursor-pointer">
-                          <div className="flex items-center gap-4">
-                            <Database className="w-5 h-5 text-gray-400 group-hover:text-purple-500 transition-colors" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Embedding</div>
-                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
-                                {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="group relative overflow-hidden rounded-[18px] border border-gray-100/50 bg-white/40 p-4 transition-all hover:border-amber-300 hover:bg-white/90 shadow-md hover:shadow-xl hover:-translate-y-1 active:scale-[0.98] backdrop-blur-sm cursor-pointer">
-                          <div className="flex items-center gap-4">
-                            <ArrowUpDown className="w-5 h-5 text-gray-400 group-hover:text-amber-500 transition-colors" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Rerank</div>
-                              <div className="font-semibold text-gray-800 text-sm truncate" title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
-                                {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-2">
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <span className="font-medium">Vector Search</span>
-                    <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="accent-purple-600 w-5 h-5" />
-                  </label>
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <span className="font-medium">Screenshot Analysis</span>
-                    <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="accent-purple-600 w-5 h-5" />
-                  </label>
-
-                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mt-4 mb-1 px-2">检索增强</h4>
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <div>
-                      <span className="font-medium">GraphRAG 知识图谱</span>
-                      <p className="text-xs text-gray-500">实体关系提取 + 社区聚类增强检索</p>
-                    </div>
-                    <input type="checkbox" checked={enableGraphRAG} onChange={e => setEnableGraphRAG(e.target.checked)} className="accent-purple-600 w-5 h-5" />
-                  </label>
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg">
-                    <div>
-                      <span className="font-medium">jieba 中文分词</span>
-                      <p className="text-xs text-gray-500">提升 BM25 中文关键词匹配精度</p>
-                    </div>
-                    <input type="checkbox" checked={enableJiebaBM25} onChange={e => setEnableJiebaBM25(e.target.checked)} className="accent-purple-600 w-5 h-5" />
-                  </label>
-                  <div className="p-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">邻居上下文扩展</label>
-                    <CustomSelect
-                      value={numExpandContextChunk}
-                      onChange={setNumExpandContextChunk}
-                      options={[
-                        { value: 0, label: '关闭' },
-                        { value: 1, label: '±1 块（前后各 1 个）' },
-                        { value: 2, label: '±2 块（前后各 2 个）' },
-                        { value: 3, label: '±3 块（前后各 3 个）' },
-                      ]}
-                    />
-                    <p className="text-xs text-gray-500 mt-1">命中 chunk 前后各扩展 N 个邻居块作为上下文</p>
-                  </div>
-
-                  {lastCallInfo && (
-                    <div className="mt-3 p-3 rounded-[18px] border text-xs text-gray-700 bg-gray-50">
-                      <div>调用来源: <strong>{lastCallInfo.provider || '未知'}</strong></div>
-                      <div>模型: <strong>{lastCallInfo.model || '未返回'}</strong></div>
-                      {lastCallInfo.fallback && <div className="text-amber-700">已切换备用</div>}
-                    </div>
-                  )}
-                  <div className="mt-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">流式输出速度</label>
-                    <CustomSelect
-                      value={streamSpeed}
-                      onChange={setStreamSpeed}
-                      options={[
-                        { value: 'fast', label: '快速 (3字符/次, ~20ms)' },
-                        { value: 'normal', label: '正常 (2字符/次, ~30ms)' },
-                        { value: 'slow', label: '慢速 (1字符/次, ~60ms)' },
-                        { value: 'off', label: '关闭流式（直接显示）' }
-                      ]}
-                    />
-                    <p className="text-xs text-gray-500 mt-1">调整AI回复的打字机效果速度</p>
-                  </div>
-                  <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-gray-50 rounded-lg mt-3">
-                    <span className="font-medium">Blur Reveal 效果</span>
-                    <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="accent-purple-600 w-5 h-5" />
-                  </label>
-                  <p className="text-xs text-gray-500 ml-2 mb-2">流式输出时每个新字符从模糊到清晰的渐变效果</p>
-                  {enableBlurReveal && (
-                    <div className="ml-2 mt-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-2">模糊效果强度</label>
-                      <CustomSelect
-                        value={blurIntensity}
-                        onChange={setBlurIntensity}
-                        options={[
-                          { value: 'light', label: '轻度 (3px blur, 0.2s)' },
-                          { value: 'medium', label: '中度 (5px blur, 0.25s)' },
-                          { value: 'strong', label: '强烈 (8px blur, 0.3s)' }
-                        ]}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* 全局设置入口 */}
-                <div className="pt-2">
-                  <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
-                    <Type className="w-4 h-4" /> 全局设置（字体、缩放）
+                <div className="flex justify-end px-1 -mt-2 mb-2">
+                  <button onClick={() => setShowEmbeddingSettings(true)} className={`transition-all duration-300 hover:shadow-[0_8px_20px_rgba(42,36,66,0.3)] hover:-translate-y-0.5 text-white text-xs font-semibold px-4 py-2.5 rounded-full ${darkMode ? 'bg-[#3a3452] hover:bg-[#2a2442]' : 'bg-[#2a2442] hover:bg-[#1a1528]'}`}>
+                    Manage Models
                   </button>
                 </div>
-                <div className="pt-2">
-                  <button onClick={() => { setShowSettings(false); setShowChatSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
-                    <SlidersHorizontal className="w-4 h-4" /> 对话设置（温度、Token、流式）
-                  </button>
-                </div>
-                <div className="pt-2">
-                  <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className="soft-card w-full px-4 py-3 rounded-xl font-medium hover:scale-105 transition-transform flex items-center justify-center gap-2">
-                    <ScanText className="w-4 h-4" /> OCR 设置（文字识别）
-                  </button>
-                </div>
-
-                {/* 工具栏设置 */}
-                <div className="pt-4 border-t border-gray-100 space-y-3">
-                  <h3 className="text-sm font-semibold text-gray-800">划词工具栏</h3>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">默认搜索引擎</label>
-                    <CustomSelect
-                      value={searchEngine}
-                      onChange={setSearchEngine}
-                      options={[
-                        { value: 'google', label: 'Google' },
-                        { value: 'bing', label: 'Bing' },
-                        { value: 'baidu', label: '百度' },
-                        { value: 'sogou', label: '搜狗' },
-                        { value: 'custom', label: '自定义' }
-                      ]}
-                    />
-                    {searchEngine === 'custom' && (
-                      <div className="mt-2 space-y-1">
-                        <input type="text" value={searchEngineUrl} onChange={(e) => setSearchEngineUrl(e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="例如：https://www.google.com/search?q={query}" />
-                        <p className="text-xs text-gray-500">使用 <code className="font-mono">{'{query}'}</code> 作为搜索词占位符</p>
-                      </div>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">工具栏尺寸</label>
-                    <CustomSelect
-                      value={toolbarSize}
-                      onChange={setToolbarSize}
-                      options={[
-                        { value: 'compact', label: '紧凑' },
-                        { value: 'normal', label: '常规' },
-                        { value: 'large', label: '大号' }
-                      ]}
-                    />
-                  </div>
-                </div>
-
-                {/* 存储位置信息 */}
-                <div className="pt-2">
-                  <h3 className="text-sm font-semibold text-gray-800 mb-3">文件存储位置</h3>
-                  {storageInfo ? (
-                    <div className="space-y-2">
-                      <div className="bg-gray-50 p-3 rounded-lg">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-600">PDF文件</span>
-                          <span className="text-xs text-gray-500">{storageInfo.pdf_count} 个文件</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">{storageInfo.uploads_dir}</code>
-                          <button onClick={() => { navigator.clipboard.writeText(storageInfo.uploads_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 hover:bg-purple-100 text-purple-600 rounded transition-colors" title="复制路径">
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                      <div className="bg-gray-50 p-3 rounded-lg">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-600">对话历史</span>
-                          <span className="text-xs text-gray-500">{storageInfo.doc_count} 个文档</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs bg-white px-2 py-1 rounded border border-gray-200 overflow-x-auto whitespace-nowrap">{storageInfo.data_dir}</code>
-                          <button onClick={() => { navigator.clipboard.writeText(storageInfo.data_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 hover:bg-purple-100 text-purple-600 rounded transition-colors" title="复制路径">
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-2">
-                        点击复制按钮复制路径，然后在{storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'}中打开
+                
+                <div className="space-y-3.5 px-1">
+                  {/* Chat Model Card */}
+                  <div onClick={() => setShowChatSettings(true)} className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
+                      <MessageSquare size={22} />
+                    </div>
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+                        CHAT MODEL
+                      </h3>
+                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
+                        {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
                       </p>
                     </div>
-                  ) : (
-                    <div className="text-sm text-gray-500">加载中...</div>
-                  )}
+                  </div>
+
+                  {/* Embedding Model Card */}
+                  <div onClick={() => setShowEmbeddingSettings(true)} className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
+                      <Database size={22} />
+                    </div>
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+                        EMBEDDING
+                      </h3>
+                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
+                        {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Rerank Model Card */}
+                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_16px_40px_rgb(0,0,0,0.08)] border transition-all duration-300 hover:-translate-y-1 cursor-pointer ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
+                      <ArrowUpDown size={22} />
+                    </div>
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+                        RERANK
+                      </h3>
+                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
+                        {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Features Section - Glass Inner Panel */}
+                <div className={`backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-3 mt-2 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/70 border-white/60'}`}>
+                  
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableVectorSearch && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Vector Search</h4>
+                        <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        基于向量的语义相似度检索，提供更准确的匹配
+                      </p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableScreenshot && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Screenshot Analysis</h4>
+                        <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        启用截图分析功能，理解视觉内容及图表
+                      </p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableGraphRAG && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>GraphRAG 知识图谱</h4>
+                        <input type="checkbox" checked={enableGraphRAG} onChange={e => setEnableGraphRAG(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        实体关系提取 + 社区聚类增强检索，提供全局视角
+                      </p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableJiebaBM25 && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>jieba 中文分词</h4>
+                        <input type="checkbox" checked={enableJiebaBM25} onChange={e => setEnableJiebaBM25(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        使用结巴分词提升 BM25 中文关键词匹配精度
+                      </p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableBlurReveal && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Blur Reveal 效果</h4>
+                        <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        流式输出时每个新字符从模糊到清晰的渐变效果
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Other Settings Access */}
+                <div className="grid grid-cols-2 gap-3 px-1 mt-4">
+                  <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
+                    <Type className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
+                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>全局设置</span>
+                  </button>
+                  <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
+                    <ScanText className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
+                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>OCR设置</span>
+                  </button>
                 </div>
               </div>
 
-              <div className="p-8 pt-4 flex-shrink-0">
-                <button onClick={() => setShowSettings(false)} className={`w-full py-4 rounded-3xl font-bold shadow-lg hover:shadow-xl hover:-translate-y-0.5 active:scale-95 transition-all duration-300 ${darkMode ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>
-                  Save Changes
+              <div className="p-6 pt-2 pb-8 flex-shrink-0 relative">
+                <button onClick={() => setShowSettings(false)} className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-all duration-300 text-white text-[15px] font-semibold py-4 rounded-[22px] shadow-[0_12px_30px_rgba(124,77,255,0.3)] hover:shadow-[0_16px_40px_rgba(124,77,255,0.45)] hover:-translate-y-1 relative overflow-hidden group">
+                  <span className="relative z-10">Save Changes</span>
+                  <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
                 </button>
               </div>
             </motion.div>
@@ -1588,40 +1496,46 @@ const CustomSelect = ({ value, onChange, options }) => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const selectedLabel = options.find(opt => opt.value === value)?.label || value;
+  const selectedOption = options.find(opt => opt.value === value);
 
   return (
-    <div className="relative" ref={containerRef}>
+    <div className="relative w-full" ref={containerRef}>
       <button
-        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full p-3 rounded-[18px] border border-gray-200 bg-white/50 backdrop-blur-sm flex items-center justify-between hover:border-purple-300 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+        className="w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm hover:border-[#7c4dff]/50 transition-all outline-none"
       >
-        <span className="text-sm font-medium text-gray-700">{selectedLabel}</span>
-        <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`} />
+        <span className="text-gray-700 dark:text-gray-300 font-medium">
+          {selectedOption ? selectedOption.label : 'Select...'}
+        </span>
+        <ChevronDown size={14} className={`text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </button>
+
       <AnimatePresence>
         {isOpen && (
           <motion.div
-            initial={{ opacity: 0, y: -20, scale: 0.9 }}
+            initial={{ opacity: 0, y: -5, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            transition={{ type: "spring", stiffness: 400, damping: 25, mass: 0.8 }}
-            style={{ transformOrigin: 'top center' }}
-            className="absolute top-full left-0 right-0 mt-2 z-50 overflow-hidden rounded-[18px] border border-gray-100 bg-white/90 backdrop-blur-md shadow-xl ring-1 ring-black/5"
+            exit={{ opacity: 0, y: -5, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+            className="absolute z-50 w-full mt-1.5 p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto"
           >
-            <div className="py-1 max-h-60 overflow-auto custom-scrollbar">
-              {options.map((option) => (
-                <button
-                  key={option.value}
-                  onClick={() => { onChange(option.value); setIsOpen(false); }}
-                  className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${option.value === value ? 'bg-purple-50 text-purple-600 font-medium' : 'text-gray-700 hover:bg-gray-50'}`}
-                >
-                  {option.label}
-                  {option.value === value && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
-                </button>
-              ))}
-            </div>
+            {options.map((option) => (
+              <button
+                key={option.value}
+                onClick={() => {
+                  onChange(option.value);
+                  setIsOpen(false);
+                }}
+                className={`w-full text-left px-3 py-2.5 rounded-[10px] text-[13px] transition-colors flex items-center justify-between ${
+                  value === option.value
+                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] font-semibold'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/50 dark:hover:bg-white/5'
+                }`}
+              >
+                {option.label}
+                {value === option.value && <Check size={14} className="text-[#7c4dff]" />}
+              </button>
+            ))}
           </motion.div>
         )}
       </AnimatePresence>
