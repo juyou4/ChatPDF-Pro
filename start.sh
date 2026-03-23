@@ -150,6 +150,50 @@ fi
 
 show_success "OCR 依赖检查完成"
 
+# ==================== DocLayout-YOLO 模型 ====================
+show_progress "检查图表检测模型..."
+
+MODEL_DIR="$(pwd)/backend/models"
+MODEL_FILE="$MODEL_DIR/doclayout_yolo_docstructbench_imgsz1280.pt"
+
+mkdir -p "$MODEL_DIR"
+
+if [ -f "$MODEL_FILE" ]; then
+    show_success "DocLayout-YOLO 模型已存在"
+else
+    show_progress "下载 DocLayout-YOLO 模型 (~30MB)..."
+    # 优先尝试 HF 镜像（国内加速）
+    HF_ENDPOINT=https://hf-mirror.com python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil
+p = hf_hub_download(repo_id='opendatalab/PDF-Extract-Kit-1.0', filename='models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt')
+shutil.copy2(p, '$MODEL_FILE')
+" > /dev/null 2>&1
+    if [ -f "$MODEL_FILE" ]; then
+        show_success "DocLayout-YOLO 模型下载成功"
+    else
+        echo -e "${YELLOW}  [!] 模型自动下载失败（可能是网络问题）${NC}"
+        echo ""
+        echo -e "${YELLOW}  ┌─ 手动下载方法 ──────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}  │                                                       │${NC}"
+        echo -e "${YELLOW}  │  1. 打开 ModelScope（国内推荐）:                     │${NC}"
+        echo -e "${YELLOW}  │     https://modelscope.cn/models/                    │${NC}"
+        echo -e "${YELLOW}  │     opendatalab/PDF-Extract-Kit                      │${NC}"
+        echo -e "${YELLOW}  │                                                       │${NC}"
+        echo -e "${YELLOW}  │  2. 下载文件:                                        │${NC}"
+        echo -e "${YELLOW}  │     models/Layout/YOLO/                              │${NC}"
+        echo -e "${YELLOW}  │     doclayout_yolo_docstructbench_imgsz1280_2501.pt  │${NC}"
+        echo -e "${YELLOW}  │                                                       │${NC}"
+        echo -e "${YELLOW}  │  3. 重命名并放到:                                    │${NC}"
+        echo -e "${YELLOW}  │     backend/models/                                  │${NC}"
+        echo -e "${YELLOW}  │     doclayout_yolo_docstructbench_imgsz1280.pt       │${NC}"
+        echo -e "${YELLOW}  │                                                       │${NC}"
+        echo -e "${YELLOW}  │  不影响正常使用，图表解读将退化为基础模式             │${NC}"
+        echo -e "${YELLOW}  └───────────────────────────────────────────────────────┘${NC}"
+        echo ""
+    fi
+fi
+
 # 前端依赖
 cd frontend
 if [ ! -d "node_modules" ]; then

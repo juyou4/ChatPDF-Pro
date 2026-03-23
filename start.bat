@@ -153,6 +153,47 @@ if exist "%OCR_DIR%\poppler.zip" (
 
 echo   [✓] OCR 依赖检查完成
 
+:: ==================== DocLayout-YOLO 模型 ====================
+echo   [▶] 检查图表检测模型...
+
+set "MODEL_DIR=%BASE_DIR%backend\models"
+set "MODEL_FILE=%MODEL_DIR%\doclayout_yolo_docstructbench_imgsz1280.pt"
+
+if not exist "%MODEL_DIR%" mkdir "%MODEL_DIR%"
+
+if exist "%MODEL_FILE%" (
+    echo   [✓] DocLayout-YOLO 模型已存在
+) else (
+    echo   [▶] 下载 DocLayout-YOLO 模型 ^(~30MB^)...
+    :: 优先尝试 HF 镜像（国内加速）
+    set "HF_ENDPOINT=https://hf-mirror.com"
+    python -c "from huggingface_hub import hf_hub_download; import shutil; p=hf_hub_download(repo_id='opendatalab/PDF-Extract-Kit-1.0', filename='models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt'); shutil.copy2(p, r'%MODEL_FILE%')" >nul 2>&1
+    if exist "%MODEL_FILE%" (
+        echo   [✓] DocLayout-YOLO 模型下载成功
+    ) else (
+        echo.
+        echo   [!] 模型自动下载失败（可能是网络问题）
+        echo.
+        echo   ┌─ 手动下载方法 ──────────────────────────────────┐
+        echo   │                                                   │
+        echo   │  1. 打开 ModelScope ^(国内推荐^):                  │
+        echo   │     https://modelscope.cn/models/                 │
+        echo   │     opendatalab/PDF-Extract-Kit                   │
+        echo   │                                                   │
+        echo   │  2. 下载文件:                                     │
+        echo   │     models/Layout/YOLO/                           │
+        echo   │     doclayout_yolo_docstructbench_imgsz1280_2501.pt│
+        echo   │                                                   │
+        echo   │  3. 将文件重命名并放到:                           │
+        echo   │     backend\models\                               │
+        echo   │     doclayout_yolo_docstructbench_imgsz1280.pt    │
+        echo   │                                                   │
+        echo   │  不影响正常使用，图表解读将退化为基础模式         │
+        echo   └───────────────────────────────────────────────────┘
+        echo.
+    )
+)
+
 :: 前端依赖
 if not exist "frontend\node_modules" (
     echo   [▶] 首次运行，安装前端依赖 ^(需要1-2分钟^)...

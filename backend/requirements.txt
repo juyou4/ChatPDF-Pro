@@ -42,5 +42,9 @@ openai==1.57.2
 anthropic==0.40.0
 google-generativeai==0.8.3
 
+# ==================== 图表检测 (DocLayout-YOLO) ====================
+doclayout_yolo>=0.0.2
+huggingface_hub>=0.20.0
+
 # ==================== 记忆系统增强 ====================
 watchdog>=3.0.0  # 文件监听（可选，用于 Markdown 源文件同步）
