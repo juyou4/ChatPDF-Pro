@@ -1095,7 +1095,7 @@ const ChatPDF = () => {
                     messages={messages}
                     renderMessage={renderMessage}
                     streamingMessageId={streamingMessageId}
-                    className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 min-w-0"
+                    className="flex-1 overflow-y-auto overflow-x-hidden p-6 pb-36 space-y-6 min-w-0"
                   />
                 </>
               )}
