@@ -1036,31 +1036,33 @@ const ChatPDF = () => {
             className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            {/* 切换按钮：速览 / 对话 */}
-            <div className="flex items-center gap-1 px-6 pt-4 pb-2 border-b border-gray-100/50">
-              <button
-                onClick={() => setRightPanelMode('overview')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                  rightPanelMode === 'overview'
-                    ? 'bg-purple-100 text-purple-700 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                速览
-              </button>
-              <button
-                onClick={() => setRightPanelMode('chat')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                  rightPanelMode === 'chat'
-                    ? 'bg-purple-100 text-purple-700 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                对话
-              </button>
-            </div>
+            {/* 顶部导航：速览 / 对话 */}
+              <div className="pt-6 pb-2 flex justify-center shrink-0">
+                <div className="flex bg-gray-100/80 rounded-full p-1 border border-gray-200/50 shadow-sm">
+                  <button
+                    onClick={() => setRightPanelMode('overview')}
+                    className={`px-6 py-1.5 text-xs font-medium rounded-full transition-colors ${
+                      rightPanelMode === 'overview'
+                        ? 'text-purple-600 bg-white shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    速览
+                  </button>
+                  <button
+                    onClick={() => setRightPanelMode('chat')}
+                    className={`px-6 py-1.5 text-xs font-medium rounded-full transition-colors ${
+                      rightPanelMode === 'chat'
+                        ? 'text-purple-600 bg-white shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    对话
+                  </button>
+                </div>
+              </div>
 
-            {/* 内容区域：根据模式显示速览或对话 */}
+              {/* 内容区域：根据模式显示速览或对话 */}
             <div className="flex-1 overflow-hidden flex flex-col min-w-0">
               {rightPanelMode === 'overview' ? (
                 <Suspense fallback={
