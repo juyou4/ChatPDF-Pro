@@ -226,10 +226,15 @@ export function mergeModels(
         modelMap.set(key, model)
     })
 
-    // 用户模型覆盖同名的系统模型
+    // 用户模型覆盖同名的系统模型，但保留系统模型的 type（防止误操作改变模型类型）
     userModels.forEach(model => {
         const key = `${model.providerId}:${model.id}`
-        modelMap.set(key, model)
+        const existing = modelMap.get(key)
+        if (existing && existing.isSystem) {
+            modelMap.set(key, { ...existing, ...model, type: existing.type })
+        } else {
+            modelMap.set(key, model)
+        }
     })
 
     return Array.from(modelMap.values())
