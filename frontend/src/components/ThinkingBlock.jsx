@@ -1,20 +1,8 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Copy, Check, ChevronRight } from 'lucide-react'
+import { Copy, Check, ChevronDown, BrainCircuit } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
 import { useChatParams } from '../contexts/ChatParamsContext'
-
-/**
- * 原子图标 SVG 组件
- */
-const AtomIcon = ({ className, size = 20 }) => (
-  <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <ellipse cx="12" cy="12" rx="10" ry="4" />
-    <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
-    <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
-    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-  </svg>
-)
 
 /**
  * 实时思考计时器组件
@@ -52,80 +40,15 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
   const seconds = (Math.max(100, displayMs) / 1000).toFixed(1)
 
   return (
-    <span className="thinking-timer-text tabular-nums">
+    <span className="text-[10px] text-gray-500 bg-gray-200/50 px-1.5 py-0.5 rounded-md ml-1 whitespace-nowrap dark:bg-gray-700/50 dark:text-gray-400">
       {isThinking ? `思考中 ${seconds}s` : `已深度思考 ${seconds}s`}
     </span>
   )
 })
 
 /**
- * 思考过程滚动预览组件（cherry-studio 风格）
- * 优化：使用更平滑的滚动逻辑和 mask 遮罩
- */
-const ThinkingPreview = memo(({ content, isThinking, expanded, streamingRef }) => {
-  const containerRef = useRef(null)
-  const [liveText, setLiveText] = useState('')
-
-  // 流式期间通过 MutationObserver 实时读取 streamingRef 的文本
-  useEffect(() => {
-    if (!isThinking || !streamingRef?.current) {
-      setLiveText('')
-      return
-    }
-    const el = streamingRef.current
-    const sync = () => setLiveText(el.textContent || '')
-    sync()
-    const observer = new MutationObserver(sync)
-    observer.observe(el, { childList: true, subtree: true, characterData: true })
-    return () => observer.disconnect()
-  }, [isThinking, streamingRef])
-
-  const displayContent = isThinking ? liveText : content
-  
-  const lines = useMemo(() => {
-    if (!displayContent) return []
-    return displayContent.split('\n')
-      .filter(l => l.trim() !== '')
-      .slice(-3) // 只保留最后3行用于滚动预览，降低 DOM 压力
-  }, [displayContent])
-
-  const showPreview = isThinking && !expanded && lines.length > 0
-
-  if (!showPreview) return null
-
-  return (
-    <div className="thinking-preview-container" ref={containerRef}>
-      <AnimatePresence mode="popLayout">
-        <motion.div
-          key={lines.join('|')} // 内容变化时触发动画
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.2 }}
-          className="thinking-preview-messages"
-        >
-          {lines.map((line, i) => (
-            <div key={i} className="thinking-preview-line">
-              {line}
-            </div>
-          ))}
-        </motion.div>
-      </AnimatePresence>
-    </div>
-  )
-})
-
-/**
  * 深度思考展示组件
- * 参考 cherry-studio 的 ThinkingBlock + ThinkingEffect 设计
- *
- * 特性：
- * - 实时计时器显示思考耗时
- * - 思考中时原子图标脉冲动画 + 内容滚动预览
- * - 可折叠/展开的思考内容面板
- * - 思考完成后支持一键复制
- * - 思考完成后自动折叠
- * - 圆角卡片边框风格
+ * 采用全新的胶囊式开关和展开面板 UI 设计
  */
 const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef }) => {
   const [expanded, setExpanded] = useState(true)
@@ -153,73 +76,58 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
     })
   }, [content])
 
-  // 计算预览区高度
-  const headerHeight = useMemo(() => {
-    if (!isStreaming || expanded) return 40
-    const lines = (content || '').split('\n').filter(l => l.trim()).length
-    if (lines < 2) return 40
-    return Math.min(78, Math.max(lines + 1, 2) * 16 + 26)
-  }, [isStreaming, expanded, content])
-
   return (
-    <div className={`thinking-block ${darkMode ? 'dark' : ''}`}>
-      {/* 可点击的头部区域 */}
-      <div
-        className={`thinking-block-header ${expanded ? 'expanded' : ''}`}
-        style={{ height: headerHeight }}
-        onClick={() => setExpanded(prev => !prev)}
+    <div className={`flex flex-col items-start gap-2 my-2 ${darkMode ? 'dark' : ''}`}>
+      {/* Expandable Pill (开关样式，与展开状态绑定) */}
+      <div 
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm cursor-pointer transition-colors select-none ${darkMode ? 'bg-gray-800 border-gray-700 hover:bg-gray-700' : 'bg-[#f4f5f9] border-gray-200/60 hover:bg-gray-100'}`}
+        onClick={() => setExpanded(!expanded)}
       >
-        {/* 原子图标（思考中时脉冲动画） */}
-        <div className="thinking-block-icon">
-          <motion.div
-            animate={isStreaming ? {
-              opacity: [1, 0.3, 1],
-              transition: { duration: 1.2, ease: 'easeInOut', times: [0, 0.5, 1], repeat: Infinity }
-            } : { opacity: 1 }}
-          >
-            <AtomIcon
-              className={isStreaming ? 'text-amber-500' : 'text-gray-400 dark:text-gray-500'}
-              size={isStreaming && !expanded ? 26 : 20}
-            />
-          </motion.div>
+        {/* Toggle Switch 视觉还原 */}
+        <div className={`w-8 h-4 rounded-full flex items-center relative shadow-inner transition-colors duration-300 ${expanded ? 'bg-[#7c3aed]' : (darkMode ? 'bg-gray-600' : 'bg-gray-300')}`}>
+           <div className={`w-3 h-3 bg-white rounded-full absolute shadow-sm transition-all duration-300 ${expanded ? 'right-0.5' : 'left-0.5'}`}></div>
         </div>
 
-        {/* 标题 + 计时器 + 滚动预览 */}
-        <div className="thinking-block-text">
-          <div className="thinking-block-title">
-            <ThinkingTimer isThinking={isStreaming} thinkingMs={thinkingMs || 0} />
-          </div>
-          <ThinkingPreview content={content} isThinking={isStreaming} expanded={expanded} streamingRef={streamingRef} />
-        </div>
-
-        {/* 右侧箭头 */}
-        <div className={`thinking-block-arrow ${expanded ? 'expanded' : ''}`}>
-          <ChevronRight size={16} />
+        <span className={`text-[11px] font-medium ${darkMode ? 'text-gray-300' : 'text-gray-800'}`}>Deep Thinking</span>
+        
+        <div className="flex items-center">
+          <ThinkingTimer isThinking={isStreaming} thinkingMs={thinkingMs || 0} />
+          <ChevronDown size={14} className={`ml-1 transition-transform duration-300 ${darkMode ? 'text-gray-500' : 'text-gray-400'} ${expanded ? 'rotate-180' : ''}`} />
         </div>
       </div>
 
-      {/* 展开的思考内容 */}
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: 'easeInOut' }}
-            className="thinking-block-body-wrapper"
-          >
-            <div className={`thinking-block-body ${darkMode ? 'dark' : ''}`}>
-              {/* 复制按钮（仅思考完成后显示） */}
-              {!isStreaming && content && (
-                <button
-                  className="thinking-copy-btn"
-                  onClick={handleCopy}
-                  title="复制思考内容"
-                >
-                  {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-                </button>
-              )}
-              <div className="thinking-block-content">
+      {/* Expanded Thought Process */}
+      <div 
+        className={`overflow-hidden transition-all duration-300 ease-in-out origin-top w-full ${
+          expanded ? 'max-h-[3000px] opacity-100 scale-100 mb-2' : 'max-h-0 opacity-0 scale-95 mb-0'
+        }`}
+      >
+        <div className={`backdrop-blur-sm border shadow-[0_4px_15px_rgba(124,58,237,0.06)] rounded-2xl p-4 w-full text-[13px] relative ml-1 ${darkMode ? 'bg-gray-800/90 border-purple-900/50 text-gray-300' : 'bg-white/90 border-purple-100 text-gray-600'}`}>
+          
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-1.5 text-purple-600 font-medium">
+              <BrainCircuit size={15} className={isStreaming ? "animate-pulse" : ""} />
+              <span>思考过程</span>
+            </div>
+            
+            {/* 复制按钮 */}
+            {!isStreaming && content && (
+              <button
+                className={`p-1.5 rounded-md transition-colors ${darkMode ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-700' : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'}`}
+                onClick={handleCopy}
+                title="复制思考内容"
+              >
+                {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+              </button>
+            )}
+          </div>
+          
+          <div className={`pl-2 border-l-2 py-0.5 ${darkMode ? 'border-purple-900/50' : 'border-purple-100/50'} ml-1.5`}>
+            <div className="relative">
+              {/* 装饰小圆点 */}
+              <span className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}></span>
+              
+              <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
                 <StreamingMarkdown
                   content={content}
                   isStreaming={isStreaming}
@@ -229,9 +137,9 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
                 />
               </div>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
