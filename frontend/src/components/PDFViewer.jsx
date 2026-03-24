@@ -301,19 +301,92 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 }
 
                 // 去除空白后的标准化字符串用于比较
-                const searchStr = String(highlightInfo.text).replace(/\s+/g, '').toLowerCase();
-                const pageStr = fullText.replace(/\s+/g, '').toLowerCase();
+                const normalize = (value) => String(value || '').replace(/\s+/g, '').toLowerCase();
+                const searchStr = normalize(highlightInfo.text);
+                const startPhrase = normalize(highlightInfo.startPhrase);
+                const endPhrase = normalize(highlightInfo.endPhrase);
+                const pageStr = normalize(fullText);
 
                 console.log(`🔍 高亮匹配：搜索文本长度=${searchStr.length}, 页面文本长度=${pageStr.length}`);
 
-                // 策略 1: 完全匹配
-                let startIndex = pageStr.indexOf(searchStr);
+                const collectMatches = (needle, limit = 8) => {
+                    if (!needle) return [];
+                    const result = [];
+                    let from = 0;
+                    while (from < pageStr.length && result.length < limit) {
+                        const idx = pageStr.indexOf(needle, from);
+                        if (idx === -1) break;
+                        result.push(idx);
+                        from = idx + Math.max(1, Math.floor(needle.length / 2));
+                    }
+                    return result;
+                };
+
+                const resolveAnchorSpan = () => {
+                    const startMatches = collectMatches(startPhrase);
+                    const endMatches = collectMatches(endPhrase);
+                    const targetLen = Math.min(Math.max(searchStr.length || startPhrase.length || endPhrase.length, 40), 140);
+
+                    let best = null;
+                    for (const s of startMatches.length ? startMatches : [-1]) {
+                        for (const e of endMatches.length ? endMatches : [-1]) {
+                            let start = s;
+                            let end = e;
+                            if (start === -1 && end === -1) continue;
+                            if (start === -1) {
+                                end = end + endPhrase.length;
+                                start = Math.max(0, end - targetLen);
+                            } else if (end === -1) {
+                                end = Math.min(pageStr.length, start + targetLen);
+                            } else {
+                                end = end + endPhrase.length;
+                                if (end <= start) continue;
+                                if (end - start > 220) continue;
+                            }
+                            const spanLen = end - start;
+                            const score = (startPhrase ? 20 : 0) + (endPhrase ? 20 : 0) - spanLen * 0.08;
+                            if (!best || score > best.score || (score === best.score && spanLen < best.spanLen)) {
+                                best = { start, end, score, spanLen };
+                            }
+                        }
+                    }
+                    return best ? { startIndex: best.start, endIndex: best.end } : null;
+                };
+
+                // 策略 0: 优先使用 start/end phrase 锚点，避免大范围误框
+                const anchored = (startPhrase || endPhrase) ? resolveAnchorSpan() : null;
+                let startIndex = anchored ? anchored.startIndex : pageStr.indexOf(searchStr);
                 let endIndex = -1;
 
-                if (startIndex !== -1) {
+                if (anchored) {
+                    endIndex = anchored.endIndex;
+                    console.log('✅ 高亮匹配：锚点匹配成功');
+                }
+
+                if (!anchored && startIndex !== -1) {
                     endIndex = startIndex + searchStr.length;
                     console.log('✅ 高亮匹配：完全匹配成功');
-                } else {
+                } else if (!anchored) {
+                    const candidateMaxLen = Math.min(120, searchStr.length);
+                    const candidateTexts = [];
+                    if (candidateMaxLen >= 24) {
+                        const midStart = Math.max(0, Math.floor((searchStr.length - candidateMaxLen) / 2));
+                        candidateTexts.push(searchStr.substring(midStart, midStart + candidateMaxLen));
+                        candidateTexts.push(searchStr.substring(0, candidateMaxLen));
+                        candidateTexts.push(searchStr.substring(searchStr.length - candidateMaxLen));
+                    }
+                    for (const candidate of candidateTexts) {
+                        const idx = pageStr.indexOf(candidate);
+                        if (idx !== -1) {
+                            startIndex = idx;
+                            endIndex = idx + candidate.length;
+                            console.log('✅ 高亮匹配：短窗口完全匹配成功');
+                            break;
+                        }
+                    }
+                }
+
+                if (!anchored && endIndex === -1) {
                     // 策略 2: 多锚点匹配（灵活大小）
                     const anchorSize = Math.min(12, Math.floor(searchStr.length * 0.15));
                     if (anchorSize < 4) {

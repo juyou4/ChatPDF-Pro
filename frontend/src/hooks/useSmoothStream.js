@@ -112,6 +112,26 @@ export const useSmoothStream = ({
   )
 
   /**
+   * 替换当前已渲染的文本（不中断流式状态）
+   * 用于后置引文注入等场景：后端流式完成后发送带 [N] 标记的完整内容替换
+   * @param {string} newText - 新的完整文本
+   */
+  const replace = useCallback(
+    (newText) => {
+      chunkQueueRef.current = []
+      displayedTextRef.current = newText
+      finalTextRef.current = newText
+      if (contentRef.current) {
+        contentRef.current.textContent = newText
+      }
+      if (onUpdate) {
+        onUpdate(newText)
+      }
+    },
+    [onUpdate]
+  )
+
+  /**
    * 获取流结束后的最终文本
    * 供调用方在流结束后同步到 React 状态
    * @returns {string} 最终文本
@@ -228,5 +248,5 @@ export const useSmoothStream = ({
     }
   }, [renderLoop])
 
-  return { addChunk, reset, contentRef, getFinalText }
+  return { addChunk, reset, replace, contentRef, getFinalText }
 }

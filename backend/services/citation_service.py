@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 # ── 常量 ──
 START_ANSWER = "FINAL ANSWER"
 START_CITATION = "CITATION LIST"
+_RE_START_ANSWER = re.compile(r"FINAL\s*ANSWER", re.IGNORECASE)
+_RE_START_CITATION = re.compile(r"CITATION\s*LIST", re.IGNORECASE)
 CITATION_PATTERN = re.compile(r"citation[【\[](\d+)[】\]]", re.IGNORECASE)
 START_PHRASE_PREFIX = "start_phrase:"
 END_PHRASE_PREFIX = "end_phrase:"
@@ -35,7 +37,7 @@ class InlineEvidence:
 # 1. 结构化引文 Prompt 构建
 # ═══════════════════════════════════════════════════
 
-def build_structured_citation_prompt(citations: list[dict]) -> str:
+def build_structured_citation_prompt(citations: list[dict], compact: bool = False) -> str:
     """构建要求 LLM 输出 CITATION LIST + FINAL ANSWER 的结构化提示词
 
     Args:
@@ -54,6 +56,32 @@ def build_structured_citation_prompt(citations: list[dict]) -> str:
             f"[{c['ref']}] 来源: {c['group_id']}，页码: {c['page_range'][0]}-{c['page_range'][1]}"
         )
     refs_text = "\n".join(ref_descriptions)
+
+    if compact:
+        prompt = (
+            "请使用以下格式回答问题：\n"
+            "\n"
+            "CITATION LIST\n"
+            "\n"
+            "CITATION【编号】\n"
+            "START_PHRASE: 从证据中原文复制的起始短语\n"
+            "END_PHRASE: 从证据中原文复制的结束短语\n"
+            "\n"
+            "FINAL ANSWER\n"
+            "在此输出完整回答，引用处使用[编号]标注来源。\n"
+            "\n"
+            f"可用的引用来源：\n{refs_text}\n"
+            "\n"
+            "注意：\n"
+            "- 只能使用上述列出的编号，禁止创造新编号\n"
+            "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
+            "- FINAL ANSWER 中每个关键事实句都应标注来源编号\n"
+            "- 每个句子的引用数量最多 2 个，格式必须为 [编号]\n"
+            "- 不同事实若来自不同证据窗口，优先使用不同编号，不要把多个独立事实都标成同一个编号\n"
+            "- 如果某句无法在上下文中找到证据，请删除该句的引用而不是强行引用\n"
+        )
+        logger.info(f"紧凑结构化引文提示词生成完成: {len(citations)} 个引用来源")
+        return prompt
 
     prompt = (
         "请使用以下格式回答问题：\n"
@@ -95,6 +123,7 @@ def build_structured_citation_prompt(citations: list[dict]) -> str:
         "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
         "- FINAL ANSWER 中每个事实性陈述都应标注来源编号\n"
         "- 每个句子的引用数量最多 2 个，格式必须为 [编号]（不要使用【编号】）\n"
+        "- 不同事实若来自不同证据窗口，优先使用不同编号，不要把多个独立事实都标成同一个编号\n"
         "- 如果某句无法在上下文中找到证据，请删除该句的引用而不是强行引用\n"
         "- 不允许整段无引用；至少在每个关键结论句后附引用\n"
         "- 如果信息来自通用知识而非上下文，则无需标注\n"
@@ -165,6 +194,18 @@ def parse_citation_list(full_output: str) -> list[InlineEvidence]:
     return citations
 
 
+def _ci_split(pattern: re.Pattern, text: str, maxsplit: int = 1):
+    """大小写不敏感的 split，返回 (before, after) 或 None。"""
+    m = pattern.search(text)
+    if not m:
+        return None
+    return text[:m.start()], text[m.end():]
+
+
+def _ci_contains(pattern: re.Pattern, text: str) -> bool:
+    return pattern.search(text) is not None
+
+
 def extract_final_answer(full_output: str) -> str:
     """从 LLM 完整输出中提取 FINAL ANSWER 部分
 
@@ -176,12 +217,13 @@ def extract_final_answer(full_output: str) -> str:
     Returns:
         FINAL ANSWER 之后的回答文本
     """
-    if START_ANSWER in full_output:
-        parts = full_output.split(START_ANSWER, 1)
+    parts = _ci_split(_RE_START_ANSWER, full_output)
+    if parts is not None:
         answer = parts[1].lstrip()
         # 如果 CITATION LIST 出现在 FINAL ANSWER 之后（小模型重复输出），截断
-        if START_CITATION in answer:
-            answer = answer.split(START_CITATION, 1)[0].rstrip()
+        cit_parts = _ci_split(_RE_START_CITATION, answer)
+        if cit_parts is not None:
+            answer = cit_parts[0].rstrip()
         return answer
 
     # 无结构化标记，返回原文
@@ -197,7 +239,7 @@ def find_start_end_phrase(
     end_phrase: str,
     context: str,
     min_length: int = 5,
-    max_excerpt_length: int = 300,
+    max_excerpt_length: int = 160,
 ) -> tuple[Optional[tuple[int, int]], int]:
     """用 SequenceMatcher 将 start/end phrase 模糊匹配回原始 context
 
@@ -211,33 +253,77 @@ def find_start_end_phrase(
     Returns:
         ((start_idx, end_idx), matched_length) 或 (None, 0)
     """
-    start_phrase = start_phrase.lower() if start_phrase else ""
-    end_phrase = end_phrase.lower() if end_phrase else ""
+    start_phrase = re.sub(r'\s+', ' ', start_phrase.lower()).strip() if start_phrase else ""
+    end_phrase = re.sub(r'\s+', ' ', end_phrase.lower()).strip() if end_phrase else ""
     ctx_lower = context.lower().replace("\n", " ")
 
-    matches = []
-    matched_length = 0
+    def _find_candidates(phrase: str) -> list[tuple[int, int, int, bool]]:
+        if not phrase:
+            return []
+        words = [re.escape(w) for w in phrase.split() if w]
+        candidates: list[tuple[int, int, int, bool]] = []
+        if words:
+            pattern = re.compile(r'\s+'.join(words))
+            for m in pattern.finditer(ctx_lower):
+                candidates.append((m.start(), m.end(), m.end() - m.start(), True))
+                if len(candidates) >= 8:
+                    break
+        if candidates:
+            return candidates
+        match = SequenceMatcher(None, phrase, ctx_lower, autojunk=False).find_longest_match()
+        if match.size > max(len(phrase) * 0.35, min_length):
+            return [(match.b, match.b + match.size, match.size, False)]
+        return []
 
-    for sentence in [start_phrase, end_phrase]:
-        if not sentence:
-            continue
-        match = SequenceMatcher(
-            None, sentence, ctx_lower, autojunk=False
-        ).find_longest_match()
-        if match.size > max(len(sentence) * 0.35, min_length):
-            matches.append((match.b, match.b + match.size))
-            matched_length += match.size
+    def _single_anchor_span(candidates: list[tuple[int, int, int, bool]]) -> tuple[Optional[tuple[int, int]], int]:
+        if not candidates:
+            return None, 0
+        start_idx, end_idx, length, _ = max(candidates, key=lambda item: item[2])
+        excerpt_start = max(0, start_idx - 20)
+        excerpt_end = min(len(ctx_lower), excerpt_start + max_excerpt_length)
+        return (excerpt_start, excerpt_end), length
 
-    # 保留两个匹配并用 min/max 扩展 span（即使 end_phrase 出现在 start_phrase 之前也正确处理）
+    start_candidates = _find_candidates(start_phrase)
+    end_candidates = _find_candidates(end_phrase)
 
-    if matches:
-        start_idx = min(s for s, _ in matches)
-        end_idx = max(e for _, e in matches)
+    best_pair = None
+    best_score = None
+    for s_start, s_end, s_len, s_exact in start_candidates or [(None, None, 0, False)]:
+        for e_start, e_end, e_len, e_exact in end_candidates or [(None, None, 0, False)]:
+            if s_start is None and e_start is None:
+                continue
+            if s_start is None:
+                pair_start, pair_end = e_start, e_end
+            elif e_start is None:
+                pair_start, pair_end = s_start, s_end
+            else:
+                if e_end <= s_start:
+                    continue
+                pair_start, pair_end = s_start, e_end
+            span_len = pair_end - pair_start
+            if span_len <= 0:
+                continue
+            if span_len > max_excerpt_length * 1.35:
+                continue
+            exact_bonus = (18 if s_exact else 0) + (18 if e_exact else 0)
+            score = exact_bonus + s_len + e_len - span_len * 0.08
+            if best_pair is None or score > best_score:
+                best_pair = (pair_start, pair_end)
+                best_score = score
 
+    if best_pair is not None:
+        start_idx, end_idx = best_pair
         if end_idx - start_idx > max_excerpt_length:
             end_idx = start_idx + max_excerpt_length
+        return (start_idx, end_idx), end_idx - start_idx
 
-        return (start_idx, end_idx), matched_length
+    single_span, single_len = _single_anchor_span(start_candidates)
+    if single_span is not None:
+        return single_span, single_len
+
+    single_span, single_len = _single_anchor_span(end_candidates)
+    if single_span is not None:
+        return single_span, single_len
 
     return None, 0
 

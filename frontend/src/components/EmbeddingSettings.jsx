@@ -13,8 +13,56 @@ import {
   Settings,
   Shield,
   Trash2,
-  X
+  X,
+  Box, Edit3, Link2, Play, ChevronRight, CheckSquare, Sparkles, Cloud, Moon, Fish, Cpu, MessageSquare, Zap, Settings2
 } from 'lucide-react'
+
+const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", disabled = false, ...props }) => (
+  <div className="relative group w-full">
+    {Icon && (
+      <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-[#7c4dff] transition-colors">
+        <Icon size={18} />
+      </div>
+    )}
+    <input 
+      type={type} 
+      placeholder={placeholder}
+      value={value}
+      onChange={onChange}
+      disabled={disabled}
+      className={`w-full bg-white/50 backdrop-blur-md border border-white/60 rounded-[16px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/40 focus:bg-white/80 transition-all shadow-[0_4px_12px_rgba(0,0,0,0.02)] ${Icon ? 'pl-10 pr-4 py-3' : 'px-4 py-3'} ${disabled ? 'opacity-60 cursor-not-allowed' : ''} ${props.className || ''}`}
+      {...props}
+    />
+  </div>
+);
+
+const Tag = ({ text, active, onClick }) => (
+  <span 
+    onClick={onClick}
+    className={`${active ? 'bg-[#7c4dff]/10 text-[#7c4dff] border-[#7c4dff]/30' : 'bg-white/50 text-gray-600 border-white/60 hover:bg-white/80'} backdrop-blur-sm border text-[12px] font-semibold px-3.5 py-1.5 rounded-[12px] cursor-pointer transition-all shadow-sm hover:shadow-md hover:-translate-y-0.5`}
+  >
+    {text}
+  </span>
+);
+
+const ProviderItem = ({ provider, isActive, onClick }) => (
+  <div 
+    onClick={onClick}
+    className={`flex items-center p-3 rounded-[20px] transition-all duration-300 cursor-pointer ${
+    isActive 
+      ? 'bg-white shadow-[0_8px_20px_rgba(124,77,255,0.15)] border border-[#7c4dff]/40 translate-x-1' 
+      : 'bg-white/70 hover:bg-white shadow-[0_4px_12px_rgba(0,0,0,0.04)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] border border-white/60 hover:-translate-y-0.5'
+  }`}>
+    <div className={`w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-gray-50 border border-gray-100 overflow-hidden`}>
+      <ProviderAvatar providerId={provider.id} size={24} />
+    </div>
+    <div className="ml-3 flex-1 min-w-0">
+      <h3 className={`text-[14px] font-bold truncate ${isActive ? 'text-[#7c4dff]' : 'text-gray-800'}`}>{provider.name}</h3>
+      <p className="text-[12px] text-gray-500 font-medium truncate">{provider.id}</p>
+    </div>
+    <div className={`w-2 h-2 rounded-full shrink-0 ml-2 ${provider.enabled ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-gray-300 shadow-sm'}`}></div>
+  </div>
+);
 import { useProvider } from '../contexts/ProviderContext'
 import { useModel } from '../contexts/ModelContext'
 import { useDefaults } from '../contexts/DefaultsContext'
@@ -396,213 +444,199 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-[#e8ebf2]/90 backdrop-blur-sm p-6 font-sans overflow-hidden"
           >
+            {/* Background Decorative Blobs for Glassmorphism */}
+            <div className="absolute top-[-5%] left-[10%] w-[600px] h-[600px] bg-purple-200/50 rounded-full mix-blend-multiply filter blur-[100px] opacity-70 animate-blob pointer-events-none"></div>
+            <div className="absolute bottom-[-10%] right-[10%] w-[500px] h-[500px] bg-blue-100/50 rounded-full mix-blend-multiply filter blur-[100px] opacity-70 animate-blob animation-delay-2000 pointer-events-none"></div>
+
             <motion.div
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-              className={`w-full max-w-6xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col`}
+              className="w-full max-w-[1150px] h-[85vh] min-h-[600px] bg-white/40 backdrop-blur-2xl rounded-[36px] p-5 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] border border-white/70 relative z-10 flex flex-col"
             >
-              {/* Header */}
-              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-purple-50 text-purple-700">
-                    <Server className="w-5 h-5" />
+              {/* Header with Close Button */}
+              <div className="flex justify-between items-center mb-4 px-2">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-white/60 text-[#7c4dff] shadow-sm">
+                    <Settings2 className="w-5 h-5" />
                   </div>
                   <div>
-                    <div className="text-lg font-bold text-gray-900">模型服务管理</div>
-                    <div className="text-xs text-gray-500">集中配置所有厂商与模型（对话 / 嵌入 / 重排）</div>
+                    <h2 className="text-[18px] font-bold text-gray-900">模型服务管理</h2>
                   </div>
                 </div>
-                <button
-                  onClick={onClose}
-                  className="p-2 rounded-full hover:bg-gray-100 transition-colors"
-                >
-                  <X className="w-5 h-5" />
+                <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white/50 hover:bg-white rounded-full border border-white/60 transition-colors shadow-sm text-gray-600">
+                  <X size={18} />
                 </button>
               </div>
 
-              <div className="flex flex-1 min-h-0">
-                {/* Left: provider list */}
-                <div className="w-64 border-r border-gray-100 p-4 flex flex-col">
-                  <div className="relative mb-3">
-                    <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-                    <input
+              {/* Main Content Area */}
+              <div className="flex gap-5 flex-1 min-h-0 overflow-hidden pb-2">
+                {/* Left Column: Sidebar */}
+                <div className="w-[240px] flex flex-col gap-4 shrink-0">
+                  {/* Search Bar */}
+                  <div className="relative">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+                    <input 
+                      type="text" 
                       value={providerSearch}
                       onChange={(e) => setProviderSearch(e.target.value)}
-                      placeholder="搜索模型平台..."
-                      className="w-full pl-9 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-purple-500 outline-none"
+                      placeholder="搜索模型平台..." 
+                      className="w-full bg-white/60 backdrop-blur-md border border-white/50 rounded-[18px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/30 shadow-sm"
                     />
                   </div>
-                  <div className="space-y-2 overflow-y-auto pr-1">
-                    {filteredProviders.length === 0 && (
-                      <div className="text-xs text-gray-500 px-3 py-2">
-                        暂无服务商，请先添加或检查配置。
-                      </div>
-                    )}
-                    {filteredProviders.map(p => (
-                      <button
-                        key={p.id}
-                        onClick={() => setActiveProviderId(p.id)}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all duration-200 ${p.id === activeProvider?.id
-                          ? 'bg-white shadow-md scale-[1.02] text-gray-900 z-10'
-                          : 'border border-gray-200 hover:border-purple-200 hover:bg-purple-50 text-gray-700'
-                          }`}
-                      >
-                        <ProviderAvatar providerId={p.id} className="w-8 h-8" />
-                        <div className="flex-1">
-                          <div className="text-sm font-semibold">{p.name}</div>
-                          <div className="text-[11px] text-gray-500">{p.id}</div>
-                        </div>
-                        <div
-                          className={`w-2.5 h-2.5 rounded-full ${p.enabled ? 'bg-green-500' : 'bg-gray-300'}`}
-                          title={p.enabled ? '已启用' : '未启用'}
-                        />
-                      </button>
-                    ))}
-                  </div>
 
-                  <div className="mt-4 space-y-2">
-                    <button
-                      onClick={() => setCustomProviderFormOpen(v => !v)}
-                      className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 px-2 py-2 rounded-lg border border-gray-200 hover:border-purple-200 hover:bg-purple-50 transition"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-purple-400" />
-                        自定义 Provider（OpenAI 兼容）
+                  {/* Provider List */}
+                  <div className="flex-1 overflow-y-auto pr-1 space-y-2 custom-scrollbar pb-2">
+                    {filteredProviders.map(p => (
+                      <ProviderItem 
+                        key={p.id}
+                        provider={p}
+                        isActive={p.id === activeProvider?.id}
+                        onClick={() => setActiveProviderId(p.id)}
+                      />
+                    ))}
+
+                    <div className="mt-4 pt-2 border-t border-white/40">
+                      <div 
+                        onClick={() => setCustomProviderFormOpen(!customProviderFormOpen)}
+                        className={`flex items-center p-3 rounded-[20px] transition-all duration-300 cursor-pointer bg-white/50 hover:bg-white/80 shadow-sm border border-white/60`}
+                      >
+                        <div className="w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-[#7c4dff] text-white">
+                          <Settings2 size={20} />
+                        </div>
+                        <div className="ml-3 flex-1">
+                          <h3 className="text-[14px] font-bold text-gray-800">自定义 Provider</h3>
+                          <p className="text-[12px] text-gray-500 font-medium">(OpenAI 兼容)</p>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${customProviderFormOpen ? 'rotate-180' : ''}`} />
                       </div>
-                      <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${customProviderFormOpen ? '' : '-rotate-90'}`} />
-                    </button>
-                    <AnimatePresence initial={false}>
-                      {customProviderFormOpen && (
-                        <motion.div
-                          key="custom-provider-form"
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: 'auto', opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          transition={{ type: 'spring', stiffness: 260, damping: 28 }}
-                          className="overflow-hidden"
-                        >
-                          <div className="p-3 rounded-xl border border-gray-200 bg-white space-y-2 shadow-sm">
-                            <input
-                              className="soft-input px-3 py-2 rounded-lg border border-gray-200 w-full"
-                              placeholder="providerId"
-                              value={customProviderForm.id}
-                              onChange={e => setCustomProviderForm({ ...customProviderForm, id: e.target.value })}
-                            />
-                            <input
-                              className="soft-input px-3 py-2 rounded-lg border border-gray-200 w-full"
-                              placeholder="名称"
-                              value={customProviderForm.name}
-                              onChange={e => setCustomProviderForm({ ...customProviderForm, name: e.target.value })}
-                            />
-                            <input
-                              className="soft-input px-3 py-2 rounded-lg border border-gray-200 w-full"
-                              placeholder="API Host（OpenAI 兼容地址，如 https://api.your.com/v1）"
-                              value={customProviderForm.apiHost}
-                              onChange={e => setCustomProviderForm({ ...customProviderForm, apiHost: e.target.value })}
-                            />
-                            <div className="flex items-center gap-3 text-xs text-gray-600">
-                              <label className="flex items-center gap-1">
-                                <input type="checkbox" checked={customProviderForm.chat} onChange={e => setCustomProviderForm({ ...customProviderForm, chat: e.target.checked })} />
-                                Chat
-                              </label>
-                              <label className="flex items-center gap-1">
-                                <input type="checkbox" checked={customProviderForm.embedding} onChange={e => setCustomProviderForm({ ...customProviderForm, embedding: e.target.checked })} />
-                                Embedding
-                              </label>
-                              <label className="flex items-center gap-1">
-                                <input type="checkbox" checked={customProviderForm.rerank} onChange={e => setCustomProviderForm({ ...customProviderForm, rerank: e.target.checked })} />
-                                Rerank
-                              </label>
+
+                      <AnimatePresence>
+                        {customProviderFormOpen && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden mt-2"
+                          >
+                            <div className="p-4 rounded-[24px] bg-white/60 border border-white/60 space-y-3 shadow-sm">
+                              <GlassInput 
+                                placeholder="Provider ID (如 my-openai)" 
+                                value={customProviderForm.id}
+                                onChange={e => setCustomProviderForm({ ...customProviderForm, id: e.target.value })}
+                              />
+                              <GlassInput 
+                                placeholder="显示名称" 
+                                value={customProviderForm.name}
+                                onChange={e => setCustomProviderForm({ ...customProviderForm, name: e.target.value })}
+                              />
+                              <GlassInput 
+                                placeholder="API Host" 
+                                value={customProviderForm.apiHost}
+                                onChange={e => setCustomProviderForm({ ...customProviderForm, apiHost: e.target.value })}
+                              />
+                              <div className="flex items-center gap-3 text-[12px] text-gray-600 px-1">
+                                <label className="flex items-center gap-1 cursor-pointer">
+                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.chat} onChange={e => setCustomProviderForm({ ...customProviderForm, chat: e.target.checked })} />
+                                  Chat
+                                </label>
+                                <label className="flex items-center gap-1 cursor-pointer">
+                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.embedding} onChange={e => setCustomProviderForm({ ...customProviderForm, embedding: e.target.checked })} />
+                                  Embedding
+                                </label>
+                                <label className="flex items-center gap-1 cursor-pointer">
+                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.rerank} onChange={e => setCustomProviderForm({ ...customProviderForm, rerank: e.target.checked })} />
+                                  Rerank
+                                </label>
+                              </div>
+                              <button
+                                onClick={handleAddCustomProvider}
+                                className="w-full bg-[#7c4dff] hover:bg-[#6836f5] text-white text-[13px] font-bold py-2.5 rounded-[14px] shadow-md transition-all flex items-center justify-center gap-2"
+                              >
+                                <Plus size={16} /> 添加
+                              </button>
                             </div>
-                            <button
-                              onClick={handleAddCustomProvider}
-                              className="w-full soft-button soft-button-primary rounded-lg py-2 text-sm flex items-center justify-center gap-2"
-                            >
-                              <Plus className="w-4 h-4" />
-                              添加并启用
-                            </button>
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   </div>
                 </div>
 
-                {/* Middle + Right */}
-                <div className="flex-1 grid grid-cols-2 gap-0 min-w-0">
-                  {/* Provider detail */}
-                  <div className="border-r border-gray-100 p-4 flex flex-col gap-4 min-h-0">
-                    <div className="flex items-center gap-3">
-                      <ProviderAvatar providerId={activeProvider?.id} className="w-10 h-10" />
-                      <div>
-                        <div className="text-base font-semibold text-gray-900">{activeProvider?.name || '未选择'}</div>
-                        <div className="text-xs text-gray-500">{activeProvider?.id}</div>
+                {/* Middle Column: Configuration */}
+                <div className="flex flex-col gap-4 min-w-[340px] flex-1 overflow-y-auto custom-scrollbar pr-2 pb-2">
+                  {/* Header Card */}
+                  <div className="bg-white/70 backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex justify-between items-center shrink-0">
+                    <div className="flex items-center space-x-4">
+                      <div className="w-12 h-12 bg-white rounded-[16px] flex items-center justify-center shadow-sm border border-gray-100 overflow-hidden">
+                        <ProviderAvatar providerId={activeProvider?.id} size={32} />
                       </div>
-                      <label className="ml-auto inline-flex items-center gap-2 text-sm text-gray-700">
+                      <div>
+                        <h2 className="text-[18px] font-bold text-gray-900">{activeProvider?.name || '未选择'}</h2>
+                        <p className="text-[14px] text-gray-500 font-medium">{activeProvider?.id}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-4">
+                      <label className="flex items-center space-x-2 bg-white/50 px-3 py-1.5 rounded-full border border-white/60 cursor-pointer hover:bg-white transition-colors">
                         <input
                           type="checkbox"
                           checked={!!activeProvider?.enabled}
                           onChange={e => handleProviderUpdate('enabled', e.target.checked)}
-                          className="accent-purple-600 w-4 h-4"
+                          className="w-4 h-4 accent-[#7c4dff] rounded"
                         />
-                        启用
+                        <span className={`text-[13px] font-bold ${activeProvider?.enabled ? 'text-[#7c4dff]' : 'text-gray-500'}`}>
+                          {activeProvider?.enabled ? '已启用' : '已停用'}
+                        </span>
                       </label>
                     </div>
+                  </div>
 
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-xs text-gray-600">API Key</label>
-                        <div className="relative mt-1">
-                          <Key className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-                          <input
-                            value={activeProvider?.apiKey || ''}
-                            onChange={e => handleProviderUpdate('apiKey', e.target.value)}
-                            placeholder="sk-... （多个 Key 用逗号分隔）"
-                            type="password"
-                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-purple-500 outline-none"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="text-xs text-gray-600">API 地址</label>
-                        <div className="relative mt-1">
-                          <Plug className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-                          <input
-                            value={activeProvider?.apiHost || ''}
-                            onChange={e => handleProviderUpdate('apiHost', e.target.value)}
-                            placeholder="https://api.openai.com/v1"
-                            className="w-full pl-10 pr-3 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-purple-500 outline-none"
-                          />
-                        </div>
-                      </div>
+                  {/* API Settings Card */}
+                  <div className="bg-white/60 backdrop-blur-xl rounded-[28px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 space-y-4 shrink-0">
+                    <div className="space-y-1.5">
+                      <label className="text-[13px] font-bold text-gray-700 ml-1">API Key</label>
+                      <GlassInput 
+                        icon={Key} 
+                        type="password"
+                        placeholder="sk-... (多个 Key 用逗号分隔)" 
+                        value={activeProvider?.apiKey || ''}
+                        onChange={e => handleProviderUpdate('apiKey', e.target.value)}
+                      />
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
+                    <div className="space-y-1.5 mt-2">
+                      <label className="text-[13px] font-bold text-gray-700 ml-1">API 地址</label>
+                      <GlassInput 
+                        icon={Link2} 
+                        placeholder="https://api.openai.com/v1" 
+                        value={activeProvider?.apiHost || ''}
+                        onChange={e => handleProviderUpdate('apiHost', e.target.value)}
+                      />
+                    </div>
+                    <div className="flex gap-4 pt-3">
+                      <button 
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="soft-button soft-button-primary px-4 py-2 rounded-xl text-sm flex items-center gap-2 disabled:opacity-60"
+                        className="flex-1 bg-[#7c4dff] hover:bg-[#6836f5] disabled:opacity-70 disabled:hover:bg-[#7c4dff] transition-all duration-300 text-white text-[14px] font-bold py-3.5 rounded-[20px] shadow-[0_8px_24px_rgba(124,77,255,0.35)] hover:shadow-[0_12px_32px_rgba(124,77,255,0.45)] hover:-translate-y-0.5 flex items-center justify-center gap-2 group relative overflow-hidden"
                       >
-                        {testing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
-                        测试连接
+                        {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-white" />}
+                        <span className="relative z-10">测试连接</span>
+                        <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
                       </button>
-                      <button
+                      <button 
                         onClick={handleSyncModels}
                         disabled={!activeProvider || isFetching}
-                        className="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-700 hover:border-purple-200 hover:text-purple-700 flex items-center gap-2 disabled:opacity-60"
+                        className="flex-1 bg-white hover:bg-white/90 disabled:opacity-70 transition-all duration-300 text-gray-700 text-[14px] font-bold py-3.5 rounded-[20px] shadow-sm hover:shadow-md border border-white flex items-center justify-center gap-2 hover:-translate-y-0.5"
                       >
-                        <RefreshCw className="w-4 h-4" />
-                        同步模型
+                        <RefreshCw size={16} className={isFetching ? "animate-spin" : ""} />
+                        {isFetching ? '同步中...' : '同步模型'}
                       </button>
                     </div>
 
-                    {/* 连接测试结果显示，成功时附带延迟信息 */}
                     {testResult && (
-                      <div className={`rounded-xl p-3 text-sm border ${testResult.success ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                      <div className={`mt-2 rounded-[16px] p-3 text-[13px] border font-medium ${testResult.success ? 'border-green-200 bg-green-50/80 text-green-700' : 'border-red-200 bg-red-50/80 text-red-700'}`}>
                         {testResult.success
                           ? `连接成功${testResult.latency ? ` (${testResult.latency}ms)` : ''}`
                           : '连接失败'
@@ -610,160 +644,227 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       </div>
                     )}
                     {fetchError && (
-                      <div className="rounded-xl p-3 text-sm border border-amber-200 bg-amber-50 text-amber-700">
+                      <div className="mt-2 rounded-[16px] p-3 text-[13px] border border-amber-200 bg-amber-50/80 text-amber-700 font-medium">
                         {fetchError}
                       </div>
                     )}
+                  </div>
 
-                    {/* Add model form */}
-                    <div className="mt-auto border-t border-gray-100 pt-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="text-sm font-semibold text-gray-800">新增模型</div>
-                        <Settings className="w-4 h-4 text-gray-400" />
+                  {/* Add Model Card */}
+                  <div className="bg-white/60 backdrop-blur-xl rounded-[28px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex flex-col flex-1 shrink-0">
+                    <h3 className="text-[15px] font-bold text-gray-900 mb-4 shrink-0">手动新增模型</h3>
+                    <div className="space-y-4 pr-2">
+                      <div className="flex gap-4 shrink-0">
+                        <div className="flex-[2]">
+                          <GlassInput 
+                            placeholder="模型 ID (如 gpt-4)" 
+                            value={addModelForm.id}
+                            onChange={e => setAddModelForm({ ...addModelForm, id: e.target.value })}
+                          />
+                        </div>
+                        <div className="flex-1 relative">
+                          <select 
+                            className="w-full bg-white/50 backdrop-blur-md border border-white/60 rounded-[16px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/40 appearance-none shadow-sm cursor-pointer"
+                            value={addModelForm.type}
+                            onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
+                          >
+                            <option value="chat">Chat</option>
+                            <option value="embedding">Embedding</option>
+                            <option value="rerank">Rerank</option>
+                            <option value="image">Image</option>
+                          </select>
+                          <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none rotate-90" />
+                        </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <input
-                          className="soft-input px-3 py-2 rounded-lg border border-gray-200"
-                          placeholder="modelId"
-                          value={addModelForm.id}
-                          onChange={e => setAddModelForm({ ...addModelForm, id: e.target.value })}
-                        />
-                        <select
-                          className="soft-input px-3 py-2 rounded-lg border border-gray-200"
-                          value={addModelForm.type}
-                          onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
-                        >
-                          <option value="chat">Chat</option>
-                          <option value="embedding">Embedding</option>
-                          <option value="rerank">Rerank</option>
-                          <option value="image">Image</option>
-                        </select>
-                        <input
-                          className="soft-input px-3 py-2 rounded-lg border border-gray-200 col-span-2"
-                          placeholder="显示名称（可选）"
+                      <div className="shrink-0">
+                        <GlassInput 
+                          placeholder="显示名称 (可选)" 
                           value={addModelForm.name}
                           onChange={e => setAddModelForm({ ...addModelForm, name: e.target.value })}
                         />
-                        {/* 标签多选组件 */}
-                        <div className="col-span-2">
-                          <label className="text-xs text-gray-600 mb-1 block">标签（可选）</label>
-                          <div className="flex flex-wrap gap-2">
-                            {TAG_OPTIONS.map(tag => (
-                              <label
-                                key={tag.value}
-                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs cursor-pointer transition-colors ${
-                                  newModelTags.includes(tag.value)
-                                    ? 'border-purple-300 bg-purple-50 text-purple-700'
-                                    : 'border-gray-200 bg-white text-gray-600 hover:border-purple-200'
-                                }`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  className="sr-only"
-                                  checked={newModelTags.includes(tag.value)}
-                                  onChange={e => {
-                                    if (e.target.checked) {
-                                      setNewModelTags([...newModelTags, tag.value])
-                                    } else {
-                                      setNewModelTags(newModelTags.filter(t => t !== tag.value))
-                                    }
-                                  }}
-                                />
-                                {newModelTags.includes(tag.value) && <Check className="w-3 h-3" />}
-                                {tag.label}
-                              </label>
-                            ))}
-                          </div>
+                      </div>
+                      
+                      <div className="space-y-2 pt-1 shrink-0 pb-2">
+                        <label className="text-[13px] font-bold text-gray-700 ml-1">标签 (可选)</label>
+                        <div className="flex flex-wrap gap-2.5">
+                          {TAG_OPTIONS.map(tag => (
+                            <Tag 
+                              key={tag.value} 
+                              text={tag.label} 
+                              active={newModelTags.includes(tag.value)}
+                              onClick={() => {
+                                if (newModelTags.includes(tag.value)) {
+                                  setNewModelTags(newModelTags.filter(t => t !== tag.value))
+                                } else {
+                                  setNewModelTags([...newModelTags, tag.value])
+                                }
+                              }}
+                            />
+                          ))}
                         </div>
-                        <button
-                          onClick={handleAddModel}
-                          className="col-span-2 soft-button soft-button-primary rounded-lg py-2 text-sm flex items-center justify-center gap-2"
-                        >
-                          <Plus className="w-4 h-4" />
-                          保存模型
-                        </button>
-                        {addSuccess && (
-                          <div className="col-span-2 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 animate-pulse">
-                            {addSuccess}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Models list */}
-                  <div className="p-4 flex flex-col gap-3 min-h-0">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-base font-semibold text-gray-900">模型列表</div>
-                        <div className="text-xs text-gray-500">按类型分组：对话 / 嵌入 / 重排</div>
-                      </div>
-                      <div className="text-xs text-gray-400 flex items-center gap-1">
-                        <ChevronDown className="w-4 h-4" />
-                        {Object.values(modelsByType).reduce((s, a) => s + a.length, 0)} 个
                       </div>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto space-y-4 pr-1">
-                      {['chat', 'embedding', 'rerank', 'image'].map(type => {
-                        const list = modelsByType[type] || []
-                        if (list.length === 0) return null
-                        const meta = TYPE_META[type] || { label: type }
-                        const isCollapsed = !!collapsedTypes[type]
-                        const defaultLabel = (() => {
-                          const key = DEFAULT_TYPE_MAP[type]
-                          if (!key) return '—'
-                          const current = getDefaultModel(key)
-                          return current || '未选择'
-                        })()
-
-                        return (
-                          <div key={type} className={`${GLASS_CARD_CLASS} ${RADIUS_CLASS}`}>
-                            <button
-                              type="button"
-                              aria-expanded={!isCollapsed}
-                              onClick={() => toggleCollapse(type)}
-                              className={`w-full px-3 py-2 flex items-center justify-between bg-gray-50 border-b border-gray-100 ${isCollapsed ? RADIUS_CLASS : `${RADIUS_CLASS} rounded-b-none`} cursor-pointer hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-200/60`}
-                            >
-                              <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-                                {meta.label}
-                                <span className="text-[11px] text-gray-400">({list.length})</span>
-                              </div>
-                              <div className="text-[11px] text-gray-500 flex items-center gap-2 min-w-0">
-                                <CheckCircle2 className="w-3 h-3 shrink-0" />
-                                <span className="truncate max-w-[180px]">默认：{defaultLabel}</span>
-                                <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
-                              </div>
-                            </button>
-                            <AnimatePresence initial={false}>
-                              {!isCollapsed && (
-                                <motion.div
-                                  key={`${type}-list`}
-                                  initial={{ height: 0, opacity: 0 }}
-                                  animate={{ height: 'auto', opacity: 1 }}
-                                  exit={{ height: 0, opacity: 0 }}
-                                  transition={{ type: 'spring', stiffness: 320, damping: 24, mass: 0.9 }}
-                                  className="overflow-hidden"
-                                >
-                                  <div className="p-3 space-y-2">
-                                    {list.map(renderModelRow)}
-                                  </div>
-                                </motion.div>
-                              )}
-                            </AnimatePresence>
-                          </div>
-                        )
-                      })}
-
-                      {(!modelsByType || Object.keys(modelsByType).length === 0) && (
-                        <div className={`${RADIUS_CLASS} border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500`}>
-                          暂无模型，请点击"同步模型"或手动新增。
+                    <div className="pt-4 shrink-0">
+                      <button 
+                        onClick={handleAddModel}
+                        className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-all duration-300 text-white text-[14px] font-bold py-3.5 rounded-[20px] shadow-[0_8px_24px_rgba(124,77,255,0.35)] hover:-translate-y-0.5 flex items-center justify-center gap-2 group relative overflow-hidden"
+                      >
+                        <Plus size={18} />
+                        <span className="relative z-10">保存模型</span>
+                        <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
+                      </button>
+                      {addSuccess && (
+                        <div className="mt-2 text-center text-[12px] text-green-600 font-medium animate-pulse">
+                          {addSuccess}
                         </div>
                       )}
                     </div>
                   </div>
                 </div>
+
+                {/* Right Column: Model List */}
+                <div className="w-[360px] bg-white/50 backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex flex-col shrink-0">
+                  <h3 className="text-[16px] font-bold text-gray-900 mt-2">模型列表</h3>
+                  <p className="text-[12px] text-gray-500 font-medium mt-1 mb-4">按类型分组: 对话 / 嵌入 / 重排</p>
+                  
+                  <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4">
+                    {['chat', 'embedding', 'rerank', 'image'].map(type => {
+                      const list = modelsByType[type] || [];
+                      if (list.length === 0) return null;
+                      const meta = TYPE_META[type] || { label: type };
+                      const isCollapsed = !!collapsedTypes[type];
+                      const defaultLabel = (() => {
+                        const key = DEFAULT_TYPE_MAP[type];
+                        if (!key) return '—';
+                        const current = getDefaultModel(key);
+                        return current || '未选择';
+                      })();
+                      
+                      return (
+                        <div key={type} className="bg-white/70 backdrop-blur-md rounded-[20px] border border-gray-200/60 shadow-[0_4px_16px_rgba(0,0,0,0.06)] overflow-hidden">
+                          <button
+                            type="button"
+                            aria-expanded={!isCollapsed}
+                            onClick={() => toggleCollapse(type)}
+                            className="w-full px-4 py-3 flex items-center justify-between hover:bg-white/50 transition-colors focus:outline-none"
+                          >
+                            <div className="flex items-center gap-2 shrink-0">
+                              {type === 'chat' && <MessageSquare size={16} className="text-[#7c4dff]" />}
+                              {type === 'embedding' && <Cpu size={16} className="text-[#7c4dff]" />}
+                              {type === 'rerank' && <Zap size={16} className="text-[#7c4dff]" />}
+                              {type === 'image' && <Sparkles size={16} className="text-[#7c4dff]" />}
+                              <span className="text-[14px] font-bold text-gray-800 whitespace-nowrap">{meta.label}</span>
+                              <span className="text-[11px] font-medium text-[#7c4dff] bg-[#7c4dff]/10 px-1.5 py-0.5 rounded-full">{list.length}</span>
+                            </div>
+                            <div className="flex items-center gap-2 min-w-0 ml-2">
+                              <CheckCircle2 size={12} className="text-gray-400 shrink-0" />
+                              <span className="text-[11px] text-gray-500 font-medium truncate max-w-[160px]" title={defaultLabel}>默认: {defaultLabel}</span>
+                              <ChevronDown size={14} className={`text-gray-400 shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
+                            </div>
+                          </button>
+                          
+                          <AnimatePresence initial={false}>
+                            {!isCollapsed && (
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="p-2 pt-0 space-y-1">
+                                  {list.map(model => (
+                                      <div key={model.id} className={`bg-white/60 hover:bg-white rounded-[16px] p-2.5 flex items-center justify-between border ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'border-green-300' : 'border-transparent'} cursor-pointer transition-all hover:shadow-sm group`}>
+                                        <div className="flex items-center space-x-2.5 overflow-hidden min-w-0 flex-1">
+                                          <div className="w-8 h-8 rounded-[10px] bg-white flex items-center justify-center shrink-0 border border-gray-100 shadow-sm">
+                                            <ProviderAvatar providerId={getIconProviderId(model)} size={20} />
+                                          </div>
+                                          <div className="flex flex-col flex-1 min-w-0 py-0.5">
+                                            <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                                              <h4 className="text-[13px] font-bold text-gray-800 break-words line-clamp-2 leading-snug" title={model.name || model.id}>{model.name || model.id}</h4>
+                                              {model.tags?.map(tag => (
+                                                <span key={tag} className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-100">
+                                                  {TAG_LABELS[tag] || tag}
+                                                </span>
+                                              ))}
+                                              {model.metadata?.dimension && (
+                                                <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-100">
+                                                  {model.metadata.dimension}维
+                                                </span>
+                                              )}
+                                            </div>
+                                            <div className="flex items-start gap-1.5 mt-0.5">
+                                               {isDefaultModel(model.type, model.id) && <span className="text-[10px] bg-[#7c4dff]/10 text-[#7c4dff] px-1.5 py-0.5 rounded-sm font-bold shrink-0 mt-px">默认</span>}
+                                               <p className="text-[11px] text-gray-400 font-medium break-all line-clamp-2 leading-snug" title={model.id}>{model.id}</p>
+                                            </div>
+                                          </div>
+                                        </div>
+                                        <div className="flex gap-1 shrink-0 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            {!isDefaultModel(model.type, model.id) && (
+                                              <button onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }} className="p-1.5 text-gray-400 hover:text-[#7c4dff] rounded-md hover:bg-[#7c4dff]/10" title="设为默认">
+                                                <CheckCircle2 size={16} />
+                                              </button>
+                                            )}
+                                            {model.isUserAdded && (
+                                              <button onClick={(e) => { e.stopPropagation(); removeModelFromCollection(model.id, model.providerId); }} className="p-1.5 text-gray-400 hover:text-red-500 rounded-md hover:bg-red-50" title="删除">
+                                                <Trash2 size={16} />
+                                              </button>
+                                            )}
+                                        </div>
+                                      </div>
+                                  ))}
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+                      );
+                    })}
+                    
+                    {(!modelsByType || Object.keys(modelsByType).length === 0) && (
+                      <div className="text-center text-sm text-gray-500 py-8 bg-white/40 rounded-[20px] border border-dashed border-gray-300">
+                        暂无模型
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
+              <style dangerouslySetInnerHTML={{__html: `
+                @keyframes shimmer {
+                  100% { left: 125%; }
+                }
+                .animate-shimmer {
+                  animation: shimmer 1.5s infinite;
+                }
+                /* Hide scrollbar for clean UI but allow scrolling */
+                .custom-scrollbar::-webkit-scrollbar {
+                  width: 4px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                  background: transparent;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                  background: rgba(124, 77, 255, 0.15);
+                  border-radius: 10px;
+                }
+                .custom-scrollbar:hover::-webkit-scrollbar-thumb {
+                  background: rgba(124, 77, 255, 0.3);
+                }
+                .animate-blob {
+                  animation: blob 7s infinite;
+                }
+                .animation-delay-2000 {
+                  animation-delay: 2s;
+                }
+                @keyframes blob {
+                  0% { transform: translate(0px, 0px) scale(1); }
+                  33% { transform: translate(30px, -50px) scale(1.1); }
+                  66% { transform: translate(-20px, 20px) scale(0.9); }
+                  100% { transform: translate(0px, 0px) scale(1); }
+                }
+              `}} />
             </motion.div>
           </motion.div>
         )}
@@ -772,13 +873,13 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   } catch (err) {
     console.error('EmbeddingSettings render error', err)
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
-        <div className={`bg-white ${RADIUS_CLASS} shadow-2xl p-6 max-w-lg w-full`}>
-          <div className="text-lg font-semibold text-gray-900 mb-2">模型服务管理加载失败</div>
-          <div className="text-sm text-gray-600 mb-4">{err?.message || '未知错误'}</div>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#e8ebf2]/90 backdrop-blur-sm p-4 font-sans">
+        <div className="bg-white/80 backdrop-blur-xl border border-white/60 rounded-[28px] shadow-2xl p-6 max-w-lg w-full">
+          <div className="text-lg font-bold text-gray-900 mb-2">模型服务管理加载失败</div>
+          <div className="text-sm text-gray-600 mb-4 bg-red-50 p-3 rounded-xl border border-red-100">{err?.message || '未知错误'}</div>
           <button
             onClick={onClose}
-            className="soft-button soft-button-primary px-4 py-2 rounded-lg"
+            className="w-full bg-[#7c4dff] text-white text-[14px] font-bold py-3 rounded-[16px] shadow-md hover:bg-[#6836f5] transition-colors"
           >
             关闭
           </button>
@@ -787,4 +888,5 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     )
   }
 }
+
 

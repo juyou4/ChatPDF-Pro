@@ -24,6 +24,15 @@ def _sanitize_api_key(api_key: Optional[str]) -> str:
     return select_api_key(api_key) or (api_key.strip() if api_key else "")
 
 
+_REASONING_MODEL_PATTERNS = ("seed", "-r1", "-r2", "o1", "o3", "o4", "thinking", "reasoning", "-think")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """判断模型是否为推理/思考模型（不支持 logprobs、logit_bias 等参数）。"""
+    m = (model or "").lower()
+    return any(p in m for p in _REASONING_MODEL_PATTERNS)
+
+
 def _extract_api_error_message(body: str, status_code: int) -> str:
     """从 API 错误响应体中提取用户友好的中文错误信息。
     兼容 OpenAI 兼容格式：{"error": {"code": "...", "message": "..."}}。
@@ -252,8 +261,12 @@ async def call_ai_api_stream(
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
 
-        # 置信度评分：请求 logprobs（仅非思考模式，避免干扰）
-        if not enable_thinking:
+        # 推理模型（自动思考）同样不支持 temperature
+        if not enable_thinking and _is_reasoning_model(model):
+            body.pop("temperature", None)
+
+        # 置信度评分：请求 logprobs（仅非思考模式且非推理模型，避免干扰）
+        if not enable_thinking and not _is_reasoning_model(model):
             body["logprobs"] = True
             body.setdefault("top_logprobs", 1)
 

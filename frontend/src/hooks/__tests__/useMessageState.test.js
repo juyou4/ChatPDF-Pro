@@ -266,12 +266,13 @@ describe('normalizeAssistantCitations', () => {
 });
 
 describe('ensureAssistantInlineCitationFallback', () => {
-  it('当正文没有任何编号且存在 citations 时，应在末尾补充参考来源编号', () => {
+  it('当正文没有任何编号且存在 citations 时，应注入内联引用', () => {
     const content = '这是一个没有编号的回答。';
     const citations = [{ ref: 1 }, { ref: 2 }];
     const result = ensureAssistantInlineCitationFallback(content, citations);
 
-    expect(result).toContain('参考来源：[1][2]');
+    // 跨语言轮流分配：至少注入一个引用编号
+    expect(result).toMatch(/\[\d+\]/);
   });
 
   it('当正文已包含编号时，不应重复补充参考来源', () => {
@@ -279,6 +280,18 @@ describe('ensureAssistantInlineCitationFallback', () => {
     const citations = [{ ref: 1 }, { ref: 2 }];
     const result = ensureAssistantInlineCitationFallback(content, citations);
     expect(result).toBe(content);
+  });
+
+  it('当正文无编号且 citations 含 highlight_text 时，应按段落注入 [N]', () => {
+    const content = '固定大小分块是一种传统方法，它按预设大小切分文档而不考虑语义内容。\n\n语义分块通过理解文本含义来切分文档，能保持上下文完整性。';
+    const citations = [
+      { ref: 1, highlight_text: '固定大小分块 传统方法 预设大小 切分文档', group_id: 'g1' },
+      { ref: 2, highlight_text: '语义分块 理解文本含义 上下文完整性', group_id: 'g2' },
+    ];
+    const result = ensureAssistantInlineCitationFallback(content, citations);
+    expect(result).toContain('[1]');
+    expect(result).toContain('[2]');
+    expect(result).not.toContain('参考来源');
   });
 });
 
@@ -295,15 +308,25 @@ describe('optimizeAssistantInlineCitations', () => {
     expect(optimized).not.toContain('[1]');
   });
 
-  it('句内引用都无法支撑时，应移除该句引用', () => {
+  it('句内引用都无法支撑时，若 ref 存在于 citationMap 则保留（跨语言兜底）', () => {
     const content = '这是一句与来源都不相关的话[1][2]。';
     const citations = [
       { ref: 1, highlight_text: '苹果 香蕉 西瓜', group_id: 'g1' },
       { ref: 2, highlight_text: '东京 旅游 酒店', group_id: 'g2' },
     ];
     const optimized = optimizeAssistantInlineCitations(content, citations);
-    expect(optimized).not.toContain('[1]');
-    expect(optimized).not.toContain('[2]');
+    // 跨语言场景下 token 重叠为 0，但 ref 在 citationMap 中有效，应保留而非剥离
+    expect(optimized).toContain('[1]');
+  });
+
+  it('句内引用不在 citations 中时，应移除该句引用', () => {
+    const content = '这是一句话[5][6]。';
+    const citations = [
+      { ref: 1, highlight_text: '苹果 香蕉 西瓜', group_id: 'g1' },
+    ];
+    const optimized = optimizeAssistantInlineCitations(content, citations);
+    expect(optimized).not.toContain('[5]');
+    expect(optimized).not.toContain('[6]');
   });
 });
 

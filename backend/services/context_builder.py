@@ -145,9 +145,15 @@ class ContextBuilder:
                 ) if text else ""
             citations.append({
                 "ref": ref_num,
+                "evidence_id": f"{group_id}:{granularity}:{ref_num}",
                 "group_id": group_id,
                 "page_range": [page_start, page_end],
+                "source_text": text,
+                "display_text": text,
                 "highlight_text": highlight_text,
+                "_full_text": text,
+                "alignment_status": "candidate",
+                "retrieval_type": "vector",
             })
 
         # 用双换行分隔各意群的上下文块

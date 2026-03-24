@@ -6,6 +6,22 @@ from typing import Literal
 QueryType = Literal['overview', 'extraction', 'analytical', 'specific']
 
 
+def is_section_explanation_query(query: str) -> bool:
+    if not query:
+        return False
+    query_lower = query.lower()
+    section_scope_patterns = [
+        '部分', '章节', 'section', 'chapter', 'method', '方法',
+    ]
+    section_explain_patterns = [
+        '讲解', '解释', '说明', '原理', '设计', '实现', '细节', '展开',
+    ]
+    return (
+        any(p in query_lower for p in section_scope_patterns)
+        and any(p in query_lower for p in section_explain_patterns)
+    )
+
+
 def analyze_query_type(query: str) -> QueryType:
     """
     分析查询类型（支持中英文）
@@ -20,6 +36,8 @@ def analyze_query_type(query: str) -> QueryType:
         return 'specific'
     
     query_lower = query.lower()
+    if is_section_explanation_query(query):
+        return 'analytical'
     
     # 概览性问题 - 需要更多上下文，但可以使用摘要
     overview_patterns = [
@@ -34,9 +52,9 @@ def analyze_query_type(query: str) -> QueryType:
     
     # 分析性问题 - 需要适中上下文和细节
     analytical_patterns = [
-        '分析', '解释', '说明', '为什么', '怎么', '如何',
+        '分析', '解释', '说明', '讲解', '为什么', '怎么', '如何',
         '原因', '理由', '比较', '对比', '区别', '差异', '联系', '关系',
-        '优缺点', '利弊', '优势', '劣势', '影响', '作用',
+        '优缺点', '利弊', '优势', '劣势', '影响', '作用', '原理', '设计', '实现', '细节',
         'analyze', 'explain', 'why', 'how does', 'compare',
         'difference', 'advantage', 'disadvantage', 'impact',
     ]
@@ -46,7 +64,7 @@ def analyze_query_type(query: str) -> QueryType:
     # 提取性问题 - 需要精确内容，但数量较少
     extraction_patterns = [
         '具体', '详细', '准确', '精确', '数据', '数值', '数字',
-        '步骤', '流程', '过程', '方法', '公式', '代码', '原文',
+        '步骤', '流程', '过程', '公式', '代码', '原文',
         'specific', 'detail', 'exact', 'data', 'number',
         'step', 'procedure', 'formula', 'code', 'algorithm',
     ]
@@ -70,6 +88,8 @@ def get_dynamic_top_k(query: str, query_type: QueryType = None) -> int:
     """
     if query_type is None:
         query_type = analyze_query_type(query)
+    if query_type == 'analytical' and is_section_explanation_query(query):
+        return 16
     
     # 根据问题类型返回不同的top_k
     if query_type == 'overview':

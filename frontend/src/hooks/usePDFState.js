@@ -179,6 +179,9 @@ export function usePDFState({
         setTimeout(() => setActiveHighlight({
           page: tp,
           text: c.highlight_text,
+          startPhrase: c.start_phrase || '',
+          endPhrase: c.end_phrase || '',
+          alignmentStatus: c.alignment_status || '',
           source: 'citation',
         }), 400);
       }

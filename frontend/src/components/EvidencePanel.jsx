@@ -54,6 +54,19 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
     const ref = c.ref;
     const isExpanded = defaultOpen ? !expandedRefs.has(ref) : expandedRefs.has(ref);
     const isActive = activeRef === ref;
+    const alignmentStatus = c.alignment_status || (c.highlight_text ? 'span_matched' : 'unmatched');
+    const statusLabel = alignmentStatus === 'span_matched'
+      ? '精确'
+      : alignmentStatus === 'fallback_window_only'
+        ? '窗口'
+        : alignmentStatus === 'candidate'
+          ? '候选'
+          : '未对齐';
+    const statusClass = alignmentStatus === 'span_matched'
+      ? 'bg-green-50 text-green-600 border-green-200'
+      : alignmentStatus === 'fallback_window_only'
+        ? 'bg-amber-50 text-amber-600 border-amber-200'
+        : 'bg-gray-50 text-gray-500 border-gray-200';
     const pageLabel = c.page_range
       ? c.page_range[0] === c.page_range[1]
         ? `P${c.page_range[0]}`
@@ -93,6 +106,9 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
           <span className="text-gray-500 truncate flex-1">
             {c.group_id || `来源 ${ref}`}
           </span>
+          <span className={`px-1.5 py-0.5 rounded border text-[10px] flex-shrink-0 ${statusClass}`}>
+            {statusLabel}
+          </span>
           {pageLabel && (
             <span className="text-[10px] text-gray-400 flex-shrink-0">{pageLabel}</span>
           )}
@@ -127,6 +143,10 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
             {c.highlight_text ? (
               <div className="text-xs text-gray-700 leading-relaxed bg-yellow-50/60 border border-yellow-100 rounded px-2.5 py-2">
                 <mark className="bg-yellow-200/70 rounded px-0.5">{c.highlight_text}</mark>
+              </div>
+            ) : (c.display_text || c.source_text) ? (
+              <div className="text-xs text-gray-700 leading-relaxed bg-gray-50 border border-gray-100 rounded px-2.5 py-2">
+                {c.display_text || c.source_text}
               </div>
             ) : (
               <div className="text-xs text-gray-400 italic">未匹配到精确引文</div>

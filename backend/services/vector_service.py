@@ -37,7 +37,16 @@ def validate_embedding_model(embedding_model: str) -> str:
     if registry_key is not None:
         return registry_key
 
-    # 解析失败，抛出 HTTP 400 错误，包含无效的模型 ID 和可用模型列表
+    # composite key（如 silicon:NewModel）允许直通，
+    # 下游 get_embedding_function 的 fallback 逻辑能根据 provider 推断 base_url
+    if ":" in embedding_model:
+        logger.warning(
+            f"模型 '{embedding_model}' 未在注册表中找到，"
+            f"将使用 composite key fallback 继续"
+        )
+        return embedding_model
+
+    # plain key 无法 fallback，抛出 HTTP 400 错误
     available_models = get_available_model_ids()
     raise HTTPException(
         status_code=400,

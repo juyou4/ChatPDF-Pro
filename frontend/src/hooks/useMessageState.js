@@ -5,7 +5,7 @@ import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
 
 // API base URL
 const API_BASE_URL = '';
-export const STREAM_FIRST_EVENT_TIMEOUT_MS = 15000;
+export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
 
 /**
  * 构建聊天历史记录
@@ -31,8 +31,16 @@ export const buildChatHistory = (messages, contextCount) => {
 
 const tokenizeForCitation = (text = '') => {
   const lowered = String(text).toLowerCase();
-  const tokens = lowered.match(/[a-z0-9]+|[\u4e00-\u9fff]/g);
-  return tokens || [];
+  // 单字符 + 中文 bigram 以提升中文场景下 overlap 命中率
+  const chars = lowered.match(/[a-z0-9]+|[\u4e00-\u9fff]/g) || [];
+  const bigrams = [];
+  for (let i = 0; i < chars.length - 1; i++) {
+    if (chars[i].length === 1 && chars[i + 1]?.length === 1
+        && /[\u4e00-\u9fff]/.test(chars[i]) && /[\u4e00-\u9fff]/.test(chars[i + 1])) {
+      bigrams.push(chars[i] + chars[i + 1]);
+    }
+  }
+  return [...chars, ...bigrams];
 };
 
 const calcTokenOverlap = (left, right) => {
@@ -130,8 +138,8 @@ const optimizeSentenceCitations = (sentence, citations) => {
     score: calcCitationSupportScore(coreSentence, citationMap.get(ref)),
   })).sort((a, b) => b.score - a.score);
 
-  const MIN_SUPPORT = 0.08;
-  const MIN_REPLACE = 0.14;
+  const MIN_SUPPORT = 0.03;
+  const MIN_REPLACE = 0.06;
 
   let chosen = scoredCurrent.filter((x) => x.score >= MIN_SUPPORT).map((x) => x.ref);
 
@@ -226,18 +234,73 @@ export const ensureAssistantInlineCitationFallback = (content, citations) => {
   const hasInlineRefs = /(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/.test(String(content));
   if (hasInlineRefs) return content;
 
-  const refs = [];
-  const seen = new Set();
-  for (const c of citations) {
-    const ref = Number(c?.ref);
-    if (!Number.isFinite(ref) || seen.has(ref)) continue;
-    seen.add(ref);
-    refs.push(ref);
-  }
-  if (refs.length === 0) return content;
+  const normalized = normalizeCitationRecords(citations);
+  if (normalized.length === 0) return content;
 
-  const tailRefs = refs.slice(0, 2).map((r) => `[${r}]`).join('');
-  return `${String(content).trimEnd()}\n\n参考来源：${tailRefs}`;
+  // 按段落匹配注入 [N] 引文（而非仅在末尾追加）
+  const paragraphs = String(content).split('\n');
+  let inCodeFence = false;
+  const usedRefs = new Set();
+  const usedCount = {};
+  const eligibleIndices = [];
+
+  // 第一遍：收集可注入段落和匹配分数
+  const paraScores = paragraphs.map((para, idx) => {
+    if (/^\s*```/.test(para)) { inCodeFence = !inCodeFence; return null; }
+    if (inCodeFence) return null;
+    const trimmed = para.trim();
+    if (!trimmed || trimmed.length < 10 || /^#+\s/.test(trimmed)) return null;
+    const paraTokens = tokenizeForCitation(trimmed);
+    if (paraTokens.length < 3) return null;
+    eligibleIndices.push(idx);
+
+    const scores = [];
+    for (const c of normalized) {
+      // 优先用 _full_text（完整段落），回退到 highlight_text
+      const supportText = (c._full_text || c.highlight_text || '').trim();
+      const citTokens = tokenizeForCitation(supportText);
+      const overlap = calcTokenOverlap(paraTokens, citTokens);
+      const score = overlap / Math.max(1, paraTokens.length);
+      if (score >= 0.02) scores.push({ ref: c.ref, score });
+    }
+    scores.sort((a, b) => b.score - a.score);
+    return scores.length > 0 ? scores : null;
+  });
+
+  // 第二遍：贪心分配，优先未使用的 citation
+  const assignments = new Map();
+  paragraphs.forEach((_, idx) => {
+    const scores = paraScores[idx];
+    if (!scores) return;
+    const topScore = scores[0].score;
+    const candidates = scores.filter(s => s.score >= topScore * 0.6);
+    candidates.sort((a, b) => (usedCount[a.ref] || 0) - (usedCount[b.ref] || 0) || b.score - a.score);
+    const chosen = candidates[0].ref;
+    assignments.set(idx, chosen);
+    usedCount[chosen] = (usedCount[chosen] || 0) + 1;
+    usedRefs.add(chosen);
+  });
+
+  // 跨语言兜底：全部段落无法匹配时，按顺序轮流分配不同 citation
+  if (usedRefs.size === 0 && eligibleIndices.length > 0) {
+    eligibleIndices.forEach((idx, i) => {
+      const ref = normalized[i % normalized.length].ref;
+      assignments.set(idx, ref);
+      usedRefs.add(ref);
+    });
+  }
+
+  if (usedRefs.size > 0) {
+    const annotated = paragraphs.map((para, idx) => {
+      if (assignments.has(idx)) return `${para}[${assignments.get(idx)}]`;
+      return para;
+    });
+    return annotated.join('\n');
+  }
+
+  // 最终兜底：末尾追加所有 ref
+  const allRefs = normalized.slice(0, 3).map((c) => `[${c.ref}]`).join('');
+  return `${String(content).trimEnd()}\n\n参考来源：${allRefs}`;
 };
 
 export const finalizeThinkingDurationMs = ({
@@ -282,6 +345,7 @@ export function useMessageState({
   getProviderById,
   streamSpeed = 'normal',
   enableVectorSearch = false,
+  embeddingApiKey = '',
   enableGraphRAG = false,
   enableJiebaBM25 = true,
   numExpandContextChunk = 1,
@@ -419,6 +483,7 @@ export function useMessageState({
       top_p: enableTopP ? topP : null,
       stream_output: streamOutput,
       enable_vector_search: enableVectorSearch,
+      embedding_api_key: embeddingApiKey || null,
       enable_graphrag: enableGraphRAG,
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
@@ -645,22 +710,13 @@ export function useMessageState({
           contentStartTime,
         });
         const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
-        const normalizedFinalContent = normalizeAssistantCitations(finalContent, streamCitationsRef.current);
-        const optimizedFinalContent = optimizeAssistantInlineCitations(
-          normalizedFinalContent,
-          streamCitationsRef.current
-        );
-        const finalContentWithInlineFallback = ensureAssistantInlineCitationFallback(
-          optimizedFinalContent,
-          streamCitationsRef.current
-        );
         const finalCitations = filterCitationsByContentRefs(
-          finalContentWithInlineFallback,
+          finalContent,
           streamCitationsRef.current
         );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContentWithInlineFallback, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -684,23 +740,14 @@ export function useMessageState({
         }
 
         const data = await response.json();
-        const normalizedAnswer = normalizeAssistantCitations(data.answer, data.retrieval_meta?.citations);
-        const optimizedAnswer = optimizeAssistantInlineCitations(
-          normalizedAnswer,
-          data.retrieval_meta?.citations
-        );
-        const answerWithInlineFallback = ensureAssistantInlineCitationFallback(
-          optimizedAnswer,
-          data.retrieval_meta?.citations
-        );
         const finalCitations = filterCitationsByContentRefs(
-          answerWithInlineFallback,
+          data.answer,
           data.retrieval_meta?.citations
         );
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: answerWithInlineFallback, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
+            ? { ...m, content: data.answer, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
             : m
         ));
         setStreamingMessageId(null);

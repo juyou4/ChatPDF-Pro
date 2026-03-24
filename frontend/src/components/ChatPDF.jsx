@@ -241,6 +241,14 @@ const ChatPDF = () => {
 
   const getEmbeddingApiKey = useCallback(() => {
     const config = getEmbeddingConfig();
+    console.log('[DEBUG getEmbeddingApiKey]', {
+      isValid: config.isValid,
+      reason: config.reason,
+      modelType: config.model?.type,
+      providerId: config.providerId,
+      hasProviderKey: !!config.provider?.apiKey,
+      fallbackKey: embeddingApiKey ? 'embeddingApiKey' : apiKey ? 'apiKey' : 'none',
+    });
     if (config.isValid && config.provider?.apiKey) {
       return config.provider.apiKey;
     }
@@ -1243,7 +1251,7 @@ const ChatPDF = () => {
                   <h2 className={`text-xl font-bold tracking-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Settings</h2>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowEmbeddingSettings(true)} className={`transition-all duration-300 hover:shadow-[0_8px_20px_rgba(42,36,66,0.3)] hover:-translate-y-0.5 text-white text-xs font-semibold px-3.5 py-2 rounded-full ${darkMode ? 'bg-[#3a3452] hover:bg-[#2a2442]' : 'bg-[#2a2442] hover:bg-[#1a1528]'}`}>
+                  <button onClick={() => { setShowSettings(false); setShowEmbeddingSettings(true); }} className={`transition-all duration-300 hover:shadow-[0_8px_20px_rgba(42,36,66,0.3)] hover:-translate-y-0.5 text-white text-xs font-semibold px-3.5 py-2 rounded-full ${darkMode ? 'bg-[#3a3452] hover:bg-[#2a2442]' : 'bg-[#2a2442] hover:bg-[#1a1528]'}`}>
                     Manage Models
                   </button>
                   <button onClick={() => setShowSettings(false)} className={`p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}>
