@@ -33,6 +33,10 @@ from services.citation_service import (
     match_citations_to_chunks,
     START_ANSWER,
     START_CITATION,
+    _RE_START_ANSWER,
+    _RE_START_CITATION,
+    _ci_contains,
+    _ci_split,
 )
 import base64
 from models.provider_registry import PROVIDER_CONFIG
@@ -284,6 +288,7 @@ class ChatRequest(BaseModel):
     enable_graphrag: bool = False
     enable_jieba_bm25: bool = True
     num_expand_context_chunk: int = 1
+    embedding_api_key: Optional[str] = None  # embedding 模型的 API key（向量检索查询编码用）
 
 
 class ChatVisionRequest(BaseModel):
@@ -491,9 +496,15 @@ def _build_selected_text_citation(
     pe = selected_page_info.get("page_end", ps) if selected_page_info else ps
     return {
         "ref": 1,
+        "evidence_id": f"selected-text:{ps}-{pe}:1",
         "group_id": "selected-text",
         "page_range": [ps, pe],
+        "source_text": selected_text,
+        "display_text": selected_text,
         "highlight_text": selected_text[:200].strip(),
+        "_full_text": selected_text,
+        "alignment_status": "fallback_window_only",
+        "retrieval_type": "selected_text",
     }
 
 
@@ -505,6 +516,368 @@ def _build_selected_text_fallback_citations(
     if not selected_text or len(selected_text.strip()) < _MIN_SELECTED_TEXT_FALLBACK_CITATION_CHARS:
         return []
     return [_build_selected_text_citation(selected_text, selected_page_info)]
+
+
+def _build_context_segments_from_citations(citations: list[dict]) -> list[dict]:
+    segments = []
+    for c in citations or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ref = int(c.get("ref"))
+        except (TypeError, ValueError):
+            continue
+        text = c.get("source_text") or c.get("_full_text") or c.get("display_text") or c.get("highlight_text") or ""
+        if not text:
+            continue
+        segments.append({
+            "ref": ref,
+            "text": text,
+            "page_range": c.get("page_range") or [],
+            "group_id": c.get("group_id", ""),
+        })
+    return segments
+
+
+def _split_context_paragraphs(context: str) -> list[str]:
+    """将 PDF 提取的 context 拆分为真实段落。
+
+    PDF 文本每行约 50-70 字符（视觉行），需要先合并为真实段落。
+    策略：双换行分段 → 单换行合并 → 长段落按句子拆分。
+    """
+    import re as _re
+
+    raw_paragraphs = _re.split(r'\n{2,}', context)
+    paragraphs = [p.strip() for p in raw_paragraphs if p.strip() and len(p.strip()) >= 30]
+
+    if len(paragraphs) < 3:
+        lines = context.split('\n')
+        merged: list[str] = []
+        buf = ""
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if buf and len(buf) >= 30:
+                    merged.append(buf)
+                buf = ""
+            else:
+                buf += (" " if buf else "") + stripped
+        if buf and len(buf) >= 30:
+            merged.append(buf)
+        if len(merged) >= 3:
+            paragraphs = merged
+
+    final: list[str] = []
+    for para in paragraphs:
+        if len(para) <= 500:
+            final.append(para)
+        else:
+            sents = _re.split(r'(?<=[.。!！?？;；])\s*', para)
+            chunk = ""
+            for s in sents:
+                if not s.strip():
+                    continue
+                if len(chunk) + len(s) > 400 and len(chunk) >= 100:
+                    final.append(chunk.strip())
+                    chunk = s
+                else:
+                    chunk += (" " if chunk else "") + s
+            if chunk.strip() and len(chunk.strip()) >= 30:
+                final.append(chunk.strip())
+    return final if final else paragraphs
+
+
+def _build_numbered_context_and_citations(
+    pages: list[dict], context: str, query: str = "", max_citations: int = 8,
+) -> tuple[str, list[dict]]:
+    """将 context 格式化为编号段落并生成对应 citations。
+
+    返回 (formatted_context, citations)：
+    - formatted_context: ``[1] 段落文本\\n\\n[2] 段落文本\\n\\n...``
+    - citations: 与编号对应的 citation 列表（group_id 以 ``para-`` 开头）
+
+    LLM 收到编号段落后可自然地在回答中引用 [N]，无需 post-hoc 匹配。
+    """
+    if not context or not pages:
+        return context, []
+
+    paragraphs = _split_context_paragraphs(context)
+    if not paragraphs:
+        return context, []
+
+    # 页码反查
+    def _locate_page(para_text: str) -> int:
+        snippet = para_text[:60].lower()
+        for pidx, page in enumerate(pages):
+            page_text = (page.get("text", "") or page.get("content", "")).lower()
+            if snippet in page_text:
+                return pidx + 1
+        return 1
+
+    # 取 top-N 更小证据窗口（按 query 相关度 + 内容丰富度 + 去重）
+    import re as _re
+    _tok_pat = _re.compile(r'[a-zA-Z0-9]+|[\u4e00-\u9fff]')
+
+    def _tokenize(text: str) -> list[str]:
+        return _tok_pat.findall(text.lower()) if text else []
+
+    stop_terms = {
+        "总结", "概括", "主要", "内容", "文章", "文档", "论文", "介绍", "什么", "如何", "哪些",
+        "本文", "问题", "用户", "提供", "根据", "这个", "那个", "以及", "进行", "关于",
+        "the", "what", "how", "why", "about", "paper", "document", "summary", "summarize",
+    }
+    query_terms = [
+        t for t in _tokenize(query)
+        if (len(t) >= 2 or _re.fullmatch(r'[\u4e00-\u9fff]', t)) and t not in stop_terms
+    ]
+
+    def _sentence_windows(text: str) -> list[str]:
+        sents = [s.strip() for s in _re.split(r'(?<=[.。!！?？;；])\s*', text) if s.strip()]
+        if len(sents) <= 1:
+            return [text.strip()]
+        windows: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for sent in sents:
+            sent_len = len(sent)
+            if current and current_len + sent_len > 240:
+                windows.append(" ".join(current).strip())
+                overlap = current[-1:] if len(current[-1]) <= 120 else []
+                current = overlap[:]
+                current_len = sum(len(x) for x in current)
+            current.append(sent)
+            current_len += sent_len
+        if current:
+            windows.append(" ".join(current).strip())
+        merged: list[str] = []
+        for window in windows:
+            if len(window) < 60 and merged:
+                merged[-1] = f"{merged[-1]} {window}".strip()
+            else:
+                merged.append(window)
+        return merged or [text.strip()]
+
+    candidates: list[tuple[float, int, int, str, str, set[str], int]] = []
+    for pi, para in enumerate(paragraphs):
+        for wi, window in enumerate(_sentence_windows(para)):
+            tokens = _tokenize(window)
+            if len(tokens) < 8:
+                continue
+            token_set = set(tokens)
+            overlap_terms = token_set & set(query_terms)
+            overlap = len(overlap_terms)
+            n_tokens = len(tokens)
+            unique_ratio = len(token_set) / max(n_tokens, 1)
+            density = overlap / max(len(query_terms), 1) if query_terms else 0.0
+            richness = unique_ratio * min(n_tokens / 24.0, 1.0)
+            number_bonus = 0.20 if _re.search(r'\d', window) else 0.0
+            keyword_bonus = 0.15 if _re.search(r'(dataset|results?|experiment|method|abstract|introduction|conclusion|贡献|实验|方法|结果|数据集)', window.lower()) else 0.0
+            score = overlap * 2.8 + density * 1.8 + richness + number_bonus + keyword_bonus
+            snippet = _context_builder._extract_relevant_snippet(window, query, max_len=140)
+            page_num = _locate_page(window)
+            candidates.append((score, pi, wi, window, snippet, token_set, page_num))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    selected: list[tuple[int, int, str, str, int]] = []
+    selected_token_sets: list[set[str]] = []
+    page_counts: dict[int, int] = {}
+    for score, pi, wi, window, snippet, token_set, page_num in candidates:
+        if page_counts.get(page_num, 0) >= 2 and len(selected) < max_citations - 1:
+            continue
+        if any(len(token_set & prev) / max(1, len(token_set | prev)) >= 0.55 for prev in selected_token_sets):
+            continue
+        selected.append((pi, wi, window, snippet, page_num))
+        selected_token_sets.append(token_set)
+        page_counts[page_num] = page_counts.get(page_num, 0) + 1
+        if len(selected) >= max_citations:
+            break
+
+    if not selected:
+        for pi, para in enumerate(paragraphs[:max_citations]):
+            page_num = _locate_page(para)
+            snippet = _context_builder._extract_relevant_snippet(para, query, max_len=140)
+            selected.append((pi, 0, para, snippet, page_num))
+
+    # 按原始顺序排列，使 context 保持逻辑连贯
+    selected.sort(key=lambda x: (x[0], x[1]))
+
+    # 构建编号段落 context + citations
+    # 将所有段落加入 context（让 LLM 看到完整文档），但仅对 selected 生成 citation
+    selected_set = {(pi, wi) for pi, wi, *_ in selected}
+    all_formatted: list[str] = []
+    for pi, para in enumerate(paragraphs):
+        all_formatted.append(para)
+
+    citations: list[dict] = []
+    for ref_idx, (pi, wi, window, snippet, page_num) in enumerate(selected, 1):
+        highlight = snippet or (window[:140] if len(window) > 140 else window)
+        citations.append({
+            "ref": ref_idx,
+            "evidence_id": f"para-{pi + 1}-seg-{wi + 1}:{ref_idx}",
+            "group_id": f"para-{pi + 1}-seg-{wi + 1}",
+            "page_range": [page_num, page_num],
+            "source_text": window,
+            "display_text": window,
+            "highlight_text": highlight,
+            "_full_text": window,
+            "alignment_status": "fallback_window_only",
+            "retrieval_type": "fallback",
+        })
+
+    formatted_context = "\n\n".join(all_formatted)
+    logger.info(
+        f"[CITATION FALLBACK] paragraphs={len(paragraphs)}, selected={len(citations)}, "
+        f"refs={[c['ref'] for c in citations]}, pages={[c['page_range'][0] for c in citations]}"
+    )
+    return formatted_context, citations
+
+
+def _generate_page_level_citations(pages: list[dict], context: str, query: str = "", max_citations: int = 8) -> list[dict]:
+    """兼容旧调用：仅返回 citations 列表。"""
+    _, citations = _build_numbered_context_and_citations(pages, context, query=query, max_citations=max_citations)
+    return citations
+
+
+def _is_paragraph_fallback(citations: list[dict]) -> bool:
+    """判断 citations 是否来自段落级兜底（非向量检索的语义 chunk）。
+
+    当 group_id 全部以 ``para-`` 或 ``page-`` 开头时，视为 fallback 引文，
+    不应触发结构化引文 prompt（CITATION LIST + FINAL ANSWER）。
+    """
+    if not citations:
+        return False
+    return all(
+        c.get("group_id", "").startswith(("para-", "page-"))
+        for c in citations
+    )
+
+
+def _should_use_compact_citation_prompt(citations: list[dict]) -> bool:
+    if not citations:
+        return False
+    return all(
+        c.get("retrieval_type") in {"fallback", "selected_text"}
+        or c.get("group_id", "").startswith(("para-", "page-", "selected-text"))
+        for c in citations
+    )
+
+
+def _inject_inline_citations(answer: str, citations: list[dict]) -> str:
+    """当 LLM 回答未包含 [N] 引文标记时，基于模糊匹配自动注入。
+
+    对每个段落，找到 token 重叠最高的 citation 并在段尾追加 [ref]。
+    优先使用 ``_full_text``（完整段落文本）进行匹配，回退到 ``highlight_text``。
+    """
+    if not answer or not citations:
+        return answer
+    # 已有 [N] 引用则不处理
+    if _INLINE_CITATION_PATTERN.search(answer):
+        return answer
+
+    import re as _re
+    _tok_pat = _re.compile(r'[a-zA-Z0-9]+|[\u4e00-\u9fff]')
+
+    def _tokenize(text: str) -> list[str]:
+        return _tok_pat.findall(text.lower()) if text else []
+
+    cit_tokens_map: list[tuple[int, set[str]]] = []
+    for c in citations:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ref = int(c.get("ref"))
+        except (TypeError, ValueError):
+            continue
+        # 优先用 _full_text（段落级完整文本），回退到 highlight_text
+        support = c.get("_full_text", "") or c.get("highlight_text", "")
+        tokens = set(_tokenize(support))
+        if tokens:
+            cit_tokens_map.append((ref, tokens))
+
+    if not cit_tokens_map:
+        return answer
+
+    # 收集可注入引文的段落及其与每个 citation 的匹配分数
+    lines = answer.split('\n')
+    para_indices: list[int] = []           # 可注入引文的行号
+    para_scores: list[list[tuple[int, float]]] = []  # 每段的 [(ref, score), ...]
+    eligible_indices: list[int] = []       # 所有可注入的行号（含无匹配的）
+
+    for li, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or len(stripped) < 10 or stripped.startswith('#'):
+            continue
+        para_tokens = _tokenize(stripped)
+        if len(para_tokens) < 3:
+            continue
+        eligible_indices.append(li)
+        para_set = set(para_tokens)
+        scores = []
+        for ref, ctoks in cit_tokens_map:
+            overlap = len(para_set & ctoks)
+            score = overlap / max(1, len(para_tokens))
+            if score >= 0.03:
+                scores.append((ref, score))
+        if scores:
+            scores.sort(key=lambda x: x[1], reverse=True)
+            para_indices.append(li)
+            para_scores.append(scores)
+
+    # 跨语言兜底：中文回答 vs 英文文档时 token overlap 极低，
+    # 此时对所有可注入段落按顺序轮流分配不同 citation
+    if not para_indices and eligible_indices:
+        all_refs = [ref for ref, _ in cit_tokens_map]
+        result = []
+        for li, line in enumerate(lines):
+            if li in eligible_indices:
+                idx = eligible_indices.index(li)
+                ref = all_refs[idx % len(all_refs)]
+                result.append(f"{line}[{ref}]")
+            else:
+                result.append(line)
+        return '\n'.join(result)
+
+    if not para_indices:
+        return answer
+
+    # 贪心分配：尽量让每个段落引用不同的 citation
+    # 如果 top-1 已被使用且有其他候选（分数 >= top-1 * 0.6），优先选未使用的
+    used_count: dict[int, int] = {}  # ref -> 被分配次数
+    assignments: dict[int, int] = {}  # line_index -> ref
+
+    for li, scores in zip(para_indices, para_scores):
+        top_score = scores[0][1]
+        # 在分数足够接近的候选中，优先选使用次数最少的
+        threshold = top_score * 0.6
+        candidates = [(ref, sc) for ref, sc in scores if sc >= threshold]
+        # 按 (使用次数, -分数) 排序，优先未使用 + 高分
+        candidates.sort(key=lambda x: (used_count.get(x[0], 0), -x[1]))
+        chosen_ref = candidates[0][0]
+        assignments[li] = chosen_ref
+        used_count[chosen_ref] = used_count.get(chosen_ref, 0) + 1
+
+    # 如果所有段落仍然指向同一个 ref，按段落顺序轮流分配不同 citation
+    unique_assigned = set(assignments.values())
+    if len(unique_assigned) == 1 and len(cit_tokens_map) > 1:
+        all_refs = [ref for ref, _ in cit_tokens_map]
+        for i, li in enumerate(para_indices):
+            assignments[li] = all_refs[i % len(all_refs)]
+
+    # 为未匹配的 eligible 段落补充分配（跨语言场景部分行无 overlap）
+    all_refs = [ref for ref, _ in cit_tokens_map]
+    unassigned = [li for li in eligible_indices if li not in assignments]
+    for i, li in enumerate(unassigned):
+        # 从已使用最少的 ref 开始轮流分配
+        ref = all_refs[(len(assignments) + i) % len(all_refs)]
+        assignments[li] = ref
+
+    result = []
+    for li, line in enumerate(lines):
+        if li in assignments:
+            result.append(f"{line}[{assignments[li]}]")
+        else:
+            result.append(line)
+    return '\n'.join(result)
 
 
 def _extract_inline_citation_refs(answer: str) -> list[int]:
@@ -779,6 +1152,10 @@ def _adjust_max_tokens(
     if has_structured_citations and effective is not None:
         effective += _CITATION_TOKEN_OVERHEAD
 
+    # 防止超出常见 Provider 的 max_tokens 上限（如 DeepSeek 8192）
+    if effective is not None and effective > 8192:
+        effective = 8192
+
     return effective
 
 
@@ -962,7 +1339,16 @@ async def chat_with_pdf(request: ChatRequest):
                 )
             except Exception as e:
                 logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
-                context = f"用户选中的文本：\n{request.selected_text}\n\n"
+                fallback_selected_citations = _build_selected_text_fallback_citations(
+                    request.selected_text, selected_page_info
+                )
+                context = _build_fused_context(
+                    request.selected_text,
+                    "",
+                    selected_page_info,
+                    selected_ref=1 if fallback_selected_citations else None,
+                )
+                retrieval_meta["citations"] = fallback_selected_citations
         elif request.selected_text:
             # 仅 selected_text 模式（向量检索未启用）
             selected_page_info = locate_selected_text(
@@ -985,7 +1371,7 @@ async def chat_with_pdf(request: ChatRequest):
             dynamic_top_k = strategy['top_k']
             context_result = await vector_context(
                 request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
-                pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
+                pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
                 top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
                 use_rerank=request.use_rerank, reranker_model=request.reranker_model,
                 rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
@@ -999,9 +1385,33 @@ async def chat_with_pdf(request: ChatRequest):
             )
             relevant_text = context_result.get("context", "")
             retrieval_meta = context_result.get("retrieval_meta", {})
-            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n" if relevant_text else doc["data"]["full_text"][:8000]
+            if relevant_text:
+                context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+            else:
+                numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                    doc.get("data", {}).get("pages", []),
+                    doc["data"]["full_text"][:30000],
+                    query=search_query,
+                )
+                context = numbered_ctx
+                retrieval_meta["citations"] = fb_cits
+            if not retrieval_meta.get("citations"):
+                retrieval_meta["citations"] = _generate_page_level_citations(
+                    doc.get("data", {}).get("pages", []), context, query=search_query
+                )
         else:
-            context = doc["data"]["full_text"][:8000]
+            numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                doc.get("data", {}).get("pages", []),
+                doc["data"]["full_text"][:30000],
+                query=search_query,
+            )
+            context = numbered_ctx
+            retrieval_meta["citations"] = fb_cits
+
+        if retrieval_meta.get("citations") and not retrieval_meta.get("_context_segments"):
+            retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
+                retrieval_meta.get("citations", [])
+            )
 
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
@@ -1029,7 +1439,10 @@ async def chat_with_pdf(request: ChatRequest):
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
         citations = retrieval_meta.get("citations", [])
         if citations:
-            citation_prompt = build_structured_citation_prompt(citations)
+            citation_prompt = build_structured_citation_prompt(
+                citations,
+                compact=_should_use_compact_citation_prompt(citations),
+            )
             if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
         system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
         user_content = request.question
@@ -1068,10 +1481,20 @@ async def chat_with_pdf(request: ChatRequest):
                     enhanced = match_citations_to_chunks(inline_cites, _retrieval_chunks_sync, context_segments=_context_segments_sync)
                     orig_citations = retrieval_meta.get("citations", [])
                     for ec in enhanced:
-                        if ec.get("highlight_text") and ec.get("idx") is not None:
+                        if ec.get("idx") is not None:
                             for oc in orig_citations:
                                 if oc.get("ref") == ec["idx"]:
-                                    oc["highlight_text"] = ec["highlight_text"]
+                                    if ec.get("start_phrase"):
+                                        oc["start_phrase"] = ec["start_phrase"]
+                                    if ec.get("end_phrase"):
+                                        oc["end_phrase"] = ec["end_phrase"]
+                                    if ec.get("highlight_text"):
+                                        oc["highlight_text"] = ec["highlight_text"]
+                                        oc["alignment_status"] = "span_matched"
+                                    if ec.get("group_id"):
+                                        oc["group_id"] = ec["group_id"]
+                                    if ec.get("page"):
+                                        oc["page_range"] = [ec["page"], ec["page"]]
                                     break
             except Exception as e:
                 logger.warning(f"非流式引文后处理失败: {e}")
@@ -1104,42 +1527,46 @@ async def chat_with_pdf_stream(request: ChatRequest):
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
-    context = ""
-    retrieval_meta = {}
-    has_structured_citations = False
-    web_search_sources: list[dict] = []
-    web_search_context = ""
-    use_agent = False
-    use_memory = _should_use_memory(request)
-    memory_context = ""
-    raw_memories = []
-    memory_hits: list[dict] = []
-    memory_meta: dict = {
-        "enabled": use_memory,
-        "strategy": None,
-        "retrieved_count": 0,
-        "selected_count": 0,
-        "truncated": False,
-        "token_budget": None,
-        "selected_kinds": [],
-    }
-    if use_memory:
-        memory_context = _retrieve_memory_context(
-            request.question, api_key=request.api_key, doc_id=request.doc_id
-        )
-        raw_memories = _retrieve_raw_memories(
-            request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
-        )
 
-    image_list = (request.image_base64_list or [])
-    if request.image_base64 and request.image_base64 not in image_list:
-        image_list = [request.image_base64] + image_list
-    image_list = [img for img in image_list if img]
+    async def event_generator():
+        yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'start', 'message': '正在检索...'}, ensure_ascii=False)}\n\n"
+        try:
+            context = ""
+            retrieval_meta = {}
+            has_structured_citations = False
+            web_search_sources: list[dict] = []
+            web_search_context = ""
+            use_agent = False
+            use_memory = _should_use_memory(request)
+            memory_context = ""
+            raw_memories = []
+            memory_hits: list[dict] = []
+            memory_meta: dict = {
+                "enabled": use_memory,
+                "strategy": None,
+                "retrieved_count": 0,
+                "selected_count": 0,
+                "truncated": False,
+                "token_budget": None,
+                "selected_kinds": [],
+            }
+            if use_memory:
+                memory_context = _retrieve_memory_context(
+                    request.question, api_key=request.api_key, doc_id=request.doc_id
+                )
+                raw_memories = _retrieve_raw_memories(
+                    request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
+                )
 
-    if image_list:
-        print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
-        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
-        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+            image_list = (request.image_base64_list or [])
+            if request.image_base64 and request.image_base64 not in image_list:
+                image_list = [request.image_base64] + image_list
+            image_list = [img for img in image_list if img]
+
+            if image_list:
+                print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
+                answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
+                system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 用户从文档中截取了 {len(image_list)} 张图片并发送给你。请仔细分析这些图片内容并回答问题。
 
 回答规则：
@@ -1149,148 +1576,183 @@ async def chat_with_pdf_stream(request: ChatRequest):
 4. 如果图片包含表格，请转换为 Markdown 格式。
 5. 学术准确、表达清晰。
 6. {answer_style_instruction}"""
-        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
-        user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
-        for img_b64 in image_list:
-            mime = _detect_mime_type(img_b64)
-            user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
-    else:
-        # 应用前端传入的检索增强设置到全局配置（即时生效）
-        settings.bm25_use_jieba = request.enable_jieba_bm25
-        settings.num_expand_context_chunk = request.num_expand_context_chunk
+                system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+                user_content = [{"type": "text", "text": request.question or "请分析这些图片"}]
+                for img_b64 in image_list:
+                    mime = _detect_mime_type(img_b64)
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
+            else:
+                # 应用前端传入的检索增强设置到全局配置（即时生效）
+                settings.bm25_use_jieba = request.enable_jieba_bm25
+                settings.num_expand_context_chunk = request.num_expand_context_chunk
 
-        use_agent = request.enable_agent_retrieval and not request.selected_text
-        # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
-        search_query = await _maybe_rewrite_query(
-            question=request.question,
-            chat_history=request.chat_history,
-            selected_text=request.selected_text,
-            api_key=request.api_key,
-            model=request.model,
-            provider=request.api_provider,
-            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
-        )
-        # 联网搜索移入 event_generator() 以便在客户端展示实时搜索状态
-        _web_search_query_for_stream = search_query
-        _web_search_doc_title_for_stream = doc.get("filename", "")
-
-        # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
-        _prelim_answer_tokens_stream = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
-
-        if request.selected_text and request.enable_vector_search:
-            # 融合模式：selected_text + 向量检索
-            _validate_rerank_request(request)
-            selected_page_info = locate_selected_text(
-                request.selected_text, doc.get("data", {}).get("pages", [])
-            )
-            try:
-                strategy = get_retrieval_strategy(search_query)
-                dynamic_top_k = strategy['top_k']
-                context_result = await vector_context(
-                    request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
-                    pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
-                    top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
-                    use_rerank=request.use_rerank, reranker_model=request.reranker_model,
-                    rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
-                    rerank_endpoint=request.rerank_endpoint,
-                    middlewares=[
-                        *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
-                        RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
-                    ],
+                use_agent = request.enable_agent_retrieval and not request.selected_text
+                # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
+                search_query = await _maybe_rewrite_query(
+                    question=request.question,
+                    chat_history=request.chat_history,
                     selected_text=request.selected_text,
-                    answer_max_tokens=_prelim_answer_tokens_stream,
+                    api_key=request.api_key,
+                    model=request.model,
+                    provider=request.api_provider,
+                    endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                 )
-                retrieval_context = context_result.get("context", "")
-                retrieval_meta = context_result.get("retrieval_meta", {})
-                retrieval_citations = retrieval_meta.get("citations") or []
-                fallback_selected_citations = _build_selected_text_fallback_citations(
-                    request.selected_text, selected_page_info
-                )
-                retrieval_meta["citations"] = retrieval_citations or fallback_selected_citations
-                # 融合：selected_text 优先 + 检索补充
-                context = _build_fused_context(
-                    request.selected_text,
-                    retrieval_context,
-                    selected_page_info,
-                    selected_ref=1 if (not retrieval_citations and fallback_selected_citations) else None,
-                )
-            except Exception as e:
-                logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
-                context = f"用户选中的文本：\n{request.selected_text}\n\n"
-        elif request.selected_text:
-            # 仅 selected_text 模式（向量检索未启用）
-            selected_page_info = locate_selected_text(
-                request.selected_text, doc.get("data", {}).get("pages", [])
-            )
-            context = _build_fused_context(
-                request.selected_text,
-                "",
-                selected_page_info,
-                selected_ref=1 if _build_selected_text_fallback_citations(
-                    request.selected_text, selected_page_info
-                ) else None,
-            )
-            retrieval_meta["citations"] = _build_selected_text_fallback_citations(
-                request.selected_text, selected_page_info
-            )
-        elif use_agent:
-            context = ""
-        elif request.enable_vector_search:
-            _validate_rerank_request(request)
+                # 联网搜索在此处设置查询参数
+                _web_search_query_for_stream = search_query
+                _web_search_doc_title_for_stream = doc.get("filename", "")
 
-            # 复杂问题分解：对包含"比较""区别"等关键词的查询，拆分为子问题分别检索
-            sub_questions = await decompose_question(
-                question=request.question,
-                api_key=request.api_key,
-                model=request.model,
-                provider=request.api_provider,
-                endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
-            )
+                # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
+                _prelim_answer_tokens_stream = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
 
-            queries_to_search = [search_query] + sub_questions if sub_questions else [search_query]
-            all_relevant_texts = []
+                if request.selected_text and request.enable_vector_search:
+                    # 融合模式：selected_text + 向量检索
+                    _validate_rerank_request(request)
+                    selected_page_info = locate_selected_text(
+                        request.selected_text, doc.get("data", {}).get("pages", [])
+                    )
+                    try:
+                        strategy = get_retrieval_strategy(search_query)
+                        dynamic_top_k = strategy['top_k']
+                        context_result = await vector_context(
+                            request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
+                            pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
+                            top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
+                            use_rerank=request.use_rerank, reranker_model=request.reranker_model,
+                            rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
+                            rerank_endpoint=request.rerank_endpoint,
+                            middlewares=[
+                                *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
+                                RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
+                            ],
+                            answer_max_tokens=_prelim_answer_tokens_stream,
+                        )
+                        retrieval_context = context_result.get("context", "")
+                        retrieval_meta = context_result.get("retrieval_meta", {})
+                        retrieval_citations = retrieval_meta.get("citations") or []
+                        fallback_selected_citations = _build_selected_text_fallback_citations(
+                            request.selected_text, selected_page_info
+                        )
+                        retrieval_meta["citations"] = retrieval_citations or fallback_selected_citations
+                        # 融合：selected_text 优先 + 检索补充
+                        context = _build_fused_context(
+                            request.selected_text,
+                            retrieval_context,
+                            selected_page_info,
+                            selected_ref=1 if (not retrieval_citations and fallback_selected_citations) else None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
+                        fallback_selected_citations = _build_selected_text_fallback_citations(
+                            request.selected_text, selected_page_info
+                        )
+                        context = _build_fused_context(
+                            request.selected_text,
+                            "",
+                            selected_page_info,
+                            selected_ref=1 if fallback_selected_citations else None,
+                        )
+                        retrieval_meta["citations"] = fallback_selected_citations
+                elif request.selected_text:
+                    # 仅 selected_text 模式（向量检索未启用）
+                    selected_page_info = locate_selected_text(
+                        request.selected_text, doc.get("data", {}).get("pages", [])
+                    )
+                    context = _build_fused_context(
+                        request.selected_text,
+                        "",
+                        selected_page_info,
+                        selected_ref=1 if _build_selected_text_fallback_citations(
+                            request.selected_text, selected_page_info
+                        ) else None,
+                    )
+                    retrieval_meta["citations"] = _build_selected_text_fallback_citations(
+                        request.selected_text, selected_page_info
+                    )
+                elif use_agent:
+                    context = ""
+                elif request.enable_vector_search:
+                    _validate_rerank_request(request)
 
-            for sq in queries_to_search:
-                strategy = get_retrieval_strategy(sq)
-                dynamic_top_k = strategy['top_k']
-                cr = await vector_context(
-                    request.doc_id, sq, vector_store_dir=router.vector_store_dir,
-                    pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
-                    top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
-                    use_rerank=request.use_rerank, reranker_model=request.reranker_model,
-                    rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
-                    rerank_endpoint=request.rerank_endpoint,
-                    middlewares=[
-                        *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
-                        RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
-                    ],
-                    answer_max_tokens=_prelim_answer_tokens_stream,
-                )
-                rt = cr.get("context", "")
-                if rt:
-                    all_relevant_texts.append(rt)
-                # 使用第一个（主查询）的 retrieval_meta
-                if sq == search_query:
-                    retrieval_meta = cr.get("retrieval_meta", {})
+                    # 复杂问题分解：对包含"比较""区别"等关键词的查询，拆分为子问题分别检索
+                    sub_questions = await decompose_question(
+                        question=request.question,
+                        api_key=request.api_key,
+                        model=request.model,
+                        provider=request.api_provider,
+                        endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+                    )
 
-            relevant_text = "\n\n---\n\n".join(all_relevant_texts) if all_relevant_texts else ""
-            context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n" if relevant_text else doc["data"]["full_text"][:8000]
-        else:
-            context = doc["data"]["full_text"][:8000]
+                    queries_to_search = [search_query] + sub_questions if sub_questions else [search_query]
+                    all_relevant_texts = []
 
-        # GraphRAG 上下文融合：如果该文档已构建 GraphRAG 索引，追加知识图谱上下文
-        if (settings.enable_graphrag or request.enable_graphrag) and hasattr(router, "_graphrag_instances") and request.doc_id in router._graphrag_instances:
-            try:
-                graphrag_inst = router._graphrag_instances[request.doc_id]
-                graphrag_context = await graphrag_inst.aquery_context(search_query)
-                if graphrag_context:
-                    context += f"\n\n## 知识图谱关联信息\n{graphrag_context}"
-                    logger.debug(f"[Chat] GraphRAG 上下文已融合，长度={len(graphrag_context)}")
-            except Exception as e:
-                logger.warning(f"[Chat] GraphRAG 上下文获取失败: {e}")
+                    for sq in queries_to_search:
+                        strategy = get_retrieval_strategy(sq)
+                        dynamic_top_k = strategy['top_k']
+                        cr = await vector_context(
+                            request.doc_id, sq, vector_store_dir=router.vector_store_dir,
+                            pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
+                            top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
+                            use_rerank=request.use_rerank, reranker_model=request.reranker_model,
+                            rerank_provider=request.rerank_provider, rerank_api_key=request.rerank_api_key,
+                            rerank_endpoint=request.rerank_endpoint,
+                            middlewares=[
+                                *( [LoggingMiddleware()] if settings.enable_search_logging else [] ),
+                                RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
+                            ],
+                            answer_max_tokens=_prelim_answer_tokens_stream,
+                        )
+                        rt = cr.get("context", "")
+                        if rt:
+                            all_relevant_texts.append(rt)
+                        # 使用第一个（主查询）的 retrieval_meta
+                        if sq == search_query:
+                            retrieval_meta = cr.get("retrieval_meta", {})
 
-        answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
-        system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
+                    relevant_text = "\n\n---\n\n".join(all_relevant_texts) if all_relevant_texts else ""
+                    if relevant_text:
+                        context = f"根据用户问题检索到的相关文档片段：\n\n{relevant_text}\n\n"
+                    else:
+                        # 向量检索失败：将 full_text 格式化为编号段落，让 LLM 自然引用
+                        numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                            doc.get("data", {}).get("pages", []),
+                            doc["data"]["full_text"][:30000],
+                            query=search_query,
+                        )
+                        context = numbered_ctx
+                        retrieval_meta["citations"] = fb_cits
+                    # 向量检索有结果但无 citations 时兜底
+                    if not retrieval_meta.get("citations"):
+                        retrieval_meta["citations"] = _generate_page_level_citations(
+                            doc.get("data", {}).get("pages", []), context, query=search_query
+                        )
+                else:
+                    # 非向量路径：格式化为编号段落
+                    numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                        doc.get("data", {}).get("pages", []),
+                        doc["data"]["full_text"][:30000],
+                        query=search_query,
+                    )
+                    context = numbered_ctx
+                    retrieval_meta["citations"] = fb_cits
+
+                # GraphRAG 上下文融合：如果该文档已构建 GraphRAG 索引，追加知识图谱上下文
+                if (settings.enable_graphrag or request.enable_graphrag) and hasattr(router, "_graphrag_instances") and request.doc_id in router._graphrag_instances:
+                    try:
+                        graphrag_inst = router._graphrag_instances[request.doc_id]
+                        graphrag_context = await graphrag_inst.aquery_context(search_query)
+                        if graphrag_context:
+                            context += f"\n\n## 知识图谱关联信息\n{graphrag_context}"
+                            logger.debug(f"[Chat] GraphRAG 上下文已融合，长度={len(graphrag_context)}")
+                    except Exception as e:
+                        logger.warning(f"[Chat] GraphRAG 上下文获取失败: {e}")
+
+                if retrieval_meta.get("citations") and not retrieval_meta.get("_context_segments"):
+                    retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
+                        retrieval_meta.get("citations", [])
+                    )
+
+                answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
+                system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 文档总页数：{doc["data"]["total_pages"]}
 
 文档内容：
@@ -1300,34 +1762,35 @@ async def chat_with_pdf_stream(request: ChatRequest):
 1. 基于文档内容准确回答，学术准确、表达清晰。
 2. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容。
 3. 优先依据文档内容回答。"""
-        system_prompt += f"\n4. {answer_style_instruction}"
-        if request.enable_glossary:
-            glossary_instruction = build_glossary_prompt(context)
-            if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
-        generation_prompt = get_generation_prompt(request.question)
-        if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
-        # 联网搜索上下文注入将在 event_generator() 中完成（需先发送状态事件）
-        citations = retrieval_meta.get("citations", [])
-        has_structured_citations = bool(citations)
-        if citations:
-            citation_prompt = build_structured_citation_prompt(citations)
-            if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
-        system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
-        user_content = request.question
+                system_prompt += f"\n4. {answer_style_instruction}"
+                if request.enable_glossary:
+                    glossary_instruction = build_glossary_prompt(context)
+                    if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
+                generation_prompt = get_generation_prompt(request.question)
+                if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
+                # 联网搜索上下文注入将在后续下游完成（需先发送状态事件）
+                citations = retrieval_meta.get("citations", [])
+                has_structured_citations = bool(citations)
+                logger.info(f"[CITATION DEBUG] enable_vector_search={request.enable_vector_search}, citations_count={len(citations)}, has_structured={has_structured_citations}, compact={_should_use_compact_citation_prompt(citations)}")
+                if has_structured_citations:
+                    citation_prompt = build_structured_citation_prompt(
+                        citations,
+                        compact=_should_use_compact_citation_prompt(citations),
+                    )
+                    if citation_prompt: system_prompt += f"\n\n{citation_prompt}"
+                system_prompt, memory_hits, memory_meta = _smart_inject_memory(system_prompt, memory_context, raw_memories)
+                user_content = request.question
 
-    messages = [{"role": "system", "content": system_prompt}]
-    if request.chat_history:
-        for hist_msg in request.chat_history:
-            if isinstance(hist_msg, dict) and hist_msg.get("role") in ("user", "assistant") and hist_msg.get("content"):
-                messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
-    messages.append({"role": "user", "content": user_content})
+            messages = [{"role": "system", "content": system_prompt}]
+            if request.chat_history:
+                for hist_msg in request.chat_history:
+                    if isinstance(hist_msg, dict) and hist_msg.get("role") in ("user", "assistant") and hist_msg.get("content"):
+                        messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
+            messages.append({"role": "user", "content": user_content})
 
-    # 收集检索到的 chunks 用于引文模糊匹配
-    _retrieval_chunks = retrieval_meta.get("_chunks", [])
+            # 收集检索到的 chunks 用于引文模糊匹配
+            _retrieval_chunks = retrieval_meta.get("_chunks", [])
 
-    async def event_generator():
-        nonlocal messages, system_prompt, retrieval_meta, web_search_sources, web_search_context
-        try:
             if use_agent:
                 # ... Agent 逻辑省略，保持原样 ...
                 pass
@@ -1433,16 +1896,32 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         if enhanced:
                             orig_citations = retrieval_meta.get("citations", [])
                             for ec in enhanced:
-                                if ec.get("highlight_text") and ec.get("idx") is not None:
+                                if ec.get("idx") is not None:
                                     for oc in orig_citations:
                                         if oc.get("ref") == ec["idx"]:
-                                            oc["highlight_text"] = ec["highlight_text"]
+                                            if ec.get("start_phrase"):
+                                                oc["start_phrase"] = ec["start_phrase"]
+                                            if ec.get("end_phrase"):
+                                                oc["end_phrase"] = ec["end_phrase"]
+                                            if ec.get("highlight_text"):
+                                                oc["highlight_text"] = ec["highlight_text"]
+                                                oc["alignment_status"] = "span_matched"
+                                            if ec.get("group_id"):
+                                                oc["group_id"] = ec["group_id"]
+                                            if ec.get("page"):
+                                                oc["page_range"] = [ec["page"], ec["page"]]
                                             break
 
                     final_answer_text = extract_final_answer(full_output) if full_output else ""
                     retrieval_meta["citations"] = _align_citations_with_answer(
                         final_answer_text, retrieval_meta.get("citations", [])
                     )
+
+                    # Bug1 兜底：LLM 未输出 FINAL ANSWER 标记时，流式过滤跳过了所有 content，
+                    # 此处补发完整回答文本，确保前端不会显示空内容
+                    if has_structured_citations and not reached_final_answer and full_output:
+                        fallback_text = final_answer_text or full_output
+                        yield f"data: {json.dumps({'content': fallback_text, 'reasoning_content': '', 'done': False})}\n\n"
 
                     # 移除内部 _chunks 字段（仅后端使用），避免发送大量原始数据
                     send_meta = {k: v for k, v in retrieval_meta.items() if not k.startswith("_")}
@@ -1516,10 +1995,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 # 结构化引文流式过滤：隐藏 CITATION LIST，只展示 FINAL ANSWER
                 if has_structured_citations and content:
                     if not reached_final_answer:
-                        if START_ANSWER in full_output:
+                        _fa_parts = _ci_split(_RE_START_ANSWER, full_output)
+                        if _fa_parts is not None:
                             reached_final_answer = True
                             # D1：CITATION LIST 已完整，立即在后台线程启动引文匹配
-                            citation_list_part = full_output.split(START_ANSWER, 1)[0]
+                            citation_list_part = _fa_parts[0]
                             if citation_list_part and (_retrieval_chunks or retrieval_meta.get("_context_segments")):
                                 _citation_match_thread = threading.Thread(
                                     target=_run_citation_match,
@@ -1533,7 +2013,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                 )
                                 _citation_match_thread.start()
                             # 提取 FINAL ANSWER 之后的内容并发送
-                            after_marker = full_output.split(START_ANSWER, 1)[1].lstrip()
+                            after_marker = _fa_parts[1].lstrip()
                             if after_marker:
                                 yield f"data: {json.dumps({'content': after_marker, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
                         # 不展示 CITATION LIST 部分
@@ -1541,9 +2021,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     else:
                         # 已进入 FINAL ANSWER 区域，检查是否 CITATION LIST 再次出现（小模型重复）
                         # 使用 continue 跳过脏块而非 break，确保 done 事件正常触发
-                        if START_CITATION in content:
+                        _cl_parts = _ci_split(_RE_START_CITATION, content)
+                        if _cl_parts is not None:
                             # 仅保留 CITATION LIST 之前的内容（如有），其余丢弃
-                            clean_part = content.split(START_CITATION, 1)[0]
+                            clean_part = _cl_parts[0]
                             if clean_part:
                                 yield f"data: {json.dumps({'content': clean_part, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
                             continue

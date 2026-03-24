@@ -61,6 +61,15 @@ LEGACY_PROJECT_UPLOAD_DIR = PROJECT_ROOT / "uploads"
 documents_store = {}
 
 
+def _normalize_page_keys(data: dict):
+    """Ensure every page has both 'text' and 'content' keys for compatibility."""
+    for page in data.get("data", {}).get("pages", []):
+        if "text" not in page and "content" in page:
+            page["text"] = page["content"]
+        elif "content" not in page and "text" in page:
+            page["content"] = page["text"]
+
+
 def save_document(doc_id: str, data: dict):
     try:
         file_path = DOCS_DIR / f"{doc_id}.json"
@@ -81,6 +90,7 @@ def load_documents():
                 import json
                 data = json.load(f)
                 doc_id = os.path.splitext(os.path.basename(file_path))[0]
+                _normalize_page_keys(data)
                 documents_store[doc_id] = data
                 count += 1
         except Exception as e:
@@ -1531,6 +1541,7 @@ async def upload_pdf(
             "data": extracted_data,
             "pdf_url": pdf_url
         }
+        _normalize_page_keys(documents_store[doc_id])
 
         save_document(doc_id, documents_store[doc_id])
 

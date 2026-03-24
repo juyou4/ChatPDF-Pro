@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import List
 
-from services.query_analyzer import analyze_query_type, QueryType
+from services.query_analyzer import analyze_query_type, is_section_explanation_query, QueryType
 from services.semantic_group_service import SemanticGroup
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,9 @@ class GranularitySelector:
 
         # 获取选择理由
         reasoning = QUERY_TYPE_REASONING[query_type]
+        if query_type == "analytical" and is_section_explanation_query(query):
+            max_groups = max(max_groups, 7)
+            reasoning = "章节深讲查询：扩大方法相关意群覆盖，兼顾细节与范围"
 
         logger.info(
             f"粒度选择: query_type={query_type}, "
@@ -139,10 +142,13 @@ class GranularitySelector:
             return []
 
         result: List[dict] = []
+        prefer_section_detail = is_section_explanation_query(query)
 
         for rank, group in enumerate(ranked_groups):
             # 根据排名位置分配粒度
-            if rank == 0:
+            if prefer_section_detail and rank <= 1:
+                granularity = "full"
+            elif rank == 0:
                 # 第 1 名：全文粒度
                 granularity = "full"
             elif rank <= 2:
@@ -151,6 +157,13 @@ class GranularitySelector:
             else:
                 # 第 4 名及之后：摘要粒度
                 granularity = "summary"
+
+            # 摘要生成失败时自动升级粒度：summary→digest, digest→full
+            if getattr(group, "summary_status", "ok") == "failed":
+                if granularity == "summary":
+                    granularity = "digest"
+                elif granularity == "digest":
+                    granularity = "full"
 
             result.append({
                 "group": group,
@@ -199,6 +212,8 @@ class GranularitySelector:
         # 分析查询类型
         query_type: QueryType = analyze_query_type(query)
         base_granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
+        if query_type == "analytical" and is_section_explanation_query(query):
+            max_groups = max(max_groups, 7)
 
         # 粒度降级顺序
         DOWNGRADE = {"full": "digest", "digest": "summary", "summary": None}
@@ -228,6 +243,13 @@ class GranularitySelector:
             else:
                 # 其余：使用 summary
                 granularity = "summary"
+
+            # 摘要生成失败时自动升级粒度
+            if getattr(group, "summary_status", "ok") == "failed":
+                if granularity == "summary":
+                    granularity = "digest"
+                elif granularity == "digest":
+                    granularity = "full"
 
             # 根据意群特征调整（短意群不需要 digest/full）
             if group.char_count < 500 and granularity in ("digest", "full"):

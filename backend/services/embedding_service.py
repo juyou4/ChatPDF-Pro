@@ -1446,6 +1446,17 @@ def _merge_segments_into_chunks(
                 current_len += seg_len + (2 if current_parts else 0)
         else:
             # 普通段落
+            if seg_len > chunk_size:
+                # 超大段落：先提交当前缓冲，再拆分超大段落
+                _commit_chunk()
+                from langchain.text_splitter import RecursiveCharacterTextSplitter
+                _oversized_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len,
+                )
+                for sub in _oversized_splitter.split_text(seg_text):
+                    chunks.append((sub, active_heading))
+                continue
+
             if current_len + seg_len + 2 > chunk_size and current_parts:
                 _commit_chunk()
 
