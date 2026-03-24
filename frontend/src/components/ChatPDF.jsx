@@ -156,7 +156,14 @@ const ChatPDF = () => {
   const [apiProvider, setApiProvider] = useDebouncedLocalStorage('apiProvider', 'openai');
   const [model, setModel] = useDebouncedLocalStorage('model', 'gpt-4o');
   const [embeddingApiKey, setEmbeddingApiKey] = useDebouncedLocalStorage('embeddingApiKey', '');
-  const [enableVectorSearch, setEnableVectorSearch] = useDebouncedLocalStorage('enableVectorSearch', false);
+  const [enableVectorSearch, setEnableVectorSearch] = useDebouncedLocalStorage('enableVectorSearch', true);
+  // 一次性迁移：旧版默认 enableVectorSearch=false，需强制升级为 true
+  useEffect(() => {
+    if (!localStorage.getItem('_migrated_vectorSearch_v1')) {
+      setEnableVectorSearch(true);
+      localStorage.setItem('_migrated_vectorSearch_v1', '1');
+    }
+  }, []);
   const [enableScreenshot, setEnableScreenshot] = useDebouncedLocalStorage('enableScreenshot', true);
   const [streamSpeed, setStreamSpeed] = useDebouncedLocalStorage('streamSpeed', 'normal');
   const [enableBlurReveal, setEnableBlurReveal] = useDebouncedLocalStorage('enableBlurReveal', true);
@@ -232,6 +239,14 @@ const ChatPDF = () => {
     };
   }, [getDefaultModel, getProviderById, getModelById]);
 
+  const getEmbeddingApiKey = useCallback(() => {
+    const config = getEmbeddingConfig();
+    if (config.isValid && config.provider?.apiKey) {
+      return config.provider.apiKey;
+    }
+    return embeddingApiKey || apiKey;
+  }, [getEmbeddingConfig, embeddingApiKey, apiKey]);
+
   const getCurrentChatModel = useCallback(() => {
     const chatKey = getDefaultModel('assistantModel');
     if (chatKey) {
@@ -269,8 +284,8 @@ const ChatPDF = () => {
     if (!rerankModel) return null;
     const { providerId, modelId } = rerankModel;
     const provider = getProviderById(providerId);
-    return { providerId, modelId, apiKey: provider?.apiKey || embeddingApiKey || apiKey };
-  }, [getCurrentRerankModel, getProviderById, embeddingApiKey, apiKey]);
+    return { providerId, modelId, apiKey: provider?.apiKey || getEmbeddingApiKey() };
+  }, [getCurrentRerankModel, getProviderById, getEmbeddingApiKey]);
 
   const getDefaultModelLabel = useCallback((key, fallback = '未选择') => {
     if (!key) return fallback;
@@ -324,7 +339,7 @@ const ChatPDF = () => {
     useRerank: useRerankSetting,
     rerankerModel,
     getRerankCredentials,
-    embeddingApiKey,
+    embeddingApiKey: getEmbeddingApiKey(),
     apiKey,
   });
   const {
@@ -371,6 +386,7 @@ const ChatPDF = () => {
     getProviderById,
     streamSpeed,
     enableVectorSearch,
+    embeddingApiKey: getEmbeddingApiKey(),
     enableGraphRAG,
     enableJiebaBM25,
     numExpandContextChunk,
@@ -669,6 +685,7 @@ const ChatPDF = () => {
             citations={msg.citations || null}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
+            webSearchSources={msg.webSearchSources || null}
           />
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
@@ -1517,10 +1534,14 @@ const ChatPDF = () => {
                 </div>
 
                 {/* Other Settings Access */}
-                <div className="grid grid-cols-2 gap-3 px-1 mt-4">
+                <div className="grid grid-cols-3 gap-3 px-1 mt-4">
                   <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
                     <Type className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
                     <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>全局设置</span>
+                  </button>
+                  <button onClick={() => { setShowSettings(false); setShowChatSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
+                    <SlidersHorizontal className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
+                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>对话设置</span>
                   </button>
                   <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
                     <ScanText className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
