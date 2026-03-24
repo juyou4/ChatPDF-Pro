@@ -1100,7 +1100,7 @@ const ChatPDF = () => {
             </div>
 
             {/* 输入区域 */}
-            <div className="p-6 pt-0 bg-transparent">
+            <div className="p-6 pt-0 bg-transparent relative z-10">
               {/* 截图预览 */}
               <ScreenshotPreview
                 screenshots={screenshots}
@@ -1108,70 +1108,82 @@ const ChatPDF = () => {
                 onClose={handleScreenshotClose}
               />
 
-              <div className="relative bg-white/80 backdrop-blur-[20px] rounded-[36px] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.22),0_8px_24px_-6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 flex items-end gap-2 border border-white/50 ring-1 ring-black/5">
-                <div className="flex-1 flex flex-col min-h-[48px] justify-center pl-6 py-1.5">
-                  <div className="flex items-center gap-2 mb-1">
-                    <textarea
-                      ref={textareaRef}
-                      onChange={(e) => {
-                        e.target.style.height = '24px';
-                        e.target.style.height = e.target.scrollHeight + 'px';
-                        const newHasInput = !!e.target.value.trim();
-                        if (newHasInput !== hasInput) setHasInput(newHasInput);
-                      }}
-                      onKeyDown={(e) => {
-                        if (sendShortcut === 'Ctrl+Enter') {
-                          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
-                        } else {
-                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-                        }
-                      }}
-                      placeholder="Summarize, rephrase, convert..."
-                      className="w-full bg-transparent border-none outline-none text-gray-800 placeholder:text-gray-400 font-medium resize-none h-[24px] overflow-hidden leading-relaxed py-0 focus:ring-0 text-[15px]"
-                      rows={1}
-                      style={{ minHeight: '24px', maxHeight: '120px' }}
-                    />
-                  </div>
-                  <div className="flex items-center gap-4 text-gray-400 mt-2">
-                    <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
-                    <button className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
-                      <SlidersHorizontal className="w-5 h-5" />
+              <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_10px_35px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/60 rounded-[2rem] p-2.5 z-20">
+                {/* 上半部分：模型选择、状态、工具图标 */}
+                <div className="flex items-center justify-between mb-2.5 px-1">
+                  <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
+                  
+                  {/* 右侧工具图标 */}
+                  <div className="flex items-center gap-2 text-gray-500 shrink-0">
+                    <button onClick={() => setShowSettings(true)} className="hover:text-gray-800 transition-colors p-1 rounded-md">
+                      <Settings size={15} />
                     </button>
-                    <button onClick={() => fileInputRef.current?.click()} className="hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50">
-                      <Paperclip className="w-5 h-5" />
+                    <button onClick={() => fileInputRef.current?.click()} className="hover:text-gray-800 transition-colors p-1 rounded-md">
+                      <Paperclip size={15} />
                     </button>
                     <WebSearchButton />
                     {isVisionCapable && (
                       <button
                         onClick={() => setIsSelectingArea(true)}
                         disabled={!docId}
-                        className={`transition-colors p-1 rounded-md ${docId ? isSelectingArea ? 'text-purple-600 bg-purple-50 hover:bg-purple-100' : 'hover:text-gray-600 hover:bg-gray-50' : 'text-gray-300 cursor-not-allowed'}`}
+                        className={`transition-colors p-1 rounded-md ${docId ? isSelectingArea ? 'text-purple-600' : 'hover:text-gray-800' : 'text-gray-300 cursor-not-allowed'}`}
                         title={!docId ? '请先上传文档' : isSelectingArea ? '框选模式已开启' : '区域截图'}
                       >
-                        <Scan className="w-5 h-5" />
+                        <Scan size={15} />
                       </button>
                     )}
                   </div>
                 </div>
-                <motion.button
-                  onClick={isLoading ? handleStop : sendMessage}
-                  disabled={!isLoading && (!hasInput && screenshots.length === 0)}
-                  className="glass-btn-3d relative z-10 flex-shrink-0"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  <AnimatePresence initial={false}>
-                    {isLoading ? (
-                      <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute inset-0 flex items-center justify-center">
-                        <PauseIcon />
-                      </motion.div>
-                    ) : (
-                      <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute inset-0 flex items-center justify-center">
-                        <SendIcon />
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.button>
+
+                {/* 下半部分：输入区 */}
+                <div className="flex items-center bg-white rounded-full p-1.5 shadow-sm border border-black/5 focus-within:ring-2 focus-within:ring-purple-100 focus-within:border-purple-200 transition-all">
+                  <textarea
+                    ref={textareaRef}
+                    onChange={(e) => {
+                      e.target.style.height = '24px';
+                      e.target.style.height = e.target.scrollHeight + 'px';
+                      const newHasInput = !!e.target.value.trim();
+                      if (newHasInput !== hasInput) setHasInput(newHasInput);
+                    }}
+                    onKeyDown={(e) => {
+                      if (sendShortcut === 'Ctrl+Enter') {
+                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+                      } else {
+                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                      }
+                    }}
+                    placeholder="Summarize, rephrase, convert..."
+                    className="flex-1 bg-transparent outline-none px-4 text-[14px] text-gray-800 min-w-0 resize-none h-[24px] overflow-hidden leading-relaxed py-0"
+                    rows={1}
+                    style={{ minHeight: '24px', maxHeight: '120px' }}
+                  />
+                  
+                  {/* Send 文字和发送按钮，固定在右侧 */}
+                  <div className="flex items-center gap-3 pr-1 shrink-0">
+                    <span className="text-[#aba6d1] text-[13px] font-medium select-none pointer-events-none">Send</span>
+                    <button
+                      onClick={isLoading ? handleStop : sendMessage}
+                      disabled={!isLoading && (!hasInput && screenshots.length === 0)}
+                      className={`w-9 h-9 rounded-full transition-colors flex items-center justify-center shadow-sm ${
+                        isLoading || hasInput || screenshots.length > 0 
+                          ? 'bg-[#f0efff] text-[#7c3aed] hover:bg-[#7c3aed] hover:text-white' 
+                          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <AnimatePresence initial={false}>
+                        {isLoading ? (
+                          <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center">
+                            <PauseIcon />
+                          </motion.div>
+                        ) : (
+                          <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center ml-0.5">
+                            <SendIcon />
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </motion.div>

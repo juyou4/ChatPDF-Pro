@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react'
-import { ChevronUp, Check, Search, ChevronRight } from 'lucide-react'
+import { ChevronUp, Check, Search, ChevronRight, Brain } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useDefaults } from '../contexts/DefaultsContext'
 import { useModel } from '../contexts/ModelContext'
@@ -246,23 +246,23 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
 
   // ========== 渲染 ==========
   return (
-    <div className="flex items-center gap-1">
-    <div ref={dropdownRef} className="relative">
+    <div className="flex items-center gap-1.5 min-w-0 pr-1">
+    <div ref={dropdownRef} className="relative shrink-0">
       {/* 触发按钮 - 显示当前模型信息和展开指示器 */}
       <button
         onClick={() => setIsOpen(prev => !prev)}
-        className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-50"
+        className="flex items-center gap-1 text-[11px] text-gray-700 bg-white border border-gray-100 shadow-sm hover:bg-gray-50 px-2.5 py-1.5 rounded-full transition-colors whitespace-nowrap overflow-hidden shrink"
       >
         {/* 当前模型的 Provider 图标 */}
         {currentProvider && (
-          <ProviderAvatar provider={currentProvider} size={18} className="flex-shrink-0" />
+          <ProviderAvatar provider={currentProvider} size={13} className="flex-shrink-0" />
         )}
         {/* 模型名称或占位文本 */}
-        <span className="truncate max-w-[150px]">
+        <span className="truncate">
           {currentModel?.name || '选择模型'}
         </span>
         {/* 向上箭头图标，指示可展开 */}
-        <ChevronUp className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
+        <ChevronUp className={`w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
       </button>
 
       {/* 向上弹出的下拉菜单 - 使用 framer-motion 动画 */}
@@ -356,35 +356,24 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
 
     {/* 深度思考力度按钮 — 点击弹出力度选择菜单，仅当 provider 支持思考模式时显示 */}
     {supportsThinking && (
-      <div ref={effortMenuRef} className="relative">
+      <div ref={effortMenuRef} className="relative shrink-0">
         <button
           onClick={() => !isAlwaysThinking && setIsEffortMenuOpen(prev => !prev)}
           title={isAlwaysThinking
             ? `${currentModel?.name || '当前模型'} 为原生推理模型，始终启用深度思考`
             : `深度思考：${currentEffort.label}`
           }
-          className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-full border transition-all ${
+          className={`flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-full whitespace-nowrap overflow-hidden shrink transition-colors border outline-none ${
             isAlwaysThinking
-              ? 'border-purple-300 bg-purple-50 text-purple-700 cursor-default'
+              ? 'bg-[#e4e5ee] text-gray-700 border-transparent cursor-default'
               : isThinkingActive
-                ? 'border-purple-300 bg-purple-50 text-purple-700 shadow-sm'
-                : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                ? 'bg-[#e4e5ee] text-gray-700 border-transparent hover:bg-[#d8d9e4]'
+                : 'bg-white text-gray-500 border-gray-100 shadow-sm hover:bg-gray-50'
           }`}
         >
-          {/* 原子图标 */}
-          <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <ellipse cx="12" cy="12" rx="10" ry="4" />
-            <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
-            <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
-            <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-          </svg>
-          {/* 显示当前力度级别标识 */}
-          <span>
-            {isAlwaysThinking
-              ? '推理模型'
-              : isThinkingActive ? `思考·${currentEffort.label}` : 'DeepThink'
-            }
-          </span>
+          <span className="truncate">{isAlwaysThinking ? '推理模型' : 'Thinking Mode'}</span>
+          <Brain size={13} className={isThinkingActive ? "text-gray-500 shrink-0" : "text-gray-400 shrink-0"} />
+          {isThinkingActive && !isAlwaysThinking && <span className="font-medium text-gray-700 shrink-0">{currentEffort.label}</span>}
         </button>
 
         {/* 力度选择弹出菜单 — 向上弹出（原生推理模型不弹出） */}

@@ -64,6 +64,7 @@ export const useSmoothStream = ({
   initialText = '',
   enableBlurReveal = false,
   blurIntensity = 'medium',
+  smoothFlush = false,
 }) => {
   /** @type {React.MutableRefObject<string[]>} 待渲染字符队列 */
   const chunkQueueRef = useRef([])
@@ -185,9 +186,16 @@ export const useSmoothStream = ({
         // 3. 动态计算本帧渲染字符数
         let charsToRenderCount = Math.max(1, Math.floor(chunkQueueRef.current.length / 5))
 
-        // 4. 流已结束时一次性渲染所有剩余字符
+        // 4. 流已结束时的渲染策略
         if (streamDone) {
-          charsToRenderCount = chunkQueueRef.current.length
+          if (smoothFlush) {
+            // 渐进刷新：每帧渲染较多字符但不一次性 dump，
+            // 用于思考内容等大批量到达的场景，保持平滑动画
+            charsToRenderCount = Math.max(charsToRenderCount, 80)
+          } else {
+            // 标准模式：一次性渲染所有剩余字符
+            charsToRenderCount = chunkQueueRef.current.length
+          }
         }
 
         // 5. 取出字符并追加到已渲染文本
@@ -234,7 +242,7 @@ export const useSmoothStream = ({
         animationFrameRef.current = requestAnimationFrame(renderLoop)
       }
     },
-    [streamDone, onUpdate, minDelay, enableBlurReveal, blurIntensity]
+    [streamDone, onUpdate, minDelay, enableBlurReveal, blurIntensity, smoothFlush]
   )
 
   // 启动渲染循环，组件卸载时取消 rAF 防止内存泄漏

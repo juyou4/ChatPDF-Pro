@@ -62,15 +62,32 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
  * 思考过程滚动预览组件（cherry-studio 风格）
  * 优化：使用更平滑的滚动逻辑和 mask 遮罩
  */
-const ThinkingPreview = memo(({ content, isThinking, expanded }) => {
+const ThinkingPreview = memo(({ content, isThinking, expanded, streamingRef }) => {
   const containerRef = useRef(null)
+  const [liveText, setLiveText] = useState('')
+
+  // 流式期间通过 MutationObserver 实时读取 streamingRef 的文本
+  useEffect(() => {
+    if (!isThinking || !streamingRef?.current) {
+      setLiveText('')
+      return
+    }
+    const el = streamingRef.current
+    const sync = () => setLiveText(el.textContent || '')
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [isThinking, streamingRef])
+
+  const displayContent = isThinking ? liveText : content
   
   const lines = useMemo(() => {
-    if (!content) return []
-    return content.split('\n')
+    if (!displayContent) return []
+    return displayContent.split('\n')
       .filter(l => l.trim() !== '')
       .slice(-3) // 只保留最后3行用于滚动预览，降低 DOM 压力
-  }, [content])
+  }, [displayContent])
 
   const showPreview = isThinking && !expanded && lines.length > 0
 
@@ -172,7 +189,7 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
           <div className="thinking-block-title">
             <ThinkingTimer isThinking={isStreaming} thinkingMs={thinkingMs || 0} />
           </div>
-          <ThinkingPreview content={content} isThinking={isStreaming} expanded={expanded} />
+          <ThinkingPreview content={content} isThinking={isStreaming} expanded={expanded} streamingRef={streamingRef} />
         </div>
 
         {/* 右侧箭头 */}

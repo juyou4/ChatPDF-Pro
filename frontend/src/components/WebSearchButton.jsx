@@ -16,17 +16,17 @@ const WebSearchButton = () => {
     return (
         <button
             onClick={toggleWebSearch}
-            className={`transition-colors p-1 rounded-md ${
+            className={`transition-colors flex items-center justify-center shrink-0 ${
                 enableWebSearch
-                    ? 'text-purple-600 bg-purple-50 hover:bg-purple-100'
-                    : 'hover:text-gray-600 hover:bg-gray-50'
+                    ? 'text-purple-600'
+                    : 'text-gray-500 hover:text-gray-800'
             }`}
             title={enableWebSearch
                 ? `联网搜索已开启 (${currentProvider.name})`
                 : '联网搜索'
             }
         >
-            <Globe className="w-5 h-5" />
+            <Globe size={15} />
         </button>
     );
 };

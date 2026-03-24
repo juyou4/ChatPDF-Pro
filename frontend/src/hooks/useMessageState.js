@@ -407,6 +407,7 @@ export function useMessageState({
 
   const thinkingStream = useSmoothStream({
     streamDone: thinkingStreamDone,
+    smoothFlush: true,
   });
 
   // ========== 副作用 ==========
