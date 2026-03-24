@@ -62,7 +62,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   } = useProvider()
 
   const {
-    getModelsByProvider,
+    userCollection,
+    systemModels,
     addModelToCollection,
     removeModelFromCollection,
     fetchAndAddModels,
@@ -86,6 +87,10 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   })
   // 新增模型表单的标签选择状态
   const [newModelTags, setNewModelTags] = useState([])
+  const [addSuccess, setAddSuccess] = useState(null)
+  const [lastAddedModelKey, setLastAddedModelKey] = useState(null)
+  // Optimistic update：保存进局部 state，不依赖 context 传播时序
+  const [locallyAddedModels, setLocallyAddedModels] = useState([])
   const [customProviderFormOpen, setCustomProviderFormOpen] = useState(false)
   const [customProviderForm, setCustomProviderForm] = useState({
     id: '',
@@ -127,15 +132,39 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     `${p.name} ${p.id}`.toLowerCase().includes(providerSearch.toLowerCase())
   )
 
+  // 直接订阅 userCollection + systemModels 基础状态（对齐 Cherry Studio 单一数据源模式）
+  // 避免通过 getModelsByProvider 函数派生，确保状态更新时立即反映在 UI 上
   const modelsByType = useMemo(() => {
     if (!activeProvider) return {}
-    const list = getModelsByProvider(activeProvider.id)
-    return list.reduce((acc, model) => {
+    const sysForProvider = systemModels.filter(m => m.providerId === activeProvider.id)
+    const userForProvider = userCollection.filter(m => m.providerId === activeProvider.id)
+    const localForProvider = locallyAddedModels.filter(m => m.providerId === activeProvider.id)
+    // 优先级：local > user > system
+    const map = new Map()
+    sysForProvider.forEach(m => map.set(m.id, m))
+    userForProvider.forEach(m => map.set(m.id, m))
+    localForProvider.forEach(m => map.set(m.id, m))
+    const list = Array.from(map.values())
+
+    const grouped = list.reduce((acc, model) => {
       acc[model.type] = acc[model.type] || []
       acc[model.type].push(model)
       return acc
     }, {})
-  }, [activeProvider, getModelsByProvider])
+
+    Object.values(grouped).forEach(group => {
+      group.sort((a, b) => {
+        const aKey = `${a.providerId}:${a.id}`
+        const bKey = `${b.providerId}:${b.id}`
+        if (aKey === lastAddedModelKey) return -1
+        if (bKey === lastAddedModelKey) return 1
+        if (!!a.isUserAdded !== !!b.isUserAdded) return a.isUserAdded ? -1 : 1
+        return (a.name || a.id).localeCompare(b.name || b.id, 'zh-Hans-CN', { sensitivity: 'base' })
+      })
+    })
+
+    return grouped
+  }, [activeProvider, systemModels, userCollection, locallyAddedModels, lastAddedModelKey])
 
   const handleProviderUpdate = (field, value) => {
     if (!activeProvider) return
@@ -161,19 +190,30 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
 
   const handleAddModel = () => {
     if (!activeProvider || !addModelForm.id.trim()) return
-    addModelToCollection({
-      id: addModelForm.id.trim(),
-      name: addModelForm.name.trim() || addModelForm.id.trim(),
+    const modelType = addModelForm.type
+    const newId = addModelForm.id.trim()
+    const newModel = {
+      id: newId,
+      name: addModelForm.name.trim() || newId,
       providerId: activeProvider.id,
-      type: addModelForm.type,
-      // 构建 capabilities 对象，标记为用户手动选择的类型
-      capabilities: [{ type: addModelForm.type, isUserSelected: true }],
-      // 用户选择的标签列表
+      type: modelType,
+      capabilities: [{ type: modelType, isUserSelected: true }],
       tags: newModelTags,
       metadata: {},
       isSystem: false,
       isUserAdded: true
+    }
+    // 将模型写入局部 state（立即显示）和 context（持久化）
+    setLocallyAddedModels(prev => {
+      const exists = prev.some(m => m.id === newId && m.providerId === activeProvider.id)
+      return exists ? prev : [...prev, newModel]
     })
+    addModelToCollection(newModel)
+    setLastAddedModelKey(`${activeProvider.id}:${newId}`)
+    // 自动展开对应类型的分组，让用户看到新增的模型
+    setCollapsedTypes(prev => ({ ...prev, [modelType]: false }))
+    setAddSuccess(`已添加: ${newId} (${modelType})`)
+    setTimeout(() => setAddSuccess(null), 3000)
     setAddModelForm({ id: '', name: '', type: 'chat' })
     // 重置标签选择
     setNewModelTags([])
@@ -266,10 +306,12 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     return model.providerId
   }
 
-  const renderModelRow = (model) => (
+  const renderModelRow = (model) => {
+    const isRecentlyAdded = `${model.providerId}:${model.id}` === lastAddedModelKey
+    return (
     <div
       key={`${model.providerId}-${model.id}`}
-      className="group flex items-center justify-between px-4 py-3 rounded-xl hover:bg-[var(--color-bg-subtle)] border border-transparent hover:border-purple-100 transition-all"
+      className={`group flex items-center justify-between px-4 py-3 rounded-xl border transition-all ${isRecentlyAdded ? 'bg-green-50 border-green-200 shadow-sm' : 'hover:bg-[var(--color-bg-subtle)] border-transparent hover:border-purple-100'}`}
     >
       <div className="flex items-center gap-4 overflow-hidden">
         <ProviderAvatar providerId={getIconProviderId(model)} size={36} className="flex-shrink-0 shadow-sm" />
@@ -278,6 +320,11 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
             <div className="text-sm font-bold text-gray-900 truncate" title={model.name || model.id}>
               {model.name || model.id}
             </div>
+            {isRecentlyAdded && (
+              <span className="flex-shrink-0 text-[10px] font-medium text-green-700 bg-green-100 px-1.5 py-0.5 rounded border border-green-200">
+                刚添加
+              </span>
+            )}
             {model.metadata?.dimension && (
               <span className="flex-shrink-0 text-[10px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-100">
                 {model.metadata.dimension}维
@@ -339,6 +386,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
       )}
     </div>
   )
+  }
 
   try {
     return (
@@ -634,6 +682,11 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           <Plus className="w-4 h-4" />
                           保存模型
                         </button>
+                        {addSuccess && (
+                          <div className="col-span-2 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 animate-pulse">
+                            {addSuccess}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -647,7 +700,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       </div>
                       <div className="text-xs text-gray-400 flex items-center gap-1">
                         <ChevronDown className="w-4 h-4" />
-                        {getModelsByProvider(activeProvider?.id || '').length || 0} 个
+                        {Object.values(modelsByType).reduce((s, a) => s + a.length, 0)} 个
                       </div>
                     </div>
 
@@ -704,7 +757,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
 
                       {(!modelsByType || Object.keys(modelsByType).length === 0) && (
                         <div className={`${RADIUS_CLASS} border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500`}>
-                          暂无模型，请点击“同步模型”或手动新增。
+                          暂无模型，请点击"同步模型"或手动新增。
                         </div>
                       )}
                     </div>
@@ -734,8 +787,4 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     )
   }
 }
-
-
-
-
 

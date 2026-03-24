@@ -131,24 +131,22 @@ export function ModelProvider({ children }: { children: ReactNode }) {
      * - tags 字段直接透传保留
      */
     const addModelToCollection = (model: Model) => {
+        // 确保 capabilities 字段存在：若缺失则根据 type 自动生成
+        const capabilities: ModelCapability[] = model.capabilities && model.capabilities.length > 0
+            ? model.capabilities
+            : [{ type: model.type, isUserSelected: true }]
+
+        // 确保 tags 字段存在：若缺失则默认为空数组
+        const tags: string[] = model.tags || []
+
         setUserCollection(prev => {
             // 避免重复添加
             const exists = prev.some(
                 m => m.id === model.id && m.providerId === model.providerId
             )
-
             if (exists) {
                 return prev
             }
-
-            // 确保 capabilities 字段存在：若缺失则根据 type 自动生成
-            const capabilities: ModelCapability[] = model.capabilities && model.capabilities.length > 0
-                ? model.capabilities
-                : [{ type: model.type, isUserSelected: true }]
-
-            // 确保 tags 字段存在：若缺失则默认为空数组
-            const tags: string[] = model.tags || []
-
             return [...prev, {
                 ...model,
                 capabilities,
@@ -156,6 +154,11 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 isUserAdded: true
             }]
         })
+
+        // 副作用必须在 state updater 外部执行（updater 须为纯函数）
+        if (model.type === 'embedding' || model.type === 'rerank') {
+            _persistModelToBackend(model, capabilities, tags)
+        }
     }
 
     /**
@@ -178,6 +181,8 @@ export function ModelProvider({ children }: { children: ReactNode }) {
      * 从用户collection移除模型
      */
     const removeModelFromCollection = (modelId: string, providerId: string) => {
+        // 同步从后端 models.json 删除
+        _deleteModelFromBackend(modelId)
         setUserCollection(prev =>
             prev.filter(m => !(m.id === modelId && m.providerId === providerId))
         )
@@ -218,6 +223,34 @@ export function ModelProvider({ children }: { children: ReactNode }) {
     /**
      * 从provider API获取模型并添加到collection
      */
+    /**
+     * 持久化单个模型到后端 models.json（fire-and-forget）
+     */
+    const _persistModelToBackend = (model: Model, capabilities: ModelCapability[], tags: string[]) => {
+        fetch('/api/models/custom', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                modelId: model.id,
+                name: model.name || model.id,
+                providerId: model.providerId,
+                type: model.type,
+                capabilities,
+                tags,
+                metadata: model.metadata || {},
+            })
+        }).catch(err => console.warn('Failed to persist model to backend:', err))
+    }
+
+    /**
+     * 从后端 models.json 删除模型（fire-and-forget）
+     */
+    const _deleteModelFromBackend = (modelId: string) => {
+        fetch(`/api/models/custom/${encodeURIComponent(modelId)}`, {
+            method: 'DELETE',
+        }).catch(err => console.warn('Failed to delete model from backend:', err))
+    }
+
     const fetchAndAddModels = async (provider: Provider, options?: { autoAdd?: boolean }) => {
         setIsFetching(true)
         setFetchError(null)
