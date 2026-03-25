@@ -317,16 +317,16 @@ describe('useMessageState streaming regressions', () => {
     expect(hoisted.useSmoothStreamMock).toHaveBeenCalledTimes(2);
     expect(hoisted.useSmoothStreamMock.mock.calls[0][0]).toEqual(
       expect.objectContaining({
-        minDelay: 60,
+        minDelay: 48,
         frameChars: 1,
-        flushChars: 80,
+        flushChars: 2,
       })
     );
     expect(hoisted.useSmoothStreamMock.mock.calls[1][0]).toEqual(
       expect.objectContaining({
-        minDelay: 60,
+        minDelay: 48,
         frameChars: 1,
-        flushChars: 80,
+        flushChars: 2,
       })
     );
   });

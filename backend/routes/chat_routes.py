@@ -2179,7 +2179,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
             async for chunk in _buffered_stream(
                 raw_stream,
-                passthrough=bool(has_structured_citations or request.enable_thinking),
+                passthrough=True,
             ):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"

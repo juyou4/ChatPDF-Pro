@@ -1040,12 +1040,20 @@ const ChatPDF = () => {
           >
             {/* 顶部导航：速览 / 对话 */}
               <div className="pt-6 pb-2 flex justify-center shrink-0">
-                <div className="flex bg-gray-100/80 rounded-full p-1 border border-gray-200/50 shadow-sm">
+                <div className="relative flex bg-gray-100/80 rounded-full p-1 border border-gray-200/50 shadow-sm">
+                  {/* 滑动背景块 */}
+                  <motion.div
+                    className="absolute top-1 bottom-1 w-[72px] bg-white rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.05)] z-0"
+                    initial={false}
+                    animate={{ x: rightPanelMode === 'overview' ? 0 : 72 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                  />
+                  
                   <button
                     onClick={() => setRightPanelMode('overview')}
-                    className={`px-6 py-1.5 text-xs font-medium rounded-full transition-colors ${
+                    className={`relative z-10 w-[72px] py-1.5 text-xs font-medium rounded-full transition-colors duration-200 ${
                       rightPanelMode === 'overview'
-                        ? 'text-purple-600 bg-white shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
+                        ? 'text-purple-600'
                         : 'text-gray-500 hover:text-gray-700'
                     }`}
                   >
@@ -1053,9 +1061,9 @@ const ChatPDF = () => {
                   </button>
                   <button
                     onClick={() => setRightPanelMode('chat')}
-                    className={`px-6 py-1.5 text-xs font-medium rounded-full transition-colors ${
+                    className={`relative z-10 w-[72px] py-1.5 text-xs font-medium rounded-full transition-colors duration-200 ${
                       rightPanelMode === 'chat'
-                        ? 'text-purple-600 bg-white shadow-[0_2px_8px_rgba(0,0,0,0.05)]'
+                        ? 'text-purple-600'
                         : 'text-gray-500 hover:text-gray-700'
                     }`}
                   >
@@ -1105,7 +1113,7 @@ const ChatPDF = () => {
 
             {/* 输入区域 */}
             <div className="p-6 pt-0 bg-transparent relative z-10">
-              <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_10px_35px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/60 rounded-[2rem] p-2.5 z-20">
+              <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_12px_40px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/80 rounded-[2rem] p-2.5 z-20">
                 {/* 截图预览 - 嵌入输入框顶部，避免被遮挡 */}
                 <ScreenshotPreview
                   screenshots={screenshots}
@@ -1507,13 +1515,13 @@ const ChatPDF = () => {
 
                     <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
                       <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>流式输出速度</label>
-                      <CustomSelect
-                        value={streamSpeed}
-                        onChange={setStreamSpeed}
-                        options={[
-                          { value: 'fast', label: '快速 (3字符/次, ~20ms)' },
-                          { value: 'normal', label: '正常 (2字符/次, ~30ms)' },
-                          { value: 'slow', label: '慢速 (1字符/次, ~60ms)' },
+                        <CustomSelect
+                          value={streamSpeed}
+                          onChange={setStreamSpeed}
+                          options={[
+                          { value: 'fast', label: '快速 (4字符/次, ~16ms)' },
+                          { value: 'normal', label: '正常 (2字符/次, ~28ms)' },
+                          { value: 'slow', label: '慢速 (1字符/次, ~48ms)' },
                           { value: 'off', label: '关闭流式（直接显示）' }
                         ]}
                       />
@@ -1740,7 +1748,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
 
 
 

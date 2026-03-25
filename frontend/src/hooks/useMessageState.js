@@ -8,9 +8,11 @@ const API_BASE_URL = '';
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
 
 const STREAM_RENDER_PROFILES = {
-  fast: { minDelay: 20, frameChars: 3, flushChars: 120 },
-  normal: { minDelay: 30, frameChars: 2, flushChars: 100 },
-  slow: { minDelay: 60, frameChars: 1, flushChars: 80 },
+  // flushChars 故意保持较小，确保“仅在 done 才拿到大块内容”时，
+  // 仍能明显看到逐步展开，而不是一帧内几乎全部冲完。
+  fast: { minDelay: 16, frameChars: 4, flushChars: 10 },
+  normal: { minDelay: 28, frameChars: 2, flushChars: 4 },
+  slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
@@ -882,9 +884,15 @@ export function useMessageState({
    */
   const regenerateMessage = useCallback(async (index) => {
     if (!docId) { alert('请先上传文档'); return; }
-    const userMsg = messages.slice(0, index).reverse().find(m => m.type === 'user');
-    if (!userMsg) return;
-    setMessages(prev => prev.slice(0, index));
+    // 找到 index 前最近一条用户消息的索引
+    let userMsgIndex = -1;
+    for (let i = index - 1; i >= 0; i--) {
+      if (messages[i].type === 'user') { userMsgIndex = i; break; }
+    }
+    if (userMsgIndex === -1) return;
+    const userMsg = messages[userMsgIndex];
+    // 截掉用户消息及之后的所有内容，sendMessage 会重新追加用户消息
+    setMessages(prev => prev.slice(0, userMsgIndex));
     setInputValue(userMsg.content);
     // 延迟发送，确保输入框已更新
     setTimeout(() => sendMessage(), 100);
