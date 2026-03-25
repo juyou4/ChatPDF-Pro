@@ -2,13 +2,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
+const hoisted = vi.hoisted(() => ({
+  useSmoothStreamMock: vi.fn(),
+}));
+
 vi.mock('../useSmoothStream', () => ({
-  useSmoothStream: () => ({
-    addChunk: vi.fn(),
-    reset: vi.fn(),
-    contentRef: { current: null },
-    getFinalText: () => '',
-  }),
+  useSmoothStream: hoisted.useSmoothStreamMock,
 }));
 
 vi.mock('../../contexts/WebSearchContext', () => ({
@@ -91,6 +90,14 @@ const createOptions = () => ({
 
 describe('useMessageState streaming regressions', () => {
   beforeEach(() => {
+    hoisted.useSmoothStreamMock.mockReset();
+    hoisted.useSmoothStreamMock.mockImplementation(() => ({
+      addChunk: vi.fn(),
+      reset: vi.fn(),
+      contentRef: { current: null },
+      getFinalText: () => '',
+      isFlushComplete: () => true,
+    }));
     global.fetch = vi.fn();
     global.alert = vi.fn();
   });
@@ -238,6 +245,91 @@ describe('useMessageState streaming regressions', () => {
       expect.objectContaining({ enabled: true, selected_count: 1 })
     );
   });
+
+  it('非流式响应应执行引用纠偏并同步过滤 citations', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: '该方法通过全局光照建模提升物理鲁棒性[1]。',
+        reasoning_content: '',
+        retrieval_meta: {
+          citations: [
+            { ref: 1, display_ref: 1, source_ref: 5, highlight_text: '全局光照建模 提升 物理 鲁棒性', group_id: 'group-5' },
+            { ref: 2, display_ref: 2, source_ref: 8, highlight_text: '补充证据', group_id: 'group-8' },
+          ],
+        },
+      }),
+    });
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      globalSettings: {
+        ...createOptions().globalSettings,
+        streamOutput: false,
+      },
+    }));
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('非流式引用纠偏');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.content).toBe('该方法通过全局光照建模提升物理鲁棒性[1]。');
+    expect(assistant.citations.map((c) => c.ref)).toEqual([1, 2]);
+    expect(assistant.citations.map((c) => c.display_ref)).toEqual([1, 2]);
+    expect(assistant.citations.map((c) => c.source_ref)).toEqual([5, 8]);
+  });
+
+  it('done 事件携带 final_content 时，应补齐未提前流出的尾部内容', async () => {
+    const events = [
+      `data: ${JSON.stringify({ content: '前半段', done: false })}\n\n`,
+      `data: ${JSON.stringify({ done: true, final_content: '前半段补齐尾部', retrieval_meta: { citations: [{ ref: 1, display_ref: 1, source_ref: 3, group_id: 'g3' }] } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('补齐尾部');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.content).toBe('前半段补齐尾部');
+
+    const contentStream = hoisted.useSmoothStreamMock.mock.results[0]?.value;
+    expect(contentStream.addChunk).toHaveBeenCalledWith('前半段');
+    expect(contentStream.addChunk).toHaveBeenCalledWith('补齐尾部');
+  });
+
+  it('streamSpeed 应映射到 useSmoothStream 的真实渲染参数', () => {
+    renderHook(() => useMessageState({
+      ...createOptions(),
+      streamSpeed: 'slow',
+    }));
+
+    expect(hoisted.useSmoothStreamMock).toHaveBeenCalledTimes(2);
+    expect(hoisted.useSmoothStreamMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        minDelay: 60,
+        frameChars: 1,
+        flushChars: 80,
+      })
+    );
+    expect(hoisted.useSmoothStreamMock.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        minDelay: 60,
+        frameChars: 1,
+        flushChars: 80,
+      })
+    );
+  });
 });
 
 describe('normalizeAssistantCitations', () => {
@@ -340,6 +432,21 @@ describe('filterCitationsByContentRefs', () => {
     ];
     const filtered = filterCitationsByContentRefs(content, citations);
     expect(filtered.map((c) => c.ref)).toEqual([2, 1]);
+  });
+
+  it('应优先使用 display_ref 过滤，并保留 source_ref 供证据联动', () => {
+    const content = '结论[1]，补充[2]。';
+    const citations = [
+      { ref: 5, display_ref: 1, source_ref: 5, group_id: 'g5' },
+      { ref: 2, display_ref: 2, source_ref: 2, group_id: 'g2' },
+      { ref: 9, display_ref: 3, source_ref: 9, group_id: 'g9' },
+    ];
+
+    const filtered = filterCitationsByContentRefs(content, citations);
+
+    expect(filtered.map((c) => c.ref)).toEqual([1, 2]);
+    expect(filtered.map((c) => c.display_ref)).toEqual([1, 2]);
+    expect(filtered.map((c) => c.source_ref)).toEqual([5, 2]);
   });
 });
 

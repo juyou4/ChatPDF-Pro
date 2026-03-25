@@ -56,12 +56,14 @@ export function parseOpenAIModels(
     return data.data.map((item: any) => {
         const modelId = item.id
         const modelType = detectModelType(modelId)
+        const modelTags = detectModelTags(modelId)
 
         return {
             id: modelId,
             name: modelId,
             providerId,
             type: modelType,
+            tags: modelTags.length > 0 ? modelTags : undefined,
             metadata: {
                 description: item.owned_by ? `Owned by: ${item.owned_by}` : undefined
             },
@@ -69,6 +71,47 @@ export function parseOpenAIModels(
             isUserAdded: false
         }
     })
+}
+
+/**
+ * 根据模型ID推断标签（vision / reasoning）
+ * 用于API动态获取的模型自动分类，覆盖主流商业模型命名规律
+ */
+export function detectModelTags(modelId: string): string[] {
+    const tags: string[] = []
+    const id = modelId.toLowerCase()
+
+    // 视觉能力检测
+    const hasVision =
+        /vision|visual|\bvl\b|vl-|vlm|multimodal/.test(id) ||
+        /gpt-4o|gpt-4\.1|gpt-5/.test(id) ||
+        /\bo[34]\b/.test(id) ||
+        /claude-(3|opus|sonnet|haiku)/.test(id) ||
+        /gemini/.test(id) ||
+        /grok-[34]/.test(id) ||
+        /kimi-k2\.5|k2\.5/.test(id) ||
+        /doubao-seed/.test(id) ||
+        /moonshot-v1/.test(id) ||
+        /qwen3\.5/.test(id)
+    if (hasVision) tags.push('vision')
+
+    // 推理能力检测（含思维链/深度推理）
+    const hasReasoning =
+        /reasoning|reasoner/.test(id) ||
+        /\bthink(ing)?\b/.test(id) ||
+        /\bqwq\b|\bqvq\b/.test(id) ||
+        /deepseek-r\d|deepseek-reasoner/.test(id) ||
+        /\bo[1-9](-mini|-preview|-pro)?\b/.test(id) ||
+        /gemini-2\.5|gemini-3/.test(id) ||
+        /grok-[34]/.test(id) ||
+        /grok-3/.test(id) ||
+        /claude-(opus|sonnet)-4/.test(id) ||
+        /glm-[45]\.\d|glm-5/.test(id) ||
+        /doubao-seed-2/.test(id) ||
+        /kimi-k2\.5|k2\.5/.test(id)
+    if (hasReasoning) tags.push('reasoning')
+
+    return tags
 }
 
 /**

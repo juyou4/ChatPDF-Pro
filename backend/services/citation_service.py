@@ -61,18 +61,18 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
         prompt = (
             "请使用以下格式回答问题：\n"
             "\n"
-            "CITATION LIST\n"
+            "FINAL ANSWER\n"
+            "先在此输出完整回答，引用处使用[编号]标注来源。\n"
             "\n"
+            "CITATION LIST\n"
             "CITATION【编号】\n"
             "START_PHRASE: 从证据中原文复制的起始短语\n"
             "END_PHRASE: 从证据中原文复制的结束短语\n"
             "\n"
-            "FINAL ANSWER\n"
-            "在此输出完整回答，引用处使用[编号]标注来源。\n"
-            "\n"
             f"可用的引用来源：\n{refs_text}\n"
             "\n"
             "注意：\n"
+            "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
             "- 只能使用上述列出的编号，禁止创造新编号\n"
             "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
             "- FINAL ANSWER 中每个关键事实句都应标注来源编号\n"
@@ -86,6 +86,9 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
     prompt = (
         "请使用以下格式回答问题：\n"
         "\n"
+        "FINAL ANSWER\n"
+        "在此输出你的完整回答，引用处使用[编号]标注来源。\n"
+        "\n"
         "CITATION LIST\n"
         "\n"
         "// 对于你引用的每一处内容，输出一个 CITATION 块\n"
@@ -96,10 +99,11 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
         "START_PHRASE: 引用段落开头的约6个词\n"
         "END_PHRASE: 引用段落结尾的约6个词\n"
         "\n"
-        "FINAL ANSWER\n"
-        "在此输出你的完整回答，引用处使用[编号]标注来源。\n"
-        "\n"
         "示例：\n"
+        "FINAL ANSWER\n"
+        "固定大小分块是一种传统方法，它按预设大小切分文档而不考虑语义内容，计算效率较高[1]。"
+        "然而，这种方法可能导致语义相关内容被割裂，从而影响检索性能[1][2]。\n"
+        "\n"
         "CITATION LIST\n"
         "\n"
         "CITATION【1】\n"
@@ -112,13 +116,10 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
         "START_PHRASE: 固定大小分块器是我们的基准\n"
         "END_PHRASE: 这表明检索质量良好。\n"
         "\n"
-        "FINAL ANSWER\n"
-        "固定大小分块是一种传统方法，它按预设大小切分文档而不考虑语义内容，计算效率较高[1]。"
-        "然而，这种方法可能导致语义相关内容被割裂，从而影响检索性能[1][2]。\n"
-        "\n"
         f"可用的引用来源：\n{refs_text}\n"
         "\n"
         "注意：\n"
+        "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
         "- 只能使用上述列出的编号，禁止创造新编号\n"
         "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
         "- FINAL ANSWER 中每个事实性陈述都应标注来源编号\n"
@@ -209,24 +210,33 @@ def _ci_contains(pattern: re.Pattern, text: str) -> bool:
 def extract_final_answer(full_output: str) -> str:
     """从 LLM 完整输出中提取 FINAL ANSWER 部分
 
-    如果输出不含 FINAL ANSWER 标记，返回原始全文（兼容非结构化输出）。
+    支持两种顺序：
+    - 新格式：FINAL ANSWER → 回答 → CITATION LIST → 引文
+    - 旧格式：CITATION LIST → 引文 → FINAL ANSWER → 回答
+
+    如果输出不含任何标记，返回原始全文（兼容非结构化输出）。
 
     Args:
         full_output: LLM 的完整输出文本
 
     Returns:
-        FINAL ANSWER 之后的回答文本
+        纯回答文本（不含 CITATION LIST）
     """
     parts = _ci_split(_RE_START_ANSWER, full_output)
     if parts is not None:
         answer = parts[1].lstrip()
-        # 如果 CITATION LIST 出现在 FINAL ANSWER 之后（小模型重复输出），截断
+        # 截断尾部 CITATION LIST（新格式：FINAL ANSWER 在前）
         cit_parts = _ci_split(_RE_START_CITATION, answer)
         if cit_parts is not None:
             answer = cit_parts[0].rstrip()
         return answer
 
-    # 无结构化标记，返回原文
+    # 无 FINAL ANSWER 标记，但可能有 CITATION LIST 在尾部
+    cit_parts = _ci_split(_RE_START_CITATION, full_output)
+    if cit_parts is not None:
+        return cit_parts[0].rstrip()
+
+    # 无任何结构化标记，返回原文
     return full_output
 
 

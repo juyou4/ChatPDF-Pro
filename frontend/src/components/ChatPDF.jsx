@@ -32,6 +32,7 @@ import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
+import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -635,8 +636,9 @@ const ChatPDF = () => {
   // ========== 虚拟消息列表渲染回调（useCallback 稳定引用） ==========
   const renderMessage = useCallback((msg, idx) => {
     const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
-    const isStreamingCurrentMessage = msg.isStreaming && streamingMessageId === msg.id;
+    const isStreamingCurrentMessage = shouldStreamAssistantContent(msg, streamingMessageId);
     const shouldShowThinking = hasThinking || (isStreamingCurrentMessage && reasoningEffort !== 'off');
+    const shouldStreamContent = isStreamingCurrentMessage;
     return (
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -687,12 +689,12 @@ const ChatPDF = () => {
           )}
           <StreamingMarkdown
             content={msg.content}
-            isStreaming={(msg.isStreaming || false) && !(shouldShowThinking && isStreamingCurrentMessage)}
+            isStreaming={shouldStreamContent}
             enableBlurReveal={enableBlurReveal}
             blurIntensity={blurIntensity}
             citations={msg.citations || null}
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
-            streamingRef={msg.isStreaming && streamingMessageId === msg.id ? streamingContentRef : undefined}
+            streamingRef={shouldStreamContent ? streamingContentRef : undefined}
             webSearchSources={msg.webSearchSources || null}
           />
           {/* 联网搜索来源 */}
@@ -1103,14 +1105,13 @@ const ChatPDF = () => {
 
             {/* 输入区域 */}
             <div className="p-6 pt-0 bg-transparent relative z-10">
-              {/* 截图预览 */}
-              <ScreenshotPreview
-                screenshots={screenshots}
-                onAction={handleScreenshotAction}
-                onClose={handleScreenshotClose}
-              />
-
               <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_10px_35px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/60 rounded-[2rem] p-2.5 z-20">
+                {/* 截图预览 - 嵌入输入框顶部，避免被遮挡 */}
+                <ScreenshotPreview
+                  screenshots={screenshots}
+                  onAction={handleScreenshotAction}
+                  onClose={handleScreenshotClose}
+                />
                 {/* 上半部分：模型选择、状态、工具图标 */}
                 <div className="flex items-center justify-between mb-2.5 px-1">
                   <ModelQuickSwitch onThinkingChange={handleThinkingChange} />

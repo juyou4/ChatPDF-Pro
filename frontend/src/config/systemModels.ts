@@ -338,7 +338,62 @@ export const DEEPSEEK_MODELS: Model[] = [
  * Chat 模型（对话）
  */
 export const CHAT_MODELS: Model[] = [
-    // ── OpenAI ──
+    // ── OpenAI GPT-5 系列 ──
+    {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI 最新旗舰，统一 Codex+GPT 架构，1M 上下文，复杂推理与编程首选' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.4-pro',
+        name: 'GPT-5.4 Pro',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'GPT-5.4 增强推理版，最强复杂任务处理能力，1M+ 上下文' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.4-mini',
+        name: 'GPT-5.4 mini',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'GPT-5.4 轻量版，高性价比，适合延迟敏感场景' },
+        tags: ['vision'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.4-nano',
+        name: 'GPT-5.4 nano',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'GPT-5.4 最轻量版，极低成本高吞吐量' },
+        tags: ['vision'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5',
+        name: 'GPT-5',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI GPT-5，强推理与编程能力' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5-mini',
+        name: 'GPT-5 mini',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'GPT-5 轻量版，高性价比' },
+        tags: ['vision'],
+        isSystem: true, isUserAdded: false
+    },
+    // ── OpenAI GPT-4 系列 ──
     {
         id: 'gpt-4.1',
         name: 'GPT-4.1',
@@ -395,6 +450,15 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── 阿里云 通义千问 ──
     {
+        id: 'qwen3.5-flash',
+        name: 'Qwen3.5-Flash',
+        providerId: 'aliyun',
+        type: 'chat',
+        metadata: { description: 'Qwen3.5 快速多模态版，支持文本/图片/视频，低延迟高性价比' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'qwen3-max',
         name: 'Qwen3-Max',
         providerId: 'aliyun',
@@ -431,18 +495,18 @@ export const CHAT_MODELS: Model[] = [
     // ── DeepSeek ──
     {
         id: 'deepseek-chat',
-        name: 'DeepSeek V3',
+        name: 'DeepSeek V3.2',
         providerId: 'deepseek',
         type: 'chat',
-        metadata: { description: 'DeepSeek 旗舰对话模型 (V3)' },
+        metadata: { description: 'DeepSeek V3.2 对话模型，推理优先架构，原生工具调用支持思维链' },
         isSystem: true, isUserAdded: false
     },
     {
         id: 'deepseek-reasoner',
-        name: 'DeepSeek R1',
+        name: 'DeepSeek V3.2 Thinking',
         providerId: 'deepseek',
         type: 'chat',
-        metadata: { description: 'DeepSeek 推理增强模型 (R1)' },
+        metadata: { description: 'DeepSeek V3.2 思维链模式，深度推理能力增强' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -452,7 +516,8 @@ export const CHAT_MODELS: Model[] = [
         name: 'Kimi K2.5',
         providerId: 'moonshot',
         type: 'chat',
-        metadata: { description: 'Kimi 最新旗舰，1T 参数 MoE，支持 Agent Swarm 并行协作' },
+        metadata: { description: 'Kimi 最新旗舰，原生多模态架构，支持视觉理解与 Thinking 推理模式，Agent Swarm 并行协作' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
@@ -554,6 +619,15 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── Anthropic (Claude) ──
     {
+        id: 'claude-haiku-4-5',
+        name: 'Claude Haiku 4.5',
+        providerId: 'anthropic',
+        type: 'chat',
+        metadata: { description: 'Claude 最新轻量级模型，低成本高并发，支持视觉输入' },
+        tags: ['vision'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'claude-opus-4-6',
         name: 'Claude Opus 4.6',
         providerId: 'anthropic',
@@ -600,11 +674,20 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── Google (Gemini) ──
     {
-        id: 'gemini-3-pro',
-        name: 'Gemini 3 Pro',
+        id: 'gemini-3.1-pro',
+        name: 'Gemini 3.1 Pro',
         providerId: 'gemini',
         type: 'chat',
-        metadata: { description: 'Google 最新旗舰推理模型，1M 上下文，自适应思考，强多模态 (preview)' },
+        metadata: { description: 'Google 最强旗舰，Gemini 3 系列最新迭代，超越 Gemini 3 Pro 全面性能' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gemini-3.1-pro-preview',
+        name: 'Gemini 3.1 Pro Preview',
+        providerId: 'gemini',
+        type: 'chat',
+        metadata: { description: 'Gemini 3.1 Pro 预览版，自定义工具调用优化' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -645,6 +728,15 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     // ── xAI (Grok) ──
+    {
+        id: 'grok-4.20',
+        name: 'Grok 4.20',
+        providerId: 'grok',
+        type: 'chat',
+        metadata: { description: 'xAI 最新 Beta 旗舰，高速强 Agent 工具调用' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     {
         id: 'grok-4',
         name: 'Grok 4',

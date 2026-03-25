@@ -173,7 +173,7 @@ export const processCitationRefs = (text, citations) => {
 
   const validRefs = new Set(
     citations
-      .map((c) => Number(c?.ref))
+      .map((c) => Number(c?.display_ref ?? c?.ref))
       .filter((ref) => Number.isFinite(ref))
   );
 
@@ -392,7 +392,7 @@ const StreamingMarkdown = React.memo(
       if (!citations || citations.length === 0) return null;
       const map = {};
       citations.forEach((c) => {
-        const ref = Number(c?.ref);
+        const ref = Number(c?.display_ref ?? c?.ref);
         if (Number.isFinite(ref)) {
           map[ref] = c;
         }

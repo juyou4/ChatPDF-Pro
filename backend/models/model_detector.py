@@ -116,8 +116,11 @@ def infer_model_tags(model_id: str) -> list[str]:
     # 优先级：关键字匹配 → 系列匹配
     if "vision" in lower_id or "vl" in lower_id:
         tags.append("vision")
-    elif re.search(r'^gpt-(4o|4-turbo|4\.1|5)', lower_id):
-        # OpenAI GPT-4o、GPT-4 Turbo、GPT-4.1、GPT-5 系列均支持视觉
+    elif re.search(r'^gpt-(4o|4-turbo|4\.1|5\.)', lower_id):
+        # OpenAI GPT-4o、GPT-4 Turbo、GPT-4.1、GPT-5.x 系列均支持视觉
+        tags.append("vision")
+    elif re.search(r'^gpt-5($|-)', lower_id):
+        # OpenAI GPT-5、GPT-5-mini 等
         tags.append("vision")
     elif re.search(r'^(o3|o4)(-|$)', lower_id):
         # OpenAI o3/o4 推理模型同样支持视觉输入
@@ -128,8 +131,8 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^gemini-(2|[3-9])', lower_id):
         # Google Gemini 2+ 系列均支持视觉
         tags.append("vision")
-    elif re.search(r'^(qwen-vl|qwen-max)', lower_id):
-        # 阿里云 Qwen-VL 和 Qwen-Max 系列
+    elif re.search(r'^(qwen-vl|qwen-max|qwen3\.5)', lower_id):
+        # 阿里云 Qwen-VL、Qwen-Max 和 Qwen3.5 系列（Qwen3.5 原生多模态）
         tags.append("vision")
     elif re.search(r'^(grok-vision|grok-4)', lower_id):
         # xAI Grok 视觉模型和 Grok-4 系列
@@ -142,6 +145,9 @@ def infer_model_tags(model_id: str) -> list[str]:
         tags.append("vision")
     elif re.search(r'^moonshot-v1', lower_id):
         # Moonshot moonshot-v1 系列支持图片输入
+        tags.append("vision")
+    elif re.search(r'kimi-k2\.5|\bk2\.5\b', lower_id):
+        # Kimi K2.5 原生多模态架构，支持视觉输入
         tags.append("vision")
 
     # 中文优化标签
@@ -174,6 +180,12 @@ def infer_model_tags(model_id: str) -> list[str]:
         tags.append("reasoning")
     elif "deepseek-r" in lower_id:
         # DeepSeek-R1 等推理模型
+        tags.append("reasoning")
+    elif re.search(r'^grok-[34]', lower_id):
+        # xAI Grok 3/4 系列支持推理能力
+        tags.append("reasoning")
+    elif re.search(r'kimi-k2\.5|\bk2\.5\b', lower_id):
+        # Kimi K2.5 支持 Thinking 推理模式
         tags.append("reasoning")
 
     return tags

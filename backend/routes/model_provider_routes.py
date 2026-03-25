@@ -387,6 +387,8 @@ async def fetch_provider_models(request: ModelFetchRequest):
                  "metadata": {"description": "Claude 均衡前代版本，高性价比"}},
                 {"id": "claude-haiku-3-5", "name": "Claude Haiku 3.5", "type": "chat",
                  "metadata": {"description": "最快速轻量 Claude 模型，低成本高并发"}},
+                {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "type": "chat",
+                 "metadata": {"description": "Claude 最新轻量级模型，低成本高并发，支持视觉输入"}},
             ]
             return {
                 "models": [
@@ -411,8 +413,10 @@ async def fetch_provider_models(request: ModelFetchRequest):
         # Google Gemini：返回预设模型列表
         if request.providerId == 'gemini':
             GEMINI_PRESET_MODELS = [
-                {"id": "gemini-3-pro", "name": "Gemini 3 Pro", "type": "chat",
-                 "metadata": {"description": "Google 最新旗舰推理模型，1M 上下文，自适应思考，强多模态 (preview)"}},
+                {"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro", "type": "chat",
+                 "metadata": {"description": "Google 最强旗舰，Gemini 3 系列最新迭代，超越 Gemini 3 Pro 全面性能"}},
+                {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "type": "chat",
+                 "metadata": {"description": "Gemini 3.1 Pro 预览版，自定义工具调用优化"}},
                 {"id": "gemini-3-flash", "name": "Gemini 3 Flash", "type": "chat",
                  "metadata": {"description": "Google 最新多模态理解模型，强编程与推理 (preview)"}},
                 {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "type": "chat",

@@ -18,6 +18,10 @@ from routes.chat_routes import (
     _build_selected_text_fallback_citations,
     _extract_inline_citation_refs,
     _align_citations_with_answer,
+    _prepare_answer_and_citations_for_display,
+    _extract_streaming_final_answer,
+    START_ANSWER,
+    START_CITATION,
 )
 
 
@@ -151,7 +155,7 @@ class TestBuildSelectedTextCitation:
         )
 
         required_keys = {"ref", "group_id", "page_range", "highlight_text"}
-        assert required_keys == set(citation.keys())
+        assert required_keys.issubset(set(citation.keys()))
 
     def test_highlight_text_stripped(self):
         """highlight_text 应去除首尾空白"""
@@ -238,4 +242,75 @@ class TestCitationAlignment:
             {"ref": 2, "group_id": "group-2", "page_range": [2, 2], "highlight_text": "B"},
         ]
         aligned = _align_citations_with_answer(answer, citations)
-        assert [c["ref"] for c in aligned] == [1, 2]
+        assert aligned == []
+
+
+class TestCitationDisplayPreparation:
+
+    def test_prepare_answer_repairs_and_remaps_display_refs(self):
+        answer = "结论见[ID: 5]，补充见ref 2。"
+        citations = [
+            {"ref": 2, "group_id": "group-2", "page_range": [2, 2], "highlight_text": "B"},
+            {"ref": 5, "group_id": "group-5", "page_range": [5, 5], "highlight_text": "E"},
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(answer, citations)
+
+        assert rewritten == "结论见[1]，补充见[2]。"
+        assert [c["ref"] for c in projected] == [1, 2]
+        assert [c["source_ref"] for c in projected] == [5, 2]
+        assert [c["display_ref"] for c in projected] == [1, 2]
+
+    def test_prepare_answer_injects_inline_refs_when_model_omits_them(self):
+        answer = (
+            "固定大小分块是一种传统方法，它按预设大小切分文档而不考虑语义内容。\n\n"
+            "语义分块通过理解文本含义来切分文档，能保持上下文完整性。"
+        )
+        citations = [
+            {"ref": 5, "group_id": "group-5", "page_range": [1, 1], "highlight_text": "固定大小分块 传统方法 预设大小 切分文档"},
+            {"ref": 8, "group_id": "group-8", "page_range": [2, 2], "highlight_text": "语义分块 理解文本含义 上下文完整性"},
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(answer, citations)
+
+        assert rewritten.count("[1]") == 1
+        assert rewritten.count("[2]") == 1
+        assert [c["ref"] for c in projected] == [1, 2]
+        assert [c["source_ref"] for c in projected] == [5, 8]
+
+    def test_prepare_answer_reassigns_single_repeated_ref_by_paragraph(self):
+        answer = "语义引导用于保持类别一致。[5]\n\n3D 渲染用于生成可打印伪装。[5]"
+        citations = [
+            {"ref": 5, "group_id": "group-5", "page_range": [3, 3], "highlight_text": "语义 引导 类别 一致"},
+            {"ref": 9, "group_id": "group-9", "page_range": [7, 7], "highlight_text": "3D 渲染 可打印 伪装"},
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(answer, citations)
+
+        assert "[1]" in rewritten
+        assert "[2]" in rewritten
+        assert [c["source_ref"] for c in projected] == [5, 9]
+
+
+class TestStreamingFinalAnswerExtraction:
+
+    def test_extract_streaming_final_answer_strips_partial_citation_marker(self):
+        full_output = f"{START_ANSWER}\n第一段回答。\n{START_CITATION[:4]}"
+
+        answer = _extract_streaming_final_answer(full_output)
+
+        assert answer == "第一段回答。"
+
+    def test_extract_streaming_final_answer_without_final_answer_marker(self):
+        full_output = "第一段回答。\n第二段回答。\nCITATION LIST\nCITATION【1】"
+
+        answer = _extract_streaming_final_answer(full_output)
+
+        assert answer == "第一段回答。\n第二段回答。"
+
+    def test_extract_streaming_final_answer_handles_cross_chunk_partial_marker(self):
+        full_output = f"{START_ANSWER}\n第一段回答[5]。\n\nCITATIO"
+
+        answer = _extract_streaming_final_answer(full_output)
+
+        assert answer == "第一段回答[5]。"

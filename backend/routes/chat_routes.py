@@ -107,70 +107,77 @@ def _detect_image_mime(image_base64: str) -> str:
         return 'image/webp'
     return 'image/jpeg'
 
-async def _buffered_stream(raw_stream):
-    """对原始 SSE 流进行字符数缓冲，合并高频小 chunk 减少 SSE 事件频率
+async def _buffered_stream(raw_stream, *, passthrough: bool = False, buffer_size: Optional[int] = None):
+    """对原始 SSE 流做轻量缓冲，减少事件频率但保留首屏响应。
 
-    根据 settings.stream_buffer_size 配置的字符数阈值，
-    累积文本内容达到阈值后统一发送。
-
-    当 stream_buffer_size=0 时退化为直通模式，不做任何缓冲。
-
-    Args:
-        raw_stream: 原始异步生成器（call_ai_api_stream 的输出）
+    - 深度思考或结构化引文场景：直通，避免内容被二次缓冲到最后。
+    - 其他场景：首个非空 chunk 立即发送，后续再按字符阈值缓冲。
     """
-    buffer_size = settings.stream_buffer_size
+    effective_buffer_size = settings.stream_buffer_size if buffer_size is None else max(0, int(buffer_size))
 
-    # 直通模式：buffer_size=0 时不缓冲，直接转发所有 chunk
-    if buffer_size <= 0:
+    if passthrough or effective_buffer_size <= 0:
         async for chunk in raw_stream:
             yield chunk
             if chunk.get("error") or chunk.get("done"):
                 break
         return
 
-    # 缓冲模式：使用 list 累积避免 O(n²) 字符串拼接
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     content_len = 0
     reasoning_len = 0
+    first_payload_emitted = False
+
+    def _build_stream_payload(base_chunk: dict, content: str, reasoning: str) -> dict:
+        payload = {
+            "content": content,
+            "reasoning_content": reasoning,
+            "done": False,
+        }
+        for key in ("used_provider", "used_model", "fallback_used"):
+            if key in base_chunk:
+                payload[key] = base_chunk.get(key)
+        return payload
 
     async for chunk in raw_stream:
-        # 错误或终止信号：立即刷新缓冲区并转发
         if chunk.get("error") or chunk.get("done"):
             if content_parts or reasoning_parts:
-                yield {
-                    "content": "".join(content_parts),
-                    "reasoning_content": "".join(reasoning_parts),
-                    "done": False,
-                }
+                yield _build_stream_payload(
+                    chunk,
+                    "".join(content_parts),
+                    "".join(reasoning_parts),
+                )
                 content_parts.clear()
                 reasoning_parts.clear()
                 content_len = reasoning_len = 0
             yield chunk
             break
 
-        # 累积到缓冲区
-        c = chunk.get("content", "")
-        r = chunk.get("reasoning_content", "")
-        if c:
-            content_parts.append(c)
-            content_len += len(c)
-        if r:
-            reasoning_parts.append(r)
-            reasoning_len += len(r)
+        content = chunk.get("content", "")
+        reasoning = chunk.get("reasoning_content", "")
 
-        # 缓冲区达到阈值，立即发送
-        if content_len >= buffer_size or reasoning_len >= buffer_size:
-            yield {
-                "content": "".join(content_parts),
-                "reasoning_content": "".join(reasoning_parts),
-                "done": False,
-            }
+        if not first_payload_emitted and (content or reasoning):
+            first_payload_emitted = True
+            yield _build_stream_payload(chunk, content, reasoning)
+            continue
+
+        if content:
+            content_parts.append(content)
+            content_len += len(content)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+            reasoning_len += len(reasoning)
+
+        if content_len >= effective_buffer_size or reasoning_len >= effective_buffer_size:
+            yield _build_stream_payload(
+                chunk,
+                "".join(content_parts),
+                "".join(reasoning_parts),
+            )
             content_parts.clear()
             reasoning_parts.clear()
             content_len = reasoning_len = 0
 
-    # 流正常结束但未收到 done/error 信号时，刷新剩余缓冲
     if content_parts or reasoning_parts:
         yield {
             "content": "".join(content_parts),
@@ -899,46 +906,47 @@ def _extract_inline_citation_refs(answer: str) -> list[int]:
     return ordered_refs
 
 
-def _align_citations_with_answer(answer: str, citations: list[dict]) -> list[dict]:
-    """将来源列表与回答正文中的实际引文编号对齐。"""
-    if not citations:
-        return []
+_BAD_INLINE_CITATION_PATTERNS = (
+    re.compile(r"\[\s*ID\s*[: ]*\s*(\d{1,3})\s*\]", re.IGNORECASE),
+    re.compile(r"【\s*ID\s*[: ]*\s*(\d{1,3})\s*】", re.IGNORECASE),
+    re.compile(r"\(\s*ID\s*[: ]*\s*(\d{1,3})\s*\)", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9_])ref\s*(\d{1,3})\b", re.IGNORECASE),
+)
 
-    refs_in_answer = _extract_inline_citation_refs(answer)
-    if not refs_in_answer:
-        logger.info(
-            "回答正文未检测到内联引用编号，保留原始 citations（count=%d）",
-            len(citations),
-        )
-        normalized = []
-        for c in citations:
-            if not isinstance(c, dict):
-                continue
-            try:
-                ref = int(c.get("ref"))
-            except (TypeError, ValueError):
-                continue
-            item = c.copy()
-            item["ref"] = ref
-            normalized.append(item)
-        return normalized
 
-    citation_map = {}
-    for c in citations:
+def _normalize_citation_records(citations: list[dict]) -> list[dict]:
+    normalized = []
+    for c in citations or []:
         if not isinstance(c, dict):
             continue
         try:
             ref = int(c.get("ref"))
         except (TypeError, ValueError):
             continue
-        normalized = c.copy()
-        normalized["ref"] = ref
-        citation_map[ref] = normalized
+        item = c.copy()
+        item["ref"] = ref
+        item.setdefault("source_ref", ref)
+        normalized.append(item)
+    return normalized
 
+
+def _align_citations_with_answer(answer: str, citations: list[dict]) -> list[dict]:
+    """将来源列表与回答正文中的实际引文编号对齐。"""
+    normalized_citations = _normalize_citation_records(citations)
+    if not normalized_citations:
+        return []
+
+    refs_in_answer = _extract_inline_citation_refs(answer)
+    if not refs_in_answer:
+        logger.info(
+            "回答正文未检测到内联引用编号，保留原始 citations（count=%d）",
+            len(normalized_citations),
+        )
+        return normalized_citations
+
+    citation_map = {int(c["ref"]): c for c in normalized_citations}
     aligned = [citation_map[ref] for ref in refs_in_answer if ref in citation_map]
     if not aligned:
-        # D5 修复：所有 ref 均越界时，说明 LLM 使用了不存在的编号，
-        # 返回空列表而非全部引文，避免展示与回答无关的引用
         invalid_refs = [r for r in refs_in_answer if r not in citation_map]
         logger.warning(
             "回答中的引文编号全部越界，不返回无关引文（invalid_refs=%s, valid_refs=%s）",
@@ -947,6 +955,306 @@ def _align_citations_with_answer(answer: str, citations: list[dict]) -> list[dic
         )
         return []
     return aligned
+
+
+def _repair_bad_citation_formats(answer: str, citations: list[dict]) -> str:
+    if not answer:
+        return answer
+
+    normalized_citations = _normalize_citation_records(citations)
+    if not normalized_citations:
+        return answer
+
+    valid_refs = {int(c["ref"]) for c in normalized_citations}
+    repaired = answer
+    for pattern in _BAD_INLINE_CITATION_PATTERNS:
+        def _replace(match: re.Match) -> str:
+            try:
+                ref = int(match.group(1))
+            except (TypeError, ValueError):
+                return match.group(0)
+            return f"[{ref}]" if ref in valid_refs else match.group(0)
+
+        repaired = pattern.sub(_replace, repaired)
+    return repaired
+
+
+def _rewrite_inline_citation_refs(answer: str, ref_mapping: dict[int, int]) -> str:
+    if not answer or not ref_mapping:
+        return answer
+
+    def _replace(match: re.Match) -> str:
+        ref_str = match.group(1) or match.group(2)
+        if not ref_str:
+            return match.group(0)
+        source_ref = int(ref_str)
+        display_ref = ref_mapping.get(source_ref)
+        if display_ref is None:
+            return match.group(0)
+        return f"[{display_ref}]"
+
+    return _INLINE_CITATION_PATTERN.sub(_replace, answer)
+
+
+def _tokenize_for_citation(text: str = "") -> list[str]:
+    lowered = str(text).lower()
+    chars = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", lowered)
+    bigrams = []
+    for idx in range(len(chars) - 1):
+        left = chars[idx]
+        right = chars[idx + 1]
+        if (
+            len(left) == 1
+            and len(right) == 1
+            and re.match(r"[\u4e00-\u9fff]", left)
+            and re.match(r"[\u4e00-\u9fff]", right)
+        ):
+            bigrams.append(left + right)
+    return [*chars, *bigrams]
+
+
+def _calc_token_overlap(left: list[str], right: list[str]) -> int:
+    if not left or not right:
+        return 0
+    right_set = set(right)
+    return sum(1 for token in left if token in right_set)
+
+
+def _strip_inline_citations(text: str = "") -> str:
+    stripped = _INLINE_CITATION_PATTERN.sub("", str(text))
+    return re.sub(r"[ \t]{2,}", " ", stripped).strip()
+
+
+def _attach_refs_to_sentence(sentence: str, refs: list[int]) -> str:
+    if not sentence or not refs:
+        return sentence
+    ref_text = "".join(f"[{ref}]" for ref in refs)
+    trimmed = sentence.rstrip()
+    tail_match = re.search(r"([。！？!?；;])$", trimmed)
+    if tail_match:
+        return f"{trimmed[:-1]}{ref_text}{tail_match.group(1)}"
+    return f"{trimmed}{ref_text}"
+
+
+def _calc_citation_support_score(sentence: str = "", citation: Optional[dict] = None) -> float:
+    if not sentence or not citation:
+        return 0.0
+
+    sentence_tokens = _tokenize_for_citation(sentence)
+    if not sentence_tokens:
+        return 0.0
+
+    support_text = f"{citation.get('highlight_text', '')} {citation.get('group_id', '')}".strip()
+    citation_tokens = _tokenize_for_citation(support_text)
+    overlap = _calc_token_overlap(sentence_tokens, citation_tokens)
+    score = overlap / max(1, len(sentence_tokens))
+
+    snippet = re.sub(r"\s+", "", str(citation.get("highlight_text", "")))[:24]
+    if len(snippet) >= 6:
+        compact_sentence = re.sub(r"\s+", "", str(sentence))
+        if snippet in compact_sentence:
+            score += 0.25
+        elif snippet[: min(10, len(snippet))] in compact_sentence:
+            score += 0.1
+
+    return score
+
+
+def _optimize_sentence_citations(sentence: str, citations: list[dict]) -> str:
+    refs_in_sentence = []
+    for match in _INLINE_CITATION_PATTERN.finditer(str(sentence)):
+        ref_str = match.group(1) or match.group(2)
+        if ref_str:
+            refs_in_sentence.append(int(ref_str))
+
+    if not refs_in_sentence:
+        return sentence
+
+    normalized = _normalize_citation_records(citations)
+    if not normalized:
+        return _strip_inline_citations(sentence)
+
+    core_sentence = _strip_inline_citations(sentence)
+    if not core_sentence:
+        return sentence
+
+    citation_map = {int(c["ref"]): c for c in normalized}
+    scored_all = sorted(
+        (
+            {"ref": int(c["ref"]), "score": _calc_citation_support_score(core_sentence, c)}
+            for c in normalized
+        ),
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+    scored_current = sorted(
+        (
+            {"ref": ref, "score": _calc_citation_support_score(core_sentence, citation_map.get(ref))}
+            for ref in dict.fromkeys(refs_in_sentence)
+        ),
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    chosen = [item["ref"] for item in scored_current if item["score"] >= 0.03]
+    if not chosen:
+        chosen = [item["ref"] for item in scored_all if item["score"] >= 0.06][:2]
+    if not chosen and scored_current and scored_current[0]["score"] >= 0.02:
+        chosen = [scored_current[0]["ref"]]
+
+    chosen = list(dict.fromkeys(chosen))[:2]
+    if not chosen:
+        preserved = [ref for ref in dict.fromkeys(refs_in_sentence) if ref in citation_map]
+        if preserved:
+            return _attach_refs_to_sentence(core_sentence, preserved[:2])
+        return core_sentence
+
+    return _attach_refs_to_sentence(core_sentence, chosen)
+
+
+def _optimize_inline_citations(answer: str, citations: list[dict]) -> str:
+    if not answer or not citations:
+        return answer
+
+    lines = str(answer).split("\n")
+    optimized = []
+    in_code_fence = False
+    for line in lines:
+        if re.match(r"^\s*```", line):
+            in_code_fence = not in_code_fence
+            optimized.append(line)
+            continue
+        if in_code_fence:
+            optimized.append(line)
+            continue
+        optimized.append(_optimize_sentence_citations(line, citations))
+    return "\n".join(optimized)
+
+
+def _normalize_single_ref_answer(answer: str, citations: list[dict]) -> str:
+    normalized = _normalize_citation_records(citations)
+    if not answer or len(normalized) <= 1:
+        return answer
+
+    refs_in_text = [
+        int(match.group(1) or match.group(2))
+        for match in _INLINE_CITATION_PATTERN.finditer(str(answer))
+        if match.group(1) or match.group(2)
+    ]
+    unique_refs = list(dict.fromkeys(refs_in_text))
+    if len(unique_refs) != 1:
+        return answer
+
+    paragraphs = str(answer).split("\n\n")
+    rewritten = []
+    for paragraph in paragraphs:
+        if not _INLINE_CITATION_PATTERN.search(paragraph):
+            rewritten.append(paragraph)
+            continue
+
+        para_tokens = _tokenize_for_citation(paragraph)
+        best_ref = unique_refs[0]
+        best_score = -1
+        for citation in normalized:
+            ref = int(citation["ref"])
+            citation_tokens = _tokenize_for_citation(citation.get("highlight_text", ""))
+            score = _calc_token_overlap(para_tokens, citation_tokens)
+            if score > best_score:
+                best_score = score
+                best_ref = ref
+        rewritten.append(_INLINE_CITATION_PATTERN.sub(f"[{best_ref}]", paragraph))
+
+    return "\n\n".join(rewritten)
+
+
+def _prepare_answer_and_citations_for_display(answer: str, citations: list[dict]) -> tuple[str, list[dict]]:
+    normalized_citations = _normalize_citation_records(citations)
+    repaired_answer = _repair_bad_citation_formats(answer, normalized_citations)
+    if normalized_citations and repaired_answer:
+        refs_in_answer = _extract_inline_citation_refs(repaired_answer)
+        valid_ref_set = {int(c["ref"]) for c in normalized_citations}
+        should_optimize_inline = (
+            len(set(refs_in_answer)) <= 1
+            or any(ref not in valid_ref_set for ref in refs_in_answer)
+        )
+
+        repaired_answer = _normalize_single_ref_answer(repaired_answer, normalized_citations)
+        if should_optimize_inline:
+            repaired_answer = _optimize_inline_citations(repaired_answer, normalized_citations)
+        if not _extract_inline_citation_refs(repaired_answer):
+            repaired_answer = _inject_inline_citations(repaired_answer, normalized_citations)
+
+    aligned = _align_citations_with_answer(repaired_answer, normalized_citations)
+    if not aligned:
+        return repaired_answer, []
+
+    refs_in_answer = _extract_inline_citation_refs(repaired_answer)
+    citation_map = {int(c["ref"]): c for c in aligned}
+    ordered_source_refs = refs_in_answer or [int(c["ref"]) for c in aligned]
+
+    source_to_display: dict[int, int] = {}
+    projected = []
+    for source_ref in ordered_source_refs:
+        if source_ref in source_to_display or source_ref not in citation_map:
+            continue
+        display_ref = len(source_to_display) + 1
+        source_to_display[source_ref] = display_ref
+        item = citation_map[source_ref].copy()
+        item["source_ref"] = source_ref
+        item["display_ref"] = display_ref
+        item["ref"] = display_ref
+        projected.append(item)
+
+    if not projected:
+        return repaired_answer, []
+
+    rewritten_answer = (
+        _rewrite_inline_citation_refs(repaired_answer, source_to_display)
+        if refs_in_answer else repaired_answer
+    )
+    return rewritten_answer, projected
+
+
+def _trim_partial_section_suffix(text: str, marker: str) -> str:
+    normalized_marker = (marker or "").strip()
+    if not text or not normalized_marker:
+        return text
+
+    marker_upper = normalized_marker.upper()
+    text_upper = text.upper()
+    max_overlap = min(len(marker_upper) - 1, len(text_upper))
+    for overlap in range(max_overlap, 2, -1):
+        if marker_upper.startswith(text_upper[-overlap:]):
+            return text[:-overlap]
+    return text
+
+
+def _extract_streaming_final_answer(full_output: str) -> str:
+    if not full_output:
+        return ""
+    parts = _ci_split(_RE_START_ANSWER, full_output)
+    if parts is not None:
+        answer = parts[1].lstrip()
+        cit_parts = _ci_split(_RE_START_CITATION, answer)
+        if cit_parts is not None:
+            answer = cit_parts[0].rstrip()
+        else:
+            answer = _trim_partial_section_suffix(answer, START_CITATION).rstrip()
+        return answer
+
+    stripped = full_output.lstrip()
+    if not stripped:
+        return ""
+
+    cit_parts = _ci_split(_RE_START_CITATION, full_output)
+    if cit_parts is not None:
+        if not cit_parts[0].strip():
+            return ""
+        return cit_parts[0].rstrip()
+
+    answer = _trim_partial_section_suffix(full_output, START_ANSWER)
+    answer = _trim_partial_section_suffix(answer, START_CITATION)
+    return answer.rstrip()
 
 
 def _normalize_web_search_max_results(value: Optional[int]) -> int:
@@ -1438,7 +1746,8 @@ async def chat_with_pdf(request: ChatRequest):
         generation_prompt = get_generation_prompt(request.question)
         if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
         citations = retrieval_meta.get("citations", [])
-        if citations:
+        has_structured_citations = bool(citations) and not _is_paragraph_fallback(citations)
+        if has_structured_citations:
             citation_prompt = build_structured_citation_prompt(
                 citations,
                 compact=_should_use_compact_citation_prompt(citations),
@@ -1454,7 +1763,7 @@ async def chat_with_pdf(request: ChatRequest):
                 messages.append({"role": hist_msg["role"], "content": hist_msg["content"]})
     messages.append({"role": "user", "content": user_content})
 
-    has_citations_non_stream = bool(citations)
+    has_citations_non_stream = bool(citations) and not _is_paragraph_fallback(citations)
     adjusted_max_tokens = _adjust_max_tokens(
         request.max_tokens, request.answer_detail, has_citations_non_stream,
     )
@@ -1499,7 +1808,7 @@ async def chat_with_pdf(request: ChatRequest):
             except Exception as e:
                 logger.warning(f"非流式引文后处理失败: {e}")
 
-        retrieval_meta["citations"] = _align_citations_with_answer(
+        answer, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
             answer, retrieval_meta.get("citations", [])
         )
 
@@ -1770,7 +2079,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 if generation_prompt: system_prompt += f"\n\n{generation_prompt}"
                 # 联网搜索上下文注入将在后续下游完成（需先发送状态事件）
                 citations = retrieval_meta.get("citations", [])
-                has_structured_citations = bool(citations)
+                has_structured_citations = bool(citations) and not _is_paragraph_fallback(citations)
                 logger.info(f"[CITATION DEBUG] enable_vector_search={request.enable_vector_search}, citations_count={len(citations)}, has_structured={has_structured_citations}, compact={_should_use_compact_citation_prompt(citations)}")
                 if has_structured_citations:
                     citation_prompt = build_structured_citation_prompt(
@@ -1850,6 +2159,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
             # 累积完整输出，用于结构化引文解析
             full_output = ""
             reached_final_answer = False
+            visible_answer_text = ""
+            content_progress_sent = False
             qa_score_val = None
             # D1：并行引文匹配（仿 kotaemon）
             # CITATION LIST 完整后立即在后台线程启动匹配，与 FINAL ANSWER 流式输出并行
@@ -1866,7 +2177,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 except Exception as exc:
                     logger.warning(f"并行引文匹配失败: {exc}")
 
-            async for chunk in _buffered_stream(raw_stream):
+            async for chunk in _buffered_stream(
+                raw_stream,
+                passthrough=bool(has_structured_citations or request.enable_thinking),
+            ):
                 if chunk.get("error"):
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
                     break
@@ -1912,16 +2226,25 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                                 oc["page_range"] = [ec["page"], ec["page"]]
                                             break
 
-                    final_answer_text = extract_final_answer(full_output) if full_output else ""
-                    retrieval_meta["citations"] = _align_citations_with_answer(
-                        final_answer_text, retrieval_meta.get("citations", [])
+                    final_answer_text = extract_final_answer(full_output) if has_structured_citations else (full_output or "")
+                    final_answer_text, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
+                        final_answer_text,
+                        retrieval_meta.get("citations", []),
                     )
 
                     # Bug1 兜底：LLM 未输出 FINAL ANSWER 标记时，流式过滤跳过了所有 content，
                     # 此处补发完整回答文本，确保前端不会显示空内容
-                    if has_structured_citations and not reached_final_answer and full_output:
+                    if has_structured_citations and full_output:
                         fallback_text = final_answer_text or full_output
-                        yield f"data: {json.dumps({'content': fallback_text, 'reasoning_content': '', 'done': False})}\n\n"
+                        fallback_delta = ""
+                        if not content_progress_sent:
+                            fallback_delta = fallback_text
+                        elif fallback_text.startswith(visible_answer_text):
+                            fallback_delta = fallback_text[len(visible_answer_text):]
+                        if fallback_delta:
+                            content_progress_sent = True
+                            visible_answer_text = fallback_text
+                            yield f"data: {json.dumps({'content': fallback_delta, 'reasoning_content': '', 'done': False})}\n\n"
 
                     # 移除内部 _chunks 字段（仅后端使用），避免发送大量原始数据
                     send_meta = {k: v for k, v in retrieval_meta.items() if not k.startswith("_")}
@@ -1929,6 +2252,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         'content': '', 'reasoning_content': reasoning,
                         'done': True, 'used_provider': chunk.get('used_provider'),
                         'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used'),
+                        'final_content': final_answer_text,
                         'retrieval_meta': send_meta,
                         'web_search_sources': web_search_sources,
                         'memory_hits': memory_hits,
@@ -1993,13 +2317,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 full_output += content
 
                 # 结构化引文流式过滤：隐藏 CITATION LIST，只展示 FINAL ANSWER
-                if has_structured_citations and content:
-                    if not reached_final_answer:
-                        _fa_parts = _ci_split(_RE_START_ANSWER, full_output)
-                        if _fa_parts is not None:
-                            reached_final_answer = True
-                            # D1：CITATION LIST 已完整，立即在后台线程启动引文匹配
-                            citation_list_part = _fa_parts[0]
+                if has_structured_citations:
+                    current_answer_text = _extract_streaming_final_answer(full_output)
+                    if current_answer_text:
+                        reached_final_answer = True
+                    # D1：CITATION LIST 已完整，立即在后台线程启动引文匹配
+                    if _citation_match_thread is None:
+                        citation_parts = _ci_split(_RE_START_CITATION, full_output)
+                        if citation_parts is not None:
+                            citation_list_part = citation_parts[1].lstrip()
                             if citation_list_part and (_retrieval_chunks or retrieval_meta.get("_context_segments")):
                                 _citation_match_thread = threading.Thread(
                                     target=_run_citation_match,
@@ -2012,22 +2338,23 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                     daemon=True,
                                 )
                                 _citation_match_thread.start()
-                            # 提取 FINAL ANSWER 之后的内容并发送
-                            after_marker = _fa_parts[1].lstrip()
-                            if after_marker:
-                                yield f"data: {json.dumps({'content': after_marker, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
-                        # 不展示 CITATION LIST 部分
-                        continue
-                    else:
-                        # 已进入 FINAL ANSWER 区域，检查是否 CITATION LIST 再次出现（小模型重复）
-                        # 使用 continue 跳过脏块而非 break，确保 done 事件正常触发
-                        _cl_parts = _ci_split(_RE_START_CITATION, content)
-                        if _cl_parts is not None:
-                            # 仅保留 CITATION LIST 之前的内容（如有），其余丢弃
-                            clean_part = _cl_parts[0]
-                            if clean_part:
-                                yield f"data: {json.dumps({'content': clean_part, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
-                            continue
+                    # 提取 FINAL ANSWER 之后的内容并发送
+                    stream_delta = ""
+                    if current_answer_text:
+                        if current_answer_text.startswith(visible_answer_text):
+                            stream_delta = current_answer_text[len(visible_answer_text):]
+                        elif not content_progress_sent:
+                            stream_delta = current_answer_text
+                        visible_answer_text = current_answer_text
+                    if stream_delta or reasoning:
+                        if stream_delta:
+                            content_progress_sent = True
+                        yield f"data: {json.dumps({'content': stream_delta, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
+                    # 不展示 CITATION LIST 部分
+                    # 已进入 FINAL ANSWER 区域，检查是否 CITATION LIST 再次出现（小模型重复）
+                    # 使用 continue 跳过脏块而非 break，确保 done 事件正常触发
+                    # 仅保留 CITATION LIST 之前的内容（如有），其余丢弃
+                    continue
 
                 chunk_data = {
                     'content': content, 'reasoning_content': reasoning,

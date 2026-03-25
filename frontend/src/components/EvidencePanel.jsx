@@ -1,5 +1,30 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import { ChevronDown, ChevronRight, FileText, ExternalLink, Image } from 'lucide-react';
+
+export const resolveEvidenceRef = (citation) => {
+  const displayRef = Number(citation?.display_ref);
+  if (Number.isFinite(displayRef)) return displayRef;
+  const ref = Number(citation?.ref);
+  return Number.isFinite(ref) ? ref : null;
+};
+
+export const partitionEvidenceCitations = (citations = []) => {
+  const sorted = [...(Array.isArray(citations) ? citations : [])]
+    .filter(Boolean)
+    .sort((a, b) => {
+      const leftRef = resolveEvidenceRef(a);
+      const rightRef = resolveEvidenceRef(b);
+      if (Number.isFinite(leftRef) && Number.isFinite(rightRef) && leftRef !== rightRef) {
+        return leftRef - rightRef;
+      }
+      return String(a?.group_id || '').localeCompare(String(b?.group_id || ''));
+    });
+
+  return {
+    cited: sorted.filter((c) => Boolean(c?.highlight_text)),
+    uncited: sorted.filter((c) => !c?.highlight_text),
+  };
+};
 
 /**
  * 证据面板：展示每个检索到的文档块
@@ -46,12 +71,13 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
 
   if (!citations || citations.length === 0) return null;
 
-  // 分组：有 highlight_text 的排前面
-  const cited = citations.filter(c => c.highlight_text);
-  const uncited = citations.filter(c => !c.highlight_text);
+  const { cited, uncited } = useMemo(
+    () => partitionEvidenceCitations(citations),
+    [citations]
+  );
 
   const renderCitation = (c, defaultOpen) => {
-    const ref = c.ref;
+    const ref = resolveEvidenceRef(c);
     const isExpanded = defaultOpen ? !expandedRefs.has(ref) : expandedRefs.has(ref);
     const isActive = activeRef === ref;
     const alignmentStatus = c.alignment_status || (c.highlight_text ? 'span_matched' : 'unmatched');

@@ -218,7 +218,9 @@ async def call_ai_api_stream(
         # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
         sanitized_key = _sanitize_api_key(api_key)
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
         }
         if sanitized_key:
             headers["Authorization"] = f"Bearer {sanitized_key}"
@@ -350,6 +352,9 @@ async def call_ai_api_stream(
                         _chunk_count += 1
                         _content_chars += len(content)
                         _reasoning_chars += len(reasoning_content)
+                        if reasoning_content and _reasoning_chars <= 500:
+                            import time as _time
+                            logger.info(f"[Stream] REASONING chunk#{_chunk_count} t={_time.time():.3f} len={len(reasoning_content)} first40={reasoning_content[:40]!r}")
                         yield {
                             "content": content,
                             "reasoning_content": reasoning_content,

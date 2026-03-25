@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
 import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
@@ -6,6 +6,15 @@ import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
 // API base URL
 const API_BASE_URL = '';
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
+
+const STREAM_RENDER_PROFILES = {
+  fast: { minDelay: 20, frameChars: 3, flushChars: 120 },
+  normal: { minDelay: 30, frameChars: 2, flushChars: 100 },
+  slow: { minDelay: 60, frameChars: 1, flushChars: 80 },
+};
+
+export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
+  STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
 
 /**
  * 构建聊天历史记录
@@ -53,15 +62,35 @@ const calcTokenOverlap = (left, right) => {
   return score;
 };
 
+const resolveCitationDisplayRef = (citation) => {
+  const displayRef = Number(citation?.display_ref);
+  if (Number.isFinite(displayRef)) return displayRef;
+  const ref = Number(citation?.ref);
+  return Number.isFinite(ref) ? ref : null;
+};
+
 const normalizeCitationRecords = (citations = []) => {
   if (!Array.isArray(citations)) return [];
   const normalized = [];
   for (const c of citations) {
-    const ref = Number(c?.ref);
+    const ref = resolveCitationDisplayRef(c);
     if (!Number.isFinite(ref)) continue;
-    normalized.push({ ...c, ref });
+    const sourceRef = Number(c?.source_ref);
+    normalized.push({
+      ...c,
+      ref,
+      display_ref: ref,
+      source_ref: Number.isFinite(sourceRef) ? sourceRef : ref,
+    });
   }
-  return normalized;
+  return normalized.sort((a, b) => {
+    const leftRef = Number(a?.display_ref ?? a?.ref);
+    const rightRef = Number(b?.display_ref ?? b?.ref);
+    if (Number.isFinite(leftRef) && Number.isFinite(rightRef) && leftRef !== rightRef) {
+      return leftRef - rightRef;
+    }
+    return String(a?.group_id || '').localeCompare(String(b?.group_id || ''));
+  });
 };
 
 export const extractInlineCitationRefs = (content = '') => {
@@ -191,6 +220,13 @@ export const filterCitationsByContentRefs = (content, citations) => {
 
   const cmap = new Map(normalized.map((c) => [c.ref, c]));
   return refs.filter((r) => cmap.has(r)).map((r) => cmap.get(r));
+};
+
+const finalizeAssistantContentAndCitations = (content, citations) => {
+  return {
+    content: String(content || ''),
+    citations: normalizeCitationRecords(citations),
+  };
 };
 
 export const normalizeAssistantCitations = (content, citations) => {
@@ -375,6 +411,7 @@ export function useMessageState({
   const streamCitationsRef = useRef(null);
   const streamMaxRelevanceRef = useRef(null);
   const streamFollowupRef = useRef(null);
+  const streamFinalContentRef = useRef(null);
   const streamQaScoreRef = useRef(null);
   const streamConvNameRef = useRef(null);
   const streamMindmapRef = useRef(null);
@@ -395,18 +432,29 @@ export function useMessageState({
   } = globalSettings;
 
   const { enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist } = useWebSearch();
+  const streamRenderProfile = useMemo(
+    () => resolveStreamRenderProfile(streamSpeed),
+    [streamSpeed]
+  );
 
   // ========== 流式输出 Hook（ref 直写模式，需求 4.2） ==========
   // 流式输出期间不调用 setMessages，通过 contentRef 直接更新 DOM
   // 流结束后通过 getFinalText() 一次性同步到 React 状态
   const contentStream = useSmoothStream({
     streamDone: contentStreamDone,
+    minDelay: streamRenderProfile.minDelay,
+    frameChars: streamRenderProfile.frameChars,
+    flushChars: streamRenderProfile.flushChars,
     enableBlurReveal,
     blurIntensity,
+    smoothFlush: true,
   });
 
   const thinkingStream = useSmoothStream({
     streamDone: thinkingStreamDone,
+    minDelay: streamRenderProfile.minDelay,
+    frameChars: streamRenderProfile.frameChars,
+    flushChars: streamRenderProfile.flushChars,
     smoothFlush: true,
   });
 
@@ -506,6 +554,7 @@ export function useMessageState({
     streamCitationsRef.current = null;
     streamMaxRelevanceRef.current = null;
     streamFollowupRef.current = null;
+    streamFinalContentRef.current = null;
     streamQaScoreRef.current = null;
     streamConvNameRef.current = null;
     streamMindmapRef.current = null;
@@ -655,6 +704,22 @@ export function useMessageState({
                 thinkingStream.addChunk(ct);
               }
             } else {
+              const finalContentFromEvent = typeof p.final_content === 'string' ? p.final_content : '';
+              if (finalContentFromEvent) {
+                streamFinalContentRef.current = finalContentFromEvent;
+                if (finalContentFromEvent.startsWith(currentText)) {
+                  const finalDelta = finalContentFromEvent.slice(currentText.length);
+                  if (finalDelta) {
+                    currentText += finalDelta;
+                    contentStream.addChunk(finalDelta);
+                    if (!contentStartTime) contentStartTime = Date.now();
+                  }
+                }
+              } else if (cc) {
+                currentText += cc;
+                contentStream.addChunk(cc);
+                if (!contentStartTime) contentStartTime = Date.now();
+              }
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
@@ -701,18 +766,27 @@ export function useMessageState({
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
         clearFirstEventTimer();
 
-        // 流结束，等待一帧让 rAF 渲染循环处理剩余字符，再同步最终状态
-        await new Promise(r => requestAnimationFrame(r));
+        // 流结束，标记 streamDone 触发 smoothFlush 渐进渲染
         setContentStreamDone(true);
         setThinkingStreamDone(true);
+        // 等待 smoothFlush 动画将队列排空后再同步最终状态（最多等 5 秒）
+        {
+          const flushStart = Date.now();
+          while (
+            (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete()) &&
+            Date.now() - flushStart < 5000
+          ) {
+            await new Promise(r => requestAnimationFrame(r));
+          }
+        }
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
           thinkingLastUpdateTime,
           contentStartTime,
         });
-        const finalContent = currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
-        const finalCitations = filterCitationsByContentRefs(
-          finalContent,
+        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
+        const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
+          streamedContent,
           streamCitationsRef.current
         );
         setMessages(prev => prev.map(m =>
@@ -741,14 +815,14 @@ export function useMessageState({
         }
 
         const data = await response.json();
-        const finalCitations = filterCitationsByContentRefs(
+        const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
           data.answer,
           data.retrieval_meta?.citations
         );
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: data.answer, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
             : m
         ));
         setStreamingMessageId(null);
@@ -776,7 +850,7 @@ export function useMessageState({
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,
-    enableWebSearch, webSearchProvider, webSearchApiKey,
+    enableWebSearch, webSearchProvider, webSearchApiKey, streamRenderProfile,
   ]);
 
   /**
