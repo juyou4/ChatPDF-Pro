@@ -267,6 +267,7 @@ describe('useMessageState streaming regressions', () => {
         ...createOptions().globalSettings,
         streamOutput: false,
       },
+      streamSpeed: 'off',
     }));
 
     act(() => {
@@ -329,6 +330,39 @@ describe('useMessageState streaming regressions', () => {
         flushChars: 2,
       })
     );
+  });
+
+  it('速度档位非 off 时，应优先走流式分支而不是受旧 streamOutput=false 阻断', async () => {
+    const events = [
+      `data: ${JSON.stringify({ content: '逐步', done: false })}\n\n`,
+      `data: ${JSON.stringify({ content: '展开', done: false })}\n\n`,
+      `data: ${JSON.stringify({ done: true, final_content: '逐步展开', retrieval_meta: { citations: [] } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      streamSpeed: 'normal',
+      globalSettings: {
+        ...createOptions().globalSettings,
+        streamOutput: false,
+      },
+    }));
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('兼容旧 streamOutput');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/chat/stream'),
+      expect.any(Object)
+    );
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.content).toBe('逐步展开');
   });
 });
 
@@ -491,6 +525,7 @@ describe('useMessageState non-stream memory hits', () => {
         ...createOptions().globalSettings,
         streamOutput: false,
       },
+      streamSpeed: 'off',
     }));
 
     act(() => {

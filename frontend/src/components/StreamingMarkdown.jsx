@@ -261,12 +261,13 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
     prevProps.isStreaming === nextProps.isStreaming &&
     (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
     prevProps.citations === nextProps.citations &&
-    prevProps.webSearchSources === nextProps.webSearchSources
+    prevProps.webSearchSources === nextProps.webSearchSources &&
+    prevProps.suppressInitialDots === nextProps.suppressInitialDots
   );
 };
 
 const StreamingMarkdown = React.memo(
-  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null }) => {
+  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false }) => {
     const containerRef = useRef(null);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
     const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
@@ -358,7 +359,7 @@ const StreamingMarkdown = React.memo(
     const streamingClass = isStreaming
       ? `streaming-active${enableBlurReveal ? ' blur-reveal-enabled' : ''}`
       : '';
-    const showWaitingDots = isStreaming && (
+    const showWaitingDots = !suppressInitialDots && isStreaming && (
       isRefDirectWrite
         ? !hasDirectWriteContent
         : (!content || content.trim().length === 0)

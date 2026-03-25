@@ -4,7 +4,15 @@ import { useWebSearch } from '../contexts/WebSearchContext';
 import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
 
 // API base URL
-const API_BASE_URL = '';
+// Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
+// Electron 桌面模式保持相对路径，由 config/desktop 注入真实 backend URL 和鉴权 token。
+const API_BASE_URL = (() => {
+  const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
+  if (!isDesktop && typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
+    return 'http://127.0.0.1:8000';
+  }
+  return '';
+})();
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
 
 const STREAM_RENDER_PROFILES = {
@@ -438,6 +446,10 @@ export function useMessageState({
     () => resolveStreamRenderProfile(streamSpeed),
     [streamSpeed]
   );
+  // 兼容旧配置：历史上 streamOutput 与 streamSpeed 是两套独立开关，
+  // 容易出现“速度不是 off，但 streamOutput 被旧 localStorage 关掉”的冲突状态。
+  // 这里以更直观的 streamSpeed 为准：只要速度档位不是 off，就走流式。
+  const shouldUseStreaming = streamSpeed !== 'off' ? true : Boolean(streamOutput);
 
   // ========== 流式输出 Hook（ref 直写模式，需求 4.2） ==========
   // 流式输出期间不调用 setMessages，通过 contentRef 直接更新 DOM
@@ -532,7 +544,7 @@ export function useMessageState({
       max_tokens: enableMaxTokens ? maxTokens : null,
       temperature: enableTemperature ? temperature : null,
       top_p: enableTopP ? topP : null,
-      stream_output: streamOutput,
+      stream_output: shouldUseStreaming,
       enable_vector_search: enableVectorSearch,
       embedding_api_key: embeddingApiKey || null,
       enable_graphrag: enableGraphRAG,
@@ -581,7 +593,7 @@ export function useMessageState({
 
     let firstEventTimeoutTriggered = false;
     try {
-      if (streamSpeed !== 'off' && streamOutput) {
+      if (shouldUseStreaming) {
         // ===== 流式输出模式 =====
         activeStreamMsgIdRef.current = tempMsgId;
 
@@ -852,7 +864,7 @@ export function useMessageState({
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,
-    enableWebSearch, webSearchProvider, webSearchApiKey, streamRenderProfile,
+    enableWebSearch, webSearchProvider, webSearchApiKey, streamRenderProfile, shouldUseStreaming,
   ]);
 
   /**

@@ -149,7 +149,7 @@ const ChatPDF = () => {
   const { getDefaultModel } = useDefaults();
   const { hasLocalRerank } = useCapabilities();
   const globalSettings = useGlobalSettings();
-  const { setReasoningEffort, reasoningEffort } = globalSettings;
+  const { setReasoningEffort, reasoningEffort, streamOutput, setStreamOutput } = globalSettings;
   const { sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers } = useChatParams();
 
   // ========== 设置状态 - 使用防抖 localStorage 写入（需求 8.1） ==========
@@ -183,6 +183,19 @@ const ChatPDF = () => {
   const [availableModels, setAvailableModels] = useState({});
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
+  const streamConfigMigratedRef = useRef(false);
+
+  // 兼容旧配置：streamSpeed 和 streamOutput 过去分别持久化，
+  // 会留下“速度仍开启，但隐藏的流式开关已关闭”的冲突状态。
+  // 首次加载时按 streamSpeed 纠正一次，避免用户看到长时间空白后整段出现。
+  useEffect(() => {
+    if (streamConfigMigratedRef.current) return;
+    const expectedStreamOutput = streamSpeed !== 'off';
+    if (streamOutput !== expectedStreamOutput) {
+      setStreamOutput(expectedStreamOutput);
+    }
+    streamConfigMigratedRef.current = true;
+  }, [streamSpeed, streamOutput, setStreamOutput]);
 
   // ========== UI 状态 Hook（需求 1.3） ==========
   const {
@@ -696,6 +709,7 @@ const ChatPDF = () => {
             onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
             streamingRef={shouldStreamContent ? streamingContentRef : undefined}
             webSearchSources={msg.webSearchSources || null}
+            suppressInitialDots={shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim())}
           />
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
@@ -1748,7 +1762,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
 
 
 

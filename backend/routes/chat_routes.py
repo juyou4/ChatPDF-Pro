@@ -2365,7 +2365,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _detect_mime_type(img_b64: str) -> str:
