@@ -93,6 +93,7 @@ describe('useMessageState streaming regressions', () => {
     hoisted.useSmoothStreamMock.mockReset();
     hoisted.useSmoothStreamMock.mockImplementation(() => ({
       addChunk: vi.fn(),
+      replace: vi.fn(),
       reset: vi.fn(),
       contentRef: { current: null },
       getFinalText: () => '',
@@ -134,6 +135,76 @@ describe('useMessageState streaming regressions', () => {
     expect(assistant.isStreaming).toBe(false);
     expect(assistant.content).toContain('最终回答');
     expect(assistant.thinking || '').toContain('思考中');
+  });
+
+  it('有检索进度但尚未返回 reasoning_content 时，思考框不应一直空白', async () => {
+    const events = [
+      `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'start', message: '正在检索文档...' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'complete', message: '检索完成' })}\n\n`,
+      `data: ${JSON.stringify({ content: '', reasoning_content: '', done: false })}\n\n`,
+      `data: ${JSON.stringify({ done: true, final_content: '最终回答', retrieval_meta: { citations: [] } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      globalSettings: {
+        ...createOptions().globalSettings,
+        reasoningEffort: 'high',
+      },
+    }));
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('为什么这么慢');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.thinking).toContain('正在检索文档');
+    expect(assistant.thinking).toContain('检索完成');
+    expect(assistant.thinking).toContain('等待模型输出思考内容');
+
+    const thinkingStream = hoisted.useSmoothStreamMock.mock.results[1]?.value;
+    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...');
+    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...\n检索完成');
+    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...\n检索完成\n正在等待模型输出思考内容...');
+  });
+
+  it('真实 reasoning_content 到达后，应替换掉前置阶段提示而不是混入最终思考', async () => {
+    const events = [
+      `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'start', message: '正在检索文档...' })}\n\n`,
+      `data: ${JSON.stringify({ content: '', reasoning_content: '', done: false })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: '第一步分析文档结构。' } }] })}\n\n`,
+      `data: ${JSON.stringify({ done: true, final_content: '最终回答', retrieval_meta: { citations: [] } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      globalSettings: {
+        ...createOptions().globalSettings,
+        reasoningEffort: 'high',
+      },
+    }));
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('开始思考');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.thinking).toContain('第一步分析文档结构');
+    expect(assistant.thinking).not.toContain('正在检索文档');
+
+    const thinkingStream = hoisted.useSmoothStreamMock.mock.results[1]?.value;
+    expect(thinkingStream.replace).toHaveBeenCalledWith('');
+    expect(thinkingStream.addChunk).toHaveBeenCalledWith('第一步分析文档结构。');
   });
 
   it('首包超时：应终止 loading 并给出超时提示', async () => {

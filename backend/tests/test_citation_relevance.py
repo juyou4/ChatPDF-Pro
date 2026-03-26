@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from routes.chat_routes import (
+    _build_fast_overview_context,
     _build_fused_context,
     _build_selected_text_citation,
     _build_selected_text_fallback_citations,
@@ -20,6 +21,7 @@ from routes.chat_routes import (
     _align_citations_with_answer,
     _prepare_answer_and_citations_for_display,
     _extract_streaming_final_answer,
+    _should_use_fast_overview_context,
     START_ANSWER,
     START_CITATION,
 )
@@ -206,6 +208,44 @@ class TestSelectedTextFallbackCitation:
 
         assert "[1]用户选中的文本（页码: 2）" in fused
         assert "框选内容" in fused
+
+
+class TestFastOverviewContext:
+    def test_should_use_fast_overview_context_only_for_overview_queries(self):
+        assert _should_use_fast_overview_context(
+            "overview",
+            enable_vector_search=True,
+            selected_text=None,
+        ) is True
+        assert _should_use_fast_overview_context(
+            "specific",
+            enable_vector_search=True,
+            selected_text=None,
+        ) is False
+        assert _should_use_fast_overview_context(
+            "overview",
+            enable_vector_search=False,
+            selected_text=None,
+        ) is False
+        assert _should_use_fast_overview_context(
+            "overview",
+            enable_vector_search=True,
+            selected_text="框选文本",
+        ) is False
+
+    def test_build_fast_overview_context_samples_front_middle_and_back_pages(self):
+        pages = [
+            {"text": f"第{i}页内容 " + ("A" * 400)}
+            for i in range(1, 13)
+        ]
+
+        context = _build_fast_overview_context(pages, "全文内容")
+
+        assert "[第1页]" in context
+        assert "[第2页]" in context
+        assert "[第11页]" in context
+        assert "[第12页]" in context
+        assert any(tag in context for tag in ("[第3页]", "[第5页]", "[第7页]", "[第8页]", "[第10页]"))
 
 
 class TestCitationAlignment:

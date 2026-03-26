@@ -650,7 +650,15 @@ const ChatPDF = () => {
   const renderMessage = useCallback((msg, idx) => {
     const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
     const isStreamingCurrentMessage = shouldStreamAssistantContent(msg, streamingMessageId);
-    const shouldShowThinking = hasThinking || (isStreamingCurrentMessage && reasoningEffort !== 'off');
+    // 只要当前消息还在生成，且正文还没开始出现，就先展示思考/生成阶段块。
+    // 这样即使 reasoningEffort 关闭，用户也不会只看到三个等待点。
+    const shouldShowThinking = hasThinking || (
+      isStreamingCurrentMessage && (
+        reasoningEffort !== 'off'
+        || !msg.content
+        || !msg.content.trim()
+      )
+    );
     const shouldStreamContent = isStreamingCurrentMessage;
     return (
       <motion.div
@@ -1762,7 +1770,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
 
 
 

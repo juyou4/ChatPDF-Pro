@@ -361,7 +361,7 @@ const StreamingMarkdown = React.memo(
       : '';
     const showWaitingDots = !suppressInitialDots && isStreaming && (
       isRefDirectWrite
-        ? !hasDirectWriteContent
+        ? !hasDirectWriteContent && (!content || content.trim().length === 0)
         : (!content || content.trim().length === 0)
     );
 
@@ -377,6 +377,12 @@ const StreamingMarkdown = React.memo(
         return;
       }
 
+      // 某些流式阶段文本会先进入 React state，再由 ref 直写同步到 DOM。
+      // 若 ref 尚未收到内容，但 content 已有文本，先回填到 ref，避免面板空白只剩等待点。
+      if ((el.textContent || '').trim().length === 0 && content && content.trim().length > 0) {
+        el.textContent = content;
+      }
+
       const syncHasContent = () => {
         const text = el.textContent || '';
         setHasDirectWriteContent(text.trim().length > 0);
@@ -387,7 +393,7 @@ const StreamingMarkdown = React.memo(
       observer.observe(el, { childList: true, subtree: true, characterData: true });
 
       return () => observer.disconnect();
-    }, [isRefDirectWrite, streamingRef]);
+    }, [isRefDirectWrite, streamingRef, content]);
 
     const citationMap = useMemo(() => {
       if (!citations || citations.length === 0) return null;

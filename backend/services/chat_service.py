@@ -71,7 +71,12 @@ def extract_reasoning_content(chunk: dict | list | str | None) -> str:
     if isinstance(chunk, dict):
         candidate = chunk.get("reasoning_content")
         if candidate is None:
-            return ""
+            for alt_key in ("reasoning", "thinking", "reasoning_text", "thinking_text"):
+                candidate = chunk.get(alt_key)
+                if candidate is not None:
+                    break
+            if candidate is None:
+                return ""
     else:
         candidate = chunk
 

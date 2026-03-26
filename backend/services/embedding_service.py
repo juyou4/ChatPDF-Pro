@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import faiss
@@ -32,6 +32,32 @@ local_embedding_models = {}
 
 # ---- OpenAI Client 连接池 ----
 _openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash) -> OpenAI
+
+
+def _emit_retrieval_progress(
+    progress_callback: Optional[Callable[[dict], None]],
+    phase: str,
+    message: str,
+    **extra,
+) -> None:
+    """向外部进度回调发送检索阶段事件。
+
+    回调是可选的；发生回调异常时直接吞掉，避免影响检索主流程。
+    """
+    if not progress_callback:
+        return
+    payload = {
+        "type": "retrieval_progress",
+        "phase": phase,
+        "message": message,
+    }
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
+    try:
+        progress_callback(payload)
+    except Exception:
+        logger.debug("[RetrievalProgress] 回调上报失败", exc_info=True)
 
 
 def _get_openai_client(api_key: str, api_base: str) -> "OpenAI":
@@ -2287,6 +2313,7 @@ def search_document_chunks(
     rerank_endpoint: Optional[str] = None,
     use_hybrid: bool = True,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> Tuple[List[dict], dict]:
     """检索文档 chunk，返回检索结果和各阶段耗时。
 
@@ -2302,6 +2329,12 @@ def search_document_chunks(
         if rewritten_query != query:
             logger.info(f"[{doc_id}] 查询改写: '{query}' → '{rewritten_query}'")
             query = rewritten_query
+            _emit_retrieval_progress(
+                progress_callback,
+                "query_rewrite",
+                "检索问题已改写，正在继续检索...",
+                query=query,
+            )
     except Exception as e:
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
 
@@ -2316,6 +2349,13 @@ def search_document_chunks(
     }
     candidate_k = max(candidate_k, dynamic_candidate_k_map.get(query_type, 20))
     logger.info(f"[{doc_id}] 查询类型: {query_type}, 动态 candidate_k: {candidate_k}")
+    _emit_retrieval_progress(
+        progress_callback,
+        "analysis",
+        f"正在分析查询并确定检索策略（{query_type}）...",
+        query_type=query_type,
+        candidate_k=candidate_k,
+    )
 
     # Wide-net: expand candidate pool when reranking, giving reranker more choices
     if use_rerank:
@@ -2377,10 +2417,12 @@ def search_document_chunks(
     hyde_passage = None
     if _search_rag_config.enable_hyde and api_key:
         try:
+            _emit_retrieval_progress(progress_callback, "hyde_start", "正在生成语义扩展（HyDE）...")
             from services.query_expander import generate_hyde_passage
             hyde_passage = _run_async(generate_hyde_passage(query, api_key))
             if hyde_passage:
                 logger.info(f"[{doc_id}] HyDE 启用，假设文档 {len(hyde_passage)} 字符")
+                _emit_retrieval_progress(progress_callback, "hyde_done", "HyDE 扩展完成，正在召回相关内容...")
         except Exception as e:
             logger.warning(f"[{doc_id}] HyDE 生成失败，降级为原始查询: {e}")
 
@@ -2393,7 +2435,9 @@ def search_document_chunks(
     if cached_vector is not None:
         query_vector = cached_vector
         logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
+        _emit_retrieval_progress(progress_callback, "embedding_query", "查询向量缓存命中，正在进行召回...")
     else:
+        _emit_retrieval_progress(progress_callback, "embedding_query", "正在计算查询向量...")
         query_vector = _normalize_query_vector(embed_fn([query]))
         _query_vector_cache.put(embedding_model_id, query, query_vector)
 
@@ -2403,7 +2447,9 @@ def search_document_chunks(
         cached_hyde = _query_vector_cache.get(embedding_model_id, hyde_cache_key)
         if cached_hyde is not None:
             hyde_vector = cached_hyde
+            _emit_retrieval_progress(progress_callback, "hyde_cache_hit", "HyDE 向量缓存命中，正在继续召回...")
         else:
+            _emit_retrieval_progress(progress_callback, "hyde_embedding", "正在计算 HyDE 向量...")
             hyde_vector = _normalize_query_vector(embed_fn([hyde_passage]))
             _query_vector_cache.put(embedding_model_id, hyde_cache_key, hyde_vector)
     else:
@@ -2413,6 +2459,7 @@ def search_document_chunks(
 
     # 主查询检索（使用 HyDE 向量或原始查询向量）
     primary_vector = hyde_vector if hyde_vector is not None else query_vector
+    _emit_retrieval_progress(progress_callback, "vector_search", "正在进行向量召回...")
     D, I = index.search(np.array(primary_vector).astype('float32'), search_k)
 
     # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
@@ -2518,6 +2565,7 @@ def search_document_chunks(
     # --- 多查询扩展 RRF 融合 ---
     if _search_rag_config.enable_query_expansion and api_key:
         try:
+            _emit_retrieval_progress(progress_callback, "query_expansion_start", "正在扩展检索问题，补充同义查询...")
             from services.query_expander import expand_query
             expanded_queries = _run_async(
                 expand_query(query, api_key, n=_search_rag_config.query_expansion_n)
@@ -2541,23 +2589,27 @@ def search_document_chunks(
                     f"{len(expanded_queries)} 个扩展查询, "
                     f"融合后={len(vector_results)}"
                 )
+            _emit_retrieval_progress(progress_callback, "query_expansion_done", "检索问题扩展完成。")
         except Exception as e:
             logger.warning(f"[{doc_id}] 多查询扩展失败，使用原始结果: {e}")
 
     # --- Parent-Child 扩展 ---
     if _search_rag_config.enable_parent_child_retrieval and parent_chunks and child_to_parent:
+        _emit_retrieval_progress(progress_callback, "parent_child_expand_start", "正在融合父子分块结果...")
         pre_expand_count = len(vector_results)
         vector_results = _expand_to_parent_chunks(vector_results, search_k)
         vector_chunk_set = {item.get("chunk", "") for item in vector_results}
         logger.info(
             f"[{doc_id}] Parent-Child 扩展: {pre_expand_count} → {len(vector_results)} 个结果"
         )
+        _emit_retrieval_progress(progress_callback, "parent_child_expand_done", "父子分块融合完成。")
 
     # --- 精确短语注入 ---
     # 如果查询包含多个词（短语），扫描所有 chunk 找到包含完整短语的，
     # 注入到结果中（如果向量搜索没返回它们）
     query_lower = query.lower().strip()
     if len(query_lower) > 3 and " " in query_lower:
+        _emit_retrieval_progress(progress_callback, "phrase_injection_start", "正在补充精确短语匹配结果...")
         phrase_injected = 0
         for chunk_text in chunks:
             if chunk_text in vector_chunk_set:
@@ -2582,16 +2634,19 @@ def search_document_chunks(
                     break
         if phrase_injected > 0:
             logger.info(f"[精确短语注入] 查询 '{query}' 注入了 {phrase_injected} 个包含完整短语的 chunk")
+        _emit_retrieval_progress(progress_callback, "phrase_injection_done", "精确短语匹配完成。")
 
     # --- 短语匹配加权 + 表格碎片降权 ---
     vector_results = _phrase_boost(vector_results, query)
 
     # MMR 多样性过滤（不使用 rerank 时）：去除语义重复 chunk，保留 top_k*3 供 BM25 融合
     if not use_rerank and len(vector_results) > top_k:
+        _emit_retrieval_progress(progress_callback, "mmr_start", "正在压缩重复结果，保留更有用的片段...")
         pre_mmr = len(vector_results)
         vector_results = _apply_mmr(vector_results, top_k=min(len(vector_results), top_k * 3))
         if len(vector_results) < pre_mmr:
             logger.info(f"[{doc_id}] MMR: {pre_mmr} → {len(vector_results)} 结果")
+        _emit_retrieval_progress(progress_callback, "mmr_done", "结果去重完成。")
 
     # 向量检索计时结束（需求 10.1）
     timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
@@ -2600,6 +2655,7 @@ def search_document_chunks(
     # BM25 始终参与混合检索，rerank 模式下先 RRF 融合再 rerank（需求 2.1, 2.2）
     if use_hybrid:
         try:
+            _emit_retrieval_progress(progress_callback, "bm25_start", "正在进行关键词混合检索...")
             from services.bm25_service import bm25_search
             from services.hybrid_search import hybrid_search_merge
 
@@ -2631,6 +2687,7 @@ def search_document_chunks(
             if use_rerank:
                 # Rerank 计时开始（需求 10.1）
                 t0 = time.perf_counter()
+                _emit_retrieval_progress(progress_callback, "rerank_start", "正在重排序候选片段...")
 
                 results = _apply_rerank(
                     query,
@@ -2646,10 +2703,12 @@ def search_document_chunks(
 
                 # Rerank 计时结束（需求 10.1）
                 timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
 
             # --- 意群级别检索 + RRF 融合（在 BM25 混合检索之后） ---
             # 意群检索计时开始
             t0 = time.perf_counter()
+            _emit_retrieval_progress(progress_callback, "group_search_start", "正在融合语义意群结果...")
             results = _merge_with_group_search(
                 doc_id=doc_id,
                 chunk_results=results,
@@ -2663,6 +2722,7 @@ def search_document_chunks(
             group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
             if group_search_elapsed > 0.1:
                 timings["group_search_ms"] = group_search_elapsed
+            _emit_retrieval_progress(progress_callback, "group_search_done", "语义意群融合完成。")
 
             # 邻居 chunk 上下文扩展
             try:
@@ -2690,6 +2750,7 @@ def search_document_chunks(
     if use_rerank:
         # Rerank 计时开始（需求 10.1）
         t0 = time.perf_counter()
+        _emit_retrieval_progress(progress_callback, "rerank_start", "正在重排序候选片段...")
 
         results = _apply_rerank(
             query,
@@ -2704,6 +2765,7 @@ def search_document_chunks(
 
         # Rerank 计时结束（需求 10.1）
         timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
     else:
         results = sorted(vector_results, key=lambda x: x.get("similarity", 0), reverse=True)
 
@@ -2712,6 +2774,7 @@ def search_document_chunks(
     # --- 意群级别检索 + RRF 融合（在纯向量/rerank 检索之后） ---
     # 意群检索计时开始
     t0 = time.perf_counter()
+    _emit_retrieval_progress(progress_callback, "group_search_start", "正在融合语义意群结果...")
     results = _merge_with_group_search(
         doc_id=doc_id,
         chunk_results=results,
@@ -2725,6 +2788,7 @@ def search_document_chunks(
     group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
     if group_search_elapsed > 0.1:
         timings["group_search_ms"] = group_search_elapsed
+    _emit_retrieval_progress(progress_callback, "group_search_done", "语义意群融合完成。")
 
     # 邻居 chunk 上下文扩展
     try:
@@ -2742,6 +2806,12 @@ def search_document_chunks(
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     logger.info(f"[{doc_id}] 检索耗时: {timings}")
+    _emit_retrieval_progress(
+        progress_callback,
+        "complete",
+        f"检索完成，共耗时 {timings['total_ms']}ms。",
+        timings=timings,
+    )
 
     return results, timings
 
@@ -2852,6 +2922,7 @@ def get_relevant_context(
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
     model_context_window: int = 0,  # 动态 Token 预算：LLM 模型的上下文窗口大小
     answer_max_tokens: int = 0,  # 期望的输出 Token 数，用于上下文预算感知
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -2899,6 +2970,7 @@ def get_relevant_context(
         rerank_api_key=rerank_api_key,
         rerank_endpoint=rerank_endpoint,
         selected_text=selected_text,  # 传递 selected_text 用于查询改写
+        progress_callback=progress_callback,
     )
 
     config = _rag_config_singleton

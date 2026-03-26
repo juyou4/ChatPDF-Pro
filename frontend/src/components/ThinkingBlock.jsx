@@ -53,6 +53,7 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
 const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef }) => {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
+  const [hasStreamingText, setHasStreamingText] = useState(false)
   const wasStreamingRef = useRef(false)
   const { thoughtAutoCollapse } = useChatParams()
 
@@ -66,6 +67,26 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
     wasStreamingRef.current = isStreaming
   }, [isStreaming, content, thoughtAutoCollapse])
 
+  // 观察流式 DOM 的直接写入内容，任何检索/思考文本出现后都隐藏占位提示。
+  useEffect(() => {
+    if (!isStreaming || !streamingRef?.current) {
+      setHasStreamingText(false)
+      return
+    }
+
+    const el = streamingRef.current
+    const syncHasContent = () => {
+      const text = el.textContent || ''
+      setHasStreamingText(text.trim().length > 0)
+    }
+
+    syncHasContent()
+    const observer = new MutationObserver(syncHasContent)
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+
+    return () => observer.disconnect()
+  }, [isStreaming, streamingRef])
+
   // 复制思考内容
   const handleCopy = useCallback((e) => {
     e.stopPropagation()
@@ -75,6 +96,10 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
       setTimeout(() => setCopied(false), 2000)
     })
   }, [content])
+
+  // 深度思考在首个 reasoning_content 到来前，直接给出可见的阶段提示，
+  // 避免面板只有三个点、看起来像“卡住了”。
+  const shouldShowStreamingHint = isStreaming && !(content && content.trim()) && !hasStreamingText
 
   return (
     <div className={`flex flex-col items-start gap-2 my-2 ${darkMode ? 'dark' : ''}`}>
@@ -126,19 +151,24 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
             <div className="relative">
               {/* 装饰小圆点 */}
               <span className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}></span>
-              
+              {shouldShowStreamingHint && (
+                <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-purple-300/90' : 'text-purple-500/90'}`}>
+                  正在检索并组织思考内容...
+                </div>
+              )}
               <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
-                <StreamingMarkdown
-                  content={content}
-                  isStreaming={isStreaming}
-                  enableBlurReveal={false}
-                  blurIntensity="light"
-                  streamingRef={streamingRef}
-                />
-              </div>
+              <StreamingMarkdown
+                content={content}
+                isStreaming={isStreaming}
+                enableBlurReveal={false}
+                blurIntensity="light"
+                streamingRef={streamingRef}
+                suppressInitialDots={shouldShowStreamingHint}
+              />
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   )

@@ -76,7 +76,8 @@ async def vector_search(
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
-    middlewares: Optional[List[BaseMiddleware]] = None
+    middlewares: Optional[List[BaseMiddleware]] = None,
+    progress_callback=None,
 ):
     """向量搜索包装函数，支持中间件钩子
 
@@ -151,6 +152,7 @@ async def vector_context(
     model_context_window: int = 0,
     selected_text: Optional[str] = None,  # 框选文本，用于融合检索
     answer_max_tokens: int = 0,  # 期望的输出 Token 数，传入 RAG 预算感知
+    progress_callback=None,
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -197,6 +199,7 @@ async def vector_context(
                 model_context_window=model_context_window,
                 selected_text=selected_text,  # 透传框选文本
                 answer_max_tokens=answer_max_tokens,
+                progress_callback=progress_callback,
             ),
             timeout=60.0  # 60 秒超时
         )
@@ -212,4 +215,5 @@ async def vector_context(
     return {
         "context": wrapped.get("context", ""),
         "retrieval_meta": wrapped.get("retrieval_meta", {}),
+        "error": wrapped.get("error"),
     }

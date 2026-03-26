@@ -594,4 +594,24 @@ describe('流式等待动画', () => {
       expect(dots.length).toBe(0);
     });
   });
+
+  it('ref 尚未直写但 content 已有文本时，应先显示 content 而不是继续等待点', async () => {
+    const streamingRef = React.createRef();
+    const { container } = render(
+      <StreamingMarkdown
+        content="正在检索文档..."
+        isStreaming={true}
+        citations={null}
+        streamingRef={streamingRef}
+      />
+    );
+
+    await waitFor(() => {
+      expect(streamingRef.current).toBeTruthy();
+      expect(streamingRef.current.textContent).toContain('正在检索文档...');
+    });
+
+    const dots = container.querySelectorAll('.streaming-dots .dot');
+    expect(dots.length).toBe(0);
+  });
 });

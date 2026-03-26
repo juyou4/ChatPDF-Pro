@@ -598,33 +598,33 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 backdrop-blur-sm p-4"
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all opacity-100"
         >
           <motion.div
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-            className="w-full max-w-xl max-h-[92vh] bg-white/80 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_-35px_rgba(15,23,42,0.6),inset_0_1px_1px_rgba(255,255,255,0.8)] rounded-[40px] overflow-hidden flex flex-col"
+            className="w-full max-w-[640px] max-h-[92vh] bg-[#fbfbfc] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.1)] rounded-[32px] overflow-hidden flex flex-col"
           >
             {/* 顶部标题栏 */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <div className="flex items-center justify-between px-6 py-5 sticky top-0 bg-[#fbfbfc]/90 backdrop-blur-md z-10 border-b border-gray-100/50">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-xl bg-amber-50 text-amber-700">
+                <div className="w-10 h-10 bg-[#8871e4]/10 rounded-2xl flex items-center justify-center text-[#8871e4]">
                   <ScanText className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="text-lg font-bold text-gray-900">
+                  <div className="text-[17px] font-bold text-gray-900 tracking-tight">
                     OCR 设置
                   </div>
-                  <div className="text-xs text-gray-500">
+                  <div className="text-[12px] font-medium text-gray-500">
                     配置文档识别与文字提取
                   </div>
                 </div>
               </div>
               <button
                 onClick={onClose}
-                className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -644,7 +644,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               )}
 
               {/* OCR 可用状态卡片 */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 <div className="flex items-center gap-2 mb-4">
                   <Info className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -664,7 +664,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <div
                         className={`w-2.5 h-2.5 rounded-full ${
                           ocrStatus.available
-                            ? 'bg-green-500'
+                            ? 'bg-emerald-500'
                             : 'bg-gray-300'
                         }`}
                       />
@@ -681,7 +681,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         )}
                       </span>
                       {ocrStatus.recommended && (
-                        <span className="ml-auto text-xs text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
+                        <span className="ml-auto text-xs text-[#8871e4] bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
                           推荐：{BACKEND_LABELS[ocrStatus.recommended] || ocrStatus.recommended}
                         </span>
                       )}
@@ -698,7 +698,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                             >
                               <div
                                 className={`w-2 h-2 rounded-full ${
-                                  available ? 'bg-green-500' : 'bg-gray-300'
+                                  available ? 'bg-emerald-500' : 'bg-gray-300'
                                 }`}
                               />
                               <span className="text-sm text-gray-700">
@@ -721,7 +721,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         <div
                           className={`w-2 h-2 rounded-full ${
                             ocrStatus.poppler_available
-                              ? 'bg-green-500'
+                              ? 'bg-emerald-500'
                               : 'bg-amber-400'
                           }`}
                         />
@@ -747,7 +747,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 模式选择 */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -765,14 +765,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         onClick={() => handleModeChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                            : 'border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 text-gray-700'
+                            ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                            : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
                         }`}
                       >
                         <div
                           className={`p-1.5 rounded-lg ${
                             isActive
-                              ? 'bg-purple-100 text-purple-600'
+                              ? 'bg-purple-100 text-[#8871e4]'
                               : 'bg-gray-100 text-gray-500'
                           }`}
                         >
@@ -784,14 +784,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-purple-500' : 'text-gray-400'
+                              isActive ? 'text-[#8871e4]' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-purple-500 flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-[#8871e4] flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -800,7 +800,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 引擎选择 */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -817,8 +817,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         onClick={() => handleBackendChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                            : 'border-gray-100 hover:border-purple-200 hover:bg-purple-50/30 text-gray-700'
+                            ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                            : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
                         }`}
                       >
                         <div className="flex-1 min-w-0">
@@ -827,14 +827,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-purple-500' : 'text-gray-400'
+                              isActive ? 'text-[#8871e4]' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-purple-500 flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-[#8871e4] flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -843,7 +843,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* 在线 OCR 服务配置卡片 */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 <div className="flex items-center gap-2 mb-4">
                   <Wifi className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -973,7 +973,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <button
                       onClick={handleValidateKey}
                       disabled={!mistralApiKey.trim() || validateStatus === 'loading'}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
                       {validateStatus === 'loading' ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1001,7 +1001,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* MinerU OCR 配置卡片（可折叠） */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setMineruExpanded(!mineruExpanded)}
@@ -1136,8 +1136,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setMineruTokenMode('frontend')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             mineruTokenMode === 'frontend'
-                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
+                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
                           }`}
                         >
                           前端透传
@@ -1146,8 +1146,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setMineruTokenMode('worker')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             mineruTokenMode === 'worker'
-                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
+                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
                           }`}
                         >
                           Worker 配置
@@ -1207,13 +1207,13 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <span className="text-xs text-gray-700">启用 OCR</span>
                           <div
                             onClick={() => setMineruEnableOcr(!mineruEnableOcr)}
-                            className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableOcr ? 'bg-purple-500' : 'bg-gray-300'
+                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
+                              mineruEnableOcr ? 'bg-[#8871e4]' : 'bg-gray-300'
                             }`}
                           >
                             <div
-                              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                                mineruEnableOcr ? 'translate-x-4' : 'translate-x-0'
+                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
+                                mineruEnableOcr ? 'translate-x-[18px]' : 'translate-x-0'
                               }`}
                             />
                           </div>
@@ -1223,13 +1223,13 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <span className="text-xs text-gray-700">启用公式识别</span>
                           <div
                             onClick={() => setMineruEnableFormula(!mineruEnableFormula)}
-                            className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableFormula ? 'bg-purple-500' : 'bg-gray-300'
+                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
+                              mineruEnableFormula ? 'bg-[#8871e4]' : 'bg-gray-300'
                             }`}
                           >
                             <div
-                              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                                mineruEnableFormula ? 'translate-x-4' : 'translate-x-0'
+                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
+                                mineruEnableFormula ? 'translate-x-[18px]' : 'translate-x-0'
                               }`}
                             />
                           </div>
@@ -1239,13 +1239,13 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <span className="text-xs text-gray-700">启用表格识别</span>
                           <div
                             onClick={() => setMineruEnableTable(!mineruEnableTable)}
-                            className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                              mineruEnableTable ? 'bg-purple-500' : 'bg-gray-300'
+                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
+                              mineruEnableTable ? 'bg-[#8871e4]' : 'bg-gray-300'
                             }`}
                           >
                             <div
-                              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                                mineruEnableTable ? 'translate-x-4' : 'translate-x-0'
+                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
+                                mineruEnableTable ? 'translate-x-[18px]' : 'translate-x-0'
                               }`}
                             />
                           </div>
@@ -1295,7 +1295,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <button
                         onClick={handleMineruValidate}
                         disabled={!mineruWorkerUrl.trim() || mineruValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {mineruValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1336,12 +1336,12 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       saveOCRSettings({ ...settings, mineruFigureEnhance: next })
                     }}
                     className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      mineruFigureEnhance ? 'bg-purple-500' : 'bg-gray-300'
+                      mineruFigureEnhance ? 'bg-[#8871e4]' : 'bg-gray-300'
                     }`}
                   >
                     <span
                       className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform ring-0 transition duration-200 ease-in-out ${
-                        mineruFigureEnhance ? 'translate-x-4' : 'translate-x-0'
+                        mineruFigureEnhance ? 'translate-x-[18px]' : 'translate-x-0'
                       }`}
                     />
                   </button>
@@ -1349,7 +1349,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* Doc2X OCR 配置卡片（可折叠） */}
-              <div className="soft-card rounded-[24px] p-5">
+              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setDoc2xExpanded(!doc2xExpanded)}
@@ -1484,8 +1484,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setDoc2xTokenMode('frontend')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             doc2xTokenMode === 'frontend'
-                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
+                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
                           }`}
                         >
                           前端透传
@@ -1494,8 +1494,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           onClick={() => setDoc2xTokenMode('worker')}
                           className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
                             doc2xTokenMode === 'worker'
-                              ? 'border-purple-200 bg-purple-50/60 text-purple-700 shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-purple-200 hover:bg-purple-50/30'
+                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
+                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
                           }`}
                         >
                           Worker 配置
@@ -1586,7 +1586,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <button
                         onClick={handleDoc2xValidate}
                         disabled={!doc2xWorkerUrl.trim() || doc2xValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-purple-200 bg-purple-50/60 text-purple-700 hover:bg-purple-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {doc2xValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1616,7 +1616,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
 
               {/* Poppler 不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.poppler_available && (
-                <div className="soft-card rounded-[24px] p-5">
+                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
                     <div>
@@ -1653,7 +1653,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
 
               {/* OCR 后端不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.available && (
-                <div className="soft-card rounded-[24px] p-5">
+                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                     <div>

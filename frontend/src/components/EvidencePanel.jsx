@@ -69,12 +69,12 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
       });
   }, [docId, thumbnails]);
 
-  if (!citations || citations.length === 0) return null;
-
   const { cited, uncited } = useMemo(
-    () => partitionEvidenceCitations(citations),
+    () => partitionEvidenceCitations(citations || []),
     [citations]
   );
+
+  if (!citations || citations.length === 0) return null;
 
   const renderCitation = (c, defaultOpen) => {
     const ref = resolveEvidenceRef(c);

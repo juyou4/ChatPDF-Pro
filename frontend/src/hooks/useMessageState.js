@@ -26,6 +26,40 @@ const STREAM_RENDER_PROFILES = {
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
 
+const formatThinkingStageEvent = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+
+  if (payload.type === 'retrieval_progress') {
+    const message = typeof payload.message === 'string' && payload.message.trim()
+      ? payload.message.trim()
+      : (payload.phase === 'complete' ? '检索完成，正在组织上下文...' : '正在检索文档...');
+    const keyParts = [payload.phase, payload.round, payload.step, message]
+      .filter((part) => part !== undefined && part !== null && String(part).trim() !== '');
+    return {
+      key: `retrieval:${keyParts.join(':')}`,
+      text: message,
+    };
+  }
+
+  if (payload.type === 'web_search_status') {
+    switch (payload.phase) {
+      case 'searching':
+        return { key: 'web_search:searching', text: '正在联网搜索补充资料...' };
+      case 'fetch_complete':
+        return {
+          key: `web_search:fetch_complete:${payload.count ?? 0}`,
+          text: payload.count
+            ? `已抓取 ${payload.count} 个网页，正在提取关键信息...`
+            : '已完成网页抓取，正在提取关键信息...',
+        };
+      default:
+        return null;
+    }
+  }
+
+  return null;
+};
+
 /**
  * 构建聊天历史记录
  * 过滤无效消息，取最近 contextCount*2 条作为上下文
@@ -639,11 +673,57 @@ export function useMessageState({
         const decoder = new TextDecoder();
         let currentText = '';
         let currentThinking = '';
+        let hasRealThinking = false;
+        let lastThinkingStageKey = null;
         let thinkingStartTime = null;
         let thinkingLastUpdateTime = null;
         let contentStartTime = null;
         let sseBuffer = '';
         let sseDone = false;
+
+        const markThinkingActivity = () => {
+          const now = Date.now();
+          if (!thinkingStartTime) thinkingStartTime = now;
+          thinkingLastUpdateTime = now;
+        };
+
+        const appendThinkingStage = (text, key) => {
+          if (!text || hasRealThinking) return;
+          if (key && lastThinkingStageKey === key) return;
+          const addition = currentThinking ? `\n${text}` : text;
+          lastThinkingStageKey = key || null;
+          markThinkingActivity();
+          currentThinking += addition;
+          thinkingStream.replace(currentThinking);
+          setMessages(prev => prev.map(m =>
+            m.id === tempMsgId
+              ? { ...m, thinking: currentThinking }
+              : m
+          ));
+        };
+
+        const beginRealThinking = () => {
+          if (hasRealThinking) return;
+          hasRealThinking = true;
+          lastThinkingStageKey = null;
+          if (currentThinking) {
+            currentThinking = '';
+            thinkingStream.replace('');
+          }
+        };
+
+        const appendRealThinking = (text) => {
+          if (!text) return;
+          beginRealThinking();
+          markThinkingActivity();
+          currentThinking += text;
+          thinkingStream.addChunk(text);
+          setMessages(prev => prev.map(m =>
+            m.id === tempMsgId
+              ? { ...m, thinking: currentThinking }
+              : m
+          ));
+        };
 
         // SSE 分隔符查找
         const findSseSeparator = (buf) => {
@@ -674,6 +754,10 @@ export function useMessageState({
               contentStream.addChunk(em);
               sseDone = true;
               return;
+            }
+            const thinkingStageEvent = formatThinkingStageEvent(p);
+            if (thinkingStageEvent) {
+              appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
             }
             if (p.type === 'retrieval_progress') return;
             if (p.type === 'web_search_status') {
@@ -711,11 +795,9 @@ export function useMessageState({
                 if (!contentStartTime) contentStartTime = Date.now();
               }
               if (ct) {
-                const now = Date.now();
-                if (!thinkingStartTime) thinkingStartTime = now;
-                thinkingLastUpdateTime = now;
-                currentThinking += ct;
-                thinkingStream.addChunk(ct);
+                appendRealThinking(ct);
+              } else if (!cc) {
+                appendThinkingStage('正在等待模型输出思考内容...', 'model:waiting_reasoning');
               }
             } else {
               const finalContentFromEvent = typeof p.final_content === 'string' ? p.final_content : '';
@@ -741,11 +823,7 @@ export function useMessageState({
               if (Object.prototype.hasOwnProperty.call(p, 'memory_hits')) streamMemoryHitsRef.current = p.memory_hits;
               if (Object.prototype.hasOwnProperty.call(p, 'memory_meta')) streamMemoryMetaRef.current = p.memory_meta;
               if (ct) {
-                const now = Date.now();
-                if (!thinkingStartTime) thinkingStartTime = now;
-                thinkingLastUpdateTime = now;
-                currentThinking += ct;
-                thinkingStream.addChunk(ct);
+                appendRealThinking(ct);
               }
               sseDone = true;
             }

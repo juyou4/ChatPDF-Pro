@@ -1,9 +1,12 @@
+import asyncio
 from datetime import datetime
 from typing import Optional, List
 import json
 import logging
 import re
 import threading
+import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -63,6 +66,37 @@ _WEB_SEARCH_PRONOUN_HINTS = (
     "这个", "该", "它", "上述", "此", "这种", "这些", "这项", "该项", "本方法",
     "this", "that", "it", "they", "he", "she", "them",
 )
+_QUERY_REWRITE_AMBIGUOUS_HINTS = (
+    "这个", "那个", "这块", "那块", "这部分", "那部分", "这段", "那段",
+    "这里", "那里", "它", "其", "上述", "前面", "后面", "上一段", "上一节",
+    "该方法", "该模型", "该公式", "该结论",
+)
+_EN_AMBIGUOUS_QUERY_RE = re.compile(r"\b(this|that|it|they|them|he|she|these|those)\b", re.IGNORECASE)
+
+
+def _preview_for_log(text: Optional[str], limit: int = 80) -> str:
+    compact = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "..."
+
+
+def _new_chat_trace_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _log_chat_trace(trace_id: str, started_at: float, stage: str, **fields) -> None:
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
+    clock = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    extras = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        extras.append(f"{key}={value!r}")
+    suffix = f" | {' '.join(extras)}" if extras else ""
+    line = f"[ChatTrace {trace_id}] {clock} +{elapsed_ms}ms {stage}{suffix}"
+    print(line, flush=True)
+    logger.warning(line)
 
 
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
@@ -186,6 +220,53 @@ async def _buffered_stream(raw_stream, *, passthrough: bool = False, buffer_size
         }
 
 
+def _sse_json(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _build_threadsafe_progress_forwarder(progress_queue: asyncio.Queue):
+    loop = asyncio.get_running_loop()
+
+    def _forward(event: dict):
+        if not isinstance(event, dict):
+            return
+        try:
+            loop.call_soon_threadsafe(progress_queue.put_nowait, event)
+        except RuntimeError:
+            # 事件循环已关闭或请求已结束，直接忽略
+            pass
+
+    return _forward
+
+
+async def _yield_task_progress(
+    task: asyncio.Task,
+    progress_queue: asyncio.Queue,
+    heartbeat_message: str,
+    heartbeat_interval: float = 8.0,
+):
+    heartbeat_step = 0
+    while not task.done():
+        try:
+            event = await asyncio.wait_for(progress_queue.get(), timeout=heartbeat_interval)
+            yield event
+        except asyncio.TimeoutError:
+            if not task.done():
+                heartbeat_step += 1
+                yield {
+                    "type": "retrieval_progress",
+                    "phase": "heartbeat",
+                    "step": heartbeat_step,
+                    "message": heartbeat_message,
+                }
+
+    while True:
+        try:
+            yield progress_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
 # 上下文构建器实例，用于生成引文指示提示词
 _context_builder = ContextBuilder()
 
@@ -210,24 +291,53 @@ async def _maybe_rewrite_query(
     3. 存在对话历史（多轮对话才需要上下文消解）
     4. 有可用的 api_key
     """
+    regex_rewritten = _query_rewriter.rewrite(question, selected_text=selected_text)
+
     if (
         not settings.enable_llm_query_rewrite
         or len(question) > settings.query_rewrite_trigger_length
         or not chat_history
         or not api_key
     ):
-        return _query_rewriter.rewrite(question, selected_text=selected_text)
+        return regex_rewritten
 
-    rewritten = await _query_rewriter.rewrite_with_llm(
-        query=question,
-        chat_history=chat_history,
-        selected_text=selected_text,
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        endpoint=endpoint,
-    )
-    return rewritten
+    # 清晰的概览/总结类问题不值得为 query rewrite 再调一次 LLM。
+    # 这类请求在当前文档上下文中已经足够自洽，额外的改写只会拉高首包延迟。
+    try:
+        query_type = get_retrieval_strategy(regex_rewritten).get("query_type")
+    except Exception:
+        query_type = None
+    if query_type == "overview" and not selected_text:
+        return regex_rewritten
+
+    # 没有选中文本、也没有明显歧义代词时，直接使用本地规则结果。
+    normalized_question = (question or "").strip()
+    if (
+        not selected_text
+        and regex_rewritten == question
+        and not any(hint in normalized_question for hint in _QUERY_REWRITE_AMBIGUOUS_HINTS)
+        and not _EN_AMBIGUOUS_QUERY_RE.search(normalized_question)
+        and len(normalized_question) >= 8
+    ):
+        return regex_rewritten
+
+    try:
+        rewritten = await asyncio.wait_for(
+            _query_rewriter.rewrite_with_llm(
+                query=question,
+                chat_history=chat_history,
+                selected_text=selected_text,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+            ),
+            timeout=2.5,
+        )
+        return rewritten
+    except asyncio.TimeoutError:
+        logger.warning("[LLM QueryRewrite] 超时，降级为本地规则改写")
+        return regex_rewritten
 
 # 模块级变量，由 app.py 注入 MemoryService 实例
 memory_service = None
@@ -546,6 +656,48 @@ def _build_context_segments_from_citations(citations: list[dict]) -> list[dict]:
     return segments
 
 
+def _build_retrieval_preview_message(citations: list[dict], max_items: int = 3, max_chars: int = 90) -> str:
+    """把命中的 citation 组装成思考区可展示的检索预览文本。"""
+    if not citations:
+        return ""
+
+    lines: list[str] = []
+    for c in citations[:max_items]:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ref = int(c.get("ref"))
+        except (TypeError, ValueError):
+            continue
+
+        page_range = c.get("page_range") or []
+        if len(page_range) >= 2 and page_range[0] and page_range[1] and page_range[0] != page_range[1]:
+            page_text = f"第 {page_range[0]}-{page_range[1]} 页"
+        elif page_range:
+            page_text = f"第 {page_range[0]} 页"
+        else:
+            page_text = "页码未知"
+
+        snippet = (
+            c.get("highlight_text")
+            or c.get("display_text")
+            or c.get("source_text")
+            or c.get("_full_text")
+            or ""
+        )
+        snippet = re.sub(r"\s+", " ", str(snippet)).strip()
+        if not snippet:
+            continue
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars].rstrip() + "..."
+        lines.append(f"- [{ref}] {page_text}: {snippet}")
+
+    if not lines:
+        return ""
+
+    return "检索到以下相关片段：\n" + "\n".join(lines)
+
+
 def _split_context_paragraphs(context: str) -> list[str]:
     """将 PDF 提取的 context 拆分为真实段落。
 
@@ -737,6 +889,70 @@ def _build_numbered_context_and_citations(
         f"refs={[c['ref'] for c in citations]}, pages={[c['page_range'][0] for c in citations]}"
     )
     return formatted_context, citations
+
+
+def _build_fast_overview_context(
+    pages: list[dict],
+    full_text: str,
+    *,
+    max_total_chars: int = 36000,
+    max_page_chars: int = 2200,
+) -> str:
+    """为概览/总结问题构建更快的全文采样上下文。
+
+    不做向量检索，直接从全文中抽取首段、尾段和均匀分布的页面文本，
+    以覆盖整篇文档的主要结构，同时控制上下文大小。
+    """
+    if not pages:
+        return (full_text or "")[:max_total_chars]
+
+    total_pages = len(pages)
+    if total_pages <= 8:
+        sample_indices = list(range(total_pages))
+    else:
+        anchors = {0, 1, total_pages - 2, total_pages - 1}
+        middle_slots = 4
+        for slot in range(1, middle_slots + 1):
+            idx = round(slot * (total_pages - 1) / (middle_slots + 1))
+            anchors.add(max(0, min(total_pages - 1, idx)))
+        sample_indices = sorted(anchors)
+
+    sampled_parts: list[str] = []
+    total_chars = 0
+    for idx in sample_indices:
+        page = pages[idx] or {}
+        page_text = (page.get("text") or page.get("content") or "").strip()
+        if not page_text:
+            continue
+        clipped = page_text[:max_page_chars].strip()
+        if not clipped:
+            continue
+        block = f"[第{idx + 1}页]\n{clipped}"
+        if total_chars + len(block) > max_total_chars and sampled_parts:
+            break
+        sampled_parts.append(block)
+        total_chars += len(block)
+
+    if sampled_parts:
+        return "\n\n".join(sampled_parts)
+    return (full_text or "")[:max_total_chars]
+
+
+def _should_use_fast_overview_context(
+    query_type: str,
+    *,
+    enable_vector_search: bool,
+    selected_text: Optional[str],
+    image_list: Optional[list] = None,
+    use_agent: bool = False,
+) -> bool:
+    return (
+        query_type == "overview"
+        and enable_vector_search
+        and not selected_text
+        and not image_list
+        and not use_agent
+    )
 
 
 def _generate_page_level_citations(pages: list[dict], context: str, query: str = "", max_citations: int = 8) -> list[dict]:
@@ -1604,6 +1820,10 @@ async def chat_with_pdf(request: ChatRequest):
             vector_store_dir=getattr(router, "vector_store_dir", ""),
         )
 
+        strategy = get_retrieval_strategy(search_query)
+        query_type = strategy["query_type"]
+        dynamic_top_k = strategy["top_k"]
+
         # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
         _prelim_answer_tokens = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
 
@@ -1614,8 +1834,6 @@ async def chat_with_pdf(request: ChatRequest):
                 request.selected_text, doc.get("data", {}).get("pages", [])
             )
             try:
-                strategy = get_retrieval_strategy(search_query)
-                dynamic_top_k = strategy['top_k']
                 context_result = await vector_context(
                     request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
                     pages=doc.get("data", {}).get("pages", []), api_key=request.api_key,
@@ -1671,12 +1889,28 @@ async def chat_with_pdf(request: ChatRequest):
                 ) else None,
             )
             retrieval_meta["citations"] = _build_selected_text_fallback_citations(
-                request.selected_text, selected_page_info
+                    request.selected_text, selected_page_info
             )
+        elif _should_use_fast_overview_context(
+            query_type,
+            enable_vector_search=request.enable_vector_search,
+            selected_text=request.selected_text,
+        ):
+            sampled_context = _build_fast_overview_context(
+                doc.get("data", {}).get("pages", []),
+                doc["data"].get("full_text", ""),
+            )
+            numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                doc.get("data", {}).get("pages", []),
+                sampled_context,
+                query=search_query,
+            )
+            context = numbered_ctx
+            retrieval_meta["citations"] = fb_cits
+            retrieval_meta["query_type"] = query_type
+            retrieval_meta["fast_overview"] = True
         elif request.enable_vector_search:
             _validate_rerank_request(request)
-            strategy = get_retrieval_strategy(search_query)
-            dynamic_top_k = strategy['top_k']
             context_result = await vector_context(
                 request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
                 pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
@@ -1836,6 +2070,21 @@ async def chat_with_pdf_stream(request: ChatRequest):
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
+    trace_id = _new_chat_trace_id()
+    trace_started_at = time.perf_counter()
+    _log_chat_trace(
+        trace_id,
+        trace_started_at,
+        "request_received",
+        doc_id=request.doc_id,
+        provider=request.api_provider,
+        model=request.model,
+        vector=request.enable_vector_search,
+        thinking=request.enable_thinking,
+        web_search=request.enable_web_search,
+        selected_text=bool(request.selected_text),
+        question=_preview_for_log(request.question, 120),
+    )
 
     async def event_generator():
         yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'start', 'message': '正在检索...'}, ensure_ascii=False)}\n\n"
@@ -1874,6 +2123,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
             if image_list:
                 print(f"[Chat Stream] 📸 截图模式：处理 {len(image_list)} 张图")
+                _log_chat_trace(
+                    trace_id,
+                    trace_started_at,
+                    "image_mode",
+                    image_count=len(image_list),
+                )
                 answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
                 system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
 用户从文档中截取了 {len(image_list)} 张图片并发送给你。请仔细分析这些图片内容并回答问题。
@@ -1897,6 +2152,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
                 use_agent = request.enable_agent_retrieval and not request.selected_text
                 # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
+                yield _sse_json({
+                    'type': 'retrieval_progress',
+                    'phase': 'query_rewrite_start',
+                    'message': '正在分析问题并改写检索查询...',
+                })
                 search_query = await _maybe_rewrite_query(
                     question=request.question,
                     chat_history=request.chat_history,
@@ -1906,9 +2166,31 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     provider=request.api_provider,
                     endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                 )
+                yield _sse_json({
+                    'type': 'retrieval_progress',
+                    'phase': 'query_rewrite_done',
+                    'message': '已生成检索查询，正在查找相关内容...',
+                })
+                _log_chat_trace(
+                    trace_id,
+                    trace_started_at,
+                    "query_ready",
+                    rewritten=search_query != (request.question or ""),
+                    search_query=_preview_for_log(search_query, 120),
+                )
                 # 联网搜索在此处设置查询参数
                 _web_search_query_for_stream = search_query
                 _web_search_doc_title_for_stream = doc.get("filename", "")
+                strategy = get_retrieval_strategy(search_query)
+                query_type = strategy["query_type"]
+                dynamic_top_k = strategy["top_k"]
+                _log_chat_trace(
+                    trace_id,
+                    trace_started_at,
+                    "retrieval_strategy",
+                    query_type=query_type,
+                    top_k=dynamic_top_k,
+                )
 
                 # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
                 _prelim_answer_tokens_stream = _adjust_max_tokens(request.max_tokens, request.answer_detail or "standard", False) or 0
@@ -1920,9 +2202,19 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         request.selected_text, doc.get("data", {}).get("pages", [])
                     )
                     try:
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_vector_start",
+                            mode="selected_text",
+                            top_k=dynamic_top_k,
+                        )
+                        yield _sse_json({'type': 'retrieval_progress', 'phase': 'vector_search_start', 'message': '正在按框选内容检索相关段落...'})
                         strategy = get_retrieval_strategy(search_query)
                         dynamic_top_k = strategy['top_k']
-                        context_result = await vector_context(
+                        _progress_queue = asyncio.Queue()
+                        _progress_forwarder = _build_threadsafe_progress_forwarder(_progress_queue)
+                        _vector_task = asyncio.create_task(vector_context(
                             request.doc_id, search_query, vector_store_dir=router.vector_store_dir,
                             pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
                             top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
@@ -1934,9 +2226,28 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                 RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
-                        )
+                            progress_callback=_progress_forwarder,
+                        ))
+                        async for _progress_event in _yield_task_progress(
+                            _vector_task,
+                            _progress_queue,
+                            "正在按框选内容检索相关段落，请稍候...",
+                        ):
+                            yield _sse_json(_progress_event)
+                        context_result = await _vector_task
                         retrieval_context = context_result.get("context", "")
                         retrieval_meta = context_result.get("retrieval_meta", {})
+                        vector_error = context_result.get("error")
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_vector_done",
+                            mode="selected_text",
+                            error=vector_error,
+                            context_chars=len(retrieval_context),
+                            citations=len(retrieval_meta.get("citations") or []),
+                            timings=retrieval_meta.get("timings") or retrieval_meta.get("timing"),
+                        )
                         retrieval_citations = retrieval_meta.get("citations") or []
                         fallback_selected_citations = _build_selected_text_fallback_citations(
                             request.selected_text, selected_page_info
@@ -1951,6 +2262,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         )
                     except Exception as e:
                         logger.warning(f"框选模式向量检索失败，降级为仅 selected_text: {e}")
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_vector_exception",
+                            mode="selected_text",
+                            error=str(e),
+                        )
                         fallback_selected_citations = _build_selected_text_fallback_citations(
                             request.selected_text, selected_page_info
                         )
@@ -1977,12 +2295,52 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta["citations"] = _build_selected_text_fallback_citations(
                         request.selected_text, selected_page_info
                     )
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_selected_text_only",
+                        citations=len(retrieval_meta.get("citations") or []),
+                    )
                 elif use_agent:
                     context = ""
+                    _log_chat_trace(trace_id, trace_started_at, "retrieval_agent_mode")
+                elif _should_use_fast_overview_context(
+                    query_type,
+                    enable_vector_search=request.enable_vector_search,
+                    selected_text=request.selected_text,
+                    image_list=image_list,
+                    use_agent=use_agent,
+                ):
+                    _log_chat_trace(trace_id, trace_started_at, "retrieval_fast_overview")
+                    yield _sse_json({
+                        'type': 'retrieval_progress',
+                        'phase': 'fast_overview',
+                        'message': '概览问题：直接使用全文采样上下文以加快回答...',
+                    })
+                    sampled_context = _build_fast_overview_context(
+                        doc.get("data", {}).get("pages", []),
+                        doc["data"].get("full_text", ""),
+                    )
+                    numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                        doc.get("data", {}).get("pages", []),
+                        sampled_context,
+                        query=search_query,
+                    )
+                    context = numbered_ctx
+                    retrieval_meta["citations"] = fb_cits
+                    retrieval_meta["query_type"] = query_type
+                    retrieval_meta["fast_overview"] = True
                 elif request.enable_vector_search:
                     _validate_rerank_request(request)
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_analysis_start",
+                        top_k=dynamic_top_k,
+                    )
 
                     # 复杂问题分解：对包含"比较""区别"等关键词的查询，拆分为子问题分别检索
+                    yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'analysis', 'message': '正在分析问题并拆分检索子任务...'}, ensure_ascii=False)}\n\n"
                     sub_questions = await decompose_question(
                         question=request.question,
                         api_key=request.api_key,
@@ -1990,14 +2348,32 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         provider=request.api_provider,
                         endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
                     )
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_analysis_done",
+                        sub_questions=len(sub_questions or []),
+                    )
 
                     queries_to_search = [search_query] + sub_questions if sub_questions else [search_query]
                     all_relevant_texts = []
 
                     for sq in queries_to_search:
-                        strategy = get_retrieval_strategy(sq)
-                        dynamic_top_k = strategy['top_k']
-                        cr = await vector_context(
+                        query_preview = re.sub(r"\s+", " ", sq).strip()
+                        if len(query_preview) > 80:
+                            query_preview = query_preview[:80].rstrip() + "..."
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_vector_start",
+                            query=_preview_for_log(sq, 80),
+                        )
+                        yield _sse_json({'type': 'retrieval_progress', 'phase': 'vector_search_start', 'message': f'正在检索: {query_preview}'})
+                        sub_strategy = get_retrieval_strategy(sq)
+                        dynamic_top_k = sub_strategy['top_k']
+                        _progress_queue = asyncio.Queue()
+                        _progress_forwarder = _build_threadsafe_progress_forwarder(_progress_queue)
+                        _vector_task = asyncio.create_task(vector_context(
                             request.doc_id, sq, vector_store_dir=router.vector_store_dir,
                             pages=doc.get("data", {}).get("pages", []), api_key=request.embedding_api_key or request.api_key,
                             top_k=dynamic_top_k, candidate_k=max(request.candidate_k, dynamic_top_k),
@@ -2009,8 +2385,26 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                 RetryMiddleware(retries=settings.search_retry_retries, delay=settings.search_retry_delay)
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
-                        )
+                            progress_callback=_progress_forwarder,
+                        ))
+                        async for _progress_event in _yield_task_progress(
+                            _vector_task,
+                            _progress_queue,
+                            f"正在检索: {query_preview}",
+                        ):
+                            yield _sse_json(_progress_event)
+                        cr = await _vector_task
                         rt = cr.get("context", "")
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_vector_done",
+                            query=_preview_for_log(sq, 80),
+                            error=cr.get("error"),
+                            context_chars=len(rt),
+                            citations=len((cr.get("retrieval_meta", {}) or {}).get("citations") or []),
+                            timings=(cr.get("retrieval_meta", {}) or {}).get("timings") or (cr.get("retrieval_meta", {}) or {}).get("timing"),
+                        )
                         if rt:
                             all_relevant_texts.append(rt)
                         # 使用第一个（主查询）的 retrieval_meta
@@ -2029,6 +2423,14 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         )
                         context = numbered_ctx
                         retrieval_meta["citations"] = fb_cits
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_fulltext_fallback",
+                            reason="vector_empty_or_failed",
+                            context_chars=len(context),
+                            citations=len(fb_cits),
+                        )
                     # 向量检索有结果但无 citations 时兜底
                     if not retrieval_meta.get("citations"):
                         retrieval_meta["citations"] = _generate_page_level_citations(
@@ -2043,6 +2445,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     context = numbered_ctx
                     retrieval_meta["citations"] = fb_cits
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_disabled_fulltext",
+                        context_chars=len(context),
+                        citations=len(fb_cits),
+                    )
 
                 # GraphRAG 上下文融合：如果该文档已构建 GraphRAG 索引，追加知识图谱上下文
                 if (settings.enable_graphrag or request.enable_graphrag) and hasattr(router, "_graphrag_instances") and request.doc_id in router._graphrag_instances:
@@ -2059,6 +2468,20 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
                         retrieval_meta.get("citations", [])
                     )
+
+                retrieval_preview = _build_retrieval_preview_message(retrieval_meta.get("citations", []))
+                if retrieval_preview:
+                    yield _sse_json({'type': 'retrieval_progress', 'phase': 'content_preview', 'message': retrieval_preview})
+                elif not use_agent and not image_list:
+                    yield _sse_json({'type': 'retrieval_progress', 'phase': 'complete', 'message': '检索完成，正在整理上下文...'})
+                _log_chat_trace(
+                    trace_id,
+                    trace_started_at,
+                    "context_ready",
+                    context_chars=len(context),
+                    citations=len(retrieval_meta.get("citations") or []),
+                    structured=bool(retrieval_meta.get("citations")) and not _is_paragraph_fallback(retrieval_meta.get("citations")),
+                )
 
                 answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
                 system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
@@ -2142,11 +2565,27 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
             if web_search_sources:
                 yield f"data: {json.dumps({'type': 'web_search', 'sources': web_search_sources}, ensure_ascii=False)}\n\n"
-            if not use_agent and not image_list:
-                yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'complete', 'message': '检索完成'}, ensure_ascii=False)}\n\n"
             # 使用 _buffered_stream 包装流式输出，合并高频小 chunk 减少 SSE 事件频率
             adjusted_stream_max_tokens = _adjust_max_tokens(
                 request.max_tokens, request.answer_detail, has_structured_citations,
+            )
+            yield _sse_json({
+                'type': 'retrieval_progress',
+                'phase': 'llm_waiting',
+                'message': (
+                    '上下文准备完成，正在等待模型开始思考并生成回答...'
+                    if request.enable_thinking
+                    else '上下文准备完成，正在等待模型开始生成回答...'
+                ),
+            })
+            _log_chat_trace(
+                trace_id,
+                trace_started_at,
+                "llm_stream_start",
+                provider=request.api_provider,
+                model=request.model,
+                max_tokens=adjusted_stream_max_tokens,
+                structured_citations=has_structured_citations,
             )
             raw_stream = call_ai_api_stream(
                 messages, request.api_key, request.model, request.api_provider,
@@ -2162,6 +2601,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
             visible_answer_text = ""
             content_progress_sent = False
             qa_score_val = None
+            first_reasoning_logged = False
+            first_content_logged = False
+            total_reasoning_chars = 0
             # D1：并行引文匹配（仿 kotaemon）
             # CITATION LIST 完整后立即在后台线程启动匹配，与 FINAL ANSWER 流式输出并行
             _citation_match_thread: Optional[threading.Thread] = None
@@ -2182,11 +2624,35 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 passthrough=True,
             ):
                 if chunk.get("error"):
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "llm_stream_error",
+                        error=chunk.get("error"),
+                    )
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
                     break
 
                 content = chunk.get('content', '')
                 reasoning = chunk.get('reasoning_content', '')
+                total_reasoning_chars += len(reasoning)
+
+                if reasoning and not first_reasoning_logged:
+                    first_reasoning_logged = True
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "llm_first_reasoning_chunk",
+                        chars=len(reasoning),
+                    )
+                if content and not first_content_logged:
+                    first_content_logged = True
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "llm_first_content_chunk",
+                        chars=len(content),
+                    )
 
                 if chunk.get("done"):
                     qa_score_val = chunk.get('qa_score')
@@ -2260,6 +2726,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     }
                     if qa_score_val is not None:
                         chunk_data['qa_score'] = qa_score_val
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "stream_done",
+                        answer_chars=len(final_answer_text),
+                        reasoning_chars=total_reasoning_chars,
+                        citations=len(send_meta.get("citations") or []),
+                        qa_score=qa_score_val,
+                    )
                     yield f"data: {json.dumps(chunk_data)}\n\n"
 
                     if use_memory: threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
@@ -2363,6 +2838,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n"
         except Exception as e:
+            _log_chat_trace(
+                trace_id,
+                trace_started_at,
+                "stream_exception",
+                error=str(e),
+            )
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(

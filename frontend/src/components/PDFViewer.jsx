@@ -607,7 +607,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         <div className={`relative h-full flex flex-col rounded-2xl overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
             {/* Toolbar Area */}
             <div className={`pt-4 px-4 pb-2 z-10 transition-colors duration-200 flex-shrink-0 ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
-                <div className={`flex items-center justify-between border shadow-sm rounded-xl px-4 py-2 transition-colors duration-200 ${darkMode ? 'bg-[#2a2d31] border-white/10 text-gray-200' : 'bg-white border-gray-200 text-gray-600'}`}>
+                <div className={`flex items-center justify-between border shadow-sm rounded-2xl px-4 py-2 transition-colors duration-200 ${darkMode ? 'bg-[#2a2d31] border-white/10 text-gray-200' : 'bg-white border-gray-200 text-gray-600'}`}>
                     {/* Left Controls */}
                     <div className="flex items-center gap-1">
                         {onToggleSidebar && (
