@@ -131,9 +131,9 @@ const OverviewPanel = ({
             <Image className="w-5 h-5 text-gray-700" strokeWidth={2} />
             <h3 className="text-lg font-semibold text-gray-900">关键图表解读</h3>
           </div>
-          {(overview.figure_meta?.source === 'mineru' || overview.figure_meta?.source === 'pdf_native') && (
+          {(overview.figure_meta?.source === 'mineru' || overview.figure_meta?.source === 'pdf_native' || overview.figure_meta?.source === 'caption_only') && (
             <span className="bg-[#EEF2FF] text-[#4F46E5] px-3 py-1 rounded-full text-xs font-semibold tracking-wide">
-              {overview.figure_meta?.source === 'mineru' ? 'MinerU 增强' : 'PDF 原生'}
+              {overview.figure_meta?.source === 'mineru' ? 'MinerU 增强' : overview.figure_meta?.source === 'caption_only' ? '矢量图识别' : 'PDF 原生'}
             </span>
           )}
         </div>
@@ -158,7 +158,7 @@ const OverviewPanel = ({
           </div>
         ) : (
           <p className="text-gray-400 text-[15px]">
-            暂无图表解读（可通过切换到「详细」模式获取）
+            暂无图表解读（重新生成速览可能获取）
           </p>
         )}
       </div>

@@ -92,6 +92,11 @@ async def get_models():
     # 这些模型不在 EMBEDDING_MODELS 中，但前端需要通过 /models API 获取
     CHAT_MODELS = {
         "openai": {
+            "gpt-5.2": "GPT-5.2",
+            "gpt-5.1": "GPT-5.1",
+            "gpt-5": "GPT-5",
+            "gpt-5-mini": "GPT-5 mini",
+            "gpt-5-nano": "GPT-5 nano",
             "gpt-4.1": "GPT-4.1",
             "gpt-4.1-mini": "GPT-4.1 mini",
             "o3": "OpenAI o3",
@@ -100,6 +105,7 @@ async def get_models():
             "gpt-4o-mini": "GPT-4o mini",
         },
         "aliyun": {
+            "qwen3.5-flash": "Qwen3.5-Flash",
             "qwen3-max": "Qwen3-Max",
             "qwen3.5-plus": "Qwen3.5-Plus",
             "qwen-plus": "Qwen-Plus",
@@ -110,8 +116,10 @@ async def get_models():
             "deepseek-reasoner": "DeepSeek R1",
         },
         "moonshot": {
-            "kimi-k2.5": "Kimi K2.5",
-            "kimi-k2": "Kimi K2",
+            "kimi-latest": "Kimi Latest",
+            "kimi-thinking-preview": "Kimi Thinking Preview",
+            "kimi-k2-0905-preview": "Kimi K2 0905 Preview",
+            "kimi-k2-turbo-preview": "Kimi K2 Turbo Preview",
             "moonshot-v1-128k": "Moonshot v1 128K",
             "moonshot-v1-32k": "Moonshot v1 32K",
             "moonshot-v1-8k": "Moonshot v1 8K",
@@ -119,39 +127,51 @@ async def get_models():
         "zhipu": {
             "glm-5": "GLM-5",
             "glm-4.7": "GLM-4.7",
+            "glm-4.6": "GLM-4.6",
             "glm-4.5": "GLM-4.5",
             "glm-4.5-air": "GLM-4.5-Air",
-            "glm-4-air": "GLM-4-Air",
+            "glm-4-air-250414": "GLM-4-Air 250414",
         },
         "minimax": {
-            "MiniMax-Text-01": "MiniMax Text-01",
-            "abab6.5s-chat": "abab6.5s-chat",
+            "MiniMax-M2.5": "MiniMax M2.5",
+            "MiniMax-M2.1": "MiniMax M2.1",
+            "MiniMax-M2": "MiniMax M2",
         },
         "silicon": {
             "deepseek-ai/DeepSeek-R1": "DeepSeek R1 (SiliconFlow)",
-            "deepseek-ai/DeepSeek-V3": "DeepSeek V3 (SiliconFlow)",
-            "Qwen/Qwen3-235B-A22B": "Qwen3-235B (SiliconFlow)",
+            "deepseek-ai/DeepSeek-V3.2": "DeepSeek V3.2 (SiliconFlow)",
+            "Qwen/Qwen3-32B": "Qwen3-32B (SiliconFlow)",
             "Qwen/Qwen2.5-7B-Instruct": "Qwen2.5 7B (SiliconFlow)",
         },
         "anthropic": {
-            "claude-opus-4-6": "Claude Opus 4.6",
-            "claude-sonnet-4-6": "Claude Sonnet 4.6",
-            "claude-opus-4-5": "Claude Opus 4.5",
-            "claude-sonnet-4-5": "Claude Sonnet 4.5",
-            "claude-haiku-3-5": "Claude Haiku 3.5",
+            "claude-opus-4-1-20250805": "Claude Opus 4.1",
+            "claude-opus-4-20250514": "Claude Opus 4",
+            "claude-sonnet-4-20250514": "Claude Sonnet 4",
+            "claude-3-7-sonnet-20250219": "Claude Sonnet 3.7",
+            "claude-3-5-haiku-20241022": "Claude Haiku 3.5",
+            "claude-3-haiku-20240307": "Claude Haiku 3",
         },
         "gemini": {
-            "gemini-3-pro": "Gemini 3 Pro",
-            "gemini-3-flash": "Gemini 3 Flash",
+            "gemini-3-pro-preview": "Gemini 3 Pro Preview",
+            "gemini-3-flash-preview": "Gemini 3 Flash Preview",
             "gemini-2.5-pro": "Gemini 2.5 Pro",
             "gemini-2.5-flash": "Gemini 2.5 Flash",
             "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite",
         },
         "grok": {
+            "grok-4.20-beta-latest-non-reasoning": "Grok 4.20 Beta",
             "grok-4": "Grok 4",
-            "grok-4-1-fast": "Grok 4.1 Fast",
+            "grok-4-1-fast-reasoning": "Grok 4.1 Fast",
             "grok-3": "Grok 3",
             "grok-3-mini": "Grok 3 Mini",
+        },
+        "doubao": {
+            "doubao-seed-2-0-pro-260215": "Doubao Seed 2.0 Pro",
+            "doubao-seed-2-0-lite-260215": "Doubao Seed 2.0 Lite",
+            "doubao-seed-2-0-mini-260215": "Doubao Seed 2.0 Mini",
+            "doubao-seed-code-preview-latest": "Doubao Seed Code Preview",
+            "doubao-seed-1-8": "Doubao Seed 1.8",
+            "doubao-1-5-pro-32k-250115": "Doubao 1.5 Pro 32K",
         },
     }
 
@@ -377,18 +397,18 @@ async def fetch_provider_models(request: ModelFetchRequest):
         # Anthropic Claude：使用非 OpenAI 格式 API，返回预设模型列表
         if request.providerId == 'anthropic':
             ANTHROPIC_PRESET_MODELS = [
-                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "type": "chat",
-                 "metadata": {"description": "Anthropic 旗舰模型，200K 上下文，最强编程与推理，支持 1M 上下文 (beta)"}},
-                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "type": "chat",
-                 "metadata": {"description": "Anthropic 最新均衡模型，Opus 级别推理能力，200K 上下文，同等价格"}},
-                {"id": "claude-opus-4-5", "name": "Claude Opus 4.5", "type": "chat",
-                 "metadata": {"description": "Claude Opus 系列前代，超强编程、Agent 工作流"}},
-                {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "type": "chat",
-                 "metadata": {"description": "Claude 均衡前代版本，高性价比"}},
-                {"id": "claude-haiku-3-5", "name": "Claude Haiku 3.5", "type": "chat",
-                 "metadata": {"description": "最快速轻量 Claude 模型，低成本高并发"}},
-                {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "type": "chat",
-                 "metadata": {"description": "Claude 最新轻量级模型，低成本高并发，支持视觉输入"}},
+                {"id": "claude-opus-4-1-20250805", "name": "Claude Opus 4.1", "type": "chat",
+                 "metadata": {"description": "Claude 旗舰模型，最强编程与推理，支持视觉输入"}},
+                {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "type": "chat",
+                 "metadata": {"description": "Claude 4 旗舰版本，强编程与推理，支持视觉输入"}},
+                {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "type": "chat",
+                 "metadata": {"description": "Anthropic 均衡旗舰，200K 上下文，适合编码与通用推理"}},
+                {"id": "claude-3-7-sonnet-20250219", "name": "Claude Sonnet 3.7", "type": "chat",
+                 "metadata": {"description": "Claude 3.7 版本，兼顾推理和效率"}},
+                {"id": "claude-3-5-haiku-20241022", "name": "Claude Haiku 3.5", "type": "chat",
+                 "metadata": {"description": "Claude 轻量版本，低成本高并发，支持视觉输入"}},
+                {"id": "claude-3-haiku-20240307", "name": "Claude Haiku 3", "type": "chat",
+                 "metadata": {"description": "Claude 轻量基础版本，适合简单任务"}},
             ]
             return {
                 "models": [
@@ -413,12 +433,10 @@ async def fetch_provider_models(request: ModelFetchRequest):
         # Google Gemini：返回预设模型列表
         if request.providerId == 'gemini':
             GEMINI_PRESET_MODELS = [
-                {"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro", "type": "chat",
-                 "metadata": {"description": "Google 最强旗舰，Gemini 3 系列最新迭代，超越 Gemini 3 Pro 全面性能"}},
-                {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "type": "chat",
-                 "metadata": {"description": "Gemini 3.1 Pro 预览版，自定义工具调用优化"}},
-                {"id": "gemini-3-flash", "name": "Gemini 3 Flash", "type": "chat",
-                 "metadata": {"description": "Google 最新多模态理解模型，强编程与推理 (preview)"}},
+                {"id": "gemini-3-pro-preview", "name": "Gemini 3 Pro Preview", "type": "chat",
+                 "metadata": {"description": "Google Gemini 3 旗舰预览版，支持思考与多模态"}},
+                {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "type": "chat",
+                 "metadata": {"description": "Google Gemini 3 快速预览版，强调速度与多模态"}},
                 {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "type": "chat",
                  "metadata": {"description": "Gemini 旗舰稳定版，1M 上下文，自适应思考"}},
                 {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "type": "chat",
@@ -460,16 +478,17 @@ async def fetch_provider_models(request: ModelFetchRequest):
             }
 
         # 字节跳动豆包：火山引擎 Ark API 不提供 GET /models 端点，返回预设模型列表
+        # 注意：2.0 系列的官方 model id 带版本号，旧短 id 会在调用时 404
         if request.providerId == 'doubao':
             DOUBAO_PRESET_MODELS = [
-                {"id": "doubao-seed-2-0-pro", "name": "Doubao Seed 2.0 Pro", "type": "chat",
-                 "metadata": {"description": "豆包 2.0 旗舰模型，对标 GPT-5.2 / Gemini 3 Pro，支持长链路推理与多模态"}},
+                {"id": "doubao-seed-2-0-pro-260215", "name": "Doubao Seed 2.0 Pro", "type": "chat",
+                 "metadata": {"description": "豆包 2.0 旗舰模型，对标 GPT-5.2 / Gemini 3 Pro Preview，支持长链路推理与多模态"}},
                 {"id": "doubao-seed-2-0-lite-260215", "name": "Doubao Seed 2.0 Lite", "type": "chat",
                  "metadata": {"description": "豆包 2.0 Lite，均衡性能与成本，能力超越上一代豆包 1.8"}},
                 {"id": "doubao-seed-2-0-mini-260215", "name": "Doubao Seed 2.0 Mini", "type": "chat",
                  "metadata": {"description": "豆包 2.0 Mini，低延迟高并发，适合成本敏感场景"}},
-                {"id": "doubao-seed-2-0-code-preview-260215", "name": "Doubao Seed 2.0 Code", "type": "chat",
-                 "metadata": {"description": "豆包 2.0 编程专项模型，深度优化 Agentic Coding 场景"}},
+                {"id": "doubao-seed-code-preview-latest", "name": "Doubao Seed Code Preview", "type": "chat",
+                 "metadata": {"description": "豆包编程专项模型，深度优化 Agentic Coding 场景"}},
                 {"id": "doubao-seed-1-8", "name": "Doubao Seed 1.8", "type": "chat",
                  "metadata": {"description": "豆包 1.8，上一代主力模型，多模态 Agent 场景优化"}},
                 {"id": "doubao-1-5-pro-32k-250115", "name": "Doubao 1.5 Pro 32K", "type": "chat",

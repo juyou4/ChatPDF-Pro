@@ -137,17 +137,14 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^(grok-vision|grok-4)', lower_id):
         # xAI Grok 视觉模型和 Grok-4 系列
         tags.append("vision")
-    elif re.search(r'^abab6\.5', lower_id):
-        # MiniMax abab6.5 系列支持视觉
-        tags.append("vision")
     elif re.search(r'^(doubao-1\.5-pro|doubao-seed)', lower_id):
         # 字节跳动豆包：1.5-Pro 及全部 Seed 系列（Seed 均为多模态）
         tags.append("vision")
     elif re.search(r'^moonshot-v1', lower_id):
         # Moonshot moonshot-v1 系列支持图片输入
         tags.append("vision")
-    elif re.search(r'kimi-k2\.5|\bk2\.5\b', lower_id):
-        # Kimi K2.5 原生多模态架构，支持视觉输入
+    elif re.search(r'kimi-(latest|k2)', lower_id):
+        # Kimi 最新系 / K2 系列支持视觉输入
         tags.append("vision")
 
     # 中文优化标签
@@ -157,7 +154,7 @@ def infer_model_tags(model_id: str) -> list[str]:
     # 推理能力标签 — 覆盖各家思考模型
     # DeepSeek: deepseek-reasoner, *-thinking
     # 智谱: glm-4.5/4.6/4.7 系列（均支持 thinking 参数）
-    # Moonshot/Kimi: kimi-k2-thinking 等 thinking 变体
+    # Moonshot/Kimi: kimi-thinking-preview 等 thinking 变体
     # MiniMax: minimax-m2, m2.1（原生支持 reasoning_split）
     # OpenAI: o1, o3, o4, gpt-4.5, gpt-5 系列（reasoning_effort）
     # Anthropic: claude-*-thinking
@@ -184,8 +181,14 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^grok-[34]', lower_id):
         # xAI Grok 3/4 系列支持推理能力
         tags.append("reasoning")
-    elif re.search(r'kimi-k2\.5|\bk2\.5\b', lower_id):
-        # Kimi K2.5 支持 Thinking 推理模式
+    elif re.search(r'kimi-thinking-preview', lower_id):
+        # Kimi Thinking Preview 支持 Thinking 推理模式
+        tags.append("reasoning")
+    elif re.search(r'qwen3(\.5)?', lower_id):
+        # Qwen3 / Qwen3.5 系列支持推理
+        tags.append("reasoning")
+    elif re.search(r'minimax-m2', lower_id):
+        # MiniMax M2 系列原生支持思考
         tags.append("reasoning")
 
     return tags

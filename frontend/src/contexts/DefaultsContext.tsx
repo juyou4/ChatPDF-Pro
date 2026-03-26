@@ -26,6 +26,40 @@ const DEPRECATED_EMBEDDING_MODEL_ALIASES: Record<string, string> = {
     'embo-01': 'minimax-embedding-v2',
 }
 
+const DEPRECATED_ASSISTANT_MODEL_ALIASES: Record<string, string> = {
+    'gpt-5.4': 'gpt-5.2',
+    'gpt-5.4-pro': 'gpt-5.2',
+    'gpt-5.4-mini': 'gpt-5-mini',
+    'gpt-5.4-nano': 'gpt-5-nano',
+    'doubao-seed-2-0-pro': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-2.0-pro': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-2-0-lite': 'doubao-seed-2-0-lite-260215',
+    'doubao-seed-2.0-lite': 'doubao-seed-2-0-lite-260215',
+    'doubao-seed-2-0-mini': 'doubao-seed-2-0-mini-260215',
+    'doubao-seed-2.0-mini': 'doubao-seed-2-0-mini-260215',
+    'doubao-seed-2-0-code-preview-260215': 'doubao-seed-code-preview-latest',
+    'doubao-seed-2.0-code-preview': 'doubao-seed-code-preview-latest',
+    'doubao-seed-code-preview': 'doubao-seed-code-preview-latest',
+    'claude-haiku-4-5': 'claude-3-5-haiku-20241022',
+    'claude-opus-4-6': 'claude-opus-4-1-20250805',
+    'claude-sonnet-4-6': 'claude-sonnet-4-20250514',
+    'claude-opus-4-5': 'claude-opus-4-20250514',
+    'claude-sonnet-4-5': 'claude-sonnet-4-20250514',
+    'claude-haiku-3-5': 'claude-3-5-haiku-20241022',
+    'gemini-3.1-pro': 'gemini-3-pro-preview',
+    'gemini-3.1-pro-preview': 'gemini-3-pro-preview',
+    'gemini-3-flash': 'gemini-3-flash-preview',
+    'kimi-k2.5': 'kimi-thinking-preview',
+    'kimi-k2': 'kimi-k2-0905-preview',
+    'grok-4.20': 'grok-4.20-beta-latest-non-reasoning',
+    'grok-4-1-fast': 'grok-4-1-fast-reasoning',
+    'MiniMax-Text-01': 'MiniMax-M2.5',
+    'abab6.5s-chat': 'MiniMax-M2.1',
+    'glm-4-air': 'glm-4-air-250414',
+    'deepseek-ai/DeepSeek-V3': 'deepseek-ai/DeepSeek-V3.2',
+    'Qwen/Qwen3-235B-A22B': 'Qwen/Qwen3-32B',
+}
+
 /**
  * 初始默认配置
  * 使用系统推荐的模型作为默认值
@@ -46,6 +80,22 @@ const normalizeEmbeddingKey = (value?: string | null) => {
 
     // 旧格式只存模型ID时，默认加上 local 前缀
     return `local:${mapModelId(value)}`
+}
+
+export const normalizeAssistantKey = (value?: string | null) => {
+    if (!value) return undefined
+
+    const mapModelId = (modelId: string) =>
+        DEPRECATED_ASSISTANT_MODEL_ALIASES[modelId] || modelId
+
+    if (value.includes(':')) {
+        const [providerId, ...rest] = value.split(':')
+        const modelId = rest.join(':')
+        if (!modelId) return value
+        return `${providerId}:${mapModelId(modelId)}`
+    }
+
+    return mapModelId(value)
 }
 
 const INITIAL_DEFAULTS: DefaultModels = {
@@ -75,7 +125,7 @@ export function migrateDefaults(oldData: string): DefaultModels | null {
             hasUserData = true
         }
         if (parsed.assistantModel) {
-            migrated.assistantModel = parsed.assistantModel
+            migrated.assistantModel = normalizeAssistantKey(parsed.assistantModel) || INITIAL_DEFAULTS.assistantModel
             hasUserData = true
         }
         if (parsed.rerankModel) {
@@ -119,7 +169,8 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
                 console.log('✅ Loaded default models (v' + CONFIG_VERSION + ')')
                 return {
                     ...parsed,
-                    embeddingModel: normalizeEmbeddingKey(parsed.embeddingModel) || INITIAL_DEFAULTS.embeddingModel
+                    embeddingModel: normalizeEmbeddingKey(parsed.embeddingModel) || INITIAL_DEFAULTS.embeddingModel,
+                    assistantModel: normalizeAssistantKey(parsed.assistantModel) || INITIAL_DEFAULTS.assistantModel,
                 }
             } catch (error) {
                 console.warn('Failed to parse saved default models')
@@ -137,6 +188,7 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
             console.log('📦 Migrating old default models configuration')
             return {
                 embeddingModel: normalizeEmbeddingKey(oldEmbeddingModel) || INITIAL_DEFAULTS.embeddingModel,
+                assistantModel: INITIAL_DEFAULTS.assistantModel,
                 rerankModel: oldRerankModel || undefined
             }
         }
@@ -158,7 +210,9 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
             ...prev,
             [type]: type === 'embeddingModel'
                 ? normalizeEmbeddingKey(modelId) || INITIAL_DEFAULTS.embeddingModel
-                : modelId || undefined
+                : type === 'assistantModel'
+                    ? normalizeAssistantKey(modelId) || INITIAL_DEFAULTS.assistantModel
+                    : modelId || undefined
         }))
     }
 

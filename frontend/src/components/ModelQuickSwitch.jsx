@@ -81,12 +81,11 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     'zhipu',     // GLM-4.5+ 支持 thinking 参数
     'openai',    // GPT-5/o3/o4 支持 reasoning_effort
     'minimax',   // M2 系列支持 reasoning_split
-    'moonshot',  // kimi-k2-thinking 等自动输出
+    'moonshot',  // Kimi 系列支持思考参数 / 思维链
   ])
 
   // 原生推理模型自动思考的 provider（这些 provider 的推理模型无需额外参数，始终输出思考内容）
   const ALWAYS_THINKING_PROVIDERS = new Set([
-    'moonshot',  // Kimi 思考模型自动输出 reasoning_content
     'doubao',    // 豆包 Seed 系列自动思考
   ])
 
@@ -100,11 +99,12 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     const nativeReasoningIds = new Set([
       'o3', 'o4-mini', 'o3-mini', 'o1', 'o1-mini',  // OpenAI 推理系列
       'deepseek-reasoner',                             // DeepSeek R1
-      'grok-4', 'grok-4-1-fast', 'grok-3', 'grok-3-mini',  // Grok 推理系列
+      'kimi-thinking-preview',                         // Kimi Thinking Preview
+      'grok-4', 'grok-4-1-fast-reasoning', 'grok-3', 'grok-3-mini',  // Grok 推理系列
     ])
     if (nativeReasoningIds.has(currentModel.id)) return true
     // 硅基流动托管的推理模型
-    if (currentModel.id.includes('DeepSeek-R1') || currentModel.id.includes('Qwen3-235B')) return true
+    if (currentModel.id.includes('DeepSeek-R1') || currentModel.id.includes('Qwen3')) return true
     return false
   }, [currentModel, currentProviderId])
 

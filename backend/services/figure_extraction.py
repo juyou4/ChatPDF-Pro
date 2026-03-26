@@ -14,7 +14,7 @@ from typing import List, Optional
 
 import fitz
 
-from schemas.figure_schema import LogicalFigureSchema, FigureSource
+from schemas.figure_schema import LogicalFigureSchema, FigureSource, FigureBlock
 from services.figure_adapter import FigureAdapterFactory
 from services.figure_builder import build_logical_figures, select_top_figures
 
@@ -73,9 +73,9 @@ def build_logical_figures_for_overview(
     images = doc_data.get("images", [])
     figures = doc_data.get("figures", [])  # 上传阶段提取的 figure 标题
 
-    # 如果没有图片，直接返回空
-    if not images:
-        logger.info(f"[FigureExtraction] No images found for doc {doc_id}")
+    # 如果没有图片且没有 figure 标题，直接返回空
+    if not images and not figures:
+        logger.info(f"[FigureExtraction] No images and no figures found for doc {doc_id}")
         _update_status(doc_data, "done", provider="none", count=0)
         return []
 
@@ -128,8 +128,8 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] MinerU Adapter failed: {e}")
             fallback_used = True
 
-    # 4.2 如果没有 MinerU 结果，使用 PDF Native Adapter
-    if not adapter_results and figures:
+    # 4.2 如果没有 MinerU 结果，使用 PDF Native Adapter（需要光栅图片做空间匹配）
+    if not adapter_results and figures and images:
         try:
             pdf_adapter = FigureAdapterFactory.get_adapter(FigureSource.PDF_NATIVE)
             pdf_blocks = pdf_adapter.parse(
@@ -146,7 +146,24 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] PDF Native Adapter failed: {e}")
             fallback_used = True
 
-    # 4.3 Fallback: 使用图片列表
+    # 4.3 Caption-only fallback: 矢量图 PDF 没有光栅图片但有 figure 标题
+    if not adapter_results and not images and figures:
+        try:
+            caption_blocks = _build_figures_from_captions(
+                figures, page_width, page_height
+            )
+            if caption_blocks:
+                adapter_results.extend(caption_blocks)
+                source = "caption_only"
+                logger.info(
+                    f"[FigureExtraction] Caption-only fallback: "
+                    f"got {len(caption_blocks)} blocks from {len(figures)} captions"
+                )
+        except Exception as e:
+            logger.warning(f"[FigureExtraction] Caption-only fallback failed: {e}")
+            fallback_used = True
+
+    # 4.4 Fallback: 使用图片列表
     if not adapter_results and images:
         try:
             fallback_adapter = FigureAdapterFactory.get_adapter(FigureSource.FALLBACK)
@@ -221,6 +238,94 @@ def build_logical_figures_for_overview(
         pdf_doc.close()
 
     return selected
+
+
+def _build_figures_from_captions(
+    figures: list,
+    page_width: float,
+    page_height: float,
+) -> List[FigureBlock]:
+    """从 figure 标题（caption）构建 FigureBlock，用于矢量图 PDF。
+
+    当 PDF 没有嵌入光栅图片（常见于 LaTeX TikZ/PGF 绘制的论文）时，
+    利用已检测到的 caption bbox 推断 figure body 区域。
+    策略：figure 主体在 caption 上方，宽度取页面左右 4% 边距内。
+    """
+
+    blocks: List[FigureBlock] = []
+
+    # 按页分组并排序，以便计算相邻 caption 间距
+    page_groups: dict = {}
+    for fig in figures:
+        p = fig.get("page", 1)
+        page_groups.setdefault(p, []).append(fig)
+
+    for page_num, page_figs in page_groups.items():
+        # 按 caption y 坐标排序
+        page_figs.sort(key=lambda f: (f.get("caption_bbox") or f.get("bbox") or [0, 0, 0, 0])[1])
+
+        for i, fig in enumerate(page_figs):
+            caption_bbox = fig.get("caption_bbox") or fig.get("bbox")
+            if not caption_bbox or len(caption_bbox) != 4:
+                continue
+
+            caption_y0 = caption_bbox[1]
+
+            # 估算 body 区域上边界
+            if i > 0:
+                prev_bbox = page_figs[i - 1].get("caption_bbox") or page_figs[i - 1].get("bbox") or [0, 0, 0, 0]
+                # 从上一个 caption 底部开始
+                body_top = max(0.0, prev_bbox[3] + 6.0)
+            else:
+                # 第一个 figure：向上回溯页面 35% 或 280pt
+                default_height = min(page_height * 0.35, 280.0)
+                body_top = max(0.0, caption_y0 - default_height)
+
+            body_bottom = max(body_top + 1.0, caption_y0 - 4.0)
+            if body_bottom <= body_top:
+                continue
+
+            # 保证最小高度
+            min_height = min(page_height, max(page_height * 0.16, 120.0))
+            if body_bottom - body_top < min_height:
+                body_top = max(0.0, body_bottom - min_height)
+
+            body_bbox = [
+                max(0.0, page_width * 0.04),
+                body_top,
+                min(page_width, page_width * 0.96),
+                body_bottom,
+            ]
+
+            # full_bbox = body + caption
+            full_bbox = [
+                min(body_bbox[0], caption_bbox[0]),
+                min(body_bbox[1], caption_bbox[1]),
+                max(body_bbox[2], caption_bbox[2]),
+                max(body_bbox[3], caption_bbox[3]),
+            ]
+
+            block = FigureBlock(
+                figure_id=fig.get("figure_id", f"caption_fig_p{page_num}_{i}"),
+                page_idx=page_num - 1,  # 转为 0-indexed
+                figure_index=fig.get("display_label") or fig.get("label", ""),
+                caption_text=fig.get("caption", ""),
+                raw_bboxes=[body_bbox],
+                body_bbox_page_pts=body_bbox,
+                full_bbox_page_pts=full_bbox,
+                source="caption_only",
+                confidence=0.5,
+                source_metadata={
+                    "adapter": "caption_only",
+                    "caption_bbox": caption_bbox,
+                    "page_width": page_width,
+                    "page_height": page_height,
+                },
+            )
+            blocks.append(block)
+
+    logger.info(f"[FigureExtraction] Built {len(blocks)} caption-only figure blocks")
+    return blocks
 
 
 def _update_status(

@@ -89,7 +89,7 @@ export function detectModelTags(modelId: string): string[] {
         /claude-(3|opus|sonnet|haiku)/.test(id) ||
         /gemini/.test(id) ||
         /grok-[34]/.test(id) ||
-        /kimi-k2\.5|k2\.5/.test(id) ||
+        /kimi-(latest|k2)/.test(id) ||
         /doubao-seed/.test(id) ||
         /moonshot-v1/.test(id) ||
         /qwen3\.5/.test(id)
@@ -108,7 +108,10 @@ export function detectModelTags(modelId: string): string[] {
         /claude-(opus|sonnet)-4/.test(id) ||
         /glm-[45]\.\d|glm-5/.test(id) ||
         /doubao-seed-2/.test(id) ||
-        /kimi-k2\.5|k2\.5/.test(id)
+        /kimi-thinking-preview/.test(id) ||
+        /kimi-k2\.5|k2\.5/.test(id) ||
+        /qwen3(\.5)?/.test(id) ||
+        /minimax-m2/.test(id)
     if (hasReasoning) tags.push('reasoning')
 
     return tags
