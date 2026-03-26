@@ -946,7 +946,7 @@ const ChatPDF = () => {
         )}
 
         {/* 内容区域 */}
-        <div className="flex-1 flex overflow-hidden px-8 pb-8 gap-4 pt-2">
+        <div className="flex-1 flex overflow-hidden px-8 pb-6 gap-4 pt-6">
           {/* 左侧：PDF 预览 */}
           {docId ? (
             <motion.div
