@@ -104,6 +104,12 @@ A self-contained Windows desktop application built with Electron. The Python bac
 - **LLM Query Rewriting** - Resolves co-references across multi-turn dialogue ("it", "this method"); long queries skip rewriting entirely.
 - **Answer Critic** - After the final answer, `cheap_model` cross-checks the response against the retrieved snippets; hallucinations are surfaced as a red warning banner (flag-gated).
 
+### One-Click Overview Panel
+- **Five structured cards** - As soon as a PDF is uploaded, the overview pane auto-generates *Abstract Summary · Terminology · Speed-Read · Key Figure Analysis · Paper Summary*. It shares the same document context with the Chat tab.
+- **Tri-source figure extraction** - Prefers **MinerU** layout analysis for high-quality images; falls back to the **PDF-native** image layer when MinerU is unavailable; vector figures use a **caption-only** path that locates and crops the figure from the caption coordinates.
+- **AI figure commentary** - Every extracted figure is run through a vision model to produce an explanation that goes beyond the original caption, instead of just showing the raw picture.
+- **Adjustable depth** - A three-level `depth` switch (shallow / medium / deep) lets you trade tokens for richer summaries.
+
 ### AI Chat Capabilities
 - **Multi-Model Support** - Native integration with OpenAI, Anthropic, Google Gemini, Grok, and local Ollama models.
 - **Precise Citations** - Automatically generates [1], [2] inline citations. Clicking a citation highlights the source in the PDF view and scrolls smoothly to the exact page.
