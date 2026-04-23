@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 from pydantic import Field, field_validator
 try:
     from pydantic_settings import BaseSettings
@@ -145,12 +146,39 @@ class AppSettings(BaseSettings):
         description="是否使用 jieba 分词增强 BM25 中文检索"
     )
 
+    # 是否启用 BM25 同义词扩展（查询时自动扩展同义词，提升召回率）
+    bm25_expand_synonyms: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("bm25_expand_synonyms", "CHATPDF_BM25_EXPAND_SYNONYMS"),
+        description="是否启用 BM25 同义词扩展"
+    )
+    # 自定义同义词词典路径（JSON 格式，可选）
+    bm25_synonym_dict_path: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("bm25_synonym_dict_path", "CHATPDF_BM25_SYNONYM_DICT_PATH"),
+        description="自定义同义词词典文件路径（JSON 格式）"
+    )
+
     # ==================== 上下文扩展配置 ====================
     # 命中 chunk 邻居扩展数（前后各扩展 N 个 chunk）
     num_expand_context_chunk: int = Field(
         default=1,
         validation_alias=AliasChoices("num_expand_context_chunk", "CHATPDF_NUM_EXPAND_CONTEXT_CHUNK"),
         description="命中 chunk 前后各扩展的邻居 chunk 数，0=不扩展"
+    )
+
+    # ==================== 双模型策略配置 ====================
+    # 辅助模型：用于查询改写、问题分解、追问生成等非核心 LLM 任务
+    # 留空则使用用户选择的主模型（与之前行为一致）
+    cheap_model: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("cheap_model", "CHATPDF_CHEAP_MODEL"),
+        description="辅助模型名称（如 gpt-4o-mini），用于非核心 LLM 任务，留空使用主模型"
+    )
+    cheap_model_provider: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("cheap_model_provider", "CHATPDF_CHEAP_MODEL_PROVIDER"),
+        description="辅助模型提供商（如 openai），留空使用主模型提供商"
     )
 
     # ==================== 查询改写配置 ====================
@@ -165,6 +193,29 @@ class AppSettings(BaseSettings):
         default=150,
         validation_alias=AliasChoices("query_rewrite_trigger_length", "CHATPDF_QUERY_REWRITE_TRIGGER_LENGTH"),
         description="触发 LLM 改写的最大查询长度"
+    )
+
+    # ==================== 答案自审配置 ====================
+    # 是否启用答案自审（用 cheap model 检测幻觉，默认关闭以减少延迟）
+    enable_answer_critic: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("enable_answer_critic", "CHATPDF_ENABLE_ANSWER_CRITIC"),
+        description="是否启用答案自审（检测幻觉，增加延迟）"
+    )
+
+    # ==================== numeric_table 专项检索增强 ====================
+    # 是否启用 numeric_table 专项检索增强（针对表格数值比较类查询，如
+    # "第二好的方法"、"Table 7 | DiffuLT | Few=29.7"）
+    # 关闭后：不做 numeric_table hard gate / evidence slot / structured
+    # bundle 升级等专项处理，走通用主链路。用于 A/B 验证专项逻辑对通用
+    # 场景（纯文本、overview、非表格 extraction）是否存在退化影响。
+    enable_numeric_table_specialization: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_numeric_table_specialization",
+            "CHATPDF_ENABLE_NUMERIC_TABLE",
+        ),
+        description="是否启用 numeric_table 专项检索增强，关闭则走通用主链路"
     )
 
     # ==================== 流式输出缓冲配置 ====================

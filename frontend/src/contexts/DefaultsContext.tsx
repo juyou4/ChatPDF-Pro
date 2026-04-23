@@ -31,15 +31,18 @@ const DEPRECATED_ASSISTANT_MODEL_ALIASES: Record<string, string> = {
     'gpt-5.4-pro': 'gpt-5.2',
     'gpt-5.4-mini': 'gpt-5-mini',
     'gpt-5.4-nano': 'gpt-5-nano',
+    'Doubao-Seed-1.6-lite': 'doubao-seed-2-0-lite-260215',
+    'doubao-seed-1.6-lite': 'doubao-seed-2-0-lite-260215',
     'doubao-seed-2-0-pro': 'doubao-seed-2-0-pro-260215',
     'doubao-seed-2.0-pro': 'doubao-seed-2-0-pro-260215',
     'doubao-seed-2-0-lite': 'doubao-seed-2-0-lite-260215',
     'doubao-seed-2.0-lite': 'doubao-seed-2-0-lite-260215',
     'doubao-seed-2-0-mini': 'doubao-seed-2-0-mini-260215',
     'doubao-seed-2.0-mini': 'doubao-seed-2-0-mini-260215',
-    'doubao-seed-2-0-code-preview-260215': 'doubao-seed-code-preview-latest',
-    'doubao-seed-2.0-code-preview': 'doubao-seed-code-preview-latest',
-    'doubao-seed-code-preview': 'doubao-seed-code-preview-latest',
+    'doubao-seed-2-0-code-preview-260215': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-2.0-code-preview': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-code-preview': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-code-preview-latest': 'doubao-seed-2-0-pro-260215',
     'claude-haiku-4-5': 'claude-3-5-haiku-20241022',
     'claude-opus-4-6': 'claude-opus-4-1-20250805',
     'claude-sonnet-4-6': 'claude-sonnet-4-20250514',
@@ -86,7 +89,9 @@ export const normalizeAssistantKey = (value?: string | null) => {
     if (!value) return undefined
 
     const mapModelId = (modelId: string) =>
-        DEPRECATED_ASSISTANT_MODEL_ALIASES[modelId] || modelId
+        DEPRECATED_ASSISTANT_MODEL_ALIASES[modelId] ||
+        DEPRECATED_ASSISTANT_MODEL_ALIASES[modelId.toLowerCase()] ||
+        modelId
 
     if (value.includes(':')) {
         const [providerId, ...rest] = value.split(':')

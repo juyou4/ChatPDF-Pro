@@ -55,7 +55,61 @@ class QueryRewriter:
         '这段', '那段', '这里', '那里', '它',
     ]
 
-    def rewrite(self, query: str, selected_text: Optional[str] = None) -> str:
+    NUMERIC_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+        'many': ('many',),
+        'medium': ('medium', 'med.', 'med'),
+        'few': ('few', 'few-shot', 'tail'),
+        'all': ('all', 'overall', 'total'),
+        'fid': ('fid',),
+        'acc': ('acc', 'accuracy', 'acc.', '分类准确率', '准确率'),
+        'd_gen': ('d_gen', 'dgen'),
+    }
+    NUMERIC_COLUMN_PATTERNS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
+        (
+            re.compile(
+                r'(?:[Δ∆△]|delta)\s*acc(?:uracy)?\s*/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)'
+                r'|(?:平均)?每样本(?:性能)?(?:提升|增益)'
+                r'|average(?:\s+\w+){0,2}\s+per\s+sample'
+                r'|per\s+sample\s+(?:gain|improvement)',
+                re.IGNORECASE,
+            ),
+            ('ΔAcc/||D_gen||',),
+        ),
+        (re.compile(r'\bfid\b', re.IGNORECASE), ('FID',)),
+        (re.compile(r'(?:\|\||∥)\s*D\s*[_ ]?gen\s*(?:\|\||∥)', re.IGNORECASE), ('||D_gen||',)),
+        (re.compile(r'\bacc(?:uracy)?\b|分类准确率|准确率', re.IGNORECASE), ('Acc',)),
+        (re.compile(r'\bmany\b', re.IGNORECASE), ('Many',)),
+        (re.compile(r'\bmedium\b|\bmed\.?\b|中等|中尾', re.IGNORECASE), ('Medium', 'Med.')),
+        (re.compile(r'\bfew(?:-shot)?\b|尾类|少样本', re.IGNORECASE), ('Few',)),
+        (re.compile(r'\ball\b|overall|总体|整体|总准确率|总体准确率', re.IGNORECASE), ('All',)),
+    )
+    NUMERIC_COMPARISON_PATTERNS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
+        (
+            re.compile(r'第二好的方法|第二好|次优|次佳|second[- ]best|nearest competitor|runner[- ]up', re.IGNORECASE),
+            ('second-best', 'nearest competitor'),
+        ),
+        (
+            re.compile(r'提升|高多少|差多少|百分点|improv|gain|gap|delta', re.IGNORECASE),
+            ('improvement', 'percentage-point', 'delta'),
+        ),
+    )
+    _GENERIC_NUMERIC_STOPWORDS: set[str] = {
+        'table', 'tables', 'many', 'medium', 'med', 'few', 'few-shot', 'all',
+        'overall', 'accuracy', 'results', 'result', 'dataset', 'datasets',
+        'baseline', 'method', 'methods', 'metric', 'metrics', 'imagenet',
+        'cifar', 'places', 'table8', 'table1', 'table3', 'resnet',
+        'fid', 'acc', 'acc.', 'd_gen', 'dgen', 'deltaacc',
+        'flops', 'flop', 'runtime', 'latency', 'overhead', 'cost',
+        'inference', 'training', 'time', 'appendix', 'limitation',
+        'limitations',
+    }
+
+    def rewrite(
+        self,
+        query: str,
+        selected_text: Optional[str] = None,
+        evidence_need: Optional[list[str]] = None,
+    ) -> str:
         """改写查询
 
         处理流程：
@@ -87,6 +141,12 @@ class QueryRewriter:
             # 追加 selected_text 关键内容以增强检索
             if selected_text and selected_text.strip() and rewritten == query:
                 rewritten = self._augment_with_selected_text(rewritten, selected_text)
+
+            # 数值表格题使用更明确的检索模板，避免退化成通用摘要检索。
+            rewritten = self._apply_evidence_need_templates(
+                rewritten,
+                evidence_need=evidence_need,
+            )
 
             return rewritten
         except Exception as e:
@@ -166,6 +226,259 @@ class QueryRewriter:
             return query
         return f"{query} {key_content}"
 
+    def _apply_evidence_need_templates(
+        self,
+        query: str,
+        evidence_need: Optional[list[str]] = None,
+    ) -> str:
+        from services.query_analyzer import analyze_evidence_need
+
+        needs = set(evidence_need or analyze_evidence_need(query))
+        if 'numeric_table' not in needs:
+            return query
+        return self._rewrite_numeric_table_query(query)
+
+    def _rewrite_numeric_table_query(self, query: str) -> str:
+        if not query:
+            return query
+
+        normalized = query.lower()
+        guard_tokens = ('表格标题', '基线方法', 'comparison object', 'metric value', '列名别名', 'row anchor')
+        if any(token.lower() in normalized for token in guard_tokens):
+            return query
+
+        hints = self.extract_numeric_table_hints(query)
+        comparison_aliases = {value.lower() for value in hints.get("comparison", []) if value}
+        if (
+            {"second-best", "nearest competitor"} & comparison_aliases
+            and len(hints.get("methods", [])) <= 1
+        ):
+            return query
+
+        if self._is_numeric_table_cost_query(query):
+            hint_text = self.build_numeric_table_cost_hint_text(query)
+            return f"{query} {hint_text}".strip()
+
+        hint_text = self.build_numeric_table_hint_text(query)
+        return f"{query} {hint_text}".strip()
+
+    def build_numeric_table_hint_text(self, query: str) -> str:
+        hints = self.extract_numeric_table_hints(query)
+        parts = [
+            (
+                "表格标题 数据集 基线方法 比较对象 指标 数值 结果行列 列名别名 行名锚点 "
+                "table caption dataset baseline metric value comparison row anchor column alias"
+            )
+        ]
+        if hints["table_labels"]:
+            parts.append(f"表号 {' '.join(hints['table_labels'])}")
+        if hints["datasets"]:
+            parts.append(f"数据集 {' '.join(hints['datasets'])}")
+        if hints["backbones"]:
+            parts.append(f"骨干网络 {' '.join(hints['backbones'])}")
+        if hints["methods"]:
+            parts.append(f"方法名 {' '.join(hints['methods'])}")
+        if hints["columns"]:
+            parts.append(f"列名别名 {' '.join(hints['columns'])}")
+        if hints["comparison"]:
+            parts.append(f"比较关系 {' '.join(hints['comparison'])}")
+        return " ".join(parts).strip()
+
+    def build_numeric_table_cost_hint_text(self, query: str) -> str:
+        hints = self.extract_numeric_table_hints(query)
+        parts = [
+            (
+                "推理开销 额外FLOPs 推理时间 训练时间 成本 限制 讨论 附录 "
+                "inference overhead extra flops inference time training time cost "
+                "limitation discussion appendix no extra overhead"
+            )
+        ]
+        if hints["methods"]:
+            parts.append(f"方法名 {' '.join(hints['methods'])}")
+        if hints["datasets"]:
+            parts.append(f"数据集 {' '.join(hints['datasets'])}")
+        return " ".join(parts).strip()
+
+    def extract_numeric_table_hints(self, query: str) -> dict[str, list[str]]:
+        if not query:
+            return {
+                "table_labels": [],
+                "datasets": [],
+                "backbones": [],
+                "methods": [],
+                "columns": [],
+                "comparison": [],
+            }
+
+        table_labels = self._dedupe_preserve_order(self._extract_table_labels(query))
+        datasets, backbones, methods = self._extract_named_anchors(query)
+        columns = self._extract_column_aliases(query)
+        comparison = self._extract_comparison_aliases(query)
+        return {
+            "table_labels": table_labels,
+            "datasets": datasets,
+            "backbones": backbones,
+            "methods": methods,
+            "columns": columns,
+            "comparison": comparison,
+        }
+
+    def _extract_table_labels(self, query: str) -> list[str]:
+        labels: list[str] = []
+        for match in re.finditer(r'(?:table|表)\s*\.?\s*(\d+)', query, re.IGNORECASE):
+            number = match.group(1)
+            labels.extend([f"Table {number}", f"表 {number}"])
+        return labels
+
+    def _extract_column_aliases(self, query: str) -> list[str]:
+        aliases: list[str] = []
+        for pattern, values in self.NUMERIC_COLUMN_PATTERNS:
+            if pattern.search(query):
+                aliases.extend(values)
+        delta_metric_query = bool(re.search(
+            r'(?:[Δ∆△]|delta)\s*acc(?:uracy)?\s*/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)'
+            r'|(?:平均)?每样本(?:性能)?(?:提升|增益)'
+            r'|average(?:\s+\w+){0,2}\s+per\s+sample'
+            r'|per\s+sample\s+(?:gain|improvement)',
+            query,
+            re.IGNORECASE,
+        ))
+        quantity_query = bool(re.search(
+            r'数量|样本数|多少(?:个)?样本|sample\s+count|how\s+many|quantit(?:y|ies)',
+            query,
+            re.IGNORECASE,
+        ))
+        if delta_metric_query:
+            aliases = [alias for alias in aliases if alias != '||D_gen||' or quantity_query]
+            if 'ΔAcc/||D_gen||' not in aliases:
+                aliases.insert(0, 'ΔAcc/||D_gen||')
+        return self._dedupe_preserve_order(aliases)
+
+    def _extract_comparison_aliases(self, query: str) -> list[str]:
+        aliases: list[str] = []
+        for pattern, values in self.NUMERIC_COMPARISON_PATTERNS:
+            if pattern.search(query):
+                aliases.extend(values)
+        return self._dedupe_preserve_order(aliases)
+
+    def _is_numeric_table_cost_query(self, query: str) -> bool:
+        normalized = (query or "").lower()
+        if not normalized:
+            return False
+        return any(
+            token in normalized
+            for token in (
+                'flops',
+                '推理时间',
+                '开销',
+                'latency',
+                'runtime',
+                'overhead',
+                'cost',
+                'inference time',
+                'inference overhead',
+                'training time',
+                '训练时间',
+                '耗时',
+                'extra flops',
+            )
+        )
+
+    def _is_numeric_column_token(self, token: str) -> bool:
+        normalized = (token or "").lower().strip()
+        if not normalized:
+            return True
+
+        compact = normalized.replace(" ", "")
+        if compact in self._GENERIC_NUMERIC_STOPWORDS:
+            return True
+
+        alias_compacts = {
+            re.sub(r"\s+", "", alias).lower()
+            for aliases in self.NUMERIC_COLUMN_ALIASES.values()
+            for alias in aliases
+        }
+        if compact in alias_compacts:
+            return True
+
+        parts = [
+            part.strip(". ")
+            for part in re.split(r"[/|,&+]+", compact)
+            if part.strip(". ")
+        ]
+        numeric_columns = {
+            "all",
+            "overall",
+            "total",
+            "many",
+            "medium",
+            "med",
+            "few",
+            "few-shot",
+            "tail",
+            "fid",
+            "acc",
+            "accuracy",
+            "d_gen",
+            "dgen",
+            "deltaacc",
+        }
+        return len(parts) >= 1 and all(part in numeric_columns for part in parts)
+
+    def _extract_named_anchors(self, query: str) -> tuple[list[str], list[str], list[str]]:
+        datasets: list[str] = []
+        backbones: list[str] = []
+        methods: list[str] = []
+
+        for match in re.finditer(r'\b(?:ResNet|DenseNet|ViT|Swin|ConvNeXt)[-_ ]?\d+\b', query, re.IGNORECASE):
+            token = match.group(0).strip()
+            canonical = re.sub(r'\s+', '-', token)
+            backbones.append(canonical)
+
+        token_pattern = re.compile(
+            r'\b(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:\s*\(\d+\s*experts?\))?',
+            re.IGNORECASE,
+        )
+        for match in token_pattern.finditer(query):
+            token = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
+            if not token:
+                continue
+            lowered = token.lower()
+            compact = lowered.replace(" ", "")
+            if compact in self._GENERIC_NUMERIC_STOPWORDS:
+                continue
+            if self._is_numeric_column_token(token):
+                continue
+            if lowered.startswith("table"):
+                continue
+            if lowered in {"diffult", "crt", "adrw"} or re.search(r'[A-Z]', token):
+                if any(alias in lowered for alias in ("imagenet-lt", "cifar", "places-lt", "inaturalist", "inat")):
+                    datasets.append(token)
+                elif lowered.startswith(("resnet", "densenet", "vit", "swin", "convnext")):
+                    backbones.append(token)
+                else:
+                    methods.append(token)
+
+        return (
+            self._dedupe_preserve_order(datasets),
+            self._dedupe_preserve_order(backbones),
+            self._dedupe_preserve_order(methods),
+        )
+
+    def _dedupe_preserve_order(self, items: list[str]) -> list[str]:
+        seen = set()
+        ordered: list[str] = []
+        for item in items:
+            normalized = item.strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(normalized)
+        return ordered
+
     async def rewrite_with_llm(
         self,
         query: str,
@@ -175,6 +488,7 @@ class QueryRewriter:
         model: str = "",
         provider: str = "",
         endpoint: str = "",
+        evidence_need: Optional[list[str]] = None,
     ) -> str:
         """用 LLM 改写查询，支持多轮对话指代消解
 
@@ -194,7 +508,11 @@ class QueryRewriter:
             改写后的查询，失败时返回 regex 改写结果
         """
         # 第一步：先跑 regex 改写
-        rewritten = self.rewrite(query, selected_text=selected_text)
+        rewritten = self.rewrite(
+            query,
+            selected_text=selected_text,
+            evidence_need=evidence_need,
+        )
 
         if not api_key:
             return rewritten

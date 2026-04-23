@@ -1,5 +1,8 @@
 import asyncio
 from datetime import datetime
+from pathlib import Path
+import os
+import pickle
 from typing import Optional, List
 import json
 import logging
@@ -29,6 +32,12 @@ from services.followup_service import generate_followup_questions
 from services.conv_name_service import suggest_conversation_name
 from services.decompose_service import decompose_question
 from services.mindmap_service import generate_mindmap
+from services.rag_config import (
+    should_apply_numeric_table_specialization,
+    should_enable_answer_critic,
+    should_enable_llm_query_rewrite,
+    apply_request_overrides,
+)
 from services.citation_service import (
     build_structured_citation_prompt,
     parse_citation_list,
@@ -62,6 +71,19 @@ _MAX_WEB_SEARCH_RESULTS = 10
 _DEFAULT_ANSWER_DETAIL = "standard"
 _VALID_ANSWER_DETAILS = {"concise", "standard", "detailed"}
 _INLINE_CITATION_PATTERN = re.compile(r'(?<!!)(?:\[(\d{1,3})\](?!\()|【(\d{1,3})】)')
+_STRICT_CITATION_EVIDENCE_NEEDS = {"numeric_table", "reference_trap", "reference_meta"}
+_STRICT_CITATION_SUPPORT_THRESHOLDS = {
+    "numeric_table": 0.08,
+    "reference_trap": 0.1,
+    "reference_meta": 0.1,
+}
+_CONSERVATIVE_REWRITE_EVIDENCE_NEEDS = {"reference_trap", "reference_meta"}
+_AGENT_RETRIEVAL_QUERY_TYPES = {"overview"}
+_AGENT_RETRIEVAL_EVIDENCE_NEEDS = {
+    "section_explanation",
+    "comparison_multi_aspect",
+    "reference_meta",
+}
 _WEB_SEARCH_PRONOUN_HINTS = (
     "这个", "该", "它", "上述", "此", "这种", "这些", "这项", "该项", "本方法",
     "this", "that", "it", "they", "he", "she", "them",
@@ -274,6 +296,106 @@ _context_builder = ContextBuilder()
 _query_rewriter = QueryRewriter()
 
 
+def _get_cheap_model_params(request) -> tuple:
+    """获取辅助模型参数（双模型策略）
+
+    优先级：request 字段（per-request）> config.settings.cheap_model*（全局）> 主模型 fallback。
+    如果 cheap_model 与 cheap_provider 均有值，返回 (cheap_model, cheap_provider, endpoint)，
+    否则回退到主模型三元组。
+
+    Returns:
+        (model, provider, endpoint) 三元组
+    """
+    # 1. per-request override
+    req_model = getattr(request, "cheap_model", None)
+    req_provider = getattr(request, "cheap_model_provider", None)
+    req_endpoint = getattr(request, "cheap_model_endpoint", None)
+    if req_model and req_provider:
+        endpoint = req_endpoint or _get_provider_endpoint(req_provider, request.api_host or "")
+        return req_model, req_provider, endpoint
+
+    # 2. 全局 settings
+    cheap_model = settings.cheap_model
+    cheap_provider = settings.cheap_model_provider
+    if cheap_model and cheap_provider:
+        endpoint = _get_provider_endpoint(cheap_provider, request.api_host or "")
+        return cheap_model, cheap_provider, endpoint
+
+    # 3. fallback 到主模型
+    return request.model, request.api_provider, _get_provider_endpoint(request.api_provider, request.api_host or "")
+
+
+def _get_project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _load_doc_chunks_for_agent(doc_id: str, vector_store_dir: str, full_text: str) -> list[str]:
+    """从向量索引元数据中加载 chunks，给 agentic 检索使用。
+
+    如果索引缺失或损坏，回退到按段落切分的全文片段，保证 agent 至少可用。
+    """
+    candidate_dirs = []
+    if vector_store_dir and vector_store_dir.strip():
+        candidate_dirs.append(Path(vector_store_dir))
+    candidate_dirs.append(_get_project_root() / "data" / "vector_stores")
+
+    for store_dir in candidate_dirs:
+        chunks_path = store_dir / f"{doc_id}.pkl"
+        if not chunks_path.exists():
+            continue
+        try:
+            with open(chunks_path, "rb") as f:
+                data = pickle.load(f)
+            if isinstance(data, dict):
+                chunks = data.get("chunks") or []
+                if isinstance(chunks, list) and chunks:
+                    return [c for c in chunks if isinstance(c, str) and c.strip()]
+            elif isinstance(data, list):
+                return [c for c in data if isinstance(c, str) and c.strip()]
+        except Exception as exc:
+            logger.warning(f"[AgentDoc] 加载 chunks 失败: {chunks_path} -> {exc}")
+
+    return _split_context_paragraphs(full_text or "") or ([full_text.strip()] if full_text.strip() else [])
+
+
+def _load_doc_semantic_groups_for_agent(doc_id: str) -> list[dict]:
+    """从落盘的 semantic_groups 中加载意群数据。"""
+    candidate_dirs = [
+        _get_project_root() / "data" / "semantic_groups",
+        Path(__file__).resolve().parents[1] / "data" / "semantic_groups",
+    ]
+    for groups_dir in candidate_dirs:
+        group_path = groups_dir / f"{doc_id}.json"
+        if not group_path.exists():
+            continue
+        try:
+            with open(group_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            groups = data.get("groups") or []
+            if isinstance(groups, list):
+                return [g for g in groups if isinstance(g, dict)]
+        except Exception as exc:
+            logger.warning(f"[AgentDoc] 加载意群失败: {group_path} -> {exc}")
+    return []
+
+
+def _build_agent_doc_context(doc_id: str, doc: dict, vector_store_dir: str, api_key: str = "") -> DocContext:
+    data = doc.get("data", {}) or {}
+    full_text = data.get("full_text", "") or ""
+    pages = data.get("pages", []) or []
+    chunks = _load_doc_chunks_for_agent(doc_id, vector_store_dir, full_text)
+    semantic_groups = _load_doc_semantic_groups_for_agent(doc_id)
+    return DocContext(
+        doc_id=doc_id,
+        full_text=full_text,
+        chunks=chunks,
+        pages=pages,
+        semantic_groups=semantic_groups,
+        vector_store_dir=vector_store_dir,
+        api_key=api_key or "",
+    )
+
+
 async def _maybe_rewrite_query(
     question: str,
     chat_history: list[dict] | None,
@@ -282,6 +404,7 @@ async def _maybe_rewrite_query(
     model: str,
     provider: str,
     endpoint: str,
+    retrieval_strategy: dict | None = None,
 ) -> str:
     """在满足条件时用 LLM 改写查询，否则回退到 regex 改写。
 
@@ -291,10 +414,16 @@ async def _maybe_rewrite_query(
     3. 存在对话历史（多轮对话才需要上下文消解）
     4. 有可用的 api_key
     """
-    regex_rewritten = _query_rewriter.rewrite(question, selected_text=selected_text)
+    strategy = retrieval_strategy or get_retrieval_strategy(question)
+    evidence_need = strategy.get("evidence_need") or []
+    regex_rewritten = _query_rewriter.rewrite(
+        question,
+        selected_text=selected_text,
+        evidence_need=evidence_need,
+    )
 
     if (
-        not settings.enable_llm_query_rewrite
+        not should_enable_llm_query_rewrite()
         or len(question) > settings.query_rewrite_trigger_length
         or not chat_history
         or not api_key
@@ -331,6 +460,7 @@ async def _maybe_rewrite_query(
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
+                evidence_need=evidence_need,
             ),
             timeout=2.5,
         )
@@ -406,6 +536,18 @@ class ChatRequest(BaseModel):
     enable_jieba_bm25: bool = True
     num_expand_context_chunk: int = 1
     embedding_api_key: Optional[str] = None  # embedding 模型的 API key（向量检索查询编码用）
+
+    # ---- 双模型策略：per-request 覆盖 config.cheap_model* ----
+    cheap_model: Optional[str] = None
+    cheap_model_provider: Optional[str] = None
+    cheap_model_endpoint: Optional[str] = None
+
+    # ---- Feature flag per-request overrides ----
+    # None = 跟随全局 settings；True/False = 本次请求强制开启/关闭
+    override_numeric_table: Optional[bool] = None
+    override_answer_critic: Optional[bool] = None
+    override_llm_query_rewrite: Optional[bool] = None
+    override_bm25_synonyms: Optional[bool] = None
 
 
 class ChatVisionRequest(BaseModel):
@@ -635,6 +777,374 @@ def _build_selected_text_fallback_citations(
     return [_build_selected_text_citation(selected_text, selected_page_info)]
 
 
+_NUMERIC_TABLE_QUERY_TABLE_RE = re.compile(r"\btable\s*\d+\b", re.IGNORECASE)
+_NUMERIC_TABLE_COMPARATOR_QUERY_RE = re.compile(
+    r"(?:second[- ]best|runner[- ]up|difference|compare|comparison|higher than|lower than|best|highest|winner|winning|"
+    r"第二好|第二佳|第二名|次优|比较|差多少|最高|最佳|最好)",
+    re.IGNORECASE,
+)
+_NUMERIC_TABLE_COST_QUERY_HINTS = (
+    "flops",
+    "推理时间",
+    "开销",
+    "latency",
+    "runtime",
+    "overhead",
+    "cost",
+    "inference time",
+    "inference overhead",
+    "training time",
+    "训练时间",
+    "耗时",
+    "extra flops",
+)
+_NUMERIC_TABLE_COST_EVIDENCE_HINTS = (
+    "24 hours",
+    "24 hour",
+    "24h",
+    "six days",
+    "6 days",
+    "6天",
+    "24小时",
+    "no extra overhead",
+    "without extra overhead",
+    "no additional overhead",
+    "additional overhead",
+    "inference overhead",
+)
+
+
+def _normalize_numeric_table_column_key(value: str = "") -> str:
+    sample = re.sub(r"\s+", "", str(value or "").lower()).strip()
+    if not sample:
+        return ""
+    replacements = {
+        "accuracy": "acc",
+        "acc.(%)": "acc",
+        "acc(%)": "acc",
+        "manyshot": "many",
+        "fewshot": "few",
+        "few-shot": "few",
+        "medium": "med",
+        "med.": "med",
+        "δacc": "deltaacc",
+        "△acc": "deltaacc",
+        "Δacc".lower(): "deltaacc",
+        "∂acc": "deltaacc",
+        "||d_gen||": "dgen",
+        "|d_gen|": "dgen",
+        "d_gen": "dgen",
+    }
+    for source, target in replacements.items():
+        sample = sample.replace(source, target)
+    return sample
+
+
+def _extract_numeric_table_target_columns(query: str = "", hints: Optional[dict] = None) -> set[str]:
+    targets: set[str] = set()
+    for value in (hints or {}).get("columns", []) or []:
+        normalized = _normalize_numeric_table_column_key(value)
+        if normalized:
+            targets.add(normalized)
+
+    sample = re.sub(r"\s+", " ", str(query or "").lower()).strip()
+    if not sample:
+        return targets
+
+    if re.search(r"\bfew(?:-shot)?\b", sample):
+        targets.add("few")
+    if re.search(r"\bmany\b", sample):
+        targets.add("many")
+    if re.search(r"\bmed(?:\.|ium)?\b", sample):
+        targets.add("med")
+    if re.search(r"\ball\b", sample):
+        targets.add("all")
+    if "fid" in sample:
+        targets.add("fid")
+    if "accuracy" in sample or re.search(r"\bacc\b", sample):
+        targets.add("acc")
+    if "d_gen" in sample or "dgen" in sample or "||d_gen||" in sample:
+        targets.add("dgen")
+    if (
+        "δacc" in sample
+        or "△acc" in sample
+        or "delta acc" in sample
+        or "deltaacc" in sample
+        or "Δacc".lower() in sample
+    ):
+        targets.add("deltaacc")
+    return targets
+
+
+def _extract_numeric_table_target_tables(query: str = "", hints: Optional[dict] = None) -> set[str]:
+    targets = {
+        re.sub(r"\s+", " ", match.group(0)).strip().lower()
+        for match in _NUMERIC_TABLE_QUERY_TABLE_RE.finditer(str(query or ""))
+    }
+    for value in (hints or {}).get("tables", []) or []:
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        if normalized:
+            targets.add(normalized)
+    return targets
+
+
+def _is_numeric_table_cost_query(query: str = "") -> bool:
+    sample = re.sub(r"\s+", " ", str(query or "").lower()).strip()
+    return bool(sample) and any(token in sample for token in _NUMERIC_TABLE_COST_QUERY_HINTS)
+
+
+def _has_numeric_table_cost_anchor(text: str = "") -> bool:
+    sample = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if not sample:
+        return False
+    compact = re.sub(r"[\s\-–—]+", "", sample)
+    if any(token in sample for token in _NUMERIC_TABLE_COST_EVIDENCE_HINTS):
+        return True
+    return any(
+        (
+            re.search(r"24\s*hours?", sample),
+            re.search(r"(?:six|6)\s*days?", sample),
+            "24hours" in compact,
+            "24hour" in compact,
+            "6days" in compact,
+            "sixdays" in compact,
+        )
+    )
+
+
+def _has_numeric_table_exact_row_support(citation: Optional[dict]) -> bool:
+    if not isinstance(citation, dict):
+        return False
+    chunk_type = str(citation.get("chunk_type") or citation.get("block_type") or "").strip().lower()
+    if chunk_type in {"table_row", "table_cell"}:
+        return True
+    if citation.get("table_row_evidence") or citation.get("table_row_slice_kind") == "exact":
+        return True
+    if citation.get("numeric_table_exact_context_row_text"):
+        return True
+    if citation.get("cell_evidence_units"):
+        return True
+    for unit in citation.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        unit_type = str(unit.get("evidence_unit_type") or "").strip().lower()
+        if unit_type in {"table_row", "table_cell"}:
+            return True
+    return False
+
+
+def _build_numeric_table_citation_support_text(citation: Optional[dict]) -> str:
+    if not isinstance(citation, dict):
+        return ""
+    parts = [
+        *_collect_citation_table_evidence_texts(citation),
+        citation.get("context_segment_text", ""),
+        citation.get("source_text", ""),
+        citation.get("display_text", ""),
+        citation.get("highlight_text", ""),
+        citation.get("_full_text", ""),
+        citation.get("table_id", ""),
+        citation.get("table_caption", ""),
+        citation.get("table_header", ""),
+    ]
+    return " ".join(
+        re.sub(r"\s+", " ", str(part or "")).strip()
+        for part in parts
+        if re.sub(r"\s+", " ", str(part or "")).strip()
+    ).strip()
+
+
+def _citation_matches_numeric_table_columns(
+    citation: Optional[dict],
+    target_columns: set[str],
+) -> bool:
+    if not target_columns:
+        return True
+    sample = _normalize_numeric_table_column_key(_build_numeric_table_citation_support_text(citation))
+    if not sample:
+        return False
+    column_patterns = {
+        "few": ("few",),
+        "many": ("many",),
+        "med": ("med",),
+        "all": ("all",),
+        "fid": ("fid",),
+        "acc": ("acc",),
+        "dgen": ("dgen",),
+        "deltaacc": ("deltaacc",),
+    }
+    return any(any(token in sample for token in column_patterns.get(column, (column,))) for column in target_columns)
+
+
+def _looks_like_broad_numeric_table_text(
+    value: str,
+    *,
+    exact_row_text: str = "",
+    table_caption: str = "",
+    table_header: str = "",
+) -> bool:
+    raw = str(value or "")
+    normalized = re.sub(r"\s+", " ", raw).strip()
+    if not normalized:
+        return False
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    normalized_exact_row = re.sub(r"\s+", " ", str(exact_row_text or "")).strip()
+    normalized_caption = re.sub(r"\s+", " ", str(table_caption or "")).strip()
+    normalized_header = re.sub(r"\s+", " ", str(table_header or "")).strip()
+
+    if normalized_exact_row and normalized_exact_row in normalized:
+        compact_budget = len(normalized_exact_row) + len(normalized_caption) + len(normalized_header) + 96
+        if len(lines) <= 4 and len(normalized) <= max(260, compact_budget):
+            return False
+
+    pipe_count = raw.count("|")
+    numeric_hits = len(re.findall(r"\d+(?:\.\d+)?", normalized))
+    if len(lines) >= 6:
+        return True
+    if pipe_count >= 16:
+        return True
+    if numeric_hits >= 14 and len(normalized) >= 220:
+        return True
+    if len(normalized) >= 420:
+        return True
+    return False
+
+
+def _should_apply_numeric_table_strict_gate(query: str = "", hints: Optional[dict] = None) -> bool:
+    if not should_apply_numeric_table_specialization():
+        return False
+    sample = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not sample:
+        return False
+    if (hints or {}).get("comparison"):
+        return True
+    return bool(_NUMERIC_TABLE_COMPARATOR_QUERY_RE.search(sample))
+
+
+def _collect_citation_table_evidence_texts(citation: dict) -> list[str]:
+    if not isinstance(citation, dict):
+        return []
+
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def _append(value: Optional[str]) -> None:
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not normalized:
+            return
+        key = normalized.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        collected.append(normalized)
+
+    def _pick_first_normalized(*fields: str) -> str:
+        for field in fields:
+            normalized = re.sub(r"\s+", " ", str(citation.get(field, "") or "")).strip()
+            if normalized:
+                return normalized
+        return ""
+
+    def _looks_like_structured_table_text(value: str) -> bool:
+        if not value:
+            return False
+        if "\n" in value or "|" in value:
+            return True
+        return len(re.findall(r"\d+(?:\.\d+)?", value)) >= 2
+
+    chunk_type = str(citation.get("chunk_type") or citation.get("block_type") or "").strip().lower()
+    has_structured_table_support = _has_numeric_table_structured_support(citation)
+    table_caption = _pick_first_normalized("numeric_table_exact_context_caption", "table_caption")
+    table_header = _pick_first_normalized("numeric_table_exact_context_header", "table_header")
+    exact_row_text = _pick_first_normalized(
+        "numeric_table_exact_context_row_text",
+        "table_row_boundary_text",
+        "table_row_raw_text",
+    )
+    focused_row_text = ""
+    if has_structured_table_support:
+        for field in ("context_segment_text", "source_text", "_full_text"):
+            candidate = _pick_first_normalized(field)
+            if not candidate:
+                continue
+            if not _looks_like_structured_table_text(candidate):
+                continue
+            if _looks_like_broad_numeric_table_text(
+                candidate,
+                exact_row_text=exact_row_text,
+                table_caption=table_caption,
+                table_header=table_header,
+            ):
+                continue
+            focused_row_text = candidate
+            break
+        if not focused_row_text:
+            for field in ("display_text", "highlight_text"):
+                candidate = _pick_first_normalized(field)
+                if _looks_like_structured_table_text(candidate):
+                    focused_row_text = candidate
+                    break
+    if not focused_row_text and chunk_type in {"table_row", "table_cell"}:
+        focused_row_text = _pick_first_normalized("display_text", "highlight_text")
+
+    row_text = focused_row_text or exact_row_text
+    if row_text:
+        if table_caption and table_caption not in row_text:
+            _append(table_caption)
+        if table_header and table_header not in row_text:
+            _append(table_header)
+        _append(row_text)
+
+    for unit in citation.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        unit_type = str(unit.get("evidence_unit_type") or "").strip().lower()
+        unit_caption = unit.get("table_caption") or table_caption
+        unit_header = unit.get("table_header") or table_header
+        if unit_type == "table_row":
+            if row_text and focused_row_text:
+                for cell in unit.get("cell_evidence_units") or []:
+                    if isinstance(cell, dict):
+                        _append(cell.get("content"))
+                continue
+            for value in (
+                unit_caption,
+                unit_header,
+                unit.get("row_text"),
+                unit.get("content"),
+                unit.get("row_numbers"),
+            ):
+                _append(value)
+            for cell in unit.get("cell_evidence_units") or []:
+                if isinstance(cell, dict):
+                    _append(cell.get("content"))
+        elif unit_type == "table_cell":
+            for value in (unit_caption, unit_header, unit.get("content")):
+                _append(value)
+
+    for cell in citation.get("cell_evidence_units") or []:
+        if isinstance(cell, dict):
+            _append(cell.get("content"))
+
+    return collected
+
+
+def _build_citation_context_text(citation: dict) -> str:
+    if not isinstance(citation, dict):
+        return ""
+
+    table_evidence = _collect_citation_table_evidence_texts(citation)
+    if table_evidence:
+        return "\n".join(table_evidence)
+
+    for field in ("context_segment_text", "source_text", "_full_text", "display_text", "highlight_text"):
+        normalized = re.sub(r"\s+", " ", str(citation.get(field, "") or "")).strip()
+        if normalized:
+            return normalized
+    return ""
+
+
 def _build_context_segments_from_citations(citations: list[dict]) -> list[dict]:
     segments = []
     for c in citations or []:
@@ -644,7 +1154,7 @@ def _build_context_segments_from_citations(citations: list[dict]) -> list[dict]:
             ref = int(c.get("ref"))
         except (TypeError, ValueError):
             continue
-        text = c.get("source_text") or c.get("_full_text") or c.get("display_text") or c.get("highlight_text") or ""
+        text = _build_citation_context_text(c)
         if not text:
             continue
         segments.append({
@@ -654,6 +1164,284 @@ def _build_context_segments_from_citations(citations: list[dict]) -> list[dict]:
             "group_id": c.get("group_id", ""),
         })
     return segments
+
+
+def _extract_numeric_table_citation_row_text(citation: Optional[dict]) -> str:
+    if not isinstance(citation, dict):
+        return ""
+
+    for field in (
+        "numeric_table_exact_context_row_text",
+        "table_row_boundary_text",
+        "table_row_raw_text",
+        "display_text",
+        "highlight_text",
+    ):
+        value = re.sub(r"\s+", " ", str(citation.get(field, "") or "")).strip()
+        if value:
+            return value
+
+    for unit in citation.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if str(unit.get("evidence_unit_type") or "").strip().lower() != "table_row":
+            continue
+        value = re.sub(r"\s+", " ", str(unit.get("content", "") or "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_numeric_table_comparator_context_segments(retrieval_meta: dict) -> list[dict]:
+    if not should_apply_numeric_table_specialization():
+        return []
+    if not isinstance(retrieval_meta, dict):
+        return []
+
+    query = str(retrieval_meta.get("search_query") or "").strip()
+    hints = _query_rewriter.extract_numeric_table_hints(query) if query else {}
+    if not _should_apply_numeric_table_strict_gate(query, hints):
+        return []
+
+    target_columns = _extract_numeric_table_target_columns(query, hints)
+    grouped: dict[str, list[dict]] = {}
+    for citation in retrieval_meta.get("citations", []) or []:
+        if not isinstance(citation, dict):
+            continue
+        if not _has_numeric_table_exact_row_support(citation):
+            continue
+        if target_columns and not _citation_matches_numeric_table_columns(citation, target_columns):
+            continue
+        bundle_key = str(citation.get("group_id") or citation.get("table_id") or "").strip()
+        if not bundle_key:
+            continue
+        grouped.setdefault(bundle_key, []).append(citation)
+
+    if not grouped:
+        return []
+
+    bundle_key, bundle_citations = max(
+        grouped.items(),
+        key=lambda item: (
+            len(item[1]),
+            sum(1 for citation in item[1] if str(citation.get("chunk_type") or citation.get("block_type") or "").strip().lower() == "table_row"),
+            -min(int(citation.get("ref") or 10**9) for citation in item[1]),
+        ),
+    )
+    if len(bundle_citations) < 2:
+        return []
+
+    ordered_citations = sorted(
+        bundle_citations,
+        key=lambda citation: (
+            int(citation.get("ref") or 10**9),
+            int(citation.get("source_ref") or citation.get("ref") or 10**9),
+        ),
+    )
+
+    caption = ""
+    header = ""
+    rows: list[str] = []
+    seen_rows: set[str] = set()
+    for citation in ordered_citations:
+        if not caption:
+            caption = re.sub(r"\s+", " ", str(citation.get("numeric_table_exact_context_caption") or citation.get("table_caption") or "")).strip()
+        if not header:
+            header = re.sub(r"\s+", " ", str(citation.get("numeric_table_exact_context_header") or citation.get("table_header") or "")).strip()
+        row_text = _extract_numeric_table_citation_row_text(citation)
+        if not row_text:
+            continue
+        row_key = row_text.casefold()
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        rows.append(row_text)
+
+    if len(rows) < 2:
+        return []
+
+    text_parts = [part for part in (caption, header, *rows) if part]
+    if not text_parts:
+        return []
+
+    first = ordered_citations[0]
+    page_points = [
+        page
+        for citation in ordered_citations
+        for page in (citation.get("page_range") or [])
+        if isinstance(page, int) and page > 0
+    ]
+    page_range = [min(page_points), max(page_points)] if page_points else (first.get("page_range") or [])
+    return [{
+        "ref": int(first.get("ref") or 1),
+        "text": "\n".join(text_parts),
+        "page_range": page_range,
+        "group_id": bundle_key,
+    }]
+
+
+def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
+    if not isinstance(retrieval_meta, dict):
+        return []
+
+    citation_segments = _build_context_segments_from_citations(retrieval_meta.get("citations", []))
+    existing_segments = []
+    for seg in retrieval_meta.get("_context_segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        existing_segments.append(
+            {
+                "ref": seg.get("ref"),
+                "text": text,
+                "page_range": seg.get("page_range") or [],
+                "group_id": seg.get("group_id", ""),
+            }
+        )
+
+    evidence_need = {
+        str(item).strip()
+        for item in (retrieval_meta.get("evidence_need") or [])
+        if str(item).strip()
+    }
+    if "numeric_table" in evidence_need and citation_segments:
+        comparator_segments = _build_numeric_table_comparator_context_segments(retrieval_meta)
+        return comparator_segments or citation_segments
+    return existing_segments or citation_segments
+
+
+
+def _has_numeric_table_structured_support(citation: Optional[dict]) -> bool:
+    if not isinstance(citation, dict):
+        return False
+
+    chunk_type = str(citation.get("chunk_type") or citation.get("block_type") or "").strip().lower()
+    if chunk_type in {"table_row", "table_cell"}:
+        return True
+    if citation.get("table_row_evidence") or citation.get("table_row_slice_kind") == "exact":
+        return True
+    if citation.get("numeric_table_exact_context_row_text"):
+        return True
+    if citation.get("cell_evidence_units"):
+        return True
+    for unit in citation.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        unit_type = str(unit.get("evidence_unit_type") or "").strip().lower()
+        if unit_type in {"table_row", "table_cell"}:
+            return True
+    return False
+
+
+def _supplement_numeric_table_citations(
+    answer: str,
+    aligned: list[dict],
+    citations: list[dict],
+    *,
+    query: str = "",
+) -> list[dict]:
+    normalized_aligned = _normalize_citation_records(aligned)
+    if not should_apply_numeric_table_specialization():
+        return normalized_aligned
+    normalized_citations = _normalize_citation_records(citations)
+    if not normalized_aligned or not normalized_citations:
+        return normalized_aligned
+
+    core_answer = _strip_inline_citations(answer)
+    if not core_answer:
+        return normalized_aligned
+
+    selected_source_refs = {int(c["ref"]) for c in normalized_aligned}
+    selected_table_ids = {
+        str(c.get("table_id") or "").strip().lower()
+        for c in normalized_aligned
+        if str(c.get("table_id") or "").strip()
+    }
+    selected_group_ids = {
+        str(c.get("group_id") or "").strip().lower()
+        for c in normalized_aligned
+        if str(c.get("group_id") or "").strip()
+    }
+    hints = _query_rewriter.extract_numeric_table_hints(query) if query else {}
+    cost_query = _is_numeric_table_cost_query(query)
+    strict_gate = (
+        bool(query)
+        and any(_has_numeric_table_exact_row_support(citation) for citation in normalized_aligned)
+        and _should_apply_numeric_table_strict_gate(query, hints)
+    )
+    target_tables = _extract_numeric_table_target_tables(query, hints)
+    target_columns = _extract_numeric_table_target_columns(query, hints)
+
+    extras: list[tuple[int, float, dict]] = []
+    cost_anchor_candidates: list[tuple[int, float, dict]] = []
+    for citation in normalized_citations:
+        source_ref = int(citation["ref"])
+        if source_ref in selected_source_refs:
+            continue
+        has_exact_row_support = _has_numeric_table_exact_row_support(citation)
+        has_structured_support = _has_numeric_table_structured_support(citation)
+        has_cost_anchor = cost_query and _has_numeric_table_cost_anchor(
+            _build_numeric_table_citation_support_text(citation)
+        )
+        if not has_structured_support and not has_cost_anchor:
+            continue
+
+        support_score = _calc_citation_support_score(core_answer, citation)
+        table_id = str(citation.get("table_id") or "").strip().lower()
+        group_id = str(citation.get("group_id") or "").strip().lower()
+        same_bundle = bool(
+            (table_id and table_id in selected_table_ids)
+            or (group_id and group_id in selected_group_ids)
+        )
+        if strict_gate:
+            if not has_exact_row_support:
+                continue
+            if selected_table_ids or selected_group_ids:
+                if not same_bundle:
+                    continue
+            elif target_tables:
+                citation_text = _build_numeric_table_citation_support_text(citation).lower()
+                if not any(target in citation_text for target in target_tables):
+                    continue
+            if target_tables:
+                citation_text = _build_numeric_table_citation_support_text(citation).lower()
+                if not same_bundle and not any(target in citation_text for target in target_tables):
+                    continue
+            if target_columns and not _citation_matches_numeric_table_columns(citation, target_columns):
+                continue
+        if not same_bundle and support_score < 0.08:
+            continue
+        extras.append((0 if same_bundle else 1, -support_score, citation))
+        if has_cost_anchor:
+            cost_anchor_candidates.append((0 if same_bundle else 1, -support_score, citation))
+
+    if not extras and not cost_anchor_candidates:
+        return normalized_aligned
+
+    augmented = list(normalized_aligned)
+    if cost_query and not any(
+        _has_numeric_table_cost_anchor(_build_numeric_table_citation_support_text(citation))
+        for citation in augmented
+    ):
+        for _same_bundle_rank, _neg_score, citation in sorted(cost_anchor_candidates, key=lambda item: item[:2]):
+            source_ref = int(citation["ref"])
+            if source_ref in selected_source_refs:
+                continue
+            augmented.append(citation)
+            selected_source_refs.add(source_ref)
+            break
+
+    for _same_bundle_rank, _neg_score, citation in sorted(extras, key=lambda item: item[:2]):
+        if len(augmented) >= len(normalized_aligned) + 4:
+            break
+        source_ref = int(citation["ref"])
+        if source_ref in selected_source_refs:
+            continue
+        augmented.append(citation)
+        selected_source_refs.add(source_ref)
+    return augmented
 
 
 def _build_retrieval_preview_message(citations: list[dict], max_items: int = 3, max_chars: int = 90) -> str:
@@ -953,6 +1741,103 @@ def _should_use_fast_overview_context(
         and not image_list
         and not use_agent
     )
+
+def _build_agent_retrieval_gate(
+    *,
+    enable_agent_retrieval: bool,
+    selected_text: Optional[str],
+    query_type: str,
+    evidence_need: Optional[list[str]] = None,
+) -> dict:
+    """返回 retrieval_agent 触发决策及其原因，便于诊断。"""
+    normalized_query_type = str(query_type or "").strip().lower()
+    normalized_needs = [
+        str(item).strip()
+        for item in (evidence_need or [])
+        if str(item).strip()
+    ]
+    matched_needs = [
+        need for need in normalized_needs
+        if need in _AGENT_RETRIEVAL_EVIDENCE_NEEDS
+    ]
+    matched_query_type = (
+        normalized_query_type
+        if normalized_query_type in _AGENT_RETRIEVAL_QUERY_TYPES
+        else None
+    )
+
+    if not enable_agent_retrieval:
+        return {
+            "enabled": False,
+            "reason": "switch_disabled",
+            "query_type": normalized_query_type,
+            "evidence_need": normalized_needs,
+            "matched_query_type": matched_query_type,
+            "matched_evidence_need": matched_needs,
+            "selected_text_present": bool(selected_text),
+        }
+
+    if bool(selected_text):
+        return {
+            "enabled": False,
+            "reason": "selected_text_present",
+            "query_type": normalized_query_type,
+            "evidence_need": normalized_needs,
+            "matched_query_type": matched_query_type,
+            "matched_evidence_need": matched_needs,
+            "selected_text_present": True,
+        }
+
+    enabled = bool(matched_query_type or matched_needs)
+    if matched_query_type:
+        reason = "matched_query_type"
+    elif matched_needs:
+        reason = "matched_evidence_need"
+    else:
+        reason = "route_not_matched"
+
+    return {
+        "enabled": enabled,
+        "reason": reason,
+        "query_type": normalized_query_type,
+        "evidence_need": normalized_needs,
+        "matched_query_type": matched_query_type,
+        "matched_evidence_need": matched_needs,
+        "selected_text_present": False,
+    }
+
+
+def _annotate_agent_gate(
+    agent_gate: dict,
+    *,
+    use_agent: bool,
+    agent_mode: bool,
+    search_query_passthrough: bool,
+) -> dict:
+    """补齐 agent gating 的运行态诊断字段。"""
+    gate = dict(agent_gate or {})
+    gate["use_agent"] = bool(use_agent)
+    gate["agent_mode"] = bool(agent_mode)
+    gate["search_query_passthrough"] = bool(search_query_passthrough)
+    gate["consistency_ok"] = (bool(gate.get("enabled")) == bool(use_agent)) and (not agent_mode or use_agent)
+    return gate
+
+
+def _should_enable_agent_retrieval(
+    *,
+    enable_agent_retrieval: bool,
+    selected_text: Optional[str],
+    query_type: str,
+    evidence_need: Optional[list[str]] = None,
+) -> bool:
+    """仅对高价值题型启用 retrieval_agent，避免全局放大延迟。"""
+    gate = _build_agent_retrieval_gate(
+        enable_agent_retrieval=enable_agent_retrieval,
+        selected_text=selected_text,
+        query_type=query_type,
+        evidence_need=evidence_need,
+    )
+    return bool(gate.get("enabled"))
 
 
 def _generate_page_level_citations(pages: list[dict], context: str, query: str = "", max_citations: int = 8) -> list[dict]:
@@ -1260,7 +2145,18 @@ def _calc_citation_support_score(sentence: str = "", citation: Optional[dict] = 
     if not sentence_tokens:
         return 0.0
 
-    support_text = f"{citation.get('highlight_text', '')} {citation.get('group_id', '')}".strip()
+    support_fields = [
+        *_collect_citation_table_evidence_texts(citation),
+        citation.get("highlight_text", ""),
+        citation.get("source_text", ""),
+        citation.get("display_text", ""),
+        citation.get("_full_text", ""),
+        citation.get("group_id", ""),
+        citation.get("table_id", ""),
+        citation.get("table_caption", ""),
+        citation.get("table_header", ""),
+    ]
+    support_text = " ".join(str(part).strip() for part in support_fields if part).strip()
     citation_tokens = _tokenize_for_citation(support_text)
     overlap = _calc_token_overlap(sentence_tokens, citation_tokens)
     score = overlap / max(1, len(sentence_tokens))
@@ -1347,6 +2243,120 @@ def _optimize_inline_citations(answer: str, citations: list[dict]) -> str:
     return "\n".join(optimized)
 
 
+def _resolve_strict_citation_support_threshold(evidence_need: Optional[list[str]]) -> Optional[float]:
+    needs = {str(item).strip() for item in (evidence_need or []) if str(item).strip()}
+    matched = needs & _STRICT_CITATION_EVIDENCE_NEEDS
+    if not matched:
+        return None
+    return max(_STRICT_CITATION_SUPPORT_THRESHOLDS[item] for item in matched)
+
+
+def _build_conservative_sentence_fallback(
+    sentence: str,
+    evidence_need: Optional[list[str]] = None,
+) -> str:
+    needs = {str(item).strip() for item in (evidence_need or []) if str(item).strip()}
+    if not (needs & _CONSERVATIVE_REWRITE_EVIDENCE_NEEDS):
+        return _strip_inline_citations(sentence)
+
+    if "reference_meta" in needs:
+        return "根据当前检索证据，文档未明确说明该引用元信息。"
+    return "根据当前检索证据，无法确认该信息，文档未明确说明。"
+
+
+def _prune_weak_inline_citations(
+    answer: str,
+    citations: list[dict],
+    *,
+    evidence_need: Optional[list[str]] = None,
+) -> tuple[str, dict]:
+    threshold = _resolve_strict_citation_support_threshold(evidence_need)
+    if not answer or not citations or threshold is None:
+        return answer, {}
+
+    normalized = _normalize_citation_records(citations)
+    if not normalized:
+        return answer, {}
+
+    citation_map = {int(c["ref"]): c for c in normalized}
+    checked_sentences = 0
+    unsupported_sentences = 0
+    removed_refs = 0
+    kept_refs = 0
+    rewritten_sentences = 0
+
+    rewritten_lines = []
+    in_code_fence = False
+    for line in str(answer).split("\n"):
+        if re.match(r"^\s*```", line):
+            in_code_fence = not in_code_fence
+            rewritten_lines.append(line)
+            continue
+        if in_code_fence or not _INLINE_CITATION_PATTERN.search(line):
+            rewritten_lines.append(line)
+            continue
+
+        rewritten_parts = []
+        for sentence in re.split(r"(?<=[。！？!?；;])", line):
+            if not sentence or not _INLINE_CITATION_PATTERN.search(sentence):
+                rewritten_parts.append(sentence)
+                continue
+
+            checked_sentences += 1
+            refs = _extract_inline_citation_refs(sentence)
+            core_sentence = _strip_inline_citations(sentence)
+            if not refs or not core_sentence:
+                rewritten_parts.append(core_sentence or sentence)
+                continue
+
+            supported_refs = []
+            for ref in refs:
+                score = _calc_citation_support_score(core_sentence, citation_map.get(ref))
+                if score >= threshold:
+                    supported_refs.append(ref)
+
+            supported_refs = list(dict.fromkeys(supported_refs))[:2]
+            if supported_refs:
+                kept_refs += len(supported_refs)
+                removed_refs += max(0, len(refs) - len(supported_refs))
+                rewritten_parts.append(_attach_refs_to_sentence(core_sentence, supported_refs))
+                continue
+
+            unsupported_sentences += 1
+            removed_refs += len(refs)
+            fallback_sentence = _build_conservative_sentence_fallback(
+                core_sentence,
+                evidence_need=evidence_need,
+            )
+            if fallback_sentence != core_sentence:
+                rewritten_sentences += 1
+            rewritten_parts.append(fallback_sentence)
+
+        rewritten_lines.append("".join(rewritten_parts))
+
+    diagnostics = {
+        "strict_mode": True,
+        "threshold": threshold,
+        "checked_sentence_count": checked_sentences,
+        "unsupported_sentence_count": unsupported_sentences,
+        "removed_ref_count": removed_refs,
+        "kept_ref_count": kept_refs,
+        "rewritten_sentence_count": rewritten_sentences,
+        "evidence_need": list(dict.fromkeys(str(item).strip() for item in (evidence_need or []) if str(item).strip())),
+    }
+    rewritten_answer = "\n".join(rewritten_lines)
+    if removed_refs > 0:
+        logger.info(
+            "严格引文检查已移除弱支撑引用: evidence_need=%s checked=%d unsupported=%d removed=%d threshold=%.2f",
+            diagnostics["evidence_need"],
+            checked_sentences,
+            unsupported_sentences,
+            removed_refs,
+            threshold,
+        )
+    return rewritten_answer, diagnostics
+
+
 def _normalize_single_ref_answer(answer: str, citations: list[dict]) -> str:
     normalized = _normalize_citation_records(citations)
     if not answer or len(normalized) <= 1:
@@ -1383,7 +2393,14 @@ def _normalize_single_ref_answer(answer: str, citations: list[dict]) -> str:
     return "\n\n".join(rewritten)
 
 
-def _prepare_answer_and_citations_for_display(answer: str, citations: list[dict]) -> tuple[str, list[dict]]:
+def _prepare_answer_and_citations_for_display(
+    answer: str,
+    citations: list[dict],
+    *,
+    evidence_need: Optional[list[str]] = None,
+    answer_guard: Optional[dict] = None,
+    query: str = "",
+) -> tuple[str, list[dict]]:
     normalized_citations = _normalize_citation_records(citations)
     repaired_answer = _repair_bad_citation_formats(answer, normalized_citations)
     if normalized_citations and repaired_answer:
@@ -1400,13 +2417,57 @@ def _prepare_answer_and_citations_for_display(answer: str, citations: list[dict]
         if not _extract_inline_citation_refs(repaired_answer):
             repaired_answer = _inject_inline_citations(repaired_answer, normalized_citations)
 
+        repaired_answer, guard_diagnostics = _prune_weak_inline_citations(
+            repaired_answer,
+            normalized_citations,
+            evidence_need=evidence_need,
+        )
+        if answer_guard is not None and guard_diagnostics:
+            answer_guard.update(guard_diagnostics)
+        if guard_diagnostics.get("removed_ref_count", 0) > 0 and not _extract_inline_citation_refs(repaired_answer):
+            numeric_cost_recovery = (
+                "numeric_table" in {
+                    str(item).strip()
+                    for item in (evidence_need or [])
+                    if str(item).strip()
+                }
+                and _is_numeric_table_cost_query(query)
+                and any(
+                    _has_numeric_table_cost_anchor(_build_numeric_table_citation_support_text(citation))
+                    for citation in normalized_citations
+                )
+            )
+            if not numeric_cost_recovery:
+                return repaired_answer, []
+
     aligned = _align_citations_with_answer(repaired_answer, normalized_citations)
+    if "numeric_table" in {
+        str(item).strip()
+        for item in (evidence_need or [])
+        if str(item).strip()
+    }:
+        aligned = _supplement_numeric_table_citations(
+            repaired_answer,
+            aligned,
+            normalized_citations,
+            query=query,
+        )
     if not aligned:
         return repaired_answer, []
 
     refs_in_answer = _extract_inline_citation_refs(repaired_answer)
     citation_map = {int(c["ref"]): c for c in aligned}
     ordered_source_refs = refs_in_answer or [int(c["ref"]) for c in aligned]
+    if "numeric_table" in {
+        str(item).strip()
+        for item in (evidence_need or [])
+        if str(item).strip()
+    }:
+        ordered_source_refs.extend(
+            int(c["ref"])
+            for c in aligned
+            if int(c["ref"]) not in ordered_source_refs
+        )
 
     source_to_display: dict[int, int] = {}
     projected = []
@@ -1644,6 +2705,32 @@ def _build_answer_style_instruction(answer_detail: str) -> str:
     )
 
 
+def _build_extraction_constraint_prompt() -> str:
+    """为 extraction 题型生成专用约束提示词
+
+    强制模型只从给定段落中直接引用或改写答案，禁止综述、推断和扩展。
+    """
+    return (
+        "【提取模式约束】你正在回答一个需要精确提取事实的问题，请严格遵守：\n"
+        "- 只允许从'文档内容'段落中直接引用或逐字改写，不得添加段落中没有明确出现的信息\n"
+        "- 禁止概括全文、总结背景或补充上下文——如果段落里没有，就说'文档中未明确记载'\n"
+        "- 数值、公式、实验结果必须完整抄录原文，不得四舍五入或使用'约'字模糊表达\n"
+        "- 回答应简短直接，不超过 300 字，除非原文本身就很长"
+    )
+
+
+def _build_numeric_table_constraint_prompt() -> str:
+    """为 numeric_table 题型生成专用约束提示词。"""
+    return (
+        "【数值表格模式约束】你正在回答一个表格数值题，请严格遵守：\n"
+        "- 只能使用同一张表中的证据回答，不得把正文说明句、相邻表格或别的表号中的数字拼接在一起\n"
+        "- 回答前先锁定表号、方法名、列名；若三者无法同时确定，就明确回答'文档中未明确给出'\n"
+        "- 遇到'提升多少/高多少/差多少个百分点'这类问题时，必须先列出参与比较的原始数值，再给出百分点差值\n"
+        "- 列名必须按表格原文对齐，例如 Medium 可对应 Med.；不得自行补造缺失列名\n"
+        "- 如果检索上下文里出现多个表号或混合表块，优先选择同时包含问题中方法名和列名的那张表；无法唯一确定时不要猜测"
+    )
+
+
 _CITATION_TOKEN_OVERHEAD = 1024  # 结构化引文（CITATION LIST）输出的预估 token 开销
 _DETAILED_MIN_TOKENS = 8192     # 详细模式下 max_tokens 的最低保证值
 _STANDARD_DEFAULT_TOKENS = 4096 # 标准模式下 max_tokens 未设置时的默认值
@@ -1740,10 +2827,62 @@ async def _maybe_perform_web_search(
         return [], ""
 
 
+def _stringify_ai_error_detail(error: object) -> str:
+    """提取 provider / 中间件返回的可读错误信息。"""
+    if error is None:
+        return ""
+    if isinstance(error, dict):
+        for key in ("message", "detail"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        nested_error = error.get("error")
+        if nested_error is not None and nested_error is not error:
+            nested_detail = _stringify_ai_error_detail(nested_error)
+            if nested_detail:
+                return nested_detail
+        try:
+            return json.dumps(error, ensure_ascii=False)
+        except TypeError:
+            return str(error)
+    return str(error)
+
+
+def _extract_non_stream_ai_message(response: object) -> dict:
+    """统一校验非流式 AI 响应，避免上游错误被二次异常掩盖。"""
+    if not isinstance(response, dict):
+        raise ValueError("AI返回格式无效：响应不是对象")
+
+    error_detail = _stringify_ai_error_detail(response.get("error"))
+    if error_detail:
+        raise RuntimeError(error_detail)
+
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("AI返回格式无效：缺少choices")
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise ValueError("AI返回格式无效：choices[0]不是对象")
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("AI返回格式无效：缺少message")
+
+    return message
+
+
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
+    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
+    apply_request_overrides(
+        numeric_table=request.override_numeric_table,
+        answer_critic=request.override_answer_critic,
+        llm_query_rewrite=request.override_llm_query_rewrite,
+        bm25_synonyms=request.override_bm25_synonyms,
+    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
@@ -1801,27 +2940,54 @@ async def chat_with_pdf(request: ChatRequest):
             mime = _detect_mime_type(img_b64)
             user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
     else:
-        # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
-        search_query = await _maybe_rewrite_query(
-            question=request.question,
-            chat_history=request.chat_history,
+        _cheap_model, _cheap_provider, _cheap_endpoint = _get_cheap_model_params(request)
+        initial_strategy = get_retrieval_strategy(request.question or "")
+        agent_gate = _build_agent_retrieval_gate(
+            enable_agent_retrieval=request.enable_agent_retrieval,
             selected_text=request.selected_text,
-            api_key=request.api_key,
-            model=request.model,
-            provider=request.api_provider,
-            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+            query_type=initial_strategy.get("query_type", ""),
+            evidence_need=initial_strategy.get("evidence_need", []),
         )
-        web_search_sources, web_search_context = await _maybe_perform_web_search(
-            request,
-            query_override=search_query,
-            doc_title=doc.get("filename", ""),
-            selected_text=request.selected_text or "",
-            doc_id=request.doc_id,
-            vector_store_dir=getattr(router, "vector_store_dir", ""),
+        use_agent = bool(agent_gate.get("enabled"))
+        retrieval_meta["agent_gate"] = _annotate_agent_gate(
+            agent_gate,
+            use_agent=use_agent,
+            agent_mode=False,
+            search_query_passthrough=bool(use_agent),
+        )
+        if use_agent:
+            search_query = request.question or ""
+        else:
+            # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
+            search_query = await _maybe_rewrite_query(
+                question=request.question,
+                chat_history=request.chat_history,
+                selected_text=request.selected_text,
+                api_key=request.api_key,
+                model=_cheap_model,
+                provider=_cheap_provider,
+                endpoint=_cheap_endpoint,
+                retrieval_strategy=initial_strategy,
+            )
+        if not use_agent:
+            web_search_sources, web_search_context = await _maybe_perform_web_search(
+                request,
+                query_override=search_query,
+                doc_title=doc.get("filename", ""),
+                selected_text=request.selected_text or "",
+                doc_id=request.doc_id,
+                vector_store_dir=getattr(router, "vector_store_dir", ""),
+            )
+        retrieval_meta["agent_gate"] = _annotate_agent_gate(
+            agent_gate,
+            use_agent=use_agent,
+            agent_mode=False,
+            search_query_passthrough=bool(use_agent),
         )
 
         strategy = get_retrieval_strategy(search_query)
         query_type = strategy["query_type"]
+        evidence_need = strategy.get("evidence_need", [])
         dynamic_top_k = strategy["top_k"]
 
         # 预先计算输出 Token 预算（不含引文开销），供 RAG 上下文预算感知使用
@@ -1954,6 +3120,9 @@ async def chat_with_pdf(request: ChatRequest):
             retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
                 retrieval_meta.get("citations", [])
             )
+        retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
+        retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
+        retrieval_meta["search_query"] = search_query
 
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
@@ -1967,6 +3136,10 @@ async def chat_with_pdf(request: ChatRequest):
 2. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容。
 3. 优先依据文档内容回答。"""
         system_prompt += f"\n4. {answer_style_instruction}"
+        if query_type == "extraction":
+            system_prompt += f"\n\n{_build_extraction_constraint_prompt()}"
+        if "numeric_table" in evidence_need:
+            system_prompt += f"\n\n{_build_numeric_table_constraint_prompt()}"
         if request.enable_glossary:
             glossary_instruction = build_glossary_prompt(context)
             if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
@@ -2009,8 +3182,8 @@ async def chat_with_pdf(request: ChatRequest):
             temperature=request.temperature, top_p=request.top_p,
             custom_params=request.custom_params, reasoning_effort=request.reasoning_effort,
         )
-        message = response["choices"][0]["message"]
-        raw_answer = message["content"]
+        message = _extract_non_stream_ai_message(response)
+        raw_answer = message.get("content") or ""
         reasoning_content = extract_reasoning_content(message)
 
         # 结构化引文后处理（非流式）
@@ -2042,9 +3215,21 @@ async def chat_with_pdf(request: ChatRequest):
             except Exception as e:
                 logger.warning(f"非流式引文后处理失败: {e}")
 
+        answer_guard: dict = {}
         answer, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
-            answer, retrieval_meta.get("citations", [])
+            answer,
+            retrieval_meta.get("citations", []),
+            evidence_need=retrieval_meta.get("evidence_need", []),
+            answer_guard=answer_guard,
+            query=retrieval_meta.get("search_query") or request.question,
         )
+        if answer_guard:
+            retrieval_meta["answer_guard"] = answer_guard
+        if retrieval_meta.get("citations"):
+            retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
+                retrieval_meta.get("citations", [])
+            )
+        response_context_segments = _build_response_context_segments(retrieval_meta)
 
         if use_memory:
             threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
@@ -2053,7 +3238,10 @@ async def chat_with_pdf(request: ChatRequest):
             "doc_id": request.doc_id, "question": request.question,
             "timestamp": datetime.now().isoformat(), "used_provider": response.get("_used_provider"),
             "used_model": response.get("_used_model"), "fallback_used": response.get("_fallback_used", False),
-            "retrieval_meta": {k: v for k, v in retrieval_meta.items() if not k.startswith("_")},
+            "retrieval_meta": {
+                **{k: v for k, v in retrieval_meta.items() if not k.startswith("_")},
+                "context_segments": response_context_segments,
+            },
             "web_search_sources": web_search_sources,
             "memory_hits": memory_hits,
             "memory_meta": memory_meta,
@@ -2066,6 +3254,13 @@ async def chat_with_pdf(request: ChatRequest):
 async def chat_with_pdf_stream(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
+    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
+    apply_request_overrides(
+        numeric_table=request.override_numeric_table,
+        answer_critic=request.override_answer_critic,
+        llm_query_rewrite=request.override_llm_query_rewrite,
+        bm25_synonyms=request.override_bm25_synonyms,
+    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
@@ -2150,39 +3345,91 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 settings.bm25_use_jieba = request.enable_jieba_bm25
                 settings.num_expand_context_chunk = request.num_expand_context_chunk
 
-                use_agent = request.enable_agent_retrieval and not request.selected_text
-                # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
-                yield _sse_json({
-                    'type': 'retrieval_progress',
-                    'phase': 'query_rewrite_start',
-                    'message': '正在分析问题并改写检索查询...',
-                })
-                search_query = await _maybe_rewrite_query(
-                    question=request.question,
-                    chat_history=request.chat_history,
+                _cheap_model, _cheap_provider, _cheap_endpoint = _get_cheap_model_params(request)
+                initial_strategy = get_retrieval_strategy(request.question or "")
+                agent_gate = _build_agent_retrieval_gate(
+                    enable_agent_retrieval=request.enable_agent_retrieval,
                     selected_text=request.selected_text,
-                    api_key=request.api_key,
-                    model=request.model,
-                    provider=request.api_provider,
-                    endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+                    query_type=initial_strategy.get("query_type", ""),
+                    evidence_need=initial_strategy.get("evidence_need", []),
                 )
-                yield _sse_json({
-                    'type': 'retrieval_progress',
-                    'phase': 'query_rewrite_done',
-                    'message': '已生成检索查询，正在查找相关内容...',
-                })
+                use_agent = bool(agent_gate.get("enabled"))
+                retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                    agent_gate,
+                    use_agent=use_agent,
+                    agent_mode=False,
+                    search_query_passthrough=bool(use_agent),
+                )
                 _log_chat_trace(
                     trace_id,
                     trace_started_at,
-                    "query_ready",
-                    rewritten=search_query != (request.question or ""),
-                    search_query=_preview_for_log(search_query, 120),
+                    "agent_gate",
+                    enabled=use_agent,
+                    reason=agent_gate.get("reason"),
+                    query_type=agent_gate.get("query_type"),
+                    matched_query_type=agent_gate.get("matched_query_type"),
+                    matched_needs=",".join(agent_gate.get("matched_evidence_need") or []),
                 )
+                if use_agent:
+                    search_query = request.question or ""
+                    retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                        agent_gate,
+                        use_agent=use_agent,
+                        agent_mode=False,
+                        search_query_passthrough=True,
+                    )
+                    yield _sse_json({
+                        'type': 'retrieval_progress',
+                        'phase': 'agent_start',
+                        'message': '正在分析问题并规划多轮检索...',
+                    })
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "agent_enabled",
+                        search_query=_preview_for_log(search_query, 120),
+                    )
+                else:
+                    retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                        agent_gate,
+                        use_agent=use_agent,
+                        agent_mode=False,
+                        search_query_passthrough=False,
+                    )
+                    # LLM 查询改写：用于检索的 search_query（消解代词/口语化），原始 question 保留用于 LLM 回答
+                    yield _sse_json({
+                        'type': 'retrieval_progress',
+                        'phase': 'query_rewrite_start',
+                        'message': '正在分析问题并改写检索查询...',
+                    })
+                    search_query = await _maybe_rewrite_query(
+                        question=request.question,
+                        chat_history=request.chat_history,
+                        selected_text=request.selected_text,
+                        api_key=request.api_key,
+                        model=_cheap_model,
+                        provider=_cheap_provider,
+                        endpoint=_cheap_endpoint,
+                        retrieval_strategy=initial_strategy,
+                    )
+                    yield _sse_json({
+                        'type': 'retrieval_progress',
+                        'phase': 'query_rewrite_done',
+                        'message': '已生成检索查询，正在查找相关内容...',
+                    })
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "query_ready",
+                        rewritten=search_query != (request.question or ""),
+                        search_query=_preview_for_log(search_query, 120),
+                    )
                 # 联网搜索在此处设置查询参数
                 _web_search_query_for_stream = search_query
                 _web_search_doc_title_for_stream = doc.get("filename", "")
                 strategy = get_retrieval_strategy(search_query)
                 query_type = strategy["query_type"]
+                evidence_need = strategy.get("evidence_need", [])
                 dynamic_top_k = strategy["top_k"]
                 _log_chat_trace(
                     trace_id,
@@ -2302,8 +3549,120 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         citations=len(retrieval_meta.get("citations") or []),
                     )
                 elif use_agent:
-                    context = ""
-                    _log_chat_trace(trace_id, trace_started_at, "retrieval_agent_mode")
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_agent_mode",
+                        top_k=dynamic_top_k,
+                    )
+                    yield _sse_json({
+                        'type': 'retrieval_progress',
+                        'phase': 'agent_mode',
+                        'message': '正在启动多轮检索代理...',
+                    })
+                    agent_api_key = request.api_key or ""
+                    agent_model, agent_provider, agent_endpoint = _get_cheap_model_params(request)
+                    agent_doc_ctx = _build_agent_doc_context(
+                        request.doc_id,
+                        doc,
+                        getattr(router, "vector_store_dir", ""),
+                        api_key=request.embedding_api_key or request.api_key or "",
+                    )
+                    agent = RetrievalAgent(
+                        api_key=agent_api_key,
+                        model=agent_model,
+                        provider=agent_provider,
+                        endpoint=agent_endpoint,
+                        max_rounds=max(1, min(int(getattr(settings, "agent_max_rounds", 5) or 5), 10)),
+                        temperature=float(getattr(settings, "agent_planner_temperature", 0.3) or 0.3),
+                    )
+                    agent_result: dict = {}
+                    try:
+                        async for agent_event in agent.run(
+                            question=search_query or request.question or "",
+                            doc_ctx=agent_doc_ctx,
+                            doc_name=doc.get("filename", ""),
+                        ):
+                            event_type = agent_event.get("type")
+                            if event_type == "retrieval_progress":
+                                yield _sse_json(agent_event)
+                                phase = agent_event.get("phase", "")
+                                message = agent_event.get("message", "")
+                                if phase in {"start", "round_start", "planning", "executing", "tool_result", "complete"}:
+                                    _log_chat_trace(
+                                        trace_id,
+                                        trace_started_at,
+                                        f"agent_{phase}",
+                                        message=_preview_for_log(message, 120),
+                                    )
+                            elif event_type == "retrieval_complete":
+                                agent_result = agent_event
+                    except Exception as e:
+                        logger.warning(f"[Agent] 多轮检索失败，降级为全文编号上下文: {e}")
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_agent_exception",
+                            error=str(e),
+                        )
+                        agent_result = {}
+
+                    agent_context = agent_result.get("context", "") if isinstance(agent_result, dict) else ""
+                    agent_detail = agent_result.get("detail", []) if isinstance(agent_result, dict) else []
+                    if isinstance(agent_result, dict):
+                        if agent_result.get("search_history"):
+                            retrieval_meta["agent_search_history"] = agent_result.get("search_history")
+                        if agent_result.get("task_status"):
+                            retrieval_meta["task_status"] = agent_result.get("task_status")
+                    retrieval_meta["agent_detail"] = agent_detail
+                    retrieval_meta["agent_mode"] = True
+                    retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                        retrieval_meta.get("agent_gate", agent_gate),
+                        use_agent=use_agent,
+                        agent_mode=True,
+                        search_query_passthrough=True,
+                    )
+                    retrieval_meta["query_type"] = query_type
+
+                    if agent_context:
+                        numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                            doc.get("data", {}).get("pages", []),
+                            agent_context,
+                            query=search_query or request.question or "",
+                        )
+                        context = numbered_ctx or agent_context
+                        agent_citations = fb_cits or _generate_page_level_citations(
+                            doc.get("data", {}).get("pages", []),
+                            agent_context,
+                            query=search_query or request.question or "",
+                        )
+                        retrieval_meta["citations"] = agent_citations
+                        retrieval_meta["agent_context_chars"] = len(agent_context)
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_agent_done",
+                            context_chars=len(context),
+                            citations=len(agent_citations or []),
+                            detail=len(agent_detail or []),
+                        )
+                    else:
+                        fallback_text = (doc.get("data", {}) or {}).get("full_text", "")[:30000]
+                        numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                            doc.get("data", {}).get("pages", []),
+                            fallback_text,
+                            query=search_query or request.question or "",
+                        )
+                        context = numbered_ctx or fallback_text
+                        retrieval_meta["citations"] = fb_cits
+                        retrieval_meta["agent_fallback"] = True
+                        _log_chat_trace(
+                            trace_id,
+                            trace_started_at,
+                            "retrieval_agent_fallback",
+                            context_chars=len(context),
+                            citations=len(fb_cits or []),
+                        )
                 elif _should_use_fast_overview_context(
                     query_type,
                     enable_vector_search=request.enable_vector_search,
@@ -2341,13 +3700,21 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
                     # 复杂问题分解：对包含"比较""区别"等关键词的查询，拆分为子问题分别检索
                     yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'analysis', 'message': '正在分析问题并拆分检索子任务...'}, ensure_ascii=False)}\n\n"
-                    sub_questions = await decompose_question(
-                        question=request.question,
-                        api_key=request.api_key,
-                        model=request.model,
-                        provider=request.api_provider,
-                        endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
-                    )
+                    try:
+                        _cm, _cp, _ce = _get_cheap_model_params(request)
+                        sub_questions = await asyncio.wait_for(
+                            decompose_question(
+                                question=request.question,
+                                api_key=request.api_key,
+                                model=_cm,
+                                provider=_cp,
+                                endpoint=_ce,
+                            ),
+                            timeout=5.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[Decompose] 问题分解超时(5s)，跳过分解")
+                        sub_questions = []
                     _log_chat_trace(
                         trace_id,
                         trace_started_at,
@@ -2468,6 +3835,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
                         retrieval_meta.get("citations", [])
                     )
+                retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
+                retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
+                retrieval_meta["search_query"] = search_query
 
                 retrieval_preview = _build_retrieval_preview_message(retrieval_meta.get("citations", []))
                 if retrieval_preview:
@@ -2495,6 +3865,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
 2. 遇到公式、数据、图表等关键信息时，必须直接引用原文展示完整内容。
 3. 优先依据文档内容回答。"""
                 system_prompt += f"\n4. {answer_style_instruction}"
+                if query_type == "extraction":
+                    system_prompt += f"\n\n{_build_extraction_constraint_prompt()}"
+                if "numeric_table" in evidence_need:
+                    system_prompt += f"\n\n{_build_numeric_table_constraint_prompt()}"
                 if request.enable_glossary:
                     glossary_instruction = build_glossary_prompt(context)
                     if glossary_instruction: system_prompt += f"\n\n{glossary_instruction}"
@@ -2524,11 +3898,110 @@ async def chat_with_pdf_stream(request: ChatRequest):
             _retrieval_chunks = retrieval_meta.get("_chunks", [])
 
             if use_agent:
-                # ... Agent 逻辑省略，保持原样 ...
-                pass
+                _log_chat_trace(
+                    trace_id,
+                    trace_started_at,
+                    "retrieval_agent_mode",
+                    top_k=dynamic_top_k,
+                )
+                agent_api_key = request.api_key or ""
+                agent_model, agent_provider, agent_endpoint = _get_cheap_model_params(request)
+                agent_doc_ctx = _build_agent_doc_context(
+                    request.doc_id,
+                    doc,
+                    getattr(router, "vector_store_dir", ""),
+                    api_key=request.embedding_api_key or request.api_key or "",
+                )
+                agent = RetrievalAgent(
+                    api_key=agent_api_key,
+                    model=agent_model,
+                    provider=agent_provider,
+                    endpoint=agent_endpoint,
+                    max_rounds=max(1, min(int(getattr(settings, "agent_max_rounds", 5) or 5), 10)),
+                    temperature=float(getattr(settings, "agent_planner_temperature", 0.3) or 0.3),
+                )
+                agent_result: dict = {}
+                try:
+                    async for agent_event in agent.run(
+                        question=search_query or request.question or "",
+                        doc_ctx=agent_doc_ctx,
+                        doc_name=doc.get("filename", ""),
+                    ):
+                        event_type = agent_event.get("type")
+                        if event_type == "retrieval_complete":
+                            agent_result = agent_event
+                        elif event_type == "retrieval_progress":
+                            phase = agent_event.get("phase", "")
+                            if phase in {"start", "round_start", "planning", "executing", "tool_result", "complete"}:
+                                _log_chat_trace(
+                                    trace_id,
+                                    trace_started_at,
+                                    f"agent_{phase}",
+                                    message=_preview_for_log(agent_event.get("message", ""), 120),
+                                )
+                except Exception as e:
+                    logger.warning(f"[Agent] 多轮检索失败，降级为全文编号上下文: {e}")
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_agent_exception",
+                        error=str(e),
+                    )
+                    agent_result = {}
+
+                agent_context = agent_result.get("context", "") if isinstance(agent_result, dict) else ""
+                agent_detail = agent_result.get("detail", []) if isinstance(agent_result, dict) else []
+                if isinstance(agent_result, dict):
+                    if agent_result.get("search_history"):
+                        retrieval_meta["agent_search_history"] = agent_result.get("search_history")
+                    if agent_result.get("task_status"):
+                        retrieval_meta["task_status"] = agent_result.get("task_status")
+                retrieval_meta["agent_detail"] = agent_detail
+                retrieval_meta["agent_mode"] = True
+                retrieval_meta["query_type"] = query_type
+
+                if agent_context:
+                    numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                        doc.get("data", {}).get("pages", []),
+                        agent_context,
+                        query=search_query or request.question or "",
+                    )
+                    context = numbered_ctx or agent_context
+                    agent_citations = fb_cits or _generate_page_level_citations(
+                        doc.get("data", {}).get("pages", []),
+                        agent_context,
+                        query=search_query or request.question or "",
+                    )
+                    retrieval_meta["citations"] = agent_citations
+                    retrieval_meta["agent_context_chars"] = len(agent_context)
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_agent_done",
+                        context_chars=len(context),
+                        citations=len(agent_citations or []),
+                        detail=len(agent_detail or []),
+                    )
+                else:
+                    fallback_text = (doc.get("data", {}) or {}).get("full_text", "")[:30000]
+                    numbered_ctx, fb_cits = _build_numbered_context_and_citations(
+                        doc.get("data", {}).get("pages", []),
+                        fallback_text,
+                        query=search_query or request.question or "",
+                    )
+                    context = numbered_ctx or fallback_text
+                    retrieval_meta["citations"] = fb_cits
+                    retrieval_meta["agent_fallback"] = True
+                    _log_chat_trace(
+                        trace_id,
+                        trace_started_at,
+                        "retrieval_agent_fallback",
+                        context_chars=len(context),
+                        citations=len(fb_cits or []),
+                    )
 
             # 联网搜索（在此处执行以便向客户端实时发送状态事件）
-            if getattr(request, "enable_web_search", False) and not image_list:
+            if getattr(request, "enable_web_search", False) and not image_list and not use_agent:
                 # 意图分析：判断此问题是否真的需要联网
                 _do_web_search = await _should_perform_web_search(
                     question=request.question,
@@ -2693,10 +4166,21 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                             break
 
                     final_answer_text = extract_final_answer(full_output) if has_structured_citations else (full_output or "")
+                    answer_guard: dict = {}
                     final_answer_text, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
                         final_answer_text,
                         retrieval_meta.get("citations", []),
+                        evidence_need=retrieval_meta.get("evidence_need", []),
+                        answer_guard=answer_guard,
+                        query=retrieval_meta.get("search_query") or request.question,
                     )
+                    if answer_guard:
+                        retrieval_meta["answer_guard"] = answer_guard
+                    if retrieval_meta.get("citations"):
+                        retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
+                            retrieval_meta.get("citations", [])
+                        )
+                    response_context_segments = _build_response_context_segments(retrieval_meta)
 
                     # Bug1 兜底：LLM 未输出 FINAL ANSWER 标记时，流式过滤跳过了所有 content，
                     # 此处补发完整回答文本，确保前端不会显示空内容
@@ -2713,7 +4197,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             yield f"data: {json.dumps({'content': fallback_delta, 'reasoning_content': '', 'done': False})}\n\n"
 
                     # 移除内部 _chunks 字段（仅后端使用），避免发送大量原始数据
-                    send_meta = {k: v for k, v in retrieval_meta.items() if not k.startswith("_")}
+                    send_meta = {
+                        **{k: v for k, v in retrieval_meta.items() if not k.startswith("_")},
+                        "context_segments": response_context_segments,
+                    }
                     chunk_data = {
                         'content': '', 'reasoning_content': reasoning,
                         'done': True, 'used_provider': chunk.get('used_provider'),
@@ -2742,29 +4229,49 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     try:
                         followup_history = list(request.chat_history or [])
                         followup_history.append({"role": "user", "content": request.question})
+                        _fm, _fp, _fe = _get_cheap_model_params(request)
                         followups = await generate_followup_questions(
                             chat_history=followup_history,
                             api_key=request.api_key,
-                            model=request.model,
-                            provider=request.api_provider,
-                            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+                            model=_fm,
+                            provider=_fp,
+                            endpoint=_fe,
                         )
                         if followups:
                             yield f"data: {json.dumps({'type': 'followup_questions', 'questions': followups}, ensure_ascii=False)}\n\n"
                     except Exception as e:
                         logger.debug(f"追问建议生成失败（不影响主流程）: {e}")
+                    # 答案自审（检测幻觉）
+                    if should_enable_answer_critic() and full_output and context:
+                        try:
+                            from services.answer_critic_service import critique_answer
+                            _cm2, _cp2, _ce2 = _get_cheap_model_params(request)
+                            critic_result = await critique_answer(
+                                question=request.question,
+                                answer=full_output,
+                                context=context[:6000],
+                                api_key=request.api_key,
+                                model=_cm2,
+                                provider=_cp2,
+                                endpoint=_ce2,
+                            )
+                            if critic_result and critic_result.get("has_hallucination"):
+                                yield f"data: {json.dumps({'type': 'answer_critic', 'critic': critic_result}, ensure_ascii=False)}\n\n"
+                        except Exception as e:
+                            logger.debug(f"答案自审失败（不影响主流程）: {e}")
                     # 首轮对话自动命名
                     if not request.chat_history or len(request.chat_history) <= 1:
                         try:
                             name_history = [{"role": "user", "content": request.question}]
                             if full_output:
                                 name_history.append({"role": "assistant", "content": full_output[:300]})
+                            _nm, _np, _ne = _get_cheap_model_params(request)
                             conv_name = await suggest_conversation_name(
                                 chat_history=name_history,
                                 api_key=request.api_key,
-                                model=request.model,
-                                provider=request.api_provider,
-                                endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+                                model=_nm,
+                                provider=_np,
+                                endpoint=_ne,
                             )
                             if conv_name:
                                 yield f"data: {json.dumps({'type': 'conv_name', 'name': conv_name}, ensure_ascii=False)}\n\n"

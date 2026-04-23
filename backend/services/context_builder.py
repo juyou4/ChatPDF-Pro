@@ -85,6 +85,12 @@ class ContextBuilder:
         if not selections:
             return "", []
 
+        # Section/path-aware 重排：优先保持同路径证据相邻（在 Lost-in-the-Middle 之前执行）
+        if _rag_config.enable_path_budget and len(selections) > 2:
+            selections = self._path_aware_reorder(
+                selections, max_singletons=_rag_config.path_max_singletons
+            )
+
         # Lost-in-the-Middle 缓解：交替排列，最相关内容在开头和结尾
         if _rag_config.enable_lost_in_middle_reorder and len(selections) > 2:
             selections = self._reorder_lost_in_middle(selections)
@@ -159,9 +165,13 @@ class ContextBuilder:
         # 用双换行分隔各意群的上下文块
         context_string = "\n\n".join(context_parts)
 
+        # path 多样性诊断
+        path_stats = self._compute_path_diagnostics(selections)
         logger.info(
             f"上下文构建完成: {len(selections)} 个意群, "
-            f"总长度 {len(context_string)} 字符"
+            f"总长度 {len(context_string)} 字符, "
+            f"唯一路径={path_stats['unique_paths']}, "
+            f"孤立路径={path_stats['singleton_paths']}"
         )
 
         return context_string, citations
@@ -325,6 +335,110 @@ class ContextBuilder:
 
         start = max(0, best_pos - max_len // 4)
         return text[start:start + max_len].strip()
+
+    @staticmethod
+    def _compute_path_diagnostics(selections: List[dict]) -> dict:
+        """计算 section/path 多样性诊断统计
+
+        以 page_range 起始页的 5 页窗口作为轻量 path 代理，
+        统计唯一路径数、孤立路径数和同路径相邻比率。
+
+        Args:
+            selections: 粒度选择结果列表，每项包含 group 对象
+
+        Returns:
+            {"unique_paths", "singleton_paths", "adjacent_path_rate"}
+        """
+        if not selections:
+            return {"unique_paths": 0, "singleton_paths": 0, "adjacent_path_rate": 0.0}
+
+        def _path_key(sel: dict) -> str:
+            group = sel.get("group")
+            if group is None:
+                return "unknown"
+            page_start = group.page_range[0] if hasattr(group, "page_range") else 0
+            window = page_start // 5
+            return f"p{window}"
+
+        path_keys = [_path_key(s) for s in selections]
+        from collections import Counter
+        counts = Counter(path_keys)
+        unique_paths = len(counts)
+        singleton_paths = sum(1 for v in counts.values() if v == 1)
+
+        # 相邻同路径比率：连续两个选择路径相同的比例
+        adjacent = sum(
+            1 for i in range(1, len(path_keys))
+            if path_keys[i] == path_keys[i - 1]
+        )
+        adjacent_rate = round(adjacent / max(len(path_keys) - 1, 1), 4)
+
+        return {
+            "unique_paths": unique_paths,
+            "singleton_paths": singleton_paths,
+            "adjacent_path_rate": adjacent_rate,
+        }
+
+    @staticmethod
+    def _path_aware_reorder(selections: List[dict], max_singletons: int = 3) -> List[dict]:
+        """按 section/path 路径重排选择列表，优先保持同路径证据相邻
+
+        以 page_range 的 5 页窗口作为 path 代理：
+        1. 同路径的意群相邻排列
+        2. 孤立路径（只有 1 个意群）超出 max_singletons 的放到末尾
+        3. 在路径组内维持原有相关性顺序
+
+        Args:
+            selections: 按相关性降序排列的选择列表
+            max_singletons: 保留在正常位置的最大孤立路径数
+
+        Returns:
+            重排后的选择列表
+        """
+        if len(selections) <= 2:
+            return selections
+
+        def _path_key(sel: dict) -> str:
+            group = sel.get("group")
+            if group is None:
+                return "unknown"
+            page_start = group.page_range[0] if hasattr(group, "page_range") else 0
+            return f"p{page_start // 5}"
+
+        from collections import defaultdict
+        path_order: list = []
+        path_groups: dict = defaultdict(list)
+        for sel in selections:
+            pk = _path_key(sel)
+            if pk not in path_order:
+                path_order.append(pk)
+            path_groups[pk].append(sel)
+
+        counts = {pk: len(items) for pk, items in path_groups.items()}
+        multi_paths = [pk for pk in path_order if counts[pk] > 1]
+        singleton_paths = [pk for pk in path_order if counts[pk] == 1]
+
+        result: list = []
+        overflow_singleton_paths: list = []
+        kept_singletons = 0
+        singleton_limit = max(max_singletons, 0)
+        for pk in path_order:
+            if counts[pk] > 1:
+                result.extend(path_groups[pk])
+                continue
+            if kept_singletons < singleton_limit:
+                result.extend(path_groups[pk])
+                kept_singletons += 1
+                continue
+            overflow_singleton_paths.append(pk)
+        for pk in reversed(overflow_singleton_paths):
+            result.extend(path_groups[pk])
+
+        logger.debug(
+            f"[PathAwareReorder] 路径数={len(path_order)}, "
+            f"多成员路径={len(multi_paths)}, 孤立路径={len(singleton_paths)}"
+        )
+        return result
 
     @staticmethod
     def _reorder_lost_in_middle(selections: List[dict]) -> List[dict]:

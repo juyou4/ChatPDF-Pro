@@ -892,18 +892,6 @@ export const DOUBAO_MODELS: Model[] = [
         isUserAdded: false
     },
     {
-        id: 'doubao-seed-code-preview-latest',
-        name: 'Doubao Seed Code Preview',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包编程专项模型，深度优化 Agentic Coding 场景'
-        },
-        tags: ['vision', 'reasoning'],
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
         id: 'doubao-seed-1-8',
         name: 'Doubao Seed 1.8',
         providerId: 'doubao',

@@ -13,6 +13,23 @@
 from typing import Dict, List, Optional, Tuple
 
 
+_QUERY_TYPE_PARAMS = {
+    # (alpha=向量权重, min_score=最小保留分数阈值, candidate_multiplier=候选池扩展倍率)
+    "extraction":  (0.35, 0.05, 1.5),  # 提取题：BM25 关键词首要
+    "overview":    (0.65, 0.04, 2.5),  # 概览题：语义完备性首要，需要较大候选池
+    "analytical":  (0.55, 0.05, 2.0),  # 分析题：小居向量
+    "specific":    (0.50, 0.06, 1.5),  # 具体题：均衡
+}
+_DEFAULT_QUERY_TYPE_PARAMS = (0.50, 0.05, 1.5)
+
+
+def get_query_type_params(query_type: Optional[str]) -> Tuple[float, float, float]:
+    """根据查询类型返回 (alpha, min_score, candidate_multiplier)"""
+    if not query_type:
+        return _DEFAULT_QUERY_TYPE_PARAMS
+    return _QUERY_TYPE_PARAMS.get(query_type, _DEFAULT_QUERY_TYPE_PARAMS)
+
+
 def reciprocal_rank_fusion(
     *result_lists: List[dict],
     k: int = 60,
@@ -76,23 +93,16 @@ def hybrid_search_merge(
         bm25_results: BM25检索结果
         top_k: 返回结果数量
         alpha: 向量检索权重（0-1），默认0.5表示平等权重
-        query_type: 查询类型（可选），用于动态调整 alpha 权重
+        query_type: 查询类型（可选），用于动态调整 alpha/min_score
         
     Returns:
         融合后的结果列表
     """
-    # 根据查询类型动态调整 alpha（向量权重）
-    if query_type is not None:
-        if query_type == 'extraction':
-            # 提取性问题：BM25 关键词匹配更重要
-            alpha = 0.35
-        elif query_type == 'overview':
-            # 概览性问题：向量语义匹配更重要
-            alpha = 0.65
-        elif query_type == 'analytical':
-            # 分析性问题：略偏向向量
-            alpha = 0.55
-        # specific 保持默认 0.5
+    # 根据查询类型动态调整 alpha 和 min_score
+    alpha_adj, min_score, _ = get_query_type_params(query_type)
+    # 只有在未显式指定 alpha 时才用动态分配
+    if alpha == 0.5:
+        alpha = alpha_adj
     if not bm25_results:
         return vector_results[:top_k]
     if not vector_results:

@@ -335,6 +335,23 @@ def find_start_end_phrase(
     if single_span is not None:
         return single_span, single_len
 
+    # 字符级 n-gram 回退（对中文短语效果更好）
+    combined = start_phrase + " " + end_phrase if start_phrase and end_phrase else (start_phrase or end_phrase or "")
+    if len(combined) >= min_length:
+        # 滑动窗口匹配：在 context 中找与 combined 最相似的子串
+        ngram_len = min(len(combined), 60)
+        best_pos, best_ratio = -1, 0.0
+        step = max(1, ngram_len // 3)
+        for i in range(0, max(1, len(ctx_lower) - ngram_len + 1), step):
+            window = ctx_lower[i:i + ngram_len]
+            ratio = SequenceMatcher(None, combined[:ngram_len], window, autojunk=False).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_pos = i
+        if best_ratio >= 0.55 and best_pos >= 0:
+            end_pos = min(len(ctx_lower), best_pos + max_excerpt_length)
+            return (best_pos, end_pos), end_pos - best_pos
+
     return None, 0
 
 
@@ -456,12 +473,22 @@ def match_citations_to_chunks(
                     raw_text = text.replace("\n", " ")
                     best_text = raw_text[span[0]:span[1]]
 
+        # 计算匹配置信度（0-1）
+        match_confidence = 0.0
+        if best_match and best_length > 0:
+            phrase_len = len((evidence.start_phrase or "") + (evidence.end_phrase or ""))
+            if phrase_len > 0:
+                match_confidence = min(1.0, best_length / max(phrase_len, 1))
+            else:
+                match_confidence = 0.5
+
         entry = {
             "idx": evidence.idx,
             "start_phrase": evidence.start_phrase,
             "end_phrase": evidence.end_phrase,
             "highlight_text": best_text if best_match else None,
             "matched_chunk_idx": best_chunk_idx,
+            "match_confidence": round(match_confidence, 3),
         }
 
         # B4 修复：策略 1/2 成功时从 segment 继承 page_range / group_id

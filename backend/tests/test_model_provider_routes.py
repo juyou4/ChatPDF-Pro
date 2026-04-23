@@ -78,8 +78,8 @@ def test_get_models_exposes_official_doubao_chat_ids(monkeypatch):
     assert "doubao-seed-2-0-pro-260215" in doubao_models
     assert "doubao-seed-2-0-lite-260215" in doubao_models
     assert "doubao-seed-2-0-mini-260215" in doubao_models
-    assert "doubao-seed-code-preview-latest" in doubao_models
     assert "doubao-seed-2-0-pro" not in doubao_models
+    assert "doubao-seed-code-preview-latest" not in doubao_models
 
 
 def test_get_models_exposes_official_current_chat_ids(monkeypatch):

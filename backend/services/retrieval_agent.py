@@ -244,7 +244,7 @@ class RetrievalAgent:
 
         # 构建最终上下文
         final_context, detail = self._build_final_context(
-            search_results, fetched_content
+            question, search_results, fetched_content
         )
 
         yield {
@@ -409,6 +409,7 @@ class RetrievalAgent:
 
     def _build_final_context(
         self,
+        question: str,
         search_results: List[str],
         fetched_content: Dict[str, dict],
     ) -> tuple:
@@ -420,9 +421,19 @@ class RetrievalAgent:
         context_parts = []
         detail = []
 
+        try:
+            from services.embedding_service import filter_reference_trap_texts
+        except Exception:
+            filter_reference_trap_texts = None
+
         # 添加搜索结果片段（去重，限制总量）
         seen = set()
-        for chunk in search_results:
+        filtered_search_results = (
+            filter_reference_trap_texts(search_results, question)
+            if filter_reference_trap_texts is not None
+            else search_results
+        )
+        for chunk in filtered_search_results:
             chunk_key = chunk[:100]
             if chunk_key in seen:
                 continue
@@ -431,12 +442,17 @@ class RetrievalAgent:
 
         # 添加意群内容
         for gid, data in fetched_content.items():
-            kw_text = ""
-            context_parts.append(f"【{gid} - {data['granularity']}】\n{data['text']}")
+            group_text = data["text"]
+            if filter_reference_trap_texts is not None:
+                filtered_group = filter_reference_trap_texts([group_text], question)
+                if not filtered_group:
+                    continue
+                group_text = filtered_group[0]
+            context_parts.append(f"【{gid} - {data['granularity']}】\n{group_text}")
             detail.append({
                 "group_id": gid,
                 "granularity": data["granularity"],
-                "char_count": len(data["text"]),
+                "char_count": len(group_text),
             })
 
         # 限制总长度（约 50000 字符）

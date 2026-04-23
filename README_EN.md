@@ -17,9 +17,19 @@
 
 ## App Preview
 
-![ChatPDF Pro Screenshot](docs/screenshot.png)
+### Interface Overview
 
-*Professional PDF reading and AI chat interface with native PDF rendering, conversation history, and intelligent text extraction.*
+<!-- Place your overview screenshot in the docs/ directory and update the filename below -->
+![Interface Overview](docs/preview_overview.png)
+
+*Overall layout: native PDF viewer on the left, AI chat panel on the right, with a draggable divider to adjust the split ratio. Supports multi-document tabs, conversation history management, and one-click preset questions.*
+
+### Chat in Action
+
+<!-- Place your chat screenshot in the docs/ directory and update the filename below -->
+![AI Chat Example](docs/preview_chat.png)
+
+*AI chat panel highlights: clickable citation markers [1][2] that jump to the exact PDF location, real-time inline math formula rendering, collapsible deep-thinking blocks, and follow-up question suggestion buttons at the bottom of each reply.*
 
 ### Standalone Desktop Client
 

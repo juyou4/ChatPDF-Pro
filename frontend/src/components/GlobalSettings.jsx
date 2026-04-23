@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key } from 'lucide-react';
+import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Sparkles } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
@@ -11,7 +11,16 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const {
         fontFamily, customFont, globalScale, setFontFamily, setCustomFont, setGlobalScale, resetFontSettings
     } = useFontSettings();
-    const { enableMemory, setEnableMemory, resetChatParams } = useChatParams();
+    const {
+        enableMemory, setEnableMemory, resetChatParams,
+        overrideNumericTable, setOverrideNumericTable,
+        overrideAnswerCritic, setOverrideAnswerCritic,
+        overrideLLMQueryRewrite, setOverrideLLMQueryRewrite,
+        overrideBM25Synonyms, setOverrideBM25Synonyms,
+        cheapModel, setCheapModel,
+        cheapModelProvider, setCheapModelProvider,
+    } = useChatParams();
+    const [showRetrievalTuning, setShowRetrievalTuning] = useState(false);
     const { exportSettings, importSettings } = useGlobalSettings();
 
     const resetSettings = () => { resetFontSettings(); resetChatParams(); resetWebSearch(); };
@@ -300,6 +309,78 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 )}
                             </div>
 
+                            {/* Retrieval Tuning — 检索增强调优 */}
+                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
+                                <button onClick={() => setShowRetrievalTuning(!showRetrievalTuning)} className="w-full flex items-center justify-between text-left">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-8 h-8 rounded-full bg-violet-50 text-violet-500 flex items-center justify-center">
+                                            <Sparkles className="w-4 h-4" />
+                                        </div>
+                                        <div>
+                                            <h3 className="text-[14px] font-bold text-gray-900">检索增强调优</h3>
+                                            <p className="text-[12px] text-gray-500">对当前会话覆盖后端检索开关，不持久化到后端 config</p>
+                                        </div>
+                                    </div>
+                                    <div className={`transform transition-transform text-gray-400 ${showRetrievalTuning ? 'rotate-180' : ''}`}>▼</div>
+                                </button>
+
+                                {showRetrievalTuning && (
+                                    <div className="pt-3 border-t border-gray-100/50 space-y-3">
+                                        <TriStateToggle
+                                            title="numeric_table 专项增强"
+                                            desc="表格数值比较类查询（如「第二好的方法」「Table 7 DiffuLT」）的专项检索增强"
+                                            value={overrideNumericTable}
+                                            onChange={setOverrideNumericTable}
+                                        />
+                                        <TriStateToggle
+                                            title="BM25 同义词扩展"
+                                            desc="查询时自动扩展同义词，提升召回率"
+                                            value={overrideBM25Synonyms}
+                                            onChange={setOverrideBM25Synonyms}
+                                        />
+                                        <TriStateToggle
+                                            title="LLM 查询改写"
+                                            desc="多轮对话中用 LLM 消解指代（代词/省略），长查询自动跳过"
+                                            value={overrideLLMQueryRewrite}
+                                            onChange={setOverrideLLMQueryRewrite}
+                                        />
+                                        <TriStateToggle
+                                            title="答案自审"
+                                            desc="回答结束后用 cheap model 检测幻觉；会增加 1-3s 延迟"
+                                            value={overrideAnswerCritic}
+                                            onChange={setOverrideAnswerCritic}
+                                        />
+
+                                        {/* Cheap Model 配置 */}
+                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 space-y-2">
+                                            <div className="flex items-center justify-between px-1">
+                                                <span className="text-[12px] font-bold text-gray-700">辅助模型（双模型策略）</span>
+                                                <span className="text-[10px] text-gray-500">为空则跟随后端默认</span>
+                                            </div>
+                                            <p className="text-[11px] text-gray-500 px-1">
+                                                用于非核心 LLM 任务（查询改写 / 追问建议 / 自动命名 / 答案自审）
+                                            </p>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={cheapModelProvider || ''}
+                                                    onChange={(e) => setCheapModelProvider(e.target.value)}
+                                                    placeholder="provider (如 openai)"
+                                                    className="text-[12px] font-mono bg-white border border-gray-200 rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    value={cheapModel || ''}
+                                                    onChange={(e) => setCheapModel(e.target.value)}
+                                                    placeholder="model (如 gpt-4o-mini)"
+                                                    className="text-[12px] font-mono bg-white border border-gray-200 rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
                             {/* Data Mgmt */}
                             <div className="grid grid-cols-4 gap-3 pt-2">
                                 {[
@@ -360,6 +441,44 @@ const ToggleSwitch = ({ checked, onChange, color = '#8871e4' }) => (
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>
 );
+
+/**
+ * 三态开关：null=自动（跟随后端 config）/ true=强制开 / false=强制关
+ * 用于检索增强调优面板，让用户无需 restart 后端即可会话级切换 feature flag。
+ */
+const TriStateToggle = ({ title, desc, value, onChange }) => {
+    const options = [
+        { v: null, label: '自动' },
+        { v: true, label: '开' },
+        { v: false, label: '关' },
+    ];
+    return (
+        <div className="flex items-start justify-between gap-4 py-2">
+            <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-bold text-gray-800">{title}</div>
+                {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
+            </div>
+            <div className="flex items-center gap-1 bg-gray-100/80 p-0.5 rounded-[12px] flex-shrink-0">
+                {options.map((opt) => {
+                    const active = value === opt.v;
+                    return (
+                        <button
+                            key={String(opt.v)}
+                            onClick={() => onChange(opt.v)}
+                            className={`px-2.5 py-1 rounded-[10px] text-[11px] font-bold transition-all ${
+                                active
+                                    ? 'bg-white text-violet-600 shadow-sm'
+                                    : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                        >
+                            {opt.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
 
 const KeyIcon = (props) => (
     <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg>

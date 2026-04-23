@@ -99,3 +99,25 @@ chatpdf_*.md
 rehype-stringify/
 remark-parse/
 remark-rehype/
+
+# RAGAS evaluation artifacts
+backend/.venv-ragas*/
+backend/app_round*.out
+backend/app_round*.err
+backend/eval_round*.out
+backend/eval_round*.err
+backend/tests/ragas_results*.csv
+backend/tests/ragas_results*.json
+backend/tests/ragas_*_config*.json
+backend/tests/ragas_*_questions.json
+backend/tests/eval_summary.md
+backend/tests/tmp_*.py
+backend/requirements-eval.txt
+
+# Debugging / temporary artifacts (project root only)
+/fix_summary.md
+/numeric_diagnosis.md
+/updateSettingsUI.js
+/scripts/export-github-stars.ps1
+/exports/
+/Problems/

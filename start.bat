@@ -194,6 +194,34 @@ if exist "%MODEL_FILE%" (
     )
 )
 
+:: ==================== ODL 去脏解析器 ====================
+echo   [▶] 检查 OpenDataLoader PDF 解析器...
+
+:: 检查 opendataloader_pdf Python 包
+python -c "import opendataloader_pdf" >nul 2>&1
+if errorlevel 1 (
+    echo   [▶] 安装 opendataloader-pdf...
+    python -m pip install -q opendataloader-pdf >nul 2>&1
+    python -c "import opendataloader_pdf" >nul 2>&1
+    if errorlevel 1 (
+        echo   [!] opendataloader-pdf 安装失败，将使用 pdfplumber 解析
+    ) else (
+        echo   [✓] opendataloader-pdf 安装成功
+    )
+) else (
+    echo   [✓] opendataloader-pdf 已安装
+)
+
+:: 检查 Java（ODL 运行所需）
+where java >nul 2>&1
+if errorlevel 1 (
+    echo   [!] Java 未安装，ODL 去脏功能将自动降级为 pdfplumber
+    echo   [!] 如需完整去脏功能，请安装 Java 11+:
+    echo   [!]   https://adoptium.net
+) else (
+    echo   [✓] Java 已安装，ODL 去脏功能已启用
+)
+
 :: 前端依赖
 if not exist "frontend\node_modules" (
     echo   [▶] 首次运行，安装前端依赖 ^(需要1-2分钟^)...

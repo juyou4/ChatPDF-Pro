@@ -5,7 +5,11 @@ import os
 # 将 backend 目录添加到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.embedding_service import _is_reference_like_text, _phrase_boost
+from services.embedding_service import (
+    _is_reference_like_text,
+    _phrase_boost,
+    filter_reference_trap_results,
+)
 
 
 def test_reference_like_text_detected():
@@ -48,3 +52,28 @@ def test_phrase_boost_keeps_reference_chunk_for_reference_query():
 
     assert ranked[0]["chunk"] == ref_chunk["chunk"]
     assert not ranked[0].get("reference_like")
+
+
+def test_reference_trap_filter_keeps_structural_metadata_on_main_exit():
+    results = [
+        {
+            "chunk": "[1] K. He et al. 2016. Deep residual learning.",
+            "chunk_type": "text",
+            "chunk_heading": "References",
+            "page": "12",
+        },
+        {
+            "chunk": "作者信息位于论文首页页眉。",
+            "chunk_type": "text",
+            "chunk_heading": "Title",
+            "page": 1,
+        },
+    ]
+
+    filtered = filter_reference_trap_results(results, "第一作者是谁？", evidence_need=["reference_trap"])
+
+    assert len(filtered) == 1
+    assert filtered[0]["chunk"] == "作者信息位于论文首页页眉。"
+    assert filtered[0]["block_type"] == "text"
+    assert filtered[0]["section_path"] == "Title"
+    assert filtered[0]["page"] == 1
