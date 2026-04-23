@@ -191,6 +191,14 @@ const GlobalSettingsBridge = ({ children }) => {
         codeShowLineNumbers: chatParams.codeShowLineNumbers,
         messageStyle: chatParams.messageStyle,
         messageFontSize: chatParams.messageFontSize,
+        // 检索增强调优（tri-state override + cheap_model）
+        overrideNumericTable: chatParams.overrideNumericTable,
+        overrideAnswerCritic: chatParams.overrideAnswerCritic,
+        overrideLLMQueryRewrite: chatParams.overrideLLMQueryRewrite,
+        overrideBM25Synonyms: chatParams.overrideBM25Synonyms,
+        cheapModel: chatParams.cheapModel,
+        cheapModelProvider: chatParams.cheapModelProvider,
+        cheapModelEndpoint: chatParams.cheapModelEndpoint,
 
         // 字体设置方法
         setFontFamily: fontSettings.setFontFamily,
@@ -220,6 +228,13 @@ const GlobalSettingsBridge = ({ children }) => {
         setCodeShowLineNumbers: chatParams.setCodeShowLineNumbers,
         setMessageStyle: chatParams.setMessageStyle,
         setMessageFontSize: chatParams.setMessageFontSize,
+        setOverrideNumericTable: chatParams.setOverrideNumericTable,
+        setOverrideAnswerCritic: chatParams.setOverrideAnswerCritic,
+        setOverrideLLMQueryRewrite: chatParams.setOverrideLLMQueryRewrite,
+        setOverrideBM25Synonyms: chatParams.setOverrideBM25Synonyms,
+        setCheapModel: chatParams.setCheapModel,
+        setCheapModelProvider: chatParams.setCheapModelProvider,
+        setCheapModelEndpoint: chatParams.setCheapModelEndpoint,
 
         // 聚合工具方法
         resetSettings,

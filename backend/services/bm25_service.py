@@ -251,12 +251,20 @@ class BM25Index:
 # 同义词扩展开关
 # ============================================================
 def _should_expand_synonyms() -> bool:
-    """判断是否启用 BM25 同义词扩展（从 settings 读取）"""
+    """判断是否启用 BM25 同义词扩展。
+
+    委托给 ``services.rag_config.should_expand_bm25_synonyms`` 以支持 per-request
+    ContextVar 覆盖。全局 settings 作为兜底。
+    """
     try:
-        from config import settings
-        return getattr(settings, "bm25_expand_synonyms", True)
+        from services.rag_config import should_expand_bm25_synonyms
+        return should_expand_bm25_synonyms()
     except Exception:
-        return True
+        try:
+            from config import settings
+            return bool(getattr(settings, "bm25_expand_synonyms", True))
+        except Exception:
+            return True
 
 
 # ============================================================

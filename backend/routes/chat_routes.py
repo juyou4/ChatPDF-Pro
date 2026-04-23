@@ -32,7 +32,12 @@ from services.followup_service import generate_followup_questions
 from services.conv_name_service import suggest_conversation_name
 from services.decompose_service import decompose_question
 from services.mindmap_service import generate_mindmap
-from services.rag_config import should_apply_numeric_table_specialization
+from services.rag_config import (
+    should_apply_numeric_table_specialization,
+    should_enable_answer_critic,
+    should_enable_llm_query_rewrite,
+    apply_request_overrides,
+)
 from services.citation_service import (
     build_structured_citation_prompt,
     parse_citation_list,
@@ -294,17 +299,29 @@ _query_rewriter = QueryRewriter()
 def _get_cheap_model_params(request) -> tuple:
     """获取辅助模型参数（双模型策略）
 
-    如果配置了 cheap_model，返回 (cheap_model, cheap_provider, cheap_endpoint)，
-    否则返回请求中的主模型参数。
+    优先级：request 字段（per-request）> config.settings.cheap_model*（全局）> 主模型 fallback。
+    如果 cheap_model 与 cheap_provider 均有值，返回 (cheap_model, cheap_provider, endpoint)，
+    否则回退到主模型三元组。
 
     Returns:
         (model, provider, endpoint) 三元组
     """
+    # 1. per-request override
+    req_model = getattr(request, "cheap_model", None)
+    req_provider = getattr(request, "cheap_model_provider", None)
+    req_endpoint = getattr(request, "cheap_model_endpoint", None)
+    if req_model and req_provider:
+        endpoint = req_endpoint or _get_provider_endpoint(req_provider, request.api_host or "")
+        return req_model, req_provider, endpoint
+
+    # 2. 全局 settings
     cheap_model = settings.cheap_model
     cheap_provider = settings.cheap_model_provider
     if cheap_model and cheap_provider:
         endpoint = _get_provider_endpoint(cheap_provider, request.api_host or "")
         return cheap_model, cheap_provider, endpoint
+
+    # 3. fallback 到主模型
     return request.model, request.api_provider, _get_provider_endpoint(request.api_provider, request.api_host or "")
 
 
@@ -406,7 +423,7 @@ async def _maybe_rewrite_query(
     )
 
     if (
-        not settings.enable_llm_query_rewrite
+        not should_enable_llm_query_rewrite()
         or len(question) > settings.query_rewrite_trigger_length
         or not chat_history
         or not api_key
@@ -519,6 +536,18 @@ class ChatRequest(BaseModel):
     enable_jieba_bm25: bool = True
     num_expand_context_chunk: int = 1
     embedding_api_key: Optional[str] = None  # embedding 模型的 API key（向量检索查询编码用）
+
+    # ---- 双模型策略：per-request 覆盖 config.cheap_model* ----
+    cheap_model: Optional[str] = None
+    cheap_model_provider: Optional[str] = None
+    cheap_model_endpoint: Optional[str] = None
+
+    # ---- Feature flag per-request overrides ----
+    # None = 跟随全局 settings；True/False = 本次请求强制开启/关闭
+    override_numeric_table: Optional[bool] = None
+    override_answer_critic: Optional[bool] = None
+    override_llm_query_rewrite: Optional[bool] = None
+    override_bm25_synonyms: Optional[bool] = None
 
 
 class ChatVisionRequest(BaseModel):
@@ -2847,6 +2876,13 @@ def _extract_non_stream_ai_message(response: object) -> dict:
 async def chat_with_pdf(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
+    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
+    apply_request_overrides(
+        numeric_table=request.override_numeric_table,
+        answer_critic=request.override_answer_critic,
+        llm_query_rewrite=request.override_llm_query_rewrite,
+        bm25_synonyms=request.override_bm25_synonyms,
+    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
@@ -3218,6 +3254,13 @@ async def chat_with_pdf(request: ChatRequest):
 async def chat_with_pdf_stream(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
+    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
+    apply_request_overrides(
+        numeric_table=request.override_numeric_table,
+        answer_critic=request.override_answer_critic,
+        llm_query_rewrite=request.override_llm_query_rewrite,
+        bm25_synonyms=request.override_bm25_synonyms,
+    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
@@ -4199,7 +4242,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     except Exception as e:
                         logger.debug(f"追问建议生成失败（不影响主流程）: {e}")
                     # 答案自审（检测幻觉）
-                    if settings.enable_answer_critic and full_output and context:
+                    if should_enable_answer_critic() and full_output and context:
                         try:
                             from services.answer_critic_service import critique_answer
                             _cm2, _cp2, _ce2 = _get_cheap_model_params(request)

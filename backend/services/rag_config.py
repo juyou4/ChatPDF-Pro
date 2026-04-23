@@ -5,7 +5,9 @@ RAG 系统配置模块
 包括语义意群、Token 预算和粒度选择等功能的默认设置。
 """
 
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -86,10 +88,51 @@ class RAGConfig:
     path_max_singletons: int = 3             # 最多允许无同伴的孤立路径数（超出则降权）
 
 
+# ==================== Per-request feature flag overrides ====================
+# 这些 ContextVar 允许单个请求临时覆盖全局 settings 开关（前端 UI 细化控制）。
+# FastAPI 每个请求是独立 contextvars context，设置值不会泄漏到其他请求。
+# 入口统一走 apply_request_overrides()。
+
+_numeric_table_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_numeric_table_override", default=None
+)
+_answer_critic_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_answer_critic_override", default=None
+)
+_llm_query_rewrite_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_llm_query_rewrite_override", default=None
+)
+_bm25_synonyms_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_bm25_synonyms_override", default=None
+)
+
+
+def apply_request_overrides(
+    *,
+    numeric_table: Optional[bool] = None,
+    answer_critic: Optional[bool] = None,
+    llm_query_rewrite: Optional[bool] = None,
+    bm25_synonyms: Optional[bool] = None,
+) -> None:
+    """在请求入口一次性设置 per-request feature flag 覆盖。
+
+    仅在传入非 None 时生效；None 表示"跟随全局 settings"。
+    """
+    if numeric_table is not None:
+        _numeric_table_override.set(bool(numeric_table))
+    if answer_critic is not None:
+        _answer_critic_override.set(bool(answer_critic))
+    if llm_query_rewrite is not None:
+        _llm_query_rewrite_override.set(bool(llm_query_rewrite))
+    if bm25_synonyms is not None:
+        _bm25_synonyms_override.set(bool(bm25_synonyms))
+
+
 def should_apply_numeric_table_specialization() -> bool:
     """numeric_table 专项检索增强的统一开关入口。
 
-    读取 ``config.settings.enable_numeric_table_specialization``。关闭后：
+    优先级：per-request ContextVar override > ``config.settings.enable_numeric_table_specialization``。
+    关闭后：
     - embedding_service 中的 ``_apply_numeric_table_same_bundle_hard_gate`` 等
       专项 gate / 证据槽逻辑全部跳过
     - chat_routes 中 ``_supplement_numeric_table_citations`` 等专项引文补充
@@ -98,8 +141,47 @@ def should_apply_numeric_table_specialization() -> bool:
 
     读取时做异常兜底，任何异常退化为开启状态，避免破坏现有行为。
     """
+    override = _numeric_table_override.get()
+    if override is not None:
+        return override
     try:
         from config import settings
         return bool(getattr(settings, "enable_numeric_table_specialization", True))
+    except Exception:
+        return True
+
+
+def should_enable_answer_critic() -> bool:
+    """答案自审开关的统一入口（per-request 可覆盖）。"""
+    override = _answer_critic_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return bool(getattr(settings, "enable_answer_critic", False))
+    except Exception:
+        return False
+
+
+def should_enable_llm_query_rewrite() -> bool:
+    """LLM 查询改写开关的统一入口（per-request 可覆盖）。"""
+    override = _llm_query_rewrite_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return bool(getattr(settings, "enable_llm_query_rewrite", True))
+    except Exception:
+        return True
+
+
+def should_expand_bm25_synonyms() -> bool:
+    """BM25 同义词扩展开关的统一入口（per-request 可覆盖）。"""
+    override = _bm25_synonyms_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return bool(getattr(settings, "bm25_expand_synonyms", True))
     except Exception:
         return True

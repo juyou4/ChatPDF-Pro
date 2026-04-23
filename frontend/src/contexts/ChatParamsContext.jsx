@@ -52,6 +52,15 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     messageStyle: 'plain',     // 'plain' | 'bubble'
     // 消息字体大小
     messageFontSize: 14,        // 12-22px
+    // 检索增强调优 (tri-state: null=跟随后端默认 / true=强制开 / false=强制关)
+    overrideNumericTable: null,     // numeric_table 专项检索增强
+    overrideAnswerCritic: null,     // 答案自审（检测幻觉）
+    overrideLLMQueryRewrite: null,  // LLM 查询改写（多轮指代消解）
+    overrideBM25Synonyms: null,     // BM25 查询时同义词扩展
+    // 辅助模型（双模型策略；空值跟随后端默认）
+    cheapModel: '',
+    cheapModelProvider: '',
+    cheapModelEndpoint: '',
 };
 
 export const ChatParamsProvider = ({ children }) => {
@@ -90,6 +99,15 @@ export const ChatParamsProvider = ({ children }) => {
     const [messageStyle, setMessageStyle] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.messageStyle);
     // 消息字体大小
     const [messageFontSize, setMessageFontSize] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize);
+    // 检索增强调优 tri-state
+    const [overrideNumericTable, setOverrideNumericTable] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideNumericTable);
+    const [overrideAnswerCritic, setOverrideAnswerCritic] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideAnswerCritic);
+    const [overrideLLMQueryRewrite, setOverrideLLMQueryRewrite] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
+    const [overrideBM25Synonyms, setOverrideBM25Synonyms] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
+    // 辅助模型
+    const [cheapModel, setCheapModel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
+    const [cheapModelProvider, setCheapModelProvider] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
+    const [cheapModelEndpoint, setCheapModelEndpoint] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelEndpoint);
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
@@ -124,6 +142,13 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.mathEnableSingleDollar !== undefined) setMathEnableSingleDollar(settings.mathEnableSingleDollar);
                 if (settings.messageStyle !== undefined) setMessageStyle(settings.messageStyle);
                 if (settings.messageFontSize !== undefined) setMessageFontSize(settings.messageFontSize);
+                if (settings.overrideNumericTable !== undefined) setOverrideNumericTable(settings.overrideNumericTable);
+                if (settings.overrideAnswerCritic !== undefined) setOverrideAnswerCritic(settings.overrideAnswerCritic);
+                if (settings.overrideLLMQueryRewrite !== undefined) setOverrideLLMQueryRewrite(settings.overrideLLMQueryRewrite);
+                if (settings.overrideBM25Synonyms !== undefined) setOverrideBM25Synonyms(settings.overrideBM25Synonyms);
+                if (settings.cheapModel !== undefined) setCheapModel(settings.cheapModel);
+                if (settings.cheapModelProvider !== undefined) setCheapModelProvider(settings.cheapModelProvider);
+                if (settings.cheapModelEndpoint !== undefined) setCheapModelEndpoint(settings.cheapModelEndpoint);
             } else {
                 // 兼容旧版：从 globalSettings 中迁移对话参数
                 const globalSaved = localStorage.getItem('globalSettings');
@@ -208,6 +233,13 @@ export const ChatParamsProvider = ({ children }) => {
             mathEnableSingleDollar,
             messageStyle,
             messageFontSize,
+            overrideNumericTable,
+            overrideAnswerCritic,
+            overrideLLMQueryRewrite,
+            overrideBM25Synonyms,
+            cheapModel,
+            cheapModelProvider,
+            cheapModelEndpoint,
         };
         debouncedSave(settings);
     }, [maxTokens, temperature, topP, contextCount, streamOutput,
@@ -216,7 +248,10 @@ export const ChatParamsProvider = ({ children }) => {
         confirmDeleteMessage, confirmRegenerateMessage,
         codeCollapsible, codeWrappable, codeShowLineNumbers,
         mathEngine, mathEnableSingleDollar,
-        messageStyle, messageFontSize, debouncedSave]);
+        messageStyle, messageFontSize,
+        overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+        cheapModel, cheapModelProvider, cheapModelEndpoint,
+        debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
     useEffect(() => {
@@ -256,6 +291,13 @@ export const ChatParamsProvider = ({ children }) => {
         setMathEnableSingleDollar(CHAT_PARAMS_DEFAULT_SETTINGS.mathEnableSingleDollar);
         setMessageStyle(CHAT_PARAMS_DEFAULT_SETTINGS.messageStyle);
         setMessageFontSize(CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize);
+        setOverrideNumericTable(CHAT_PARAMS_DEFAULT_SETTINGS.overrideNumericTable);
+        setOverrideAnswerCritic(CHAT_PARAMS_DEFAULT_SETTINGS.overrideAnswerCritic);
+        setOverrideLLMQueryRewrite(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
+        setOverrideBM25Synonyms(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
+        setCheapModel(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
+        setCheapModelProvider(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
+        setCheapModelEndpoint(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelEndpoint);
     }, []);
 
     const value = {
@@ -283,6 +325,13 @@ export const ChatParamsProvider = ({ children }) => {
         mathEnableSingleDollar,
         messageStyle,
         messageFontSize,
+        overrideNumericTable,
+        overrideAnswerCritic,
+        overrideLLMQueryRewrite,
+        overrideBM25Synonyms,
+        cheapModel,
+        cheapModelProvider,
+        cheapModelEndpoint,
 
         // 设置方法
         setMaxTokens,
@@ -308,6 +357,13 @@ export const ChatParamsProvider = ({ children }) => {
         setMathEnableSingleDollar,
         setMessageStyle,
         setMessageFontSize,
+        setOverrideNumericTable,
+        setOverrideAnswerCritic,
+        setOverrideLLMQueryRewrite,
+        setOverrideBM25Synonyms,
+        setCheapModel,
+        setCheapModelProvider,
+        setCheapModelEndpoint,
 
         // 工具方法
         resetChatParams,

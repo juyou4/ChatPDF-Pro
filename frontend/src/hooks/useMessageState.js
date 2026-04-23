@@ -474,6 +474,8 @@ export function useMessageState({
     enableTemperature, enableTopP, enableMaxTokens,
     customParams, reasoningEffort, answerDetailLevel,
     enableMemory,
+    overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    cheapModel, cheapModelProvider, cheapModelEndpoint,
   } = globalSettings;
 
   const { enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist } = useWebSearch();
@@ -594,6 +596,15 @@ export function useMessageState({
       web_search_provider: webSearchProvider,
       web_search_api_key: webSearchApiKey || null,
       web_search_blacklist: webSearchBlacklist && webSearchBlacklist.length > 0 ? webSearchBlacklist : null,
+      // 检索增强调优 overrides（null 表示跟随后端默认）
+      override_numeric_table: overrideNumericTable ?? null,
+      override_answer_critic: overrideAnswerCritic ?? null,
+      override_llm_query_rewrite: overrideLLMQueryRewrite ?? null,
+      override_bm25_synonyms: overrideBM25Synonyms ?? null,
+      // 辅助模型（双模型策略；空字符串转 null 避免后端误匹配）
+      cheap_model: cheapModel ? cheapModel : null,
+      cheap_model_provider: cheapModelProvider ? cheapModelProvider : null,
+      cheap_model_endpoint: cheapModelEndpoint ? cheapModelEndpoint : null,
     };
 
     // 中止之前的请求
@@ -950,6 +961,8 @@ export function useMessageState({
     reasoningEffort, answerDetailLevel, enableMemory,
     enableWebSearch, webSearchProvider, webSearchApiKey, embeddingApiKey,
     streamRenderProfile, shouldUseStreaming,
+    overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    cheapModel, cheapModelProvider, cheapModelEndpoint,
   ]);
 
   /**
