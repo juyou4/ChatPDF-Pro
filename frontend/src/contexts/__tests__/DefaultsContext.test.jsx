@@ -31,9 +31,10 @@ describe('DefaultsContext - assistant model normalization', () => {
 
         expect(normalizeAssistantKey('glm-4-air')).toBe('glm-4-air-250414');
 
+        expect(normalizeAssistantKey('Doubao-Seed-1.6-lite')).toBe('doubao-seed-2-0-lite-260215');
         expect(normalizeAssistantKey('doubao-seed-2-0-pro')).toBe('doubao-seed-2-0-pro-260215');
         expect(normalizeAssistantKey('doubao-seed-2.0-pro')).toBe('doubao-seed-2-0-pro-260215');
-        expect(normalizeAssistantKey('doubao:doubao-seed-2-0-code-preview-260215')).toBe('doubao:doubao-seed-code-preview-latest');
+        expect(normalizeAssistantKey('doubao:doubao-seed-2-0-code-preview-260215')).toBe('doubao:doubao-seed-2-0-pro-260215');
         expect(normalizeAssistantKey('deepseek-ai/DeepSeek-V3')).toBe('deepseek-ai/DeepSeek-V3.2');
         expect(normalizeAssistantKey('Qwen/Qwen3-235B-A22B')).toBe('Qwen/Qwen3-32B');
         expect(normalizeAssistantKey('deepseek:deepseek-chat')).toBe('deepseek:deepseek-chat');

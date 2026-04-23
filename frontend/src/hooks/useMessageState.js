@@ -942,7 +942,8 @@ export function useMessageState({
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,
-    enableWebSearch, webSearchProvider, webSearchApiKey, streamRenderProfile, shouldUseStreaming,
+    enableWebSearch, webSearchProvider, webSearchApiKey, embeddingApiKey,
+    streamRenderProfile, shouldUseStreaming,
   ]);
 
   /**

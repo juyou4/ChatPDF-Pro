@@ -679,11 +679,9 @@ const ChatPDF = () => {
         >
           {msg.type === 'assistant' && (
             <div className="flex items-center gap-2 mb-2 select-none">
-              <div className="p-1 rounded-lg bg-purple-600 text-white shadow-sm">
-                <Bot className="w-4 h-4" />
-              </div>
-              <span className="font-bold text-sm text-gray-800 dark:text-gray-100">AI Assistant</span>
-              {msg.model && <span className="text-xs text-gray-400 border border-gray-200 rounded px-1.5 py-0.5">{msg.model}</span>}
+              <span className="px-3 py-1 bg-[#eeeffe] text-[#4f46e5] dark:bg-[#4f46e5]/20 dark:text-[#a5b4fc] rounded-[24px] text-[11px] font-bold uppercase tracking-wider">
+                {msg.model || 'ASSISTANT'}
+              </span>
             </div>
           )}
           {shouldShowThinking && (

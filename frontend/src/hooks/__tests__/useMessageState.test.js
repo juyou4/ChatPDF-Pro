@@ -137,6 +137,36 @@ describe('useMessageState streaming regressions', () => {
     expect(assistant.thinking || '').toContain('思考中');
   });
 
+  it('embeddingApiKey 变更后，聊天请求应使用最新值', async () => {
+    const events = [
+      `data: ${JSON.stringify({ done: true, final_content: '最终回答', retrieval_meta: { citations: [] } })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    let embeddingApiKey = 'embed-key-old';
+    const createWithKey = () => useMessageState({
+      ...createOptions(),
+      embeddingApiKey,
+    });
+
+    const { result, rerender } = renderHook(() => createWithKey());
+
+    embeddingApiKey = 'embed-key-new';
+    rerender();
+
+    act(() => {
+      result.current.textareaRef.current = createInputEl('检查 embedding key');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const [, options] = global.fetch.mock.calls[0];
+    const requestBody = JSON.parse(options.body);
+    expect(requestBody.embedding_api_key).toBe('embed-key-new');
+  });
+
   it('有检索进度但尚未返回 reasoning_content 时，思考框不应一直空白', async () => {
     const events = [
       `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'start', message: '正在检索文档...' })}\n\n`,
