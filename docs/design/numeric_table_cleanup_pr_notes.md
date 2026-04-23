@@ -51,6 +51,37 @@ validation data.
 | 8 | `c20519e6` | feat(document): structured-table bundle sanitisation and model provider route hardening |
 | 9 | `8c55a946` | feat(frontend): streaming state plumbing for numeric_table citations and model defaults |
 | 10 | `9e11f381` | chore(docs): add AGENTS.md workspace guide, README updates, DocLayout-YOLO startup wiring |
+| 11 | `0ac1b739` | docs(design): PR notes and RAG plan feature-flag matrix |
+| 12 | `007ebdb3` | fix(frontend): handle answer_critic SSE event and render hallucination warning |
+| 13 | `39ff4b7a` | feat(chat): per-request feature flag overrides and cheap_model plumbing |
+| 14 | `d94c6df8` | feat(settings): Retrieval Tuning panel in GlobalSettings |
+| M | `9f84d087` | Merge commit into `main` (--no-ff) |
+
+### Phase A — Front/back sync fixes
+
+Commits 12–14 close three concrete gaps between the new backend
+features and the existing frontend:
+
+- **12 (A1)** — the `answer_critic` SSE event reached the browser but
+  was silently dropped because no handler existed; `useMessageState.js`
+  now stores `answerCritic.hallucinated`/`reason` on the message and
+  `ChatPDF.jsx` renders a red warning banner below the low-relevance
+  warning. Regression test added in `useMessageState.test.js`.
+- **13 (A2)** — the 4 retrieval feature flags and `cheap_model` were
+  only reachable via environment variables. `rag_config.py` now owns
+  4 ContextVars with an `apply_request_overrides()` entrypoint; the
+  chat routes call it at request scope, `ChatRequest` gained 7 new
+  optional fields, and `_get_cheap_model_params` prefers request
+  overrides over `config.settings`. `bm25_service` and the
+  answer/query branches in `chat_routes` read through the new getters
+  so per-request control actually propagates.
+- **14 (A3)** — `GlobalSettings` gained a collapsible "Retrieval
+  Tuning" panel. A new `TriStateToggle` sub-component drives the
+  `null|true|false` values (自动 / 开 / 关); cheap model provider +
+  model name are plain inputs. Values are persisted via
+  `ChatParamsContext` (same debounced localStorage pattern as the rest
+  of the settings) and wired through `useMessageState.js` into the
+  chat request body.
 
 ## Validation
 
@@ -67,6 +98,15 @@ The 11 failing tests are unrelated to numeric_table: OpenAI provider
 properties, web-search service, overview figure clip, and a
 hypothesis-seed-dependent snippet-alignment property. All of them
 already failed on the snapshot before cleanup.
+
+### Post-merge acceptance (main HEAD `9f84d087`)
+
+| Scope | Result |
+|---|---|
+| Full backend suite | **510 passed / 11 failed** |
+| Delta vs `origin/main` baseline | +1 failure (`test_cleanup_numeric_table_context_entries_keeps_same_table_bundle_projection_for_comparator_rows`, pre-existing on `0ac1b739`, not introduced by Phase A), −1 failure (`test_upload_reads_embedding_fields_from_form` is now passing) |
+| Frontend on touched files (`useMessageState`, `ChatParamsContext`, `GlobalSettingsContext`, `DefaultsContext`) | **32 passed / 0 failed** |
+| Backend ContextVar smoke | `[True, False, True, True]` → after `apply_request_overrides(False, True, False, False)` → `[False, True, False, False]` |
 
 ### Flag OFF (`CHATPDF_ENABLE_NUMERIC_TABLE=0`)
 | Scope | Result |
