@@ -459,6 +459,7 @@ export function useMessageState({
   const streamQaScoreRef = useRef(null);
   const streamConvNameRef = useRef(null);
   const streamMindmapRef = useRef(null);
+  const streamAnswerCriticRef = useRef(null);
   const streamWebSearchRef = useRef(null);
   const streamWebSearchStatusRef = useRef(null);
   const streamMemoryHitsRef = useRef(null);
@@ -606,6 +607,7 @@ export function useMessageState({
     streamQaScoreRef.current = null;
     streamConvNameRef.current = null;
     streamMindmapRef.current = null;
+    streamAnswerCriticRef.current = null;
     streamWebSearchRef.current = null;
     streamWebSearchStatusRef.current = null;
     streamMemoryHitsRef.current = null;
@@ -785,6 +787,10 @@ export function useMessageState({
               streamMindmapRef.current = p.markdown || null;
               return;
             }
+            if (p.type === 'answer_critic') {
+              streamAnswerCriticRef.current = p.critic || null;
+              return;
+            }
             const delta = p.choices?.[0]?.delta || {};
             const cc = delta.content || p.content || '';
             const ct = delta.reasoning_content || p.reasoning_content || '';
@@ -883,7 +889,7 @@ export function useMessageState({
         );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;

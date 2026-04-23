@@ -318,6 +318,37 @@ describe('useMessageState streaming regressions', () => {
     expect(latestAssistant.isStreaming).toBe(false);
   });
 
+  it('流式事件中的 answer_critic 应被捕获并透传到最终消息', async () => {
+    const events = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '回答正文' } }] })}\n\n`,
+      `data: ${JSON.stringify({ type: 'answer_critic', critic: { has_hallucination: true, reason: '第三段数值与上下文不一致', confidence: 0.82 } })}\n\n`,
+      `data: ${JSON.stringify({ done: true })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('触发答案自审');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.answerCritic).toEqual(
+      expect.objectContaining({
+        has_hallucination: true,
+        reason: '第三段数值与上下文不一致',
+        confidence: 0.82,
+      })
+    );
+  });
+
   it('流式完成事件应保存 memory hits 与 meta', async () => {
     const events = [
       `data: ${JSON.stringify({ choices: [{ delta: { content: '回答正文' } }] })}\n\n`,
