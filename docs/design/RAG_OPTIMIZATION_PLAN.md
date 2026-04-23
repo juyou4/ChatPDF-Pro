@@ -163,13 +163,31 @@
   - 主链路检索、引文、流式输出
   - query rewrite / fast overview / answer critic 的基础骨架
   - BM25 同义词、table-aware、chunk importance、GraphRAG / RAPTOR / Agentic 的底层服务
+  - **numeric_table 专项**（Table 7 / DiffuLT / "第二好的方法" 类比较查询）
+    通过 `config.enable_numeric_table_specialization` flag 控制，默认开启
 - 仍需继续完善：
   - `sentence_window_splitter` 的默认接线策略
   - GraphRAG 的默认路由接入
   - RAPTOR 的路由开关与缓存策略
   - Agentic / Web Search / GraphRAG 的互斥与预算控制
+  - `embedding_service.py` 拆分：把 `_numeric_table_*` / `_structured_table_bundle`
+    函数族抽出到独立 `services/numeric_table_service.py`（follow-up PR，
+    纯结构搬迁，不改行为）
 
-## 11. 约束
+## 11. Feature flag 矩阵
+
+所有实验/专项能力必须通过开关显式启用/关闭，便于 A/B 验证。
+
+| Flag | Env | Default | 作用 |
+|---|---|---|---|
+| `enable_numeric_table_specialization` | `CHATPDF_ENABLE_NUMERIC_TABLE` | `true` | 表格数值比较类查询的专项检索增强 |
+| `enable_llm_query_rewrite` | `CHATPDF_ENABLE_LLM_QUERY_REWRITE` | `true` | 多轮指代消解 |
+| `enable_answer_critic` | `CHATPDF_ENABLE_ANSWER_CRITIC` | `false` | 答案自审（增加延迟） |
+| `bm25_expand_synonyms` | `CHATPDF_BM25_EXPAND_SYNONYMS` | `true` | BM25 查询时同义词扩展 |
+| `cheap_model` | `CHATPDF_CHEAP_MODEL` | 空 | 辅助模型（非核心 LLM 任务） |
+| `enable_graphrag` | `CHATPDF_ENABLE_GRAPHRAG` | `false` | GraphRAG 知识图谱增强检索 |
+
+## 12. 约束
 
 - 默认优先复用现有服务，只有缺口才写真新增。
 - 不改变现有引文展示和流式输出 UI。
