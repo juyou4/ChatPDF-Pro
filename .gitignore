@@ -121,3 +121,12 @@ backend/requirements-eval.txt
 /scripts/export-github-stars.ps1
 /exports/
 /Problems/
+
+# Orphan backup files at repo root
+tmp_backup.*
+/tmp_*.jsx
+/tmp_*.tsx
+
+# Vendored OCR tools (keep local, don't track)
+ocr_tools/poppler/
+ocr_tools/*.zip
