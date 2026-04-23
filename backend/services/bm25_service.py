@@ -13,9 +13,12 @@ BM25检索服务 - 轻量级关键词检索，作为向量检索的补充
 - 支持内存缓存，避免重复构建索引
 """
 import math
+import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
+
+logger = logging.getLogger(__name__)
 
 try:
     import jieba
@@ -167,17 +170,67 @@ class BM25Index:
 
         return scores
 
-    def search(self, query: str, top_k: int = 10) -> List[dict]:
+    def score_with_expansion(self, query: str) -> List[float]:
+        """带同义词扩展和细粒度分词的 BM25 评分
+
+        扩展策略（参考 ragflow query.py）：
+        1. 原始 token: 权重 1.0
+        2. 同义词 token: 权重 0.4（由 SynonymDict.synonym_weight 控制）
+        3. 细粒度子词: 权重 0.3（长中文词拆分为 bigram）
+        """
+        from services.synonym_service import get_synonym_dict, _fine_grained_tokenize
+
+        query_tokens = _tokenize(query)
+        syn_dict = get_synonym_dict()
+
+        # 扩展：原始 token + 同义词（带权重）
+        weighted_tokens = syn_dict.expand_tokens(query_tokens)
+
+        # 细粒度分词补充：对长中文词生成 bigram 子词
+        fine_grained_additions: List[Tuple[str, float]] = []
+        seen = {t for t, _ in weighted_tokens}
+        for token in query_tokens:
+            for sub in _fine_grained_tokenize(token):
+                if sub not in seen:
+                    fine_grained_additions.append((sub, 0.3))
+                    seen.add(sub)
+        weighted_tokens.extend(fine_grained_additions)
+
+        scores = [0.0] * self.doc_count
+
+        for token, weight in weighted_tokens:
+            if token not in self.idf:
+                continue
+            idf_val = self.idf[token]
+
+            for i in self.inverted_index.get(token, ()):
+                tf = self.term_freqs[i][token]
+                dl = self.doc_lengths[i]
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * dl / max(self.avg_dl, 1))
+                scores[i] += weight * idf_val * numerator / denominator
+
+        return scores
+
+    def search(self, query: str, top_k: int = 10, expand_synonyms: bool = True) -> List[dict]:
         """
         BM25检索
-        
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+            expand_synonyms: 是否启用同义词扩展（默认 True）
+
         Returns:
             排序后的结果列表，每项包含 chunk, score, index
         """
         if not self.chunks:
             return []
 
-        scores = self.score(query)
+        if expand_synonyms and _should_expand_synonyms():
+            scores = self.score_with_expansion(query)
+        else:
+            scores = self.score(query)
 
         # 获取top_k结果
         indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0]
@@ -192,6 +245,18 @@ class BM25Index:
             })
 
         return results
+
+
+# ============================================================
+# 同义词扩展开关
+# ============================================================
+def _should_expand_synonyms() -> bool:
+    """判断是否启用 BM25 同义词扩展（从 settings 读取）"""
+    try:
+        from config import settings
+        return getattr(settings, "bm25_expand_synonyms", True)
+    except Exception:
+        return True
 
 
 # ============================================================
