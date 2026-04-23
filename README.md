@@ -25,16 +25,24 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 > 下方两个区块用于展示主界面与对话截图。如果你是从源码直接启动，截图替换流程为：运行后自行截图并覆盖 `docs/preview_overview.png` 与 `docs/preview_chat.png` 即可，无需改动 README。
 
-### 整体界面 · `docs/preview_overview.png`
+### 一键速览 · `docs/preview_overview.png`
 
 <div align="center">
 
-<!-- 主预览图：建议使用完整窗口截图，宽度 ≥ 1600px，保留侧边栏与底部状态栏 -->
-<img src="docs/preview_overview.png" alt="ChatPDF Pro 主界面预览" width="880" />
+<!-- 速览截图：右栏切到「速览」Tab 后的效果。建议截图里至少能看到「论文速读」和「关键图表解读」两张卡片。 -->
+<img src="docs/preview_overview.png" alt="ChatPDF Pro 一键速览功能预览" width="880" />
 
 </div>
 
-左侧为原生 PDF 阅读区（PDF.js 高保真渲染 + 划词工具栏），右侧为 AI 对话区，中间分隔条可自由拖动。顶部标签页支持同时挂载多个文档，左下角可切换深色模式、设置数学引擎、管理记忆库。
+**左侧** 是原生 PDF 阅读区（PDF.js 高保真渲染 + 划词工具栏），**右侧** 顶部可在「速览 / 对话」两个 Tab 间切换。文档上传后速览会在后台自动生成，由五张结构化卡片组成：
+
+- **全文概述** —— 一段话讲清文档在做什么、为什么做
+- **术语解释** —— 从全文中挑出核心概念并给出 inline 释义
+- **论文速读** —— 三段式拆解：论文方法 / 实验设计 / 解决的问题
+- **关键图表解读** —— 自动抽取页内图像（支持 **MinerU 增强 / PDF 原生 / 矢量图 caption 识别** 三种源），对每张图给出 caption 之外的 AI 解读
+- **论文总结** —— 优点与创新 + 未来展望
+
+截图里展示的正是论文速读 + 关键图表解读两张卡片（arXiv:2603.15031 *Attention Residuals* 为示例文档）。速览卡片和右上角的「对话」Tab 共用同一个 PDF 文档上下文，点任一卡片内的术语/图注都能联动回 PDF 定位。
 
 ### 对话示例 · `docs/preview_chat.png`
 

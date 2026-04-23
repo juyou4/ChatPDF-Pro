@@ -25,16 +25,24 @@ ChatPDF Pro is a local-first AI reading assistant tailored for academic papers a
 
 > The two blocks below showcase the main UI and a chat example. If you build from source, just take your own screenshots and overwrite `docs/preview_overview.png` and `docs/preview_chat.png` — no README edits required.
 
-### Main Interface · `docs/preview_overview.png`
+### One-Click Overview · `docs/preview_overview.png`
 
 <div align="center">
 
-<!-- Hero screenshot: use a full-window capture, ≥ 1600px wide, keeping the sidebar and status bar visible. -->
-<img src="docs/preview_overview.png" alt="ChatPDF Pro main interface preview" width="880" />
+<!-- Overview screenshot: right pane switched to the "速览 / Overview" tab. Ideally the frame shows both the "Speed-Read" and "Key Figure Analysis" cards. -->
+<img src="docs/preview_overview.png" alt="ChatPDF Pro one-click overview panel" width="880" />
 
 </div>
 
-Left: native PDF viewer (PDF.js high-fidelity rendering + text-selection toolbar). Right: the AI chat panel. Drag the divider to re-balance the layout. Top tabs host multiple documents simultaneously; the bottom-left toolbar switches dark mode, math engines and memory.
+**Left:** the native PDF reader (PDF.js + text-selection toolbar). **Right:** a toggle between the **Overview (速览)** and **Chat (对话)** tabs. The overview is generated in the background as soon as a PDF is uploaded and is composed of five structured cards:
+
+- **Abstract-level summary** — one paragraph describing what the paper does and why it matters.
+- **Terminology** — core concepts lifted from the document with inline definitions.
+- **Speed-Read** — three-bullet breakdown: method / experimental design / problem solved.
+- **Key Figure Analysis** — page figures extracted automatically (**MinerU-enhanced**, **PDF-native**, or **caption-only (vector figures)** sources are supported) with AI commentary beyond the original caption.
+- **Paper Summary** — strengths / innovations plus suggested future work.
+
+The screenshot shows the Speed-Read and Key Figure Analysis cards for arXiv:2603.15031 *Attention Residuals*. Overview cards share the same document context with the Chat tab; tapping any term or figure reference jumps back to the matching page in the PDF.
 
 ### Chat in Action · `docs/preview_chat.png`
 
