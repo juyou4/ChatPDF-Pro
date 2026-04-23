@@ -70,6 +70,110 @@ def _normalize_page_keys(data: dict):
             page["content"] = page["text"]
 
 
+def _clean_control_text(text: str) -> str:
+    if not text:
+        return ""
+    return ''.join(ch for ch in text if ord(ch) >= 32 or ch in '\t\n\r')
+
+
+def _clean_nested_text(value):
+    if isinstance(value, str):
+        return _clean_control_text(value)
+    if isinstance(value, dict):
+        return {key: _clean_nested_text(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clean_nested_text(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clean_nested_text(item) for item in value)
+    return value
+
+
+def _clean_structured_table_bundle(bundle: dict) -> dict:
+    if not isinstance(bundle, dict):
+        return {}
+    cleaned_bundle = dict(bundle)
+    for key in (
+        "bundle_text",
+        "table_caption",
+        "table_header",
+        "table_body_markdown",
+        "table_markdown",
+        "html_table",
+        "table_footnote",
+        "table_id",
+    ):
+        if key in cleaned_bundle:
+            cleaned_bundle[key] = _clean_control_text(str(cleaned_bundle.get(key) or ""))
+    if "evidence_units" in cleaned_bundle:
+        cleaned_bundle["evidence_units"] = _clean_nested_text(cleaned_bundle.get("evidence_units"))
+    return cleaned_bundle
+
+
+def _clean_structured_table_bundles(bundles: list[dict]) -> list[dict]:
+    cleaned_bundles = []
+    for bundle in bundles or []:
+        if not isinstance(bundle, dict):
+            continue
+        cleaned_bundles.append(_clean_structured_table_bundle(bundle))
+    return cleaned_bundles
+
+
+def _backfill_bundle_evidence_units_from_pages(
+    bundles: list[dict],
+    pages: list[dict],
+) -> list[dict]:
+    """当顶层 structured_table_bundles 缺少 evidence_units 时，从 page.table_bundles 回填。"""
+    evidence_units_by_key: dict[tuple[str, str], list] = {}
+
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        for bundle in page.get("table_bundles", []) or []:
+            if not isinstance(bundle, dict):
+                continue
+            evidence_units = bundle.get("evidence_units")
+            if not evidence_units:
+                continue
+
+            bundle_id = str(bundle.get("bundle_id") or "").strip()
+            table_id = _clean_control_text(str(bundle.get("table_id") or "")).strip()
+            if bundle_id:
+                evidence_units_by_key.setdefault(("bundle_id", bundle_id), evidence_units)
+            if table_id:
+                evidence_units_by_key.setdefault(("table_id", table_id), evidence_units)
+
+    hydrated_bundles = []
+    for bundle in bundles or []:
+        if not isinstance(bundle, dict):
+            continue
+        hydrated_bundle = dict(bundle)
+        if not hydrated_bundle.get("evidence_units"):
+            bundle_id = str(hydrated_bundle.get("bundle_id") or "").strip()
+            table_id = _clean_control_text(str(hydrated_bundle.get("table_id") or "")).strip()
+            if bundle_id and ("bundle_id", bundle_id) in evidence_units_by_key:
+                hydrated_bundle["evidence_units"] = evidence_units_by_key[("bundle_id", bundle_id)]
+            elif table_id and ("table_id", table_id) in evidence_units_by_key:
+                hydrated_bundle["evidence_units"] = evidence_units_by_key[("table_id", table_id)]
+        hydrated_bundles.append(hydrated_bundle)
+    return hydrated_bundles
+
+
+def _clean_page_texts(pages: list[dict]) -> list[dict]:
+    cleaned_pages = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        cleaned_page = dict(page)
+        raw_text = cleaned_page.get("text", cleaned_page.get("content", ""))
+        cleaned_text = _clean_control_text(raw_text)
+        cleaned_page["text"] = cleaned_text
+        cleaned_page["content"] = cleaned_text
+        if isinstance(cleaned_page.get("table_bundles"), list):
+            cleaned_page["table_bundles"] = _clean_structured_table_bundles(cleaned_page.get("table_bundles", []))
+        cleaned_pages.append(cleaned_page)
+    return cleaned_pages
+
+
 def save_document(doc_id: str, data: dict):
     try:
         file_path = DOCS_DIR / f"{doc_id}.json"
@@ -911,6 +1015,15 @@ def extract_text_from_pdf(
                 # 清理文本
                 page_text = clean_text(page_text)
 
+                # ==================== 表格检测与 Markdown 注入 ====================
+                try:
+                    from services.table_aware_service import extract_tables_from_page, inject_tables_into_text
+                    page_tables = extract_tables_from_page(page, page_text, page_num + 1)
+                    if page_tables:
+                        page_text = inject_tables_into_text(page_text, page_tables)
+                except Exception as table_err:
+                    pass  # 表格检测失败不影响主流程
+
                 # ==================== Figure 标题检测 ====================
                 page_figures = _extract_figure_captions_from_dict(
                     text_dict,
@@ -1435,6 +1548,7 @@ async def upload_pdf(
     embedding_model: str = Form("local-minilm"),
     embedding_api_key: Optional[str] = Form(None),
     embedding_api_host: Optional[str] = Form(None),
+    api_key: Optional[str] = Form(None),
     enable_ocr: Optional[str] = Form(None)
 ):
     """
@@ -1445,6 +1559,7 @@ async def upload_pdf(
         embedding_model: 文本嵌入模型
         embedding_api_key: 云端嵌入模型的 API 密钥
         embedding_api_host: 自定义 API 地址
+        api_key: 语义意群摘要使用的 LLM API 密钥（可选，默认回退到 embedding_api_key）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
                     缺失时使用后端配置中的 ocr_default_mode 默认值。
     """
@@ -1483,10 +1598,12 @@ async def upload_pdf(
                     "pdf_url": None,
                 }
                 save_document(doc_id, documents_store[doc_id])
+                summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
                 create_index(
                     doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR),
                     embedding_model, embedding_api_key, embedding_api_host,
                     pages=extracted_data.get("pages"),
+                    summary_api_key=summary_api_key,
                 )
                 return {
                     "message": "文档上传成功",
@@ -1535,6 +1652,39 @@ async def upload_pdf(
 
         pdf_url = f"/uploads/{pdf_filename}"
 
+        # ── ODL 去脏覆盖层 ──────────────────────────────────────────────────
+        # PDF 已落盘，尝试用 OpenDataLoader 解析，得到过滤了 header/footer/
+        # caption/image 脏块的干净文本；失败则静默降级使用 pdfplumber 结果。
+        try:
+            from services.odl_parser_service import parse_pdf_odl, is_odl_available
+            if is_odl_available():
+                odl_result = parse_pdf_odl(str(pdf_path))
+                if odl_result:
+                    cleaned_odl_pages = _clean_page_texts(odl_result.get("pages", []))
+                    cleaned_odl_bundles = _clean_structured_table_bundles(odl_result.get("structured_table_bundles", []))
+                    cleaned_odl_bundles = _backfill_bundle_evidence_units_from_pages(
+                        cleaned_odl_bundles,
+                        cleaned_odl_pages,
+                    )
+                    cleaned_odl_full_text = _clean_control_text(odl_result.get("full_text", ""))
+                    if not cleaned_odl_full_text and cleaned_odl_pages:
+                        cleaned_odl_full_text = "\n\n".join(
+                            page.get("text", "") for page in cleaned_odl_pages if page.get("text", "").strip()
+                        )
+                    extracted_data["full_text"] = cleaned_odl_full_text
+                    extracted_data["pages"] = cleaned_odl_pages
+                    extracted_data["total_pages"] = odl_result["total_pages"]
+                    extracted_data["extraction_method"] = "odl"
+                    extracted_data["odl_element_count"] = odl_result.get("odl_element_count", 0)
+                    extracted_data["odl_kept_count"] = odl_result.get("odl_kept_count", 0)
+                    extracted_data["odl_soft_kept_caption_count"] = odl_result.get("odl_soft_kept_caption_count", 0)
+                    extracted_data["structured_table_bundles"] = cleaned_odl_bundles
+                    extracted_data["structured_table_count"] = odl_result.get("structured_table_count", 0)
+                    extracted_data["extraction_quality"] = odl_result.get("extraction_quality", "odl_clean")
+        except Exception as _odl_err:
+            logger.warning(f"[Upload] ODL 覆盖失败，使用 pdfplumber 结果: {_odl_err}")
+        # ────────────────────────────────────────────────────────────────────
+
         documents_store[doc_id] = {
             "filename": file.filename,
             "upload_time": datetime.now().isoformat(),
@@ -1545,7 +1695,18 @@ async def upload_pdf(
 
         save_document(doc_id, documents_store[doc_id])
 
-        create_index(doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR), embedding_model, embedding_api_key, embedding_api_host, pages=extracted_data.get("pages"))
+        summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
+        create_index(
+            doc_id,
+            extracted_data["full_text"],
+            str(VECTOR_STORE_DIR),
+            embedding_model,
+            embedding_api_key,
+            embedding_api_host,
+            pages=extracted_data.get("pages"),
+            structured_table_bundles=extracted_data.get("structured_table_bundles"),
+            summary_api_key=summary_api_key,
+        )
 
         response = {
             "message": "PDF上传成功",
@@ -1558,8 +1719,13 @@ async def upload_pdf(
             "ocr_used": extracted_data.get("ocr_used", False),
             "ocr_backend": extracted_data.get("ocr_backend"),
             "extraction_quality": extracted_data.get("extraction_quality", "unknown"),
-            "extraction_method": extracted_data.get("extraction_method", "unknown")
+            "extraction_method": extracted_data.get("extraction_method", "unknown"),
         }
+        if extracted_data.get("extraction_method") == "odl":
+            response["odl_element_count"] = extracted_data.get("odl_element_count", 0)
+            response["odl_kept_count"] = extracted_data.get("odl_kept_count", 0)
+            response["odl_soft_kept_caption_count"] = extracted_data.get("odl_soft_kept_caption_count", 0)
+            response["structured_table_count"] = extracted_data.get("structured_table_count", 0)
         
         if extracted_data.get("ocr_error"):
             response["ocr_warning"] = extracted_data["ocr_error"]
@@ -1585,13 +1751,15 @@ async def import_url(
         embedding_model: 文本嵌入模型
         embedding_api_key: 云端嵌入模型的 API 密钥（可选）
         embedding_api_host: 自定义 API 地址（可选）
+        api_key: 语义意群摘要使用的 LLM API 密钥（可选，默认回退到 embedding_api_key）
     """
     try:
         body = await request.json()
         url = body.get("url", "").strip()
         embedding_model = body.get("embedding_model", "local-minilm")
-        embedding_api_key = body.get("embedding_api_key")
+        embedding_api_key = (body.get("embedding_api_key") or "").strip() or None
         embedding_api_host = body.get("embedding_api_host")
+        api_key = (body.get("api_key") or "").strip() or None
 
         if not url:
             raise HTTPException(status_code=400, detail="URL 不能为空")
@@ -1633,6 +1801,7 @@ async def import_url(
             doc_id, content, str(VECTOR_STORE_DIR),
             embedding_model, embedding_api_key, embedding_api_host,
             pages=extracted_data["pages"],
+            summary_api_key=api_key or embedding_api_key,
         )
 
         return {
