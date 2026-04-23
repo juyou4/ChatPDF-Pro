@@ -15,21 +15,37 @@
 
 ---
 
+## Overview
+
+ChatPDF Pro is a local-first AI reading assistant tailored for academic papers and long technical documents. The native PDF viewer on the left and the AI chat panel on the right, combined with a retrieval pipeline built on **Semantic Groups + three-tier granularity + dual-index RRF**, lets the model handle both high-level summarisation and pinpoint lookups down to a single table row. All requests go to your own OpenAI / Anthropic / Gemini / Ollama endpoint, and **every document and chat transcript stays on your machine**.
+
+---
+
 ## App Preview
 
-### Interface Overview
+> The two blocks below showcase the main UI and a chat example. If you build from source, just take your own screenshots and overwrite `docs/preview_overview.png` and `docs/preview_chat.png` — no README edits required.
 
-<!-- Place your overview screenshot in the docs/ directory and update the filename below -->
-![Interface Overview](docs/preview_overview.png)
+### Main Interface · `docs/preview_overview.png`
 
-*Overall layout: native PDF viewer on the left, AI chat panel on the right, with a draggable divider to adjust the split ratio. Supports multi-document tabs, conversation history management, and one-click preset questions.*
+<div align="center">
 
-### Chat in Action
+<!-- Hero screenshot: use a full-window capture, ≥ 1600px wide, keeping the sidebar and status bar visible. -->
+<img src="docs/preview_overview.png" alt="ChatPDF Pro main interface preview" width="880" />
 
-<!-- Place your chat screenshot in the docs/ directory and update the filename below -->
-![AI Chat Example](docs/preview_chat.png)
+</div>
 
-*AI chat panel highlights: clickable citation markers [1][2] that jump to the exact PDF location, real-time inline math formula rendering, collapsible deep-thinking blocks, and follow-up question suggestion buttons at the bottom of each reply.*
+Left: native PDF viewer (PDF.js high-fidelity rendering + text-selection toolbar). Right: the AI chat panel. Drag the divider to re-balance the layout. Top tabs host multiple documents simultaneously; the bottom-left toolbar switches dark mode, math engines and memory.
+
+### Chat in Action · `docs/preview_chat.png`
+
+<div align="center">
+
+<!-- Chat screenshot: capture one full round-trip showing [1][2] citations, the collapsible thinking block, and follow-up suggestions. -->
+<img src="docs/preview_chat.png" alt="ChatPDF Pro chat example" width="880" />
+
+</div>
+
+Inline `[1]` `[2]` citations jump straight to the matching PDF page. Inline / block math renders live, deep-thinking blocks are collapsed by default, and each reply is followed by 3-5 suggested follow-up questions plus an optional hallucination-critic banner.
 
 ### Standalone Desktop Client
 
@@ -68,12 +84,17 @@ A self-contained Windows desktop application built with Electron. The Python bac
 - **Multimodal Extraction** - Uses `pdfplumber` for high-quality text extraction, accurately recognizing complex multi-column layouts.
 - **Structural Parsing** - Automatically detects and extracts PDF tables, converting them into Markdown structures easily understood by LLMs.
 
-### Intelligent Retrieval (RAG v3.0)
+### Intelligent Retrieval (RAG v3.0+)
 - **Semantic Groups** - Aggregates scattered text chunks into semantically coherent units of ~5000 characters, respecting page, heading, and table boundaries.
 - **Three-Level Granularity** - Automatically generates Summary (80 chars), Digest (1000 chars), and Full text representations for every semantic group.
 - **Dynamic Granularity Matching** - Leverages LLMs to infer user intent (e.g., overview, extraction, specific data) during retrieval, automatically returning the optimal text granularity.
 - **Token Budget Control** - Estimates token counts accurately based on target models and character properties (Chinese vs. English). Triggers intelligent granularity degradation instead of hard truncation when approaching context limits.
 - **Dual-Index Retrieval** - Queries both chunk-level and group-level FAISS vector indexes simultaneously, combining with BM25 algorithms and RRF (Reciprocal Rank Fusion) for reranking.
+- **Numeric-Table Specialisation** - A dedicated retrieval branch for numeric comparison queries ("second-best method", "Table 7 DiffuLT"); when a table row is hit, sibling rows are back-filled as contrastive context. Toggled by a feature flag.
+- **BM25 Synonym Expansion** - Query-time expansion using a bundled zh/en synonym dictionary plus fine-grained Chinese tokenisation to boost recall.
+- **Dual-Model Strategy (`cheap_model`)** - Non-core LLM tasks (query rewriting, sub-question decomposition, follow-up suggestions, answer critic) are routed to a cheaper model, saving 40-60% tokens without touching the primary answer model.
+- **LLM Query Rewriting** - Resolves co-references across multi-turn dialogue ("it", "this method"); long queries skip rewriting entirely.
+- **Answer Critic** - After the final answer, `cheap_model` cross-checks the response against the retrieved snippets; hallucinations are surfaced as a red warning banner (flag-gated).
 
 ### AI Chat Capabilities
 - **Multi-Model Support** - Native integration with OpenAI, Anthropic, Google Gemini, Grok, and local Ollama models.
@@ -196,7 +217,14 @@ A: Switch between KaTeX and MathJax in the settings panel (bottom left). KaTeX i
 
 ## Changelog
 
-### v3.0.1 (Current)
+### v3.0.2 (Retrieval Depth · Current Dev Branch)
+- **Numeric-Table Specialisation**: New retrieval branch for "Table N" / numeric-comparison queries, unified under a single feature flag.
+- **BM25 Synonym Expansion**: Built-in zh/en synonym dictionary + fine-grained tokenisation, measurably improves recall on long Chinese queries.
+- **Dual-Model Strategy (`cheap_model`)**: Query rewriting, decomposition, follow-up suggestions, and the answer critic each take an independent cheap model.
+- **LLM Query Rewriting + Answer Critic**: Multi-turn co-reference resolution; post-hoc hallucination detection with a red warning banner.
+- **Per-Request Feature-Flag Overrides**: New "Retrieval Tuning" panel in GlobalSettings with tri-state switches (Auto / On / Off) — no backend restart required.
+
+### v3.0.1
 - **Desktop Client Release**: Full Windows standalone application packaged via Electron 26 and PyInstaller.
 - **Deep Thinking Enhancements**: Introduced `ThinkingBlock` for multi-tier reasoning visualization and smooth collapsing.
 - **Math Engine Iteration**: Support for hot-swapping between KaTeX and MathJax, resolving rendering crashes on complex LaTeX.
