@@ -194,6 +194,51 @@ shutil.copy2(p, '$MODEL_FILE')
     fi
 fi
 
+# ==================== ODL 去脏解析器 ====================
+show_progress "检查 OpenDataLoader PDF 解析器..."
+
+# 检查并安装 opendataloader_pdf Python 包
+if ! python3 -c "import opendataloader_pdf" 2>/dev/null; then
+    show_progress "安装 opendataloader-pdf..."
+    pip3 install -q opendataloader-pdf 2>/dev/null
+    if python3 -c "import opendataloader_pdf" 2>/dev/null; then
+        show_success "opendataloader-pdf 安装成功"
+    else
+        echo -e "${YELLOW}  [!] opendataloader-pdf 安装失败，将使用 pdfplumber 解析${NC}"
+    fi
+else
+    show_success "opendataloader-pdf 已安装"
+fi
+
+# 检查 Java（ODL 运行所需）
+if ! command -v java &> /dev/null; then
+    # 尝试自动安装 Java
+    if [[ "$OSTYPE" == "darwin"* ]] && command -v brew &> /dev/null; then
+        show_progress "安装 Java (Homebrew)..."
+        brew install --cask temurin 2>/dev/null || brew install openjdk 2>/dev/null
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if command -v apt-get &> /dev/null; then
+            show_progress "安装 Java (apt)..."
+            sudo apt-get install -y -qq default-jre-headless 2>/dev/null
+        elif command -v yum &> /dev/null; then
+            show_progress "安装 Java (yum)..."
+            sudo yum install -y -q java-11-openjdk-headless 2>/dev/null
+        elif command -v pacman &> /dev/null; then
+            show_progress "安装 Java (pacman)..."
+            sudo pacman -S --noconfirm jre-openjdk-headless 2>/dev/null
+        fi
+    fi
+    # 再次检查
+    if ! command -v java &> /dev/null; then
+        echo -e "${YELLOW}  [!] Java 未安装，ODL 去脏功能将自动降级为 pdfplumber${NC}"
+        echo -e "${YELLOW}  [!] 如需完整去脏功能，请安装 Java 11+: https://adoptium.net${NC}"
+    else
+        show_success "Java 已安装，ODL 去脏功能已启用"
+    fi
+else
+    show_success "Java 已安装，ODL 去脏功能已启用"
+fi
+
 # 前端依赖
 cd frontend
 if [ ! -d "node_modules" ]; then
