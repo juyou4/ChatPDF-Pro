@@ -13,8 +13,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from routes.chat_routes import (
+    _build_citation_context_text,
     _build_fast_overview_context,
     _build_fused_context,
+    _build_response_context_segments,
     _build_selected_text_citation,
     _build_selected_text_fallback_citations,
     _extract_inline_citation_refs,
@@ -330,6 +332,420 @@ class TestCitationDisplayPreparation:
         assert "[1]" in rewritten
         assert "[2]" in rewritten
         assert [c["source_ref"] for c in projected] == [5, 9]
+
+    def test_prepare_answer_prunes_weak_citations_for_numeric_table(self):
+        answer = "作者来自东京大学并主导了实验实现[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "table-8",
+                "page_range": [9, 9],
+                "highlight_text": "DiffuLT ResNet-50 All 56.4 Many 63.3 Med. 55.6 Few 39.4",
+            }
+        ]
+
+        guard = {}
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard=guard,
+        )
+
+        assert rewritten == "作者来自东京大学并主导了实验实现。"
+        assert projected == []
+        assert guard["strict_mode"] is True
+        assert guard["checked_sentence_count"] == 1
+        assert guard["unsupported_sentence_count"] == 1
+        assert guard["removed_ref_count"] == 1
+
+    def test_prepare_answer_keeps_supported_citations_for_numeric_table(self):
+        answer = "DiffuLT 在 ResNet-50 上的 All 为 56.4，Many 为 63.3[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "table-8",
+                "page_range": [9, 9],
+                "highlight_text": "DiffuLT ResNet-50 All 56.4 Many 63.3 Med. 55.6 Few 39.4",
+            }
+        ]
+
+        guard = {}
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard=guard,
+        )
+
+        assert rewritten == "DiffuLT 在 ResNet-50 上的 All 为 56.4，Many 为 63.3[1]。"
+        assert len(projected) == 1
+        assert projected[0]["source_ref"] == 1
+        assert guard["strict_mode"] is True
+        assert guard["checked_sentence_count"] == 1
+        assert guard["unsupported_sentence_count"] == 0
+        assert guard["removed_ref_count"] == 0
+
+    def test_prepare_answer_keeps_numeric_table_citation_with_evidence_units(self):
+        answer = "CBDM(τ=1) 的 FID 是 5.86，准确率是 46.6[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "table-1",
+                "page_range": [4, 4],
+                "highlight_text": "Table 1 main results",
+                "source_text": "[Structured Table Bundle] Table 1 main results",
+                "display_text": "[Structured Table Bundle] Table 1 main results",
+                "evidence_units": [
+                    {
+                        "evidence_unit_type": "table_row",
+                        "table_caption": "Table 1: generation results",
+                        "table_header": "Method | FID | Acc",
+                        "content": "CBDM(τ=1) | 5.86 | 46.6",
+                        "cell_evidence_units": [
+                            {"content": "CBDM(τ=1)"},
+                            {"content": "5.86"},
+                            {"content": "46.6"},
+                        ],
+                    }
+                ],
+            }
+        ]
+
+        guard = {}
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard=guard,
+        )
+
+        assert rewritten == "CBDM(τ=1) 的 FID 是 5.86，准确率是 46.6[1]。"
+        assert len(projected) == 1
+        assert projected[0]["source_ref"] == 1
+        assert guard["unsupported_sentence_count"] == 0
+        assert guard["removed_ref_count"] == 0
+
+    def test_prepare_answer_keeps_numeric_table_same_bundle_exact_rows_for_context(self):
+        answer = (
+            "On ResNet-50 All, DiffuLT is 9.1 points above cRT, "
+            "1.5 above RIDE(3 experts), and 2.3 above ADRW[1][2]."
+        )
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "highlight_text": "DiffuLT 56.4",
+                "display_text": "DiffuLT 56.4",
+                "chunk_type": "table_row",
+                "numeric_table_exact_context_row_text": "DiffuLT 56.4 63.3 55.6 39.4",
+            },
+            {
+                "ref": 2,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "highlight_text": "cRT 47.3",
+                "display_text": "cRT 47.3",
+                "chunk_type": "table_row",
+                "numeric_table_exact_context_row_text": "cRT 47.3 58.8 44.0 26.1",
+            },
+            {
+                "ref": 3,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "highlight_text": "RIDE(3 experts) 54.9",
+                "display_text": "RIDE(3 experts) 54.9",
+                "chunk_type": "table_row",
+                "numeric_table_exact_context_row_text": "RIDE(3 experts) 54.9 66.2 51.7 34.9",
+            },
+            {
+                "ref": 4,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "highlight_text": "ADRW 54.1",
+                "display_text": "ADRW 54.1",
+                "chunk_type": "table_row",
+                "numeric_table_exact_context_row_text": "ADRW 54.1 62.9 52.6 37.1",
+            },
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard={},
+        )
+
+        assert "2.3 above ADRW" in rewritten
+        assert "[1]" in rewritten
+        assert sorted(item["source_ref"] for item in projected) == [1, 2, 3, 4]
+
+    def test_prepare_answer_strict_gate_skips_broad_table_summary_for_second_best_query(self):
+        answer = "Table 8 中 second-best 的方法是 ADRW[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "chunk_type": "table_row",
+                "table_caption": "Table 8: long-tail recognition",
+                "table_header": "Method | All | Many | Med. | Few",
+                "display_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+                "highlight_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+                "numeric_table_exact_context_row_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+            },
+            {
+                "ref": 2,
+                "group_id": "table-8",
+                "table_id": "Table 8",
+                "page_range": [9, 9],
+                "chunk_type": "table",
+                "table_caption": "Table 8: long-tail recognition",
+                "table_header": "Method | All | Many | Med. | Few",
+                "source_text": (
+                    "Table 8: long-tail recognition\n"
+                    "Method | All | Many | Med. | Few\n"
+                    "DiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4\n"
+                    "cRT | ResNet-50 | 47.3 | 58.8 | 44.0 | 26.1\n"
+                    "RIDE(3 experts) | ResNet-50 | 54.9 | 66.2 | 51.7 | 34.9\n"
+                    "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1\n"
+                    "OCR junk row | ??? | ??? | ??? | ???"
+                ),
+                "display_text": "Table 8 full summary",
+                "highlight_text": "Table 8 full summary",
+            },
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard={},
+            query="Table 8 中 second-best 的方法是什么？它在 Few 上的数值是多少？",
+        )
+
+        assert "ADRW" in rewritten
+        assert [item["source_ref"] for item in projected] == [1]
+
+    def test_prepare_answer_cost_query_supplements_cost_anchor_citation(self):
+        answer = "文中未明确记载额外开销和训练时间[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "title-page",
+                "page_range": [1, 1],
+                "source_text": "DiffuLT: Long-Tail Recognition with Diffusion Models.",
+                "display_text": "DiffuLT title page",
+                "highlight_text": "DiffuLT title page",
+            },
+            {
+                "ref": 2,
+                "group_id": "appendix-b",
+                "page_range": [12, 12],
+                "chunk_type": "text",
+                "source_text": (
+                    "Our method adds no extra overhead. "
+                    "Training time is about 24 hours on CIFAR100-LT and approximately six days on ImageNet-LT."
+                ),
+                "display_text": "no extra overhead | 24 hours | six days",
+                "highlight_text": "no extra overhead | 24 hours | six days",
+            },
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["numeric_table"],
+            answer_guard={},
+            query="这篇论文的额外开销、训练时间和持续时间分别是多少？",
+        )
+
+        assert "额外开销" in rewritten
+        assert 2 in [item["source_ref"] for item in projected]
+
+    def test_prepare_answer_rewrites_reference_trap_sentence_to_conservative_text(self):
+        answer = "第一作者是东京大学教授并提出了这套方法[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "references",
+                "page_range": [15, 15],
+                "highlight_text": "Zhou et al. Diffusion models for image generation.",
+            }
+        ]
+
+        guard = {}
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["reference_trap"],
+            answer_guard=guard,
+        )
+
+        assert rewritten == "根据当前检索证据，无法确认该信息，文档未明确说明。"
+        assert projected == []
+        assert guard["unsupported_sentence_count"] == 1
+        assert guard["removed_ref_count"] == 1
+        assert guard["rewritten_sentence_count"] == 1
+
+    def test_prepare_answer_rewrites_reference_meta_sentence_to_conservative_text(self):
+        answer = "通讯作者来自清华大学并在附录提供了邮箱地址[1]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "author-bio",
+                "page_range": [1, 1],
+                "highlight_text": "This paper introduces a diffusion-based long-tail learner.",
+            }
+        ]
+
+        guard = {}
+        rewritten, projected = _prepare_answer_and_citations_for_display(
+            answer,
+            citations,
+            evidence_need=["reference_meta"],
+            answer_guard=guard,
+        )
+
+        assert rewritten == "根据当前检索证据，文档未明确说明该引用元信息。"
+        assert projected == []
+        assert guard["unsupported_sentence_count"] == 1
+        assert guard["removed_ref_count"] == 1
+        assert guard["rewritten_sentence_count"] == 1
+
+
+class TestNumericTableCitationContextAssembly:
+
+    @pytest.mark.parametrize(
+        "caption, header, focused_row, stale_row",
+        [
+            (
+                "Table 1: generation results",
+                "Method | FID | Acc",
+                "CBDM(τ=1) | 5.86 | 46.6",
+                "CBDM(τ=1) | 44.8 | 36.3",
+            ),
+            (
+                "Table 8: long-tail recognition",
+                "Method | All | Many | Med. | Few",
+                "DiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4",
+                "DiffuLT | ResNet-50 | 44.8 | 36.3 | 55.6 | 39.4",
+            ),
+            (
+                "Cost-anchor summary",
+                "Method | Extra overhead | Duration",
+                "No extra overhead | 24 hours | 6 days",
+                "Shared header only | 48 hours | 12 days",
+            ),
+        ],
+    )
+    def test_build_citation_context_text_prefers_focused_numeric_table_context(
+        self,
+        caption,
+        header,
+        focused_row,
+        stale_row,
+    ):
+        citation = {
+            "ref": 1,
+            "group_id": "table-test",
+            "page_range": [4, 4],
+            "table_id": caption,
+            "chunk_type": "table_row",
+            "table_caption": caption,
+            "table_header": header,
+            "context_segment_text": f"{caption}\n{header}\n{focused_row}",
+            "source_text": f"{caption}\n{header}\n{focused_row}",
+            "display_text": focused_row,
+            "highlight_text": focused_row,
+            "numeric_table_exact_context_row_text": stale_row,
+            "table_row_boundary_text": stale_row,
+            "table_row_raw_text": stale_row,
+        }
+
+        text = _build_citation_context_text(citation)
+
+        assert caption in text
+        assert header in text
+        assert focused_row in text
+        assert stale_row not in text
+
+    def test_build_citation_context_text_drops_broad_raw_table_payload_when_exact_row_exists(self):
+        raw_table = (
+            "Table 8: long-tail recognition\n"
+            "Method | All | Many | Med. | Few\n"
+            "DiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4\n"
+            "cRT | ResNet-50 | 47.3 | 58.8 | 44.0 | 26.1\n"
+            "RIDE(3 experts) | ResNet-50 | 54.9 | 66.2 | 51.7 | 34.9\n"
+            "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1\n"
+            "OCR junk row | ??? | ??? | ??? | ???"
+        )
+        citation = {
+            "ref": 1,
+            "group_id": "table-8",
+            "page_range": [9, 9],
+            "table_id": "Table 8",
+            "chunk_type": "table_row",
+            "table_caption": "Table 8: long-tail recognition",
+            "table_header": "Method | All | Many | Med. | Few",
+            "context_segment_text": raw_table,
+            "source_text": raw_table,
+            "display_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+            "highlight_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+            "numeric_table_exact_context_row_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+            "table_row_boundary_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+            "table_row_raw_text": "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1",
+        }
+
+        text = _build_citation_context_text(citation)
+
+        assert "ADRW | ResNet-50 | 54.1 | 62.9 | 52.6 | 37.1" in text
+        assert "OCR junk row" not in text
+
+    def test_build_response_context_segments_numeric_table_prefers_focused_text_over_raw_segments(self):
+        citation = {
+            "ref": 1,
+            "group_id": "table-8",
+            "page_range": [9, 9],
+            "table_id": "Table 8",
+            "chunk_type": "table_row",
+            "table_caption": "Table 8: long-tail recognition",
+            "table_header": "Method | All | Many | Med. | Few",
+            "context_segment_text": "Table 8: long-tail recognition\nMethod | All | Many | Med. | Few\nDiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4",
+            "source_text": "Table 8: long-tail recognition\nMethod | All | Many | Med. | Few\nDiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4",
+            "display_text": "DiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4",
+            "highlight_text": "DiffuLT | ResNet-50 | 56.4 | 63.3 | 55.6 | 39.4",
+            "numeric_table_exact_context_row_text": "DiffuLT | ResNet-50 | 44.8 | 36.3 | 55.6 | 39.4",
+            "table_row_boundary_text": "DiffuLT | ResNet-50 | 44.8 | 36.3 | 55.6 | 39.4",
+            "table_row_raw_text": "DiffuLT | ResNet-50 | 44.8 | 36.3 | 55.6 | 39.4",
+        }
+
+        segments = _build_response_context_segments(
+            {
+                "evidence_need": ["numeric_table"],
+                "citations": [citation],
+                "_context_segments": [
+                    {
+                        "ref": 1,
+                        "text": "DiffuLT | ResNet-50 | 44.8 | 36.3 | 55.6 | 39.4",
+                        "page_range": [9, 9],
+                        "group_id": "table-8",
+                    }
+                ],
+            }
+        )
+
+        assert len(segments) == 1
+        assert "56.4" in segments[0]["text"]
+        assert "63.3" in segments[0]["text"]
+        assert "44.8" not in segments[0]["text"]
+        assert "36.3" not in segments[0]["text"]
 
 
 class TestStreamingFinalAnswerExtraction:
