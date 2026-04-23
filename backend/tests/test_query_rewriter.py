@@ -243,3 +243,95 @@ class TestErrorHandling:
         # 指示代词应被替换，口语化表达也应被改写
         assert "这个" not in result
         assert "啥意思" not in result
+
+
+class TestEvidenceNeedTemplates:
+    def test_numeric_table_queries_append_table_rewrite_template(self, rewriter):
+        result = rewriter.rewrite(
+            "表 1 中哪种生成模型取得了最高分类准确率？对应的 FID 和准确率分别是多少？",
+            evidence_need=["numeric_table"],
+        )
+
+        assert "表格标题" in result
+        assert "metric value" in result
+        assert "Table 1" in result
+        assert "FID" in result
+        assert "Acc" in result
+
+    def test_numeric_table_second_best_queries_keep_original_search_query(self, rewriter):
+        query = "ImageNet-LT 上 DiffuLT 相比第二好的方法在 Many/Medium/Few 上分别提升多少？"
+
+        result = rewriter.rewrite(
+            query,
+            evidence_need=["numeric_table"],
+        )
+
+        assert result == query
+        assert "表格标题" not in result
+        assert "second-best" not in result
+
+    def test_numeric_table_queries_expand_backbone_and_all_alias(self, rewriter):
+        result = rewriter.rewrite(
+            "表 8 中 ResNet-50 的 All 指标上，DiffuLT 分别比 cRT 和 ADRW 高多少个百分点？",
+            evidence_need=["numeric_table"],
+        )
+
+        assert "Table 8" in result
+        assert "ResNet-50" in result
+        assert "All" in result
+        assert "DiffuLT" in result
+        assert "cRT" in result
+        assert "ADRW" in result
+
+    def test_numeric_table_cost_query_uses_cost_specific_rewrite_template(self, rewriter):
+        result = rewriter.rewrite(
+            "DiffuLT 的推理开销（额外 FLOPs 或推理时间）相比基线增加了多少？",
+            evidence_need=["numeric_table"],
+        )
+
+        assert "表格标题" not in result
+        assert "metric value" not in result
+        assert "appendix" in result.lower()
+        assert "limitation" in result.lower()
+        assert "no extra overhead" in result.lower()
+        assert "DiffuLT" in result
+
+    def test_numeric_table_hint_extraction_skips_column_bundle_and_keeps_expert_method(self, rewriter):
+        hints = rewriter.extract_numeric_table_hints(
+            "在 ImageNet-LT 上，DiffuLT 相比第二好的方法在 Many/Medium/Few 三个子集上分别提升了多少百分点？"
+        )
+        assert hints["methods"] == ["DiffuLT"]
+        assert "second-best" in hints["comparison"]
+        assert "percentage-point" in hints["comparison"]
+
+        expert_hints = rewriter.extract_numeric_table_hints(
+            "表 8 中 ResNet-50 的 All 指标上，DiffuLT 分别比 cRT、RIDE(3 experts) 和 ADRW 高多少个百分点？"
+        )
+        assert "Table 8" in expert_hints["table_labels"]
+        assert "表 8" in expert_hints["table_labels"]
+        assert "RIDE(3 experts)" in expert_hints["methods"]
+
+    def test_numeric_table_hint_extraction_keeps_metric_columns_out_of_methods(self, rewriter):
+        q4_hints = rewriter.extract_numeric_table_hints(
+            "表 1 中哪种生成模型取得了最高分类准确率？对应的 FID 和准确率分别是多少？"
+        )
+        assert "FID" in q4_hints["columns"]
+        assert "Acc" in q4_hints["columns"]
+        assert "FID" not in q4_hints["methods"]
+
+        q5_hints = rewriter.extract_numeric_table_hints(
+            "表 3 中哪类生成样本带来的平均每样本性能提升最大？对应的 ΔAcc/||D_gen|| 和分类准确率是多少？"
+        )
+        assert "Table 3" in q5_hints["table_labels"]
+        assert "表 3" in q5_hints["table_labels"]
+        assert "Acc" in q5_hints["columns"]
+        assert "ΔAcc/||D_gen||" in q5_hints["columns"]
+        assert "||D_gen||" not in q5_hints["columns"]
+        assert "D_gen" not in q5_hints["methods"]
+
+    def test_numeric_table_cost_hint_extraction_keeps_flops_out_of_methods(self, rewriter):
+        hints = rewriter.extract_numeric_table_hints(
+            "DiffuLT 的推理开销（额外 FLOPs 或推理时间）相比基线增加了多少？"
+        )
+        assert hints["methods"] == ["DiffuLT"]
+        assert "FLOPs" not in hints["methods"]
