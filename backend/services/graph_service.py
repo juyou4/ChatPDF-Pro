@@ -10,13 +10,19 @@
 完整 GraphRAG（nano-graphrag 集成）可在此基础上扩展。
 """
 
+import hashlib
 import json
 import logging
+import os
 import re
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# LLM 调用缓存（hash → response），避免重复提取（参考 LightRAG）
+_llm_cache: dict[str, str] = {}
 
 ENTITY_EXTRACTION_PROMPT = """从以下文本中提取实体和关系。
 
@@ -158,6 +164,48 @@ class DocumentGraph:
             )[:10],
         }
 
+    def to_dict(self) -> dict:
+        """序列化为字典"""
+        return {
+            "doc_id": self.doc_id,
+            "nodes": {k: {"name": v.name, "type": v.node_type, "mentions": v.mentions, "chunks": v.source_chunks} for k, v in self.nodes.items()},
+            "edges": [{"source": e.source, "target": e.target, "relation": e.relation, "weight": e.weight} for e in self.edges],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DocumentGraph":
+        """从字典反序列化"""
+        graph = cls(data["doc_id"])
+        for k, v in data.get("nodes", {}).items():
+            graph.nodes[k] = GraphNode(name=v["name"], node_type=v.get("type", "entity"), mentions=v.get("mentions", 1), source_chunks=v.get("chunks", []))
+        for e in data.get("edges", []):
+            graph.edges.append(GraphEdge(source=e["source"], target=e["target"], relation=e["relation"], weight=e.get("weight", 1.0)))
+        return graph
+
+    def save(self, store_dir: str):
+        """持久化图谱到 JSON 文件"""
+        os.makedirs(store_dir, exist_ok=True)
+        path = os.path.join(store_dir, f"{self.doc_id}_graph.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+        logger.info(f"[GraphRAG] 图谱已保存: {path}")
+
+    @classmethod
+    def load(cls, doc_id: str, store_dir: str) -> Optional["DocumentGraph"]:
+        """从文件加载图谱"""
+        path = os.path.join(store_dir, f"{doc_id}_graph.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            graph = cls.from_dict(data)
+            logger.info(f"[GraphRAG] 图谱已加载: {len(graph.nodes)} 实体, {len(graph.edges)} 关系")
+            return graph
+        except Exception as e:
+            logger.warning(f"[GraphRAG] 加载失败: {e}")
+            return None
+
 
 # 全局图谱缓存
 _graph_cache: dict[str, DocumentGraph] = {}
@@ -199,18 +247,21 @@ async def build_document_graph(
 
             try:
                 prompt = ENTITY_EXTRACTION_PROMPT.format(text=chunk_text[:1500])
-                response = await call_ai_api(
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=api_key, model=model,
-                    provider=provider, endpoint=endpoint,
-                    max_tokens=500, temperature=0.0,
-                )
 
-                content = ""
-                if isinstance(response, dict) and not response.get("error"):
-                    choices = response.get("choices", [])
-                    if choices:
-                        content = choices[0].get("message", {}).get("content", "")
+                # LLM 缓存：相同输入不重复调用（参考 LightRAG hash 缓存）
+                cache_key = hashlib.md5(prompt.encode()).hexdigest()
+                if cache_key in _llm_cache:
+                    content = _llm_cache[cache_key]
+                else:
+                    response = await call_ai_api(
+                        messages=[{"role": "user", "content": prompt}],
+                        api_key=api_key, model=model,
+                        provider=provider, endpoint=endpoint,
+                        max_tokens=500, temperature=0.0,
+                    )
+                    content = response if isinstance(response, str) else ""
+                    if content:
+                        _llm_cache[cache_key] = content
 
                 if not content:
                     continue
@@ -245,12 +296,29 @@ async def build_document_graph(
 
     _graph_cache[doc_id] = graph
     logger.info(f"[GraphRAG] 图谱构建完成: {graph.stats()}")
+
+    # 自动持久化
+    try:
+        from config import settings
+        data_dir = getattr(settings, 'data_dir', 'data')
+        store_dir = os.path.join(data_dir, 'vector_stores')
+        graph.save(store_dir)
+    except Exception as e:
+        logger.debug(f"[GraphRAG] 自动保存失败: {e}")
+
     return graph
 
 
-def get_graph(doc_id: str) -> Optional[DocumentGraph]:
-    """获取已构建的文档图谱"""
-    return _graph_cache.get(doc_id)
+def get_graph(doc_id: str, store_dir: str = "") -> Optional[DocumentGraph]:
+    """获取已构建的文档图谱（优先内存缓存，回退磁盘加载）"""
+    if doc_id in _graph_cache:
+        return _graph_cache[doc_id]
+    if store_dir:
+        graph = DocumentGraph.load(doc_id, store_dir)
+        if graph:
+            _graph_cache[doc_id] = graph
+            return graph
+    return None
 
 
 def get_graph_context(doc_id: str, query: str) -> str:

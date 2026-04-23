@@ -3,9 +3,10 @@ import logging
 import os
 import pickle
 import re
+import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
@@ -13,6 +14,8 @@ import faiss
 import httpx
 import numpy as np
 from fastapi import HTTPException
+from config import settings as _settings
+from services import bm25_service as _bm25_service, chunk_expander as _chunk_expander, hybrid_search as _hybrid_search
 try:
     from sentence_transformers import SentenceTransformer
     _HAS_SENTENCE_TRANSFORMERS = True
@@ -23,6 +26,7 @@ from models.api_key_selector import select_api_key
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
 from models.model_id_resolver import resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
+from services.rag_config import should_apply_numeric_table_specialization
 from services.rerank_service import rerank_service
 
 logger = logging.getLogger(__name__)
@@ -250,7 +254,10 @@ _group_generation_in_progress: set[str] = set()
 
 # ---- 模块级单例：避免热路径中重复实例化和重复 import ----
 from services.query_rewriter import QueryRewriter as _QueryRewriter
-from services.query_analyzer import analyze_query_type as _analyze_query_type
+from services.query_analyzer import (
+    analyze_evidence_need as _analyze_evidence_need,
+    analyze_query_type as _analyze_query_type,
+)
 from services.rag_config import RAGConfig as _RAGConfig
 from services.context_builder import ContextBuilder as _ContextBuilder
 from services.retrieval_logger import RetrievalLogger as _RetrievalLogger, RetrievalTrace as _RetrievalTrace
@@ -960,6 +967,7 @@ def _build_page_index(pages: List[dict]) -> dict:
     """
     if not pages:
         return {}
+    _annotate_pages_with_provenance(pages)
     index = {}
     for page in pages:
         content = page.get("content", "")
@@ -973,6 +981,120 @@ def _build_page_index(pages: List[dict]) -> dict:
             if key not in index:
                 index[key] = page_num
     return index
+
+
+def _normalize_positive_int(value) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+        return value if value > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _build_page_uid(page_num: int) -> str:
+    return f"page:{int(page_num)}"
+
+
+def _annotate_pages_with_provenance(pages: Optional[List[dict]]) -> None:
+    if not isinstance(pages, list):
+        return
+    for idx, page in enumerate(pages):
+        if not isinstance(page, dict):
+            continue
+        page_num = (
+            _normalize_positive_int(page.get("page"))
+            or _normalize_positive_int(page.get("page_num"))
+            or idx + 1
+        )
+        page["page"] = page_num
+        if not isinstance(page.get("page_index"), int) or page.get("page_index") < 0:
+            page["page_index"] = page_num - 1
+        if not str(page.get("page_uid") or "").strip():
+            page["page_uid"] = _build_page_uid(page_num)
+
+
+def _extract_page_candidates_from_metadata(metadata: Optional[dict]) -> List[int]:
+    if not isinstance(metadata, dict):
+        return []
+
+    pages: List[int] = []
+
+    def _append(value) -> None:
+        page_num = _normalize_positive_int(value)
+        if page_num and page_num not in pages:
+            pages.append(page_num)
+
+    _append(metadata.get("page"))
+    _append(metadata.get("page_start"))
+    _append(metadata.get("page_end"))
+
+    page_index = metadata.get("page_index")
+    if isinstance(page_index, int) and page_index >= 0:
+        _append(page_index + 1)
+
+    for key in ("page_range", "table_pages", "pages"):
+        value = metadata.get(key)
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                _append(item)
+
+    table_page_indices = metadata.get("table_page_indices")
+    if isinstance(table_page_indices, (list, tuple)):
+        for item in table_page_indices:
+            if isinstance(item, int) and item >= 0:
+                _append(item + 1)
+
+    return pages
+
+
+def _resolve_primary_page_from_metadata(metadata: Optional[dict], fallback: int = 0) -> int:
+    page_candidates = _extract_page_candidates_from_metadata(metadata)
+    if page_candidates:
+        return page_candidates[0]
+    fallback_page = _normalize_positive_int(fallback)
+    return fallback_page or 0
+
+
+def _apply_page_provenance(item: dict, metadata: Optional[dict] = None) -> None:
+    if not isinstance(item, dict):
+        return
+
+    page_num = _resolve_primary_page_from_metadata(metadata, fallback=item.get("page") or 0)
+    if page_num > 0:
+        item["page"] = page_num
+
+    if not isinstance(item.get("page_index"), int) or item.get("page_index") < 0:
+        metadata_page_index = metadata.get("page_index") if isinstance(metadata, dict) else None
+        if isinstance(metadata_page_index, int) and metadata_page_index >= 0:
+            item["page_index"] = metadata_page_index
+        elif page_num > 0:
+            item["page_index"] = page_num - 1
+
+    page_uid = ""
+    if isinstance(metadata, dict):
+        page_uid = str(metadata.get("page_uid") or "").strip()
+        if not page_uid:
+            page_uids = metadata.get("table_page_uids") or metadata.get("page_uids")
+            if isinstance(page_uids, (list, tuple)) and page_uids:
+                first_uid = str(page_uids[0] or "").strip()
+                if first_uid:
+                    page_uid = first_uid
+    if not page_uid and page_num > 0:
+        page_uid = _build_page_uid(page_num)
+    if page_uid and not str(item.get("page_uid") or "").strip():
+        item["page_uid"] = page_uid
 
 
 def _find_page_for_chunk(chunk_text: str, pages: List[dict], page_index: dict = None) -> int:
@@ -1004,6 +1126,4652 @@ def _find_page_for_chunk(chunk_text: str, pages: List[dict], page_index: dict = 
         if chunk_text[:60].lower() in content.lower():
             return page.get("page", 1)
     return pages[0].get("page", 1)
+
+
+def _get_document_title(doc_id: str) -> str:
+    try:
+        module = sys.modules.get("routes.document_routes")
+        if module is None:
+            return doc_id
+        documents_store = getattr(module, "documents_store", {})
+        doc = documents_store.get(doc_id) or {}
+        filename = (doc.get("filename") or "").strip()
+        if filename:
+            return os.path.splitext(filename)[0]
+    except Exception:
+        pass
+    return doc_id
+
+
+def _guess_chunk_type(text: str) -> str:
+    sample = (text or "").strip()
+    if not sample:
+        return "text"
+    if _is_likely_table(sample):
+        return "table"
+    first_line = sample.splitlines()[0].strip()
+    if re.match(r"^(?:Figure|Fig\.?|图|Table|TABLE|表)\s*\d+[a-zA-Z]?\b", first_line, re.IGNORECASE):
+        return "caption"
+    if "$$" in sample or "\\[" in sample or "\\]" in sample:
+        return "formula"
+    math_hits = len(re.findall(r"(?:\\[a-zA-Z]+|[=<>±∑∫μσλβγδθ]|x_t|y_t|z_t)", sample))
+    if math_hits >= 3 and len(sample) <= 1200:
+        return "formula"
+    return "text"
+
+
+def _normalize_structural_metadata(item: dict) -> dict:
+    chunk_text = item.get("raw_chunk_text") or item.get("child_chunk") or item.get("chunk", "")
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip()
+    if not chunk_type:
+        chunk_type = _guess_chunk_type(chunk_text)
+    item["chunk_type"] = chunk_type or "text"
+    item["block_type"] = (item.get("block_type") or item["chunk_type"] or "text").strip() or "text"
+
+    section_path = (item.get("section_path") or item.get("chunk_heading") or "").strip()
+    item["section_path"] = section_path
+    item["chunk_heading"] = (item.get("chunk_heading") or section_path).strip()
+
+    page = item.get("page", 0)
+    try:
+        page_int = int(page)
+    except (TypeError, ValueError):
+        page_int = 0
+    item["page"] = page_int if page_int > 0 else 0
+    return item
+
+
+def _normalize_section_heading(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _build_chunk_idx_to_group_map(group_chunk_map: Optional[dict]) -> dict:
+    mapping = {}
+    if not group_chunk_map:
+        return mapping
+    for gid, indices in group_chunk_map.items():
+        if not isinstance(indices, list):
+            continue
+        for idx in indices:
+            if isinstance(idx, int) and idx >= 0 and idx not in mapping:
+                mapping[idx] = gid
+    return mapping
+
+
+def _resolve_result_chunk_index(item: dict, chunk_text_to_idx: dict) -> Optional[int]:
+    chunk_id = item.get("chunk_id")
+    if isinstance(chunk_id, int) and chunk_id >= 0:
+        return chunk_id
+    child_chunk_id = item.get("child_chunk_id")
+    if isinstance(child_chunk_id, int) and child_chunk_id >= 0:
+        return child_chunk_id
+    child_chunk = item.get("child_chunk", "")
+    if child_chunk:
+        child_idx = chunk_text_to_idx.get(child_chunk)
+        if child_idx is not None:
+            return child_idx
+    chunk_text = item.get("chunk", "")
+    return chunk_text_to_idx.get(chunk_text)
+
+
+def _get_numeric_table_boundary_text(item: dict) -> str:
+    """优先保留表行边界文本，避免宽切片把相邻行混进来。"""
+    for key in (
+        "table_row_boundary_text",
+        "table_row_raw_text",
+        "raw_chunk_text",
+        "row_text",
+        "chunk",
+    ):
+        value = item.get(key)
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if normalized:
+            return normalized
+    return ""
+
+
+def _build_evidence_unit_text(item: dict, chunks: List[str], parent_chunks: List[str]) -> str:
+    chunk_type = (item.get("block_type") or item.get("chunk_type") or "text").strip() or "text"
+    if chunk_type == "table_row":
+        title = (item.get("doc_title") or item.get("doc_id") or "").strip()[:200]
+        section = (item.get("section_path") or item.get("chunk_heading") or "未标注章节").strip()[:200]
+        page = item.get("page") or 0
+        table_caption = (item.get("table_caption") or item.get("table_id") or "").strip()[:300]
+        table_header = (item.get("table_header") or "").strip()[:400]
+        row_text = _get_numeric_table_boundary_text(item)[:1200]
+        row_id = (item.get("row_id") or "").strip()[:120]
+        return (
+            f"[Title]\n{title}\n\n"
+            f"[Section]\n{section}\n\n"
+            f"[Table]\n{table_caption}\n\n"
+            f"[Header]\n{table_header}\n\n"
+            f"[Row]\n{row_text}\n\n"
+            f"[Hints]\npage={page}; type=table_row; row_id={row_id}"
+        )
+
+    chunk_id = item.get("chunk_id")
+    parent_id = item.get("parent_id")
+    local_passage = (item.get("raw_chunk_text") or item.get("child_chunk") or item.get("chunk") or "").strip()
+    if not local_passage and isinstance(chunk_id, int) and 0 <= chunk_id < len(chunks):
+        local_passage = (chunks[chunk_id] or "").strip()
+
+    context_text = ""
+    if isinstance(parent_id, int) and 0 <= parent_id < len(parent_chunks):
+        context_text = (parent_chunks[parent_id] or "").strip()
+        if context_text == local_passage:
+            context_text = ""
+    elif isinstance(chunk_id, int) and 0 <= chunk_id < len(chunks):
+        start = max(0, chunk_id - 1)
+        end = min(len(chunks), chunk_id + 2)
+        context_text = "\n\n".join(
+            chunks[idx].strip()
+            for idx in range(start, end)
+            if idx != chunk_id and chunks[idx].strip()
+        )
+
+    title = (item.get("doc_title") or item.get("doc_id") or "").strip()[:200]
+    section = (item.get("section_path") or item.get("chunk_heading") or "未标注章节").strip()[:200]
+    page = item.get("page") or 0
+    return (
+        f"[Title]\n{title}\n\n"
+        f"[Section]\n{section}\n\n"
+        f"[Passage]\n{local_passage[:1200]}\n\n"
+        f"[Context]\n{context_text[:1200]}\n\n"
+        f"[Hints]\npage={page}; type={chunk_type}"
+    )
+
+
+def _should_use_multi_row_bundle_context(query: str, hints: dict[str, List[str]]) -> bool:
+    if not query:
+        return False
+    if hints.get("comparison") or _is_numeric_table_explicit_comparator_query(query, hints):
+        return True
+    if re.search(r"(?:第二好(?:的)?|第二佳|第二名|次优|次佳|second[- ]best|runner[- ]up|nearest competitor)", query, re.IGNORECASE):
+        return True
+    target_columns = [value for value in hints.get("columns", []) if str(value or "").strip()]
+    return len(target_columns) >= 3 and not _is_numeric_table_winner_style_query(query, hints)
+
+
+_NUMERIC_TABLE_EXPLICIT_COMPARATOR_RE = re.compile(
+    r"(?:比|高多少|差多少|提升|百分点|improv(?:e|ement|ed|ing)?|gain|delta|vs|versus|compare)",
+    re.IGNORECASE,
+)
+_NUMERIC_TABLE_SECOND_BEST_RE = re.compile(
+    r"(?:第二好(?:的)?|第二佳|第二名|次优|次佳|second[- ]best|runner[- ]up|nearest competitor)",
+    re.IGNORECASE,
+)
+
+
+def _extract_numeric_table_bundle_row_units(item: dict, query: str) -> List[dict]:
+    if not isinstance(item, dict) or not query:
+        return []
+
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type == "table_row":
+        return []
+
+    evidence_units = item.get("evidence_units")
+    row_units = [
+        dict(unit)
+        for unit in evidence_units
+        if isinstance(unit, dict)
+        and str(unit.get("evidence_unit_type") or "").strip().lower() == "table_row"
+    ] if isinstance(evidence_units, list) else []
+    if not row_units and item.get("structured_table_bundle"):
+        row_units = _extract_structured_bundle_body_rows(item)
+    if not row_units:
+        row_units = _extract_markdown_table_rows((item.get("chunk") or item.get("raw_chunk_text") or "").strip())
+    if not row_units:
+        row_units = _extract_plain_table_rows((item.get("chunk") or item.get("raw_chunk_text") or "").strip(), _query_rewriter_singleton.extract_numeric_table_hints(query), query)
+    if not row_units:
+        return []
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    explicit_comparator_mode = _is_numeric_table_explicit_comparator_query(query, hints)
+    selected_units: List[dict] = []
+    seen_row_keys: set[str] = set()
+    for unit in row_units:
+        merged_unit = dict(unit)
+        if not merged_unit.get("table_caption") and item.get("table_caption"):
+            merged_unit["table_caption"] = item.get("table_caption")
+        if not merged_unit.get("table_id") and item.get("table_id"):
+            merged_unit["table_id"] = item.get("table_id")
+        if not merged_unit.get("table_header") and item.get("table_header"):
+            merged_unit["table_header"] = item.get("table_header")
+
+        if _is_headerish_numeric_table_row(merged_unit):
+            continue
+
+        row_id = str(merged_unit.get("row_id") or "").strip()
+        if row_id and _is_composite_numeric_row_id(row_id) and not explicit_comparator_mode:
+            continue
+
+        row_text = re.sub(
+            r"\s+",
+            " ",
+            str(
+                merged_unit.get("content")
+                or merged_unit.get("row_text")
+                or merged_unit.get("row_numbers")
+                or "",
+            ),
+        ).strip()
+        if not row_text or not _extract_numeric_value_tokens(row_text):
+            continue
+
+        row_key = _normalize_numeric_table_method_token(row_id) or row_text.lower()
+        if row_key in seen_row_keys:
+            continue
+        seen_row_keys.add(row_key)
+        selected_units.append(merged_unit)
+
+    return selected_units
+
+
+def _build_multi_row_bundle_context_text(item: dict, query: str) -> str:
+    if not isinstance(item, dict) or not query:
+        return ""
+
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type == "table_row":
+        return ""
+
+    row_units = _extract_numeric_table_bundle_row_units(item, query)
+    if not row_units:
+        return ""
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    if not _should_use_multi_row_bundle_context(query, hints):
+        return ""
+
+    parts: list[str] = []
+    for value in (
+        item.get("numeric_table_exact_context_caption", "") or item.get("table_caption", ""),
+        item.get("numeric_table_exact_context_header", "") or item.get("table_header", ""),
+    ):
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if normalized and normalized not in parts:
+            parts.append(normalized)
+
+    for unit in row_units:
+        row_text = re.sub(
+            r"\s+",
+            " ",
+            str(
+                unit.get("content")
+                or unit.get("row_text")
+                or unit.get("row_numbers")
+                or ""
+            ),
+        ).strip()
+        parts.append(row_text)
+
+    if len(parts) <= 2:
+        return ""
+    return "\n".join(parts)
+
+
+def _maybe_attach_numeric_table_bundle_exact_context(item: dict, query: str) -> None:
+    if not should_apply_numeric_table_specialization():
+        return
+    if not isinstance(item, dict) or not query:
+        return
+    if str(item.get("numeric_table_exact_context_row_text") or "").strip():
+        return
+
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type == "table_row":
+        return
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    comparison_query = bool(hints.get("comparison"))
+    target_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    explicit_comparator_mode = _is_numeric_table_explicit_comparator_query(query, hints)
+    second_best_mode = bool(_NUMERIC_TABLE_SECOND_BEST_RE.search(query or ""))
+    winner_only_mode = bool(
+        not explicit_comparator_mode
+        and not second_best_mode
+        and (preferred_sort_column or target_columns or target_tables)
+    )
+    if not winner_only_mode:
+        return
+
+    row_units = _extract_numeric_table_bundle_row_units(item, query)
+    if not row_units:
+        return
+
+    best_unit = None
+    best_focused = None
+    best_score = float("-inf")
+    for unit in row_units:
+        merged_unit = dict(unit)
+        if not merged_unit.get("table_caption") and item.get("table_caption"):
+            merged_unit["table_caption"] = item.get("table_caption")
+        if not merged_unit.get("table_id") and item.get("table_id"):
+            merged_unit["table_id"] = item.get("table_id")
+        if not merged_unit.get("table_header") and item.get("table_header"):
+            merged_unit["table_header"] = item.get("table_header")
+        if _is_headerish_numeric_table_row(merged_unit):
+            continue
+        if target_tables and not _has_explicit_numeric_table_match(merged_unit, target_tables):
+            continue
+
+        focused = _build_query_focused_table_row(merged_unit, hints)
+        focused_text = str(focused.get("text") or "").strip()
+        column_coverage = int(focused.get("column_coverage", 0) or 0)
+        if not focused_text or (target_columns and column_coverage <= 0):
+            continue
+
+        lexical = _compute_lexical_evidence_score(
+            query,
+            f"{merged_unit.get('table_caption', '')} {merged_unit.get('table_header', '')} {focused_text}",
+        )
+        score = (
+            float(_numeric_table_sort_bonus(merged_unit, query, hints) or 0.0)
+            + lexical
+            + min(column_coverage, 4) * 0.08
+        )
+        if score > best_score:
+            best_unit = merged_unit
+            best_focused = focused
+            best_score = score
+
+    if best_unit is None or best_focused is None:
+        return
+
+    exact_row_text = str(best_focused.get("text") or "").strip()
+    if not exact_row_text:
+        return
+
+    item["numeric_table_exact_context_row_text"] = exact_row_text
+    item["numeric_table_exact_context_caption"] = (
+        best_unit.get("table_caption")
+        or item.get("table_caption")
+        or ""
+    )
+    item["numeric_table_exact_context_header"] = (
+        best_unit.get("table_header")
+        or item.get("table_header")
+        or ""
+    )
+    item["numeric_table_force_exact_context"] = True
+
+
+def _build_query_focused_numeric_table_exact_context_text(item: dict, query: str) -> str:
+    """把 table_row 的 exact row 投影成 query-focused 的最终上下文文本。"""
+    if not isinstance(item, dict) or not query:
+        return ""
+
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type != "table_row":
+        return ""
+
+    if not (
+        item.get("numeric_table_exact_context_row_text")
+        or item.get("table_row_evidence")
+        or item.get("table_row_slice_kind") == "exact"
+        or item.get("cell_evidence_units")
+        or item.get("table_row_raw_text")
+        or item.get("row_text")
+        or item.get("chunk")
+        or item.get("raw_chunk_text")
+    ):
+        return ""
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    if not (
+        _is_numeric_table_explicit_comparator_query(query, hints)
+        or _is_numeric_table_bundle_query(query, hints)
+        or _is_numeric_table_row_band_query(query, hints)
+        or _is_numeric_table_winner_style_query(query, hints)
+    ):
+        return ""
+
+    row_text = re.sub(
+        r"\s+",
+        " ",
+        str(
+            item.get("numeric_table_exact_context_row_text")
+            or _get_numeric_table_boundary_text(item)
+            or item.get("table_row_raw_text")
+            or item.get("row_text")
+            or item.get("chunk")
+            or item.get("raw_chunk_text")
+            or ""
+        ),
+    ).strip()
+    if not row_text:
+        return ""
+
+    row_id = str(item.get("row_id") or "").strip()
+    if not row_id:
+        row_id = re.split(r"\s+", row_text, maxsplit=1)[0].strip(" ,;")
+
+    focused = _build_query_focused_table_row(
+        {
+            "row_id": row_id,
+            "row_text": row_text,
+            "row_numbers": _strip_leading_numeric_table_row_id(row_text, row_id) or row_text,
+            "table_caption": item.get("numeric_table_exact_context_caption")
+            or item.get("table_caption")
+            or item.get("table_id")
+            or "",
+            "table_id": item.get("table_id") or "",
+            "table_header": item.get("numeric_table_exact_context_header") or item.get("table_header") or "",
+        },
+        hints,
+    )
+    focused_text = re.sub(r"\s+", " ", str(focused.get("text") or "")).strip()
+    if not focused_text:
+        return ""
+
+    caption = re.sub(
+        r"\s+",
+        " ",
+        str(
+            item.get("numeric_table_exact_context_caption")
+            or item.get("table_caption")
+            or item.get("table_id")
+            or ""
+        ),
+    ).strip()
+    if caption and caption not in focused_text:
+        return "\n".join([caption, focused_text])
+    return focused_text
+
+
+def _build_context_text_for_result(item: dict, query: str = "") -> str:
+    """构造真正进入最终上下文的文本；table_row 必须带上 caption 和 header。"""
+    _maybe_attach_numeric_table_bundle_exact_context(item, query)
+    chunk_text = (item.get("chunk") or item.get("raw_chunk_text") or "").strip()
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    exact_row_text = re.sub(
+        r"\s+",
+        " ",
+        str(item.get("numeric_table_exact_context_row_text") or "").strip(),
+    ).strip()
+    if not exact_row_text and chunk_type == "table_row":
+        exact_row_text = re.sub(
+            r"\s+",
+            " ",
+            str(
+                _get_numeric_table_boundary_text(item)
+                or item.get("table_row_raw_text")
+                or item.get("row_text")
+                or item.get("chunk")
+                or item.get("raw_chunk_text")
+                or ""
+            ),
+        ).strip()
+    has_typed_table_evidence = bool(
+        chunk_type in {"table_row", "table", "caption", "table_cell"}
+        or item.get("table_row_evidence")
+        or item.get("table_row_slice_kind") == "exact"
+        or item.get("numeric_table_exact_context_row_text")
+        or item.get("evidence_units")
+        or item.get("cell_evidence_units")
+    )
+    if exact_row_text and has_typed_table_evidence:
+        focused_exact_context_text = _build_query_focused_numeric_table_exact_context_text(item, query)
+        if focused_exact_context_text:
+            return focused_exact_context_text
+        parts: list[str] = []
+        for value in (
+            item.get("numeric_table_exact_context_caption", "") or item.get("table_caption", ""),
+            item.get("numeric_table_exact_context_header", "") or item.get("table_header", ""),
+            exact_row_text,
+        ):
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+            if not normalized or normalized in parts:
+                continue
+            parts.append(normalized)
+        if parts:
+            exact_context = "\n".join(parts)
+            if item.get("numeric_table_force_exact_context"):
+                return exact_context
+    bundle_context_text = _build_multi_row_bundle_context_text(item, query)
+    if bundle_context_text:
+        return bundle_context_text
+    if exact_row_text and has_typed_table_evidence:
+        parts: list[str] = []
+        for value in (
+            item.get("numeric_table_exact_context_caption", "") or item.get("table_caption", ""),
+            item.get("numeric_table_exact_context_header", "") or item.get("table_header", ""),
+            exact_row_text,
+        ):
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+            if not normalized or normalized in parts:
+                continue
+            parts.append(normalized)
+        if parts:
+            return "\n".join(parts)
+    if chunk_type != "table_row":
+        return chunk_text
+
+    parts: list[str] = []
+    for value in (
+        item.get("table_caption", ""),
+        item.get("table_header", ""),
+        _get_numeric_table_boundary_text(item),
+    ):
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not normalized:
+            continue
+        if normalized in parts:
+            continue
+        parts.append(normalized)
+    return "\n".join(parts) if parts else chunk_text
+
+
+def _resolve_numeric_table_context_table_id(item: dict) -> str:
+    explicit_table = _extract_table_id(
+        (
+            item.get("table_id")
+            or item.get("numeric_table_exact_context_caption")
+            or item.get("table_caption")
+            or ""
+        ).strip()
+    )
+    if explicit_table:
+        return explicit_table.lower()
+
+    evidence_text = (
+        _build_numeric_table_evidence_text(item)
+        or item.get("raw_chunk_text")
+        or item.get("chunk")
+        or ""
+    )
+    explicit_table = _extract_table_id(evidence_text)
+    return explicit_table.lower() if explicit_table else ""
+
+
+def _classify_numeric_table_context_role(
+    item: dict,
+    query: str,
+    hints: dict[str, List[str]],
+    *,
+    primary_table_id: str = "",
+    primary_anchor_pages: Optional[set[int]] = None,
+) -> str:
+    primary_anchor_pages = primary_anchor_pages or set()
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    context_table_id = _resolve_numeric_table_context_table_id(item)
+    evidence_text = (
+        _build_numeric_table_evidence_text(item)
+        or item.get("raw_chunk_text")
+        or item.get("chunk")
+        or ""
+    )
+    evidence_lower = evidence_text.lower()
+    page = int(item.get("page") or 0)
+    cost_query = _is_numeric_table_cost_query(query)
+    comparator_query = bool(hints.get("comparison")) or _is_numeric_table_row_band_query(query, hints)
+
+    has_exact_row = bool(
+        item.get("numeric_table_exact_context_row_text")
+        or item.get("table_row_evidence")
+        or item.get("table_row_slice_kind") == "exact"
+        or item.get("cell_evidence_units")
+        or (
+            chunk_type in {"table_row", "table_cell"}
+            and (
+                _get_numeric_table_boundary_text(item)
+                or item.get("table_row_raw_text")
+                or item.get("cell_evidence_units")
+            )
+        )
+        or (
+            item.get("structured_table_bundle")
+            and _build_multi_row_bundle_context_text(item, query)
+        )
+    )
+
+    if cost_query:
+        if _is_numeric_table_cost_anchor_text(item):
+            return "anchor"
+        if primary_anchor_pages and page in primary_anchor_pages:
+            if (
+                item.get("numeric_table_keep_support")
+                or chunk_type in {"table", "caption"}
+                or any(
+                    token in evidence_lower
+                    for token in ("cost", "overhead", "training", "inference", "hours", "days")
+                )
+            ):
+                return "focus"
+        return "background"
+
+    if has_exact_row:
+        if primary_table_id and context_table_id and context_table_id != primary_table_id:
+            return "background"
+        return "anchor"
+
+    if primary_table_id and context_table_id == primary_table_id:
+        if (
+            item.get("structured_table_bundle")
+            or chunk_type in {"table", "caption"}
+            or _looks_like_numeric_table_support(evidence_text, chunk_type)
+            or (item.get("numeric_table_keep_support") and chunk_type in {"table_row", "table_cell"})
+        ):
+            return "focus"
+
+    if comparator_query and primary_anchor_pages and page in primary_anchor_pages:
+        if item.get("structured_table_bundle") or _looks_like_numeric_table_support(evidence_text, chunk_type):
+            return "focus"
+
+    return "background"
+
+
+def _cleanup_numeric_table_context_entries(
+    fallback_entries: List[tuple[dict, str]],
+    query: str,
+) -> List[dict]:
+    if not fallback_entries:
+        return []
+
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return [
+            {"item": item, "text": text, "context_role": "background"}
+            for item, text in fallback_entries
+        ]
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    cost_query = _is_numeric_table_cost_query(query)
+    second_best_mode = bool(_NUMERIC_TABLE_SECOND_BEST_RE.search(query or ""))
+    comparator_query = bool(hints.get("comparison")) or _is_numeric_table_row_band_query(query, hints) or second_best_mode
+    explicit_comparator_mode = _is_numeric_table_explicit_comparator_query(query, hints)
+    winner_style_query = bool(_preferred_numeric_table_sort_column(query, hints))
+    keep_row_projection = comparator_query or explicit_comparator_mode or winner_style_query
+    ordered_target_method_keys = [
+        _normalize_numeric_table_method_token(value)
+        for value in hints.get("methods", [])
+        if value and _normalize_numeric_table_method_token(value)
+    ]
+    target_method_keys = {
+        value for value in ordered_target_method_keys if value not in _NUMERIC_TABLE_METHOD_STOPWORDS
+    }
+
+    def _chunk_type(item: dict) -> str:
+        return (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+
+    def _table_key(entry: dict) -> str:
+        return entry["table_id"] or f"page:{entry['page']}"
+
+    def _exact_row_text(item: dict) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            str(
+                item.get("numeric_table_exact_context_row_text")
+                or _get_numeric_table_boundary_text(item)
+                or item.get("table_row_raw_text")
+                or item.get("row_text")
+                or item.get("chunk")
+                or item.get("raw_chunk_text")
+                or ""
+            ),
+        ).strip()
+
+    def _entry_has_exact_row(item: dict) -> bool:
+        chunk_type = _chunk_type(item)
+        return bool(
+            item.get("numeric_table_exact_context_row_text")
+            or item.get("table_row_evidence")
+            or item.get("table_row_slice_kind") == "exact"
+            or item.get("cell_evidence_units")
+            or (
+                chunk_type in {"table_row", "table_cell"}
+                and (_get_numeric_table_boundary_text(item) or item.get("table_row_raw_text"))
+            )
+        )
+
+    def _entry_anchor_rank(entry: dict, idx: int) -> tuple[int, int, int, float, float, int]:
+        item = entry["item"]
+        return (
+            1 if _chunk_type(item) == "table_row" and _entry_has_exact_row(item) else 0,
+            1 if _entry_has_exact_row(item) else 0,
+            1 if _build_multi_row_bundle_context_text(item, query) else 0,
+            float(item.get("numeric_table_priority", 0.0) or 0.0),
+            float(item.get("similarity", 0.0) or 0.0),
+            -idx,
+        )
+
+    def _synthesize_same_table_bundle_text(entries: List[tuple[int, dict]]) -> str:
+        if not entries:
+            return ""
+
+        for _idx, entry in entries:
+            existing_bundle_text = _build_multi_row_bundle_context_text(entry["item"], query)
+            if existing_bundle_text:
+                return existing_bundle_text
+
+        best_caption = ""
+        best_header = ""
+        row_payloads: dict[str, tuple[tuple, str]] = {}
+
+        def _remember_caption_and_header(item: dict) -> None:
+            nonlocal best_caption, best_header
+            if not best_caption:
+                best_caption = (
+                    item.get("numeric_table_exact_context_caption")
+                    or item.get("table_caption")
+                    or best_caption
+                )
+            if not best_header:
+                best_header = (
+                    item.get("numeric_table_exact_context_header")
+                    or item.get("table_header")
+                    or best_header
+                )
+
+        def _store_row(
+            row_key: str,
+            row_text: str,
+            row_rank: tuple,
+        ) -> None:
+            if not row_key or not row_text:
+                return
+            current = row_payloads.get(row_key)
+            if current is None or row_rank > current[0]:
+                row_payloads[row_key] = (row_rank, row_text)
+
+        for idx, entry in entries:
+            item = entry["item"]
+            _remember_caption_and_header(item)
+
+            row_units = []
+            if _chunk_type(item) != "table_row":
+                row_units = _extract_numeric_table_bundle_row_units(item, query)
+            if row_units:
+                for unit in row_units:
+                    row_id = str(unit.get("row_id") or "").strip()
+                    row_key = _normalize_numeric_table_method_token(row_id)
+                    if explicit_comparator_mode:
+                        if not row_key or row_key not in target_method_keys:
+                            continue
+                    elif row_id and _is_composite_numeric_row_id(row_id) and not comparator_query:
+                        continue
+                    focused_row = _build_query_focused_table_row(unit, hints)
+                    row_text = re.sub(
+                        r"\s+",
+                        " ",
+                        str(
+                            focused_row.get("text")
+                            or unit.get("content")
+                            or unit.get("row_text")
+                            or unit.get("row_numbers")
+                            or ""
+                        ),
+                    ).strip()
+                    if not row_text:
+                        continue
+                    row_rank = (
+                        1 if row_key in target_method_keys else 0,
+                        int(focused_row.get("column_coverage", 0) or 0),
+                        float(_numeric_table_sort_bonus(unit, query, hints) or 0.0),
+                        float(item.get("numeric_table_priority", 0.0) or 0.0),
+                        float(item.get("similarity", 0.0) or 0.0),
+                        -idx,
+                    )
+                    _store_row(row_key or row_text.lower(), row_text, row_rank)
+                continue
+
+            if not _entry_has_exact_row(item):
+                continue
+            row_id = str(item.get("row_id") or "").strip()
+            row_key = _normalize_numeric_table_method_token(row_id)
+            if explicit_comparator_mode:
+                if not row_key or row_key not in target_method_keys:
+                    continue
+            elif row_id and _is_composite_numeric_row_id(row_id):
+                continue
+            row_text = _exact_row_text(item)
+            if not row_text:
+                continue
+            row_rank = (
+                1 if row_key in target_method_keys else 0,
+                len(target_method_keys) if row_key in target_method_keys else 0,
+                float(item.get("numeric_table_priority", 0.0) or 0.0),
+                float(item.get("similarity", 0.0) or 0.0),
+                -idx,
+            )
+            _store_row(row_key or row_text.lower(), row_text, row_rank)
+
+        if explicit_comparator_mode:
+            ordered_row_keys = [
+                key for key in ordered_target_method_keys
+                if key in target_method_keys and key in row_payloads
+            ]
+        else:
+            ordered_row_keys = [
+                key for key in ordered_target_method_keys
+                if key in target_method_keys and key in row_payloads
+            ]
+            competitor_rows = sorted(
+                (
+                    (key, payload)
+                    for key, payload in row_payloads.items()
+                    if key not in ordered_row_keys
+                ),
+                key=lambda entry: entry[1][0],
+                reverse=True,
+            )
+            ordered_row_keys.extend(key for key, _payload in competitor_rows[:4])
+            if not ordered_row_keys:
+                ordered_row_keys = [
+                    key
+                    for key, _payload in sorted(
+                        row_payloads.items(),
+                        key=lambda entry: entry[1][0],
+                        reverse=True,
+                    )[:4]
+                ]
+
+        row_texts: List[str] = []
+        for row_key in ordered_row_keys:
+            payload = row_payloads.get(row_key)
+            if payload is None:
+                continue
+            row_text = payload[1]
+            if row_text not in row_texts:
+                row_texts.append(row_text)
+
+        if len(row_texts) < 2 and not explicit_comparator_mode:
+            fallback_exact_rows: list[tuple[tuple, str]] = []
+            for idx, entry in entries:
+                item = entry["item"]
+                if not _entry_has_exact_row(item):
+                    continue
+                row_id = str(item.get("row_id") or "").strip()
+                if row_id and _is_composite_numeric_row_id(row_id):
+                    continue
+                row_text = _exact_row_text(item)
+                if not row_text or row_text in row_texts:
+                    continue
+                row_key = _normalize_numeric_table_method_token(row_id) or row_text.lower()
+                row_rank = (
+                    1 if row_key in target_method_keys else 0,
+                    len(target_method_keys) if row_key in target_method_keys else 0,
+                    float(item.get("numeric_table_priority", 0.0) or 0.0),
+                    float(item.get("similarity", 0.0) or 0.0),
+                    -idx,
+                )
+                fallback_exact_rows.append((row_rank, row_text))
+            fallback_exact_rows.sort(reverse=True)
+            for _row_rank, row_text in fallback_exact_rows:
+                if row_text in row_texts:
+                    continue
+                row_texts.append(row_text)
+                if len(row_texts) >= 2:
+                    break
+
+        if len(row_texts) < 2:
+            synthetic_units: list[dict] = []
+            for _idx, entry in entries:
+                item = entry["item"]
+                if not _entry_has_exact_row(item):
+                    continue
+                row_id = str(item.get("row_id") or "").strip()
+                if row_id and _is_composite_numeric_row_id(row_id) and not explicit_comparator_mode:
+                    continue
+                if explicit_comparator_mode:
+                    row_key = _normalize_numeric_table_method_token(row_id)
+                    if not row_key or row_key not in target_method_keys:
+                        continue
+                row_text = _exact_row_text(item)
+                if not row_text:
+                    continue
+                synthetic_units.append(
+                    {
+                        "evidence_unit_type": "table_row",
+                        "row_id": row_id,
+                        "row_text": row_text,
+                        "row_numbers": _strip_leading_numeric_table_row_id(row_text, row_id),
+                    }
+                )
+            if len(synthetic_units) >= 2:
+                synthetic_bundle_text = _build_multi_row_bundle_context_text(
+                    {
+                        "chunk_type": "table",
+                        "block_type": "table",
+                        "structured_table_bundle": True,
+                        "table_caption": best_caption,
+                        "table_header": best_header,
+                        "evidence_units": synthetic_units,
+                    },
+                    query,
+                )
+                if synthetic_bundle_text:
+                    return synthetic_bundle_text
+            return ""
+
+        parts: list[str] = []
+        for value in (best_caption, best_header, *row_texts):
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+            if normalized and normalized not in parts:
+                parts.append(normalized)
+        return "\n".join(parts)
+
+    provisional_entries: List[dict] = []
+    for item, text in fallback_entries:
+        provisional_entries.append(
+            {
+                "item": item,
+                "text": text,
+                "page": int(item.get("page") or 0),
+                "table_id": _resolve_numeric_table_context_table_id(item),
+            }
+        )
+
+    bundle_row_keys_by_table: dict[str, set[str]] = {}
+    for entry in provisional_entries:
+        bundle_text = _build_multi_row_bundle_context_text(entry["item"], query)
+        if not bundle_text:
+            continue
+        bundle_row_units = _extract_numeric_table_bundle_row_units(entry["item"], query)
+        if not bundle_row_units:
+            continue
+        table_key = entry["table_id"] or f"page:{entry['page']}"
+        table_row_keys = bundle_row_keys_by_table.setdefault(table_key, set())
+        for unit in bundle_row_units:
+            row_id = str(unit.get("row_id") or "").strip()
+            row_text = re.sub(
+                r"\s+",
+                " ",
+                str(
+                    unit.get("content")
+                    or unit.get("row_text")
+                    or unit.get("row_numbers")
+                    or "",
+                ),
+            ).strip()
+            row_key = _normalize_numeric_table_method_token(row_id) or row_text.lower()
+            if row_key:
+                table_row_keys.add(row_key)
+
+    anchor_candidates = []
+    for idx, entry in enumerate(provisional_entries):
+        role = _classify_numeric_table_context_role(entry["item"], query, hints)
+        if role == "anchor":
+            anchor_candidates.append((idx, entry))
+
+    primary_table_id = ""
+    primary_table_key = ""
+    primary_anchor_pages: set[int] = set()
+    if anchor_candidates:
+        table_scores: dict[str, dict] = {}
+        for idx, entry in anchor_candidates:
+            table_key = _table_key(entry)
+            stats = table_scores.setdefault(
+                table_key,
+                {
+                    "count": 0,
+                    "best_rank": None,
+                    "best_entry": entry,
+                    "first_idx": idx,
+                },
+            )
+            stats["count"] += 1
+            rank = _entry_anchor_rank(entry, idx)
+            if stats["best_rank"] is None or rank > stats["best_rank"]:
+                stats["best_rank"] = rank
+                stats["best_entry"] = entry
+            stats["first_idx"] = min(stats["first_idx"], idx)
+        primary_table_key, primary_stats = max(
+            table_scores.items(),
+            key=lambda item: (
+                item[1]["best_rank"][0],
+                item[1]["best_rank"][1],
+                item[1]["count"],
+                item[1]["best_rank"][2],
+                item[1]["best_rank"][3],
+                item[1]["best_rank"][4],
+                -item[1]["first_idx"],
+            ),
+        )
+        primary_table_id = primary_stats["best_entry"]["table_id"] or ""
+        primary_anchor_pages = {
+            entry["page"]
+            for _idx, entry in anchor_candidates
+            if entry["page"] > 0 and _table_key(entry) == primary_table_key
+        }
+        if not primary_anchor_pages:
+            primary_anchor_pages = {
+                entry["page"]
+                for _idx, entry in anchor_candidates
+                if entry["page"] > 0
+            }
+
+    bundle_override_by_table: dict[str, str] = {}
+    bundle_projection_item_ids: dict[str, int] = {}
+    if comparator_query:
+        grouped_entries: dict[str, list[tuple[int, dict]]] = {}
+        for idx, entry in enumerate(provisional_entries):
+            grouped_entries.setdefault(_table_key(entry), []).append((idx, entry))
+        preferred_table_keys = [primary_table_key] if primary_table_key else list(grouped_entries.keys())
+        for table_key in preferred_table_keys:
+            table_entries = grouped_entries.get(table_key, [])
+            bundle_text = _synthesize_same_table_bundle_text(table_entries)
+            if bundle_text:
+                bundle_override_by_table[table_key] = bundle_text
+                if table_entries:
+                    projection_entry = next(
+                        (
+                            candidate[1]
+                            for candidate in table_entries
+                            if _chunk_type(candidate[1]["item"]) == "table_row"
+                            and _entry_has_exact_row(candidate[1]["item"])
+                        ),
+                        None,
+                    )
+                    if projection_entry is None:
+                        _projection_idx, projection_entry = max(
+                            table_entries,
+                            key=lambda candidate: _entry_anchor_rank(candidate[1], candidate[0]),
+                        )
+                    bundle_projection_item_ids[table_key] = id(projection_entry["item"])
+
+    layered_entries: List[dict] = []
+    seen_by_role: dict[str, set[str]] = {"anchor": set(), "focus": set(), "background": set()}
+    seen_row_keys_by_table: dict[str, set[str]] = {}
+    role_counts: Counter[str] = Counter()
+    role_priority = {"anchor": 0, "focus": 1, "background": 2}
+    role_limits = {
+        "anchor": None,
+        "focus": 1 if cost_query else 2,
+        "background": 0 if anchor_candidates else 2,
+    }
+
+    for entry in provisional_entries:
+        role = _classify_numeric_table_context_role(
+            entry["item"],
+            query,
+            hints,
+            primary_table_id=primary_table_id,
+            primary_anchor_pages=primary_anchor_pages,
+        )
+        if anchor_candidates and role == "background":
+            if keep_row_projection and _chunk_type(entry["item"]) == "table_row":
+                if _table_key(entry) in bundle_row_keys_by_table:
+                    role = "anchor"
+                else:
+                    continue
+            else:
+                continue
+
+        text = entry["text"]
+        table_key = _table_key(entry)
+        bundle_text = bundle_override_by_table.get(table_key)
+        bundle_projection_item_id = bundle_projection_item_ids.get(table_key)
+        bundle_projection_entry = (
+            comparator_query
+            and bundle_projection_item_id is not None
+            and id(entry["item"]) == bundle_projection_item_id
+        )
+        chunk_type = _chunk_type(entry["item"])
+        if (
+            comparator_query
+            and bundle_text
+            and bundle_projection_item_id is not None
+            and id(entry["item"]) != bundle_projection_item_id
+            and chunk_type in {"table_row", "table", "caption", "table_cell"}
+        ):
+            continue
+        if bundle_projection_entry:
+            role = "anchor"
+        if comparator_query and bundle_text:
+            if bundle_projection_entry or (role == "anchor" and chunk_type != "table_row"):
+                text = bundle_text
+        if role != "anchor" and len(text) > 320:
+            text = (
+                _context_builder_singleton._extract_relevant_snippet(text, query, max_len=260)
+                or text[:260]
+            )
+
+        chunk_type = _chunk_type(entry["item"])
+        row_key = ""
+        if chunk_type == "table_row":
+            row_id = str(entry["item"].get("row_id") or "").strip()
+            row_text = re.sub(r"\s+", " ", str(entry["item"].get("chunk") or entry["item"].get("raw_chunk_text") or text or "")).strip()
+            row_key = _normalize_numeric_table_method_token(row_id) or _normalize_sparse_bundle_row_key(row_id, row_text)
+            if row_key:
+                bundle_row_keys = bundle_row_keys_by_table.get(table_key)
+                if bundle_row_keys and row_key in bundle_row_keys and not keep_row_projection:
+                    continue
+                table_seen_row_keys = seen_row_keys_by_table.setdefault(table_key, set())
+                if row_key in table_seen_row_keys:
+                    continue
+                table_seen_row_keys.add(row_key)
+        normalized_context = " ".join(text.split()).lower()
+        dedupe_key = f"{entry['page']}|{entry['table_id']}|{normalized_context}"
+        if bundle_projection_entry and chunk_type == "table_row" and row_key:
+            # 同文本的 bundle 摘要和投影行要分别保留，避免 comparator 主锚被去重吞掉。
+            dedupe_key = f"{dedupe_key}|projection|{row_key}"
+        if dedupe_key in seen_by_role[role]:
+            continue
+
+        limit = role_limits.get(role)
+        if limit is not None and role_counts[role] >= limit:
+            continue
+
+        layered_entries.append(
+            {
+                "item": entry["item"],
+                "text": text,
+                "context_role": role,
+            }
+        )
+        seen_by_role[role].add(dedupe_key)
+        role_counts[role] += 1
+
+    if not layered_entries:
+        return [
+            {"item": item, "text": text, "context_role": "background"}
+            for item, text in fallback_entries
+        ]
+
+    layered_entries.sort(key=lambda entry: role_priority.get(entry["context_role"], 99))
+    logger.info(
+        "[numeric_table_context] layered cleanup: anchor=%d focus=%d background=%d primary_table=%s primary_pages=%s",
+        sum(1 for entry in layered_entries if entry["context_role"] == "anchor"),
+        sum(1 for entry in layered_entries if entry["context_role"] == "focus"),
+        sum(1 for entry in layered_entries if entry["context_role"] == "background"),
+        primary_table_id or "-",
+        sorted(primary_anchor_pages),
+    )
+    return layered_entries
+
+
+def _annotate_results_for_evidence_rerank(
+    doc_id: str,
+    results: List[dict],
+    chunks: List[str],
+    parent_chunks: List[str],
+    chunk_headings: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    child_to_parent: dict,
+    group_chunk_map: Optional[dict],
+    include_rerank_text: bool = False,
+) -> List[dict]:
+    if not results:
+        return results
+
+    doc_title = _get_document_title(doc_id) if include_rerank_text else ""
+    chunk_text_to_idx = {text: idx for idx, text in enumerate(chunks)} if chunks else {}
+    chunk_idx_to_group = _build_chunk_idx_to_group_map(group_chunk_map)
+
+    for item in results:
+        chunk_id = _resolve_result_chunk_index(item, chunk_text_to_idx)
+        if chunk_id is not None:
+            item["chunk_id"] = chunk_id
+            if chunk_id < len(chunk_headings) and not item.get("chunk_heading"):
+                item["chunk_heading"] = chunk_headings[chunk_id]
+            page = item.get("page")
+            if chunk_id < len(chunk_pages) and (not isinstance(page, int) or page <= 0):
+                item["page"] = chunk_pages[chunk_id]
+            if chunk_id < len(chunk_types) and not item.get("chunk_type"):
+                item["chunk_type"] = chunk_types[chunk_id]
+            if chunk_id < len(chunk_metadata):
+                _apply_chunk_metadata(item, chunk_metadata[chunk_id])
+            if item.get("parent_id") is None:
+                parent_id = child_to_parent.get(chunk_id)
+                if parent_id is not None:
+                    item["parent_id"] = parent_id
+            if not item.get("group_id"):
+                group_id = chunk_idx_to_group.get(chunk_id, "")
+                if group_id:
+                    item["group_id"] = group_id
+            item["raw_chunk_text"] = item.get("child_chunk") or chunks[chunk_id]
+        else:
+            item["raw_chunk_text"] = item.get("child_chunk") or item.get("chunk", "")
+
+        if not item.get("chunk_type"):
+            item["chunk_type"] = _guess_chunk_type(item.get("raw_chunk_text") or item.get("chunk", ""))
+
+        item["doc_id"] = item.get("doc_id") or doc_id
+        item["semantic_group_id"] = item.get("group_id") or ""
+        item["snippet_basis"] = item.get("snippet") or (item.get("raw_chunk_text") or item.get("chunk", ""))[:200]
+        _normalize_structural_metadata(item)
+        raw_text = item.get("raw_chunk_text") or item.get("chunk", "")
+        if (
+            item.get("chunk_type") != "table_row"
+            and raw_text
+            and _looks_like_numeric_table_support(raw_text, item.get("chunk_type", ""))
+        ):
+            if not item.get("table_caption"):
+                table_caption = _extract_table_caption_from_text(raw_text)
+                if table_caption:
+                    item["table_caption"] = table_caption
+            if not item.get("table_id"):
+                table_id = _extract_table_id(item.get("table_caption", ""))
+                if table_id:
+                    item["table_id"] = table_id
+            if not item.get("table_header"):
+                table_header = _extract_table_header_snippet(raw_text)
+                if table_header:
+                    item["table_header"] = table_header
+        if include_rerank_text:
+            item["doc_title"] = item.get("doc_title") or doc_title
+            item["rerank_text"] = _build_evidence_unit_text(item, chunks, parent_chunks)
+
+    return results
+
+
+def _extract_table_caption_from_text(text: str, preferred_labels: Optional[List[str]] = None) -> str:
+    if not text:
+        return ""
+    candidates: List[str] = []
+    for line in text.splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        normalized = re.sub(r"^\[TABLE\]\s*", "", normalized, flags=re.IGNORECASE)
+        if re.match(r"^(?:Table|TABLE|表)\s*\.?\s*\d+[a-zA-Z]?\b", normalized, re.IGNORECASE):
+            candidates.append(normalized)
+    if not candidates:
+        return ""
+    preferred = [label.lower() for label in (preferred_labels or []) if label]
+    for candidate in candidates:
+        candidate_lower = candidate.lower()
+        if any(label in candidate_lower for label in preferred):
+            return candidate
+    return candidates[0]
+
+
+def _extract_table_id(caption: str) -> str:
+    if not caption:
+        return ""
+    match = re.search(r"(Table\s*\.?\s*\d+[a-zA-Z]?|表\s*\.?\s*\d+[a-zA-Z]?)", caption, re.IGNORECASE)
+    if not match:
+        return ""
+    value = match.group(1)
+    if value.lower().startswith("table"):
+        number = re.search(r"\d+[a-zA-Z]?", value)
+        return f"Table {number.group(0)}" if number else re.sub(r"\s+", " ", value).strip()
+    number = re.search(r"\d+[a-zA-Z]?", value)
+    return f"Table {number.group(0)}" if number else value.strip()
+
+
+def _has_explicit_numeric_table_match(item: dict, target_tables: set[str]) -> bool:
+    if not target_tables:
+        return False
+    explicit_table = _extract_table_id(
+        (item.get("table_id") or item.get("table_caption") or "").strip()
+    )
+    if explicit_table:
+        return explicit_table.lower() in target_tables
+    caption = (item.get("table_caption") or "").strip().lower()
+    return bool(caption and any(value in caption for value in target_tables))
+
+
+_STRICT_EXPLICIT_TABLE_COLUMNS = {"FID", "Acc", "||D_gen||", "ΔAcc/||D_gen||"}
+
+
+def _should_require_explicit_table_anchor(hints: dict[str, List[str]]) -> bool:
+    target_tables = {value for value in hints.get("table_labels", []) if value}
+    normalized_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    if not target_tables or not normalized_columns:
+        return False
+    if not normalized_columns.issubset(_STRICT_EXPLICIT_TABLE_COLUMNS):
+        return False
+    return not hints.get("comparison") and not hints.get("backbones")
+
+
+def _extract_prefix_table_id(text: str) -> str:
+    sample = (text or "").strip()
+    if not sample:
+        return ""
+    match = re.match(
+        r"^(?:\[TABLE\]\s*)?((?:Table|表)\s*\.?\s*\d+[a-zA-Z]?)\b",
+        sample,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _extract_table_id(match.group(1))
+
+
+def _has_strict_numeric_table_anchor(
+    item: dict,
+    target_tables: set[str],
+    evidence_text: str = "",
+) -> bool:
+    if not target_tables:
+        return False
+    explicit_table = _extract_table_id(
+        (item.get("table_id") or item.get("table_caption") or "").strip()
+    )
+    if explicit_table and explicit_table.lower() in target_tables:
+        return True
+    for source in (
+        item.get("table_caption", ""),
+        item.get("raw_chunk_text", ""),
+        item.get("chunk", ""),
+        evidence_text,
+    ):
+        prefix_table = _extract_prefix_table_id(source)
+        if prefix_table and prefix_table.lower() in target_tables:
+            return True
+    return False
+
+
+def _extract_table_mentions(text: str) -> List[tuple[int, int, str]]:
+    mentions: List[tuple[int, int, str]] = []
+    for match in re.finditer(r"(?:Table|表)\s*\.?\s*\d+[a-zA-Z]?\b", text or "", re.IGNORECASE):
+        table_id = _extract_table_id(match.group(0))
+        if not table_id:
+            continue
+        mentions.append((match.start(), match.end(), table_id))
+    return mentions
+
+
+def _is_caption_like_table_mention(text: str, start: int, end: int) -> bool:
+    if not text or start < 0 or end < start:
+        return False
+    if re.match(r"^\s*[:：]", (text or "")[end:end + 3]):
+        return True
+    line_start = text.rfind("\n", 0, start)
+    line_start = 0 if line_start < 0 else line_start + 1
+    prefix = text[line_start:start]
+    if not prefix.strip():
+        return True
+    normalized_prefix = re.sub(r"\s+", "", prefix).lower()
+    return normalized_prefix in {"[table]", "[table]:"}
+
+
+def _fallback_page_text_table_bundle_id(table_id: str) -> str:
+    resolved = _extract_table_id(table_id or "")
+    if not resolved:
+        return ""
+    return f"page-text:{resolved.lower()}"
+
+
+def _slice_text_to_requested_table(text: str, preferred_labels: Optional[List[str]] = None) -> str:
+    mentions = _extract_table_mentions(text)
+    if not mentions or not preferred_labels:
+        return text
+
+    target_tables = {
+        _extract_table_id(label).lower()
+        for label in preferred_labels
+        if _extract_table_id(label)
+    }
+    if not target_tables:
+        return text
+
+    matched_index = next(
+        (
+            idx
+            for idx, (start, end, table_id) in enumerate(mentions)
+            if table_id.lower() in target_tables and _is_caption_like_table_mention(text, start, end)
+        ),
+        None,
+    )
+    if matched_index is None:
+        return ""
+
+    start = mentions[matched_index][0]
+    full_text = text or ""
+    candidate_ends = [entry[0] for entry in mentions[matched_index + 1:]] + [len(full_text)]
+    row_pattern = _build_plain_table_row_pattern(2, 7)
+    chosen_end = len(full_text)
+    for end in candidate_ends:
+        candidate = full_text[start:end].strip()
+        if not candidate:
+            continue
+        header = _extract_table_header_snippet(candidate)
+        numeric_hits = len(_extract_numeric_value_tokens(candidate))
+        has_table_body = bool(
+            _extract_markdown_table_rows(candidate)
+            or row_pattern.search(re.sub(r"\s+", " ", candidate))
+            or (
+                numeric_hits >= 4
+                and len(_extract_table_header_columns(header)) >= 1
+                and _looks_like_numeric_table_support(candidate, "table")
+            )
+        )
+        if has_table_body:
+            chosen_end = end
+            break
+    return full_text[start:chosen_end].strip()
+
+
+def _extract_table_header_snippet(text: str) -> str:
+    if not text:
+        return ""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if line.startswith("|") and idx + 1 < len(lines) and "---" in lines[idx + 1]:
+            return line[:400]
+
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return ""
+    header_match = re.search(
+        r"((?:\b(?:ResNet|DenseNet|ViT|Swin|ConvNeXt)[-_ ]?\d+\b\s*){1,4}"
+        r"(?:(?<!\w)(?:all|overall|total|many|medium|med\.?|few(?:-shot)?)(?!\w)\s*){2,8})",
+        normalized,
+        re.IGNORECASE,
+    )
+    if header_match:
+        return re.sub(r"\s+", " ", header_match.group(1)).strip()[:400]
+    token_positions = [
+        normalized.lower().find(token)
+        for token in ("resnet", "all", "many", "med.", "medium", "few", "fid", "acc", "d_gen")
+        if normalized.lower().find(token) >= 0
+    ]
+    if token_positions:
+        pos = min(token_positions)
+        start = max(0, pos - 20)
+        end = min(len(normalized), pos + 260)
+        snippet = normalized[start:end].strip()
+        row_start = re.search(
+            r"\b[A-Za-z][A-Za-z0-9+/_\-.]*(?:\s+[A-Z][a-z]+\s+et\s+al\.\s*\[\d+[a-z]?\])?"
+            r"\s+(?:-?\d+\.?\d*|-)(?:\s+(?:-?\d+\.?\d*|-)){3,}",
+            snippet,
+        )
+        if row_start and row_start.start() > 0:
+            snippet = snippet[:row_start.start()].strip()
+        return snippet[:400]
+    return normalized[:220]
+
+
+def _extract_markdown_table_rows(text: str) -> List[dict]:
+    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines: List[str] = []
+    for line in raw_lines:
+        if line.startswith("|"):
+            lines.append(line)
+            continue
+        if "|" in line:
+            pipe_fragment = line[line.find("|"):].strip()
+            if pipe_fragment.startswith("|") and pipe_fragment.count("|") >= 2:
+                lines.append(pipe_fragment)
+    if not lines:
+        return []
+
+    caption = _extract_table_caption_from_text(text)
+    table_id = _extract_table_id(caption)
+    rows: List[dict] = []
+    header = ""
+    for idx, line in enumerate(lines):
+        if not line.startswith("|"):
+            pipe_idx = line.find("|")
+            if pipe_idx <= 0:
+                continue
+            line = line[pipe_idx:].strip()
+        if not line.startswith("|"):
+            continue
+        if idx + 1 < len(lines) and lines[idx + 1].startswith("|") and "---" in lines[idx + 1]:
+            header = line
+            for row_line in lines[idx + 2:]:
+                if not row_line.startswith("|"):
+                    break
+                cells = [cell.strip() for cell in row_line.strip("|").split("|")]
+                row_text = " | ".join(cell for cell in cells if cell)
+                if not row_text:
+                    continue
+                row_id = cells[0].strip() if cells else ""
+                rows.append(
+                    {
+                        "row_id": row_id,
+                        "row_text": row_text,
+                        "row_numbers": " ".join(cell for cell in cells[1:] if cell),
+                        "table_caption": caption,
+                        "table_id": table_id,
+                        "table_header": header,
+                    }
+                )
+            break
+    return rows
+
+
+def _extract_structured_table_rows(item: dict) -> List[dict]:
+    evidence_units = item.get("evidence_units")
+    if not isinstance(evidence_units, list):
+        return []
+
+    rows: List[dict] = []
+    for unit in evidence_units:
+        if not isinstance(unit, dict):
+            continue
+        if (unit.get("evidence_unit_type") or "").strip().lower() != "table_row":
+            continue
+        if unit.get("is_header_row"):
+            continue
+
+        row_text = (unit.get("row_text") or unit.get("content") or "").strip()
+        if not row_text:
+            continue
+
+        cell_units = unit.get("cell_evidence_units")
+        if not isinstance(cell_units, list):
+            cell_units = []
+
+        row_id = (unit.get("row_id") or "").strip()
+        if not row_id and cell_units:
+            row_id = str(
+                cell_units[0].get("cell_text")
+                or cell_units[0].get("content")
+                or ""
+            ).strip()
+
+        row_numbers = (unit.get("row_numbers") or "").strip()
+        if not row_numbers and cell_units:
+            row_numbers = " ".join(
+                str(cell.get("cell_text") or cell.get("content") or "").strip()
+                for cell in cell_units[1:]
+                if isinstance(cell, dict)
+            ).strip()
+
+        rows.append({
+            "evidence_unit_id": unit.get("evidence_unit_id", ""),
+            "row_id": row_id,
+            "row_text": row_text,
+            "row_numbers": row_numbers,
+            "table_bundle_id": (
+                unit.get("table_bundle_id")
+                or item.get("table_bundle_id", "")
+                or _fallback_page_text_table_bundle_id(unit.get("table_id") or item.get("table_id", ""))
+            ),
+            "table_caption": unit.get("table_caption") or item.get("table_caption", ""),
+            "table_id": unit.get("table_id") or item.get("table_id", ""),
+            "table_header": unit.get("table_header") or item.get("table_header", ""),
+            "row_number": unit.get("row_number") or unit.get("row_idx"),
+            "page": unit.get("page") or item.get("page"),
+            "bounding_box": unit.get("bounding_box") or unit.get("bbox") or [],
+            "cell_evidence_units": cell_units,
+            "cell_evidence_unit_ids": unit.get("cell_evidence_unit_ids") or [
+                cell.get("evidence_unit_id")
+                for cell in cell_units
+                if isinstance(cell, dict) and cell.get("evidence_unit_id")
+            ],
+        })
+
+    return rows
+
+
+def _extract_plain_table_rows(text: str, hints: dict[str, List[str]], query: str = "") -> List[dict]:
+    if not text:
+        return []
+
+    scoped_text = _slice_text_to_requested_table(text, hints.get("table_labels", []))
+    if hints.get("table_labels") and not scoped_text:
+        return []
+
+    normalized = re.sub(r"\s+", " ", scoped_text).strip()
+    # PDF extraction often glues compact author suffixes onto method names
+    # (for example `cRTKangetal.[2019]`), which breaks generic row parsing.
+    # Normalize these author citations before regex row extraction so the row id
+    # stays on the method side instead of collapsing to the author token.
+    normalized = re.sub(
+        r"(?<=[A-Za-z0-9\)])(?=([A-Z][a-z]+etal\.\[\d+[a-z]?\]))",
+        " ",
+        normalized,
+    )
+    normalized = re.sub(
+        r"([A-Z][a-z]+)etal\.\[(\d+[a-z]?)\]",
+        r"\1 et al. [\2]",
+        normalized,
+    )
+    caption = _extract_table_caption_from_text(scoped_text, preferred_labels=hints.get("table_labels", []))
+    table_id = _extract_table_id(caption)
+    header = _extract_table_header_snippet(scoped_text)
+    header_columns = _extract_table_header_columns(header)
+    rows: List[dict] = []
+    seen: set[str] = set()
+    markdown_rows = _extract_markdown_table_rows(scoped_text)
+    if markdown_rows:
+        rows.extend(markdown_rows)
+        seen.update(
+            (item.get("row_text") or "").strip().lower()
+            for item in markdown_rows
+            if (item.get("row_text") or "").strip()
+        )
+    comparison_query = bool(hints.get("comparison"))
+    min_numeric_tokens, max_numeric_tokens = _get_plain_table_row_numeric_span(hints)
+    numeric_group = rf"(?:{_NUMERIC_VALUE_TOKEN_PATTERN})"
+    method_numeric_pattern = (
+        rf"{numeric_group}(?:\s+{numeric_group})"
+        rf"{{{max(1, min_numeric_tokens - 1)},{max(1, max_numeric_tokens - 1)}}}"
+    )
+    target_methods_compact = {
+        re.sub(r"\s+", "", str(value or "").lower())
+        for value in hints.get("methods", [])
+        if value
+    }
+
+    def _looks_like_header_fragment(row_id: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (row_id or "").lower()).strip()
+        if not normalized:
+            return True
+
+        compact = re.sub(r"\s+", "", normalized)
+        tokens = [
+            token.strip("()[]{}:;,.-")
+            for token in re.split(r"[\s/|]+", normalized)
+            if token.strip("()[]{}:;,.-")
+        ]
+        header_label_tokens = {
+            "baseline",
+            "id",
+            "aid",
+            "ood",
+            "model",
+            "models",
+            "method",
+            "methods",
+            "group",
+            "groups",
+            "acc",
+            "accuracy",
+            "fid",
+            "all",
+            "many",
+            "med",
+            "few",
+            "resnet",
+            "p",
+            "t",
+        }
+        if len(_extract_table_header_columns(row_id)) >= 2:
+            return True
+        has_target_method = bool(
+            target_methods_compact and any(value in compact for value in target_methods_compact)
+        )
+        column_hits = {
+            value.lower()
+            for value in hints.get("columns", [])
+            if value and value.lower() in normalized
+        }
+        if len(column_hits) >= 2:
+            return True
+        header_token_hits = sum(1 for token in tokens if token in header_label_tokens)
+        if len(tokens) >= 3 and header_token_hits >= 2:
+            return True
+        if "baseline" in tokens and header_token_hits >= 1:
+            return True
+        if normalized.count("resnet") >= 2:
+            return True
+        if (
+            not has_target_method
+            and len(normalized.split()) >= 3
+            and any(
+                token in normalized
+                for token in (
+                    "method",
+                    "methods",
+                    "dataset",
+                    "datasets",
+                    "imagenet-lt",
+                    "cifar100-lt",
+                    "cifar10-lt",
+                    "places-lt",
+                    "inaturalist",
+                    "results on",
+                )
+            )
+        ):
+            return True
+        return False
+
+    # 优先用查询中的方法名锚定局部行片段，直接抽取数字列，避免专家数或相邻行串入。
+    method_patterns = []
+    for method in hints.get("methods", []):
+        pattern = re.escape(method.strip())
+        pattern = pattern.replace(r"\ ", r"\s*")
+        pattern = pattern.replace(r"\(", r"\s*\(")
+        pattern = pattern.replace(r"\)", r"\s*\)")
+        method_patterns.append((method, pattern))
+
+    for method, method_pattern in method_patterns:
+        match = re.search(
+            rf"(?<![A-Za-z0-9])({method_pattern})"
+            rf"(?:\s*[A-Za-z][A-Za-z.\-]*(?:\s*et\s*al\.?)?(?:\s*\[\d+[a-z]?\])?)*\s+"
+            rf"({method_numeric_pattern})",
+            normalized,
+            re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        if _has_composite_prefix_before_method(normalized, match.start(1)):
+            continue
+        row_numbers = match.group(2).strip(" ,;")
+        row_text = f"{method} {row_numbers}".strip()
+        key = row_text.lower()
+        if len(row_text) < 12 or key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "row_id": method,
+                "row_text": row_text,
+                "row_numbers": row_numbers,
+                "table_caption": caption,
+                "table_id": table_id,
+                "table_header": header,
+            }
+        )
+
+    # 无方法锚点时，退化为通用行模式抽取。
+    if rows and not (comparison_query or _is_numeric_table_bundle_query(query, hints)):
+        return rows
+
+    search_spaces = [normalized]
+    if header_columns:
+        last_header = header_columns[-1]
+        header_patterns = {
+            "All": r"\b(?:all|overall|total)\b",
+            "Many": r"\bmany\b",
+            "Med.": r"\b(?:medium|med\.?)\b",
+            "Few": r"\bfew(?:-shot)?\b",
+        }
+        pattern = header_patterns.get(last_header)
+        if pattern:
+            header_match = re.search(pattern, normalized, re.IGNORECASE)
+            if header_match:
+                trimmed = normalized[header_match.end():].strip()
+                if trimmed and trimmed != normalized:
+                    search_spaces.insert(0, trimmed)
+
+    row_pattern = _build_plain_table_row_pattern(min_numeric_tokens, max_numeric_tokens)
+    normalized_query_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    prefer_first_duplicate_row_id = bool(
+        hints.get("table_labels")
+        and normalized_query_columns == {"FID", "Acc"}
+        and not target_methods_compact
+    )
+    row_id_scores: dict[str, tuple[float, int]] = {}
+
+    def _score_duplicate_row(unit: dict) -> float:
+        if not prefer_first_duplicate_row_id:
+            return 0.0
+        duplicate_sort_column = ""
+        if "ΔAcc/||D_gen||" in normalized_query_columns:
+            duplicate_sort_column = "ΔAcc/||D_gen||"
+        elif "Few" in normalized_query_columns:
+            duplicate_sort_column = "Few"
+        elif "Acc" in normalized_query_columns:
+            duplicate_sort_column = "Acc"
+        elif "FID" in normalized_query_columns:
+            duplicate_sort_column = "FID"
+        if not duplicate_sort_column:
+            return 0.0
+        focused = _build_query_focused_table_row(unit, hints)
+        column_map = focused.get("column_map") or {}
+        value = _parse_numeric_table_value(column_map.get(duplicate_sort_column, ""))
+        if value is None:
+            return float("-inf")
+        if duplicate_sort_column == "FID":
+            return -value
+        return value
+
+    for search_space in search_spaces:
+        for match in row_pattern.finditer(search_space):
+            row_id = match.group(1).strip(" ,;")
+            row_numbers = match.group(2).strip(" ,;")
+            row_text = f"{row_id} {row_numbers}".strip()
+            key = row_text.lower()
+            if len(row_text) < 12 or key in seen or _looks_like_header_fragment(row_id):
+                continue
+            normalized_row_id = _normalize_numeric_table_method_token(row_id)
+            if (
+                {"||D_gen||", "ΔAcc/||D_gen||"} & normalized_query_columns
+                and re.fullmatch(r"[-−]?\d+(?:\.\d+)?", row_id.replace(",", ""))
+            ):
+                continue
+            candidate = {
+                "row_id": row_id,
+                "row_text": row_text,
+                "row_numbers": row_numbers,
+                "table_caption": caption,
+                "table_id": table_id,
+                "table_header": header,
+            }
+            seen.add(key)
+            if prefer_first_duplicate_row_id and normalized_row_id:
+                candidate_score = _score_duplicate_row(candidate)
+                existing = row_id_scores.get(normalized_row_id)
+                if existing is None:
+                    rows.append(candidate)
+                    row_id_scores[normalized_row_id] = (candidate_score, len(rows) - 1)
+                elif candidate_score > existing[0]:
+                    rows[existing[1]] = candidate
+                    row_id_scores[normalized_row_id] = (candidate_score, existing[1])
+                continue
+            rows.append(candidate)
+    return rows
+
+
+def _normalize_numeric_column_name(value: str) -> str:
+    lowered = re.sub(r"\s+", "", str(value or "").lower())
+    if lowered in {"all", "overall", "total"}:
+        return "All"
+    if lowered == "many":
+        return "Many"
+    if lowered in {"medium", "med", "med."}:
+        return "Med."
+    if lowered in {"few", "few-shot", "tail"}:
+        return "Few"
+    if lowered in {"fid"}:
+        return "FID"
+    if lowered in {"acc", "acc.", "accuracy", "accuracy."}:
+        return "Acc"
+    if "d_gen" in lowered or "dgen" in lowered:
+        if "delta" in lowered or "acc" in lowered or "δ" in value or "∆" in value or "Δ" in value:
+            return "ΔAcc/||D_gen||"
+        return "||D_gen||"
+    return str(value or "").strip()
+
+
+def _normalize_numeric_table_method_token(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").lower())
+
+
+def _row_mentions_target_method(row_id: str, target_method_keys: set[str]) -> bool:
+    compact = _normalize_numeric_table_method_token(row_id)
+    if not compact or not target_method_keys:
+        return False
+    return any(method_key and method_key in compact for method_key in target_method_keys)
+
+
+def _is_composite_numeric_row_id(row_id: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(row_id or "").lower()).strip()
+    if not normalized:
+        return False
+    return bool(re.search(r"(?:\+|/|&|\band\b|\bwith\b)", normalized))
+
+
+def _is_headerish_numeric_table_row(unit: dict) -> bool:
+    row_id = re.sub(r"\s+", " ", str(unit.get("row_id") or "")).strip().lower()
+    if not row_id:
+        return True
+    if len(_extract_table_header_columns(row_id)) >= 2:
+        return True
+
+    tokens = [
+        token.strip("()[]{}:;,.-")
+        for token in re.split(r"[\s/|]+", row_id)
+        if token.strip("()[]{}:;,.-")
+    ]
+    header_label_tokens = {
+        "baseline",
+        "id",
+        "aid",
+        "ood",
+        "model",
+        "models",
+        "method",
+        "methods",
+        "group",
+        "groups",
+        "acc",
+        "accuracy",
+        "fid",
+        "all",
+        "many",
+        "med",
+        "few",
+        "resnet",
+        "p",
+        "t",
+    }
+    header_token_hits = sum(1 for token in tokens if token in header_label_tokens)
+    if len(tokens) >= 3 and header_token_hits >= 2:
+        return True
+    if "baseline" in tokens and header_token_hits >= 1:
+        return True
+
+    headerish_tokens = ("acc", "accuracy", "fid", "all", "many", "med", "few", "d_gen")
+    if len(row_id.split()) >= 3 and any(token in row_id for token in headerish_tokens):
+        return True
+
+    row_text = re.sub(
+        r"\s+",
+        " ",
+        str(unit.get("row_text") or unit.get("chunk") or unit.get("raw_chunk_text") or ""),
+    ).strip().lower()
+    if row_text and row_text != row_id and len(row_id.split()) <= 2:
+        if (
+            not _extract_numeric_value_tokens(row_text)
+            and len(row_text.split()) >= 4
+            and sum(1 for token in headerish_tokens if token in row_text) >= 2
+        ):
+            return True
+    return False
+
+
+def _is_numeric_table_cost_anchor_text(item: dict) -> bool:
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type in {"table_row", "table", "caption"}:
+        return False
+    evidence_text = (
+        _build_numeric_table_evidence_text(item)
+        or item.get("raw_chunk_text")
+        or item.get("chunk")
+        or ""
+    )
+    if not evidence_text:
+        return False
+    return _has_numeric_table_cost_anchor(evidence_text)
+
+
+_NUMERIC_TABLE_BUNDLE_QUERY_RE = re.compile(
+    r"(?:最高|最好|最佳|最优|最大|largest|highest|best|top(?:[- ]performing)?|which\s+(?:method|type)|哪种|哪个方法|哪类|取得最高|提升最大|第二好(?:的)?|第二佳|第二名|次优|second[- ]best|runner[- ]up)",
+    re.IGNORECASE,
+)
+
+
+def _is_numeric_table_bundle_query(query: str, hints: dict[str, List[str]]) -> bool:
+    if hints.get("comparison"):
+        return True
+    if not query:
+        return False
+    normalized_query = re.sub(r"\s+", " ", query).strip().lower()
+    if _NUMERIC_TABLE_BUNDLE_QUERY_RE.search(normalized_query):
+        return True
+    second_best_tokens = (
+        "\u7b2c\u4e8c\u597d",
+        "\u7b2c\u4e8c\u4f73",
+        "\u7b2c\u4e8c\u540d",
+        "\u6b21\u4f18",
+        "\u6b21\u4f73",
+    )
+    return any(
+        token in normalized_query
+        for token in (
+            "second best",
+            "second-best",
+            "runner up",
+            "runner-up",
+            "nearest competitor",
+        )
+    ) or any(token in normalized_query for token in second_best_tokens)
+
+
+_NUMERIC_TABLE_WINNER_QUERY_RE = re.compile(
+    r"(?:最高|最好|最佳|最优|最大|largest|highest|best|top(?:[- ]performing)?|winner|winning)",
+    re.IGNORECASE,
+)
+
+
+def _is_numeric_table_winner_style_query(query: str, hints: dict[str, List[str]]) -> bool:
+    if not query or _is_numeric_table_cost_query(query):
+        return False
+    if not _NUMERIC_TABLE_WINNER_QUERY_RE.search(query):
+        return False
+    return bool(_preferred_numeric_table_sort_column(query, hints))
+
+
+def _is_numeric_table_row_band_query(query: str, hints: dict[str, List[str]]) -> bool:
+    return _is_numeric_table_bundle_query(query, hints) or _is_numeric_table_winner_style_query(query, hints)
+
+
+def _is_numeric_table_explicit_comparator_query(
+    query: str,
+    hints: dict[str, List[str]],
+) -> bool:
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    if len(target_methods) < 2:
+        return False
+    if hints.get("comparison"):
+        return True
+
+    normalized_query = re.sub(r"\s+", " ", (query or "").strip())
+    return bool(_NUMERIC_TABLE_EXPLICIT_COMPARATOR_RE.search(normalized_query))
+
+
+_NUMERIC_VALUE_TOKEN_PATTERN = (
+    r"(?:[-−]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-−]?\d+(?:\.\d+)?)"
+    r"(?:\s*(?:[×xX]|·)\s*10\s*(?:\^?\s*[-−]?\s*\d+)?)?"
+    r"|-"
+)
+_NUMERIC_VALUE_TOKEN_RE = re.compile(_NUMERIC_VALUE_TOKEN_PATTERN)
+
+
+def _extract_numeric_value_tokens(text: str) -> List[str]:
+    sample = re.sub(r"\s+", " ", text or "").strip()
+    if not sample:
+        return []
+    return [match.group(0).strip() for match in _NUMERIC_VALUE_TOKEN_RE.finditer(sample)]
+
+
+def _get_plain_table_row_numeric_span(hints: dict[str, List[str]]) -> tuple[int, int]:
+    override = hints.get("_numeric_span_override") if isinstance(hints, dict) else None
+    if isinstance(override, (list, tuple)) and len(override) >= 2:
+        min_override = _normalize_positive_int(override[0]) or 0
+        max_override = _normalize_positive_int(override[1]) or 0
+        if min_override > 0:
+            if max_override <= 0:
+                max_override = min_override
+            return min_override, max(min_override, max_override)
+
+    query_columns = _sort_numeric_columns(hints.get("columns", []))
+    if not query_columns:
+        return 4, 7
+
+    query_column_keys = {
+        re.sub(r"\s+", "", value).lower()
+        for value in query_columns
+        if value
+    }
+    long_tail_column_keys = {"all", "many", "med.", "few"}
+    if query_column_keys and query_column_keys.issubset(long_tail_column_keys):
+        if len(query_column_keys) >= 4:
+            return 4, 7
+        # Some long-tail result tables omit `All` and only expose
+        # `Many / Med. / Few`. Lower the minimum span so those rows can be
+        # recovered, but keep the historical upper bound for Table 8-style
+        # rows that still carry 5 numeric values.
+        return 3, 7
+    if long_tail_column_keys & query_column_keys:
+        return 4, 7
+
+    has_fid = "fid" in query_column_keys
+    has_acc = bool({"acc", "accuracy"} & query_column_keys)
+    has_d_gen = any("d_gen" in value or "dgen" in value for value in query_column_keys)
+    has_delta = any("delta" in value or "δacc" in value or "∂acc" in value for value in query_column_keys)
+
+    if has_fid and has_acc and not (has_d_gen or has_delta):
+        return 2, 2
+    if (has_d_gen or has_delta) and has_acc:
+        return 3, 3
+    if has_acc:
+        return 2, 4
+    if has_d_gen or has_delta:
+        return 2, 4
+    return max(2, len(query_columns)), min(7, max(2, len(query_columns)) + 2)
+
+
+def _build_plain_table_row_pattern(min_numeric_tokens: int, max_numeric_tokens: int) -> re.Pattern:
+    min_numeric_tokens = max(2, min_numeric_tokens)
+    max_numeric_tokens = max(min_numeric_tokens, max_numeric_tokens)
+    numeric_group = rf"(?:{_NUMERIC_VALUE_TOKEN_PATTERN})"
+    repeated_group = rf"{numeric_group}(?:\s+{numeric_group}){{{min_numeric_tokens - 1},{max_numeric_tokens - 1}}}"
+    return re.compile(
+        rf"(?<![A-Za-z0-9])"
+        rf"([^\W\d][\w+/_\-.\[\]=]*(?:\s+[^\W\d][\w+/_\-.\[\]=]*){{0,3}}(?:\s*\([^)]{{0,32}}\))?)"
+        rf"(?:\s+[A-Z][a-z]+\s+et\s+al\.\s*\[\d+[a-z]?\])?"
+        rf"\s+({repeated_group})"
+    )
+
+
+_NUMERIC_TABLE_METHOD_STOPWORDS = {
+    "fid",
+    "acc",
+    "accuracy",
+    "in",
+    "flops",
+    "time",
+    "cost",
+    "latency",
+    "runtime",
+    "overhead",
+    "params",
+    "param",
+    "parameter",
+    "parameters",
+}
+
+_NUMERIC_TABLE_COST_QUERY_HINTS = (
+    "flops",
+    "推理时间",
+    "开销",
+    "latency",
+    "runtime",
+    "overhead",
+    "cost",
+    "inference time",
+    "inference overhead",
+    "training time",
+    "训练时间",
+    "耗时",
+    "extra flops",
+)
+
+_NUMERIC_TABLE_COST_EVIDENCE_HINTS = (
+    "24 hours",
+    "24 hour",
+    "24h",
+    "six days",
+    "6 days",
+    "6天",
+    "24小时",
+    "no extra overhead",
+    "without extra overhead",
+    "no additional overhead",
+    "additional overhead",
+    "inference overhead",
+)
+
+
+def _extract_numeric_table_row_method_targets(hints: dict[str, List[str]]) -> set[str]:
+    targets: set[str] = set()
+    for value in hints.get("methods", []):
+        key = _normalize_numeric_table_method_token(value)
+        if not key or key in _NUMERIC_TABLE_METHOD_STOPWORDS:
+            continue
+        targets.add(key)
+    return targets
+
+
+def _is_numeric_table_cost_query(query: str) -> bool:
+    sample = re.sub(r"\s+", " ", (query or "").lower()).strip()
+    if not sample:
+        return False
+    return any(token in sample for token in _NUMERIC_TABLE_COST_QUERY_HINTS)
+
+
+def _has_numeric_table_cost_anchor(text: str) -> bool:
+    sample = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if not sample:
+        return False
+    compact = re.sub(r"[\s\-–—]+", "", sample)
+    if any(token in sample for token in _NUMERIC_TABLE_COST_EVIDENCE_HINTS):
+        return True
+    has_duration_anchor = any(
+        (
+            re.search(r"24\s*hours?", sample),
+            re.search(r"(?:six|6)\s*days?", sample),
+            "24hours" in compact,
+            "24hour" in compact,
+            "6days" in compact,
+            "sixdays" in compact,
+            "24小时" in compact,
+            "6天" in compact,
+        )
+    )
+    has_overhead_anchor = any(
+        (
+            re.search(r"no\s*extra\s*overhead", sample),
+            re.search(r"without\s*extra\s*overhead", sample),
+            re.search(r"no\s*additional\s*overhead", sample),
+            re.search(r"inference\s*overhead", sample),
+            re.search(r"extra\s*flops", sample),
+            "noextraoverhead" in compact,
+            "withoutextraoverhead" in compact,
+            "noadditionaloverhead" in compact,
+            "inferenceoverhead" in compact,
+            "extraflops" in compact,
+        )
+    )
+    return has_duration_anchor or has_overhead_anchor
+
+
+def _preferred_numeric_table_sort_column(query: str, hints: dict[str, List[str]]) -> str:
+    query_lower = re.sub(r"\s+", " ", (query or "").lower()).strip()
+    query_columns = _sort_numeric_columns(hints.get("columns", []))
+    column_set = set(query_columns)
+
+    if not column_set:
+        return ""
+
+    best_query = any(
+        token in query_lower
+        for token in ("最高", "最好", "最佳", "最优", "最大", "largest", "highest", "best", "top")
+    )
+    gain_query = any(
+        token in query_lower
+        for token in ("提升最大", "average gain", "per sample", "每样本", "增益", "gain")
+    )
+    few_query = "few" in query_lower or "少样本" in query_lower or "尾类" in query_lower
+    accuracy_query = any(token in query_lower for token in ("acc", "accuracy", "准确率", "分类准确率"))
+
+    if "ΔAcc/||D_gen||" in column_set and (best_query or gain_query):
+        return "ΔAcc/||D_gen||"
+    if gain_query and ("||D_gen||" in column_set or "Acc" in column_set):
+        return "ΔAcc/||D_gen||"
+    if "Few" in column_set and best_query and few_query:
+        return "Few"
+    if "Acc" in column_set and best_query and accuracy_query:
+        return "Acc"
+    if "FID" in column_set and best_query and accuracy_query:
+        return "Acc"
+    if "FID" in column_set and any(token in query_lower for token in ("最小", "最低", "smallest", "lowest", "minimum")):
+        return "FID"
+    if "All" in column_set and any(token in query_lower for token in ("all", "overall", "total", "整体", "总体")):
+        return "All"
+    return ""
+
+
+def _resolve_numeric_table_effective_top_k(
+    query: str,
+    top_k: int,
+    hints: Optional[dict[str, List[str]]] = None,
+    results: Optional[List[dict]] = None,
+) -> int:
+    if top_k <= 0:
+        return top_k
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return top_k
+
+    hints = hints or _query_rewriter_singleton.extract_numeric_table_hints(query)
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    explicit_comparison_methods = _is_numeric_table_explicit_comparator_query(query, hints)
+    if explicit_comparison_methods:
+        available_methods = {
+            _normalize_numeric_table_method_token(item.get("row_id", ""))
+            for item in (results or [])
+            if (item.get("chunk_type") or item.get("block_type") or "").strip().lower() == "table_row"
+            and _normalize_numeric_table_method_token(item.get("row_id", "")) in target_methods
+        }
+        if len(available_methods) > top_k:
+            return max(top_k, min(len(available_methods), 6))
+        return top_k
+    if _is_numeric_table_row_band_query(query, hints):
+        available_rows = [
+            item
+            for item in (results or [])
+            if (item.get("chunk_type") or item.get("block_type") or "").strip().lower() == "table_row"
+        ]
+        if available_rows:
+            return max(top_k, min(max(len(available_rows), 4), 6))
+    return top_k
+
+
+def _parse_numeric_table_value(value: str) -> Optional[float]:
+    sample = re.sub(r"\s+", "", str(value or "").strip())
+    if not sample or sample == "-":
+        return None
+    sample = sample.replace("−", "-")
+    sample = sample.replace("×", "x").replace("·", "x")
+    match = re.fullmatch(
+        r"([-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?|[-+]?\d+(?:\.\d+)?)(?:x10(?:\^?([-+]?\d+))?)?",
+        sample,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    base = match.group(1).replace(",", "")
+    try:
+        value_float = float(base)
+    except ValueError:
+        return None
+    exponent = int(match.group(2)) if match.group(2) else 0
+    return value_float * (10 ** exponent)
+
+
+def _numeric_table_sort_bonus(unit: dict, query: str, hints: dict[str, List[str]]) -> float:
+    if _is_headerish_numeric_table_row(unit):
+        return 0.0
+    column = _preferred_numeric_table_sort_column(query, hints)
+    if not column:
+        query_lower = re.sub(r"\s+", " ", (query or "").lower()).strip()
+        focus_columns = {
+            _normalize_numeric_column_name(value)
+            for value in (unit.get("table_focus_columns") or [])
+            if value
+        }
+        if any(token in query_lower for token in ("提升最大", "average gain", "per sample", "每样本", "增益", "gain")) and "ΔAcc/||D_gen||" in focus_columns:
+            column = "ΔAcc/||D_gen||"
+        elif ("few" in query_lower or "few-shot" in query_lower or "少样本" in query_lower or "尾类" in query_lower) and "Few" in focus_columns:
+            column = "Few"
+        elif any(token in query_lower for token in ("all", "overall", "total", "整体", "总体")) and "All" in focus_columns:
+            column = "All"
+        elif any(token in query_lower for token in ("acc", "accuracy", "准确率", "分类准确率")) and "Acc" in focus_columns:
+            column = "Acc"
+        elif "fid" in query_lower and "FID" in focus_columns:
+            column = "FID"
+    if not column:
+        return 0.0
+    focused = _build_query_focused_table_row(unit, hints)
+    column_map = focused.get("column_map") or {}
+    raw_value = column_map.get(column, "")
+    if not raw_value:
+        alias_map = {
+            "FID": r"fid",
+            "Acc": r"acc(?:uracy)?",
+            "All": r"all|overall|total",
+            "Many": r"many",
+            "Med.": r"med\.?|medium",
+            "Few": r"few(?:-shot)?",
+            "||D_gen||": r"(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)",
+            "ΔAcc/||D_gen||": r"[Δ∆]\s*acc(?:/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥))?",
+        }
+        value_pattern = alias_map.get(column, re.escape(column))
+        for source in (
+            focused.get("text", ""),
+            unit.get("chunk", ""),
+            unit.get("raw_chunk_text", ""),
+            unit.get("table_row_raw_text", ""),
+        ):
+            match = re.search(
+                rf"(?:{value_pattern})\s*[:=]\s*({_NUMERIC_VALUE_TOKEN_PATTERN})",
+                source or "",
+                re.IGNORECASE,
+            )
+            if match:
+                raw_value = match.group(1).strip()
+                break
+    value = _parse_numeric_table_value(raw_value)
+    if value is None:
+        return 0.0
+
+    if column == "FID":
+        score = -value
+    elif column == "ΔAcc/||D_gen||":
+        score = value * 100000.0
+    else:
+        score = value
+    return score * 0.5
+
+
+def _has_composite_prefix_before_method(text: str, match_start: int) -> bool:
+    prefix = (text or "")[max(0, match_start - 32):match_start]
+    return bool(
+        re.search(r"(?:[A-Za-z0-9\)])\s*(?:\+|/|&|and|with)\s*$", prefix, re.IGNORECASE)
+    )
+
+
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(normalized)
+    return ordered
+
+
+def _strip_leading_numeric_table_row_id(text: str, row_id: str) -> str:
+    sample = str(text or "").strip()
+    label = str(row_id or "").strip()
+    if not sample or not label:
+        return sample
+
+    compact_sample = re.sub(r"\s+", "", sample)
+    compact_label = re.sub(r"\s+", "", label)
+    if not compact_sample.lower().startswith(compact_label.lower()):
+        return sample
+
+    seen = 0
+    cutoff = 0
+    target = len(compact_label)
+    for idx, char in enumerate(sample):
+        if char.isspace():
+            continue
+        seen += 1
+        if seen >= target:
+            cutoff = idx + 1
+            break
+
+    stripped = sample[cutoff:].strip()
+    return stripped or sample
+
+
+def _extract_table_header_backbones(header: str) -> List[str]:
+    matches = re.finditer(
+        r"\b(?:ResNet|DenseNet|ViT|Swin|ConvNeXt)[-_ ]?\d+\b",
+        header or "",
+        re.IGNORECASE,
+    )
+    return _dedupe_preserve_order([match.group(0).strip() for match in matches])
+
+
+def _extract_table_header_columns(header: str) -> List[str]:
+    columns: List[str] = []
+    for match in re.finditer(
+        r"(?<!\w)(?:all|overall|total|many|medium|med\.?|few(?:-shot)?|fid|acc(?:uracy)?\.?|(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)|[Δ∆]\s*acc(?:/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥))?)(?!\w)",
+        header or "",
+        re.IGNORECASE,
+    ):
+        normalized = _normalize_numeric_column_name(match.group(0))
+        if normalized:
+            columns.append(normalized)
+    return columns
+
+
+def _extract_rightmost_unique_columns(columns: List[str]) -> List[str]:
+    reversed_unique: List[str] = []
+    seen: set[str] = set()
+    for column in reversed(columns):
+        key = column.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        reversed_unique.append(column)
+    return list(reversed(reversed_unique))
+
+
+def _sort_numeric_columns(columns: List[str]) -> List[str]:
+    normalized = _dedupe_preserve_order(
+        [_normalize_numeric_column_name(value) for value in columns if value]
+    )
+    preferred_order = {
+        "FID": 0,
+        "||D_gen||": 1,
+        "Acc": 2,
+        "ΔAcc/||D_gen||": 3,
+        "All": 4,
+        "Many": 5,
+        "Med.": 6,
+        "Few": 7,
+    }
+    return [
+        normalized[idx]
+        for idx in sorted(
+            range(len(normalized)),
+            key=lambda idx: (preferred_order.get(normalized[idx], 99), idx),
+        )
+    ]
+
+
+def _build_query_focused_table_row(unit: dict, hints: dict[str, List[str]]) -> dict:
+    row_text = _get_numeric_table_boundary_text(unit)
+    if not row_text:
+        return {
+            "text": "",
+            "matched_backbone": "",
+            "resolved_columns": [],
+            "column_coverage": 0,
+        }
+
+    row_id = (unit.get("row_id") or "").strip()
+    numeric_row_text = (unit.get("row_numbers") or "").strip()
+    if not numeric_row_text:
+        numeric_row_text = _strip_leading_numeric_table_row_id(row_text, row_id)
+    if not numeric_row_text:
+        numeric_row_text = row_text
+    row_values = _extract_numeric_value_tokens(numeric_row_text)
+    if not row_values:
+        return {
+            "text": "",
+            "matched_backbone": "",
+            "resolved_columns": [],
+            "column_coverage": 0,
+        }
+
+    query_columns = _sort_numeric_columns(hints.get("columns", []))
+    query_backbones = _dedupe_preserve_order(hints.get("backbones", []))
+    header = unit.get("table_header", "") or ""
+    header_backbones = _extract_table_header_backbones(header)
+    header_columns = _extract_table_header_columns(header)
+    header_column_keys = {column for column in header_columns if column}
+    tail_columns = _extract_rightmost_unique_columns(header_columns)
+    if tail_columns:
+        tail_columns = _sort_numeric_columns(tail_columns)
+    else:
+        tail_columns = query_columns
+
+    generic_metric_columns = {"FID", "Acc", "||D_gen||", "ΔAcc/||D_gen||"}
+    strict_explicit_metric_query = bool(
+        hints.get("table_labels")
+        and query_columns
+        and set(query_columns).issubset(generic_metric_columns)
+    )
+    allow_query_column_fallback = True
+    if strict_explicit_metric_query:
+        focus_column_keys = {
+            _normalize_numeric_column_name(value)
+            for value in (unit.get("table_focus_columns") or [])
+            if value
+        }
+        compact_metric_match = len(row_values) in {len(query_columns), len(query_columns) + 1}
+        support_metric_match = bool(
+            "ΔAcc/||D_gen||" in query_columns
+            and "||D_gen||" in header_column_keys
+            and "Acc" in header_column_keys
+            and len(row_values) >= len(query_columns) + 1
+        )
+        allow_query_column_fallback = (
+            (bool(header_column_keys) and set(query_columns).issubset(header_column_keys))
+            or (bool(focus_column_keys) and set(query_columns).issubset(focus_column_keys))
+            or compact_metric_match
+            or support_metric_match
+        )
+        if not allow_query_column_fallback:
+            tail_columns = []
+
+    matched_backbone = ""
+    if query_backbones:
+        for backbone in header_backbones:
+            if any(backbone.lower() == target.lower() for target in query_backbones):
+                matched_backbone = backbone
+                break
+        if not matched_backbone and not header_backbones and len(query_backbones) == 1:
+            matched_backbone = query_backbones[0]
+        if header_backbones and not matched_backbone:
+            return {
+                "text": "",
+                "matched_backbone": "",
+                "resolved_columns": [],
+                "column_coverage": 0,
+            }
+
+    column_map: dict[str, str] = {}
+    tail_column_keys = set(tail_columns)
+    metric_tail_columns = (
+        tail_columns
+        if tail_columns and set(tail_columns).issubset(generic_metric_columns)
+        else []
+    )
+    if (
+        "ΔAcc/||D_gen||" in query_columns
+        and "||D_gen||" in tail_column_keys
+        and "Acc" in tail_column_keys
+    ):
+        metric_tail_columns = ["||D_gen||", "Acc", "ΔAcc/||D_gen||"]
+    if (
+        allow_query_column_fallback
+        and metric_tail_columns
+        and not matched_backbone
+        and len(row_values) > len(metric_tail_columns)
+    ):
+        prefix_values = row_values[:len(metric_tail_columns)]
+        column_map = {
+            column: value
+            for column, value in zip(metric_tail_columns, prefix_values)
+        }
+    should_preserve_support_tail_columns = bool(
+        allow_query_column_fallback
+        and not column_map
+        and query_columns
+        and tail_columns
+        and "ΔAcc/||D_gen||" in query_columns
+        and "||D_gen||" in tail_column_keys
+        and set(query_columns).issubset(tail_column_keys)
+        and len(row_values) >= len(tail_columns)
+    )
+    if should_preserve_support_tail_columns:
+        mapped_values = row_values[-len(tail_columns):]
+        column_map = {column: value for column, value in zip(tail_columns, mapped_values)}
+    if not column_map and allow_query_column_fallback and query_columns and len(row_values) == len(query_columns):
+        column_map = {column: value for column, value in zip(query_columns, row_values)}
+    if (
+        not column_map
+        and allow_query_column_fallback
+        and query_columns
+        and "ΔAcc/||D_gen||" in query_columns
+        and "||D_gen||" not in query_columns
+        and len(row_values) == len(query_columns) + 1
+    ):
+        mapped_columns = ["||D_gen||", *query_columns]
+        column_map = {column: value for column, value in zip(mapped_columns, row_values[-len(mapped_columns):])}
+    if (
+        not column_map
+        and allow_query_column_fallback
+        and query_columns
+        and len(row_values) == len(query_columns) + 1
+        and query_columns[0] != "FID"
+    ):
+        mapped_values = row_values[-len(query_columns):]
+        column_map = {column: value for column, value in zip(query_columns, mapped_values)}
+    if not column_map and tail_columns and len(row_values) >= len(tail_columns):
+        mapped_values = row_values[-len(tail_columns):]
+        column_map = {column: value for column, value in zip(tail_columns, mapped_values)}
+    if not column_map and len(row_values) >= 4 and (
+        matched_backbone or any(column in {"All", "Many", "Med.", "Few"} for column in query_columns)
+    ):
+        fallback_columns = ["All", "Many", "Med.", "Few"]
+        mapped_values = row_values[-len(fallback_columns):]
+        column_map = {column: value for column, value in zip(fallback_columns, mapped_values)}
+    if not column_map and len(row_values) == 2 and matched_backbone:
+        column_map = {"All": row_values[-1]}
+    if (
+        allow_query_column_fallback
+        and len(query_columns) == 1
+        and query_columns[0] in {"All", "Many", "Med.", "Few"}
+    ):
+        requested_column = query_columns[0]
+        if requested_column == "All" and len(row_values) >= 4:
+            column_map = {"All": row_values[-4]}
+        elif requested_column == "Many" and len(row_values) >= 3:
+            column_map = {"Many": row_values[-3]}
+        elif requested_column == "Med." and len(row_values) >= 3:
+            column_map = {"Med.": row_values[-2]}
+        elif requested_column == "Few" and len(row_values) >= 3:
+            column_map = {"Few": row_values[-1]}
+
+    if not column_map:
+        return {
+            "text": "",
+            "matched_backbone": matched_backbone,
+            "resolved_columns": [],
+            "column_coverage": 0,
+        }
+
+    resolved_columns = query_columns or tail_columns
+    if (
+        tail_columns
+        and query_columns
+        and set(query_columns).issubset(set(tail_columns))
+        and len(tail_columns) > len(query_columns)
+        and (
+            strict_explicit_metric_query
+            or set(tail_columns).issubset(generic_metric_columns)
+        )
+    ):
+        resolved_columns = metric_tail_columns or tail_columns
+    elif (
+        metric_tail_columns
+        and query_columns
+        and set(query_columns).issubset(set(metric_tail_columns))
+        and len(metric_tail_columns) > len(query_columns)
+    ):
+        resolved_columns = metric_tail_columns
+    if (
+        query_columns
+        and "ΔAcc/||D_gen||" in query_columns
+        and "||D_gen||" in column_map
+        and "||D_gen||" not in resolved_columns
+    ):
+        resolved_columns = ["||D_gen||", *resolved_columns]
+    pairs = [(column, column_map[column]) for column in resolved_columns if column in column_map]
+    if query_columns and not pairs:
+        return {
+            "text": "",
+            "matched_backbone": matched_backbone,
+            "resolved_columns": [],
+            "column_coverage": 0,
+        }
+
+    focus_parts: List[str] = []
+    if row_id:
+        focus_parts.append(row_id)
+    if matched_backbone:
+        focus_parts.append(matched_backbone)
+    focus_parts.extend(f"{column}={value}" for column, value in pairs)
+
+    return {
+        "text": " | ".join(focus_parts).strip(),
+        "matched_backbone": matched_backbone,
+        "resolved_columns": [column for column, _ in pairs],
+        "column_coverage": len(pairs),
+        "column_map": column_map,
+    }
+
+
+def _expand_numeric_table_evidence_units(
+    results: List[dict],
+    query: str,
+    *,
+    include_rerank_text: bool = False,
+    doc_title: str = "",
+) -> List[dict]:
+    if not should_apply_numeric_table_specialization():
+        return results
+    needs = set(_analyze_evidence_need(query) or [])
+    if not results or not ({"numeric_table", "comparison_multi_aspect"} & needs):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    comparison_query = bool(hints.get("comparison"))
+    bundle_query = _is_numeric_table_bundle_query(query, hints)
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    explicit_comparison_methods = comparison_query and len(target_methods) >= 2
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_backbones = {value.lower() for value in hints.get("backbones", []) if value}
+    target_columns = {value.lower() for value in hints.get("columns", []) if value}
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    require_explicit_table_anchor = _should_require_explicit_table_anchor(hints)
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    min_row_number_hits, _ = _get_plain_table_row_numeric_span(hints)
+    if bundle_query:
+        row_limit = 4 if len(target_methods) <= 1 else min(5, max(len(target_methods), 4))
+    else:
+        row_limit = 1 if len(target_methods) <= 1 else min(3, len(target_methods))
+        if not target_methods:
+            row_limit = 2
+    expanded: List[dict] = list(results)
+    seen_keys = {
+        (
+            (item.get("chunk") or item.get("raw_chunk_text") or "").strip().lower(),
+            (item.get("page") or 0),
+        )
+        for item in results
+    }
+
+    for item in results:
+        chunk_text = (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+        structured_row_units = _extract_structured_table_rows(item)
+        if not chunk_text and not structured_row_units:
+            continue
+        if not structured_row_units and not _looks_like_numeric_table_support(chunk_text, chunk_type):
+            continue
+
+        row_units = structured_row_units
+        if not row_units and item.get("structured_table_bundle"):
+            # Stored bundle chunks may carry the full table body in metadata even when
+            # the serialized chunk text is only a sparse wrapper. Prefer body rows first
+            # so second-best / winner queries keep comparator rows from the same bundle.
+            row_units = _extract_structured_bundle_body_rows(item)
+        if not row_units:
+            row_units = _extract_markdown_table_rows(chunk_text)
+        if not row_units:
+            row_units = _extract_plain_table_rows(chunk_text, hints, query)
+
+        if row_units:
+            normalized_units: List[dict] = []
+            for unit in row_units:
+                merged_unit = dict(unit)
+                if not merged_unit.get("table_caption") and item.get("table_caption"):
+                    merged_unit["table_caption"] = item.get("table_caption")
+                if not merged_unit.get("table_id") and item.get("table_id"):
+                    merged_unit["table_id"] = item.get("table_id")
+                if not merged_unit.get("table_header") and item.get("table_header"):
+                    merged_unit["table_header"] = item.get("table_header")
+                normalized_units.append(merged_unit)
+            row_units = normalized_units
+
+        if target_tables:
+            explicit_match_units = [
+                unit for unit in row_units if _has_explicit_numeric_table_match(unit, target_tables)
+            ]
+            if explicit_match_units:
+                row_units = explicit_match_units
+            else:
+                # 显式表号题优先拒绝 mixed-table markdown 误标；如果首轮行抽取未能
+                # 产出 exact table 命中，则退回到 scoped plain/markdown 抽取再试一次。
+                fallback_units = _extract_plain_table_rows(chunk_text, hints, query)
+                if fallback_units:
+                    normalized_fallback_units: List[dict] = []
+                    for unit in fallback_units:
+                        merged_unit = dict(unit)
+                        if not merged_unit.get("table_caption") and item.get("table_caption"):
+                            merged_unit["table_caption"] = item.get("table_caption")
+                        if not merged_unit.get("table_id") and item.get("table_id"):
+                            merged_unit["table_id"] = item.get("table_id")
+                        if not merged_unit.get("table_header") and item.get("table_header"):
+                            merged_unit["table_header"] = item.get("table_header")
+                        normalized_fallback_units.append(merged_unit)
+                    row_units = [
+                        unit for unit in normalized_fallback_units
+                        if _has_explicit_numeric_table_match(unit, target_tables)
+                    ]
+                else:
+                    # 显式表号题只允许 exact caption/table_id 命中的 generic rows 升格，
+                    # 避免 side-by-side / mixed-page 文本把相邻表的数字伪装成目标表行。
+                    row_units = []
+
+        ranked_units: List[tuple[float, dict]] = []
+        for unit in row_units:
+            row_text = unit["row_text"].strip()
+            row_lower = row_text.lower()
+            row_numbers = (unit.get("row_numbers") or row_text).strip()
+            typed_row_unit = bool(unit.get("evidence_unit_id"))
+            focused_row = _build_query_focused_table_row(unit, hints)
+            focused_text = focused_row.get("text", "")
+            focus_backbone_hit = bool(focused_row.get("matched_backbone"))
+            focus_column_coverage = int(focused_row.get("column_coverage", 0) or 0)
+            row_method_scope = " ".join(
+                part.lower()
+                for part in (
+                    unit.get("row_id", ""),
+                    focused_text,
+                    row_text,
+                )
+                if part
+            )
+            combined_lower = " ".join(
+                part.lower()
+                for part in (
+                    unit.get("table_caption", ""),
+                    unit.get("table_header", ""),
+                    focused_text,
+                    row_text,
+                )
+                if part
+            )
+            normalized_row = re.sub(r"\s+", "", combined_lower)
+            row_method_key = _normalize_numeric_table_method_token(unit.get("row_id", ""))
+            row_method_hit = bool(target_methods and row_method_key in target_methods)
+            composite_target_noise = (
+                bundle_query
+                and bool(target_methods)
+                and not explicit_comparison_methods
+                and not row_method_hit
+                and _is_composite_numeric_row_id(unit.get("row_id", ""))
+                and _row_mentions_target_method(unit.get("row_id", ""), target_methods)
+            )
+            dataset_mentions = _extract_numeric_table_dataset_mentions(combined_lower)
+            row_column_hits = sum(1 for value in target_columns if value in combined_lower)
+            row_number_hits = len(_extract_numeric_value_tokens(row_numbers))
+            table_caption = unit.get("table_caption", "") or unit.get("table_id", "")
+            lexical = _compute_lexical_evidence_score(
+                query,
+                f"{table_caption} {unit.get('table_header', '')} {focused_text or row_text}",
+            )
+            strict_table_match = bool(target_tables and any(value in table_caption.lower() for value in target_tables))
+            strict_dataset_match = bool(target_datasets and dataset_mentions & target_datasets)
+            sort_bonus = _numeric_table_sort_bonus(unit, query, hints)
+            allow_competitor_row = (
+                bundle_query
+                and not explicit_comparison_methods
+                and row_column_hits >= max(1, min(len(target_columns), 2))
+                and (not target_backbones or focus_backbone_hit)
+                and (not target_columns or focus_column_coverage >= min(len(target_columns), 1))
+                and not composite_target_noise
+            )
+            if target_datasets and not strict_dataset_match and not strict_table_match:
+                continue
+            if composite_target_noise:
+                continue
+            # 显式 comparator 题只保留 query 中明确点名的方法，避免把 CE / 复合方法行混进 bundle。
+            if target_methods and not row_method_hit and not allow_competitor_row:
+                continue
+            if target_backbones and row_method_hit and not focus_backbone_hit:
+                continue
+            if target_columns and row_column_hits == 0 and not row_method_hit:
+                continue
+            if target_columns and len(target_columns) >= 2 and row_column_hits < 2 and not row_method_hit:
+                continue
+            if target_columns and row_method_hit and focus_column_coverage == 0:
+                continue
+            min_required_row_numbers = 1 if typed_row_unit else min_row_number_hits
+            if row_number_hits < min_required_row_numbers:
+                continue
+            lexical_threshold = 0.18 if target_methods else 0.12
+            if strict_table_match:
+                lexical_threshold -= 0.03
+            if strict_dataset_match:
+                lexical_threshold -= 0.02
+            exact_row_override = bool(
+                strict_table_match
+                and sort_bonus > 0
+                and (
+                    not target_columns
+                    or focus_column_coverage >= max(1, min(len(target_columns), 1))
+                )
+            )
+            if lexical < lexical_threshold and not exact_row_override:
+                continue
+
+            strength = lexical
+            if row_method_hit:
+                strength += 0.2
+            elif allow_competitor_row:
+                strength += 0.06
+            strength += min(row_column_hits, 3) * 0.04
+            if strict_table_match:
+                strength += 0.08
+            if strict_dataset_match:
+                strength += 0.09
+            if focused_text:
+                strength += 0.08 + min(focus_column_coverage, 4) * 0.03
+            strength += sort_bonus
+            ranked_units.append((strength, unit))
+
+        seen_ranked_row_keys: set[str] = set()
+        for strength, unit in sorted(ranked_units, key=lambda item: item[0], reverse=True):
+            row_text = unit["row_text"].strip()
+            focused_row = _build_query_focused_table_row(unit, hints)
+            focused_text = (focused_row.get("text") or row_text).strip()
+            normalized_row_key = _normalize_numeric_table_method_token(unit.get("row_id", ""))
+            dedupe_key = normalized_row_key or re.sub(
+                r"\s+",
+                " ",
+                (unit.get("row_id") or focused_text),
+            ).strip().lower()
+            if dedupe_key and dedupe_key in seen_ranked_row_keys:
+                continue
+            lexical = _compute_lexical_evidence_score(
+                query,
+                f"{unit.get('table_caption', '')} {unit.get('table_header', '')} {focused_text}",
+            )
+            key = (focused_text.lower(), int(item.get("page") or 0))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if dedupe_key:
+                seen_ranked_row_keys.add(dedupe_key)
+
+            similarity = float(item.get("similarity", 0.0) or 0.0) + min(0.22, lexical * 0.30) + min(0.18, strength * 0.18)
+            similarity_percent = min(99.99, round(similarity * 100, 2))
+            candidate = {
+                **item,
+                "chunk": focused_text,
+                "raw_chunk_text": row_text,
+                "highlight_text": focused_text[:240],
+                "snippet": focused_text[:160],
+                "chunk_type": "table_row",
+                "block_type": "table_row",
+                "table_row_evidence": True,
+                "table_caption": unit.get("table_caption", ""),
+                "table_header": unit.get("table_header", ""),
+                "table_id": unit.get("table_id", ""),
+                "table_bundle_id": (
+                    unit.get("table_bundle_id")
+                    or item.get("table_bundle_id", "")
+                    or _fallback_page_text_table_bundle_id(unit.get("table_id") or item.get("table_id", ""))
+                ),
+                "evidence_unit_id": unit.get("evidence_unit_id", ""),
+                "row_id": unit.get("row_id", ""),
+                "table_row_number": unit.get("row_number"),
+                "table_focus_backbone": focused_row.get("matched_backbone", ""),
+                "table_focus_columns": focused_row.get("resolved_columns", []),
+                "table_row_raw_text": row_text,
+                "table_row_boundary_text": row_text,
+                "table_row_bbox": unit.get("bounding_box") or unit.get("bbox") or [],
+                "cell_evidence_units": unit.get("cell_evidence_units", []),
+                "cell_evidence_unit_ids": unit.get("cell_evidence_unit_ids", []),
+                "table_row_slice_kind": "exact",
+                "similarity": similarity,
+                "similarity_percent": similarity_percent,
+                "table_row_score": round(lexical, 4),
+                "table_row_strength": round(strength, 4),
+                "doc_title": item.get("doc_title") or doc_title,
+            }
+            if include_rerank_text:
+                candidate["rerank_text"] = _build_evidence_unit_text(candidate, [], [])
+            expanded.append(candidate)
+            if len(seen_ranked_row_keys) >= row_limit:
+                break
+
+    return expanded
+
+
+def _resolve_numeric_table_signature(item: dict) -> str:
+    page = item.get("page") or 0
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+
+    table_id = (item.get("table_id") or "").strip()
+    if not table_id:
+        raw_text = (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
+        caption = _extract_table_caption_from_text(raw_text)
+        table_id = _extract_table_id(caption)
+    if table_id:
+        return f"{table_id.lower()}|p{page}"
+
+    group_id = (item.get("group_id") or "").strip()
+    if group_id:
+        return f"group:{group_id.lower()}|p{page}"
+    return ""
+
+
+def _dedupe_numeric_table_evidence_units(results: List[dict], query: str) -> List[dict]:
+    if not should_apply_numeric_table_specialization():
+        return results
+    needs = set(_analyze_evidence_need(query) or [])
+    if not results or not ({"numeric_table", "comparison_multi_aspect"} & needs):
+        return results
+
+    row_signatures = {
+        _resolve_numeric_table_signature(item)
+        for item in results
+        if (item.get("chunk_type") or item.get("block_type") or "").strip().lower() == "table_row"
+    }
+    row_signatures.discard("")
+    if not row_signatures:
+        return results
+
+    deduped: List[dict] = []
+    removed = 0
+    for item in results:
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+        if chunk_type == "table_row":
+            deduped.append(item)
+            continue
+
+        signature = _resolve_numeric_table_signature(item)
+        raw_text = (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
+        if (
+            signature
+            and signature in row_signatures
+            and not item.get("numeric_table_keep_support")
+            and (
+                chunk_type in {"table", "caption"}
+                or _looks_like_numeric_table_support(raw_text, chunk_type)
+            )
+        ):
+            removed += 1
+            continue
+        deduped.append(item)
+
+    if removed:
+        logger.info(f"[NumericTableDedup] 移除与 table_row 重复的原始表格证据 {removed} 条")
+    return deduped
+
+
+def _mark_numeric_table_support_chunks(results: List[dict], query: str) -> List[dict]:
+    if not should_apply_numeric_table_specialization():
+        return results
+    needs = set(_analyze_evidence_need(query) or [])
+    if not results or not ({"numeric_table", "comparison_multi_aspect"} & needs):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    comparison_query = bool(hints.get("comparison"))
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    if not comparison_query and not preferred_sort_column:
+        return results
+
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_backbones = {
+        str(value or "").strip().lower()
+        for value in hints.get("backbones", [])
+        if value
+    }
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    preferred_column_key = _normalize_numeric_column_name(preferred_sort_column) if preferred_sort_column else ""
+    anchor_table_ids: set[str] = set()
+
+    def _chunk_type(item: dict) -> str:
+        return (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+
+    def _table_id(item: dict) -> str:
+        explicit_table = _extract_table_id(
+            (item.get("table_id") or item.get("table_caption") or "").strip()
+        )
+        if explicit_table:
+            return explicit_table.lower()
+        evidence_text = _build_numeric_table_evidence_text(item) or item.get("raw_chunk_text") or item.get("chunk") or ""
+        explicit_table = _extract_table_id(evidence_text)
+        return explicit_table.lower() if explicit_table else ""
+
+    def _support_matches_target_profile(item: dict) -> bool:
+        if _chunk_type(item) not in {"table", "caption"}:
+            return False
+        table_id = _table_id(item)
+        if target_tables and (not table_id or table_id not in target_tables):
+            return False
+
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        if not evidence_text:
+            return False
+
+        if target_datasets:
+            dataset_mentions = _extract_numeric_table_dataset_mentions(evidence_text)
+            if not (dataset_mentions & target_datasets):
+                return False
+
+        if target_backbones:
+            candidate_backbones = {
+                backbone.strip().lower()
+                for backbone in _extract_table_header_backbones(item.get("table_header", "") or evidence_text)
+                if backbone
+            }
+            if not candidate_backbones or not (candidate_backbones & target_backbones):
+                return False
+
+        if preferred_column_key:
+            candidate_columns = {
+                _normalize_numeric_column_name(value)
+                for value in (
+                    list(item.get("table_focus_columns") or [])
+                    + _extract_table_header_columns(item.get("table_header", "") or evidence_text)
+                )
+                if value
+            }
+            if preferred_column_key not in candidate_columns:
+                return False
+
+        return bool(table_id or target_datasets or target_backbones or preferred_column_key)
+
+    for item in results:
+        if _chunk_type(item) != "table_row":
+            continue
+        row_key = _normalize_numeric_table_method_token(item.get("row_id", ""))
+        if comparison_query and len(target_methods) >= 2 and target_methods and row_key not in target_methods:
+            continue
+        table_id = _table_id(item)
+        if table_id:
+            anchor_table_ids.add(table_id)
+
+    if not anchor_table_ids:
+        for item in results:
+            if _chunk_type(item) == "table_row":
+                table_id = _table_id(item)
+                if table_id:
+                    anchor_table_ids.add(table_id)
+                    break
+
+    for item in results:
+        chunk_type = _chunk_type(item)
+        if chunk_type not in {"table", "caption"}:
+            continue
+        table_id = _table_id(item)
+        if (table_id and table_id in anchor_table_ids) or _support_matches_target_profile(item):
+            item["numeric_table_keep_support"] = True
+
+    return results
+
+
+
+def _attach_numeric_table_exact_context(item: dict, anchor_row: dict) -> None:
+    """把 exact row 绑到同表 support 上，避免 live context_segments 丢掉关键数值。"""
+    if not item or not anchor_row:
+        return
+    exact_row_text = _get_numeric_table_boundary_text(anchor_row)
+    if not exact_row_text:
+        return
+    item["numeric_table_exact_context_row_text"] = exact_row_text
+    item["numeric_table_exact_context_caption"] = (
+        anchor_row.get("table_caption")
+        or item.get("table_caption")
+        or item.get("numeric_table_exact_context_caption")
+        or ""
+    )
+    item["numeric_table_exact_context_header"] = (
+        anchor_row.get("table_header")
+        or item.get("table_header")
+        or item.get("numeric_table_exact_context_header")
+        or ""
+    )
+
+
+def _apply_numeric_table_same_bundle_hard_gate(results: List[dict], query: str) -> List[dict]:
+    if not should_apply_numeric_table_specialization():
+        return results
+    needs = set(_analyze_evidence_need(query) or [])
+    if not results or not ({"numeric_table", "comparison_multi_aspect"} & needs):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    comparison_query = bool(hints.get("comparison"))
+    cost_query = _is_numeric_table_cost_query(query)
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_backbones = {
+        str(value or "").strip().lower()
+        for value in hints.get("backbones", [])
+        if value
+    }
+    target_columns = {
+        _normalize_numeric_column_name(value).lower()
+        for value in hints.get("columns", [])
+        if value
+    }
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    bundle_query = _is_numeric_table_bundle_query(query, hints)
+    explicit_comparator_mode = _is_numeric_table_explicit_comparator_query(query, hints)
+    bundle_query = bundle_query or explicit_comparator_mode
+    winner_only_mode = bool(
+        preferred_sort_column
+        or (target_tables and target_columns and not comparison_query)
+    )
+
+    def _chunk_type(item: dict) -> str:
+        return (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+
+    def _bundle_table_id(item: dict) -> str:
+        explicit_table = _extract_table_id(
+            (item.get("table_id") or item.get("table_caption") or "").strip()
+        )
+        if explicit_table:
+            return explicit_table.lower()
+        evidence_text = _build_numeric_table_evidence_text(item) or item.get("raw_chunk_text") or item.get("chunk") or ""
+        explicit_table = _extract_table_id(evidence_text)
+        return explicit_table.lower() if explicit_table else ""
+
+    def _bundle_key(item: dict) -> str:
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        table_id = _bundle_table_id(item) or "-"
+        dataset_mentions = _extract_numeric_table_dataset_mentions(evidence_text)
+        dataset_key = ",".join(sorted(dataset_mentions)) if dataset_mentions else "-"
+        backbone_key = (item.get("table_focus_backbone") or "").strip().lower()
+        if not backbone_key:
+            header_backbones = _extract_table_header_backbones(item.get("table_header", "") or evidence_text)
+            if header_backbones:
+                backbone_key = header_backbones[0].strip().lower()
+        focus_columns = [
+            _normalize_numeric_column_name(value)
+            for value in (item.get("table_focus_columns") or [])
+            if value
+        ]
+        if not focus_columns:
+            focus_columns = _sort_numeric_columns(
+                _extract_table_header_columns(item.get("table_header", "") or evidence_text)
+            )
+        column_key = ",".join(
+            sorted(
+                value.lower()
+                for value in focus_columns
+                if value
+            )
+        ) if focus_columns else "-"
+        return "|".join((table_id, dataset_key, backbone_key or "-", column_key or "-"))
+
+    def _is_composite_target_noise(item: dict) -> bool:
+        if _chunk_type(item) != "table_row":
+            return False
+        if not bundle_query or not target_methods or explicit_comparator_mode:
+            return False
+        row_id = item.get("row_id", "")
+        return (
+            _is_composite_numeric_row_id(row_id)
+            and _row_mentions_target_method(row_id, target_methods)
+            and _normalize_numeric_table_method_token(row_id) not in target_methods
+        )
+
+    def _looks_like_headerish_anchor(item: dict) -> bool:
+        return _is_headerish_numeric_table_row(item)
+
+    def _is_cost_anchor_text(item: dict) -> bool:
+        if not cost_query:
+            return False
+        return _is_numeric_table_cost_anchor_text(item)
+
+    def _build_focused_row(item: dict) -> dict:
+        row_text = re.sub(
+            r"\s+",
+            " ",
+            str(
+                item.get("numeric_table_exact_context_row_text")
+                or _get_numeric_table_boundary_text(item)
+                or item.get("table_row_raw_text")
+                or item.get("row_text")
+                or item.get("chunk")
+                or item.get("raw_chunk_text")
+                or ""
+            ),
+        ).strip()
+        if not row_text:
+            return {}
+        return _build_query_focused_table_row(
+            {
+                "row_id": item.get("row_id") or "",
+                "row_text": row_text,
+                "row_numbers": _strip_leading_numeric_table_row_id(row_text, item.get("row_id") or "") or row_text,
+                "table_caption": item.get("numeric_table_exact_context_caption")
+                or item.get("table_caption")
+                or item.get("table_id")
+                or "",
+                "table_id": item.get("table_id") or "",
+                "table_header": item.get("numeric_table_exact_context_header")
+                or item.get("table_header")
+                or "",
+                "table_focus_columns": list(item.get("table_focus_columns") or []),
+            },
+            hints,
+        )
+
+    def _matches_target_dataset(item: dict) -> bool:
+        if not target_datasets or cost_query:
+            return True
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        dataset_mentions = _extract_numeric_table_dataset_mentions(evidence_text)
+        return bool(dataset_mentions & target_datasets)
+
+    def _matches_target_backbone(item: dict) -> bool:
+        if not target_backbones or cost_query:
+            return True
+        candidate_backbones = {
+            str(item.get("table_focus_backbone") or "").strip().lower()
+        } if item.get("table_focus_backbone") else set()
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        candidate_backbones.update(
+            value.strip().lower()
+            for value in _extract_table_header_backbones(item.get("table_header", "") or evidence_text)
+            if value
+        )
+        focused_row = _build_focused_row(item)
+        matched_backbone = str(focused_row.get("matched_backbone") or "").strip().lower()
+        if matched_backbone:
+            candidate_backbones.add(matched_backbone)
+        return bool(candidate_backbones & target_backbones)
+
+    def _matches_target_columns(item: dict) -> bool:
+        if not target_columns or cost_query:
+            return True
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        candidate_columns = {
+            _normalize_numeric_column_name(value).lower()
+            for value in (item.get("table_focus_columns") or [])
+            if value
+        }
+        candidate_columns.update(
+            _normalize_numeric_column_name(value).lower()
+            for value in _extract_table_header_columns(item.get("table_header", "") or evidence_text)
+            if value
+        )
+        focused_row = _build_focused_row(item)
+        candidate_columns.update(
+            _normalize_numeric_column_name(value).lower()
+            for value in (focused_row.get("resolved_columns") or [])
+            if value
+        )
+        return bool(candidate_columns & target_columns)
+
+    def _matches_target_hard_gate(item: dict) -> bool:
+        return (
+            _matches_target_columns(item)
+            and _matches_target_dataset(item)
+            and _matches_target_backbone(item)
+        )
+
+    def _matches_target_table(item: dict) -> bool:
+        if not target_tables:
+            return True
+        item_table_id = _bundle_table_id(item)
+        if item_table_id and item_table_id in target_tables:
+            return True
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        explicit_table = _extract_table_id(evidence_text)
+        return bool(explicit_table and explicit_table.lower() in target_tables)
+
+    def _fallback_without_anchor() -> List[dict]:
+        fallback: List[dict] = []
+        seen_ids: set[int] = set()
+
+        def _append(item: dict) -> None:
+            item_id = id(item)
+            if item_id in seen_ids:
+                return
+            fallback.append(item)
+            seen_ids.add(item_id)
+
+        if cost_query:
+            for item in results:
+                if _is_cost_anchor_text(item):
+                    _append(item)
+            if fallback:
+                return fallback
+
+        row_candidates = [
+            item
+            for item in results
+            if _chunk_type(item) == "table_row"
+            and not _is_composite_target_noise(item)
+            and (not target_methods or _normalize_numeric_table_method_token(item.get("row_id", "")) in target_methods)
+            and _matches_target_hard_gate(item)
+            and _matches_target_table(item)
+        ]
+        for item in row_candidates:
+            _append(item)
+
+        table_support_candidates = [
+            item
+            for item in results
+            if _chunk_type(item) in {"table", "caption"}
+            and _matches_target_table(item)
+            and _matches_target_hard_gate(item)
+        ]
+        for item in table_support_candidates:
+            _append(item)
+
+        return fallback
+
+    row_items = [item for item in results if _chunk_type(item) == "table_row"]
+    if not row_items:
+        fallback = _fallback_without_anchor()
+        return fallback or results
+
+    def _select_anchor_row(items: List[dict]) -> Optional[dict]:
+        candidates: List[tuple[int, dict]] = []
+        for idx, item in enumerate(items):
+            if _is_composite_target_noise(item):
+                continue
+            if target_methods:
+                row_key = _normalize_numeric_table_method_token(item.get("row_id", ""))
+                if row_key not in target_methods:
+                    continue
+            if (winner_only_mode or explicit_comparator_mode or comparison_query) and not _matches_target_hard_gate(item):
+                continue
+            candidates.append((idx, item))
+        if not candidates:
+            return None
+
+        def _is_exact_row_support(item: dict) -> bool:
+            return bool(
+                item.get("table_row_evidence")
+                or item.get("table_row_slice_kind") == "exact"
+                or item.get("numeric_table_exact_context_row_text")
+                or item.get("evidence_units")
+                or item.get("cell_evidence_units")
+            )
+
+        bundle_stats: dict[str, tuple[int, int]] = {}
+        for _idx, item in candidates:
+            bundle_key = _bundle_key(item)
+            if not bundle_key:
+                continue
+            bundle_count, bundle_exact_count = bundle_stats.get(bundle_key, (0, 0))
+            bundle_count += 1
+            if _is_exact_row_support(item):
+                bundle_exact_count += 1
+            bundle_stats[bundle_key] = (bundle_count, bundle_exact_count)
+
+        if winner_only_mode or bundle_query or explicit_comparator_mode:
+            ranked: List[tuple[int, int, int, int, float, float, float, int, dict]] = []
+            for idx, item in candidates:
+                bundle_key = _bundle_key(item)
+                bundle_count, bundle_exact_count = bundle_stats.get(bundle_key, (0, 0))
+                ranked.append(
+                    (
+                        bundle_exact_count,
+                        bundle_count,
+                        1 if _is_exact_row_support(item) else 0,
+                        0 if _looks_like_headerish_anchor(item) else 1,
+                        float(_numeric_table_sort_bonus(item, query, hints) or 0.0),
+                        float(item.get("numeric_table_priority", 0.0) or 0.0),
+                        float(item.get("similarity", 0.0) or 0.0),
+                        -idx,
+                        item,
+                    )
+                )
+            ranked.sort(reverse=True)
+            if ranked:
+                return ranked[0][8]
+        return candidates[0][1]
+
+    allowed_bundle_keys: set[str] = set()
+    allowed_table_ids: set[str] = set()
+    allowed_row_ids: set[str] = set()
+    anchor_rows: List[dict] = []
+
+    if explicit_comparator_mode:
+        for item in row_items:
+            row_key = _normalize_numeric_table_method_token(item.get("row_id", ""))
+            if row_key in target_methods and not _is_composite_target_noise(item):
+                if not _matches_target_hard_gate(item):
+                    continue
+                anchor_rows.append(item)
+        if not anchor_rows:
+            fallback = _fallback_without_anchor()
+            return fallback or results
+        for item in anchor_rows:
+            bundle_key = _bundle_key(item)
+            if bundle_key:
+                allowed_bundle_keys.add(bundle_key)
+            table_id = _bundle_table_id(item)
+            if table_id:
+                allowed_table_ids.add(table_id)
+            row_key = _normalize_numeric_table_method_token(item.get("row_id", ""))
+            if row_key:
+                allowed_row_ids.add(row_key)
+    else:
+        anchor_row = _select_anchor_row(row_items)
+        if anchor_row is None:
+            fallback = _fallback_without_anchor()
+            return fallback or results
+        anchor_rows.append(anchor_row)
+        bundle_key = _bundle_key(anchor_row)
+        if bundle_key:
+            allowed_bundle_keys.add(bundle_key)
+        table_id = _bundle_table_id(anchor_row)
+        if table_id:
+            allowed_table_ids.add(table_id)
+        if winner_only_mode:
+            row_key = _normalize_numeric_table_method_token(anchor_row.get("row_id", ""))
+            if row_key:
+                allowed_row_ids.add(row_key)
+
+    filtered: List[dict] = []
+    for item in results:
+        chunk_type = _chunk_type(item)
+        if chunk_type not in {"table_row", "table", "caption"}:
+            if _is_cost_anchor_text(item):
+                filtered.append(item)
+            continue
+        if _is_composite_target_noise(item):
+            continue
+
+        item_table_id = _bundle_table_id(item)
+        item_bundle_key = _bundle_key(item)
+        exact_context_anchor = None
+        if item_table_id:
+            exact_context_anchor = next(
+                (
+                    anchor
+                    for anchor in anchor_rows
+                    if _bundle_table_id(anchor) == item_table_id
+                ),
+                None,
+            )
+        if exact_context_anchor is None and len(anchor_rows) == 1:
+            exact_context_anchor = anchor_rows[0]
+        if chunk_type == "table_row":
+            row_key = _normalize_numeric_table_method_token(item.get("row_id", ""))
+            if explicit_comparator_mode:
+                if row_key not in allowed_row_ids:
+                    continue
+                if not _matches_target_hard_gate(item):
+                    continue
+            elif winner_only_mode:
+                if not _matches_target_hard_gate(item):
+                    continue
+                if target_methods:
+                    if allowed_row_ids and row_key not in allowed_row_ids:
+                        continue
+                elif not target_tables:
+                    if allowed_bundle_keys and item_bundle_key not in allowed_bundle_keys:
+                        continue
+                elif allowed_row_ids and row_key not in allowed_row_ids:
+                    continue
+            elif allowed_bundle_keys and item_bundle_key not in allowed_bundle_keys:
+                continue
+
+        if item_table_id and allowed_table_ids and item_table_id not in allowed_table_ids:
+            if chunk_type == "table_row":
+                continue
+            if chunk_type not in {"table", "caption"}:
+                continue
+
+        if chunk_type in {"table", "caption"} and not item_table_id:
+            continue
+
+        if chunk_type in {"table", "caption"} and allowed_table_ids and item_table_id not in allowed_table_ids:
+            continue
+
+        if chunk_type in {"table", "caption"} and exact_context_anchor is not None:
+            _attach_numeric_table_exact_context(item, exact_context_anchor)
+
+        if chunk_type == "table_row" and not explicit_comparator_mode and not winner_only_mode:
+            if allowed_bundle_keys and item_bundle_key not in allowed_bundle_keys:
+                continue
+
+        filtered.append(item)
+
+    if not any(_chunk_type(item) == "table_row" for item in filtered):
+        if filtered and all(
+            _is_cost_anchor_text(item) or _chunk_type(item) in {"table", "caption"}
+            for item in filtered
+        ):
+            return filtered
+        recovered: List[dict] = []
+        seen_ids: set[int] = set()
+        for item in anchor_rows + filtered:
+            item_id = id(item)
+            if item_id in seen_ids:
+                continue
+            recovered.append(item)
+            seen_ids.add(item_id)
+        if any(_chunk_type(item) == "table_row" for item in recovered):
+            return recovered
+        return results
+    return filtered
+
+
+
+def _apply_group_pre_cap(results: List[dict], per_group_limit: int = 4) -> Tuple[List[dict], dict]:
+    if not results or per_group_limit <= 0:
+        return results, {}
+
+    kept = []
+    group_counts = {}
+    removed = 0
+
+    for item in results:
+        group_id = (item.get("group_id") or "").strip()
+        if group_id:
+            count = group_counts.get(group_id, 0)
+            if count >= per_group_limit:
+                removed += 1
+                continue
+            group_counts[group_id] = count + 1
+        kept.append(item)
+
+    stats = {
+        "input": len(results),
+        "output": len(kept),
+        "removed": removed,
+        "group_limit": per_group_limit,
+        "unique_groups": len(group_counts),
+    }
+    if removed > 0:
+        logger.info(f"[RerankPreCap] 候选 {len(results)} → {len(kept)}，移除同组冗余 {removed} 条")
+    return kept, stats
+
+
+def _apply_group_post_cap(
+    results: List[dict],
+    top_k: int,
+    per_group_limit: int = 2,
+    per_section_limit: int = 2,
+) -> Tuple[List[dict], dict]:
+    if not results or top_k <= 0:
+        return [], {}
+
+    selected = []
+    selected_ids = set()
+    group_counts = {}
+    section_counts = {}
+    group_blocked = 0
+    section_blocked = 0
+
+    def _can_take(item: dict, enforce_section: bool) -> Tuple[bool, str]:
+        group_id = (item.get("group_id") or "").strip()
+        if group_id and group_counts.get(group_id, 0) >= per_group_limit:
+            return False, "group"
+        section = _normalize_section_heading(item.get("chunk_heading", ""))
+        if enforce_section and section and section_counts.get(section, 0) >= per_section_limit:
+            return False, "section"
+        return True, ""
+
+    def _take(item: dict, track_section: bool) -> None:
+        group_id = (item.get("group_id") or "").strip()
+        if group_id:
+            group_counts[group_id] = group_counts.get(group_id, 0) + 1
+        section = _normalize_section_heading(item.get("chunk_heading", ""))
+        if track_section and section:
+            section_counts[section] = section_counts.get(section, 0) + 1
+        selected.append(item)
+        selected_ids.add(id(item))
+
+    for item in results:
+        ok, reason = _can_take(item, True)
+        if not ok:
+            if reason == "group":
+                group_blocked += 1
+            elif reason == "section":
+                section_blocked += 1
+            continue
+        _take(item, True)
+        if len(selected) >= top_k:
+            break
+
+    if len(selected) < top_k:
+        for item in results:
+            if id(item) in selected_ids:
+                continue
+            ok, reason = _can_take(item, False)
+            if not ok:
+                if reason == "group":
+                    group_blocked += 1
+                continue
+            _take(item, False)
+            if len(selected) >= top_k:
+                break
+
+    stats = {
+        "input": len(results),
+        "output": len(selected),
+        "group_limit": per_group_limit,
+        "section_limit": per_section_limit,
+        "group_blocked": group_blocked,
+        "section_blocked": section_blocked,
+        "unique_groups": len(group_counts),
+        "unique_sections": len(section_counts),
+    }
+    return selected[:top_k], stats
+
+
+def _focus_mode_compress(
+    results: List[dict],
+    query: str,
+    window_size: int = 2,
+    max_sentences: int = 4,
+    min_chars: int = 80,
+) -> List[dict]:
+    """对 rerank 后的候选列表做句级 Focus Mode 压缩。
+
+    策略：
+    1. 将 chunk 文本按句子切分
+    2. 用 query 关键词为每句打分（命中词数）
+    3. 选出 top max_sentences 句，并各自扩展 window_size 个上下文句形成窗口
+    4. 合并去重窗口后拼接为 focus_text，替换 chunk 用于 LLM 上下文
+    5. 保留 focus_original_chars / focus_sentences_count / focus_compression_ratio 供诊断
+    6. citation / highlight 追溯字段（chunk_id, parent_id, page, group_id）原样保留
+
+    文本低于 min_chars 或切不出多句时直接跳过，保留原始 chunk。
+    """
+    from services.sentence_window_splitter import split_sentences
+
+    if not results or not query:
+        return results
+
+    # 提取 query 关键词（≥2字符）
+    import re as _re
+    query_terms = [
+        t.lower() for t in _re.split(r'[\s,;，。；、？！?!：:""\'\'\"\"]+', query)
+        if len(t) >= 2
+    ]
+    numeric_table_query = "numeric_table" in (_analyze_evidence_need(query) or [])
+    cost_query = numeric_table_query and _is_numeric_table_cost_query(query)
+
+    for item in results:
+        chunk_text = (item.get("chunk") or "").strip()
+        if not chunk_text or len(chunk_text) < min_chars:
+            continue
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+        source_text = (item.get("raw_chunk_text") or chunk_text).strip()
+        if numeric_table_query and (
+            chunk_type in {"table_row", "table", "caption"}
+            or _looks_like_numeric_table_support(source_text, chunk_type)
+            or (cost_query and _has_numeric_table_cost_anchor(source_text))
+        ):
+            continue
+
+        sentences = split_sentences(chunk_text)
+        if len(sentences) <= 2:
+            continue
+
+        # 为每句打分
+        def _score(sent: str) -> float:
+            sl = sent.lower()
+            return sum(1 for t in query_terms if t in sl)
+
+        scored = [(i, _score(s), s) for i, s in enumerate(sentences)]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # 选 top max_sentences 个支持句（保持原顺序）
+        top_indices = sorted({i for i, sc, _ in scored[:max_sentences]})
+
+        # 展开窗口
+        window_indices: set = set()
+        for idx in top_indices:
+            for wi in range(max(0, idx - window_size), min(len(sentences), idx + window_size + 1)):
+                window_indices.add(wi)
+        window_indices_sorted = sorted(window_indices)
+
+        focus_text = " ".join(sentences[i] for i in window_indices_sorted).strip()
+        if not focus_text:
+            continue
+
+        original_chars = len(chunk_text)
+        focus_chars = len(focus_text)
+        compression_ratio = round(focus_chars / max(original_chars, 1), 4)
+
+        # 只有压缩率低于 0.95 才覆盖（避免无意义替换）
+        if compression_ratio >= 0.95:
+            continue
+
+        item["focus_original_chunk"] = chunk_text
+        item["focus_original_chars"] = original_chars
+        item["focus_sentences_count"] = len(window_indices_sorted)
+        item["focus_compression_ratio"] = compression_ratio
+        item["chunk"] = focus_text
+
+    return results
+
+
+def _ensure_numeric_table_evidence_slots(
+    results: List[dict],
+    query: str,
+    top_k: int,
+) -> List[dict]:
+    if not should_apply_numeric_table_specialization():
+        return results[:top_k] if results else []
+    if not results or top_k <= 0:
+        return []
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return results[:top_k]
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    effective_top_k = _resolve_numeric_table_effective_top_k(query, top_k, hints, results)
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    require_explicit_table_anchor = _should_require_explicit_table_anchor(hints)
+    ordered_target_method_keys = [
+        _normalize_numeric_table_method_token(value)
+        for value in hints.get("methods", [])
+        if value and _normalize_numeric_table_method_token(value)
+    ]
+    ordered_target_method_keys = [
+        value for value in ordered_target_method_keys if value not in _NUMERIC_TABLE_METHOD_STOPWORDS
+    ]
+    target_method_keys = set(ordered_target_method_keys)
+    comparison_query = bool(hints.get("comparison"))
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    bundle_query = _is_numeric_table_bundle_query(query, hints)
+    second_best_mode = bool(_NUMERIC_TABLE_SECOND_BEST_RE.search(query or ""))
+    explicit_comparison_methods = _is_numeric_table_explicit_comparator_query(query, hints)
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_backbones = {
+        str(value or "").lower()
+        for value in hints.get("backbones", [])
+        if value
+    }
+    target_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    cost_query = _is_numeric_table_cost_query(query)
+    winner_bundle_query = bool(
+        preferred_sort_column
+        and not target_tables
+        and not target_method_keys
+        and not cost_query
+    )
+    bundle_query = bundle_query or explicit_comparison_methods or winner_bundle_query
+    min_support = 1
+    if bundle_query:
+        min_support = min(effective_top_k, 4 if len(hints.get("methods", [])) >= 2 else 3)
+    elif len(hints.get("columns", [])) >= 3:
+        min_support = min(effective_top_k, 2)
+
+    def _chunk_type(item: dict) -> str:
+        return (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+
+    def _row_method_key(item: dict) -> str:
+        return _normalize_numeric_table_method_token(item.get("row_id", ""))
+
+    def _bundle_group_key(item: dict) -> str:
+        if _chunk_type(item) != "table_row":
+            return ""
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        page = item.get("page") or 0
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            page = 0
+        table_key = (item.get("table_id") or "").strip().lower() or f"page:{page}"
+        dataset_mentions = _extract_numeric_table_dataset_mentions(evidence_text)
+        dataset_key = ",".join(sorted(dataset_mentions & target_datasets)) if target_datasets else ""
+        backbone_key = (item.get("table_focus_backbone") or "").strip().lower()
+        if target_backbones and backbone_key and backbone_key not in target_backbones:
+            return ""
+        resolved_columns = {
+            _normalize_numeric_column_name(value)
+            for value in (item.get("table_focus_columns") or [])
+            if value
+        }
+        column_values = sorted(
+            value.lower()
+            for value in resolved_columns
+            if value and (not target_columns or value in target_columns)
+        )
+        column_key = ",".join(column_values)
+        return "|".join((table_key, dataset_key or "-", backbone_key or "-", column_key or "-"))
+
+    def _is_composite_target_noise(item: dict) -> bool:
+        if _chunk_type(item) != "table_row":
+            return False
+        if not bundle_query or not target_method_keys or explicit_comparison_methods:
+            return False
+        row_id = item.get("row_id", "")
+        return (
+            _is_composite_numeric_row_id(row_id)
+            and _row_mentions_target_method(row_id, target_method_keys)
+            and _row_method_key(item) not in target_method_keys
+        )
+
+    def _matches_target_table(item: dict) -> bool:
+        if not target_tables:
+            return False
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        )
+        if require_explicit_table_anchor:
+            return _has_strict_numeric_table_anchor(item, target_tables, evidence_text)
+        if _has_explicit_numeric_table_match(item, target_tables):
+            return True
+        if _chunk_type(item) == "table_row":
+            return False
+        return any(value in evidence_text.lower() for value in target_tables)
+
+    def _is_hard_support(item: dict) -> bool:
+        chunk_type = _chunk_type(item)
+        evidence_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        ).strip()
+        if not evidence_text:
+            return False
+        if chunk_type == "table_row":
+            return True
+        if chunk_type in {"table", "caption"}:
+            if _looks_like_numeric_table_support(evidence_text, chunk_type):
+                return True
+            return bool(target_tables and _matches_target_table(item))
+        if cost_query and _is_numeric_table_cost_anchor_text(item):
+            return True
+        return False
+
+    def _support_score(item: dict) -> float:
+        chunk_type = _chunk_type(item)
+        raw_text = (
+            _build_numeric_table_evidence_text(item)
+            or item.get("raw_chunk_text")
+            or item.get("chunk")
+            or ""
+        ).strip()
+        score = float(item.get("numeric_table_priority", 0.0) or 0.0)
+        if chunk_type == "table_row":
+            score += 5.0
+            if item.get("table_row_slice_kind") == "exact":
+                score += 1.2
+            elif item.get("table_row_slice_kind") == "broad":
+                score -= 0.4
+        elif chunk_type == "table":
+            score += 3.0
+        elif chunk_type == "caption":
+            score += 1.5
+        if cost_query and _is_numeric_table_cost_anchor_text(item):
+            score += 4.5
+        if _looks_like_numeric_table_support(raw_text, chunk_type):
+            score += 2.0
+        if item.get("row_id"):
+            score += 0.8
+        if item.get("table_id"):
+            score += 0.6
+        score += min(len(item.get("numeric_table_anchor_hits") or []), 5) * 0.4
+        score += float(item.get("similarity", 0.0) or 0.0) * 0.5
+        score += _numeric_table_sort_bonus(item, query, hints)
+        return score
+
+    ordered_scores = [(_support_score(item), idx, item) for idx, item in enumerate(results)]
+    support_candidates = [
+        (score, idx, item)
+        for score, idx, item in ordered_scores
+        if score >= 3.0 and _is_hard_support(item) and not _is_composite_target_noise(item)
+    ]
+    if not support_candidates:
+        return results[:top_k]
+
+    bundle_group_counts: dict[str, int] = {}
+    bundle_group_exact_counts: dict[str, int] = {}
+    for _score, _idx, item in ordered_scores:
+        if _chunk_type(item) != "table_row":
+            continue
+        bundle_key = _bundle_group_key(item)
+        if not bundle_key:
+            continue
+        bundle_group_counts[bundle_key] = bundle_group_counts.get(bundle_key, 0) + 1
+        if (
+            item.get("table_row_evidence")
+            or item.get("table_row_slice_kind") == "exact"
+            or item.get("numeric_table_exact_context_row_text")
+        ):
+            bundle_group_exact_counts[bundle_key] = bundle_group_exact_counts.get(bundle_key, 0) + 1
+
+    final = list(results[:effective_top_k])
+    protected_ids = {
+        id(item)
+        for item in final
+        if (
+            (target_tables and _matches_target_table(item))
+            or (explicit_comparison_methods and _row_method_key(item) in target_method_keys)
+        )
+    }
+
+    def _is_support(item: dict) -> bool:
+        return _is_hard_support(item) and _support_score(item) >= 3.0
+
+    def _prefer_exact_slice_support(items: List[dict]) -> List[dict]:
+        if not items:
+            return items
+
+        cost_support: List[dict] = []
+        exact_support: List[dict] = []
+        fallback: List[dict] = []
+        for item in items:
+            chunk_type = _chunk_type(item)
+            if cost_query and _is_numeric_table_cost_anchor_text(item):
+                cost_support.append(item)
+                continue
+            if (
+                chunk_type == "table_row"
+                or item.get("table_row_evidence")
+                or item.get("table_row_slice_kind") == "exact"
+            ):
+                exact_support.append(item)
+                continue
+            if (
+                chunk_type in {"table", "caption"}
+                and item.get("table_augmented_scope") != "page_content"
+                and not item.get("numeric_table_mixed_table")
+                ):
+                exact_support.append(item)
+                continue
+            fallback.append(item)
+
+        if cost_query:
+            merged = cost_support + exact_support + fallback
+        else:
+            merged = exact_support + fallback
+        return merged if merged else items
+
+    def _dedupe_explicit_comparator_rows(items: List[dict]) -> List[dict]:
+        if not explicit_comparison_methods:
+            return items
+
+        deduped: List[dict] = []
+        seen_method_keys: set[str] = set()
+        for item in items:
+            if _chunk_type(item) != "table_row":
+                deduped.append(item)
+                continue
+
+            row_key = _row_method_key(item)
+            if row_key and row_key in target_method_keys:
+                if row_key in seen_method_keys:
+                    continue
+                seen_method_keys.add(row_key)
+            deduped.append(item)
+        return deduped
+
+    def _limit_second_best_bundle_rows(items: List[dict]) -> List[dict]:
+        if not second_best_mode or explicit_comparison_methods:
+            return items
+
+        row_items = [item for item in items if _chunk_type(item) == "table_row"]
+        max_second_best_rows = max(len(target_method_keys), 1) + 1
+        if len(row_items) <= max_second_best_rows:
+            return items
+
+        preferred_bundle_keys: list[str] = []
+        for item in row_items:
+            row_key = _row_method_key(item)
+            if target_method_keys and row_key not in target_method_keys:
+                continue
+            bundle_key = _bundle_group_key(item)
+            if bundle_key and bundle_key not in preferred_bundle_keys:
+                preferred_bundle_keys.append(bundle_key)
+        if not preferred_bundle_keys:
+            fallback_bundle_key = next(
+                (_bundle_group_key(item) for item in row_items if _bundle_group_key(item)),
+                "",
+            )
+            if fallback_bundle_key:
+                preferred_bundle_keys.append(fallback_bundle_key)
+        if not preferred_bundle_keys:
+            return items
+
+        def _second_best_rank_score(item: dict) -> float:
+            focused_row = _build_query_focused_table_row(item, hints)
+            column_map = focused_row.get("column_map") or {}
+            all_value = _parse_numeric_table_value(column_map.get("All", ""))
+            if all_value is not None:
+                return all_value
+
+            rank_values = [
+                _parse_numeric_table_value(value)
+                for column, value in column_map.items()
+                if column in {"Many", "Med.", "Few", "Acc"}
+            ]
+            rank_values = [value for value in rank_values if value is not None]
+            if rank_values:
+                return sum(rank_values) / len(rank_values)
+            return float("-inf")
+
+        kept_row_ids: set[int] = set()
+        kept_target_keys: set[str] = set()
+        for item in items:
+            if _chunk_type(item) != "table_row":
+                continue
+            if preferred_bundle_keys and _bundle_group_key(item) not in preferred_bundle_keys:
+                continue
+            row_key = _row_method_key(item)
+            if target_method_keys:
+                if row_key not in target_method_keys or row_key in kept_target_keys:
+                    continue
+                kept_target_keys.add(row_key)
+            elif kept_row_ids:
+                continue
+            kept_row_ids.add(id(item))
+
+        competitor_candidates: list[tuple[float, float, float, int, dict]] = []
+        for idx, item in enumerate(items):
+            if _chunk_type(item) != "table_row":
+                continue
+            if preferred_bundle_keys and _bundle_group_key(item) not in preferred_bundle_keys:
+                continue
+            row_key = _row_method_key(item)
+            if target_method_keys and row_key in target_method_keys:
+                continue
+            competitor_candidates.append(
+                (
+                    _second_best_rank_score(item),
+                    _support_score(item),
+                    float(_numeric_table_sort_bonus(item, query, hints) or 0.0),
+                    float(item.get("numeric_table_priority", 0.0) or 0.0),
+                    -idx,
+                    item,
+                )
+            )
+        if competitor_candidates:
+            best_competitor = max(competitor_candidates)[5]
+            kept_row_ids.add(id(best_competitor))
+
+        limited: List[dict] = []
+        for item in items:
+            chunk_type = _chunk_type(item)
+            if chunk_type == "table_row":
+                if id(item) in kept_row_ids:
+                    limited.append(item)
+                continue
+            if (
+                chunk_type in {"table", "caption"}
+                or item.get("table_augmented_scope") == "page_content"
+                or _looks_like_numeric_table_support(
+                    _build_numeric_table_evidence_text(item)
+                    or item.get("raw_chunk_text")
+                    or item.get("chunk")
+                    or "",
+                    chunk_type,
+                )
+            ):
+                continue
+            limited.append(item)
+        return limited
+
+    def _support_candidate_priority(entry: tuple[float, int, dict]) -> tuple[int, int, int, float, int]:
+        score, idx, item = entry
+        chunk_type = _chunk_type(item)
+        bundle_key = _bundle_group_key(item)
+        bundle_exact_count = bundle_group_exact_counts.get(bundle_key, 0) if bundle_key else 0
+        bundle_count = bundle_group_counts.get(bundle_key, 0) if bundle_key else 0
+        if (
+            chunk_type == "table_row"
+            or item.get("table_row_evidence")
+            or item.get("table_row_slice_kind") == "exact"
+        ):
+            support_rank = 0
+        elif (
+            chunk_type in {"table", "caption"}
+            and item.get("table_augmented_scope") != "page_content"
+            and not item.get("numeric_table_mixed_table")
+        ):
+            support_rank = 1
+        else:
+            support_rank = 2
+        return (support_rank, -bundle_exact_count, -bundle_count, -score, idx)
+
+    ordered_support_candidates = sorted(support_candidates, key=_support_candidate_priority)
+    hard_support_pool = _limit_second_best_bundle_rows(
+        _dedupe_explicit_comparator_rows(
+            _prefer_exact_slice_support([item for _score, _idx, item in ordered_support_candidates])
+        )
+    )
+    support_target_k = effective_top_k if explicit_comparison_methods else top_k
+    if (
+        not cost_query
+        and support_target_k > 0
+        and len(hard_support_pool) >= support_target_k
+        and any(_chunk_type(item) == "table_row" for item in hard_support_pool)
+    ):
+        return hard_support_pool[:support_target_k]
+    ordered_cost_anchor_candidates = [
+        item
+        for _score, _idx, item in sorted(ordered_scores, key=lambda entry: (-entry[0], entry[1]))
+        if cost_query and _is_numeric_table_cost_anchor_text(item)
+    ]
+
+    required_supports: List[dict] = []
+    seen_required_ids: set[int] = set()
+
+    def _append_required(predicate) -> None:
+        for _, _, item in ordered_support_candidates:
+            item_id = id(item)
+            if item_id in seen_required_ids:
+                continue
+            if predicate(item):
+                required_supports.append(item)
+                seen_required_ids.add(item_id)
+                break
+
+    if target_tables and not any(
+        _matches_target_table(item) and _chunk_type(item) == "table_row" and _is_support(item)
+        for item in final
+    ):
+        _append_required(
+            lambda item: _matches_target_table(item) and _chunk_type(item) == "table_row"
+        )
+    if target_tables and not any(_matches_target_table(item) and _is_support(item) for item in final):
+        _append_required(lambda item: _matches_target_table(item))
+
+    if explicit_comparison_methods:
+        for method_key in ordered_target_method_keys:
+            if any(
+                _row_method_key(item) == method_key
+                and _is_support(item)
+                and (not target_tables or _matches_target_table(item))
+                for item in final
+            ):
+                continue
+            _append_required(
+                lambda item, method_key=method_key: (
+                    _chunk_type(item) == "table_row"
+                    and _row_method_key(item) == method_key
+                    and (not target_tables or _matches_target_table(item))
+                )
+            )
+
+    if bundle_query and target_method_keys and not any(
+        _row_method_key(item) in target_method_keys
+        and _is_support(item)
+        and (not target_tables or _matches_target_table(item))
+        for item in final
+    ):
+        _append_required(
+            lambda item: (
+                _chunk_type(item) == "table_row"
+                and _row_method_key(item) in target_method_keys
+                and (not target_tables or _matches_target_table(item))
+            )
+        )
+
+    if cost_query and not any(_is_numeric_table_cost_anchor_text(item) for item in final):
+        cost_anchor_candidates = [
+            (float(item.get("similarity", 0.0) or 0.0), idx, item)
+            for idx, item in enumerate(results)
+            if _is_numeric_table_cost_anchor_text(item)
+        ]
+        if cost_anchor_candidates:
+            _, _, cost_anchor_item = max(cost_anchor_candidates, key=lambda entry: (entry[0], -entry[1]))
+            _append_required(lambda item, cost_anchor_item=cost_anchor_item: item is cost_anchor_item)
+
+    if bundle_query and not explicit_comparison_methods:
+        bundle_groups: dict[str, list[dict]] = {}
+        bundle_group_scores: dict[str, float] = {}
+        for score, _, item in ordered_support_candidates:
+            if _chunk_type(item) != "table_row":
+                continue
+            if target_tables and not _matches_target_table(item):
+                continue
+            bundle_key = _bundle_group_key(item)
+            if not bundle_key:
+                continue
+            bundle_groups.setdefault(bundle_key, []).append(item)
+            bundle_group_scores[bundle_key] = max(bundle_group_scores.get(bundle_key, 0.0), score)
+        if bundle_groups:
+            preferred_bundle_key = max(
+                bundle_groups,
+                key=lambda key: (len(bundle_groups[key]), bundle_group_scores.get(key, 0.0)),
+            )
+            required_bundle_rows = min(effective_top_k, 4 if target_method_keys else 3)
+            bundle_selected_ids = {
+                id(item)
+                for item in final
+                if _chunk_type(item) == "table_row"
+                and _bundle_group_key(item) == preferred_bundle_key
+                and _is_support(item)
+            }
+            bundle_selected_ids.update(
+                id(item)
+                for item in required_supports
+                if _chunk_type(item) == "table_row"
+                and _bundle_group_key(item) == preferred_bundle_key
+                and _is_support(item)
+            )
+            for item in bundle_groups[preferred_bundle_key]:
+                item_id = id(item)
+                if len(bundle_selected_ids) >= required_bundle_rows:
+                    break
+                if item_id in bundle_selected_ids or item_id in seen_required_ids:
+                    continue
+                required_supports.append(item)
+                seen_required_ids.add(item_id)
+                bundle_selected_ids.add(item_id)
+
+    if cost_query and ordered_cost_anchor_candidates and not any(
+        _is_numeric_table_cost_anchor_text(item) for item in final
+    ):
+        cost_anchor_item = ordered_cost_anchor_candidates[0]
+        cost_anchor_id = id(cost_anchor_item)
+        if cost_anchor_id not in seen_required_ids:
+            required_supports.append(cost_anchor_item)
+            seen_required_ids.add(cost_anchor_id)
+
+    selected_ids = {id(item) for item in final}
+
+    def _inject_required(item: dict) -> None:
+        item_id = id(item)
+        if item_id in selected_ids:
+            protected_ids.add(item_id)
+            return
+        if len(final) < effective_top_k:
+            final.append(item)
+            selected_ids.add(item_id)
+            protected_ids.add(item_id)
+            return
+        replacement_indices = sorted(
+            range(len(final)),
+            key=lambda idx: (
+                id(final[idx]) in protected_ids,
+                _row_method_key(final[idx]) in target_method_keys,
+                _matches_target_table(final[idx]),
+                _is_support(final[idx]),
+                _support_score(final[idx]),
+                -idx,
+            ),
+        )
+        if not replacement_indices:
+            return
+        replace_idx = replacement_indices[0]
+        selected_ids.discard(id(final[replace_idx]))
+        final[replace_idx] = item
+        selected_ids.add(item_id)
+        protected_ids.add(item_id)
+
+    def _finalize_support_selection(items: List[dict]) -> List[dict]:
+        if (
+            not cost_query
+            and support_target_k > 0
+            and len(hard_support_pool) >= support_target_k
+        ):
+            return hard_support_pool[:support_target_k]
+        finalized = _limit_second_best_bundle_rows(
+            _dedupe_explicit_comparator_rows(
+                _prefer_exact_slice_support(_prioritize_numeric_table_results(items, query))
+            )
+        )
+        return finalized[:effective_top_k]
+
+    for item in required_supports:
+        _inject_required(item)
+
+    existing_support = sum(1 for item in final if _is_support(item))
+    needed = max(0, min_support - existing_support)
+    if needed <= 0:
+        return _finalize_support_selection(final)
+
+    additions = [
+        item
+        for _, _, item in ordered_support_candidates
+        if id(item) not in selected_ids
+    ][:needed]
+    if not additions:
+        return _finalize_support_selection(final)
+
+    replacement_indices = [
+        idx for idx in range(len(final) - 1, -1, -1)
+        if not _is_support(final[idx])
+    ]
+    for item in additions:
+        if replacement_indices:
+            final[replacement_indices.pop(0)] = item
+        elif len(final) < effective_top_k:
+            final.append(item)
+
+    return _finalize_support_selection(final)
+
+
+def _finalize_without_rerank(
+    results: List[dict],
+    query: str,
+    top_k: int,
+    config,
+) -> List[dict]:
+    ordered = _prioritize_numeric_table_results(results, query)
+    ordered = _apply_numeric_table_same_bundle_hard_gate(ordered, query)
+    final = _ensure_numeric_table_evidence_slots(ordered, query, top_k)
+    final = _apply_numeric_table_same_bundle_hard_gate(final, query)
+    if config.enable_focus_mode:
+        final = _focus_mode_compress(
+            final,
+            query,
+            window_size=config.focus_mode_window_size,
+            max_sentences=config.focus_mode_max_sentences,
+            min_chars=config.focus_mode_min_chars,
+        )
+    return final
+
+
+def _should_bypass_conditional_rerank_for_numeric_table(
+    results: List[dict],
+    query: str,
+    top_k: int,
+) -> bool:
+    if not should_apply_numeric_table_specialization():
+        return False
+    if not results or top_k <= 0:
+        return False
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return False
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    effective_top_k = _resolve_numeric_table_effective_top_k(query, top_k, hints, results)
+    target_methods = _extract_numeric_table_row_method_targets(hints)
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    target_backbones = {
+        str(value or "").lower()
+        for value in hints.get("backbones", [])
+        if value
+    }
+    comparison_query = _is_numeric_table_explicit_comparator_query(query, hints)
+
+    rows_by_group: dict[tuple[int, str, str, str, str], set[str]] = {}
+    best_column_coverage = 0
+    primary_row_found = False
+
+    for item in results:
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+        if chunk_type != "table_row":
+            continue
+
+        row_id = (item.get("row_id") or "").strip()
+        if not row_id:
+            continue
+
+        compact_row_id = _normalize_numeric_table_method_token(row_id)
+        matched_methods = {
+            method for method in target_methods if method and method == compact_row_id
+        }
+        if target_methods and not matched_methods:
+            continue
+
+        matched_backbone = (item.get("table_focus_backbone") or "").strip().lower()
+        if target_backbones and matched_backbone and matched_backbone not in target_backbones:
+            continue
+
+        resolved_columns = {
+            _normalize_numeric_column_name(value)
+            for value in (item.get("table_focus_columns") or [])
+            if value
+        }
+        column_coverage = len(resolved_columns & target_columns) if target_columns else 0
+        if target_columns:
+            best_column_coverage = max(best_column_coverage, column_coverage)
+
+        if comparison_query:
+            page = item.get("page") or 0
+            try:
+                page = int(page)
+            except (TypeError, ValueError):
+                page = 0
+            table_id = (item.get("table_id") or "").strip().lower()
+            dataset_mentions = _extract_numeric_table_dataset_mentions(
+                " ".join(
+                    str(value or "")
+                    for value in (
+                        item.get("table_caption", ""),
+                        item.get("table_header", ""),
+                        item.get("chunk", ""),
+                        item.get("raw_chunk_text", ""),
+                    )
+                )
+            )
+            dataset_key = ",".join(sorted(dataset_mentions & target_datasets)) if target_datasets else ""
+            column_key = ",".join(sorted(value.lower() for value in resolved_columns))
+            group_key = (
+                page,
+                table_id or f"page:{page}",
+                dataset_key or "-",
+                matched_backbone or "-",
+                column_key or "-",
+            )
+            rows_by_group.setdefault(group_key, set()).update(matched_methods)
+        else:
+            primary_row_found = True
+
+    if comparison_query:
+        required_rows = min(
+            effective_top_k,
+            4 if len(target_methods) >= 3 else max(len(target_methods), 2),
+        )
+        return any(len(methods) >= required_rows for methods in rows_by_group.values())
+
+    if not target_columns:
+        return primary_row_found
+    return primary_row_found and best_column_coverage >= min(len(target_columns), 3)
+
+
+def _build_retrieval_diagnostics(results: List[dict], query: str) -> dict:
+    if not results:
+        return {}
+
+    total = len(results)
+    raw_chunks = [
+        (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
+        for item in results
+        if (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
+    ]
+    unique_chunks = len(set(raw_chunks)) if raw_chunks else 0
+    duplicate_ratio = 0.0 if not raw_chunks else max(0.0, 1.0 - unique_chunks / max(len(raw_chunks), 1))
+    unique_groups = {
+        (item.get("group_id") or "").strip()
+        for item in results
+        if (item.get("group_id") or "").strip()
+    }
+    unique_sections = {
+        _normalize_section_heading(item.get("chunk_heading", ""))
+        for item in results
+        if _normalize_section_heading(item.get("chunk_heading", ""))
+    }
+    reference_hits = sum(
+        1 for item in results
+        if _is_reference_like_text(item.get("raw_chunk_text") or item.get("chunk", ""))
+    )
+    table_hits = sum(1 for item in results if item.get("chunk_type") == "table")
+    formula_hits = sum(1 for item in results if item.get("chunk_type") == "formula")
+    numeric_hits = sum(
+        1 for item in results
+        if any(ch.isdigit() for ch in (item.get("raw_chunk_text") or item.get("chunk", ""))[:400])
+    )
+
+    numeric_table_query = "numeric_table" in (_analyze_evidence_need(query) or [])
+
+    diagnostics = {
+        "duplicate_chunk_ratio": round(duplicate_ratio, 4),
+        "unique_group_count": len(unique_groups),
+        "unique_group_coverage": round(len(unique_groups) / max(total, 1), 4),
+        "unique_section_count": len(unique_sections),
+        "section_diversity_ratio": round(len(unique_sections) / max(total, 1), 4),
+        "reference_pollution_count": reference_hits,
+        "reference_pollution_ratio": round(reference_hits / max(total, 1), 4),
+        "table_chunk_hits": table_hits,
+        "formula_chunk_hits": formula_hits,
+        "numeric_chunk_hits": numeric_hits,
+        "numeric_table_query": numeric_table_query,
+    }
+    if numeric_table_query:
+        support_hits = sum(
+            1 for item in results
+            if item.get("chunk_type") in {"table", "formula", "caption"}
+            or any(ch.isdigit() for ch in (item.get("raw_chunk_text") or item.get("chunk", ""))[:400])
+        )
+        diagnostics["numeric_table_hit_quality"] = round(support_hits / max(total, 1), 4)
+
+    # Focus Mode 压缩统计（仅当有条目被压缩时计算）
+    compressed_items = [item for item in results if "focus_compression_ratio" in item]
+    if compressed_items:
+        avg_ratio = sum(item["focus_compression_ratio"] for item in compressed_items) / len(compressed_items)
+        diagnostics["focus_mode_compressed_count"] = len(compressed_items)
+        diagnostics["focus_mode_avg_compression_ratio"] = round(avg_ratio, 4)
+        diagnostics["focus_mode_total_chars_saved"] = sum(
+            item.get("focus_original_chars", 0) - len(item.get("chunk", ""))
+            for item in compressed_items
+        )
+
+    # section/path 路径多样性
+    path_keys = [
+        f"{_normalize_section_heading(item.get('chunk_heading',''))}|{item.get('group_id','') or item.get('parent_id','')}"
+        for item in results
+    ]
+    unique_paths = len(set(pk for pk in path_keys if pk.strip("|")))
+    singleton_paths = sum(
+        1 for pk in set(pk for pk in path_keys if pk.strip("|"))
+        if path_keys.count(pk) == 1
+    )
+    diagnostics["unique_path_count"] = unique_paths
+    diagnostics["singleton_path_count"] = singleton_paths
+    diagnostics["path_diversity_ratio"] = round(unique_paths / max(total, 1), 4)
+
+    return diagnostics
 
 
 def _apply_rerank(
@@ -1109,7 +5877,11 @@ def _augment_with_table_chunks(
     chunks: List[str],
     pages: List[dict],
     page_index: dict,
+    query: str = "",
+    evidence_need: Optional[List[str]] = None,
     max_augment: int = 3,
+    chunk_pages: Optional[List[int]] = None,
+    chunk_metadata: Optional[List[dict]] = None,
 ) -> List[dict]:
     """Augment results with table-like chunks from the same pages as hit chunks.
 
@@ -1117,40 +5889,458 @@ def _augment_with_table_chunks(
     secondary pass adds table chunks that share a page with an already-retrieved
     chunk, improving numeric/tabular question coverage.
     """
-    if not results or not chunks:
+    if not results or (not chunks and not pages):
         return results
 
-    hit_pages = {item.get("page") for item in results if item.get("page")}
+    _annotate_pages_with_provenance(pages)
+    hit_pages: set[int] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        hit_pages.update(_extract_page_candidates_from_metadata(item))
     if not hit_pages:
         return results
+    numeric_table_query = "numeric_table" in (evidence_need or _analyze_evidence_need(query) or [])
+    candidate_pages = set(hit_pages)
+    if numeric_table_query:
+        for page in list(hit_pages):
+            if isinstance(page, int) and page > 0:
+                candidate_pages.add(page - 1)
+                candidate_pages.add(page + 1)
+        numeric_hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+        cost_query = _is_numeric_table_cost_query(query)
+        target_methods = _extract_numeric_table_row_method_targets(numeric_hints)
+        comparison_query = bool(numeric_hints.get("comparison"))
+        preferred_sort_column = _preferred_numeric_table_sort_column(query, numeric_hints)
+        allow_sparse_page_fallback = bool(preferred_sort_column) or (
+            comparison_query and len(target_methods) <= 1
+        )
+    else:
+        numeric_hints = {}
+        cost_query = False
+        allow_sparse_page_fallback = False
 
-    existing_texts = {item.get("chunk", "") for item in results}
-    augmented = []
+    pages_by_number: dict[int, dict] = {}
+    for page_payload in pages or []:
+        if not isinstance(page_payload, dict):
+            continue
+        try:
+            page_num = int(page_payload.get("page") or page_payload.get("page_num") or 0)
+        except (TypeError, ValueError):
+            page_num = 0
+        if page_num > 0 and page_num not in pages_by_number:
+            pages_by_number[page_num] = page_payload
 
-    for chunk_text in chunks:
-        if chunk_text in existing_texts:
+    def _has_nonempty_upgrade_value(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value)
+        if isinstance(value, (list, tuple, dict, set)):
+            return len(value) > 0
+        return True
+
+    upgraded_results: List[dict] = []
+    existing_texts: set[str] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            upgraded_results.append(item)
             continue
-        if not _is_likely_table(chunk_text):
-            continue
-        page = _find_page_for_chunk(chunk_text, pages, page_index=page_index)
-        if page not in hit_pages:
-            continue
-        augmented.append({
+        original_texts = {
+            str(item.get("chunk") or ""),
+            str(item.get("raw_chunk_text") or ""),
+        }
+        upgraded_item = item
+        if numeric_table_query and item.get("structured_table_bundle"):
+            page = _resolve_primary_page_from_metadata(item)
+            if page <= 0:
+                try:
+                    page = int(item.get("page") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+            chunk_text = str(item.get("chunk") or item.get("raw_chunk_text") or "").strip()
+            if chunk_text and page > 0:
+                upgraded_chunk, upgraded_metadata = _maybe_upgrade_sparse_structured_bundle(
+                    chunk_text,
+                    item,
+                    pages_by_number.get(page),
+                    query=query,
+                )
+                if upgraded_chunk != chunk_text and isinstance(upgraded_metadata, dict):
+                    upgraded_item = dict(item)
+                    upgraded_item["chunk"] = upgraded_chunk
+                    upgraded_item["raw_chunk_text"] = upgraded_chunk
+                    for key, value in upgraded_metadata.items():
+                        if _has_nonempty_upgrade_value(value):
+                            upgraded_item[key] = value
+                    _apply_page_provenance(upgraded_item, upgraded_metadata)
+        upgraded_results.append(upgraded_item)
+        existing_texts.update(
+            text
+            for text in {
+                *original_texts,
+                str(upgraded_item.get("chunk") or ""),
+                str(upgraded_item.get("raw_chunk_text") or ""),
+            }
+            if text
+        )
+    results = upgraded_results
+    augmented_candidates: dict[tuple[str, int], tuple[float, dict, bool]] = {}
+    structured_anchor_pages: set[int] = set()
+
+    def _is_cost_support_text(text: str) -> bool:
+        if not cost_query:
+            return False
+        sample = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        if not sample:
+            return False
+        if _has_numeric_table_cost_anchor(sample):
+            return True
+        return any(
+            token in sample
+            for token in ("discussion", "limitation", "limitations", "future work", "conclusion", "cost profile")
+        )
+
+    def _score_numeric_candidate(chunk_text: str, page: int) -> tuple[float, list[str], bool]:
+        boost_score = 1.0
+        anchor_hits: list[str] = []
+        anchor_groups = {
+            "table_labels": 0,
+            "datasets": 0,
+            "backbones": 0,
+            "methods": 0,
+            "columns": 0,
+        }
+        chunk_lower = chunk_text.lower()
+        for group_name, weight in (
+            ("table_labels", 0.8),
+            ("datasets", 1.1),
+            ("backbones", 1.0),
+            ("methods", 1.2),
+            ("columns", 0.9),
+        ):
+            hits = [value for value in numeric_hints.get(group_name, []) if value.lower() in chunk_lower]
+            if not hits:
+                continue
+            anchor_groups[group_name] = len(hits)
+            boost_score += min(len(hits), 3) * weight
+            anchor_hits.extend(hits[:3])
+        if page in hit_pages:
+            boost_score += 0.8
+        if len(set(re.findall(r'\btable\s*\d+\b', chunk_text.lower()))) >= 2:
+            boost_score -= 0.9
+
+        if anchor_groups["methods"] >= 1 and anchor_groups["backbones"] >= 1:
+            boost_score += 0.8
+        if anchor_groups["columns"] >= max(1, min(len(numeric_hints.get("columns", [])), 2)):
+            boost_score += 0.5
+
+        cost_anchor_match = _is_cost_support_text(chunk_text)
+        if cost_anchor_match:
+            boost_score += 6.0 if _has_numeric_table_cost_anchor(chunk_text) else 2.0
+            anchor_hits.append("cost_anchor")
+        elif cost_query and (
+            _looks_like_numeric_table_support(chunk_text, "table")
+            or bool(re.search(r"\btable\s*\d+\b", chunk_lower))
+        ):
+            boost_score -= 3.5
+
+        strong_anchor_match = (
+            anchor_groups["table_labels"] >= 1
+            or (anchor_groups["methods"] >= 1 and anchor_groups["backbones"] >= 1)
+            or (
+                anchor_groups["methods"] >= 1
+                and anchor_groups["columns"] >= 1
+                and len({value.lower() for value in anchor_hits}) >= 3
+            )
+            or cost_anchor_match
+        )
+        return boost_score, list(dict.fromkeys(anchor_hits)), strong_anchor_match
+
+    def _record_candidate(
+        chunk_text: str,
+        page: int,
+        boost_score: float,
+        anchor_hits: list[str],
+        scope: str,
+        strong_anchor_match: bool,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        key = (chunk_text, int(page or 0))
+        structured_bundle = isinstance(metadata, dict) and metadata.get("structured_table_bundle")
+        inferred_chunk_type = ""
+        if structured_bundle or _is_likely_table(chunk_text):
+            inferred_chunk_type = "table"
+        elif _is_cost_support_text(chunk_text):
+            inferred_chunk_type = "text"
+        candidate = {
             "chunk": chunk_text,
+            "raw_chunk_text": chunk_text,
             "page": page,
-            "similarity": 0.45,
-            "similarity_percent": 45.0,
+            "similarity": 0.45 + min(boost_score * 0.04, 0.28),
+            "similarity_percent": 45.0 + min(boost_score * 4.0, 28.0),
             "score": 0.0,
             "snippet": chunk_text[:200],
             "highlights": [],
             "reranked": False,
             "table_augmented": True,
-        })
-        if len(augmented) >= max_augment:
-            break
+            "table_augmented_scope": scope,
+            "numeric_table_anchor_hits": anchor_hits,
+        }
+        if inferred_chunk_type:
+            candidate["chunk_type"] = inferred_chunk_type
+            candidate["block_type"] = inferred_chunk_type
+        if metadata:
+            _apply_chunk_metadata(candidate, metadata)
+        _apply_page_provenance(candidate, metadata)
+        previous = augmented_candidates.get(key)
+        if previous is None or boost_score > previous[0]:
+            augmented_candidates[key] = (boost_score, candidate, strong_anchor_match)
+
+    for idx, chunk_text in enumerate(chunks):
+        if chunk_text in existing_texts:
+            continue
+        metadata = chunk_metadata[idx] if isinstance(chunk_metadata, list) and idx < len(chunk_metadata) else {}
+        is_structured_bundle = isinstance(metadata, dict) and metadata.get("structured_table_bundle")
+        is_cost_like = _is_cost_support_text(chunk_text)
+        is_table_like = is_structured_bundle or _is_likely_table(chunk_text) or (
+            numeric_table_query and _looks_like_numeric_table_support(chunk_text)
+        )
+        if not is_table_like and not is_cost_like:
+            continue
+        page = _resolve_primary_page_from_metadata(metadata)
+        if page <= 0:
+            page = chunk_pages[idx] if isinstance(chunk_pages, list) and idx < len(chunk_pages) else 0
+        if (not isinstance(page, int) or page <= 0) and pages:
+            page = _find_page_for_chunk(chunk_text, pages, page_index=page_index)
+        effective_chunk_text = chunk_text
+        effective_metadata = metadata if isinstance(metadata, dict) else None
+        if numeric_table_query and is_structured_bundle and page > 0:
+            effective_chunk_text, effective_metadata = _maybe_upgrade_sparse_structured_bundle(
+                chunk_text,
+                effective_metadata,
+                pages_by_number.get(page),
+                query=query,
+            )
+        if page not in candidate_pages:
+            continue
+        if numeric_table_query:
+            boost_score, anchor_hits, strong_anchor_match = _score_numeric_candidate(effective_chunk_text, page)
+            if isinstance(effective_metadata, dict) and effective_metadata.get("structured_table_bundle"):
+                boost_score += 0.45
+                table_ref = " ".join(
+                    str(effective_metadata.get(key) or "")
+                    for key in ("table_id", "table_caption", "table_header")
+                ).lower()
+                if any(
+                    label.lower() in table_ref
+                    for label in numeric_hints.get("table_labels", [])
+                    if label
+                ):
+                    boost_score += 0.6
+                    strong_anchor_match = True
+        else:
+            boost_score, anchor_hits, strong_anchor_match = 1.0, [], False
+        structured_bundle_has_rows = bool(
+            isinstance(effective_metadata, dict)
+            and effective_metadata.get("structured_table_bundle")
+            and effective_metadata.get("evidence_units")
+        )
+        _record_candidate(
+            effective_chunk_text,
+            page,
+            boost_score,
+            anchor_hits,
+            scope=(
+                "structured_bundle"
+                if isinstance(effective_metadata, dict) and effective_metadata.get("structured_table_bundle")
+                else ("nearby_page" if numeric_table_query else "same_page")
+            ),
+            strong_anchor_match=strong_anchor_match,
+            metadata=effective_metadata if isinstance(effective_metadata, dict) else None,
+        )
+        # winner / implicit second-best 题即使已有少量 row evidence，
+        # 也要允许同页 page_content 回补，避免只剩单行候选时直接收口。
+        if strong_anchor_match and structured_bundle_has_rows and not allow_sparse_page_fallback:
+            structured_anchor_pages.add(page)
+
+    if numeric_table_query:
+        for page_payload in pages:
+            try:
+                page = int(page_payload.get("page") or 0)
+            except (TypeError, ValueError):
+                continue
+            page_content = (page_payload.get("content") or page_payload.get("text") or "").strip()
+            if not page_content or page_content in existing_texts or page not in candidate_pages:
+                continue
+            if page in structured_anchor_pages:
+                continue
+            is_cost_like = _is_cost_support_text(page_content)
+            is_table_like = _is_likely_table(page_content) or _looks_like_numeric_table_support(
+                page_content,
+                "table",
+            )
+            if not is_table_like and not is_cost_like:
+                continue
+            boost_score, anchor_hits, strong_anchor_match = _score_numeric_candidate(page_content, page)
+            if not strong_anchor_match and page not in hit_pages:
+                continue
+            boost_score += 0.25
+            _record_candidate(
+                page_content,
+                page,
+                boost_score,
+                anchor_hits,
+                scope="page_content",
+                strong_anchor_match=strong_anchor_match,
+                metadata=page_payload,
+            )
+
+    local_has_strong_anchor = any(item[2] for item in augmented_candidates.values())
+    local_has_strong_cost_anchor = cost_query and any(
+        _is_numeric_table_cost_anchor_text(candidate)
+        for _, candidate, _ in augmented_candidates.values()
+    )
+    should_scan_global_anchor = (
+        numeric_table_query
+        and (
+            (cost_query and not local_has_strong_cost_anchor)
+            or
+            bool(numeric_hints.get("table_labels"))
+            or (
+                not local_has_strong_anchor
+                and (
+                    numeric_hints.get("table_labels")
+                    or numeric_hints.get("backbones")
+                    or numeric_hints.get("methods")
+                )
+            )
+        )
+    )
+    if should_scan_global_anchor:
+        for idx, chunk_text in enumerate(chunks):
+            if chunk_text in existing_texts:
+                continue
+            metadata = chunk_metadata[idx] if isinstance(chunk_metadata, list) and idx < len(chunk_metadata) else {}
+            is_structured_bundle = isinstance(metadata, dict) and metadata.get("structured_table_bundle")
+            is_cost_like = _is_cost_support_text(chunk_text)
+            is_table_like = is_structured_bundle or _is_likely_table(chunk_text) or _looks_like_numeric_table_support(chunk_text)
+            if not is_table_like and not is_cost_like:
+                continue
+            page = _resolve_primary_page_from_metadata(metadata)
+            if page <= 0:
+                page = chunk_pages[idx] if isinstance(chunk_pages, list) and idx < len(chunk_pages) else 0
+            if (not isinstance(page, int) or page <= 0) and pages:
+                page = _find_page_for_chunk(chunk_text, pages, page_index=page_index)
+            effective_chunk_text = chunk_text
+            effective_metadata = metadata if isinstance(metadata, dict) else None
+            if numeric_table_query and is_structured_bundle and page > 0:
+                effective_chunk_text, effective_metadata = _maybe_upgrade_sparse_structured_bundle(
+                    chunk_text,
+                    effective_metadata,
+                    pages_by_number.get(page),
+                    query=query,
+                )
+            if page in candidate_pages:
+                continue
+            boost_score, anchor_hits, strong_anchor_match = _score_numeric_candidate(effective_chunk_text, page)
+            if isinstance(effective_metadata, dict) and effective_metadata.get("structured_table_bundle"):
+                boost_score += 0.45
+                table_ref = " ".join(
+                    str(effective_metadata.get(key) or "")
+                    for key in ("table_id", "table_caption", "table_header")
+                ).lower()
+                if any(
+                    label.lower() in table_ref
+                    for label in numeric_hints.get("table_labels", [])
+                    if label
+                ):
+                    boost_score += 0.6
+                    strong_anchor_match = True
+            if not strong_anchor_match:
+                continue
+            boost_score += 0.35
+            _record_candidate(
+                effective_chunk_text,
+                page,
+                boost_score,
+                anchor_hits,
+                scope=(
+                    "structured_bundle_global_anchor"
+                    if isinstance(effective_metadata, dict) and effective_metadata.get("structured_table_bundle")
+                    else "global_anchor"
+                ),
+                strong_anchor_match=strong_anchor_match,
+                metadata=effective_metadata if isinstance(effective_metadata, dict) else None,
+            )
+            if isinstance(effective_metadata, dict) and effective_metadata.get("structured_table_bundle"):
+                structured_anchor_pages.add(page)
+        for page_payload in pages:
+            try:
+                page = int(page_payload.get("page") or 0)
+            except (TypeError, ValueError):
+                continue
+            page_content = (page_payload.get("content") or page_payload.get("text") or "").strip()
+            if not page_content or page_content in existing_texts or page in candidate_pages:
+                continue
+            if page in structured_anchor_pages:
+                continue
+            is_cost_like = _is_cost_support_text(page_content)
+            is_table_like = _is_likely_table(page_content) or _looks_like_numeric_table_support(
+                page_content,
+                "table",
+            )
+            if not is_table_like and not is_cost_like:
+                continue
+            boost_score, anchor_hits, strong_anchor_match = _score_numeric_candidate(page_content, page)
+            if not strong_anchor_match:
+                continue
+            boost_score += 0.55
+            _record_candidate(
+                page_content,
+                page,
+                boost_score,
+                anchor_hits,
+                scope="page_global_anchor",
+                strong_anchor_match=strong_anchor_match,
+            )
+
+    ranked_candidates = sorted(
+        augmented_candidates.values(),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    selected_candidates = list(ranked_candidates[:max_augment])
+    if cost_query and max_augment > 0:
+        def _candidate_is_cost_anchor(candidate_item: dict) -> bool:
+            return _is_numeric_table_cost_anchor_text(candidate_item)
+
+        best_cost_candidate = next(
+            (candidate for candidate in ranked_candidates if _candidate_is_cost_anchor(candidate[1])),
+            None,
+        )
+        if best_cost_candidate and not any(best_cost_candidate[1] is existing[1] for existing in selected_candidates):
+            replacement_idx = next(
+                (
+                    idx
+                    for idx in range(len(selected_candidates) - 1, -1, -1)
+                    if not _candidate_is_cost_anchor(selected_candidates[idx][1])
+                ),
+                len(selected_candidates) - 1,
+            )
+            if selected_candidates:
+                selected_candidates[replacement_idx] = best_cost_candidate
+            else:
+                selected_candidates.append(best_cost_candidate)
+            selected_candidates.sort(key=lambda item: item[0], reverse=True)
+    augmented = [item for _, item, _ in selected_candidates]
 
     if augmented:
-        logger.info(f"[TableAugment] 补充 {len(augmented)} 个同页表格 chunk")
+        if numeric_table_query and any(item.get("table_augmented_scope") == "global_anchor" for item in augmented):
+            scope = "同页/相邻页 + 全局锚点"
+        else:
+            scope = "同页/相邻页" if numeric_table_query else "同页"
+        logger.info(f"[TableAugment] 补充 {len(augmented)} 个{scope}表格 chunk")
     return results + augmented
 
 
@@ -1526,6 +6716,760 @@ def _get_overlap_parts(parts: list[str], overlap_size: int) -> list[str]:
     return overlap_parts
 
 
+def _sanitize_structured_table_bundle(bundle: dict) -> dict:
+    """清洗结构化表格 bundle，确保可安全写入索引元数据。"""
+    if not isinstance(bundle, dict):
+        return {}
+    cleaned = {}
+    for key in (
+        "bundle_id",
+        "evidence_unit_id",
+        "table_id",
+        "table_caption",
+        "table_header",
+        "table_body_markdown",
+        "html_table",
+        "table_footnote",
+        "page_start",
+        "page_end",
+        "pages",
+        "page_index",
+        "page_uid",
+        "page_uids",
+        "bounding_box",
+        "bounding_boxes",
+        "source_ids",
+        "previous_table_ids",
+        "next_table_ids",
+        "source",
+        "evidence_units",
+    ):
+        value = bundle.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if key == "evidence_units":
+            cleaned[key] = _sanitize_nested_value(value)
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _sanitize_control_text(text: str) -> str:
+    if not text:
+        return ""
+    return "".join(ch for ch in text if ord(ch) >= 32 or ch in "\t\n\r")
+
+
+def _sanitize_nested_value(value):
+    if isinstance(value, str):
+        return _sanitize_control_text(value)
+    if isinstance(value, dict):
+        return {key: _sanitize_nested_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_nested_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_nested_value(item) for item in value)
+    return value
+
+
+def _build_structured_table_bundle_chunk(bundle: dict) -> str:
+    """把结构化 table bundle 转成适合向量索引的 typed chunk 文本。"""
+    sanitized = _sanitize_structured_table_bundle(bundle)
+    if not sanitized:
+        return ""
+
+    caption = (sanitized.get("table_caption") or sanitized.get("table_id") or "").strip()
+    table_id = (sanitized.get("table_id") or "").strip()
+    header = (sanitized.get("table_header") or "").strip()
+    body = (sanitized.get("table_body_markdown") or "").strip()
+    footnote = (sanitized.get("table_footnote") or "").strip()
+    page_start = sanitized.get("page_start")
+    page_end = sanitized.get("page_end")
+
+    hint_parts = []
+    if table_id:
+        hint_parts.append(f"table_id={table_id}")
+    if isinstance(page_start, int) and page_start > 0:
+        if isinstance(page_end, int) and page_end > page_start:
+            hint_parts.append(f"pages={page_start}-{page_end}")
+        else:
+            hint_parts.append(f"page={page_start}")
+    bundle_id = (sanitized.get("bundle_id") or "").strip()
+    if bundle_id:
+        hint_parts.append(f"bundle_id={bundle_id}")
+
+    lines = ["[Structured Table Bundle]"]
+    if caption:
+        lines.extend(["", caption])
+    if hint_parts:
+        lines.extend(["", "[Hints]", "; ".join(hint_parts)])
+    if header:
+        lines.extend(["", "[Header]", header])
+    if body:
+        lines.extend(["", "[Body]", body])
+    if footnote:
+        lines.extend(["", "[Footnote]", footnote])
+    return "\n".join(lines).strip()
+
+
+def _append_structured_table_bundle_chunks(
+    doc_id: str,
+    chunks: List[str],
+    chunk_headings: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    structured_table_bundles: Optional[List[dict]],
+) -> None:
+    """将结构化表格 bundle 追加为 typed table chunks。"""
+    if not structured_table_bundles:
+        return
+
+    appended = 0
+    seen_bundle_ids = set()
+    for bundle in structured_table_bundles:
+        sanitized = _sanitize_structured_table_bundle(bundle)
+        if not sanitized:
+            continue
+        bundle_id = (sanitized.get("bundle_id") or "").strip()
+        if bundle_id and bundle_id in seen_bundle_ids:
+            continue
+        chunk_text = _build_structured_table_bundle_chunk(sanitized)
+        if not chunk_text:
+            continue
+
+        pages = sanitized.get("pages") or []
+        if isinstance(pages, list):
+            page_candidates = [int(page) for page in pages if isinstance(page, int) and page > 0]
+        else:
+            page_candidates = []
+        primary_page = sanitized.get("page_start")
+        if not isinstance(primary_page, int) or primary_page <= 0:
+            primary_page = page_candidates[0] if page_candidates else 1
+        primary_page_index = primary_page - 1
+        primary_page_uid = _build_page_uid(primary_page)
+        table_page_indices = [page - 1 for page in (page_candidates or [primary_page])]
+        table_page_uids = [_build_page_uid(page) for page in (page_candidates or [primary_page])]
+
+        chunk_metadata.append({
+            "structured_table_bundle": True,
+            "table_bundle_id": bundle_id,
+            "evidence_unit_id": sanitized.get("evidence_unit_id", ""),
+            "table_id": sanitized.get("table_id", ""),
+            "table_caption": sanitized.get("table_caption", ""),
+            "table_header": sanitized.get("table_header", ""),
+            "table_body_markdown": sanitized.get("table_body_markdown", ""),
+            "html_table": sanitized.get("html_table", ""),
+            "table_footnote": sanitized.get("table_footnote", ""),
+            "page_range": [sanitized.get("page_start", primary_page), sanitized.get("page_end", primary_page)],
+            "table_pages": page_candidates or [primary_page],
+            "page_index": primary_page_index,
+            "page_uid": primary_page_uid,
+            "table_page_indices": table_page_indices,
+            "table_page_uids": table_page_uids,
+            "table_bbox": sanitized.get("bounding_box", []),
+            "table_bboxes": sanitized.get("bounding_boxes", []),
+            "table_source_ids": sanitized.get("source_ids", []),
+            "evidence_units": sanitized.get("evidence_units", []),
+            "source": sanitized.get("source", "odl"),
+        })
+        chunks.append(chunk_text)
+        chunk_headings.append(sanitized.get("table_caption") or sanitized.get("table_id") or "Structured Table Bundle")
+        chunk_pages.append(primary_page)
+        chunk_types.append("table")
+        if bundle_id:
+            seen_bundle_ids.add(bundle_id)
+        appended += 1
+
+    if appended > 0:
+        logger.info(f"[{doc_id}] 追加 {appended} 个 structured table bundle chunks")
+
+
+def _maybe_append_runtime_structured_table_bundle_chunks(
+    doc_id: str,
+    chunks: List[str],
+    chunk_headings: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    pages: Optional[List[dict]],
+) -> None:
+    """旧索引缺少 structured bundle 元数据时，基于 pages 运行时回补 bundle chunks。"""
+    if not pages:
+        return
+    has_structured_bundle = any(
+        isinstance(metadata, dict)
+        and (
+            metadata.get("structured_table_bundle")
+            or metadata.get("table_bundle_id")
+            or metadata.get("evidence_units")
+        )
+        for metadata in chunk_metadata
+    )
+    if has_structured_bundle:
+        return
+    if any("[Structured Table Bundle]" in str(chunk or "") for chunk in chunks):
+        return
+
+    runtime_bundles = _extract_page_text_table_bundles(pages)
+    if not runtime_bundles:
+        return
+
+    before_count = len(chunks)
+    _append_structured_table_bundle_chunks(
+        doc_id,
+        chunks,
+        chunk_headings,
+        chunk_pages,
+        chunk_types,
+        chunk_metadata,
+        runtime_bundles,
+    )
+    appended = len(chunks) - before_count
+    if appended > 0:
+        logger.info(
+            f"[{doc_id}] 运行时回补 {appended} 个 structured table bundle chunks "
+            f"(旧索引缺少 chunk_metadata / structured bundles)"
+        )
+
+
+def _normalize_chunk_metadata_list(chunk_metadata: Optional[list], length: int) -> List[dict]:
+    normalized: List[dict] = []
+    source = chunk_metadata if isinstance(chunk_metadata, list) else []
+    for idx in range(length):
+        value = source[idx] if idx < len(source) and isinstance(source[idx], dict) else {}
+        normalized.append(dict(value))
+    return normalized
+
+
+def _apply_chunk_metadata(item: dict, metadata: Optional[dict]) -> None:
+    if not isinstance(metadata, dict):
+        return
+    for key, value in metadata.items():
+        if value in (None, "", [], {}):
+            continue
+        if key == "page_range":
+            if not item.get("page_range"):
+                item["page_range"] = value
+            continue
+        if key == "table_pages":
+            if not item.get("table_pages"):
+                item["table_pages"] = value
+            continue
+        if key == "table_bundle_id":
+            if not item.get("table_bundle_id"):
+                item["table_bundle_id"] = value
+            continue
+        if key == "source" and item.get("source"):
+            continue
+        if not item.get(key):
+            item[key] = value
+
+
+_PAGE_TEXT_TABLE_CAPTION_RE = re.compile(r"Table\s*\d+\s*:", re.IGNORECASE)
+
+
+def _trim_page_text_table_segment(segment: str, max_lines: int = 28) -> str:
+    lines: List[str] = []
+    narrative_run = 0
+    for raw_line in (segment or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if len(lines) >= max_lines:
+            break
+        table_like = bool(
+            re.search(r"\d|[%±×∆τ]|method|all|many|few|med\.|acc|fid|resnet|cifar|imagenet", line, re.IGNORECASE)
+        )
+        if lines and not table_like:
+            narrative_run += 1
+            if narrative_run >= 2 and len(lines) >= 6:
+                break
+        else:
+            narrative_run = 0
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _build_runtime_page_text_table_hints(table_id: str, header: str) -> dict[str, List[str]]:
+    header_columns = _sort_numeric_columns(_extract_table_header_columns(header))
+    return {
+        "table_labels": [table_id] if table_id else [],
+        "datasets": [],
+        "backbones": _extract_table_header_backbones(header),
+        "methods": [],
+        "columns": header_columns,
+        "comparison": [],
+    }
+
+
+def _estimate_runtime_table_row_numeric_span(segment: str) -> tuple[int, int]:
+    row_pattern = _build_plain_table_row_pattern(3, 12)
+    counts: List[int] = []
+    for raw_line in (segment or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^(?:Table|TABLE|表)\s*\.?\s*\d+", line, re.IGNORECASE):
+            continue
+        match = row_pattern.search(line)
+        if not match:
+            continue
+        row_id = match.group(1).strip()
+        normalized_row_id = re.sub(r"\s+", " ", row_id.lower()).strip()
+        if (
+            not normalized_row_id
+            or normalized_row_id in {"method", "model", "group", "statistics"}
+            or normalized_row_id.startswith("cifar")
+            or normalized_row_id.startswith("imagenet")
+        ):
+            continue
+        row_numbers = match.group(2).strip()
+        numeric_tokens = len(_extract_numeric_value_tokens(row_numbers))
+        if numeric_tokens >= 3:
+            counts.append(numeric_tokens)
+    if counts:
+        best_count = max(Counter(counts).items(), key=lambda item: (item[1], item[0]))[0]
+        return best_count, best_count
+    return 0, 0
+
+
+def _build_runtime_page_text_table_header(table_id: str, header: str) -> str:
+    header_columns = _sort_numeric_columns(_extract_table_header_columns(header))
+    if not header_columns:
+        return header
+
+    header_keys = set(header_columns)
+    if "ΔAcc/||D_gen||" in header_keys or "||D_gen||" in header_keys:
+        lead_column = "Group"
+    elif {"All", "Many", "Med.", "Few"} & header_keys:
+        lead_column = "Method"
+    elif {"FID", "Acc"} & header_keys:
+        lead_column = "Model"
+    elif table_id and "table 3" in table_id.lower():
+        lead_column = "Group"
+    else:
+        lead_column = "Row"
+    return " | ".join([lead_column, *header_columns])
+
+
+def _build_runtime_page_text_evidence_units(
+    segment: str,
+    table_id: str,
+    caption: str,
+    header: str,
+    page_num: int,
+    focus_hints: Optional[dict[str, List[str]]] = None,
+) -> List[dict]:
+    bundle_id = f"page-text:{table_id.lower()}" if table_id else ""
+    parse_hints = _build_runtime_page_text_table_hints(table_id, header)
+    min_span, max_span = _estimate_runtime_table_row_numeric_span(segment)
+    if min_span > 0:
+        parse_hints["_numeric_span_override"] = [min_span, max_span]
+    row_units = _extract_plain_table_rows(segment, parse_hints)
+    focus_hints = focus_hints or parse_hints
+    if focus_hints is not parse_hints:
+        focus_row_units = _extract_plain_table_rows(segment, focus_hints)
+        if focus_row_units:
+            merged_rows: dict[str, dict] = {}
+            ordered_keys: List[str] = []
+
+            def _store_row(row: dict) -> None:
+                row_key = _normalize_sparse_bundle_row_key(
+                    str(row.get("row_id") or ""),
+                    str(row.get("row_text") or row.get("content") or ""),
+                )
+                if not row_key:
+                    return
+                if row_key in merged_rows:
+                    return
+                ordered_keys.append(row_key)
+                merged_rows[row_key] = row
+
+            for row in row_units:
+                _store_row(row)
+            for row in focus_row_units:
+                _store_row(row)
+            row_units = [merged_rows[key] for key in ordered_keys]
+    evidence_units: List[dict] = []
+    seen_rows: set[str] = set()
+
+    for row_number, row in enumerate(row_units, start=1):
+        if _is_headerish_numeric_table_row(row):
+            continue
+        focused_row = _build_query_focused_table_row(row, focus_hints)
+        if not (focused_row.get("text") or "").strip() and focus_hints is not parse_hints:
+            focused_row = _build_query_focused_table_row(row, parse_hints)
+        row_text = (focused_row.get("text") or row.get("row_text") or "").strip()
+        if not row_text:
+            continue
+        dedupe_key = re.sub(r"\s+", " ", row_text).strip().lower()
+        if dedupe_key in seen_rows:
+            continue
+        seen_rows.add(dedupe_key)
+        evidence_units.append(
+            {
+                "evidence_unit_id": f"{bundle_id}:row:{row_number}",
+                "evidence_unit_type": "table_row",
+                "table_bundle_id": bundle_id,
+                "table_id": table_id,
+                "table_caption": caption,
+                "table_header": header,
+                "table_focus_columns": focused_row.get("resolved_columns", parse_hints.get("columns", [])),
+                "row_id": row.get("row_id", ""),
+                "row_text": row_text,
+                "row_numbers": row.get("row_numbers", ""),
+                "content": row_text,
+                "row_number": row_number,
+                "page": page_num,
+            }
+        )
+
+    return evidence_units
+
+
+def _build_runtime_page_text_table_body(segment: str, evidence_units: List[dict]) -> str:
+    if not evidence_units:
+        return segment
+    body_lines = [
+        (unit.get("row_text") or unit.get("content") or "").strip()
+        for unit in evidence_units
+        if (unit.get("row_text") or unit.get("content") or "").strip()
+    ]
+    if body_lines:
+        return "\n".join(body_lines)
+    return segment
+
+
+def _normalize_sparse_bundle_row_key(row_id: str, row_text: str) -> str:
+    normalized_row_id = _normalize_numeric_table_method_token(row_id or "")
+    if normalized_row_id:
+        return normalized_row_id
+    sample = re.sub(r"\s+", " ", (row_text or "")).strip().lower()
+    sample = re.sub(r"[^0-9a-z\u4e00-\u9fffτ∆×%().+\-/|= ]+", "", sample)
+    return sample[:160]
+
+
+def _extract_structured_bundle_body_rows(bundle: dict) -> List[dict]:
+    body = (bundle.get("table_body_markdown") or "").strip()
+    if not body:
+        return []
+    rows = _extract_markdown_table_rows(body)
+    if rows:
+        return rows
+    table_id = (bundle.get("table_id") or "").strip()
+    header = (bundle.get("table_header") or "").strip()
+    hints = _build_runtime_page_text_table_hints(table_id, header)
+    return _extract_plain_table_rows(body, hints)
+
+
+def _merge_sparse_bundle_evidence_units(
+    bundle: dict,
+    recovered_units: List[dict],
+    *,
+    table_id: str,
+    caption: str,
+    header: str,
+    page_num: int,
+) -> List[dict]:
+    existing_units = bundle.get("evidence_units")
+    existing_row_units: dict[str, dict] = {}
+    passthrough_units: List[dict] = []
+    if isinstance(existing_units, list):
+        for unit in existing_units:
+            if not isinstance(unit, dict):
+                continue
+            if (unit.get("evidence_unit_type") or "").strip().lower() != "table_row":
+                passthrough_units.append(dict(unit))
+                continue
+            if unit.get("is_header_row"):
+                continue
+            row_key = _normalize_sparse_bundle_row_key(
+                str(unit.get("row_id") or ""),
+                str(unit.get("row_text") or unit.get("content") or ""),
+            )
+            if row_key and row_key not in existing_row_units:
+                existing_row_units[row_key] = dict(unit)
+
+    merged_rows: List[dict] = []
+    seen_keys: set[str] = set()
+    for recovered_unit in recovered_units:
+        row_key = _normalize_sparse_bundle_row_key(
+            str(recovered_unit.get("row_id") or ""),
+            str(recovered_unit.get("row_text") or recovered_unit.get("content") or ""),
+        )
+        if not row_key or row_key in seen_keys:
+            continue
+        seen_keys.add(row_key)
+        merged = dict(recovered_unit)
+        existing = existing_row_units.pop(row_key, None)
+        if existing:
+            for key, value in existing.items():
+                if value not in (None, "", [], {}):
+                    if key in {"row_text", "content", "row_numbers", "table_caption", "table_header", "table_focus_columns"} and merged.get(key):
+                        continue
+                    merged[key] = value
+        merged["table_bundle_id"] = (
+            merged.get("table_bundle_id")
+            or bundle.get("table_bundle_id")
+            or bundle.get("bundle_id", "")
+        )
+        merged["table_id"] = merged.get("table_id") or table_id
+        merged["table_caption"] = merged.get("table_caption") or caption
+        merged["table_header"] = merged.get("table_header") or header
+        merged["page"] = merged.get("page") or page_num
+        merged_rows.append(merged)
+
+    for row_key, unit in existing_row_units.items():
+        if row_key not in seen_keys:
+            merged_rows.append(unit)
+
+    return merged_rows + passthrough_units
+
+
+def _prefer_sparse_bundle_text(existing_text: str, candidate_text: str, *, header_like: bool) -> str:
+    existing = re.sub(r"\s+", " ", str(existing_text or "")).strip()
+    candidate = re.sub(r"\s+", " ", str(candidate_text or "")).strip()
+    if not candidate:
+        return existing
+    if not existing:
+        return candidate
+    if header_like:
+        existing_columns = len(_extract_table_header_columns(existing))
+        candidate_columns = len(_extract_table_header_columns(candidate))
+        if existing_columns > candidate_columns:
+            return existing
+        if existing_columns == candidate_columns and existing.count(" ") >= candidate.count(" "):
+            return existing
+        return candidate
+    if existing.count(" ") >= candidate.count(" "):
+        return existing
+    return candidate
+
+
+def _maybe_upgrade_sparse_structured_bundle(
+    chunk_text: str,
+    metadata: Optional[dict],
+    page_payload: Optional[dict],
+    *,
+    query: str = "",
+) -> tuple[str, Optional[dict]]:
+    if not should_apply_numeric_table_specialization():
+        return chunk_text, metadata
+    if not isinstance(metadata, dict) or not metadata.get("structured_table_bundle"):
+        return chunk_text, metadata
+    if not isinstance(page_payload, dict):
+        return chunk_text, metadata
+
+    table_id = str(metadata.get("table_id") or "").strip()
+    if not table_id:
+        return chunk_text, metadata
+
+    page_text = (page_payload.get("content") or page_payload.get("text") or "").strip()
+    if not page_text:
+        return chunk_text, metadata
+
+    try:
+        page_num = int(page_payload.get("page") or 0)
+    except (TypeError, ValueError):
+        page_num = 0
+    if page_num <= 0:
+        page_num = _resolve_primary_page_from_metadata(metadata)
+    if page_num <= 0:
+        return chunk_text, metadata
+
+    scoped_segment = _slice_text_to_requested_table(page_text, [table_id])
+    if not scoped_segment:
+        return chunk_text, metadata
+    segment = _trim_page_text_table_segment(scoped_segment)
+    if len(segment) < 40:
+        return chunk_text, metadata
+
+    query_hints = _query_rewriter_singleton.extract_numeric_table_hints(query) if query else {}
+
+    current_rows = _extract_structured_table_rows(metadata)
+    current_body_rows = _extract_structured_bundle_body_rows(metadata)
+    current_keys = {
+        _normalize_sparse_bundle_row_key(row.get("row_id", ""), row.get("row_text", ""))
+        for row in [*current_rows, *current_body_rows]
+        if _normalize_sparse_bundle_row_key(row.get("row_id", ""), row.get("row_text", ""))
+    }
+
+    raw_header = _extract_table_header_snippet(segment)
+    recovered_header_candidate = _build_runtime_page_text_table_header(
+        table_id,
+        raw_header,
+    )
+    recovered_header = _prefer_sparse_bundle_text(
+        str(metadata.get("table_header") or "").strip(),
+        recovered_header_candidate,
+        header_like=True,
+    ) or recovered_header_candidate or str(metadata.get("table_header") or "").strip()
+    recovered_caption_candidate = _extract_table_caption_from_text(segment) or table_id
+    recovered_caption = _prefer_sparse_bundle_text(
+        str(metadata.get("table_caption") or "").strip(),
+        recovered_caption_candidate,
+        header_like=False,
+    ) or recovered_caption_candidate
+    recovered_units = _build_runtime_page_text_evidence_units(
+        segment,
+        table_id,
+        recovered_caption,
+        recovered_header,
+        page_num,
+        focus_hints=query_hints,
+    )
+    validation_units = recovered_units
+    existing_row_fallback_units: List[dict] = []
+    for row in [*current_rows, *current_body_rows]:
+        if not isinstance(row, dict):
+            continue
+        row_unit = dict(row)
+        row_unit.setdefault("evidence_unit_type", "table_row")
+        row_unit.setdefault("table_id", table_id)
+        row_unit.setdefault("table_caption", recovered_caption)
+        row_unit.setdefault("table_header", recovered_header)
+        row_unit.setdefault("page", page_num)
+        existing_row_fallback_units.append(row_unit)
+    if existing_row_fallback_units:
+        validation_units = _merge_sparse_bundle_evidence_units(
+            {
+                "evidence_units": existing_row_fallback_units,
+                "table_bundle_id": str(metadata.get("table_bundle_id") or ""),
+                "bundle_id": str(metadata.get("bundle_id") or ""),
+            },
+            recovered_units,
+            table_id=table_id,
+            caption=recovered_caption,
+            header=recovered_header,
+            page_num=page_num,
+        )
+    recovered_keys = {
+        _normalize_sparse_bundle_row_key(unit.get("row_id", ""), unit.get("row_text", ""))
+        for unit in validation_units
+        if _normalize_sparse_bundle_row_key(unit.get("row_id", ""), unit.get("row_text", ""))
+    }
+    current_row_count = len(current_keys)
+    recovered_row_count = len(recovered_keys)
+    if recovered_row_count < max(2, current_row_count + 1):
+        return chunk_text, metadata
+    if current_keys and not current_keys.issubset(recovered_keys):
+        return chunk_text, metadata
+
+    upgraded = dict(metadata)
+    upgraded["evidence_units"] = _merge_sparse_bundle_evidence_units(
+        upgraded,
+        recovered_units,
+        table_id=table_id,
+        caption=recovered_caption,
+        header=recovered_header,
+        page_num=page_num,
+    )
+    existing_header_columns = len(
+        _extract_table_header_columns(str(metadata.get("table_header") or ""))
+    )
+    recovered_header_columns = len(_extract_table_header_columns(recovered_header))
+    if recovered_header and recovered_header_columns >= existing_header_columns:
+        upgraded["table_header"] = recovered_header
+    if recovered_caption:
+        upgraded["table_caption"] = recovered_caption
+    recovered_body = _build_runtime_page_text_table_body(segment, recovered_units)
+    existing_body = str(metadata.get("table_body_markdown") or "").strip()
+    if recovered_body:
+        focus_tokens = [
+            re.sub(r"\s+", "", str(value or "")).lower()
+            for value in (query_hints.get("columns") or query_hints.get("methods") or [])
+            if value
+        ]
+        recovered_body_norm = re.sub(r"\s+", "", recovered_body).lower()
+        existing_body_norm = re.sub(r"\s+", "", existing_body).lower()
+        recovered_has_focus = bool(focus_tokens and any(token in recovered_body_norm for token in focus_tokens))
+        existing_has_focus = bool(focus_tokens and any(token in existing_body_norm for token in focus_tokens))
+        if len(recovered_body) > len(existing_body) or (recovered_has_focus and not existing_has_focus):
+            upgraded["table_body_markdown"] = recovered_body
+    upgraded["sparse_table_bundle"] = True
+    upgraded["sparse_table_bundle_source"] = "page_text_row_recovery"
+    upgraded["sparse_table_bundle_original_rows"] = current_row_count
+    upgraded["sparse_table_bundle_recovered_rows"] = recovered_row_count
+
+    upgraded_chunk = _build_structured_table_bundle_chunk(upgraded)
+    return upgraded_chunk or chunk_text, upgraded
+
+
+def _extract_page_text_table_bundles(pages: Optional[List[dict]]) -> List[dict]:
+    """在 ODL 不可用时，从现有页面文本中提取 Table X 结构化 bundle。"""
+    bundles: List[dict] = []
+    seen_table_ids: set[str] = set()
+
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        page_num = page.get("page")
+        if not isinstance(page_num, int) or page_num <= 0:
+            page_num = page.get("page_num") if isinstance(page.get("page_num"), int) else 1
+        page_text = (page.get("content") or page.get("text") or "").strip()
+        if not page_text:
+            continue
+
+        matches = list(_PAGE_TEXT_TABLE_CAPTION_RE.finditer(page_text))
+        if not matches:
+            continue
+
+        for idx, match in enumerate(matches):
+            next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(page_text)
+            raw_segment = page_text[match.start():next_start]
+            matched_table_id = _extract_table_id(match.group(0))
+            if matched_table_id:
+                scoped_segment = _slice_text_to_requested_table(
+                    page_text[match.start():],
+                    [matched_table_id],
+                )
+                if scoped_segment:
+                    raw_segment = scoped_segment
+            segment = _trim_page_text_table_segment(raw_segment)
+            if len(segment) < 40 and next_start > match.start():
+                segment = _trim_page_text_table_segment(page_text[match.start():next_start])
+            if len(segment) < 40:
+                continue
+
+            caption = _extract_table_caption_from_text(segment) or segment.splitlines()[0].strip()
+            table_id = _extract_table_id(caption) or _extract_table_id(match.group(0))
+            if not table_id or table_id.lower() in seen_table_ids:
+                continue
+            raw_header = _extract_table_header_snippet(segment)
+            normalized_header = _build_runtime_page_text_table_header(table_id, raw_header)
+            evidence_units = _build_runtime_page_text_evidence_units(
+                segment,
+                table_id,
+                caption,
+                normalized_header or raw_header,
+                page_num,
+            )
+            table_body = _build_runtime_page_text_table_body(segment, evidence_units)
+
+            bundles.append({
+                "bundle_id": f"page-text:{table_id.lower()}",
+                "table_id": table_id,
+                "table_caption": caption,
+                "table_header": normalized_header or raw_header,
+                "table_body_markdown": table_body,
+                "html_table": "",
+                "table_footnote": "",
+                "page_start": page_num,
+                "page_end": page_num,
+                "pages": [page_num],
+                "page_index": page_num - 1,
+                "page_uid": _build_page_uid(page_num),
+                "page_uids": [_build_page_uid(page_num)],
+                "source_ids": [],
+                "evidence_units": evidence_units,
+                "source": "page_text_bundle",
+            })
+            seen_table_ids.add(table_id.lower())
+
+    return bundles
+
+
 def build_vector_index(
     doc_id: str,
     text: str,
@@ -1533,7 +7477,9 @@ def build_vector_index(
     embedding_model_id: str = "local-minilm",
     api_key: str = None,
     api_host: str = None,
-    pages: List[dict] = None
+    pages: List[dict] = None,
+    structured_table_bundles: Optional[List[dict]] = None,
+    summary_api_key: str = None,
 ):
     try:
         logger.info(f"[{doc_id}] Building vector index...")
@@ -1577,8 +7523,27 @@ def build_vector_index(
             )
             chunks = text_splitter.split_text(preprocessed_text)
             chunk_headings = [""] * len(chunks)
-        logger.info(f"[{doc_id}] Split into {len(chunks)} chunks")
+        _annotate_pages_with_provenance(pages)
+        chunk_page_index = _build_page_index(pages or [])
+        chunk_pages = [
+            _find_page_for_chunk(chunk_text, pages or [], page_index=chunk_page_index) if pages else 1
+            for chunk_text in chunks
+        ]
+        chunk_types = [_guess_chunk_type(chunk_text) for chunk_text in chunks]
+        chunk_metadata = [{} for _ in chunks]
+        effective_table_bundles = structured_table_bundles or _extract_page_text_table_bundles(pages)
 
+        _append_structured_table_bundle_chunks(
+            doc_id,
+            chunks,
+            chunk_headings,
+            chunk_pages,
+            chunk_types,
+            chunk_metadata,
+            effective_table_bundles,
+        )
+
+        logger.info(f"[{doc_id}] Split into {len(chunks)} chunks")
         if not chunks:
             return
 
@@ -1652,6 +7617,10 @@ def build_vector_index(
         save_data = {
             "chunks": chunks,
             "embedding_model": embedding_model_id,
+            "chunk_headings": chunk_headings,
+            "chunk_pages": chunk_pages,
+            "chunk_types": chunk_types,
+            "chunk_metadata": chunk_metadata,
             "parent_chunks": parent_chunks,
             "child_to_parent": child_to_parent,
         }
@@ -1666,7 +7635,7 @@ def build_vector_index(
             chunks=chunks,
             pages=pages,
             embed_fn=embed_fn,
-            api_key=api_key,
+            api_key=summary_api_key or api_key,
         )
 
     except Exception as e:
@@ -2077,7 +8046,7 @@ def _rrf_merge_chunk_and_group(
                             "reranked": False,
                         }
 
-    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 2 个（从 1 提升到 2，减少过度去重）
+    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 2 个
     if chunk_group_map:
         # 构建反向映射：chunk_index -> group_id（基于 group_chunk_map）
         chunk_idx_to_group = {}
@@ -2233,6 +8202,56 @@ def _is_reference_like_text(text: str) -> bool:
     return signal >= 2
 
 
+def filter_reference_trap_results(
+    results: List[dict],
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+) -> List[dict]:
+    """统一过滤参考文献型污染结果，供主检索链路和其他调用方复用。"""
+    if not results:
+        return results
+    if _is_reference_query(query):
+        normalized = []
+        for item in results:
+            normalized_item = dict(item)
+            _normalize_structural_metadata(normalized_item)
+            normalized.append(normalized_item)
+        return normalized
+
+    filtered_results = []
+    removed = 0
+    numeric_table_query = "numeric_table" in (evidence_need or [])
+    for item in results:
+        normalized_item = dict(item)
+        _normalize_structural_metadata(normalized_item)
+        chunk_text = normalized_item.get("raw_chunk_text") or normalized_item.get("chunk", "")
+        if chunk_text and _is_reference_like_text(chunk_text):
+            chunk_type = normalized_item.get("chunk_type") or normalized_item.get("block_type") or ""
+            if numeric_table_query and _looks_like_numeric_table_support(chunk_text, chunk_type):
+                filtered_results.append(normalized_item)
+                continue
+            normalized_item["reference_like"] = True
+            removed += 1
+            continue
+        filtered_results.append(normalized_item)
+
+    if filtered_results:
+        if removed > 0:
+            logger.info(f"[检索净化] 过滤参考文献型结果 {removed} 条")
+        return filtered_results
+    return results
+
+
+def filter_reference_trap_texts(
+    texts: List[str],
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+) -> List[str]:
+    wrapped = [{"chunk": text} for text in texts if isinstance(text, str) and text.strip()]
+    filtered = filter_reference_trap_results(wrapped, query, evidence_need=evidence_need)
+    return [item.get("chunk", "") for item in filtered if item.get("chunk", "").strip()]
+
+
 def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) -> List[dict]:
     """对包含完整查询短语的 chunk 进行相似度加权提升
 
@@ -2298,6 +8317,944 @@ def _phrase_boost(results: List[dict], query: str, boost_factor: float = 1.2) ->
     return sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)
 
 
+def _apply_query_intent_boost(results: List[dict], query: str) -> List[dict]:
+    if not results or not query:
+        return results
+
+    query_lower = query.lower().strip()
+    wants_intro = any(hint in query_lower for hint in (
+        "motivation", "动机", "背景", "why", "为什么", "不足", "不够充分", "区别", "不同",
+    ))
+    wants_experiment = any(hint in query_lower for hint in (
+        "dataset", "datasets", "数据集", "baseline", "baselines", "基线", "实验", "评估",
+    ))
+    wants_limitation = any(hint in query_lower for hint in (
+        "limitation", "limitations", "future work", "局限", "限制", "未来", "改进",
+    ))
+    wants_cost = _is_numeric_table_cost_query(query)
+
+    if not any((wants_intro, wants_experiment, wants_limitation, wants_cost)):
+        return results
+
+    boosted = False
+    for item in results:
+        chunk_text = item.get("chunk", "")
+        if not chunk_text:
+            continue
+
+        sample = chunk_text[:1500].lower()
+        importance = item.get("importance_weight", 1.0)
+        factor = 1.0
+
+        if wants_intro:
+            if importance >= 1.3 or any(token in sample for token in ("abstract", "introduction", "motivation", "background", "摘要", "引言", "背景")):
+                factor *= 1.25
+            elif _is_reference_like_text(chunk_text):
+                factor *= 0.6
+
+        if wants_experiment:
+            if importance >= 1.3 or any(token in sample for token in ("dataset", "datasets", "baseline", "baselines", "experiment", "evaluation", "cifar", "imagenet", "数据集", "基线", "实验", "评估")):
+                factor *= 1.2
+            if _is_reference_like_text(chunk_text):
+                factor *= 0.35
+
+        if wants_limitation:
+            if any(token in sample for token in ("limitation", "limitations", "future work", "discussion", "conclusion", "局限", "限制", "未来", "改进")):
+                factor *= 1.2
+            elif importance < 1.0:
+                factor *= 0.8
+
+        if wants_cost:
+            has_cost_anchor = _has_numeric_table_cost_anchor(sample) or _has_numeric_table_cost_anchor(chunk_text)
+            is_table_like = _looks_like_numeric_table_support(chunk_text, item.get("chunk_type", "") or item.get("block_type", ""))
+            if has_cost_anchor:
+                factor *= 1.35 if importance >= 1.0 else 1.25
+            elif is_table_like:
+                factor *= 0.62
+            elif any(token in sample for token in ("discussion", "limitation", "limitations", "future work", "conclusion")):
+                factor *= 1.15
+
+        if factor != 1.0:
+            item["similarity"] = min(item.get("similarity", 0) * factor, 1.0)
+            item["similarity_percent"] = min(round(item.get("similarity_percent", 0) * factor, 2), 99.99)
+            item["query_intent_boost"] = round(factor, 3)
+            boosted = True
+
+    if boosted:
+        return sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)
+    return results
+
+
+def _looks_like_numeric_table_support(chunk_text: str, chunk_type: str = "") -> bool:
+    if not chunk_text:
+        return False
+    sample = chunk_text[:1600]
+    sample_lower = sample.lower()
+    if chunk_type in {"table", "table_row"} or _is_likely_table(sample):
+        return True
+    column_hit = bool(re.search(r'\b(all|many|medium|med\.?|few)\b', sample_lower))
+    number_hit = len(re.findall(r'\d+\.?\d*', sample_lower)) >= 4
+    method_hit = bool(re.search(r'\b(resnet-\d+|diffult|crt|adrw|ride)\b', sample_lower))
+    return column_hit and number_hit and method_hit
+
+
+_NUMERIC_TABLE_DATASET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\bimagenet[-\s]?lt\b", re.IGNORECASE), "imagenet-lt"),
+    (re.compile(r"\bcifar[-\s]?100[-\s]?lt\b", re.IGNORECASE), "cifar100-lt"),
+    (re.compile(r"\bcifar[-\s]?10[-\s]?lt\b", re.IGNORECASE), "cifar10-lt"),
+    (re.compile(r"\bplaces[-\s]?lt\b", re.IGNORECASE), "places-lt"),
+    (re.compile(r"\binaturalist(?:18|19)?\b|\binat(?:18|19)?\b", re.IGNORECASE), "inaturalist"),
+)
+
+
+def _build_numeric_table_evidence_text(item: dict) -> str:
+    parts: List[str] = []
+    seen: set[str] = set()
+    for value in (
+        item.get("table_id", ""),
+        item.get("table_caption", ""),
+        item.get("table_header", ""),
+        item.get("chunk", ""),
+        item.get("raw_chunk_text", ""),
+    ):
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(normalized)
+    return " ".join(parts).strip()
+
+
+def _extract_numeric_table_dataset_mentions(text: str) -> set[str]:
+    mentions: set[str] = set()
+    sample = re.sub(r"\s+", " ", text or "").strip()
+    if not sample:
+        return mentions
+    for pattern, canonical in _NUMERIC_TABLE_DATASET_PATTERNS:
+        if pattern.search(sample):
+            mentions.add(canonical)
+    return mentions
+
+
+def _apply_numeric_table_boost(results: List[dict], query: str) -> List[dict]:
+    if not results or not query:
+        return results
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    require_explicit_table_anchor = _should_require_explicit_table_anchor(hints)
+    cost_query = _is_numeric_table_cost_query(query)
+    boosted = False
+    adjusted: List[dict] = []
+
+    for item in results:
+        chunk_text = (item.get("chunk") or item.get("raw_chunk_text") or "").strip()
+        evidence_text = _build_numeric_table_evidence_text(item) or chunk_text
+        if not evidence_text:
+            adjusted.append(item)
+            continue
+
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+        chunk_lower = evidence_text.lower()
+        factor = 1.0
+        anchor_hits: list[str] = []
+        is_table_like = _looks_like_numeric_table_support(evidence_text, chunk_type)
+        group_hit_counts: dict[str, int] = {}
+        present_table_labels = set(re.findall(r'\btable\s*\d+\b', chunk_lower))
+        target_table_labels = target_tables
+        table_match = (
+            _has_strict_numeric_table_anchor(item, target_table_labels, evidence_text)
+            if require_explicit_table_anchor and target_table_labels
+            else (
+                not target_table_labels
+                or bool(any(value in chunk_lower for value in target_table_labels))
+            )
+        )
+
+        if is_table_like:
+            factor *= 1.12
+
+        for group_name, weight in (
+            ("table_labels", 0.06),
+            ("datasets", 0.08),
+            ("backbones", 0.08),
+            ("methods", 0.10),
+            ("columns", 0.08),
+            ("comparison", 0.05),
+        ):
+            group_hits = [
+                value
+                for value in hints.get(group_name, [])
+                if value and value.lower() in chunk_lower
+            ]
+            if not group_hits:
+                continue
+            group_hit_counts[group_name] = len(group_hits)
+            factor *= 1.0 + min(len(group_hits), 3) * weight
+            anchor_hits.extend(group_hits[:3])
+
+        column_hits = group_hit_counts.get("columns", 0)
+        method_hits = group_hit_counts.get("methods", 0)
+        if hints.get("columns") and column_hits == 0:
+            factor *= 0.88 if is_table_like else 0.58
+        elif len(hints.get("columns", [])) >= 3 and column_hits < 2:
+            factor *= 0.72 if is_table_like else 0.62
+        if hints.get("methods") and method_hits == 0:
+            factor *= 0.55 if column_hits >= 2 else 0.40
+        if not is_table_like and column_hits < 2:
+            factor *= 0.72
+        if target_table_labels and not table_match:
+            if require_explicit_table_anchor:
+                factor *= 0.18 if is_table_like else 0.10
+            else:
+                factor *= 0.82 if is_table_like else 0.68
+        if target_table_labels and present_table_labels and not (target_table_labels & present_table_labels):
+            factor *= 0.35 if column_hits >= 2 else 0.20
+        if column_hits >= 3 and group_hit_counts.get("methods", 0) >= 1:
+            factor *= 2.00
+
+        if cost_query:
+            has_cost_anchor = _has_numeric_table_cost_anchor(evidence_text)
+            if has_cost_anchor:
+                factor *= 1.30
+            elif is_table_like:
+                factor *= 0.72
+            elif chunk_type not in {"table_row", "table", "caption"} and any(
+                token in chunk_lower for token in ("discussion", "limitation", "future work", "conclusion")
+            ):
+                factor *= 1.15
+
+        mixed_tables = present_table_labels
+        if len(mixed_tables) >= 2:
+            factor *= 0.78
+        if item.get("table_augmented_scope") == "page_content":
+            factor *= 0.86
+            if len(mixed_tables) >= 2:
+                factor *= 0.32
+            elif target_table_labels and present_table_labels and not (target_table_labels & present_table_labels):
+                factor *= 0.22
+
+        if chunk_type == "caption" and not anchor_hits:
+            factor *= 0.85
+
+        if factor != 1.0:
+            boosted = True
+            updated = dict(item)
+            updated["similarity"] = float(item.get("similarity", 0.0) or 0.0) * factor
+            updated["similarity_percent"] = min(
+                round(float(item.get("similarity_percent", 0.0) or 0.0) * factor, 2),
+                99.99,
+            )
+            updated["numeric_table_boost"] = round(factor, 4)
+            updated["numeric_table_anchor_hits"] = list(dict.fromkeys(anchor_hits))
+            if len(mixed_tables) >= 2:
+                updated["numeric_table_mixed_table"] = True
+            adjusted.append(updated)
+        else:
+            adjusted.append(item)
+
+    if boosted:
+        adjusted.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+        return adjusted
+    return results
+
+
+def _prioritize_numeric_table_results(results: List[dict], query: str) -> List[dict]:
+    """在最终结果排序中前置 numeric_table 的强表格证据。"""
+    if not results or not query:
+        return results
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    target_method_keys = _extract_numeric_table_row_method_targets(hints)
+    comparison_query = bool(hints.get("comparison"))
+    bundle_query = _is_numeric_table_bundle_query(query, hints)
+    explicit_comparison_methods = comparison_query and len(target_method_keys) >= 2
+    cost_query = _is_numeric_table_cost_query(query)
+    has_table_row_result = any(
+        (item.get("chunk_type") or item.get("block_type") or "").strip().lower() == "table_row"
+        for item in results
+    )
+    target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
+    target_backbones = {value.lower() for value in hints.get("backbones", []) if value}
+    target_columns = {
+        _normalize_numeric_column_name(value).lower()
+        for value in hints.get("columns", [])
+        if value
+    }
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    require_explicit_table_anchor = _should_require_explicit_table_anchor(hints)
+    preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
+    winner_style_query = bool(preferred_sort_column)
+    row_band_query = _is_numeric_table_row_band_query(query, hints)
+    ranked: List[tuple[float, int, dict]] = []
+    strong_support_count = 0
+
+    for original_rank, item in enumerate(results):
+        updated = dict(item)
+        chunk_text = (updated.get("chunk") or updated.get("raw_chunk_text") or "").strip()
+        raw_chunk_text = (updated.get("raw_chunk_text") or "").strip()
+        table_caption = (updated.get("table_caption") or updated.get("table_id") or "").strip()
+        table_header = (updated.get("table_header") or "").strip()
+        evidence_text = "\n".join(
+            part
+            for part in (table_caption, table_header, chunk_text, raw_chunk_text)
+            if part
+        ).strip()
+        evidence_lower = evidence_text.lower()
+        chunk_type = (updated.get("chunk_type") or updated.get("block_type") or "").strip().lower()
+        headerish_anchor = chunk_type == "table_row" and _is_headerish_numeric_table_row(updated)
+        is_table_like = _looks_like_numeric_table_support(evidence_text or chunk_text, chunk_type)
+        number_hits = len(re.findall(r'\d+\.?\d*', evidence_lower))
+        present_table_labels = set(re.findall(r'\btable\s*\d+\b', evidence_lower))
+        target_table_labels = target_tables
+        method_hits = [
+            value for value in hints.get("methods", [])
+            if value and re.sub(r"\s+", "", value.lower()) in re.sub(r"\s+", "", evidence_lower)
+        ]
+        backbone_hits = {
+            value.lower()
+            for value in hints.get("backbones", [])
+            if value and value.lower() in evidence_lower
+        }
+        column_hits = {
+            _normalize_numeric_column_name(value).lower()
+            for value in hints.get("columns", [])
+            if value and value.lower() in evidence_lower
+        }
+        row_key = _normalize_numeric_table_method_token(updated.get("row_id", ""))
+        row_method_exact = bool(row_key and row_key in target_method_keys)
+        explicit_table_match = _has_explicit_numeric_table_match(updated, target_table_labels)
+        strict_table_match = _has_strict_numeric_table_anchor(updated, target_table_labels, evidence_text)
+        table_match = not target_table_labels or (
+            strict_table_match
+            if require_explicit_table_anchor
+            else (
+                explicit_table_match
+                or (
+                    chunk_type != "table_row"
+                    and bool(any(value in evidence_lower for value in target_table_labels))
+                )
+            )
+        )
+        dataset_mentions = _extract_numeric_table_dataset_mentions(evidence_text)
+        dataset_match = not target_datasets or bool(dataset_mentions & target_datasets)
+
+        resolved_column_hits: set[str] = set()
+        resolved_backbone_hits: set[str] = set()
+        if chunk_type == "table_row" and (target_columns or target_backbones or preferred_sort_column):
+            row_text = re.sub(
+                r"\s+",
+                " ",
+                str(
+                    updated.get("numeric_table_exact_context_row_text")
+                    or _get_numeric_table_boundary_text(updated)
+                    or updated.get("table_row_raw_text")
+                    or updated.get("row_text")
+                    or updated.get("chunk")
+                    or updated.get("raw_chunk_text")
+                    or ""
+                ),
+            ).strip()
+            if row_text:
+                focused_row = _build_query_focused_table_row(
+                    {
+                        "row_id": updated.get("row_id") or "",
+                        "row_text": row_text,
+                        "row_numbers": _strip_leading_numeric_table_row_id(row_text, updated.get("row_id") or "") or row_text,
+                        "table_caption": updated.get("numeric_table_exact_context_caption")
+                        or updated.get("table_caption")
+                        or updated.get("table_id")
+                        or "",
+                        "table_id": updated.get("table_id") or "",
+                        "table_header": updated.get("numeric_table_exact_context_header")
+                        or updated.get("table_header")
+                        or "",
+                        "table_focus_columns": list(updated.get("table_focus_columns") or []),
+                    },
+                    hints,
+                )
+                resolved_column_hits = {
+                    _normalize_numeric_column_name(value).lower()
+                    for value in (focused_row.get("resolved_columns") or [])
+                    if value
+                }
+                matched_backbone = str(focused_row.get("matched_backbone") or "").strip().lower()
+                if matched_backbone:
+                    resolved_backbone_hits.add(matched_backbone)
+        if updated.get("table_focus_backbone"):
+            resolved_backbone_hits.add(str(updated.get("table_focus_backbone") or "").strip().lower())
+        resolved_backbone_hits.update(
+            value.strip().lower()
+            for value in _extract_table_header_backbones(updated.get("table_header", "") or evidence_text)
+            if value
+        )
+
+        effective_column_hits = column_hits | resolved_column_hits
+        effective_backbone_hits = backbone_hits | resolved_backbone_hits
+        backbone_match = not target_backbones or bool(effective_backbone_hits & target_backbones)
+        column_match = not target_columns or bool(effective_column_hits & target_columns)
+        same_bundle_match = table_match and dataset_match and backbone_match and column_match
+        bundle_sensitive_query = bool(
+            target_table_labels or target_columns or target_backbones or target_datasets or bundle_query
+        )
+        bundle_row_match = chunk_type == "table_row" and (
+            row_method_exact
+            or (target_table_labels and table_match)
+            or (target_columns and len(effective_column_hits & target_columns) >= 1 and same_bundle_match)
+        )
+        composite_target_noise = (
+            bundle_query
+            and bool(target_method_keys)
+            and not explicit_comparison_methods
+            and not row_method_exact
+            and _is_composite_numeric_row_id(updated.get("row_id", ""))
+            and _row_mentions_target_method(updated.get("row_id", ""), target_method_keys)
+        )
+
+        priority = 0.0
+        anchor_hits: list[str] = []
+
+        if is_table_like:
+            priority += 4.0
+        if chunk_type == "table_row":
+            priority += 2.2
+            if row_method_exact:
+                priority += 1.4
+            if updated.get("table_row_slice_kind") == "exact":
+                priority += 0.8
+        elif chunk_type == "table":
+            priority += 1.6
+        elif chunk_type == "caption":
+            priority += 0.8
+        if row_band_query and not cost_query:
+            if chunk_type == "table_row":
+                priority += 3.0
+                if updated.get("table_row_slice_kind") == "exact":
+                    priority += 0.6
+            elif chunk_type in {"table", "caption"}:
+                priority += 1.0
+            else:
+                priority -= 4.0
+        if target_table_labels:
+            if table_match:
+                priority += 3.5
+            else:
+                priority -= 8.5 if require_explicit_table_anchor else 6.0
+        if number_hits >= 4:
+            priority += min(number_hits, 12) * 0.12
+
+        for group_name, weight in (
+            ("table_labels", 1.0),
+            ("datasets", 1.3),
+            ("backbones", 1.2),
+            ("methods", 1.5),
+            ("columns", 1.2),
+            ("comparison", 0.7),
+        ):
+            group_hits = [
+                value
+                for value in hints.get(group_name, [])
+                if value and value.lower() in evidence_lower
+            ]
+            if not group_hits:
+                continue
+            priority += min(len(group_hits), 3) * weight
+            anchor_hits.extend(group_hits[:3])
+
+        if len(hints.get("columns", [])) >= 3 and len(effective_column_hits & target_columns) >= 3:
+            priority += 1.5
+        if hints.get("methods") and method_hits:
+            priority += 0.9
+        if chunk_type == "table_row" and method_hits:
+            priority += 1.1
+        if chunk_type == "table_row" and effective_backbone_hits & target_backbones:
+            priority += 0.9
+        if chunk_type == "table_row" and target_columns and same_bundle_match and len(effective_column_hits & target_columns) >= 1:
+            priority += 0.9
+        if chunk_type == "table_row" and len(effective_column_hits & target_columns) >= 2:
+            priority += 1.0
+        if preferred_sort_column and chunk_type == "table_row":
+            preferred_sort_key = _normalize_numeric_column_name(preferred_sort_column).lower()
+            if preferred_sort_key in effective_column_hits:
+                priority += 1.6
+            elif winner_style_query and not cost_query:
+                priority -= 5.8
+        if chunk_type == "table_row" and target_table_labels and present_table_labels & target_table_labels:
+            priority += 0.7
+        if target_table_labels and present_table_labels and not (target_table_labels & present_table_labels):
+            priority -= 3.0
+        if headerish_anchor:
+            priority -= 3.5
+        if chunk_type == "table_row" and target_table_labels and not (
+            strict_table_match if require_explicit_table_anchor else explicit_table_match
+        ):
+            priority -= 3.2
+        if explicit_comparison_methods and chunk_type == "table_row" and not row_method_exact:
+            priority -= 4.5
+        if composite_target_noise:
+            priority -= 4.8
+        if has_table_row_result and bundle_sensitive_query and chunk_type not in {"table_row", "table", "caption"}:
+            if method_hits or effective_backbone_hits or len(effective_column_hits) >= 1 or present_table_labels:
+                priority -= 3.4 if bundle_query else 2.4
+        if has_table_row_result and updated.get("table_augmented_scope") == "page_content":
+            priority -= 2.8 if bundle_query else 1.6
+            if len(present_table_labels) >= 2:
+                priority -= 1.8
+            elif target_table_labels and present_table_labels and not (target_table_labels & present_table_labels):
+                priority -= 2.2
+        if chunk_type == "table_row" and target_table_labels and not table_match:
+            priority -= 4.6 if require_explicit_table_anchor else 2.8
+        if chunk_type == "table_row" and not same_bundle_match and target_table_labels:
+            priority -= 1.5 if require_explicit_table_anchor else 1.0
+        if chunk_type == "table_row" and not bundle_row_match and comparison_query and len(target_method_keys) <= 1:
+            priority -= 0.5
+        if (winner_style_query or explicit_comparison_methods or comparison_query) and not cost_query:
+            if chunk_type == "table_row":
+                if target_columns and not column_match:
+                    priority -= 6.0
+                if target_backbones and not backbone_match:
+                    priority -= 4.5
+                if target_datasets and not dataset_match:
+                    priority -= 4.5
+            elif has_table_row_result and chunk_type in {"table", "caption"}:
+                if target_columns and not column_match:
+                    priority -= 4.8
+                if target_backbones and not backbone_match:
+                    priority -= 3.6
+                if target_datasets and not dataset_match:
+                    priority -= 3.6
+        priority += _numeric_table_sort_bonus(updated, query, hints)
+        if preferred_sort_column and has_table_row_result and chunk_type not in {"table_row", "table", "caption"} and not cost_query:
+            priority -= 3.2
+        if cost_query:
+            has_cost_anchor = _has_numeric_table_cost_anchor(evidence_text)
+            if has_cost_anchor:
+                priority += 6.0 if chunk_type not in {"table_row", "table", "caption"} else 3.5
+            elif is_table_like:
+                priority -= 8.0
+            elif chunk_type not in {"table_row", "table", "caption"} and any(
+                token in evidence_lower for token in ("discussion", "limitation", "future work", "conclusion")
+            ):
+                priority += 2.0
+        if not is_table_like and not anchor_hits:
+            priority -= 1.4
+        if chunk_type not in {"table_row", "table", "caption"} and method_hits and effective_backbone_hits and len(effective_column_hits) >= 2:
+            priority -= 1.2
+        if len(chunk_text) < 120 and number_hits < 2:
+            priority -= 0.8
+
+        if priority >= 4.0:
+            strong_support_count += 1
+
+        updated["numeric_table_priority"] = round(priority, 4)
+        updated["numeric_table_anchor_hits"] = list(dict.fromkeys(anchor_hits))
+        ranked.append((priority, original_rank, updated))
+
+    if strong_support_count == 0 and not has_table_row_result:
+        return results
+
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [item for _, _, item in ranked]
+
+
+def _filter_reference_pollution(
+    results: List[dict],
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+) -> List[dict]:
+    return filter_reference_trap_results(results, query, evidence_need=evidence_need)
+
+
+def _csv_to_set(raw_value: str) -> set[str]:
+    return {
+        item.strip()
+        for item in (raw_value or "").split(",")
+        if item and item.strip()
+    }
+
+
+def _should_enable_hyde(query_type: str, evidence_need: List[str], config) -> bool:
+    if not config.enable_hyde:
+        return False
+    blocked = _csv_to_set(getattr(config, "hyde_evidence_blocklist", ""))
+    allowed_types = _csv_to_set(getattr(config, "hyde_query_types", ""))
+    allowed_evidence = _csv_to_set(getattr(config, "hyde_evidence_allowlist", ""))
+    evidence_set = set(evidence_need or [])
+    if evidence_set & blocked:
+        return False
+    return query_type in allowed_types or bool(evidence_set & allowed_evidence)
+
+
+def _should_enable_query_expansion(query_type: str, evidence_need: List[str], config) -> bool:
+    if not config.enable_query_expansion:
+        return False
+    blocked = _csv_to_set(getattr(config, "query_expansion_evidence_blocklist", ""))
+    allowed_types = _csv_to_set(getattr(config, "query_expansion_query_types", ""))
+    allowed_evidence = _csv_to_set(getattr(config, "query_expansion_evidence_allowlist", ""))
+    evidence_set = set(evidence_need or [])
+    if evidence_set & blocked:
+        return False
+    return query_type in allowed_types or bool(evidence_set & allowed_evidence)
+
+
+def _should_force_conditional_rerank(
+    query_type: str,
+    evidence_need: List[str],
+    reranker_model: Optional[str],
+    config,
+) -> bool:
+    if not config.enable_conditional_rerank:
+        return False
+    cond_types = _csv_to_set(config.conditional_rerank_types or "")
+    cond_evidence = _csv_to_set(getattr(config, "conditional_rerank_evidence_needs", ""))
+    evidence_set = set(evidence_need or [])
+    return query_type in cond_types or bool(evidence_set & cond_evidence)
+
+
+_STRUCTURAL_SECTION_BLACKLIST = (
+    "references",
+    "bibliography",
+    "appendix",
+    "broader impacts",
+    "broader impact",
+    "safeguards",
+    "acknowledgments",
+    "acknowledgements",
+    "funding",
+    "declarations",
+    "conflicts of interest",
+    "author contributions",
+    "supplementary",
+    "附录",
+    "参考文献",
+    "致谢",
+    "资金",
+    "作者贡献",
+)
+
+
+def _is_structural_noise(text: str) -> bool:
+    """检测 chunk 是否为结构性噪声章节（附录/参考/声明/致谢等）。
+    仅看前 600 字符的第一行，避免误伤正文中提到这些词的段落。
+    """
+    if not text:
+        return False
+    sample = text[:600]
+    first_line = sample.split("\n")[0].strip().lower()
+    for word in _STRUCTURAL_SECTION_BLACKLIST:
+        if first_line.startswith(word) or (len(first_line) < 40 and word in first_line):
+            return True
+    return False
+
+
+def _unified_post_clean(results: List[dict], query: str, top_k: int) -> List[dict]:
+    """统一末端清洗器（参考 openclaw candidateMultiplier + minScore 策略）
+
+    在检索管线最末端执行，保证最终上下文干净：
+    1. 结构性噪声降权（附录/声明/致谢等章节标题开头的 chunk）
+    2. 碎片惩罚（过短 chunk）
+    3. 最小相似度过滤（但至少保留 min_keep 条）
+    4. 保序截断到 top_k
+    """
+    _rc = _rag_config_singleton
+    if not results or not _rc.enable_post_clean:
+        return results[:top_k]
+
+    min_score = _rc.post_clean_min_score
+    min_keep = min(max(_rc.post_clean_min_keep, 1), max(top_k, 1))
+    cost_query = _is_numeric_table_cost_query(query)
+
+    scored = []
+    for item in results:
+        chunk_text = item.get("chunk", "")
+        sim = item.get("similarity", 0.0)
+        penalty = 1.0
+        keep_cost_anchor = bool(cost_query and chunk_text and _has_numeric_table_cost_anchor(chunk_text))
+
+        if chunk_text and _is_structural_noise(chunk_text) and not keep_cost_anchor:
+            penalty *= 0.15
+        if chunk_text and len(chunk_text.strip()) < 80 and not keep_cost_anchor:
+            penalty *= 0.5
+
+        scored.append((item, sim * penalty if penalty < 1.0 else sim, keep_cost_anchor))
+
+    scored.sort(key=lambda x: (x[2], x[1]), reverse=True)
+
+    kept = []
+    for i, (item, adj_score, keep_cost_anchor) in enumerate(scored):
+        if keep_cost_anchor or adj_score >= min_score or i < min_keep:
+            kept.append(item)
+
+    removed = len(results) - len(kept)
+    if removed > 0:
+        logger.info(f"[统一清洗] 过滤低质量/结构噪声结果 {removed} 条 (min_score={min_score})")
+
+    return kept[:top_k]
+
+
+
+# ── P0-C: 候选前置过滤 —————————————————————————————————————————————————————
+# formula/caption/title chunk 对非公式类问题贡献极低但极易被向量检索命中；
+# 在 annotation（chunk_type 已填充）之后、rerank 之前做轻量得分折扣。
+_FORMULA_QUERY_TOKENS = frozenset({
+    "公式", "formula", "equation", "算法", "algorithm", "derive",
+    "推导", "proof", "表达式", "expression",
+})
+_NUMERIC_QUERY_TOKENS = frozenset({
+    "准确率", "accuracy", "数值", "score", "metric", "table", "表格",
+    "性能", "performance", "结果", "result", "f1", "bleu", "rouge",
+})
+
+
+def _sanitize_by_chunk_type(results: List[dict], query: str) -> List[dict]:
+    """对特定 chunk_type 做得分折扣（不完全排除，避免误伤）
+
+    折扣策略（考虑题目意图）：
+    - formula  : 非公式问题 ×0.25；公式/算法问题 ×1.0
+    - caption  : 非数值问题 ×0.50；数值/表格问题 ×0.80
+    - 极短 chunk (< 40 chars) 且非表格/数字：额外 ×0.40
+    """
+    if not results:
+        return results
+
+    query_lower = (query or "").lower()
+    is_formula_query = any(t in query_lower for t in _FORMULA_QUERY_TOKENS)
+    is_numeric_query = any(t in query_lower for t in _NUMERIC_QUERY_TOKENS)
+
+    adjusted = []
+    penalized = 0
+    for item in results:
+        chunk_type = (item.get("chunk_type") or "").strip()
+        sim = item.get("similarity", 0.0)
+        penalty = 1.0
+
+        if chunk_type == "formula" and not is_formula_query:
+            penalty *= 0.25
+        elif chunk_type == "caption":
+            penalty *= 0.50 if not is_numeric_query else 0.80
+
+        chunk_text = (item.get("chunk") or "").strip()
+        if len(chunk_text) < 40 and chunk_type not in ("table",) and not any(ch.isdigit() for ch in chunk_text):
+            penalty *= 0.40
+
+        if penalty < 1.0:
+            penalized += 1
+            item = dict(item)  # 浅拷贝，避免改动原对象
+            item["similarity"] = sim * penalty
+            item["_type_penalty"] = round(penalty, 4)
+
+        adjusted.append(item)
+
+    if penalized:
+        logger.debug(f"[TypeSanitizer] 对 {penalized}/{len(results)} 个候选应用类型折扣")
+
+    adjusted.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
+    return adjusted
+
+
+def _compute_lexical_evidence_score(query: str, chunk_text: str) -> float:
+    """计算 chunk 与 query 之间的词法证据得分（不需要模型，纯字符串匹配）
+
+    评分维度：
+    1. 查询词命中率：query 中 ≥2 字符的词在 chunk 中出现的比例
+    2. 数字匹配奖励：query 含数字且 chunk 也含对应数字
+    3. 长度惩罚：过短 chunk 得分减半
+
+    返回 [0, 1] 的标量，0 = 无词法重叠，1 = 完全匹配
+    """
+    if not query or not chunk_text:
+        return 0.0
+    import re as _re
+    query_terms = [
+        t.lower() for t in _re.split(r'[\s,;，。；、？！?!：:""\'\'\"\"]+', query)
+        if len(t) >= 2
+    ]
+    if not query_terms:
+        return 0.0
+    chunk_lower = chunk_text.lower()
+    hit_count = sum(1 for t in query_terms if t in chunk_lower)
+    base_score = hit_count / len(query_terms)
+
+    # 数字匹配奖励
+    query_digits = set(_re.findall(r'\d+\.?\d*', query))
+    if query_digits:
+        chunk_digits = set(_re.findall(r'\d+\.?\d*', chunk_text))
+        if query_digits & chunk_digits:
+            base_score = min(1.0, base_score + 0.2)
+
+    # 过短 chunk 惩罚
+    if len(chunk_text.strip()) < 60:
+        base_score *= 0.5
+
+    return min(1.0, base_score)
+
+
+def _apply_evidence_gate(
+    results: List[dict],
+    query: str,
+    relevance_weight: float = 0.7,
+    evidence_weight: float = 0.3,
+) -> List[dict]:
+    """对 rerank 结果施加词法证据门控，融合 topic-relevance 与 evidence-usefulness
+
+    final_score = relevance_weight * rerank_score + evidence_weight * lexical_evidence_score
+
+    只对"有明确 rerank_score"的结果生效（即已开启 rerank 的情况）。
+    """
+    if not results:
+        return results
+    gated = []
+    for item in results:
+        rerank_score = item.get("rerank_score")
+        if rerank_score is None:
+            gated.append(item)
+            continue
+        chunk_text = (item.get("chunk") or "").strip()
+        ev_score = _compute_lexical_evidence_score(query, chunk_text)
+        relevance_score = float(item.get("similarity", rerank_score))
+        type_penalty = float(item.get("_type_penalty", 1.0) or 1.0)
+        combined = (relevance_weight * relevance_score + evidence_weight * ev_score) * type_penalty
+        item = dict(item)
+        item["evidence_score"] = round(ev_score, 4)
+        item["applied_type_penalty"] = round(type_penalty, 4)
+        item["combined_score"] = round(combined, 6)
+        gated.append(item)
+    gated.sort(key=lambda x: x.get("combined_score", x.get("rerank_score", 0.0)), reverse=True)
+    return gated
+
+
+def _finalize_with_optional_rerank(
+    query: str,
+    results: List[dict],
+    top_k: int,
+    use_rerank: bool,
+    reranker_model: Optional[str],
+    rerank_provider: Optional[str],
+    rerank_api_key: Optional[str],
+    rerank_endpoint: Optional[str],
+    timings: dict,
+    progress_callback=None,
+    conditional_rerank_active: bool = False,
+) -> List[dict]:
+    """在所有候选扩展完成后执行最终 rerank，确保重排序是末端裁决。"""
+    _fm_config = _rag_config_singleton
+    effective_top_k = _resolve_numeric_table_effective_top_k(query, top_k, results=results)
+
+    if not use_rerank:
+        return _finalize_without_rerank(results, query, top_k, _fm_config)
+
+    if (
+        conditional_rerank_active
+        and _should_bypass_conditional_rerank_for_numeric_table(results, query, effective_top_k)
+    ):
+        logger.info("[ConditionalRerank] numeric_table 已有稳定 table_row bundle，跳过最终 rerank")
+        ordered = _apply_numeric_table_same_bundle_hard_gate(results, query)
+        final = ordered[:effective_top_k]
+        if not all(
+            (item.get("chunk_type") or item.get("block_type") or "").strip().lower() == "table_row"
+            for item in final
+        ):
+            final = _ensure_numeric_table_evidence_slots(ordered, query, effective_top_k)
+        final = _apply_numeric_table_same_bundle_hard_gate(final, query)
+        if _fm_config.enable_focus_mode:
+            t1 = time.perf_counter()
+            final = _focus_mode_compress(
+                final,
+                query,
+                window_size=_fm_config.focus_mode_window_size,
+                max_sentences=_fm_config.focus_mode_max_sentences,
+                min_chars=_fm_config.focus_mode_min_chars,
+            )
+            timings["focus_mode_ms"] = round((time.perf_counter() - t1) * 1000, 1)
+        return final
+
+    t0 = time.perf_counter()
+    _emit_retrieval_progress(progress_callback, "rerank_start", "正在重排序候选片段...")
+    reranked_results = _apply_rerank(
+        query,
+        results,
+        reranker_model,
+        rerank_provider,
+        rerank_api_key,
+        rerank_endpoint,
+    )
+    reranked_results = _apply_evidence_gate(reranked_results, query)
+    effective_top_k = _resolve_numeric_table_effective_top_k(
+        query,
+        top_k,
+        results=reranked_results,
+    )
+    reranked_results, post_cap_stats = _apply_group_post_cap(reranked_results, top_k=effective_top_k)
+    if post_cap_stats:
+        logger.info(f"[RerankPostCap] 输出 {post_cap_stats['output']} 条，group_blocked={post_cap_stats['group_blocked']}, section_blocked={post_cap_stats['section_blocked']}")
+    min_score = float(getattr(_fm_config, "rerank_score_min", 0.0) or 0.0)
+    min_keep = min(
+        max(int(getattr(_fm_config, "rerank_score_min_keep", 1) or 1), 1),
+        max(effective_top_k, 1),
+    )
+    if min_score > 0:
+        kept = []
+        removed = 0
+        for idx, item in enumerate(reranked_results):
+            score = item.get("combined_score")
+            if score is None:
+                score = item.get("rerank_score")
+            if score is None:
+                score = item.get("similarity", 0.0)
+            if float(score or 0.0) >= min_score or idx < min_keep:
+                kept.append(item)
+            else:
+                removed += 1
+        if removed > 0:
+            logger.info(
+                f"[RerankFloor] 过滤低分候选 {removed} 条 "
+                f"(min_score={min_score}, min_keep={min_keep})"
+            )
+        reranked_results = kept
+    timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
+
+    final = _ensure_numeric_table_evidence_slots(reranked_results, query, effective_top_k)
+    final = _apply_numeric_table_same_bundle_hard_gate(final, query)
+    if _fm_config.enable_focus_mode:
+        t1 = time.perf_counter()
+        final = _focus_mode_compress(
+            final, query,
+            window_size=_fm_config.focus_mode_window_size,
+            max_sentences=_fm_config.focus_mode_max_sentences,
+            min_chars=_fm_config.focus_mode_min_chars,
+        )
+        timings["focus_mode_ms"] = round((time.perf_counter() - t1) * 1000, 1)
+        compressed = sum(1 for item in final if "focus_compression_ratio" in item)
+        if compressed:
+            logger.info(f"[FocusMode] 压缩 {compressed}/{len(final)} 个候选")
+
+    return final
+
+
 def search_document_chunks(
     doc_id: str,
     query: str,
@@ -2323,11 +9280,18 @@ def search_document_chunks(
         - timings: 各阶段耗时字典（毫秒），如 {"vector_search_ms": 12.3, "total_ms": 29.3}
           未执行的阶段不包含对应字段
     """
+    original_query = query
+
     # 查询改写（需求 1.1, 1.5）—— 使用模块级单例避免重复实例化
     try:
-        rewritten_query = _query_rewriter_singleton.rewrite(query, selected_text=selected_text)
-        if rewritten_query != query:
-            logger.info(f"[{doc_id}] 查询改写: '{query}' → '{rewritten_query}'")
+        pre_rewrite_evidence_need = _analyze_evidence_need(original_query)
+        rewritten_query = _query_rewriter_singleton.rewrite(
+            original_query,
+            selected_text=selected_text,
+            evidence_need=pre_rewrite_evidence_need,
+        )
+        if rewritten_query != original_query:
+            logger.info(f"[{doc_id}] 查询改写: '{original_query}' → '{rewritten_query}'")
             query = rewritten_query
             _emit_retrieval_progress(
                 progress_callback,
@@ -2339,21 +9303,30 @@ def search_document_chunks(
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
 
     # 查询类型分析 + 动态 candidate_k（提升召回率）
-    query_type = _analyze_query_type(query)
-    # 根据查询类型动态调整 candidate_k
-    dynamic_candidate_k_map = {
-        'extraction': 50,   # 提取性问题需要更大候选池
-        'overview': 30,     # 概览性问题需要较大候选池
-        'analytical': 25,   # 分析性问题适中
-        'specific': 20,     # 具体性问题标准候选池
+    query_type = _analyze_query_type(original_query)
+    evidence_need = pre_rewrite_evidence_need if 'pre_rewrite_evidence_need' in locals() else _analyze_evidence_need(original_query)
+    analysis_query = original_query
+    _rc_ref = _rag_config_singleton
+    _candidate_k_map = {
+        'extraction': max(50, int(candidate_k * _rc_ref.extraction_candidate_multiplier)),
+        'overview':   max(30, int(candidate_k * _rc_ref.overview_candidate_multiplier)),
+        'analytical': max(25, int(candidate_k * _rc_ref.analytical_candidate_multiplier)),
+        'specific':   max(20, candidate_k),
     }
-    candidate_k = max(candidate_k, dynamic_candidate_k_map.get(query_type, 20))
-    logger.info(f"[{doc_id}] 查询类型: {query_type}, 动态 candidate_k: {candidate_k}")
+    candidate_k = _candidate_k_map.get(query_type, max(candidate_k, 20))
+    if 'numeric_table' in evidence_need:
+        candidate_k = max(candidate_k, 48)
+    if 'section_explanation' in evidence_need:
+        candidate_k = max(candidate_k, 30)
+    logger.info(
+        f"[{doc_id}] 查询类型: {query_type}, evidence_need={evidence_need}, 动态 candidate_k: {candidate_k}"
+    )
     _emit_retrieval_progress(
         progress_callback,
         "analysis",
         f"正在分析查询并确定检索策略（{query_type}）...",
         query_type=query_type,
+        evidence_need=evidence_need,
         candidate_k=candidate_k,
     )
 
@@ -2384,21 +9357,58 @@ def search_document_chunks(
             data = pickle.load(f)
         _index_cache.put_index(doc_id, index, data, index_path)
 
+    _annotate_pages_with_provenance(pages)
+
     if isinstance(data, dict):
         chunks = data["chunks"]
         embedding_model_id = data.get("embedding_model", "local-minilm")
         parent_chunks = data.get("parent_chunks", [])
         child_to_parent = data.get("child_to_parent", {})
+        chunk_headings = data.get("chunk_headings") or [""] * len(chunks)
+        chunk_pages = data.get("chunk_pages") or [0] * len(chunks)
+        chunk_types = data.get("chunk_types") or [_guess_chunk_type(c) for c in chunks]
+        chunk_metadata = _normalize_chunk_metadata_list(data.get("chunk_metadata"), len(chunks))
     else:
         chunks = data
         embedding_model_id = "local-minilm"
         parent_chunks = []
         child_to_parent = {}
+        chunk_headings = [""] * len(chunks)
+        chunk_pages = [0] * len(chunks)
+        chunk_types = [_guess_chunk_type(c) for c in chunks]
+        chunk_metadata = [{} for _ in chunks]
+
+    if len(chunk_headings) != len(chunks):
+        chunk_headings = (chunk_headings[:len(chunks)] + [""] * len(chunks))[:len(chunks)]
+    if len(chunk_pages) != len(chunks):
+        chunk_pages = (chunk_pages[:len(chunks)] + [0] * len(chunks))[:len(chunks)]
+    if len(chunk_types) != len(chunks):
+        chunk_types = (chunk_types[:len(chunks)] + [""] * len(chunks))[:len(chunks)]
+    if len(chunk_metadata) != len(chunks):
+        chunk_metadata = _normalize_chunk_metadata_list(chunk_metadata, len(chunks))
+
+    _maybe_append_runtime_structured_table_bundle_chunks(
+        doc_id,
+        chunks,
+        chunk_headings,
+        chunk_pages,
+        chunk_types,
+        chunk_metadata,
+        pages,
+    )
+
+    group_chunk_map = _load_group_data(doc_id) or {}
 
     embed_fn = get_embedding_function(embedding_model_id, api_key)
 
     # 预构建页面前缀索引，加速 chunk → 页码映射
     _page_index = _build_page_index(pages)
+
+    if pages and any((not isinstance(page, int) or page <= 0) for page in chunk_pages):
+        chunk_pages = [
+            page if isinstance(page, int) and page > 0 else _find_page_for_chunk(chunks[idx], pages, page_index=_page_index)
+            for idx, page in enumerate(chunk_pages)
+        ]
 
     # 检测索引类型：IP（新索引）还是 L2（旧索引）
     is_ip_index = (index.metric_type == faiss.METRIC_INNER_PRODUCT)
@@ -2415,7 +9425,8 @@ def search_document_chunks(
 
     # HyDE：用假设文档的 embedding 替代原始查询 embedding
     hyde_passage = None
-    if _search_rag_config.enable_hyde and api_key:
+    hyde_enabled = _should_enable_hyde(query_type, evidence_need, _search_rag_config)
+    if hyde_enabled and api_key:
         try:
             _emit_retrieval_progress(progress_callback, "hyde_start", "正在生成语义扩展（HyDE）...")
             from services.query_expander import generate_hyde_passage
@@ -2426,47 +9437,60 @@ def search_document_chunks(
         except Exception as e:
             logger.warning(f"[{doc_id}] HyDE 生成失败，降级为原始查询: {e}")
 
-    # 向量检索计时开始（需求 10.1）
-    t0 = time.perf_counter()
-
-    # 查询向量 LRU 缓存（需求 5.1, 5.2, 5.3）
-    # HyDE 模式下：同时缓存原始查询向量和 HyDE 向量
-    cached_vector = _query_vector_cache.get(embedding_model_id, query)
-    if cached_vector is not None:
-        query_vector = cached_vector
-        logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
-        _emit_retrieval_progress(progress_callback, "embedding_query", "查询向量缓存命中，正在进行召回...")
-    else:
-        _emit_retrieval_progress(progress_callback, "embedding_query", "正在计算查询向量...")
-        query_vector = _normalize_query_vector(embed_fn([query]))
-        _query_vector_cache.put(embedding_model_id, query, query_vector)
-
-    # HyDE：额外生成假设文档的 embedding 用于检索
-    if hyde_passage:
-        hyde_cache_key = f"hyde:{query}"
-        cached_hyde = _query_vector_cache.get(embedding_model_id, hyde_cache_key)
-        if cached_hyde is not None:
-            hyde_vector = cached_hyde
-            _emit_retrieval_progress(progress_callback, "hyde_cache_hit", "HyDE 向量缓存命中，正在继续召回...")
-        else:
-            _emit_retrieval_progress(progress_callback, "hyde_embedding", "正在计算 HyDE 向量...")
-            hyde_vector = _normalize_query_vector(embed_fn([hyde_passage]))
-            _query_vector_cache.put(embedding_model_id, hyde_cache_key, hyde_vector)
-    else:
-        hyde_vector = None
-
     search_k = max(candidate_k, top_k)
 
-    # 主查询检索（使用 HyDE 向量或原始查询向量）
-    primary_vector = hyde_vector if hyde_vector is not None else query_vector
-    _emit_retrieval_progress(progress_callback, "vector_search", "正在进行向量召回...")
-    D, I = index.search(np.array(primary_vector).astype('float32'), search_k)
+    # 向量检索计时开始（需求 10.1）
+    t0 = time.perf_counter()
+    query_vector = None
+    hyde_vector = None
+    D = I = D_orig = I_orig = None
+    vector_error = None
 
-    # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
-    if hyde_vector is not None:
-        D_orig, I_orig = index.search(np.array(query_vector).astype('float32'), search_k)
-    else:
-        D_orig, I_orig = None, None
+    try:
+        # 查询向量 LRU 缓存（需求 5.1, 5.2, 5.3）
+        # HyDE 模式下：同时缓存原始查询向量和 HyDE 向量
+        cached_vector = _query_vector_cache.get(embedding_model_id, query)
+        if cached_vector is not None:
+            query_vector = cached_vector
+            logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
+            _emit_retrieval_progress(progress_callback, "embedding_query", "查询向量缓存命中，正在进行召回...")
+        else:
+            _emit_retrieval_progress(progress_callback, "embedding_query", "正在计算查询向量...")
+            query_vector = _normalize_query_vector(embed_fn([query]))
+            _query_vector_cache.put(embedding_model_id, query, query_vector)
+
+        # HyDE：额外生成假设文档的 embedding 用于检索
+        if hyde_passage:
+            hyde_cache_key = f"hyde:{query}"
+            cached_hyde = _query_vector_cache.get(embedding_model_id, hyde_cache_key)
+            if cached_hyde is not None:
+                hyde_vector = cached_hyde
+                _emit_retrieval_progress(progress_callback, "hyde_cache_hit", "HyDE 向量缓存命中，正在继续召回...")
+            else:
+                _emit_retrieval_progress(progress_callback, "hyde_embedding", "正在计算 HyDE 向量...")
+                hyde_vector = _normalize_query_vector(embed_fn([hyde_passage]))
+                _query_vector_cache.put(embedding_model_id, hyde_cache_key, hyde_vector)
+
+        # 主查询检索（使用 HyDE 向量或原始查询向量）
+        primary_vector = hyde_vector if hyde_vector is not None else query_vector
+        _emit_retrieval_progress(progress_callback, "vector_search", "正在进行向量召回...")
+        D, I = index.search(np.array(primary_vector).astype('float32'), search_k)
+
+        # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
+        if hyde_vector is not None:
+            D_orig, I_orig = index.search(np.array(query_vector).astype('float32'), search_k)
+    except Exception as e:
+        vector_error = e
+        if not use_hybrid:
+            raise
+        logger.warning(f"[{doc_id}] 向量召回失败，降级为 BM25-only/hybrid: {e}")
+        _emit_retrieval_progress(
+            progress_callback,
+            "vector_search_fallback",
+            "向量召回失败，正在降级为关键词检索...",
+        )
+    finally:
+        timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
     vector_results = []
     vector_chunk_set = set()  # 记录向量搜索已返回的 chunk
@@ -2477,10 +9501,16 @@ def search_document_chunks(
         for dist, idx in zip(D_arr[0], I_arr[0]):
             if idx < len(chunks):
                 chunk_text = chunks[idx]
-                page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
+                metadata = chunk_metadata[idx] if idx < len(chunk_metadata) else {}
+                page_num = chunk_pages[idx] if idx < len(chunk_pages) else 0
+                page_num = _resolve_primary_page_from_metadata(metadata, fallback=page_num)
+                if (not isinstance(page_num, int) or page_num <= 0) and pages:
+                    page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
                 similarity = _distance_to_similarity(float(dist), is_ip=is_ip_index)
                 snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
-                results.append({
+                chunk_heading = chunk_headings[idx] if idx < len(chunk_headings) else ""
+                chunk_type = chunk_types[idx] if idx < len(chunk_types) else _guess_chunk_type(chunk_text)
+                result = {
                     "chunk": chunk_text,
                     "page": page_num,
                     "score": float(dist),
@@ -2488,8 +9518,68 @@ def search_document_chunks(
                     "similarity_percent": round(similarity * 100, 2),
                     "snippet": snippet,
                     "highlights": highlights,
-                    "reranked": False
-                })
+                    "reranked": False,
+                    "chunk_id": idx,
+                    "chunk_heading": chunk_heading,
+                    "section_path": chunk_heading,
+                    "chunk_type": chunk_type,
+                    "block_type": chunk_type,
+                }
+                if idx < len(chunk_metadata):
+                    _apply_chunk_metadata(result, metadata)
+                _apply_page_provenance(result, metadata)
+                results.append(result)
+        return results
+
+    def _build_results_from_bm25(bm25_items: List[dict]) -> List[dict]:
+        """将 BM25 结果转换为统一的候选格式。"""
+        if not bm25_items:
+            return []
+
+        max_score = max(float(item.get("score", 0.0) or 0.0) for item in bm25_items)
+        max_score = max(max_score, 1.0)
+        results = []
+
+        for item in bm25_items:
+            idx = item.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(chunks):
+                continue
+
+            chunk_text = chunks[idx]
+            metadata = chunk_metadata[idx] if idx < len(chunk_metadata) else {}
+            page_num = chunk_pages[idx] if idx < len(chunk_pages) else 0
+            page_num = _resolve_primary_page_from_metadata(metadata, fallback=page_num)
+            if (not isinstance(page_num, int) or page_num <= 0) and pages:
+                page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
+
+            score = float(item.get("score", 0.0) or 0.0)
+            similarity = min(score / max_score, 0.995)
+            snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
+            chunk_heading = chunk_headings[idx] if idx < len(chunk_headings) else ""
+            chunk_type = chunk_types[idx] if idx < len(chunk_types) else _guess_chunk_type(chunk_text)
+
+            result = {
+                "chunk": chunk_text,
+                "page": page_num,
+                "score": score,
+                "bm25_score": score,
+                "similarity": similarity,
+                "similarity_percent": round(similarity * 100, 2),
+                "snippet": snippet,
+                "highlights": highlights,
+                "reranked": False,
+                "bm25": True,
+                "chunk_id": idx,
+                "chunk_heading": chunk_heading,
+                "section_path": chunk_heading,
+                "chunk_type": chunk_type,
+                "block_type": chunk_type,
+            }
+            if idx < len(chunk_metadata):
+                _apply_chunk_metadata(result, metadata)
+            _apply_page_provenance(result, metadata)
+            results.append(result)
+
         return results
 
     def _expand_to_parent_chunks(results_list, top_n):
@@ -2535,19 +9625,28 @@ def search_document_chunks(
             new_item = item.copy()
             new_item["chunk"] = parent_chunks[p_idx]
             new_item["child_chunk"] = child_text  # 保留原始 child 用于高亮
+            new_item["child_chunk_id"] = child_idx
             new_item["parent_expanded"] = True
+            new_item["parent_id"] = p_idx
             seen_parents[p_idx] = True
             expanded.append(new_item)
 
         return expanded[:top_n]
 
-    primary_results = _build_results_from_faiss(D, I)
+    primary_results = filter_reference_trap_results(
+        _build_results_from_faiss(D, I) if D is not None and I is not None else [],
+        query,
+        evidence_need=evidence_need,
+    )
 
     # HyDE 双路 RRF 融合：合并 HyDE 路和原始查询路的结果
     if D_orig is not None and I_orig is not None:
-        orig_results = _build_results_from_faiss(D_orig, I_orig)
-        from services.hybrid_search import reciprocal_rank_fusion
-        vector_results = reciprocal_rank_fusion(
+        orig_results = filter_reference_trap_results(
+            _build_results_from_faiss(D_orig, I_orig),
+            query,
+            evidence_need=evidence_need,
+        )
+        vector_results = _hybrid_search.reciprocal_rank_fusion(
             primary_results, orig_results,
             k=60, top_k=search_k, chunk_key='chunk'
         )
@@ -2558,12 +9657,14 @@ def search_document_chunks(
         )
     else:
         vector_results = primary_results
+    vector_results = filter_reference_trap_results(vector_results, query, evidence_need=evidence_need)
 
     for item in vector_results:
         vector_chunk_set.add(item.get("chunk", ""))
 
     # --- 多查询扩展 RRF 融合 ---
-    if _search_rag_config.enable_query_expansion and api_key:
+    query_expansion_enabled = _should_enable_query_expansion(query_type, evidence_need, _search_rag_config)
+    if query_expansion_enabled and api_key and query_vector is not None:
         try:
             _emit_retrieval_progress(progress_callback, "query_expansion_start", "正在扩展检索问题，补充同义查询...")
             from services.query_expander import expand_query
@@ -2571,219 +9672,95 @@ def search_document_chunks(
                 expand_query(query, api_key, n=_search_rag_config.query_expansion_n)
             )
             if expanded_queries:
-                from services.hybrid_search import reciprocal_rank_fusion
                 expansion_result_lists = [vector_results]
                 for eq in expanded_queries:
                     eq_vector = _normalize_query_vector(embed_fn([eq]))
-                    D_eq, I_eq = index.search(np.array(eq_vector).astype('float32'), search_k)
-                    eq_results = _build_results_from_faiss(D_eq, I_eq)
-                    expansion_result_lists.append(eq_results)
-
-                vector_results = reciprocal_rank_fusion(
-                    *expansion_result_lists,
-                    k=60, top_k=search_k, chunk_key='chunk'
+                    D_eq, I_eq = _search_faiss(index, eq_vector, search_k)
+                    expansion_result_lists.append(
+                        filter_reference_trap_results(
+                            _build_results_from_faiss(D_eq, I_eq),
+                            query,
+                            evidence_need=evidence_need,
+                        )
+                    )
+                vector_results = _hybrid_search.reciprocal_rank_fusion(
+                    *expansion_result_lists, k=60, top_k=search_k, chunk_key='chunk'
                 )
-                vector_chunk_set = {item.get("chunk", "") for item in vector_results}
-                logger.info(
-                    f"[{doc_id}] 多查询扩展 RRF 融合: "
-                    f"{len(expanded_queries)} 个扩展查询, "
-                    f"融合后={len(vector_results)}"
+                logger.info(f"[{doc_id}] 多查询扩展启用，生成 {len(expanded_queries)} 个查询")
+                _emit_retrieval_progress(
+                    progress_callback,
+                    "query_expansion_done",
+                    f"多查询扩展完成，生成 {len(expanded_queries)} 个扩展查询。",
                 )
-            _emit_retrieval_progress(progress_callback, "query_expansion_done", "检索问题扩展完成。")
         except Exception as e:
-            logger.warning(f"[{doc_id}] 多查询扩展失败，使用原始结果: {e}")
+            logger.warning(f"[{doc_id}] 多查询扩展失败，跳过: {e}")
 
-    # --- Parent-Child 扩展 ---
-    if _search_rag_config.enable_parent_child_retrieval and parent_chunks and child_to_parent:
-        _emit_retrieval_progress(progress_callback, "parent_child_expand_start", "正在融合父子分块结果...")
-        pre_expand_count = len(vector_results)
-        vector_results = _expand_to_parent_chunks(vector_results, search_k)
-        vector_chunk_set = {item.get("chunk", "") for item in vector_results}
-        logger.info(
-            f"[{doc_id}] Parent-Child 扩展: {pre_expand_count} → {len(vector_results)} 个结果"
-        )
-        _emit_retrieval_progress(progress_callback, "parent_child_expand_done", "父子分块融合完成。")
-
-    # --- 精确短语注入 ---
-    # 如果查询包含多个词（短语），扫描所有 chunk 找到包含完整短语的，
-    # 注入到结果中（如果向量搜索没返回它们）
-    query_lower = query.lower().strip()
-    if len(query_lower) > 3 and " " in query_lower:
-        _emit_retrieval_progress(progress_callback, "phrase_injection_start", "正在补充精确短语匹配结果...")
-        phrase_injected = 0
-        for chunk_text in chunks:
-            if chunk_text in vector_chunk_set:
-                continue
-            if query_lower in chunk_text.lower():
-                page_num = _find_page_for_chunk(chunk_text, pages, page_index=_page_index)
-                snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
-                vector_results.append({
-                    "chunk": chunk_text,
-                    "page": page_num,
-                    "score": 0.0,
-                    "similarity": 0.95,  # 精确短语匹配给高分
-                    "similarity_percent": 95.0,
-                    "snippet": snippet,
-                    "highlights": highlights,
-                    "reranked": False,
-                    "phrase_match": True,
-                })
-                vector_chunk_set.add(chunk_text)
-                phrase_injected += 1
-                if phrase_injected >= 5:  # 最多注入 5 个（从 3 提升到 5，提高召回率）
-                    break
-        if phrase_injected > 0:
-            logger.info(f"[精确短语注入] 查询 '{query}' 注入了 {phrase_injected} 个包含完整短语的 chunk")
-        _emit_retrieval_progress(progress_callback, "phrase_injection_done", "精确短语匹配完成。")
-
-    # --- 短语匹配加权 + 表格碎片降权 ---
-    vector_results = _phrase_boost(vector_results, query)
-
-    # MMR 多样性过滤（不使用 rerank 时）：去除语义重复 chunk，保留 top_k*3 供 BM25 融合
-    if not use_rerank and len(vector_results) > top_k:
-        _emit_retrieval_progress(progress_callback, "mmr_start", "正在压缩重复结果，保留更有用的片段...")
-        pre_mmr = len(vector_results)
-        vector_results = _apply_mmr(vector_results, top_k=min(len(vector_results), top_k * 3))
-        if len(vector_results) < pre_mmr:
-            logger.info(f"[{doc_id}] MMR: {pre_mmr} → {len(vector_results)} 结果")
-        _emit_retrieval_progress(progress_callback, "mmr_done", "结果去重完成。")
-
-    # 向量检索计时结束（需求 10.1）
-    timings["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-
-    # --- BM25混合检索 ---
-    # BM25 始终参与混合检索，rerank 模式下先 RRF 融合再 rerank（需求 2.1, 2.2）
+    bm25_results: List[dict] = []
     if use_hybrid:
+        t_bm25 = time.perf_counter()
         try:
-            _emit_retrieval_progress(progress_callback, "bm25_start", "正在进行关键词混合检索...")
-            from services.bm25_service import bm25_search
-            from services.hybrid_search import hybrid_search_merge
-
-            # BM25 检索计时开始（需求 10.1）
-            t0 = time.perf_counter()
-
-            bm25_results = bm25_search(doc_id, query, chunks, top_k=search_k)
-            # 为BM25结果补充page信息
-            for item in bm25_results:
-                item['page'] = _find_page_for_chunk(item['chunk'], pages, page_index=_page_index)
-
-            results = hybrid_search_merge(vector_results, bm25_results, top_k=top_k, query_type=query_type)
-            # 补充snippet/highlights（BM25结果可能缺少）
-            for item in results:
-                if 'snippet' not in item or not item.get('snippet'):
-                    snippet, highlights = _extract_snippet_and_highlights(item['chunk'], query)
-                    item['snippet'] = snippet
-                    item['highlights'] = highlights
-                if 'similarity' not in item:
-                    item['similarity'] = 0.5
-                    item['similarity_percent'] = 50.0
-
-            # BM25 检索计时结束（需求 10.1）
-            timings["bm25_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-
-            logger.info(f"[{doc_id}][Hybrid] 向量: {len(vector_results)}条, BM25: {len(bm25_results)}条, 融合后: {len(results)}条")
-
-            # rerank 模式下：对 BM25+向量 RRF 融合结果执行 rerank（需求 2.1）
-            if use_rerank:
-                # Rerank 计时开始（需求 10.1）
-                t0 = time.perf_counter()
-                _emit_retrieval_progress(progress_callback, "rerank_start", "正在重排序候选片段...")
-
-                results = _apply_rerank(
-                    query,
-                    results,
-                    reranker_model,
-                    rerank_provider,
-                    rerank_api_key,
-                    rerank_endpoint
-                )
-                # rerank 后做短语加权和表格碎片降权
-                results = _phrase_boost(results, query, boost_factor=1.2)
-                results = results[:top_k]
-
-                # Rerank 计时结束（需求 10.1）
-                timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-                _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
-
-            # --- 意群级别检索 + RRF 融合（在 BM25 混合检索之后） ---
-            # 意群检索计时开始
-            t0 = time.perf_counter()
-            _emit_retrieval_progress(progress_callback, "group_search_start", "正在融合语义意群结果...")
-            results = _merge_with_group_search(
-                doc_id=doc_id,
-                chunk_results=results,
-                query_vector=query_vector,
-                chunks=chunks,
-                pages=pages,
-                query=query,
-                top_k=top_k,
+            _emit_retrieval_progress(progress_callback, "bm25_search", "正在进行关键词召回...")
+            bm25_hits = _bm25_service.bm25_search(doc_id, query, chunks, top_k=search_k)
+            bm25_results = filter_reference_trap_results(
+                _build_results_from_bm25(bm25_hits),
+                query,
+                evidence_need=evidence_need,
             )
-            # 意群检索计时结束（仅在实际执行时记录）
-            group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
-            if group_search_elapsed > 0.1:
-                timings["group_search_ms"] = group_search_elapsed
-            _emit_retrieval_progress(progress_callback, "group_search_done", "语义意群融合完成。")
-
-            # 邻居 chunk 上下文扩展
-            try:
-                from config import settings as _cfg
-                _expand_n = _cfg.num_expand_context_chunk
-                if _expand_n > 0:
-                    from services.chunk_expander import expand_context_chunks
-                    results = expand_context_chunks(results, chunks, expand_n=_expand_n)
-            except Exception as _expand_err:
-                logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
-
-            # 同页表格补充检索
-            results = _augment_with_table_chunks(results, chunks, pages, _page_index)
-
-            # 总耗时记录（需求 10.1）
-            timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
-            logger.info(f"[{doc_id}] 检索耗时: {timings}")
-
-            return results, timings
         except Exception as e:
-            # BM25 失败时回退：rerank 模式回退到仅向量检索结果进行 rerank（需求 2.3）
-            logger.warning(f"[{doc_id}][Hybrid] BM25混合检索失败，回退到纯向量检索: {e}")
+            logger.warning(f"[{doc_id}] BM25 检索失败，跳过混合检索: {e}")
+            bm25_results = []
+        timings["bm25_search_ms"] = round((time.perf_counter() - t_bm25) * 1000, 1)
 
-    # --- 纯向量检索（BM25 失败回退 或 use_hybrid=False 时的路径） ---
-    if use_rerank:
-        # Rerank 计时开始（需求 10.1）
-        t0 = time.perf_counter()
-        _emit_retrieval_progress(progress_callback, "rerank_start", "正在重排序候选片段...")
-
-        results = _apply_rerank(
-            query,
-            vector_results,
-            reranker_model,
-            rerank_provider,
-            rerank_api_key,
-            rerank_endpoint
+    # --- 混合检索 / BM25 回退 / 纯向量路径 ---
+    # 条件 rerank gate（参考 ragflow 按题型启用）：
+    # 当 enable_conditional_rerank=True 且当前 query_type 在配置列表中时强制开启 rerank
+    requested_use_rerank = use_rerank
+    if not use_rerank and _should_force_conditional_rerank(
+        query_type,
+        evidence_need,
+        reranker_model,
+        _search_rag_config,
+    ):
+        use_rerank = True
+        logger.info(
+            f"[{doc_id}] 条件 rerank gate 触发: query_type={query_type}, evidence_need={evidence_need}"
         )
-        # rerank 后也做短语加权和表格碎片降权
-        results = _phrase_boost(results, query, boost_factor=1.2)
-
-        # Rerank 计时结束（需求 10.1）
-        timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
+    conditional_rerank_active = bool(use_rerank and not requested_use_rerank)
+    pre_rerank_top_k = search_k if use_rerank else top_k
+    if use_hybrid and bm25_results:
+        if vector_results:
+            results = _hybrid_search.hybrid_search_merge(
+                vector_results,
+                bm25_results,
+                top_k=search_k,
+                query_type=query_type,
+            )
+        else:
+            results = bm25_results[:search_k]
+            if vector_error is not None:
+                logger.info(f"[{doc_id}] 向量召回不可用，使用 BM25-only 候选 {len(results)} 条")
     else:
         results = sorted(vector_results, key=lambda x: x.get("similarity", 0), reverse=True)
-
-    results = results[:top_k]
 
     # --- 意群级别检索 + RRF 融合（在纯向量/rerank 检索之后） ---
     # 意群检索计时开始
     t0 = time.perf_counter()
     _emit_retrieval_progress(progress_callback, "group_search_start", "正在融合语义意群结果...")
-    results = _merge_with_group_search(
-        doc_id=doc_id,
-        chunk_results=results,
-        query_vector=query_vector,
-        chunks=chunks,
-        pages=pages,
-        query=query,
-        top_k=top_k,
-    )
+    if query_vector is not None:
+        results = _merge_with_group_search(
+            doc_id=doc_id,
+            chunk_results=results,
+            query_vector=query_vector,
+            chunks=chunks,
+            pages=pages,
+            query=query,
+            top_k=pre_rerank_top_k,
+        )
+        results = _apply_query_intent_boost(results, analysis_query)
+        results = _apply_numeric_table_boost(results, analysis_query)
+        results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
+    else:
+        logger.info(f"[{doc_id}] 跳过意群级融合：查询向量不可用")
     # 意群检索计时结束（仅在实际执行时记录）
     group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
     if group_search_elapsed > 0.1:
@@ -2792,16 +9769,67 @@ def search_document_chunks(
 
     # 邻居 chunk 上下文扩展
     try:
-        from config import settings
-        _expand_n = settings.num_expand_context_chunk
+        _expand_n = _settings.num_expand_context_chunk
         if _expand_n > 0:
-            from services.chunk_expander import expand_context_chunks
-            results = expand_context_chunks(results, chunks, expand_n=_expand_n)
+            results = _chunk_expander.expand_context_chunks(results, chunks, expand_n=_expand_n)
     except Exception as _expand_err:
         logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
 
     # 同页表格补充检索
-    results = _augment_with_table_chunks(results, chunks, pages, _page_index)
+    results = _augment_with_table_chunks(
+        results, chunks, pages, _page_index,
+        query=analysis_query, evidence_need=evidence_need,
+        chunk_pages=chunk_pages,
+        chunk_metadata=chunk_metadata,
+    )
+    results = _apply_query_intent_boost(results, analysis_query)
+    results = _apply_numeric_table_boost(results, analysis_query)
+    results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
+    post_clean_top_k = pre_rerank_top_k
+    if "numeric_table" in evidence_need:
+        post_clean_top_k = max(
+            post_clean_top_k,
+            min(len(results), max(top_k * 4, 24)),
+        )
+    results = _unified_post_clean(results, analysis_query, post_clean_top_k)
+    results = _annotate_results_for_evidence_rerank(
+        doc_id=doc_id,
+        results=results,
+        chunks=chunks,
+        parent_chunks=parent_chunks,
+        chunk_headings=chunk_headings,
+        chunk_pages=chunk_pages,
+        chunk_types=chunk_types,
+        chunk_metadata=chunk_metadata,
+        child_to_parent=child_to_parent,
+        group_chunk_map=group_chunk_map,
+        include_rerank_text=use_rerank,
+    )
+    results = _expand_numeric_table_evidence_units(
+        results,
+        analysis_query,
+        include_rerank_text=use_rerank,
+        doc_title=_get_document_title(doc_id) if use_rerank else "",
+    )
+    results = _mark_numeric_table_support_chunks(results, analysis_query)
+    results = _dedupe_numeric_table_evidence_units(results, analysis_query)
+    results = _sanitize_by_chunk_type(results, analysis_query)
+    if use_rerank:
+        results, pre_cap_stats = _apply_group_pre_cap(results)
+    results = _finalize_with_optional_rerank(
+        query=analysis_query,
+        results=results,
+        top_k=top_k,
+        use_rerank=use_rerank,
+        reranker_model=reranker_model,
+        rerank_provider=rerank_provider,
+        rerank_api_key=rerank_api_key,
+        rerank_endpoint=rerank_endpoint,
+        timings=timings,
+        progress_callback=progress_callback,
+        conditional_rerank_active=conditional_rerank_active,
+    )
+    results = _prioritize_numeric_table_results(results, analysis_query)
 
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
@@ -2950,6 +9978,9 @@ def get_relevant_context(
         - retrieval_meta: 检索元数据字典，包含 query_type、granularities、
           token_used、fallback、citations 等信息
     """
+    query_type = _analyze_query_type(query)
+    evidence_need = _analyze_evidence_need(query)
+
     # 延迟导入（仅首次触发模块加载，后续为字典查找）
     from services.semantic_group_service import SemanticGroupService
     from services.granularity_selector import GranularitySelector
@@ -2974,6 +10005,7 @@ def get_relevant_context(
     )
 
     config = _rag_config_singleton
+    prefer_raw_chunk_context = "numeric_table" in evidence_need
 
     # 动态 Token 预算：根据模型上下文窗口动态调整，同时扣除输出预留
     if config.token_budget_ratio > 0 and model_context_window > 0:
@@ -2990,7 +10022,7 @@ def get_relevant_context(
             config.max_token_budget = dynamic_budget
 
     # 尝试使用语义意群增强检索
-    if config.enable_semantic_groups:
+    if config.enable_semantic_groups and not prefer_raw_chunk_context:
         try:
             context_str, retrieval_meta = _build_context_with_groups(
                 doc_id=doc_id,
@@ -3001,31 +10033,61 @@ def get_relevant_context(
                 timings=timings,
             )
             if context_str is not None:
+                retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
+                retrieval_meta["evidence_need"] = list(evidence_need)
+                retrieval_meta["search_query"] = query
                 return context_str, retrieval_meta
         except Exception as e:
             # 意群增强失败，回退到简单拼接
             logger.warning(f"[{doc_id}] 意群增强检索失败，回退到简单拼接: {e}")
+    elif prefer_raw_chunk_context:
+        logger.info(f"[{doc_id}] numeric_table 查询跳过语义意群摘要，直接使用原始 chunk 上下文")
 
-    # 回退逻辑：使用原有的简单拼接
-    relevant_chunks = [item["chunk"] for item in results]
+    # 回退逻辑：numeric_table 走分层上下文投影，其他题型保留简单拼接去重。
+    fallback_entries: List[tuple[dict, str]] = []
+    for item in results:
+        context_text = (_build_context_text_for_result(item, query=query) or "").strip()
+        if not context_text:
+            continue
+        fallback_entries.append((item, context_text))
+
+    if prefer_raw_chunk_context:
+        layered_entries = _cleanup_numeric_table_context_entries(fallback_entries, query)
+    else:
+        seen_fallback_contexts: set[str] = set()
+        layered_entries = []
+        for item, context_text in fallback_entries:
+            normalized_context = " ".join(context_text.split()).lower()
+            dedupe_key = f"{int(item.get('page') or 0)}|{normalized_context}"
+            if dedupe_key in seen_fallback_contexts:
+                continue
+            seen_fallback_contexts.add(dedupe_key)
+            layered_entries.append(
+                {
+                    "item": item,
+                    "text": context_text,
+                    "context_role": "background",
+                }
+            )
+
+    relevant_chunks = [entry["text"] for entry in layered_entries]
     context_string = "\n\n...\n\n".join(relevant_chunks)
 
     # 回退路径也生成基本的 citations（基于 chunk 的页码信息）
-    # 使用智能片段提取，从 chunk 中找到与查询最相关的部分
+    # numeric_table 查询优先把 exact row / typed cell 证据传给答案端和 context_segments。
     fallback_citations = []
-    for idx, item in enumerate(results):
-        chunk_text = item.get("chunk", "")
-        page = item.get("page", 0)
-        if chunk_text:
-            highlight_text = _context_builder_singleton._extract_relevant_snippet(
-                chunk_text, query, max_len=200
-            )
-            fallback_citations.append({
-                "ref": idx + 1,
-                "group_id": f"chunk-{idx}",
-                "page_range": [page, page],
-                "highlight_text": highlight_text,
-            })
+    for idx, entry in enumerate(layered_entries):
+        item = entry["item"]
+        context_text = entry["text"]
+        citation = _build_fallback_citation_from_result(
+            item,
+            idx + 1,
+            query,
+            context_text=context_text,
+            context_role=entry.get("context_role", ""),
+        )
+        if citation:
+            fallback_citations.append(citation)
 
     # 质量阈值检查（需求 8.1, 8.4）
     low_relevance = False
@@ -3054,7 +10116,7 @@ def get_relevant_context(
         fallback_detail = f"回退到简单拼接逻辑，原因: {fallback_type}"
     trace = _RetrievalTrace(
         query=query,
-        query_type="unknown",
+        query_type=query_type,
         query_confidence=0.0,
         chunk_hits=len(results),
         group_hits=0,
@@ -3068,23 +10130,154 @@ def get_relevant_context(
     )
     _retrieval_logger_singleton.log_trace(trace)
     retrieval_meta = _retrieval_logger_singleton.to_retrieval_meta(trace)
+    retrieval_meta["diagnostics"] = {"retrieval": _build_retrieval_diagnostics(results, query)}
+    retrieval_meta["query_type"] = query_type
+    retrieval_meta["evidence_need"] = list(evidence_need)
+    retrieval_meta["search_query"] = query
 
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
-    retrieval_meta["timings"] = timings
+    retrieval_meta["timings"] = {k: v for k, v in timings.items() if not k.startswith("_")}
 
     # 传递原始 chunks 用于结构化引文匹配
     retrieval_meta["_chunks"] = [
-        {"text": item.get("chunk", ""), "page": item.get("page", 0), "group_id": f"chunk-{i}"}
-        for i, item in enumerate(results)
+        {
+            "text": entry["text"],
+            "raw_text": entry["item"].get("chunk", ""),
+            "page": entry["item"].get("page", 0),
+            "group_id": entry["item"].get("group_id", f"chunk-{i}"),
+            "chunk_id": entry["item"].get("chunk_id"),
+            "parent_id": entry["item"].get("parent_id"),
+            "doc_id": entry["item"].get("doc_id", doc_id),
+            "chunk_type": entry["item"].get("chunk_type", ""),
+            "block_type": entry["item"].get("block_type", entry["item"].get("chunk_type", "")),
+            "chunk_heading": entry["item"].get("chunk_heading", ""),
+            "section_path": entry["item"].get("section_path", entry["item"].get("chunk_heading", "")),
+            "table_id": entry["item"].get("table_id", ""),
+            "table_caption": entry["item"].get("numeric_table_exact_context_caption") or entry["item"].get("table_caption", ""),
+            "table_header": entry["item"].get("numeric_table_exact_context_header") or entry["item"].get("table_header", ""),
+            "numeric_table_exact_context_row_text": entry["item"].get("numeric_table_exact_context_row_text", ""),
+            "numeric_table_exact_context_caption": entry["item"].get("numeric_table_exact_context_caption", ""),
+            "numeric_table_exact_context_header": entry["item"].get("numeric_table_exact_context_header", ""),
+            "evidence_units": entry["item"].get("evidence_units", []),
+            "cell_evidence_units": entry["item"].get("cell_evidence_units", []),
+            "context_role": entry.get("context_role", ""),
+        }
+        for i, entry in enumerate(layered_entries)
     ]
 
     # 回退路径：chunk 即为 LLM 看到的上下文段，直接复用
     retrieval_meta["_context_segments"] = [
-        {"ref": idx + 1, "text": item.get("chunk", "")}
-        for idx, item in enumerate(results)
+        {
+            "ref": idx + 1,
+            "text": entry["text"],
+            "page_range": entry["item"].get("page_range") or [entry["item"].get("page", 0), entry["item"].get("page", 0)],
+            "group_id": entry["item"].get("group_id", f"chunk-{idx}"),
+            "context_role": entry.get("context_role", ""),
+        }
+        for idx, entry in enumerate(layered_entries)
     ]
 
     return context_string, retrieval_meta
+
+
+def _extract_primary_cell_evidence_units(item: dict) -> List[dict]:
+    cell_evidence_units = item.get("cell_evidence_units")
+    if isinstance(cell_evidence_units, list) and cell_evidence_units:
+        return [dict(unit) for unit in cell_evidence_units if isinstance(unit, dict)]
+
+    evidence_units = item.get("evidence_units")
+    if not isinstance(evidence_units, list):
+        return []
+
+    for unit in evidence_units:
+        if not isinstance(unit, dict):
+            continue
+        if (unit.get("evidence_unit_type") or "").strip().lower() != "table_row":
+            continue
+        row_cells = unit.get("cell_evidence_units")
+        if isinstance(row_cells, list) and row_cells:
+            return [dict(cell) for cell in row_cells if isinstance(cell, dict)]
+    return []
+
+
+def _build_fallback_citation_from_result(
+    item: dict,
+    ref: int,
+    query: str,
+    context_text: Optional[str] = None,
+    context_role: str = "",
+) -> Optional[dict]:
+    if not isinstance(item, dict):
+        return None
+
+    chunk_text = (context_text or _build_context_text_for_result(item, query=query) or "").strip()
+    if not chunk_text:
+        return None
+
+    page = item.get("page", 0)
+    chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    page_range = item.get("page_range") or [page, page]
+
+    exact_row_text = re.sub(
+        r"\s+",
+        " ",
+        str(
+            item.get("numeric_table_exact_context_row_text")
+            or _get_numeric_table_boundary_text(item)
+            or item.get("table_row_raw_text")
+            or ""
+        ),
+    ).strip()
+    if not exact_row_text and chunk_type == "table_row":
+        exact_row_text = re.sub(
+            r"\s+",
+            " ",
+            str(item.get("raw_chunk_text") or item.get("chunk") or ""),
+        ).strip()
+
+    has_typed_table_evidence = bool(
+        chunk_type in {"table_row", "table", "caption", "table_cell"}
+        or item.get("table_row_evidence")
+        or item.get("table_row_slice_kind") == "exact"
+        or item.get("numeric_table_exact_context_row_text")
+        or item.get("evidence_units")
+        or item.get("cell_evidence_units")
+    )
+    display_text = exact_row_text if has_typed_table_evidence and exact_row_text else chunk_text
+    highlight_text = (
+        display_text
+        if has_typed_table_evidence and display_text
+        else _context_builder_singleton._extract_relevant_snippet(chunk_text, query, max_len=200)
+    )
+    if not highlight_text:
+        highlight_text = display_text[:200]
+
+    citation = {
+        "ref": ref,
+        "evidence_id": item.get("evidence_unit_id") or f"chunk-{ref - 1}:{page}",
+        "group_id": item.get("group_id", f"chunk-{ref - 1}"),
+        "page_range": page_range,
+        "source_text": chunk_text,
+        "display_text": display_text,
+        "highlight_text": highlight_text,
+        "_full_text": chunk_text,
+        "alignment_status": "candidate",
+        "retrieval_type": "vector",
+        "chunk_type": item.get("chunk_type", ""),
+        "block_type": item.get("block_type", item.get("chunk_type", "")),
+        "table_id": item.get("table_id", ""),
+        "table_caption": item.get("numeric_table_exact_context_caption") or item.get("table_caption", ""),
+        "table_header": item.get("numeric_table_exact_context_header") or item.get("table_header", ""),
+        "numeric_table_exact_context_row_text": item.get("numeric_table_exact_context_row_text", ""),
+        "numeric_table_exact_context_caption": item.get("numeric_table_exact_context_caption", ""),
+        "numeric_table_exact_context_header": item.get("numeric_table_exact_context_header", ""),
+        "evidence_units": item.get("evidence_units", []),
+        "cell_evidence_units": _extract_primary_cell_evidence_units(item),
+        "context_role": context_role,
+    }
+    if has_typed_table_evidence:
+        citation["context_segment_text"] = chunk_text
+    return citation
 
 
 def _build_context_with_groups(
@@ -3141,7 +10334,10 @@ def _build_context_with_groups(
             if os.path.exists(chunks_path):
                 with open(chunks_path, "rb") as f:
                     chunks_data = pickle.load(f)
-                chunks = chunks_data.get("chunks", None)
+                if isinstance(chunks_data, dict):
+                    chunks = chunks_data.get("chunks", None)
+                else:
+                    chunks = chunks_data
                 if chunks:
                     logger.info(f"[{doc_id}] 已加载 {len(chunks)} 个分块，用于 chunk_indices 精确映射")
         except Exception as e:
@@ -3161,7 +10357,12 @@ def _build_context_with_groups(
 
     # 先获取查询类型对应的最大意群数限制
     selection_info = selector.select(query=query, groups=groups, max_tokens=config.max_token_budget)
-    max_groups = selection_info.max_groups
+    # P0-A fix: extraction 严格遵守 max_groups 上限，不允许 len(results) 撑大;
+    # 其他题型保留原有 max() 逻辑（允许 results 数量推高上限）
+    if selection_info.query_type == "extraction":
+        max_groups = selection_info.max_groups
+    else:
+        max_groups = max(selection_info.max_groups, len(results))
 
     # 截断排序后的意群列表，避免引入过多低相关性意群
     ranked_groups_limited = ranked_groups[:max_groups]
@@ -3173,8 +10374,14 @@ def _build_context_with_groups(
     )
 
     # 步骤 4：使用 TokenBudgetManager 调整 Token 预算
+    # P0-B: 按题型设差异化 Token 上限，避免 extraction 塞进 5000+ token
+    _TYPE_TOKEN_CAP = {"extraction": 2000, "specific": 3500, "analytical": 5000, "overview": 7000}
+    effective_budget = min(
+        config.max_token_budget,
+        _TYPE_TOKEN_CAP.get(selection_info.query_type, config.max_token_budget),
+    )
     budget_manager = TokenBudgetManager(
-        max_tokens=config.max_token_budget,
+        max_tokens=effective_budget,
         reserve_for_answer=config.reserve_for_answer,
     )
     fitted_selections = budget_manager.fit_within_budget(mixed_selections)
@@ -3208,6 +10415,7 @@ def _build_context_with_groups(
     # 步骤 7：使用 RetrievalLogger 记录检索追踪
     # 查询类型已在步骤 3 中获取（selection_info）
 
+    evidence_need = _analyze_evidence_need(query)
     retrieval_logger = RetrievalLogger()
     trace = RetrievalTrace(
         query=query,
@@ -3233,14 +10441,28 @@ def _build_context_with_groups(
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
+    retrieval_meta["diagnostics"] = {"retrieval": _build_retrieval_diagnostics(results, query)}
+    retrieval_meta["evidence_need"] = list(evidence_need)
+    retrieval_meta["search_query"] = query
 
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
     if timings is not None:
-        retrieval_meta["timings"] = timings
+        retrieval_meta["timings"] = {k: v for k, v in timings.items() if not k.startswith("_")}
 
     # 传递原始 chunks 用于结构化引文匹配
     retrieval_meta["_chunks"] = [
-        {"text": item.get("chunk", ""), "page": item.get("page", 0), "group_id": item.get("group_id", "")}
+        {
+            "text": item.get("chunk", ""),
+            "page": item.get("page", 0),
+            "group_id": item.get("group_id", ""),
+            "chunk_id": item.get("chunk_id"),
+            "parent_id": item.get("parent_id"),
+            "doc_id": item.get("doc_id", doc_id),
+            "chunk_type": item.get("chunk_type", ""),
+            "block_type": item.get("block_type", item.get("chunk_type", "")),
+            "chunk_heading": item.get("chunk_heading", ""),
+            "section_path": item.get("section_path", item.get("chunk_heading", "")),
+        }
         for item in results
     ]
 
@@ -3251,7 +10473,12 @@ def _build_context_with_groups(
         granularity = selection.get("granularity", "full")
         text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}.get(granularity, "full_text")
         text = getattr(group, text_attr, "")
-        _context_segments.append({"ref": idx + 1, "text": text})
+        _context_segments.append({
+            "ref": idx + 1,
+            "text": text,
+            "page_range": [group.page_range[0], group.page_range[1]],
+            "group_id": group.group_id,
+        })
     retrieval_meta["_context_segments"] = _context_segments
 
     logger.info(

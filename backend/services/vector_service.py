@@ -57,10 +57,30 @@ def validate_embedding_model(embedding_model: str) -> str:
     )
 
 
-def create_index(doc_id: str, full_text: str, vector_store_dir: str, embedding_model: str, api_key: Optional[str], api_host: Optional[str], pages: Optional[list] = None):
+def create_index(
+    doc_id: str,
+    full_text: str,
+    vector_store_dir: str,
+    embedding_model: str,
+    api_key: Optional[str],
+    api_host: Optional[str],
+    pages: Optional[list] = None,
+    structured_table_bundles: Optional[list] = None,
+    summary_api_key: Optional[str] = None,
+):
     """Wrapper to build vector index with validation"""
     embedding_model = validate_embedding_model(embedding_model)
-    build_vector_index(doc_id, full_text, vector_store_dir, embedding_model, api_key, api_host, pages=pages)
+    build_vector_index(
+        doc_id,
+        full_text,
+        vector_store_dir,
+        embedding_model,
+        api_key,
+        api_host,
+        pages=pages,
+        structured_table_bundles=structured_table_bundles,
+        summary_api_key=summary_api_key,
+    )
 
 
 async def vector_search(
