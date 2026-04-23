@@ -64,7 +64,7 @@ A self-contained Windows desktop application built with Electron. The Python bac
 ## What's New in v3.0.1
 
 ### Desktop Architecture (Electron)
-- **Standalone Application** - Windows desktop client built on Electron 26, breaking free from browser limitations.
+- **Standalone Application** - Windows desktop client built on Electron 28, breaking free from browser limitations.
 - **One-Click Installation** - Provided as an NSIS installer. Just double-click to install and run.
 - **Embedded Backend** - FastAPI backend packaged with PyInstaller. The app's process manager automatically finds an available port and spawns the backend service upon startup.
 
@@ -89,8 +89,9 @@ A self-contained Windows desktop application built with Electron. The Python bac
 
 ### PDF Document Processing
 - **Native Rendering** - High-fidelity document display via PDF.js with smooth zooming, pagination, and text selection.
-- **Multimodal Extraction** - Uses `pdfplumber` for high-quality text extraction, accurately recognizing complex multi-column layouts.
-- **Structural Parsing** - Automatically detects and extracts PDF tables, converting them into Markdown structures easily understood by LLMs.
+- **Character-level text extraction** - The primary pipeline is **PyMuPDF `get_text("dict")`** with adaptive coordinate thresholds (line-break / whitespace detection); on failure it falls back to **pdfplumber**'s chars API. A heuristic rebuild pass repairs hyphenated line breaks and zh/en punctuation artefacts.
+- **Table structuring** - `services/table_aware_service.py` uses **PyMuPDF `find_tables()`** to detect table regions and convert them into `[TABLE]`-tagged Markdown, which the chunker treats as protected regions.
+- **Optional OCR** - Scanned / low-quality pages are routed through a quality-assessment gate and can opt into **MinerU** cloud OCR, **PaddleOCR**, or Google Document AI.
 
 ### Intelligent Retrieval (RAG v3.0+)
 - **Semantic Groups** - Aggregates scattered text chunks into semantically coherent units of ~5000 characters, respecting page, heading, and table boundaries.
@@ -106,9 +107,9 @@ A self-contained Windows desktop application built with Electron. The Python bac
 
 ### One-Click Overview Panel
 - **Five structured cards** - As soon as a PDF is uploaded, the overview pane auto-generates *Abstract Summary · Terminology · Speed-Read · Key Figure Analysis · Paper Summary*. It shares the same document context with the Chat tab.
-- **Tri-source figure extraction** - Prefers **MinerU** layout analysis for high-quality images; falls back to the **PDF-native** image layer when MinerU is unavailable; vector figures use a **caption-only** path that locates and crops the figure from the caption coordinates.
+- **Figure-extraction adapter chain** - The default path is **PDF-native** (PyMuPDF image objects + Figure caption spatial matching, with 1a/1b sub-figure grouping); vector-figure PDFs fall onto a **caption-only** path that crops the figure from caption coordinates; if **MinerU cloud OCR** (via a Cloudflare Worker proxy) is enabled, its `middle.json` layout analysis is used first — ideal for scanned / image-based PDFs.
 - **AI figure commentary** - Every extracted figure is run through a vision model to produce an explanation that goes beyond the original caption, instead of just showing the raw picture.
-- **Adjustable depth** - A three-level `depth` switch (shallow / medium / deep) lets you trade tokens for richer summaries.
+- **Adjustable depth** - The `depth` switch accepts `brief` / `standard` / `detailed`, which drive per-card character caps (150/400/600), term counts (3/5/8) and figure counts (2/3/5).
 
 ### AI Chat Capabilities
 - **Multi-Model Support** - Native integration with OpenAI, Anthropic, Google Gemini, Grok, and local Ollama models.
@@ -147,18 +148,19 @@ Visit `http://localhost:3000` to start using the application.
 ## Tech Stack
 
 ### Frontend
-- **Core**: React 18 + Vite 6 + Tailwind CSS
+- **Core**: React 18 + Vite 5 + Tailwind CSS
 - **PDF Rendering**: react-pdf 9.0 + PDF.js
 - **UI Animation**: Framer Motion
 - **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
-- **Desktop Environment**: Electron 26 + electron-builder
+- **Desktop Environment**: Electron 28 + electron-builder
 
 ### Backend
 - **Framework**: FastAPI 0.115 (Uvicorn async driven)
-- **PDF Processing**: pdfplumber
-- **Vector Database**: FAISS
+- **PDF Processing**: PyMuPDF 1.24 (primary) + pdfplumber 0.11 (fallback)
+- **Vector Database**: FAISS 1.9
 - **Retrieval Architecture**: Semantic Groups + Dual-Index RRF Fusion
 - **Model SDKs**: OpenAI, Anthropic, Google Generative AI
+- **Optional OCR**: MinerU (Worker proxy) / PaddleOCR / Google Document AI
 
 ---
 
@@ -239,7 +241,7 @@ A: Switch between KaTeX and MathJax in the settings panel (bottom left). KaTeX i
 - **Per-Request Feature-Flag Overrides**: New "Retrieval Tuning" panel in GlobalSettings with tri-state switches (Auto / On / Off) — no backend restart required.
 
 ### v3.0.1
-- **Desktop Client Release**: Full Windows standalone application packaged via Electron 26 and PyInstaller.
+- **Desktop Client Release**: Full Windows standalone application packaged via Electron 28 and PyInstaller.
 - **Deep Thinking Enhancements**: Introduced `ThinkingBlock` for multi-tier reasoning visualization and smooth collapsing.
 - **Math Engine Iteration**: Support for hot-swapping between KaTeX and MathJax, resolving rendering crashes on complex LaTeX.
 - **Render Optimization**: Rewrote `StreamingMarkdown`'s underlying logic to use DOM Ref direct-writes, bypassing React reconciliation overhead. Added virtual lists to eliminate lag in extensive histories.

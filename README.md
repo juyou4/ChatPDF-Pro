@@ -64,7 +64,7 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 ## v3.0.1 新特性
 
 ### 桌面客户端架构 (Electron)
-- **独立应用** - 基于 Electron 26 打包的 Windows 桌面客户端，脱离浏览器限制
+- **独立应用** - 基于 Electron 28 打包的 Windows 桌面客户端，脱离浏览器限制
 - **一键安装** - 提供 NSIS 格式的独立安装包，双击即可完成安装
 - **内嵌后端** - 使用 PyInstaller 打包 FastAPI 后端，应用启动时由进程管理器自动寻找可用端口并拉起后端服务
 
@@ -89,8 +89,9 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 ### PDF 文档处理
 - **原生 PDF 渲染** - 基于 PDF.js 的高保真文档显示，支持平滑缩放、翻页、划词与文本选择
-- **多模态提取** - 使用 `pdfplumber` 进行高质量文本提取，支持复杂双栏布局识别
-- **结构化解析** - 自动检测并提取 PDF 中的表格内容，转换为易于 LLM 理解的 Markdown 结构
+- **字符级文本提取** - 主力管线是 **PyMuPDF `get_text("dict")`** + 自适应坐标阈值（换行 / 空格检测），失败时回退到 **pdfplumber** 的 chars API；配合启发式重建修复断行单词与中英标点
+- **表格结构化** - `services/table_aware_service.py` 使用 **PyMuPDF `find_tables()`** 检测表格区域并转为带 `[TABLE]` 标记的 Markdown，分块时作为受保护区域不被切割
+- **可选 OCR** - 扫描件 / 低质量页自动触发页面质量评估，可切换到 **MinerU** 云端 OCR、**PaddleOCR** 或 Google Document AI
 
 ### 智能检索增强 (RAG v3.0+)
 - **语义意群聚合 (Semantic Groups)** - 将零散的文本块聚合为约 5000 字符的语义完整单元，不跨越页码、标题或表格边界
@@ -106,9 +107,9 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 ### 一键速览 (Overview Panel)
 - **五卡结构化导读** - 文档上传后自动生成 *全文概述 / 术语解释 / 论文速读 / 关键图表解读 / 论文总结* 五张卡片，对话 Tab 和速览 Tab 共用同一文档上下文
-- **图表源三段式抽取** - 优先使用 **MinerU** 进行版式解析获取高质量图像；无 MinerU 环境时回退到 **PDF 原生图层** 直抽；矢量图由 **caption-only** 路径基于图注定位并框选
+- **图表抽取 Adapter 链** - 默认走 **PDF 原生图层**（PyMuPDF 取图 + Figure 标题空间匹配，支持 1a/1b 子图合并）；矢量图 PDF 走 **caption-only** 路径基于图注坐标框选；若启用了 **MinerU 云端 OCR**（通过 Cloudflare Worker 代理），则优先使用其 middle.json 版面分析结果，适用于扫描件 / 图片型 PDF
 - **AI 图表解读** - 对每张抽取到的图执行一次视觉模型分析，输出 caption 之外的 AI 解读，而不是仅把图片贴过来
-- **深度可调 (depth)** - 可在生成速览时切换浅 / 中 / 深三档深度，深度越高调用的 token 越多但摘要越细
+- **深度可调 (depth)** - 速览生成时可切换 `brief` / `standard` / `detailed` 三档，分别控制每卡字符上限（150/400/600）、术语数量（3/5/8）和图表数量（2/3/5）
 
 ### AI 对话能力
 - **多模型支持** - 原生支持 OpenAI、Anthropic、Google Gemini、Grok 以及 Ollama 本地模型
@@ -147,18 +148,19 @@ npm run dev
 ## 技术栈
 
 ### 前端 (Frontend)
-- **核心**: React 18 + Vite 6 + Tailwind CSS
+- **核心**: React 18 + Vite 5 + Tailwind CSS
 - **PDF 渲染**: react-pdf 9.0 + PDF.js
 - **UI 动画**: Framer Motion
 - **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
-- **桌面端**: Electron 26 + electron-builder
+- **桌面端**: Electron 28 + electron-builder
 
 ### 后端 (Backend)
 - **框架**: FastAPI 0.115 (Uvicorn 异步驱动)
-- **PDF 处理**: pdfplumber
-- **向量数据库**: FAISS
+- **PDF 处理**: PyMuPDF 1.24（主）+ pdfplumber 0.11（fallback）
+- **向量数据库**: FAISS 1.9
 - **检索架构**: 语义意群 (Semantic Groups) + 双索引 RRF 融合
 - **多模型 SDK**: OpenAI, Anthropic, Google Generative AI
+- **可选 OCR**: MinerU (Worker 代理) / PaddleOCR / Google Document AI
 
 ---
 
@@ -264,7 +266,7 @@ A: 请在左下角设置面板中切换 KaTeX 与 MathJax 引擎。KaTeX 渲染�
 - **请求级 Feature Flag 覆盖**: 前端 GlobalSettings 新增"检索增强调优"面板，无需重启后端即可三态切换（自动 / 开 / 关）。
 
 ### v3.0.1
-- **桌面客户端发布**: 完整的 Windows 独立应用，基于 Electron 26 与 PyInstaller 打包。
+- **桌面客户端发布**: 完整的 Windows 独立应用，基于 Electron 28 与 PyInstaller 打包。
 - **深度思考增强**: 引入 ThinkingBlock 组件，实现多档位推理可视化与平滑折叠。
 - **数学引擎迭代**: 支持 KaTeX 与 MathJax 在线切换，解决复杂 LaTeX 嵌套导致的渲染崩溃。
 - **渲染优化**: 重写 StreamingMarkdown 的底层渲染逻辑，使用 DOM Ref 直写规避 React 调和开销，并加入虚拟列表解决历史会话卡顿。
