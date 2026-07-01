@@ -34,6 +34,12 @@ from services.ocr_service import (
     Doc2XAdapter,
     WorkerOCRAdapter,
 )
+from services.layout_service import (
+    configure_yolo_model_path,
+    download_yolo_model,
+    get_yolo_model_status,
+    reset_yolo_model_config,
+)
 from models.model_detector import normalize_embedding_model_id
 from models.model_id_resolver import resolve_model_id
 from config import settings
@@ -2239,11 +2245,71 @@ async def get_ocr_status():
             "can_extract_figures": online_services.get("mineru", {}).get("available", False),
             "timeout_sec": settings.figure_extraction_timeout_sec,
         },
+        "figure_preview": {
+            "yolo": get_yolo_model_status(),
+        },
     }
 
 
 # 支持的在线 OCR 提供商列表
 _SUPPORTED_ONLINE_OCR_PROVIDERS = {"mistral", "mineru", "doc2x"}
+
+
+@router.get("/api/layout/yolo/status")
+async def get_layout_yolo_status():
+    """获取速览 YOLO 图表预览资源状态。"""
+    return get_yolo_model_status()
+
+
+@router.post("/api/layout/yolo/download")
+async def download_layout_yolo_model(request: Request):
+    """下载 YOLO 权重到默认用户数据目录或用户指定目录。"""
+    try:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        install_dir = (body.get("install_dir") or "").strip()
+        force = bool(body.get("force", False))
+        return download_yolo_model(install_dir=install_dir or None, force=force)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"下载 YOLO 权重失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/layout/yolo/config")
+async def save_layout_yolo_config(request: Request):
+    """保存用户手动指定的 YOLO 权重路径。"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体格式错误，需要 JSON")
+
+    model_path = (body.get("model_path") or "").strip()
+    if not model_path:
+        raise HTTPException(status_code=400, detail="缺少 model_path 参数")
+
+    try:
+        return configure_yolo_model_path(model_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"保存 YOLO 权重路径失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/layout/yolo/reset")
+async def reset_layout_yolo_config():
+    """清除用户自定义 YOLO 权重路径。"""
+    try:
+        return reset_yolo_model_config()
+    except Exception as e:
+        logger.error(f"重置 YOLO 权重配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/ocr/online-config")
@@ -2729,6 +2795,7 @@ async def create_overview(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
+    figure_render_mode: str = "raw",
 ):
     """
     触发速览生成
@@ -2773,6 +2840,7 @@ async def create_overview(
         model,
         provider,
         _get_overview_provider_endpoint(provider, api_host),
+        figure_render_mode=figure_render_mode,
     )
 
     return {
@@ -2832,6 +2900,7 @@ async def get_overview(
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
     use_mineru_figures: bool = False,
+    figure_render_mode: str = "raw",
 ):
     """
     获取速览（同步接口）
@@ -2871,7 +2940,13 @@ async def get_overview(
         prov = merged.get(provider, {})
         api_key = (prov.get("api_key") or "").strip()
 
-    logger.info(f"[Overview-Route] doc={doc_id} depth={depth} use_mineru_figures={use_mineru_figures}")
+    logger.info(
+        "[Overview-Route] doc=%s depth=%s use_mineru_figures=%s figure_render_mode=%s",
+        doc_id,
+        depth,
+        use_mineru_figures,
+        figure_render_mode,
+    )
     try:
         overview = await get_or_create_overview(
             doc_id,
@@ -2881,6 +2956,7 @@ async def get_overview(
             provider,
             _get_overview_provider_endpoint(provider, api_host),
             use_mineru_figures=use_mineru_figures,
+            figure_render_mode=figure_render_mode,
         )
         return overview.model_dump()
     except TimeoutError:

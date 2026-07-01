@@ -35,4 +35,7 @@ contextBridge.exposeInMainWorld('chatpdfDesktop', {
   /** 选择文件对话框 */
   selectFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null> =>
     ipcRenderer.invoke('select-file', options),
+
+  /** 选择目录对话框 */
+  selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('select-directory'),
 });

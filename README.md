@@ -1,15 +1,15 @@
-# ChatPDF Pro v3.0.1
+# ChatPDF Pro v3.0.2
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.1-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.2-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
-**智能文档助手 - 与 PDF 对话，让知识触手可及** · [English](README_EN.md)
+**面向学术论文的本地 AI 阅读助手 — Agentic RAG · 引用溯源 · 全程离线** · [English](README_EN.md)
 
-[快速开始](#快速开始) • [核心功能](#核心功能) • [v3.0.1 新特性](#v301-新特性) • [技术栈](#技术栈) • [项目结构](#项目结构)
+[快速开始](#快速开始) • [核心功能](#核心功能) • [评测](#ragas-评测) • [技术栈](#技术栈) • [项目结构](#项目结构)
 
 </div>
 
@@ -17,163 +17,167 @@
 
 ## 项目简介
 
-ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅读助手。左边原生 PDF 阅读器 + 右边 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF**的检索管线，让模型既能做高层次总结、也能精确定位到表格某一行的具体数值。所有请求默认指向用户自带的 OpenAI / Anthropic / Gemini / Ollama 接口，**文档与对话历史全程留在本地**。
+ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅读助手。左侧原生 PDF 阅读器 + 右侧 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF** 的检索管线和 **Agentic RAG 工具链**，让模型既能做高层次综述、也能精确定位到某张表格的某一行数值。所有请求指向用户自带的 OpenAI / Anthropic / Gemini / DeepSeek / Ollama 接口，文档与对话历史全程留在本地。
 
 ---
 
 ## 应用预览
 
-> 下方两个区块用于展示主界面与对话截图。如果你是从源码直接启动，截图替换流程为：运行后自行截图并覆盖 `docs/preview_overview.png` 与 `docs/preview_chat.png` 即可，无需改动 README。
-
-### 一键速览 · `docs/preview_overview.png`
+### 一键速览
 
 <div align="center">
-
-<!-- 速览截图：右栏切到「速览」Tab 后的效果。建议截图里至少能看到「论文速读」和「关键图表解读」两张卡片。 -->
-<img src="docs/preview_overview.png" alt="ChatPDF Pro 一键速览功能预览" width="880" />
-
+<img src="docs/preview_overview.png" alt="ChatPDF Pro 一键速览" width="880" />
 </div>
 
-**左侧** 是原生 PDF 阅读区（PDF.js 高保真渲染 + 划词工具栏），**右侧** 顶部可在「速览 / 对话」两个 Tab 间切换。文档上传后速览会在后台自动生成，由五张结构化卡片组成：
+**左侧**原生 PDF 阅读区（PDF.js 高保真渲染 + 划词工具栏），**右侧**顶部可在「速览 / 对话」两个 Tab 间切换。文档上传后速览自动生成五张结构化卡片：
 
-- **全文概述** —— 一段话讲清文档在做什么、为什么做
-- **术语解释** —— 从全文中挑出核心概念并给出 inline 释义
-- **论文速读** —— 三段式拆解：论文方法 / 实验设计 / 解决的问题
-- **关键图表解读** —— 自动抽取页内图像（支持 **MinerU 增强 / PDF 原生 / 矢量图 caption 识别** 三种源），对每张图给出 caption 之外的 AI 解读
-- **论文总结** —— 优点与创新 + 未来展望
+- **全文概述** — 一段话讲清文档在做什么、为什么做
+- **术语解释** — 挑出核心概念并给出 inline 释义
+- **论文速读** — 论文方法 / 实验设计 / 解决的问题三段式拆解
+- **关键图表解读** — 自动抽取页内图像（支持 MinerU 增强 / PDF 原生 / 矢量图 caption 识别三种源），输出 caption 之外的 AI 解读
+- **论文总结** — 优点与创新 + 未来展望
 
-截图里展示的正是论文速读 + 关键图表解读两张卡片（arXiv:2603.15031 *Attention Residuals* 为示例文档）。速览卡片和右上角的「对话」Tab 共用同一个 PDF 文档上下文，点任一卡片内的术语/图注都能联动回 PDF 定位。
+速览卡片和对话 Tab 共用同一文档上下文，点击卡片内的术语或图注可联动回 PDF 定位。
 
-### 对话示例 · `docs/preview_chat.png`
+### 对话示例
 
 <div align="center">
-
-<!-- 对话截图：建议包含一次完整问答，展示 [1][2] 引文、思考折叠块、追问建议按钮 -->
 <img src="docs/preview_chat.png" alt="ChatPDF Pro 对话示例" width="880" />
-
 </div>
 
-对话区效果：回答中的 `[1]` `[2]` 引文可点击直接跳转到 PDF 对应页，行内 / 块级公式实时渲染，深度思考过程默认折叠，回答下方自动生成 3-5 个追问建议与可选的幻觉自审提示。
+回答中的 `[1]` `[2]` 引文可点击直接跳转到 PDF 对应页；行内 / 块级公式实时渲染；深度思考过程默认折叠；回答下方自动生成追问建议与可选的幻觉自审提示。
 
 ### 独立桌面客户端
 
-基于 Electron 构建的独立桌面应用，采用 PyInstaller 将 Python 后端集成打包为单可执行文件，实现**开箱即用，无需配置任何 Python 或 Node.js 环境**。
+基于 Electron 构建的独立桌面应用，使用 PyInstaller 将 Python 后端打包为单可执行文件，开箱即用、无需配置 Python 或 Node.js 环境。
 
----
-
-## v3.0.1 新特性
-
-### 桌面客户端架构 (Electron)
-- **独立应用** - 基于 Electron 28 打包的 Windows 桌面客户端，脱离浏览器限制
-- **一键安装** - 提供 NSIS 格式的独立安装包，双击即可完成安装
-- **内嵌后端** - 使用 PyInstaller 打包 FastAPI 后端，应用启动时由进程管理器自动寻找可用端口并拉起后端服务
-
-### 深度思考模式 (Deep Thinking)
-- **推理过程可视化** - 在对话区实时展示 AI 的 ThinkingBlock，支持手动折叠与展开
-- **推理强度可调** - 可在对话参数中实时调节低、中、高三档推理强度
-- **平滑流式输出** - 思考过程与最终回复均支持基于 RequestAnimationFrame 的平滑逐字渲染
-
-### 数学公式引擎 (Math Rendering)
-- **多引擎支持** - 内置 KaTeX 与 MathJax 双引擎，用户可在设置面板中自由切换或关闭
-- **单美元符号支持** - 支持 `$...$` 行内公式渲染，规避纯文本与公式冲突
-- **LaTeX 括号转换** - 内置平衡匹配算法，自动将 `\[...\]` 和 `\(...\)` 转换为标准的 Markdown 公式语法
-
-### 联网增强与 UI 优化
-- **联网搜索** - 允许 AI 在作答时获取实时网络信息，并在回答底部清晰展示带有来源链接的引用标签
-- **渲染性能** - 引入虚拟滚动（Virtual List），在包含大量长文本的对话历史中依然保持 60fps 流畅体验
-- **DOM 直写** - 流式输出期间跳过 React 状态更新，直接通过 ref 修改 DOM 节点，大幅降低内存和 CPU 占用
+- **CPU-only 精简打包** — 自动剥离 CUDA / cuDNN 运行库（~2.5 GB），安装包仅 ~440 MB
+- **YOLO 按需下载** — DocLayout-YOLO 权重不内置，在 OCR 设置面板中一键下载或手动指定本地路径
+- **安全隔离** — 桌面模式通过 `X-ChatPDF-Token` 认证中间件保护所有 API，自动绑定 `127.0.0.1`
 
 ---
 
 ## 核心功能
 
 ### PDF 文档处理
-- **原生 PDF 渲染** - 基于 PDF.js 的高保真文档显示，支持平滑缩放、翻页、划词与文本选择
-- **字符级文本提取** - 主力管线是 **PyMuPDF `get_text("dict")`** + 自适应坐标阈值（换行 / 空格检测），失败时回退到 **pdfplumber** 的 chars API；配合启发式重建修复断行单词与中英标点
-- **表格结构化** - `services/table_aware_service.py` 使用 **PyMuPDF `find_tables()`** 检测表格区域并转为带 `[TABLE]` 标记的 Markdown，分块时作为受保护区域不被切割
-- **可选 OCR** - 扫描件 / 低质量页自动触发页面质量评估，可切换到 **MinerU** 云端 OCR、**PaddleOCR** 或 Google Document AI
+- **原生 PDF 渲染** — 基于 PDF.js 的高保真文档显示，支持平滑缩放、翻页、划词与文本选择
+- **字符级文本提取** — 主力管线 PyMuPDF `get_text("dict")` + 自适应坐标阈值（换行 / 空格检测），失败时回退到 pdfplumber；启发式修复断行单词与中英标点
+- **表格结构化** — PyMuPDF `find_tables()` 检测表格区域并转为带 `[TABLE]` 标记的 Markdown，分块时作为受保护区域不被切割
+- **可选 OCR** — 扫描件 / 低质量页自动触发页面质量评估，可切换到 MinerU 云端 OCR、PaddleOCR 或 Google Document AI
 
-### 智能检索增强 (RAG v3.0+)
-- **语义意群聚合 (Semantic Groups)** - 将零散的文本块聚合为约 5000 字符的语义完整单元，不跨越页码、标题或表格边界
-- **三层粒度体系** - 每个意群自动生成 Summary（80 字）、Digest（1000 字）和 Full（全文）三种粒度表示
-- **动态粒度匹配** - 检索时通过大模型判断用户意图（如概览、提取、具体数据），自动选择最优的文本粒度返回
-- **Token 预算控制** - 根据目标模型自动估算中英文字符 token，当超出上下文窗口时触发智能降级而非强行截断
-- **双索引检索** - 同时查询分块级别和意群级别的 FAISS 向量索引，结合 BM25 算法与 RRF（倒数排序融合）进行重排
-- **Agentic RAG 工具链** - 对综述、章节解释、公式框架、多跳证据等问题自动启用 agent 检索；可组合向量搜索、BM25、grep、regex、boolean search、map/fetch 等工具，并把子问题、命中路径和引用候选回传给前端 Trace 面板
-- **数值表格专项增强** - 针对"第二好的方法"、"Table 7 DiffuLT"这类表格数值对比类查询的专项检索通路（feature flag 可关），命中表格行时自动补齐同簇行作为对照上下文
-- **引用溯源增强** - 表格数值问题优先选择目标表、目标列、精确行和方法名锚点一致的证据；公式类问题会做通用的 LaTeX / OCR 归一化，减少引用漂移
-- **BM25 同义词扩展** - 查询时自动扩展中英同义词词典，改善召回率；支持细粒度中文分词
-- **双模型策略 (cheap_model)** - 查询改写 / 问题分解 / 追问建议 / 答案自审等非核心 LLM 任务默认走廉价模型，与主回答模型解耦，节省 40-60% tokens
-- **LLM 查询改写** - 多轮对话自动消解指代（"它"、"这个方法"），长查询则跳过改写直接检索
-- **答案自审 (Answer Critic)** - 回答结束后用 cheap_model 对照原文片段检测幻觉，命中时在对话卡片下方展示红色警告横幅（可关）
+### Agentic RAG 检索
 
-### RAGAS 评测情况
+v3.0.2 引入工具化 Agent 检索——对综述、章节解释、公式框架、多跳证据等复杂问题，自动激活 agent 模式，组合以下工具并把子问题、命中路径和引用候选回传给前端 Trace 面板：
 
-当前开发分支使用多论文 manifest 做了小规模 RAGAS 回归验证，覆盖 baseline 与 holdout 两个 split；回答模型使用 DeepSeek，嵌入评测使用 SiliconFlow 的 `BAAI/bge-m3`。这组数据用于开发回归，不等同于公开基准榜单。
+| 工具 | 说明 |
+|------|------|
+| 向量搜索 | 语义意群级 + 分块级双 FAISS 索引 |
+| BM25 | 带中英同义词扩展和细粒度分词 |
+| grep / regex | 精确字面匹配 |
+| boolean search | `AND` / `OR` / `NOT` 组合 |
+| map / fetch | 跨章节定位与段落抓取 |
+| 树形分解检索 | 递归子问题拆解，逐层回收证据 |
+
+### 智能检索管线 (RAG)
+- **语义意群聚合** — 将零散文本块聚合为约 5000 字符的语义完整单元，不跨越页码、标题或表格边界
+- **三层粒度** — 每个意群自动生成 Summary（80 字）、Digest（1000 字）和 Full（全文）三种表示，检索时根据用户意图（概览 / 提取 / 精确数据）动态匹配
+- **双索引 RRF** — 同时查询分块级和意群级 FAISS 向量索引，结合 BM25 与倒数排序融合进行重排
+- **Token 预算控制** — 根据目标模型自动估算 token，超出上下文窗口时智能降级而非强行截断
+
+### 引用溯源增强
+- **表格数值锚定** — 数值对比类查询优先选择目标表、目标列、精确行和方法名锚点一致的证据；命中表格行时自动补齐同簇行作为对照上下文
+- **公式归一化** — 公式类问题做通用的 LaTeX / OCR 归一化，减少引用漂移
+- **答案自审** — 回答结束后用 cheap_model 对照原文片段检测幻觉，命中时展示红色警告横幅
+
+### 一键速览
+- **五卡结构化导读** — 全文概述 / 术语解释 / 论文速读 / 关键图表解读 / 论文总结
+- **图表抽取 Adapter 链** — PDF 原生图层（PyMuPDF 取图 + Figure 标题空间匹配）→ 矢量图 caption-only 路径 → MinerU 云端 OCR（通过 Cloudflare Worker 代理）
+- **深度可调** — `brief` / `standard` / `detailed` 三档，分别控制每卡字符上限、术语数量和图表数量
+
+### AI 对话能力
+- **多模型支持** — OpenAI、Anthropic、Google Gemini、Grok、DeepSeek 以及 Ollama 本地模型
+- **精确引文** — 回答中自动生成 `[1]` `[2]` 内联引用，点击即跳转 PDF 对应页
+- **深度思考** — ThinkingBlock 实时展示推理过程，支持低 / 中 / 高三档推理强度
+- **划词工具栏** — PDF 中选中文本后弹出悬浮工具栏，一键解释、翻译或作为上下文发送给 AI
+- **数学公式** — 内置 KaTeX 与 MathJax 双引擎，支持 `$...$` 行内公式和 `\[...\]` 块级公式
+- **可视化图表** — 自动渲染 AI 生成的 Mermaid 流程图与思维导图
+- **双模型策略** — 查询改写 / 问题分解 / 追问建议 / 答案自审等辅助任务走廉价模型，与主回答模型解耦，节省 40–60% tokens
+- **联网搜索** — 允许 AI 作答时获取实时网络信息，回答底部展示带来源链接的引用标签
+
+---
+
+## RAGAS 评测
+
+使用多论文 manifest 做小规模 RAGAS 回归验证，覆盖 baseline 与 holdout 两个 split；回答模型使用 DeepSeek，嵌入评测使用 SiliconFlow `BAAI/bge-m3`。本组数据用于开发回归，不等同于公开基准。
 
 | Split | Faithfulness | Answer Relevancy | Context Precision | Context Recall |
 | --- | ---: | ---: | ---: | ---: |
-| Baseline | 0.617039 | 0.644992 | 0.697321 | 0.812500 |
-| Holdout | 0.665570 | 0.645191 | 0.708333 | 1.000000 |
+| Baseline | 0.617 | 0.645 | 0.697 | 0.813 |
+| Holdout | 0.666 | 0.645 | 0.708 | 1.000 |
 
-相对 pre-agent baseline，四项核心指标在 baseline 与 holdout 上均为正向提升：baseline 分别提升 `+0.355106 / +0.235220 / +0.634821 / +0.520833`，holdout 分别提升 `+0.468600 / +0.292424 / +0.583333 / +0.750000`。同时加入生产静态 guard，防止固定论文、固定 doc_id、评测产物路径或固定答案数值重新进入生产代码。
-
-### 一键速览 (Overview Panel)
-- **五卡结构化导读** - 文档上传后自动生成 *全文概述 / 术语解释 / 论文速读 / 关键图表解读 / 论文总结* 五张卡片，对话 Tab 和速览 Tab 共用同一文档上下文
-- **图表抽取 Adapter 链** - 默认走 **PDF 原生图层**（PyMuPDF 取图 + Figure 标题空间匹配，支持 1a/1b 子图合并）；矢量图 PDF 走 **caption-only** 路径基于图注坐标框选；若启用了 **MinerU 云端 OCR**（通过 Cloudflare Worker 代理），则优先使用其 middle.json 版面分析结果，适用于扫描件 / 图片型 PDF
-- **AI 图表解读** - 对每张抽取到的图执行一次视觉模型分析，输出 caption 之外的 AI 解读，而不是仅把图片贴过来
-- **深度可调 (depth)** - 速览生成时可切换 `brief` / `standard` / `detailed` 三档，分别控制每卡字符上限（150/400/600）、术语数量（3/5/8）和图表数量（2/3/5）
-
-### AI 对话能力
-- **多模型支持** - 原生支持 OpenAI、Anthropic、Google Gemini、Grok 以及 Ollama 本地模型
-- **精确引文** - 回答中自动生成 [1] [2] 格式的内联引用，点击即可使左侧 PDF 视图高亮并平滑滚动到对应页
-- **划词工具栏** - 在 PDF 中选中文本后，自动弹出悬浮工具栏，支持一键解释、翻译或作为上下文发送给 AI
-- **可视化图表** - 自动解析并渲染 AI 生成的 Mermaid 代码块，适用于流程图与思维导图
+相对 pre-agent baseline 四项指标均为正向提升。Baseline 分别 +0.36 / +0.24 / +0.63 / +0.52，Holdout 分别 +0.47 / +0.29 / +0.58 / +0.75。
 
 ---
 
 ## 快速开始
 
-### 方式一：下载桌面客户端 (推荐)
+### 方式一：下载桌面客户端（推荐）
 
-直接从 [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) 页面下载最新的 `.exe` 安装包。
-安装后双击桌面图标即可运行，无需任何环境配置。
+从 [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) 页面下载最新 `.exe` 安装包，双击安装即可运行，无需任何环境配置。
 
-### 方式二：源码运行 (Web 模式)
+### 方式二：源码运行（Web 模式）
 
-**1. 后端服务 (Python 3.10+)**
+**1. 后端服务（Python 3.10+）**
 ```bash
 cd backend
 pip install -r requirements.txt
 python app.py
 ```
 
-**2. 前端服务 (Node.js 18+)**
+**2. 前端服务（Node.js 18+）**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
+
 访问 `http://localhost:3000` 即可使用。
+
+---
+
+## 使用技巧
+
+### 高效阅读
+1. **划词问答** — 在 PDF 中选中文本后，对话框里的提问会自动关联选中内容
+2. **预设问题** — 文档加载后点击预设按钮快速获取总结、公式、方法等信息
+3. **调整布局** — 拖动中间分隔线调整 PDF 和对话区域的比例
+
+### 智能检索
+1. **自动粒度** — 问"总结全文"返回更多意群摘要，问"具体数据"返回少量意群全文
+2. **正则搜索** — 输入 `/regex:pattern` 进行精确匹配
+3. **布尔搜索** — `term1 AND term2`、`term1 OR term2`、`NOT term`
+
+### 引文验证
+1. 回答中的 `[1]` `[2]` 编号对应文档中的具体位置，点击直接跳转
+2. Agent 模式下可在 Trace 面板查看子问题拆解和工具调用路径
 
 ---
 
 ## 技术栈
 
-### 前端 (Frontend)
+### 前端
 - **核心**: React 18 + Vite 5 + Tailwind CSS
 - **PDF 渲染**: react-pdf 9.0 + PDF.js
-- **UI 动画**: Framer Motion
 - **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
 - **桌面端**: Electron 28 + electron-builder
 
-### 后端 (Backend)
-- **框架**: FastAPI 0.115 (Uvicorn 异步驱动)
+### 后端
+- **框架**: FastAPI 0.115（Uvicorn 异步驱动）
 - **PDF 处理**: PyMuPDF 1.24（主）+ pdfplumber 0.11（fallback）
 - **向量数据库**: FAISS 1.9
-- **检索架构**: 语义意群 (Semantic Groups) + 双索引 RRF 融合
+- **检索架构**: 语义意群 + 双索引 RRF + Agentic RAG 工具链
 - **多模型 SDK**: OpenAI, Anthropic, Google Generative AI
-- **可选 OCR**: MinerU (Worker 代理) / PaddleOCR / Google Document AI
+- **可选 OCR**: MinerU（Worker 代理）/ PaddleOCR / Google Document AI
 
 ---
 
@@ -181,138 +185,110 @@ npm run dev
 
 ```text
 ChatPDF/
-├── frontend/                    # React 前端
-
+├── frontend/                         # React 前端
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ChatPDF.jsx          # 主应用组件
-│   │   │   ├── PDFViewer.jsx        # PDF 渲染组件
-│   │   │   ├── StreamingMarkdown.jsx # Markdown + 数学公式 + Mermaid 渲染
-│   │   │   ├── ThinkingBlock.jsx    # 深度思考可视化
-│   │   │   ├── ChatSettings.jsx     # 对话参数设置面板
-│   │   │   ├── VirtualMessageList.jsx # 虚拟化消息列表
-│   │   │   ├── PresetQuestions.jsx   # 预设问题栏
-│   │   │   └── CitationLink.jsx     # 引文点击跳转
-│   │   ├── contexts/
-│   │   │   ├── ChatParamsContext.jsx # 对话参数（含数学引擎设置）
-│   │   │   ├── GlobalSettingsContext.jsx
-│   │   │   └── WebSearchContext.jsx  # 联网搜索状态
-│   │   ├── hooks/
-│   │   │   ├── useMessageState.js    # 消息状态 + 流式请求
-│   │   │   └── useSmoothStream.js    # 平滑流式输出
-│   │   └── utils/
-│   │       └── processLatexBrackets.js # LaTeX 括号转换
-│   ├── package.json
+│   │   │   ├── ChatPDF.jsx               # 主应用组件
+│   │   │   ├── PDFViewer.jsx             # PDF 渲染
+│   │   │   ├── AgentTracePanel.jsx       # Agent 子问题 / 工具调用 Trace
+│   │   │   ├── OverviewPanel.jsx         # 一键速览面板
+│   │   │   ├── StreamingMarkdown.jsx     # Markdown + 公式 + Mermaid
+│   │   │   ├── ThinkingBlock.jsx         # 深度思考可视化
+│   │   │   ├── VirtualMessageList.jsx    # 虚拟化消息列表
+│   │   │   └── GlobalSettings.jsx        # 全局设置（含检索调优）
+│   │   ├── contexts/                 # React Context（模型 / 参数 / Provider）
+│   │   └── hooks/                    # 消息状态、流式输出、PDF 等 Hooks
 │   └── vite.config.js
-├── backend/                     # FastAPI 后端
-│   ├── app.py                   # 主应用入口
-│   ├── desktop_entry.py         # 桌面端冻结打包入口
-│   ├── routes/                  # API 路由
+├── backend/                          # FastAPI 后端
+│   ├── app.py                            # 主入口
+│   ├── config.py                         # Pydantic 配置（环境变量 + .env）
+│   ├── routes/
+│   │   ├── chat_routes.py                # 对话 + 流式 SSE
+│   │   ├── document_routes.py            # 文档上传 / 解析 / 索引
+│   │   └── search_routes.py              # 独立检索接口
 │   ├── services/
-│   │   ├── semantic_group_service.py  # 语义意群生成
-│   │   ├── hybrid_search.py           # 混合检索 + RRF 融合
-│   │   ├── context_builder.py         # 上下文拼接与引文生成
-│   │   ├── chat_service.py            # AI 对话逻辑与思考流处理
-│   │   ├── web_search_service.py      # 联网搜索引擎服务
-│   │   ├── embedding_service.py       # 文本嵌入计算与 FAISS 索引
-│   │   └── rerank_service.py          # 交叉编码器重排序
+│   │   ├── retrieval_agent.py            # Agentic RAG 主控
+│   │   ├── retrieval_tools.py            # Agent 工具实现
+│   │   ├── agent_retrieval_service.py    # Agent 结果整合
+│   │   ├── tree_decomposition_retrieval.py # 树形分解检索
+│   │   ├── citation_enhancer.py          # 引用溯源增强
+│   │   ├── semantic_group_service.py     # 语义意群生成
+│   │   ├── hybrid_search.py              # 混合检索 + RRF
+│   │   ├── embedding_service.py          # 嵌入计算 + FAISS 索引
+│   │   ├── rerank_service.py             # 交叉编码器重排序
+│   │   ├── context_builder.py            # 上下文拼接与引文
+│   │   ├── chat_service.py               # 对话逻辑与思考流
+│   │   ├── query_analyzer.py             # 查询意图分析
+│   │   ├── query_rewriter.py             # 多轮指代消解
+│   │   ├── overview_service.py           # 速览卡片生成
+│   │   ├── layout_service.py            # DocLayout-YOLO 布局检测与资源管理
+│   │   └── table_aware_service.py        # 表格结构化检测
+│   ├── chatpdf.spec                      # PyInstaller 打包配置（CUDA 剥离 + 数据过滤）
 │   └── requirements.txt
-├── electron/                    # Electron 桌面端
-│   ├── src/main.ts              # 主进程：窗口管理、后端拉起、自动更新
+├── electron/                         # Electron 桌面端
+│   ├── src/main.ts                       # 主进程：窗口管理、后端拉起、IPC
 │   └── package.json
-├── scripts/                     # 跨平台构建脚本
+├── scripts/                          # 构建脚本
+├── start.bat / start.sh              # 一键启动
 └── README.md
 ```
-
----
-
-## 使用技巧
-
-### 高效阅读
-1. **文本选择问答** - 在 PDF 中选择文本后，在对话框中提问可以针对选中内容回答
-2. **预设问题** - 文档加载后点击预设按钮快速获取总结、公式、方法等信息
-3. **调整布局** - 拖动中间分隔线调整 PDF 和对话区域的比例
-
-### 智能检索
-1. **自动粒度** - 问"总结全文"会返回更多意群的摘要，问"具体数据"会返回少量意群的全文
-2. **正则搜索** - 输入 `/regex:pattern` 进行精确匹配
-3. **布尔搜索** - 使用 `term1 AND term2`、`term1 OR term2`、`NOT term` 组合搜索
-
-### 引文验证
-1. AI 回答中的 [1] [2] 等编号对应文档中的具体位置
-2. 点击编号直接跳转到 PDF 对应页面
-3. 可在 retrieval_meta 中查看详细的检索信息
-
-### 可视化生成
-1. 点击"生成思维导图"按钮获取文档结构化概览
-2. 点击"生成流程图"按钮获取 Mermaid 可视化流程图
-3. 流程图会自动渲染，也可复制 Mermaid 代码到其他工具使用
 
 ---
 
 ## 常见问题
 
 **Q: 桌面客户端启动白屏或报错？**
-A: 请确保未开启系统代理拦截 localhost，或尝试右键以管理员身份运行。首次启动时应用会自动在后台拉起 Python 引擎，可能需要数秒钟。
+A: 确保未开启系统代理拦截 localhost，或尝试以管理员身份运行。首次启动时应用会在后台拉起 Python 引擎，可能需要数秒。
 
 **Q: Web 模式下 PDF 无法显示？**
-A: 确保后端服务正常运行（默认端口 8000），检查浏览器控制台是否有 CORS 跨域错误或网络拦截。
+A: 确认后端服务正常运行（默认端口 8000），检查浏览器控制台有无 CORS 跨域错误。
 
 **Q: API 调用失败或超时？**
-A: 检查 API Key 格式是否正确，并确认您的网络环境能否访问目标提供商的接口（如 OpenAI 需要海外网络，或配置代理/中转 URL）。
+A: 检查 API Key 格式是否正确，确认网络环境能访问目标提供商接口（OpenAI 需要海外网络，或配置代理 / 中转 URL）。
 
 **Q: 本地模型（Ollama）连接拒绝？**
-A: 请确保后台 Ollama 服务已启动，并在系统环境变量中设置了 `OLLAMA_ORIGINS="*" ` 以允许跨域请求。
+A: 确保 Ollama 服务已启动，并在系统环境变量中设置 `OLLAMA_ORIGINS="*"` 以允许跨域请求。
 
-**Q: 部分数学公式渲染乱码？**
-A: 请在左下角设置面板中切换 KaTeX 与 MathJax 引擎。KaTeX 渲染速度快，而 MathJax 对复杂 LaTeX 嵌套的兼容性更好。
+**Q: 数学公式渲染异常？**
+A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，MathJax 对复杂 LaTeX 嵌套兼容更好。
 
 ---
 
 ## 更新日志
 
-### v3.0.2 (检索深度增强 · 当前开发分支)
-- **Agentic RAG 泛化**: 新增工具化 agent 检索、子问题追踪、公式/表格引用溯源增强，并清理旧的论文定制 rewrite 逻辑。
-- **RAGAS 回归验证**: 使用多论文 baseline/holdout manifest 验证四项核心指标（faithfulness / answer relevancy / context precision / context recall）均相对 pre-agent baseline 提升。
-- **数值表格专项**: 新增针对 "Table N" / 数值对比类查询的专项检索通路，通过 feature flag 统一控制。
-- **BM25 同义词扩展**: 内置中英同义词词典 + 细粒度分词，显著改善中文长查询的召回。
-- **双模型策略 (cheap_model)**: 查询改写 / 问题分解 / 追问 / 答案自审等辅助 LLM 任务独立配置廉价模型。
-- **LLM 查询改写 + 答案自审**: 多轮消解指代；回答后幻觉检测 + 红色警告横幅。
-- **请求级 Feature Flag 覆盖**: 前端 GlobalSettings 新增"检索增强调优"面板，无需重启后端即可三态切换（自动 / 开 / 关）。
+### v3.0.2（Agentic RAG 泛化 + 桌面打包优化）
+- **Agentic RAG 工具链** — 新增工具化 agent 检索、子问题追踪、树形分解检索，前端新增 AgentTracePanel 展示调用路径
+- **引用溯源增强** — 表格数值锚定 + 公式 LaTeX/OCR 归一化，减少引用漂移
+- **RAGAS 回归验证** — 多论文 baseline/holdout manifest，四项核心指标均相对 pre-agent baseline 提升
+- **数值表格专项** — 针对 "Table N" / 数值对比类查询的专项检索通路（feature flag 可关）
+- **BM25 同义词扩展** — 内置中英同义词词典 + 细粒度分词，改善中文长查询召回
+- **双模型策略** — 查询改写 / 问题分解 / 追问 / 答案自审等辅助任务独立走廉价模型
+- **LLM 查询改写 + 答案自审** — 多轮消解指代；回答后幻觉检测 + 警告横幅
+- **请求级 Feature Flag** — 前端 GlobalSettings 新增"检索增强调优"面板，无需重启后端即可三态切换
+- **DocLayout-YOLO 资源管理** — OCR 设置面板新增 YOLO 模型一键下载、手动路径配置、重置；权重不再内置于安装包
+- **桌面打包瘦身** — PyInstaller spec 自动剥离 CUDA/cuDNN 库，安装包从 ~3 GB 降至 ~440 MB；过滤用户数据防止隐私泄露
 
-### v3.0.1
-- **桌面客户端发布**: 完整的 Windows 独立应用，基于 Electron 28 与 PyInstaller 打包。
-- **深度思考增强**: 引入 ThinkingBlock 组件，实现多档位推理可视化与平滑折叠。
-- **数学引擎迭代**: 支持 KaTeX 与 MathJax 在线切换，解决复杂 LaTeX 嵌套导致的渲染崩溃。
-- **渲染优化**: 重写 StreamingMarkdown 的底层渲染逻辑，使用 DOM Ref 直写规避 React 调和开销，并加入虚拟列表解决历史会话卡顿。
+### v3.0.1（桌面客户端）
+- **桌面客户端发布** — Windows 独立应用，Electron 28 + PyInstaller 打包
+- **深度思考增强** — ThinkingBlock 组件，多档位推理可视化与平滑折叠
+- **数学引擎迭代** — KaTeX / MathJax 在线切换，修复复杂 LaTeX 嵌套渲染崩溃
+- **渲染优化** — StreamingMarkdown 底层改用 DOM Ref 直写，加入虚拟列表
 
-### v3.0.0
-- **RAG 架构重构**: 引入语义意群（Semantic Groups）与三级粒度（Full/Digest/Summary）降级策略。
-- **Token 精确计算**: 基于语言字符特性的动态预算系统。
-- **双路检索**: 意群级别与块级别的 FAISS 向量检索结合 RRF 融合。
+### v3.0.0（RAG 架构重构）
+- 语义意群（Semantic Groups）与三级粒度降级策略
+- 基于语言字符特性的动态 Token 预算系统
+- 意群级 + 块级双 FAISS 向量检索 + RRF 融合
 
-### v2.0.3
-- 划词工具栏支持拖动和四角缩放
-- 搜索引擎可自定义模板 URL
-- 修复悬浮工具栏按钮无效等问题
-
-### v2.0.2
-- 升级到 pdfplumber 进行更高质量的文本提取
-- 新增表格自动识别和格式化
-- 实现完整的对话历史管理
-
-### v2.0.0
-- 全新蓝白治愈系 UI 设计
-- 升级到 Vite 6.0 + React 18.3
-- 支持深色模式
-- 集成多个 AI 提供商
-- 添加截图和视觉分析功能
+### v2.x
+- v2.0.3 — 划词工具栏拖动缩放、搜索引擎自定义模板
+- v2.0.2 — pdfplumber 文本提取、表格自动识别、对话历史管理
+- v2.0.0 — 蓝白 UI 重构、Vite 6.0 + React 18.3、深色模式、多 AI 提供商
 
 ---
 
 ## 致谢
 
-本项目的 RAG 系统优化方案借鉴了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 的设计理念（语义意群、三层粒度、智能粒度选择等概念）。Paper Burner X 采用 AGPL-3.0 许可证，版权归 Feather-2 及贡献者所有。ChatPDF 的所有实现代码为独立编写的 Python 代码，未复制其源代码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目的 RAG 系统优化方案借鉴了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 的设计理念（语义意群、三层粒度、智能粒度选择等概念）。Paper Burner X 采用 AGPL-3.0 许可证，版权归 Feather-2 及贡献者所有。ChatPDF Pro 的所有实现代码为独立编写，未复制其源代码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 
@@ -330,11 +306,11 @@ A: 请在左下角设置面板中切换 KaTeX 与 MathJax 引擎。KaTeX 渲染�
 
 ## 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+本项目采用 MIT 许可证 — 详见 [LICENSE](LICENSE) 文件。
 
 <div align="center">
 
-**如果这个项目对你有帮助，请给一个 ⭐ Star 支持一下！**
+**如果这个项目对你有帮助，请给一个 Star 支持一下！**
 
 Made with ❤️ by ChatPDF Team
 

@@ -8,8 +8,13 @@ Layout Service - 基于 DocLayout-YOLO 的文档布局检测
 - detect_layout: 检测页面所有布局元素
 - get_image_body_bboxes: 只返回 ImageBody 类别的 bbox
 """
+import json
 import logging
 import os
+import shutil
+import sys
+import threading
+from importlib.util import find_spec
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -32,15 +37,224 @@ CATEGORY_MAP = {
     9: "EquationNumber",
 }
 
-# 默认模型路径
-_MODEL_DIR = Path(__file__).parent.parent / "models"
 _MODEL_FILENAME = "doclayout_yolo_docstructbench_imgsz1280.pt"
+_MODEL_REPO_ID = "opendatalab/PDF-Extract-Kit-1.0"
+_MODEL_REPO_FILENAME = "models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt"
+_MODEL_CONFIG_FILENAME = "layout_model.json"
 
 # 全局单例
 _model_instance = None
 _model_device = None
+_model_path: Optional[Path] = None
+_model_lock = threading.Lock()
+_last_error = ""
 
 
+def _runtime_data_dir() -> Path:
+    """返回运行时数据目录，桌面端对应用户 AppData。"""
+    try:
+        from runtime_mode import runtime
+        return Path(runtime.data_dir)
+    except Exception:
+        return Path(__file__).resolve().parents[2] / "data"
+
+
+def _model_config_path() -> Path:
+    return _runtime_data_dir() / "config" / _MODEL_CONFIG_FILENAME
+
+
+def _default_model_dir() -> Path:
+    return _runtime_data_dir() / "models" / "layout"
+
+
+def _default_model_path() -> Path:
+    return _default_model_dir() / _MODEL_FILENAME
+
+
+def _load_model_config() -> Dict[str, Any]:
+    path = _model_config_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[LayoutService] Failed to read model config %s: %s", path, exc)
+        return {}
+
+
+def _save_model_config(config: Dict[str, Any]) -> None:
+    path = _model_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalize_user_path(value: str) -> Path:
+    cleaned = (value or "").strip().strip('"')
+    if not cleaned:
+        raise ValueError("路径不能为空")
+    if "\x00" in cleaned:
+        raise ValueError("路径包含非法字符")
+    return Path(cleaned).expanduser().resolve()
+
+
+def _candidate_model_paths() -> List[tuple[Path, str]]:
+    """按优先级返回可用权重候选路径。"""
+    candidates: List[tuple[Path, str]] = []
+    configured = (_load_model_config().get("model_path") or "").strip()
+    if configured:
+        try:
+            configured_path = Path(configured).expanduser().resolve()
+            candidates.append((configured_path, "custom"))
+        except Exception:
+            pass
+
+    candidates.append((_default_model_path(), "default"))
+
+    # 源码开发模式保留兼容：本地忽略的 backend/models/*.pt 可直接用于调试。
+    if not getattr(sys, "frozen", False):
+        candidates.append((Path(__file__).parent.parent / "models" / _MODEL_FILENAME, "source_tree"))
+
+    return candidates
+
+
+def _resolve_model_path() -> tuple[Optional[Path], str]:
+    for path, source in _candidate_model_paths():
+        if path.exists() and path.is_file():
+            return path, source
+    return None, "missing"
+
+
+def _check_dependencies() -> tuple[bool, str]:
+    missing = [
+        name
+        for name in ("doclayout_yolo", "torch", "cv2")
+        if find_spec(name) is None
+    ]
+    if missing:
+        return False, f"缺少依赖: {', '.join(missing)}"
+    return True, ""
+
+
+def reset_model_cache() -> None:
+    """清空已加载的 YOLO 模型，配置变更后调用。"""
+    global _model_instance, _model_device, _model_path
+    with _model_lock:
+        _model_instance = None
+        _model_device = None
+        _model_path = None
+
+
+def get_yolo_model_status() -> Dict[str, Any]:
+    """返回 DocLayout-YOLO 运行依赖和权重配置状态。"""
+    deps_ok, deps_error = _check_dependencies()
+    path, source = _resolve_model_path()
+    config = _load_model_config()
+    model_installed = path is not None and path.exists()
+    configured_path = (config.get("model_path") or "").strip()
+
+    return {
+        "available": bool(deps_ok and model_installed),
+        "dependencies_available": deps_ok,
+        "dependencies_error": deps_error,
+        "model_installed": bool(model_installed),
+        "model_path": str(path) if path else "",
+        "configured_model_path": configured_path,
+        "source": source,
+        "default_install_dir": str(_default_model_dir()),
+        "expected_filename": _MODEL_FILENAME,
+        "download": {
+            "repo_id": _MODEL_REPO_ID,
+            "filename": _MODEL_REPO_FILENAME,
+        },
+        "last_error": _last_error,
+    }
+
+
+def configure_yolo_model_path(model_path: str) -> Dict[str, Any]:
+    """保存用户手动指定的 YOLO 权重路径。"""
+    global _last_error
+
+    path = _normalize_user_path(model_path)
+    if path.is_dir():
+        path = path / _MODEL_FILENAME
+    if not path.exists() or not path.is_file():
+        _last_error = f"权重文件不存在: {path}"
+        raise FileNotFoundError(_last_error)
+    if path.suffix.lower() != ".pt":
+        _last_error = "权重文件必须是 .pt 文件"
+        raise ValueError(_last_error)
+
+    _save_model_config({"model_path": str(path)})
+    reset_model_cache()
+    _last_error = ""
+    return get_yolo_model_status()
+
+
+def reset_yolo_model_config() -> Dict[str, Any]:
+    """清除用户自定义 YOLO 权重路径，回到默认安装目录。"""
+    global _last_error
+    config_path = _model_config_path()
+    if config_path.exists():
+        config_path.unlink()
+    reset_model_cache()
+    _last_error = ""
+    return get_yolo_model_status()
+
+
+def download_yolo_model(install_dir: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
+    """下载 DocLayout-YOLO 权重到用户指定目录或默认用户数据目录。"""
+    global _last_error
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception as exc:
+        _last_error = f"缺少 huggingface_hub，无法自动下载: {exc}"
+        raise RuntimeError(_last_error) from exc
+
+    if install_dir and install_dir.strip():
+        target_dir = _normalize_user_path(install_dir)
+        if target_dir.suffix.lower() == ".pt":
+            target_dir = target_dir.parent
+    else:
+        target_dir = _default_model_dir()
+    target_path = target_dir / _MODEL_FILENAME
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if target_path.exists() and not force:
+            _save_model_config({"model_path": str(target_path)})
+            reset_model_cache()
+            _last_error = ""
+            status = get_yolo_model_status()
+            status["downloaded"] = False
+            return status
+
+        cache_dir = target_dir / ".hf_cache"
+        downloaded = hf_hub_download(
+            repo_id=_MODEL_REPO_ID,
+            filename=_MODEL_REPO_FILENAME,
+            cache_dir=str(cache_dir),
+        )
+
+        part_path = target_path.with_suffix(target_path.suffix + ".part")
+        if part_path.exists():
+            part_path.unlink()
+        shutil.copy2(downloaded, part_path)
+        part_path.replace(target_path)
+
+        # 清理 HuggingFace 临时缓存，避免在用户目录留下一份冗余权重副本
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+        _save_model_config({"model_path": str(target_path)})
+        reset_model_cache()
+        _last_error = ""
+        status = get_yolo_model_status()
+        status["downloaded"] = True
+        return status
+    except Exception as exc:
+        _last_error = f"YOLO 权重下载失败: {exc}"
+        logger.error("[LayoutService] %s", _last_error)
+        raise
 
 def _get_device() -> str:
     """检测可用设备
@@ -63,54 +277,43 @@ def _get_device() -> str:
 
 
 def _download_model(model_path: Path) -> Path:
-    """从 HuggingFace 下载 DocLayout-YOLO 模型权重"""
+    """兼容旧调用：不在推理路径自动下载。"""
     if model_path.exists():
-        logger.info(f"[LayoutService] Model already exists: {model_path}")
         return model_path
-
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        from huggingface_hub import hf_hub_download
-        logger.info("[LayoutService] Downloading DocLayout-YOLO model from HuggingFace...")
-        downloaded = hf_hub_download(
-            repo_id="opendatalab/PDF-Extract-Kit-1.0",
-            filename="models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt",
-            local_dir=str(model_path.parent / "_hf_cache"),
-        )
-        # 移动到目标位置
-        import shutil
-        shutil.move(str(downloaded), str(model_path))
-        logger.info(f"[LayoutService] Model downloaded to: {model_path}")
-        return model_path
-    except Exception as e:
-        logger.error(f"[LayoutService] Failed to download model: {e}")
-        raise
+    raise FileNotFoundError(
+        "DocLayout-YOLO 权重未安装。请在 OCR 设置中一键下载，或手动指定 .pt 权重路径。"
+    )
 
 
 def _get_model():
     """获取或初始化模型单例（lazy init）"""
-    global _model_instance, _model_device
+    global _model_instance, _model_device, _model_path, _last_error
 
-    if _model_instance is not None:
-        return _model_instance
+    resolved_path, _source = _resolve_model_path()
+    if not resolved_path:
+        _last_error = "DocLayout-YOLO 权重未安装"
+        raise FileNotFoundError(
+            "DocLayout-YOLO 权重未安装。请在 OCR 设置中一键下载，或手动指定 .pt 权重路径。"
+        )
 
-    model_path = _MODEL_DIR / _MODEL_FILENAME
+    with _model_lock:
+        if _model_instance is not None and _model_path == resolved_path:
+            return _model_instance
 
-    # 自动下载
-    model_path = _download_model(model_path)
+        device = _get_device()
+        _model_device = device
 
-    device = _get_device()
-    _model_device = device
-
-    try:
-        from doclayout_yolo import YOLOv10
-        _model_instance = YOLOv10(str(model_path)).to(device)
-        logger.info(f"[LayoutService] Model loaded on {device}")
-        return _model_instance
-    except Exception as e:
-        logger.error(f"[LayoutService] Failed to load model: {e}")
-        raise
+        try:
+            from doclayout_yolo import YOLOv10
+            _model_instance = YOLOv10(str(resolved_path)).to(device)
+            _model_path = resolved_path
+            _last_error = ""
+            logger.info(f"[LayoutService] Model loaded on {device}: {resolved_path}")
+            return _model_instance
+        except Exception as e:
+            _last_error = f"DocLayout-YOLO 加载失败: {e}"
+            logger.error(f"[LayoutService] Failed to load model: {e}")
+            raise
 
 
 def detect_layout(
@@ -242,8 +445,4 @@ def pixel_bbox_to_page_pts(
 
 def is_available() -> bool:
     """检查 layout service 是否可用"""
-    try:
-        from doclayout_yolo import YOLOv10
-        return True
-    except ImportError:
-        return False
+    return bool(get_yolo_model_status().get("available"))

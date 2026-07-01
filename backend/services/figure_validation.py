@@ -162,7 +162,8 @@ def apply_fallback(
     figure: LogicalFigureSchema,
     strategy: Dict,
     pdf_doc,
-    render_func
+    render_func,
+    render_kwargs: Optional[Dict] = None,
 ) -> Tuple[Optional[RenderResult], str]:
     """应用 fallback 策略
     
@@ -176,11 +177,12 @@ def apply_fallback(
         (RenderResult 或 None, 应用的策略描述)
     """
     strategy_type = strategy.get("type")
+    render_kwargs = render_kwargs or {}
     
     try:
         if strategy_type == "padding":
             padding = strategy.get("value", 10)
-            result = render_func(pdf_doc, figure, padding=padding)
+            result = render_func(pdf_doc, figure, padding=padding, **render_kwargs)
             return result, f"padding={padding}"
         
         elif strategy_type == "switch_bbox":
@@ -190,7 +192,7 @@ def apply_fallback(
                 original = figure.body_bbox_page_pts
                 figure.body_bbox_page_pts = figure.full_bbox_page_pts
                 figure.full_bbox_page_pts = original
-                result = render_func(pdf_doc, figure)
+                result = render_func(pdf_doc, figure, **render_kwargs)
                 # 恢复
                 figure.full_bbox_page_pts = figure.body_bbox_page_pts
                 figure.body_bbox_page_pts = original
@@ -200,13 +202,13 @@ def apply_fallback(
                 # 临时交换
                 original = figure.full_bbox_page_pts
                 figure.full_bbox_page_pts = figure.body_bbox_page_pts
-                result = render_func(pdf_doc, figure)
+                result = render_func(pdf_doc, figure, **render_kwargs)
                 # 恢复
                 figure.full_bbox_page_pts = original
                 return result, "switched to body_bbox"
         
         elif strategy_type == "retry_original":
-            result = render_func(pdf_doc, figure)
+            result = render_func(pdf_doc, figure, **render_kwargs)
             return result, "retry_original"
     
     except Exception as e:
@@ -218,7 +220,8 @@ def apply_fallback(
 def validate_and_fallback(
     figure: LogicalFigureSchema,
     pdf_doc,
-    render_func
+    render_func,
+    render_kwargs: Optional[Dict] = None,
 ) -> RenderResult:
     """验证图像质量，如果失败则应用 fallback
     
@@ -230,14 +233,15 @@ def validate_and_fallback(
     Returns:
         RenderResult: 包含验证状态
     """
+    render_kwargs = render_kwargs or {}
     # 首次渲染
-    result = render_func(pdf_doc, figure)
+    result = render_func(pdf_doc, figure, **render_kwargs)
     
     if not result.success:
         # 渲染失败，尝试 fallback
         for strategy in FALLBACK_STRATEGIES:
             fallback_result, strategy_desc = apply_fallback(
-                figure, strategy, pdf_doc, render_func
+                figure, strategy, pdf_doc, render_func, render_kwargs=render_kwargs
             )
             if fallback_result and fallback_result.success:
                 # 验证 fallback 结果
@@ -267,7 +271,7 @@ def validate_and_fallback(
             # 验证失败，尝试 fallback
             for strategy in FALLBACK_STRATEGIES:
                 fallback_result, strategy_desc = apply_fallback(
-                    figure, strategy, pdf_doc, render_func
+                    figure, strategy, pdf_doc, render_func, render_kwargs=render_kwargs
                 )
                 if fallback_result and fallback_result.success:
                     # 验证 fallback 结果
