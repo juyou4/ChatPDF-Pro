@@ -264,16 +264,23 @@ pushd backend
 start "" /B python app.py >backend_startup.log 2>&1
 popd
 
-:: 等待后端启动（最多30秒）
+:: 等待后端启动（最多90秒）
 set "wait_ok=0"
-for /l %%i in (1,1,30) do (
-    netstat -ano | findstr :8000 | findstr LISTENING >nul 2>&1
-    if not errorlevel 1 (
-        set "wait_ok=1"
-        goto BACK_OK
-    )
-    timeout /t 1 /nobreak >nul
-)
+set "wait_count=0"
+:WAIT_BACKEND
+curl -fsS --max-time 2 http://127.0.0.1:8000/health >nul 2>&1
+if not errorlevel 1 goto BACK_HEALTHY
+
+netstat -ano | findstr :8000 | findstr LISTENING >nul 2>&1
+if not errorlevel 1 goto BACK_HEALTHY
+
+set /a wait_count+=1
+if !wait_count! geq 90 goto BACK_OK
+timeout /t 1 /nobreak >nul
+goto WAIT_BACKEND
+
+:BACK_HEALTHY
+set "wait_ok=1"
 :BACK_OK
 
 if "!wait_ok!"=="0" (
@@ -335,6 +342,9 @@ pause
 exit /b 1
 
 :BACKFAIL
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING 2^>nul') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
 echo   [✗] 后端启动失败，请检查错误信息
 echo.
 pause

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
 import { Copy, Check, ChevronDown, BrainCircuit } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
 import { useChatParams } from '../contexts/ChatParamsContext'
+import AgentTracePanel from './AgentTracePanel'
 
 /**
  * 实时思考计时器组件
@@ -50,12 +50,21 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
  * 深度思考展示组件
  * 采用全新的胶囊式开关和展开面板 UI 设计
  */
-const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef }) => {
+const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef, agentTrace }) => {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
   const [hasStreamingText, setHasStreamingText] = useState(false)
+  const [progressLineCount, setProgressLineCount] = useState(1)
   const wasStreamingRef = useRef(false)
   const { thoughtAutoCollapse } = useChatParams()
+  const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
+
+  const getProgressLineCount = useCallback((text = '') => {
+    const lines = String(text)
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+    return Math.max(1, lines.length)
+  }, [])
 
   // 思考完成后自动折叠（受 thoughtAutoCollapse 设置控制）
   useEffect(() => {
@@ -71,6 +80,7 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
   useEffect(() => {
     if (!isStreaming || !streamingRef?.current) {
       setHasStreamingText(false)
+      setProgressLineCount(getProgressLineCount(content))
       return
     }
 
@@ -78,6 +88,10 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
     const syncHasContent = () => {
       const text = el.textContent || ''
       setHasStreamingText(text.trim().length > 0)
+      setProgressLineCount((prev) => {
+        const next = getProgressLineCount(text || content)
+        return prev === next ? prev : next
+      })
     }
 
     syncHasContent()
@@ -85,7 +99,7 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
     observer.observe(el, { childList: true, subtree: true, characterData: true })
 
     return () => observer.disconnect()
-  }, [isStreaming, streamingRef])
+  }, [content, getProgressLineCount, isStreaming, streamingRef])
 
   // 复制思考内容
   const handleCopy = useCallback((e) => {
@@ -100,6 +114,8 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
   // 深度思考在首个 reasoning_content 到来前，直接给出可见的阶段提示，
   // 避免面板只有三个点、看起来像“卡住了”。
   const shouldShowStreamingHint = isStreaming && !(content && content.trim()) && !hasStreamingText
+  const shouldShowTimeline = shouldShowStreamingHint || isStreaming || Boolean(content && content.trim())
+  const timelineDotOffset = Math.min(280, Math.max(0, (progressLineCount - 1) * 23))
 
   return (
     <div className={`flex flex-col items-start gap-2 my-2 ${darkMode ? 'dark' : ''}`}>
@@ -127,7 +143,7 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
           expanded ? 'max-h-[3000px] opacity-100 scale-100 mb-2' : 'max-h-0 opacity-0 scale-95 mb-0'
         }`}
       >
-        <div className={`backdrop-blur-sm border shadow-[0_4px_15px_rgba(124,58,237,0.06)] rounded-2xl p-4 w-full text-[13px] relative ml-1 ${darkMode ? 'bg-gray-800/90 border-purple-900/50 text-gray-300' : 'bg-white/90 border-purple-100 text-gray-600'}`}>
+        <div className={`backdrop-blur-sm border shadow-[0_4px_15px_rgba(124,58,237,0.06)] rounded-lg p-4 w-full text-[13px] relative ml-1 ${darkMode ? 'bg-gray-800/90 border-purple-900/50 text-gray-300' : 'bg-white/90 border-purple-100 text-gray-600'}`}>
           
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-1.5 text-purple-600 font-medium">
@@ -147,28 +163,37 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
             )}
           </div>
           
-          <div className={`pl-2 border-l-2 py-0.5 ${darkMode ? 'border-purple-900/50' : 'border-purple-100/50'} ml-1.5`}>
-            <div className="relative">
-              {/* 装饰小圆点 */}
-              <span className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}></span>
-              {shouldShowStreamingHint && (
-                <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-purple-300/90' : 'text-purple-500/90'}`}>
-                  正在检索并组织思考内容...
+          {shouldShowTimeline && (
+            <div className={`pl-2 border-l-2 py-0.5 ${darkMode ? 'border-purple-900/50' : 'border-purple-100/70'} ml-1.5`}>
+              <div className="relative">
+                {/* 活动进度点：随检索/思考阶段行数下移，避免一直停在第一行。 */}
+                <span
+                  className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full transition-transform duration-300 ease-out ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}
+                  style={{ transform: `translateY(${timelineDotOffset}px)` }}
+                />
+                {shouldShowStreamingHint && (
+                  <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-purple-300/90' : 'text-purple-500/90'}`}>
+                    正在检索并组织思考内容...
+                  </div>
+                )}
+                <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
+                  <StreamingMarkdown
+                    content={content}
+                    isStreaming={isStreaming}
+                    enableBlurReveal={false}
+                    blurIntensity="light"
+                    streamingRef={streamingRef}
+                    suppressInitialDots={shouldShowStreamingHint}
+                  />
                 </div>
-              )}
-              <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
-              <StreamingMarkdown
-                content={content}
-                isStreaming={isStreaming}
-                enableBlurReveal={false}
-                blurIntensity="light"
-                streamingRef={streamingRef}
-                suppressInitialDots={shouldShowStreamingHint}
-              />
+              </div>
             </div>
-          </div>
+          )}
+
+          {hasAgentTrace && (
+            <AgentTracePanel trace={agentTrace} embedded />
+          )}
         </div>
-      </div>
       </div>
     </div>
   )

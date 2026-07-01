@@ -29,7 +29,6 @@ import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
 import EvidencePanel from './EvidencePanel';
-import AgentTracePanel from './AgentTracePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
@@ -791,10 +790,11 @@ const ChatPDF = () => {
   // ========== 虚拟消息列表渲染回调（useCallback 稳定引用） ==========
   const renderMessage = useCallback((msg, idx) => {
     const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
+    const hasAgentTrace = msg.type === 'assistant' && msg.agentTrace && msg.agentTrace.enabled;
     const isStreamingCurrentMessage = shouldStreamAssistantContent(msg, streamingMessageId);
     // 只要当前消息还在生成，且正文还没开始出现，就先展示思考/生成阶段块。
     // 这样即使 reasoningEffort 关闭，用户也不会只看到三个等待点。
-    const shouldShowThinking = hasThinking || (
+    const shouldShowThinking = hasThinking || hasAgentTrace || (
       isStreamingCurrentMessage && (
         reasoningEffort !== 'off'
         || !msg.content
@@ -833,6 +833,7 @@ const ChatPDF = () => {
               darkMode={darkMode}
               thinkingMs={msg.thinkingMs || 0}
               streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
+              agentTrace={msg.agentTrace || null}
             />
           )}
           {msg.hasImage && (
@@ -890,10 +891,6 @@ const ChatPDF = () => {
             activeRef={activeCitationRef}
             onRefHover={setActiveCitationRef}
           />
-        )}
-        {/* 检索代理轨迹 */}
-        {msg.type === 'assistant' && !msg.isStreaming && msg.agentTrace && msg.agentTrace.enabled && (
-          <AgentTracePanel trace={msg.agentTrace} />
         )}
         {/* 思维导图 */}
         {msg.type === 'assistant' && !msg.isStreaming && msg.mindmapMarkdown && (
