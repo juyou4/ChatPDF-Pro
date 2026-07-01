@@ -153,12 +153,9 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
 
         // 版本不匹配时尝试迁移旧数据
         if (saved && savedVersion !== CONFIG_VERSION) {
-            console.log('🔄 Upgrading default models to version', CONFIG_VERSION)
-
             // 尝试从旧数据迁移用户选择的默认模型
             const migrated = migrateDefaults(saved)
             if (migrated) {
-                console.log('✅ 成功从旧版本迁移默认模型配置')
                 localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
                 return migrated
             }
@@ -171,7 +168,6 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
         if (saved && savedVersion === CONFIG_VERSION) {
             try {
                 const parsed = JSON.parse(saved) as DefaultModels
-                console.log('✅ Loaded default models (v' + CONFIG_VERSION + ')')
                 return {
                     ...parsed,
                     embeddingModel: normalizeEmbeddingKey(parsed.embeddingModel) || INITIAL_DEFAULTS.embeddingModel,
@@ -190,7 +186,6 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
         const oldRerankModel = localStorage.getItem('selectedRerankModelId')
 
         if (oldEmbeddingModel || oldRerankModel) {
-            console.log('📦 Migrating old default models configuration')
             return {
                 embeddingModel: normalizeEmbeddingKey(oldEmbeddingModel) || INITIAL_DEFAULTS.embeddingModel,
                 assistantModel: INITIAL_DEFAULTS.assistantModel,
@@ -248,7 +243,6 @@ export function DefaultsProvider({ children }: { children: ReactNode }) {
      */
     const resetToDefaults = () => {
         setDefaults(INITIAL_DEFAULTS)
-        console.log('🔄 Reset to initial default models')
     }
 
     return (

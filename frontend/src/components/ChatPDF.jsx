@@ -29,6 +29,7 @@ import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
 import ThinkingBlock from './ThinkingBlock';
 import EvidencePanel from './EvidencePanel';
+import AgentTracePanel from './AgentTracePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
@@ -127,6 +128,9 @@ const PauseIcon = () => (
   </svg>
 );
 
+// GraphRAG 构建/查询端点使用本常量。其他 fetch 依赖均已在各自 hooks 内部维护同名常量。
+const API_BASE_URL = '';
+
 const UPLOAD_RING_CONFIGS = [
   { s: 298, w: 14, c: 'rgba(100, 50, 255, 0.5)',  br: '52% 48% 55% 45% / 48% 52% 48% 52%', dur: 4.2, del: -2.1, dir: 'normal',  mix: 'screen' },
   { s: 302, w: 22, c: 'rgba(50, 150, 255, 0.5)',  br: '45% 55% 48% 52% / 55% 45% 52% 48%', dur: 6.8, del: -4.3, dir: 'reverse', mix: 'screen' },
@@ -176,6 +180,8 @@ const ChatPDF = () => {
   const [useRerankSetting, setUseRerankSetting] = useDebouncedLocalStorage('useRerank', true);
   const [rerankerModel, setRerankerModel] = useDebouncedLocalStorage('rerankerModel', 'BAAI/bge-reranker-base');
   const [enableGraphRAG, setEnableGraphRAG] = useDebouncedLocalStorage('enableGraphRAG', false);
+  const [enableAgentRetrieval, setEnableAgentRetrieval] = useDebouncedLocalStorage('enableAgentRetrieval', false);
+  const [forceAgentRetrieval, setForceAgentRetrieval] = useDebouncedLocalStorage('chatpdf_force_agent_retrieval', false);
   const [enableJiebaBM25, setEnableJiebaBM25] = useDebouncedLocalStorage('enableJiebaBM25', true);
   const [numExpandContextChunk, setNumExpandContextChunk] = useDebouncedLocalStorage('numExpandContextChunk', 1);
 
@@ -255,14 +261,6 @@ const ChatPDF = () => {
 
   const getEmbeddingApiKey = useCallback(() => {
     const config = getEmbeddingConfig();
-    console.log('[DEBUG getEmbeddingApiKey]', {
-      isValid: config.isValid,
-      reason: config.reason,
-      modelType: config.model?.type,
-      providerId: config.providerId,
-      hasProviderKey: !!config.provider?.apiKey,
-      fallbackKey: embeddingApiKey ? 'embeddingApiKey' : apiKey ? 'apiKey' : 'none',
-    });
     if (config.isValid && config.provider?.apiKey) {
       return config.provider.apiKey;
     }
@@ -410,6 +408,8 @@ const ChatPDF = () => {
     enableVectorSearch,
     embeddingApiKey: getEmbeddingApiKey(),
     enableGraphRAG,
+    enableAgentRetrieval,
+    forceAgentRetrieval,
     enableJiebaBM25,
     numExpandContextChunk,
     enableBlurReveal,
@@ -439,6 +439,12 @@ const ChatPDF = () => {
   // 用户反馈
   const [feedbackTarget, setFeedbackTarget] = useState(null); // {idx, msg}
   const [dislikedMessages, setDislikedMessages] = useState(new Set());
+
+  // GraphRAG 构建状态：per-docId，不持久化（后端重启后内存实例丢失，由 stats 查询恢复）
+  const [graphragStatus, setGraphragStatus] = useState('unknown'); // unknown | idle | building | built | error
+  const [graphragStats, setGraphragStats] = useState(null); // { num_nodes, num_edges, num_docs, num_chunks }
+  const [graphragError, setGraphragError] = useState('');
+  const [graphragProgress, setGraphragProgress] = useState(null); // { stage, progress, last_error }
 
   // 将 setter 函数注册到 ref 桥接对象，供 useDocumentState 和 useScreenshotState 使用
   messageSettersRef.current = { setMessages, setIsLoading, setInputValue, sendMessage };
@@ -475,6 +481,142 @@ const ChatPDF = () => {
   useEffect(() => {
     if (docId && docInfo) saveCurrentSession(messages);
   }, [docId, docInfo, messages]);
+
+  // ========== GraphRAG 构建 / 状态查询 ==========
+  // 切换文档时先重置状态，然后查询是否已有图谱实例在后端内存中。
+  // 注意：后端 `_graphrag_instances` 只在进程内存里存活，重启后会丢；磁盘上的
+  // `data/graphrag/<doc_id>/` 目录存在但没有自动 reload 逻辑，所以这里只能拿
+  // 到「本次进程已构建」的状态。
+  useEffect(() => {
+    if (!docId) {
+      setGraphragStatus('unknown');
+      setGraphragStats(null);
+      setGraphragError('');
+      setGraphragProgress(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setGraphragStatus('idle');
+      setGraphragStats(null);
+      setGraphragError('');
+      setGraphragProgress(null);
+      try {
+        const res = await fetch(`${API_BASE_URL}/document/${docId}/graphrag/stats`);
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          const stats = data.stats || {};
+          setGraphragStats(stats);
+          // 从 build_meta 恢复进度/错误信息
+          const meta = stats.build_meta || {};
+          if (meta.status === 'done') {
+            setGraphragStatus('built');
+          } else if (meta.status === 'failed') {
+            setGraphragStatus('error');
+            setGraphragError(meta.last_error || '构建失败');
+          }
+          setGraphragProgress(meta);
+        }
+        // 404 表示未构建 → 保持 'idle'
+      } catch (e) {
+        if (!cancelled) console.warn('[GraphRAG] stats 查询失败', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+
+  const handleBuildGraphRAG = useCallback(async (opts = {}) => {
+    if (!docId) { alert('请先上传文档'); return; }
+    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
+    if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
+      alert('请先配置对话模型的 API Key');
+      return;
+    }
+    if (!chatModel) {
+      alert('请先选择对话模型');
+      return;
+    }
+
+    setGraphragStatus('building');
+    setGraphragError('');
+
+    const chatProviderFull = getProviderById?.(chatProvider);
+    const embedConfig = getEmbeddingConfig?.() || {};
+    const embedModel = embedConfig.model || chatModel;
+    const embedProvider = embedConfig.provider || chatProvider;
+    const embedApiKey = embedConfig.apiKey || chatApiKey;
+    const embedApiHost = embedConfig.apiHost || '';
+
+    const body = {
+      api_key: chatApiKey,
+      model: chatModel,
+      api_provider: chatProviderFull?.provider || chatProvider,
+      api_host: chatProviderFull?.apiHost || '',
+      embedding_model: embedModel,
+      embedding_api_key: embedApiKey,
+      embedding_api_host: embedApiHost,
+      force_rebuild: opts.forceRebuild || false,
+    };
+
+    // 轮询 progress API
+    let pollInterval = null;
+    const startPolling = () => {
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/document/${docId}/graphrag/progress`);
+          if (!res.ok) return;
+          const data = await res.json();
+          const prog = data.progress || {};
+          setGraphragProgress(prog);
+          if (prog.status === 'done') {
+            clearInterval(pollInterval);
+            // 构建完成，查询 stats
+            const statsRes = await fetch(`${API_BASE_URL}/document/${docId}/graphrag/stats`);
+            if (statsRes.ok) {
+              const statsData = await statsRes.json();
+              setGraphragStats(statsData.stats || null);
+            }
+            setGraphragStatus('built');
+          } else if (prog.status === 'failed') {
+            clearInterval(pollInterval);
+            setGraphragError(prog.last_error || '构建失败');
+            setGraphragStatus('error');
+          }
+        } catch (e) {
+          // 轮询失败不中断
+        }
+      }, 2000);
+    };
+
+    try {
+      startPolling();
+      const res = await fetch(`${API_BASE_URL}/document/${docId}/graphrag/build`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        clearInterval(pollInterval);
+        const detail = (await res.json()).detail || '构建失败';
+        throw new Error(detail);
+      }
+      const data = await res.json();
+      if (data.loaded_from_disk || data.stats) {
+        clearInterval(pollInterval);
+        setGraphragStats(data.stats || null);
+        setGraphragProgress(data.stats?.build_meta || null);
+        setGraphragStatus('built');
+      }
+    } catch (e) {
+      clearInterval(pollInterval);
+      console.error('[GraphRAG] 构建失败', e);
+      setGraphragError(String(e?.message || e));
+      setGraphragStatus('error');
+    }
+  }, [docId, getChatCredentials, getProviderById, getEmbeddingConfig, getEmbeddingApiKey]);
 
   // ========== 数据获取函数（useCallback 包裹，稳定引用） ==========
   const fetchAvailableModels = useCallback(async () => {
@@ -748,6 +890,10 @@ const ChatPDF = () => {
             activeRef={activeCitationRef}
             onRefHover={setActiveCitationRef}
           />
+        )}
+        {/* 检索代理轨迹 */}
+        {msg.type === 'assistant' && !msg.isStreaming && msg.agentTrace && msg.agentTrace.enabled && (
+          <AgentTracePanel trace={msg.agentTrace} />
         )}
         {/* 思维导图 */}
         {msg.type === 'assistant' && !msg.isStreaming && msg.mindmapMarkdown && (
@@ -1413,6 +1559,103 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+
+                  {/* GraphRAG 构建控制：仅在勾选 + 有活动文档时显示 */}
+                  {enableGraphRAG && docId && (
+                    <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-purple-500/10 border-purple-400/20' : 'bg-purple-50/80 border-purple-200'}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-[12px] leading-relaxed flex-1 min-w-0">
+                          {graphragStatus === 'built' && graphragStats ? (
+                            <span className={`inline-flex items-center gap-1.5 font-medium ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>
+                              <Check size={12} strokeWidth={3} className="shrink-0" />
+                              已构建：{graphragStats.num_nodes ?? 0} 实体 · {graphragStats.num_edges ?? 0} 关系 · {graphragStats.num_chunks ?? 0} 分块
+                            </span>
+                          ) : graphragStatus === 'building' ? (
+                            <span className={`inline-flex items-center gap-1.5 ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>
+                              <Loader2 size={12} className="animate-spin shrink-0" />
+                              {graphragProgress?.stage ? (
+                                <>
+                                  {graphragProgress.stage === 'chunking' && '分块中'}
+                                  {graphragProgress.stage === 'extracting' && '提取实体/关系中'}
+                                  {graphragProgress.stage === 'clustering' && '社区聚类中'}
+                                  {graphragProgress.stage === 'reporting' && '生成社区报告中'}
+                                  {graphragProgress.stage === 'persisting' && '持久化中'}
+                                  {graphragProgress.progress > 0 && ` (${graphragProgress.progress}%)`}
+                                </>
+                              ) : '正在构建知识图谱，请勿关闭页面...'}
+                            </span>
+                          ) : graphragStatus === 'error' ? (
+                            <span className="text-red-500">构建失败</span>
+                          ) : (
+                            <span className={darkMode ? 'text-gray-400' : 'text-gray-600'}>此文档尚未构建知识图谱</span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBuildGraphRAG(); }}
+                          disabled={graphragStatus === 'building'}
+                          className={`shrink-0 px-3 py-1 rounded-full text-[11px] font-semibold transition-colors ${
+                            graphragStatus === 'building'
+                              ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                              : 'bg-[#7c4dff] text-white hover:bg-[#6a3ff0] shadow-[0_2px_8px_rgba(124,77,255,0.25)]'
+                          }`}
+                        >
+                          {graphragStatus === 'built' ? '重新构建' : graphragStatus === 'building' ? '构建中' : '立即构建'}
+                        </button>
+                      </div>
+                      {graphragStatus === 'error' && graphragError && (
+                        <div className="mt-2 text-[11px] text-red-500 leading-relaxed break-words">
+                          {graphragError}
+                        </div>
+                      )}
+                      {graphragStatus === 'idle' && (
+                        <p className={`mt-1.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          首次构建会调用对话模型逐块提取，通常耗时 30 秒至数分钟。构建后知识图谱会自动注入聊天上下文。
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 检索代理：多轮规划 + 工具集 */}
+                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableAgentRetrieval && <Check size={13} strokeWidth={3.5} />}
+                    </div>
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>检索代理 (Agentic RAG)</h4>
+                        <input type="checkbox" checked={enableAgentRetrieval} onChange={e => setEnableAgentRetrieval(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        多轮规划 + 7 种检索工具，仅对综述/比较/章节解析等高价值题型触发
+                      </p>
+                    </div>
+                  </label>
+
+                  {enableAgentRetrieval && (
+                    <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-violet-500/10 border-violet-400/20' : 'bg-violet-50/80 border-violet-200'}`}>
+                      <p className={`text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                        启用后，对「综述全文 / 多角度比较 / 章节解读 / 文献元信息」等高价值问题会自动进入多轮代理：
+                        每轮 LLM 规划 → 调用 vector / BM25 / GREP / 正则 / 布尔 / 意群 fetch / 文档地图 等工具采集证据，
+                        最多 5 轮（可在后端 <code className="px-1 rounded bg-black/5">agent_max_rounds</code> 配置 1–10）。
+                        每条回答下方会展示完整执行轨迹。
+                      </p>
+                    </div>
+                  )}
+
+                  {enableAgentRetrieval && (
+                    <label className="ml-[34px] mt-1 flex items-center gap-2 text-[12px] text-gray-600 dark:text-gray-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={forceAgentRetrieval}
+                        onChange={e => setForceAgentRetrieval(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded border-gray-300 text-violet-500 focus:ring-violet-300"
+                      />
+                      <span>强制启用 Agent</span>
+                      <span title="勾选后所有问题都将走 Agent 路径，绕过 query_type / evidence_needs 白名单门控。仅供调试与高价值题型评估。"
+                            className="text-gray-400 cursor-help">ⓘ</span>
+                    </label>
+                  )}
 
                   <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
                     <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>

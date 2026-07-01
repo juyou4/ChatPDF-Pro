@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -18,6 +19,8 @@ from utils.middleware import (
     FallbackMiddleware,
 )
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -103,8 +106,13 @@ async def search_in_pdf(request: SearchRequest):
         # 智能分析查询类型，动态调整top_k
         strategy = get_retrieval_strategy(request.query)
         dynamic_top_k = strategy['top_k']
-        
-        print(f"[Search] 查询类型: {strategy['query_type']}, 动态top_k: {dynamic_top_k}, 原因: {strategy['reasoning']}")
+
+        logger.debug(
+            "[Search] query_type=%s dynamic_top_k=%s reason=%s",
+            strategy["query_type"],
+            dynamic_top_k,
+            strategy["reasoning"],
+        )
 
         middlewares = build_search_middlewares()
 

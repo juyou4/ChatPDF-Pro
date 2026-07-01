@@ -26,12 +26,16 @@ from services.ocr_service import (
     _save_online_ocr_config,
     _load_online_ocr_config,
     _mask_api_key,
+    apply_ocr_result_to_pages,
+    select_ocr_target_pages,
+    validate_external_ocr_service_url,
     MistralAdapter,
     MinerUAdapter,
     Doc2XAdapter,
     WorkerOCRAdapter,
 )
 from models.model_detector import normalize_embedding_model_id
+from models.model_id_resolver import resolve_model_id
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -180,13 +184,13 @@ def save_document(doc_id: str, data: dict):
         with open(file_path, "w", encoding="utf-8") as f:
             import json
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Saved document {doc_id} to {file_path}")
+        logger.debug("Saved document %s to %s", doc_id, file_path)
     except Exception as e:
-        print(f"Error saving document {doc_id}: {e}")
+        logger.warning("Error saving document %s: %s", doc_id, e)
 
 
 def load_documents():
-    print("Loading documents from disk...")
+    logger.info("Loading documents from disk...")
     count = 0
     for file_path in glob.glob(str(DOCS_DIR / "*.json")):
         try:
@@ -198,8 +202,8 @@ def load_documents():
                 documents_store[doc_id] = data
                 count += 1
         except Exception as e:
-            print(f"Error loading document from {file_path}: {e}")
-    print(f"Loaded {count} documents.")
+            logger.warning("Error loading document from %s: %s", file_path, e)
+    logger.info("Loaded %s documents.", count)
 
 
 def migrate_legacy_storage():
@@ -989,13 +993,19 @@ def extract_text_from_pdf(
         total_pages = len(doc)
         total_batches = (total_pages + BATCH_SIZE - 1) // BATCH_SIZE
         
-        print(f"[PDF] Processing {total_pages} pages in {total_batches} batches")
+        logger.debug("[PDF] Processing %s pages in %s batches", total_pages, total_batches)
         
         for batch_idx in range(total_batches):
             start_page = batch_idx * BATCH_SIZE
             end_page = min((batch_idx + 1) * BATCH_SIZE, total_pages)
             
-            print(f"[PDF] Batch {batch_idx + 1}/{total_batches}: pages {start_page + 1}-{end_page}")
+            logger.debug(
+                "[PDF] Batch %s/%s: pages %s-%s",
+                batch_idx + 1,
+                total_batches,
+                start_page + 1,
+                end_page,
+            )
             
             for page_num in range(start_page, end_page):
                 page = doc[page_num]
@@ -1004,12 +1014,17 @@ def extract_text_from_pdf(
                 
                 # ==================== 字符级文本提取（参考 paper-burner-x）====================
                 # 使用 get_text("dict") 获取详细的文本结构
+                text_dict = {"blocks": []}
                 try:
                     text_dict = page.get_text("dict")
                     page_text = extract_text_from_dict(text_dict)
                 except Exception as dict_err:
                     # 如果 dict 模式失败，回退到简单的 text 模式
-                    print(f"[PDF] Page {page_num + 1} dict extraction failed, fallback to text mode: {dict_err}")
+                    logger.debug(
+                        "[PDF] Page %s dict extraction failed, fallback to text mode: %s",
+                        page_num + 1,
+                        dict_err,
+                    )
                     page_text = page.get_text("text")
                 
                 # 清理文本
@@ -1078,7 +1093,7 @@ def extract_text_from_pdf(
                                             img_data = buffer.getvalue()
                                             img_ext = "jpg"
                                         except Exception as resize_err:
-                                            print(f"[PDF] Image resize failed: {resize_err}")
+                                            logger.debug("[PDF] Image resize failed: %s", resize_err)
                                     
                                     img_id = f"page{page_num + 1}_img{img_idx + 1}"
                                     img_base64 = base64.b64encode(img_data).decode('utf-8')
@@ -1111,7 +1126,11 @@ def extract_text_from_pdf(
                         all_images.extend(page_images)
                         
                     except Exception as img_extract_err:
-                        print(f"[PDF] Page {page_num + 1} image extraction failed: {img_extract_err}")
+                        logger.debug(
+                            "[PDF] Page %s image extraction failed: %s",
+                            page_num + 1,
+                            img_extract_err,
+                        )
                 
                 # 评估页面质量（使用传入的质量阈值）
                 quality = assess_page_quality(page_text, 1, ocr_quality_threshold)  # block_count设为1，因为我们不再使用blocks
@@ -1335,6 +1354,7 @@ def extract_text_from_pdf(
     page_qualities = None
     all_images = []
     extraction_method = None
+    err = "pdf_bytes not provided"
     
     # 优先使用 PyMuPDF
     figures = []
@@ -1342,11 +1362,16 @@ def extract_text_from_pdf(
         pages, full_text, page_qualities, all_images, figures, err = extract_with_pymupdf(pdf_bytes, extract_images)
         if pages is not None:
             extraction_method = "pymupdf"
-            print(f"[PDF] Using PyMuPDF extraction, {len(pages)} pages, {len(all_images)} images, {len(figures)} figures")
+            logger.info(
+                "[PDF] Using PyMuPDF extraction, %s pages, %s images, %s figures",
+                len(pages),
+                len(all_images),
+                len(figures),
+            )
 
     # 如果 PyMuPDF 失败，回退到 pdfplumber
     if pages is None:
-        print(f"[PDF] PyMuPDF failed ({err}), falling back to pdfplumber")
+        logger.warning("[PDF] PyMuPDF failed (%s), falling back to pdfplumber", err)
         pages, full_text, page_qualities, all_images, err = extract_with_pdfplumber(pdf_file)
         extraction_method = "pdfplumber"
         figures = []  # pdfplumber 暂不提取 figures
@@ -1381,38 +1406,28 @@ def extract_text_from_pdf(
         "pages_needing_ocr": pages_needing_ocr
     }
     
-    # 检查是否需要 OCR
-    if enable_ocr == "never":
-        return result
-    
-    # 逐页 OCR 决策：enable_ocr 为 "always" 时对所有页面执行 OCR
-    if enable_ocr == "always":
-        # "always" 模式：对所有页面执行 OCR
-        ocr_target_pages = list(range(total_pages))
-    else:
-        # "auto" 模式：仅对质量差的页面执行 OCR
-        ocr_target_pages = pages_needing_ocr
+    ocr_target_pages = select_ocr_target_pages(enable_ocr, total_pages, pages_needing_ocr)
 
     if not ocr_target_pages:
-        print(f"[PDF] 所有页面质量合格 (平均: {avg_quality:.1f})，无需 OCR")
+        logger.debug("[PDF] 无需执行 OCR 或 OCR 已禁用 (mode=%s, avg_quality=%.1f)", enable_ocr, avg_quality)
         return result
     
     # 通过注册表获取 OCR 适配器
     adapter = _ocr_registry.get_adapter(settings.ocr_backend)
     if adapter is None:
-        print(f"[PDF] 需要对 {len(ocr_target_pages)} 页执行 OCR，但无可用 OCR 后端")
+        logger.warning("[PDF] 需要对 %s 页执行 OCR，但无可用 OCR 后端", len(ocr_target_pages))
         result["ocr_error"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
         result["ocr_warning"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
         return result
     
     if pdf_bytes is None:
-        print("[PDF] 需要 OCR 但未提供 pdf_bytes")
+        logger.warning("[PDF] 需要 OCR 但未提供 pdf_bytes")
         result["ocr_error"] = "无法执行 OCR：缺少 PDF 原始数据"
         result["ocr_warning"] = "无法执行 OCR：缺少 PDF 原始数据"
         return result
     
     # 使用适配器系统执行逐页 OCR
-    print(f"[PDF] 开始逐页 OCR，共 {len(ocr_target_pages)} 页，后端: {adapter.name}")
+    logger.info("[PDF] 开始逐页 OCR，共 %s 页，后端: %s", len(ocr_target_pages), adapter.name)
     try:
         # 调用适配器的 ocr_pages()，仅传入需要 OCR 的页码列表
         ocr_result = adapter.ocr_pages(
@@ -1421,121 +1436,91 @@ def extract_text_from_pdf(
             dpi=ocr_dpi
         )
         
-        # 构建页码到 OCR 结果的映射（page_number 从 1 开始，pages_needing_ocr 从 0 开始）
-        ocr_page_map = {}
-        for page_ocr in ocr_result.pages:
-            if page_ocr.success:
-                # page_number 从 1 开始，转换为从 0 开始的索引
-                ocr_page_map[page_ocr.page_number - 1] = page_ocr.text
-        
-        # 合并 OCR 结果到原始提取文本
-        merged_text_parts = []
-        for i, page in enumerate(pages):
-            if i in ocr_page_map:
-                ocr_content = ocr_page_map[i]
-                orig_content = page.get("content", "")
-                
-                # 只有 OCR 结果更好时才替换（OCR 文本长度 >= 原始文本的 80%）
-                if len(ocr_content) > len(orig_content) * 0.8:
-                    page["content"] = heuristic_rebuild(ocr_content, is_cjk)
-                    page["source"] = "ocr"
-                    page["ocr_backend"] = ocr_result.backend
-                    result["ocr_used"] = True
-            
-            merged_text_parts.append(page["content"])
-        
-        # 更新结果中的 OCR 元数据
-        if result["ocr_used"]:
-            result["full_text"] = "\n\n".join(merged_text_parts)
-            result["ocr_backend"] = ocr_result.backend
-            result["ocr_pages"] = ocr_target_pages
+        apply_ocr_result_to_pages(
+            result,
+            pages,
+            ocr_result,
+            ocr_target_pages,
+            heuristic_rebuild,
+            is_cjk=is_cjk,
+        )
         
         # 处理部分页面 OCR 失败的警告信息
         if ocr_result.failed_pages:
             failed_info = ", ".join(str(p) for p in ocr_result.failed_pages)
-            warning_msg = f"部分页面 OCR 失败（页码: {failed_info}）"
-            result["ocr_warning"] = warning_msg
-            print(f"[PDF] OCR 警告: {warning_msg}")
+            logger.warning("[PDF] OCR 警告: 部分页面 OCR 失败（页码: %s）", failed_info)
         
         # 所有目标页面均失败时，附带全部失败警告
         if len(ocr_result.failed_pages) == len(ocr_target_pages):
-            result["ocr_warning"] = "所有需要 OCR 的页面均处理失败，已保留原始提取文本"
-            result["ocr_used"] = False
-            print("[PDF] OCR 全部失败，保留原始文本")
+            logger.warning("[PDF] OCR 全部失败，保留原始文本")
         
-        print(f"[PDF] OCR 完成。已使用: {result['ocr_used']}，目标页面: {ocr_target_pages}，后端: {ocr_result.backend}")
+        logger.info(
+            "[PDF] OCR 完成。已使用: %s，目标页面: %s，后端: %s",
+            result["ocr_used"],
+            ocr_target_pages,
+            ocr_result.backend,
+        )
         
         # 存储 MinerU 版面分析提取的 figure 数据（供速览 Figure Pipeline 使用）
         if hasattr(ocr_result, 'layout_figures') and ocr_result.layout_figures:
-            result["ocr_result"] = {
-                "figures": ocr_result.layout_figures,
-                "backend": ocr_result.backend,
-            }
-            print(f"[PDF] MinerU 版面分析: 存储 {len(ocr_result.layout_figures)} 个 figure 区域")
+            logger.info("[PDF] MinerU 版面分析: 存储 %s 个 figure 区域", len(ocr_result.layout_figures))
         
     except Exception as e:
         # 在线 OCR 失败时，尝试回退到本地 OCR 引擎
         if adapter.name in _ocr_registry._ONLINE_ADAPTERS:
-            logger.warning(f"在线 OCR ({adapter.name}) 失败，尝试回退到本地引擎: {e}")
-            print(f"[PDF] 在线 OCR ({adapter.name}) 失败，尝试回退到本地引擎: {e}")
+            logger.warning("[PDF] 在线 OCR (%s) 失败，尝试回退到本地引擎: %s", adapter.name, e)
             local_adapter = _ocr_registry.get_local_adapter(exclude=[adapter.name])
             if local_adapter is not None:
                 try:
-                    print(f"[PDF] 回退到本地 OCR 引擎: {local_adapter.name}")
-                    logger.info(f"回退到本地 OCR 引擎: {local_adapter.name}")
+                    logger.info("[PDF] 回退到本地 OCR 引擎: %s", local_adapter.name)
                     ocr_result = local_adapter.ocr_pages(
                         pdf_bytes=pdf_bytes,
                         page_numbers=ocr_target_pages,
                         dpi=ocr_dpi
                     )
 
-                    # 构建页码到 OCR 结果的映射
-                    ocr_page_map = {}
-                    for page_ocr in ocr_result.pages:
-                        if page_ocr.success:
-                            ocr_page_map[page_ocr.page_number - 1] = page_ocr.text
-
-                    # 合并 OCR 结果到原始提取文本
-                    merged_text_parts = []
-                    for i, page in enumerate(pages):
-                        if i in ocr_page_map:
-                            ocr_content = ocr_page_map[i]
-                            orig_content = page.get("content", "")
-                            if len(ocr_content) > len(orig_content) * 0.8:
-                                page["content"] = heuristic_rebuild(ocr_content, is_cjk)
-                                page["source"] = "ocr"
-                                page["ocr_backend"] = ocr_result.backend
-                                result["ocr_used"] = True
-                        merged_text_parts.append(page["content"])
-
-                    if result["ocr_used"]:
-                        result["full_text"] = "\n\n".join(merged_text_parts)
-                        result["ocr_backend"] = ocr_result.backend
-                        result["ocr_pages"] = ocr_target_pages
-
-                    result["ocr_warning"] = (
-                        f"在线 OCR ({adapter.name}) 失败，已回退到本地引擎 ({local_adapter.name})"
+                    apply_ocr_result_to_pages(
+                        result,
+                        pages,
+                        ocr_result,
+                        ocr_target_pages,
+                        heuristic_rebuild,
+                        is_cjk=is_cjk,
                     )
-                    logger.info(
-                        f"在线 OCR 回退成功: {adapter.name} -> {local_adapter.name}"
-                    )
-                    print(f"[PDF] 在线 OCR 回退成功: {adapter.name} -> {local_adapter.name}")
+
+                    if result.get("ocr_used"):
+                        result["ocr_warning"] = (
+                            f"在线 OCR ({adapter.name}) 失败，已回退到本地引擎 ({local_adapter.name})"
+                        )
+                        logger.info(
+                            "[PDF] 在线 OCR 回退成功: %s -> %s",
+                            adapter.name,
+                            local_adapter.name,
+                        )
+                    else:
+                        result["ocr_warning"] = (
+                            f"在线 OCR ({adapter.name}) 失败，本地引擎 ({local_adapter.name}) "
+                            "未产生可用 OCR 文本，已保留原始提取文本"
+                        )
+                        logger.warning(
+                            "[PDF] 在线 OCR 回退未产生可用文本: %s -> %s",
+                            adapter.name,
+                            local_adapter.name,
+                        )
                 except Exception as fallback_err:
-                    logger.error(f"本地 OCR 回退也失败: {fallback_err}")
-                    print(f"[PDF] 本地 OCR 回退也失败: {fallback_err}")
+                    logger.error("[PDF] 本地 OCR 回退也失败: %s", fallback_err)
                     result["ocr_error"] = str(e)
                     result["ocr_warning"] = (
                         f"在线 OCR ({adapter.name}) 和本地 OCR 回退均失败: {str(e)}"
                     )
             else:
-                logger.warning("在线 OCR 失败且无可用的本地 OCR 引擎用于回退")
-                print("[PDF] 在线 OCR 失败且无可用的本地 OCR 引擎用于回退")
+                logger.warning("[PDF] 在线 OCR 失败且无可用的本地 OCR 引擎用于回退")
                 result["ocr_error"] = str(e)
                 result["ocr_warning"] = (
                     f"在线 OCR ({adapter.name}) 失败且无可用的本地 OCR 引擎: {str(e)}"
                 )
         else:
-            print(f"[PDF] OCR 失败: {e}")
+            logger.warning("[PDF] OCR 失败: %s", e)
             result["ocr_error"] = str(e)
             result["ocr_warning"] = f"OCR 处理异常: {str(e)}"
     
@@ -1909,10 +1894,12 @@ async def build_graphrag_index(doc_id: str, request: Request):
         embedding_model: Embedding 模型名（可选）
         embedding_api_key: Embedding API 密钥（可选）
         embedding_api_host: Embedding API 地址（可选）
-    """
-    if not settings.enable_graphrag:
-        raise HTTPException(status_code=400, detail="GraphRAG 未启用，请在配置中设置 enable_graphrag=true")
+        force_rebuild: 是否强制重建（可选，默认 false）
 
+    说明：该端点由前端「GraphRAG 知识图谱」按钮显式触发，调用即表示用户同意
+    构建。是否开启全局 settings.enable_graphrag 只影响 /chat 路径是否把图谱
+    上下文拼进 prompt，不再作为构建入口的硬门槛，避免勾选框常年半成品。
+    """
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
@@ -1920,6 +1907,12 @@ async def build_graphrag_index(doc_id: str, request: Request):
     full_text = doc.get("data", {}).get("full_text", "")
     if not full_text or len(full_text) < 50:
         raise HTTPException(status_code=400, detail="文档内容过短，无法构建知识图谱")
+
+    # 文档级构建锁：防止同一文档并发构建
+    from services.graphrag import get_build_lock, INSTANCES as _GRAPHRAG_INSTANCES, BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
+    lock = get_build_lock(doc_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="该文档正在构建中，请勿重复提交")
 
     try:
         body = await request.json()
@@ -1930,11 +1923,15 @@ async def build_graphrag_index(doc_id: str, request: Request):
         embedding_model = body.get("embedding_model", "")
         embedding_api_key = body.get("embedding_api_key", "")
         embedding_api_host = body.get("embedding_api_host", "")
+        force_rebuild = body.get("force_rebuild", False)
 
-        if not api_key or not model:
-            raise HTTPException(status_code=400, detail="GraphRAG 构建需要 api_key 和 model")
+        provider_lower = (provider or "").lower()
+        if not model:
+            raise HTTPException(status_code=400, detail="GraphRAG 构建需要 model")
+        if not api_key and provider_lower not in {"ollama", "local"}:
+            raise HTTPException(status_code=400, detail="GraphRAG 构建需要 api_key")
 
-        from services.graphrag import GraphRAG, GraphRAGConfig
+        from services.graphrag import GraphRAG, GraphRAGConfig, BuildProgress
 
         # 解析 endpoint
         endpoint = ""
@@ -1946,9 +1943,37 @@ async def build_graphrag_index(doc_id: str, request: Request):
         embed_endpoint = ""
         if embedding_api_host:
             host = embedding_api_host.strip().rstrip('/')
-            embed_endpoint = f"{host}/v1" if not host.endswith('/v1') else host
+            if host.endswith('/embeddings') or host.endswith('/v1'):
+                embed_endpoint = host
+            else:
+                embed_endpoint = f"{host}/v1"
 
         working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+
+        embedding_registry_key = None
+        embedding_config = None
+        if embedding_model:
+            embedding_registry_key, embedding_config = resolve_model_id(embedding_model)
+
+        resolved_embedding_model = embedding_model or model
+        resolved_embedding_provider = provider
+        resolved_embedding_dim = 1536
+        resolved_embedding_base_url = ""
+
+        if embedding_config:
+            resolved_embedding_model = (
+                embedding_config.get("model_name")
+                or embedding_registry_key
+                or resolved_embedding_model
+            )
+            resolved_embedding_provider = embedding_config.get("provider") or provider
+            resolved_embedding_dim = int(embedding_config.get("dimension") or 1536)
+            resolved_embedding_base_url = (embedding_config.get("base_url") or "").strip().rstrip('/')
+        elif embedding_model:
+            logger.warning(
+                "[GraphRAG] 未找到 embedding 模型注册信息，沿用请求参数: %s",
+                embedding_model,
+            )
 
         config = GraphRAGConfig(
             api_key=api_key,
@@ -1956,11 +1981,49 @@ async def build_graphrag_index(doc_id: str, request: Request):
             provider=provider,
             endpoint=endpoint,
             embedding_api_key=embedding_api_key or api_key,
-            embedding_model=embedding_model or model,
-            embedding_provider=provider,
-            embedding_endpoint=embed_endpoint or endpoint.replace("/chat/completions", ""),
+            embedding_model=resolved_embedding_model,
+            embedding_provider=resolved_embedding_provider,
+            embedding_endpoint=embed_endpoint or resolved_embedding_base_url or endpoint.replace("/chat/completions", ""),
+            embedding_dim=resolved_embedding_dim,
         )
 
+        # 检查是否已有持久化索引且配置未变（跳过构建）
+        need_clean_existing_index = force_rebuild
+        if not force_rebuild and GraphRAG.has_persisted_index(working_dir):
+            disk_meta = GraphRAG.load_metadata(working_dir)
+            from services.graphrag.graphrag import _compute_config_hash
+            current_hash = _compute_config_hash(
+                config, settings.graphrag_chunk_token_size, settings.graphrag_max_gleaning
+            )
+            if disk_meta and disk_meta.status == "done" and disk_meta.config_hash == current_hash:
+                # 索引已存在且配置未变，直接从磁盘加载
+                rag = await GraphRAG.load_from_disk(
+                    working_dir=working_dir,
+                    config=config,
+                    chunk_token_size=settings.graphrag_chunk_token_size,
+                    entity_extract_max_gleaning=settings.graphrag_max_gleaning,
+                    best_model_max_async=settings.graphrag_max_async,
+                    cheap_model_max_async=settings.graphrag_max_async,
+                )
+                if rag is not None:
+                    _GRAPHRAG_INSTANCES[doc_id] = rag
+                    _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
+                    return {
+                        "message": "GraphRAG 索引已存在，从磁盘加载",
+                        "doc_id": doc_id,
+                        "stats": rag.stats(),
+                        "loaded_from_disk": True,
+                    }
+            else:
+                need_clean_existing_index = True
+
+        if need_clean_existing_index and os.path.exists(working_dir):
+            import shutil
+            _GRAPHRAG_INSTANCES.pop(doc_id, None)
+            _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
+            shutil.rmtree(working_dir, ignore_errors=True)
+
+        # 构建新索引
         rag = GraphRAG(
             working_dir=working_dir,
             config=config,
@@ -1970,34 +2033,108 @@ async def build_graphrag_index(doc_id: str, request: Request):
             cheap_model_max_async=settings.graphrag_max_async,
         )
 
+        # 注册构建进度（供 progress 端点读取）
+        _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
+
         await rag.ainsert(full_text)
 
         stats = rag.stats()
-        # 缓存实例以便查询时复用
-        if not hasattr(router, "_graphrag_instances"):
-            router._graphrag_instances = {}
-        router._graphrag_instances[doc_id] = rag
+        # 缓存实例以便查询时复用（存到模块级 registry，跨 router 共享）
+        _GRAPHRAG_INSTANCES[doc_id] = rag
+        _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
 
         return {
             "message": "GraphRAG 索引构建完成",
             "doc_id": doc_id,
             "stats": stats,
+            "loaded_from_disk": False,
         }
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[GraphRAG] 构建失败: {e}", exc_info=True)
+        # 记录失败到进度表
+        if doc_id in _GRAPHRAG_BUILD_PROGRESS:
+            prog = _GRAPHRAG_BUILD_PROGRESS[doc_id]
+            prog.status = "failed"
+            prog.last_error = str(e)
         raise HTTPException(status_code=500, detail=f"GraphRAG 构建失败: {str(e)}")
+    finally:
+        lock.release()
 
 
 @router.get("/document/{doc_id}/graphrag/stats")
 async def get_graphrag_stats(doc_id: str):
-    """获取文档的 GraphRAG 索引统计信息"""
-    if not hasattr(router, "_graphrag_instances") or doc_id not in router._graphrag_instances:
-        raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
-    rag = router._graphrag_instances[doc_id]
-    return {"doc_id": doc_id, "stats": rag.stats()}
+    """获取文档的 GraphRAG 索引统计信息
+
+    优先从内存 INSTANCES 读取，若不存在则尝试从磁盘加载。
+    """
+    from services.graphrag import INSTANCES as _GRAPHRAG_INSTANCES, BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
+
+    # 1. 内存中已有实例
+    if doc_id in _GRAPHRAG_INSTANCES:
+        rag = _GRAPHRAG_INSTANCES[doc_id]
+        return {"doc_id": doc_id, "stats": rag.stats()}
+
+    # 2. 尝试从磁盘加载元数据（不需要 api_key 也能读取统计）
+    working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+    from services.graphrag import GraphRAG
+    disk_meta = GraphRAG.load_metadata(working_dir)
+    if disk_meta is not None:
+        return {
+            "doc_id": doc_id,
+            "stats": {
+                "working_dir": working_dir,
+                "num_nodes": disk_meta.num_nodes,
+                "num_edges": disk_meta.num_edges,
+                "num_docs": disk_meta.num_docs,
+                "num_chunks": disk_meta.num_chunks,
+                "build_meta": disk_meta.to_dict(),
+            },
+            "loaded_from_disk_meta": True,
+        }
+
+    raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
+
+
+@router.get("/document/{doc_id}/graphrag/progress")
+async def get_graphrag_build_progress(doc_id: str):
+    """获取文档的 GraphRAG 构建进度"""
+    from services.graphrag import BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
+
+    # 1. 内存中的实时进度
+    if doc_id in _GRAPHRAG_BUILD_PROGRESS:
+        prog = _GRAPHRAG_BUILD_PROGRESS[doc_id]
+        return {"doc_id": doc_id, "progress": prog.to_dict()}
+
+    # 2. 磁盘元数据
+    working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+    from services.graphrag import GraphRAG
+    disk_meta = GraphRAG.load_metadata(working_dir)
+    if disk_meta is not None:
+        return {"doc_id": doc_id, "progress": disk_meta.to_dict()}
+
+    raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
+
+
+@router.delete("/document/{doc_id}/graphrag")
+async def delete_graphrag_index(doc_id: str):
+    """删除文档的 GraphRAG 索引（内存 + 磁盘）"""
+    import shutil
+    from services.graphrag import INSTANCES as _GRAPHRAG_INSTANCES, BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
+
+    # 从内存移除
+    _GRAPHRAG_INSTANCES.pop(doc_id, None)
+    _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
+
+    # 删除磁盘数据
+    working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+    if os.path.exists(working_dir):
+        shutil.rmtree(working_dir, ignore_errors=True)
+        return {"message": "GraphRAG 索引已删除", "doc_id": doc_id}
+
+    raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
 
 
 @router.get("/api/ocr/status")
@@ -2175,6 +2312,13 @@ async def save_online_ocr_config(request: Request):
         # 校验 worker_url 参数
         if not worker_url:
             raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
+        try:
+            worker_url = validate_external_ocr_service_url(
+                worker_url,
+                service_name=f"{provider} Worker",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         # 校验 token_mode 参数
         if token_mode not in ("frontend", "worker"):
@@ -2203,6 +2347,13 @@ async def save_online_ocr_config(request: Request):
 
         config = {"api_key": api_key}
         if base_url:
+            try:
+                base_url = validate_external_ocr_service_url(
+                    base_url,
+                    service_name="Mistral OCR Base URL",
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             config["base_url"] = base_url
 
     # 持久化配置到本地文件
@@ -2398,6 +2549,13 @@ async def validate_ocr_key(request: Request):
         # 加载当前配置获取 base_url（如果用户已配置过自定义 base_url）
         current_config = _load_online_ocr_config("mistral")
         base_url = (current_config.get("base_url", "") or "https://api.mistral.ai").rstrip("/")
+        try:
+            base_url = validate_external_ocr_service_url(
+                base_url,
+                service_name="Mistral OCR Base URL",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         try:
             # 调用 Mistral API 的文件列表接口验证 Key 有效性
@@ -2439,7 +2597,13 @@ async def validate_ocr_key(request: Request):
         if not worker_url:
             raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
 
-        worker_url_clean = worker_url.rstrip("/")
+        try:
+            worker_url_clean = validate_external_ocr_service_url(
+                worker_url,
+                service_name=f"{provider} Worker",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         provider_label = "MinerU" if provider == "mineru" else "Doc2X"
 
         try:

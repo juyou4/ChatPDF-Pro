@@ -52,8 +52,11 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
 
     ref_descriptions = []
     for c in citations:
+        ref = c.get("ref", len(ref_descriptions) + 1)
+        group_id = c.get("group_id") or c.get("source") or c.get("context_id") or "unknown"
+        page_text = _format_citation_page_range(c.get("page_range") or c.get("page"))
         ref_descriptions.append(
-            f"[{c['ref']}] 来源: {c['group_id']}，页码: {c['page_range'][0]}-{c['page_range'][1]}"
+            f"[{ref}] 来源: {group_id}，页码: {page_text}"
         )
     refs_text = "\n".join(ref_descriptions)
 
@@ -75,6 +78,8 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
             "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
             "- 只能使用上述列出的编号，禁止创造新编号\n"
             "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
+            "- 引用编号必须直接支撑它所在句子的具体事实，不能只因为同页、同章节或同主题就引用\n"
+            "- 若一个句子包含多个事实且来自不同证据，请拆成多个短句分别标注\n"
             "- FINAL ANSWER 中每个关键事实句都应标注来源编号\n"
             "- 每个句子的引用数量最多 2 个，格式必须为 [编号]\n"
             "- 不同事实若来自不同证据窗口，优先使用不同编号，不要把多个独立事实都标成同一个编号\n"
@@ -122,6 +127,9 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
         "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
         "- 只能使用上述列出的编号，禁止创造新编号\n"
         "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
+        "- 引用编号必须直接支撑它所在句子的具体事实，不能只因为同页、同章节或同主题就引用\n"
+        "- 若一个句子包含多个事实且来自不同证据，请拆成多个短句分别标注\n"
+        "- CITATION 块的 START_PHRASE/END_PHRASE 必须包围该句所依赖的真实证据，不要引用无关窗口\n"
         "- FINAL ANSWER 中每个事实性陈述都应标注来源编号\n"
         "- 每个句子的引用数量最多 2 个，格式必须为 [编号]（不要使用【编号】）\n"
         "- 不同事实若来自不同证据窗口，优先使用不同编号，不要把多个独立事实都标成同一个编号\n"
@@ -132,6 +140,28 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
 
     logger.info(f"结构化引文提示词生成完成: {len(citations)} 个引用来源")
     return prompt
+
+
+def _format_citation_page_range(value) -> str:
+    """格式化 citation page_range，兼容空列表、单页和跨页范围。"""
+    if isinstance(value, (list, tuple)):
+        pages: list[int] = []
+        for item in value:
+            try:
+                page = int(item)
+            except (TypeError, ValueError):
+                continue
+            if page > 0:
+                pages.append(page)
+        if not pages:
+            return "未知"
+        start, end = pages[0], pages[-1]
+        return str(start) if start == end else f"{start}-{end}"
+    try:
+        page = int(value)
+    except (TypeError, ValueError):
+        return "未知"
+    return str(page) if page > 0 else "未知"
 
 
 # ═══════════════════════════════════════════════════

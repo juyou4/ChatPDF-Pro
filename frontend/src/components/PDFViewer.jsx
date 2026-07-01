@@ -87,10 +87,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         return fullPdfUrl;
     }, [fullPdfUrl, isDesktop, desktopBackendToken]);
 
-    console.log('📄 PDFViewer - Loading PDF:', fullPdfUrl);
-
     function onDocumentLoadSuccess({ numPages }) {
-        console.log('✅ PDF loaded successfully, pages:', numPages);
         setNumPages(numPages);
         setError(null);
         setPageNumber(prev => {
@@ -160,7 +157,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             setCachedImage(dataURL);
         } catch (e) {
             // canvas 捕获失败时静默忽略，不影响正常渲染
-            console.warn('⚠️ PDF 页面缓存捕获失败:', e);
         }
     }, [pageNumber, debouncedScale]);
 
@@ -296,7 +292,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 });
 
                 if (!fullText) {
-                    console.log('⚠️ 高亮匹配：页面文本为空');
                     return;
                 }
 
@@ -306,8 +301,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 const startPhrase = normalize(highlightInfo.startPhrase);
                 const endPhrase = normalize(highlightInfo.endPhrase);
                 const pageStr = normalize(fullText);
-
-                console.log(`🔍 高亮匹配：搜索文本长度=${searchStr.length}, 页面文本长度=${pageStr.length}`);
 
                 const collectMatches = (needle, limit = 8) => {
                     if (!needle) return [];
@@ -360,12 +353,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
                 if (anchored) {
                     endIndex = anchored.endIndex;
-                    console.log('✅ 高亮匹配：锚点匹配成功');
                 }
 
                 if (!anchored && startIndex !== -1) {
                     endIndex = startIndex + searchStr.length;
-                    console.log('✅ 高亮匹配：完全匹配成功');
                 } else if (!anchored) {
                     const candidateMaxLen = Math.min(120, searchStr.length);
                     const candidateTexts = [];
@@ -380,7 +371,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         if (idx !== -1) {
                             startIndex = idx;
                             endIndex = idx + candidate.length;
-                            console.log('✅ 高亮匹配：短窗口完全匹配成功');
                             break;
                         }
                     }
@@ -390,7 +380,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     // 策略 2: 多锚点匹配（灵活大小）
                     const anchorSize = Math.min(12, Math.floor(searchStr.length * 0.15));
                     if (anchorSize < 4) {
-                        console.log('⚠️ 高亮匹配：搜索文本太短，无法使用锚点匹配');
                         return;
                     }
                     const startAnchor = searchStr.substring(0, anchorSize);
@@ -406,7 +395,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             // 两个锚点都找到了
                             startIndex = startAnchorIndex;
                             endIndex = endAnchorIndex + endAnchor.length;
-                            console.log('✅ 高亮匹配：双锚点匹配成功');
                         } else {
                             // 尝试中间锚点作为后备
                             const midPoint = Math.floor(searchStr.length / 2);
@@ -416,7 +404,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             if (midAnchorIndex !== -1) {
                                 startIndex = startAnchorIndex;
                                 endIndex = Math.min(startIndex + Math.floor(searchStr.length * 1.3), pageStr.length);
-                                console.log('✅ 高亮匹配：中间锚点匹配成功');
                             } else {
                                 // 最后手段：从起始锚点逐字符匹配
                                 startIndex = startAnchorIndex;
@@ -429,7 +416,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     }
                                 }
                                 endIndex = startIndex + matchLen;
-                                console.log(`✅ 高亮匹配：逐字符匹配 ${matchLen} 个字符`);
                             }
                         }
                     } else {
@@ -443,12 +429,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 // 从中间片段向两侧扩展
                                 startIndex = Math.max(0, midSliceIndex - midStart);
                                 endIndex = Math.min(startIndex + searchStr.length, pageStr.length);
-                                console.log('✅ 高亮匹配：中间子串滑动窗口匹配成功');
-                            } else {
-                                console.log('⚠️ 高亮匹配：所有策略均未匹配到文本');
                             }
-                        } else {
-                            console.log('⚠️ 高亮匹配：所有策略均未匹配到文本');
                         }
                     }
                 }

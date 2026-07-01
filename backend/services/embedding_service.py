@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import pickle
 import re
@@ -26,10 +27,20 @@ from models.api_key_selector import select_api_key
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
 from models.model_id_resolver import resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
+from runtime_mode import runtime
+from services.formula_text import build_formula_alias_text, formula_term_matches, looks_formula_like
 from services.rag_config import should_apply_numeric_table_specialization
 from services.rerank_service import rerank_service
 
 logger = logging.getLogger(__name__)
+
+
+def _get_runtime_data_dir() -> str:
+    """获取与 app.py/document_routes.py 一致的数据目录。"""
+    if runtime.is_desktop:
+        return runtime.data_dir
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(project_root, "data")
 
 # Lazy-loaded caches
 local_embedding_models = {}
@@ -244,8 +255,7 @@ class QueryVectorCache:
 
 # 全局查询向量缓存实例（默认容量 256，启用磁盘持久化）
 _cache_persist_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "cache", "query_vector_cache.pkl"
+    _get_runtime_data_dir(), "cache", "query_vector_cache.pkl"
 )
 _query_vector_cache = QueryVectorCache(persist_path=_cache_persist_path)
 
@@ -269,8 +279,7 @@ _retrieval_logger_singleton = _RetrievalLogger()
 
 # ---- 意群数据目录（只计算一次）----
 _SEMANTIC_GROUPS_DIR: str = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "data", "semantic_groups"
+    _get_runtime_data_dir(), "semantic_groups"
 )
 
 
@@ -1358,6 +1367,8 @@ def _extract_numeric_table_bundle_row_units(item: dict, query: str) -> List[dict
         ).strip()
         if not row_text or not _extract_numeric_value_tokens(row_text):
             continue
+        if _is_composite_numeric_row_id(row_id) and not explicit_comparator_mode:
+            continue
 
         row_key = _normalize_numeric_table_method_token(row_id) or row_text.lower()
         if row_key in seen_row_keys:
@@ -1538,6 +1549,7 @@ def _build_query_focused_numeric_table_exact_context_text(item: dict, query: str
         or _is_numeric_table_bundle_query(query, hints)
         or _is_numeric_table_row_band_query(query, hints)
         or _is_numeric_table_winner_style_query(query, hints)
+        or "numeric_table" in (_analyze_evidence_need(query) or [])
     ):
         return ""
 
@@ -1572,6 +1584,7 @@ def _build_query_focused_numeric_table_exact_context_text(item: dict, query: str
             or "",
             "table_id": item.get("table_id") or "",
             "table_header": item.get("numeric_table_exact_context_header") or item.get("table_header") or "",
+            "table_focus_columns": list(item.get("table_focus_columns") or []),
         },
         hints,
     )
@@ -1660,6 +1673,8 @@ def _build_context_text_for_result(item: dict, query: str = "") -> str:
         if parts:
             return "\n".join(parts)
     if chunk_type != "table_row":
+        if chunk_type == "formula" or looks_formula_like(query) or looks_formula_like(chunk_text):
+            return build_formula_alias_text(chunk_text)
         return chunk_text
 
     parts: list[str] = []
@@ -1674,7 +1689,76 @@ def _build_context_text_for_result(item: dict, query: str = "") -> str:
         if normalized in parts:
             continue
         parts.append(normalized)
-    return "\n".join(parts) if parts else chunk_text
+    context_text = "\n".join(parts) if parts else chunk_text
+    if chunk_type == "formula" or looks_formula_like(query) or looks_formula_like(context_text):
+        return build_formula_alias_text(context_text)
+    return context_text
+
+
+def _is_delta_per_sample_metric_query(query: str, hints: Optional[dict[str, List[str]]] = None) -> bool:
+    hints = hints or _query_rewriter_singleton.extract_numeric_table_hints(query)
+    query_columns = {
+        _normalize_numeric_column_name(value)
+        for value in hints.get("columns", [])
+        if value
+    }
+    if "ΔAcc/||D_gen||" in query_columns:
+        return True
+    sample = (query or "").lower()
+    return any(token in sample for token in ("每样本", "per sample", "average gain", "增益", "提升最大"))
+
+
+def _numeric_table_delta_column_coverage(item: dict, query: str, hints: dict[str, List[str]]) -> int:
+    """判断表格证据是否真正覆盖每样本提升三列，避免混入相邻表的 Acc/All 数值。"""
+    required = {"||D_gen||", "Acc", "ΔAcc/||D_gen||"}
+
+    def _columns_from_values(values) -> set[str]:
+        return {
+            _normalize_numeric_column_name(value)
+            for value in (values or [])
+            if value
+        }
+
+    candidates: list[dict] = []
+    if isinstance(item, dict):
+        candidates.append(item)
+        candidates.extend(_extract_numeric_table_bundle_row_units(item, query))
+
+    best = 0
+    for candidate in candidates:
+        header_columns = set(_extract_table_header_columns(candidate.get("table_header", "") or ""))
+        focus_columns = _columns_from_values(candidate.get("table_focus_columns"))
+        focused = _build_query_focused_table_row(candidate, hints)
+        resolved_columns = _columns_from_values(focused.get("resolved_columns", []))
+        column_map = set((focused.get("column_map") or {}).keys())
+        text = " ".join(
+            str(candidate.get(key) or "")
+            for key in (
+                "numeric_table_exact_context_row_text",
+                "table_row_boundary_text",
+                "table_row_raw_text",
+                "row_text",
+                "content",
+                "chunk",
+                "raw_chunk_text",
+            )
+        )
+        text_lower = text.lower()
+        text_compact = re.sub(r"\s+", "", text_lower)
+        text_columns = {
+            column for column, pattern in {
+                "||D_gen||": r"(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)|\bd\s*[_ ]?gen\b",
+                "Acc": r"\bacc\.?(?:uracy)?\b|准确率|分类准确率",
+                "ΔAcc/||D_gen||": r"[δ∆Δ]\s*acc\s*/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)|delta\s*acc\s*/\s*d\s*gen",
+            }.items()
+            if re.search(pattern, text_lower, re.IGNORECASE)
+            or (column == "ΔAcc/||D_gen||" and any(token in text_compact for token in ("Δacc/||d_gen||", "∆acc/∥dgen∥")))
+        }
+        present = header_columns | focus_columns | resolved_columns | column_map | text_columns
+        best = max(best, len(required & present))
+        if best >= len(required):
+            return best
+    return best
 
 
 def _resolve_numeric_table_context_table_id(item: dict) -> str:
@@ -1791,6 +1875,7 @@ def _cleanup_numeric_table_context_entries(
 
     hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
     cost_query = _is_numeric_table_cost_query(query)
+    delta_metric_query = _is_delta_per_sample_metric_query(query, hints)
     second_best_mode = bool(_NUMERIC_TABLE_SECOND_BEST_RE.search(query or ""))
     comparator_query = bool(hints.get("comparison")) or _is_numeric_table_row_band_query(query, hints) or second_best_mode
     explicit_comparator_mode = _is_numeric_table_explicit_comparator_query(query, hints)
@@ -1841,7 +1926,9 @@ def _cleanup_numeric_table_context_entries(
 
     def _entry_anchor_rank(entry: dict, idx: int) -> tuple[int, int, int, float, float, int]:
         item = entry["item"]
+        delta_coverage = _numeric_table_delta_column_coverage(item, query, hints) if delta_metric_query else 0
         return (
+            1 if delta_metric_query and delta_coverage >= 3 else 0,
             1 if _chunk_type(item) == "table_row" and _entry_has_exact_row(item) else 0,
             1 if _entry_has_exact_row(item) else 0,
             1 if _build_multi_row_bundle_context_text(item, query) else 0,
@@ -2077,6 +2164,14 @@ def _cleanup_numeric_table_context_entries(
             }
         )
 
+    has_delta_exact_anchor = bool(
+        delta_metric_query
+        and any(
+            _numeric_table_delta_column_coverage(entry["item"], query, hints) >= 3
+            for entry in provisional_entries
+        )
+    )
+
     bundle_row_keys_by_table: dict[str, set[str]] = {}
     for entry in provisional_entries:
         bundle_text = _build_multi_row_bundle_context_text(entry["item"], query)
@@ -2161,6 +2256,8 @@ def _cleanup_numeric_table_context_entries(
     if comparator_query:
         grouped_entries: dict[str, list[tuple[int, dict]]] = {}
         for idx, entry in enumerate(provisional_entries):
+            if has_delta_exact_anchor and _numeric_table_delta_column_coverage(entry["item"], query, hints) < 3:
+                continue
             grouped_entries.setdefault(_table_key(entry), []).append((idx, entry))
         preferred_table_keys = [primary_table_key] if primary_table_key else list(grouped_entries.keys())
         for table_key in preferred_table_keys:
@@ -2229,6 +2326,11 @@ def _cleanup_numeric_table_context_entries(
             and bundle_projection_item_id is not None
             and id(entry["item"]) != bundle_projection_item_id
             and chunk_type in {"table_row", "table", "caption", "table_cell"}
+            and not (
+                chunk_type == "table_row"
+                and _entry_has_exact_row(entry["item"])
+                and not explicit_comparator_mode
+            )
         ):
             continue
         if bundle_projection_entry:
@@ -2236,6 +2338,12 @@ def _cleanup_numeric_table_context_entries(
         if comparator_query and bundle_text:
             if bundle_projection_entry or (role == "anchor" and chunk_type != "table_row"):
                 text = bundle_text
+        if (
+            has_delta_exact_anchor
+            and chunk_type in {"table", "caption", "table_cell", "table_row"}
+            and _numeric_table_delta_column_coverage(entry["item"], query, hints) < 3
+        ):
+            continue
         if role != "anchor" and len(text) > 320:
             text = (
                 _context_builder_singleton._extract_relevant_snippet(text, query, max_len=260)
@@ -2646,6 +2754,70 @@ def _extract_markdown_table_rows(text: str) -> List[dict]:
     return rows
 
 
+def _extract_serialized_structured_bundle_body_rows(
+    text: str,
+    *,
+    table_id: str = "",
+    table_caption: str = "",
+    table_header: str = "",
+) -> List[dict]:
+    if "[Structured Table Bundle]" not in (text or "") or "[Body]" not in (text or ""):
+        return []
+
+    header_match = re.search(
+        r"\[Header\]\s*(.*?)(?:\n\s*\[Body\]|\Z)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    body_match = re.search(
+        r"\[Body\]\s*(.*?)(?:\n\s*\[(?:Footnote|Structured Table Bundle|Hints|Header)\]|\Z)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not body_match:
+        return []
+
+    effective_header = re.sub(
+        r"\s+",
+        " ",
+        str(table_header or (header_match.group(1) if header_match else "") or "").strip(),
+    ).strip()
+    caption = table_caption or _extract_table_caption_from_text(text)
+    effective_table_id = table_id or _extract_table_id(caption)
+
+    rows: List[dict] = []
+    for raw_line in body_match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("["):
+            continue
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in re.split(r"\s+\|\s+", line.strip())]
+        cells = [cell for cell in cells if cell]
+        if len(cells) < 2:
+            continue
+        row_id = cells[0]
+        row_numbers = " ".join(
+            re.sub(r"^[^=|]{1,40}=", "", cell).strip()
+            for cell in cells[1:]
+            if cell
+        ).strip()
+        row_text = " | ".join(cells)
+        if not row_id or not row_numbers:
+            continue
+        rows.append(
+            {
+                "row_id": row_id,
+                "row_text": row_text,
+                "row_numbers": row_numbers,
+                "table_caption": caption,
+                "table_id": effective_table_id,
+                "table_header": effective_header,
+            }
+        )
+    return rows
+
+
 def _extract_structured_table_rows(item: dict) -> List[dict]:
     evidence_units = item.get("evidence_units")
     if not isinstance(evidence_units, list):
@@ -2775,7 +2947,6 @@ def _extract_plain_table_rows(text: str, hints: dict[str, List[str]], query: str
         header_label_tokens = {
             "baseline",
             "id",
-            "aid",
             "ood",
             "model",
             "models",
@@ -2823,11 +2994,6 @@ def _extract_plain_table_rows(text: str, hints: dict[str, List[str]], query: str
                     "methods",
                     "dataset",
                     "datasets",
-                    "imagenet-lt",
-                    "cifar100-lt",
-                    "cifar10-lt",
-                    "places-lt",
-                    "inaturalist",
                     "results on",
                 )
             )
@@ -2844,19 +3010,35 @@ def _extract_plain_table_rows(text: str, hints: dict[str, List[str]], query: str
         pattern = pattern.replace(r"\)", r"\s*\)")
         method_patterns.append((method, pattern))
 
+    # Do not run a single complex method+numbers regex over the whole table
+    # string. PDF table text can be highly glued, and the optional author-token
+    # subpattern may backtrack catastrophically. Anchor the method first, then
+    # search only a short local window for the numeric span.
+    method_number_re = re.compile(method_numeric_pattern, re.IGNORECASE)
+    max_method_scan_chars = 360
+    max_method_number_gap = 140
     for method, method_pattern in method_patterns:
-        match = re.search(
-            rf"(?<![A-Za-z0-9])({method_pattern})"
-            rf"(?:\s*[A-Za-z][A-Za-z.\-]*(?:\s*et\s*al\.?)?(?:\s*\[\d+[a-z]?\])?)*\s+"
-            rf"({method_numeric_pattern})",
-            normalized,
+        method_anchor_re = re.compile(
+            rf"(?<![A-Za-z0-9])({method_pattern})",
             re.IGNORECASE,
         )
-        if match is None:
+        match = None
+        number_match = None
+        for candidate_match in method_anchor_re.finditer(normalized):
+            if _has_composite_prefix_before_method(normalized, candidate_match.start(1)):
+                continue
+            tail = normalized[candidate_match.end(1): candidate_match.end(1) + max_method_scan_chars]
+            candidate_number_match = method_number_re.search(tail)
+            if candidate_number_match is None:
+                continue
+            if candidate_number_match.start() > max_method_number_gap:
+                continue
+            match = candidate_match
+            number_match = candidate_number_match
+            break
+        if match is None or number_match is None:
             continue
-        if _has_composite_prefix_before_method(normalized, match.start(1)):
-            continue
-        row_numbers = match.group(2).strip(" ,;")
+        row_numbers = number_match.group(0).strip(" ,;")
         row_text = f"{method} {row_numbers}".strip()
         key = row_text.lower()
         if len(row_text) < 12 or key in seen:
@@ -2973,7 +3155,7 @@ def _normalize_numeric_column_name(value: str) -> str:
         return "All"
     if lowered == "many":
         return "Many"
-    if lowered in {"medium", "med", "med."}:
+    if lowered in {"medium", "med", "med.", "middle"}:
         return "Med."
     if lowered in {"few", "few-shot", "tail"}:
         return "Few"
@@ -2985,7 +3167,49 @@ def _normalize_numeric_column_name(value: str) -> str:
         if "delta" in lowered or "acc" in lowered or "δ" in value or "∆" in value or "Δ" in value:
             return "ΔAcc/||D_gen||"
         return "||D_gen||"
+    if lowered in {"many/medium/few", "many/med./few", "many/med/few", "many/medium/few"}:
+        return "Many/Med./Few"
     return str(value or "").strip()
+
+
+_NUMERIC_TABLE_COLUMN_METHOD_NOISE = {
+    "all",
+    "overall",
+    "total",
+    "many",
+    "medium",
+    "med",
+    "med.",
+    "middle",
+    "few",
+    "few-shot",
+    "tail",
+    "fid",
+    "acc",
+    "acc.",
+    "accuracy",
+    "accuracy.",
+}
+
+
+def _is_numeric_table_column_noise(value: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(value or "").lower())
+    if not normalized:
+        return False
+    if normalized in _NUMERIC_TABLE_COLUMN_METHOD_NOISE:
+        return True
+    canonical = _normalize_numeric_column_name(value)
+    return canonical in {
+        "All",
+        "Many",
+        "Med.",
+        "Few",
+        "FID",
+        "Acc",
+        "||D_gen||",
+        "ΔAcc/||D_gen||",
+        "Many/Med./Few",
+    }
 
 
 def _normalize_numeric_table_method_token(value: str) -> str:
@@ -3021,7 +3245,6 @@ def _is_headerish_numeric_table_row(unit: dict) -> bool:
     header_label_tokens = {
         "baseline",
         "id",
-        "aid",
         "ood",
         "model",
         "models",
@@ -3179,16 +3402,16 @@ def _get_plain_table_row_numeric_span(hints: dict[str, List[str]]) -> tuple[int,
         for value in query_columns
         if value
     }
-    long_tail_column_keys = {"all", "many", "med.", "few"}
-    if query_column_keys and query_column_keys.issubset(long_tail_column_keys):
+    frequency_bin_column_keys = {"all", "many", "med.", "few"}
+    if query_column_keys and query_column_keys.issubset(frequency_bin_column_keys):
         if len(query_column_keys) >= 4:
             return 4, 7
-        # Some long-tail result tables omit `All` and only expose
+        # Some frequency-bin result tables omit `All` and only expose
         # `Many / Med. / Few`. Lower the minimum span so those rows can be
-        # recovered, but keep the historical upper bound for Table 8-style
-        # rows that still carry 5 numeric values.
+        # recovered, but keep the upper bound for wide result-table rows
+        # that still carry 5 numeric values.
         return 3, 7
-    if long_tail_column_keys & query_column_keys:
+    if frequency_bin_column_keys & query_column_keys:
         return 4, 7
 
     has_fid = "fid" in query_column_keys
@@ -3826,11 +4049,49 @@ def _expand_numeric_table_evidence_units(
     hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
     comparison_query = bool(hints.get("comparison"))
     bundle_query = _is_numeric_table_bundle_query(query, hints)
+    hinted_columns = list(hints.get("columns", []) or [])
+    hinted_methods = list(hints.get("methods", []) or [])
+    method_column_noise = [
+        value for value in hinted_methods if _is_numeric_table_column_noise(value)
+    ]
+    if method_column_noise:
+        hints = dict(hints)
+        hints["methods"] = [
+            value for value in hinted_methods if not _is_numeric_table_column_noise(value)
+        ]
+        existing_columns = list(hinted_columns)
+        existing_column_keys = {
+            _normalize_numeric_column_name(value).lower()
+            for value in existing_columns
+            if value
+        }
+        for value in method_column_noise:
+            canonical = _normalize_numeric_column_name(value)
+            key = canonical.lower()
+            if canonical and key not in existing_column_keys:
+                existing_columns.append(canonical)
+                existing_column_keys.add(key)
+        frequency_columns = {
+            _normalize_numeric_column_name(value)
+            for value in existing_columns
+            if _normalize_numeric_column_name(value) in {"All", "Many", "Med.", "Few"}
+        }
+        if frequency_columns:
+            existing_columns = [
+                value
+                for value in existing_columns
+                if _normalize_numeric_column_name(value) != "Acc"
+            ]
+        hints["columns"] = existing_columns
     target_methods = _extract_numeric_table_row_method_targets(hints)
     explicit_comparison_methods = comparison_query and len(target_methods) >= 2
     target_datasets = _extract_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])))
     target_backbones = {value.lower() for value in hints.get("backbones", []) if value}
-    target_columns = {value.lower() for value in hints.get("columns", []) if value}
+    target_columns = {
+        _normalize_numeric_column_name(value).lower()
+        for value in hints.get("columns", [])
+        if value
+    }
     target_tables = {
         value.lower()
         for value in hints.get("table_labels", [])
@@ -3845,6 +4106,8 @@ def _expand_numeric_table_evidence_units(
     min_row_number_hits, _ = _get_plain_table_row_numeric_span(hints)
     if bundle_query:
         row_limit = 4 if len(target_methods) <= 1 else min(5, max(len(target_methods), 4))
+    elif comparison_query:
+        row_limit = 5 if len(target_methods) <= 1 else min(6, max(len(target_methods) + 2, 5))
     else:
         row_limit = 1 if len(target_methods) <= 1 else min(3, len(target_methods))
         if not target_methods:
@@ -3858,10 +4121,21 @@ def _expand_numeric_table_evidence_units(
         for item in results
     }
 
-    for item in results:
+    max_items_to_expand = max(8, min(len(results), row_limit * 6))
+    expand_started_at = time.perf_counter()
+    max_expand_seconds = 1.5
+    max_plain_parse_chars = 2500
+    for item in results[:max_items_to_expand]:
+        if time.perf_counter() - expand_started_at > max_expand_seconds:
+            logger.warning(
+                "[numeric_table] evidence-unit 扩展超过 %.1fs，提前停止（已处理部分候选）",
+                max_expand_seconds,
+            )
+            break
         chunk_text = (item.get("raw_chunk_text") or item.get("chunk") or "").strip()
         chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
         structured_row_units = _extract_structured_table_rows(item)
+        has_structured_rows = bool(structured_row_units)
         if not chunk_text and not structured_row_units:
             continue
         if not structured_row_units and not _looks_like_numeric_table_support(chunk_text, chunk_type):
@@ -3875,7 +4149,7 @@ def _expand_numeric_table_evidence_units(
             row_units = _extract_structured_bundle_body_rows(item)
         if not row_units:
             row_units = _extract_markdown_table_rows(chunk_text)
-        if not row_units:
+        if not row_units and len(chunk_text) <= max_plain_parse_chars:
             row_units = _extract_plain_table_rows(chunk_text, hints, query)
 
         if row_units:
@@ -3900,7 +4174,9 @@ def _expand_numeric_table_evidence_units(
             else:
                 # 显式表号题优先拒绝 mixed-table markdown 误标；如果首轮行抽取未能
                 # 产出 exact table 命中，则退回到 scoped plain/markdown 抽取再试一次。
-                fallback_units = _extract_plain_table_rows(chunk_text, hints, query)
+                fallback_units = []
+                if not has_structured_rows and len(chunk_text) <= max_plain_parse_chars:
+                    fallback_units = _extract_plain_table_rows(chunk_text, hints, query)
                 if fallback_units:
                     normalized_fallback_units: List[dict] = []
                     for unit in fallback_units:
@@ -3965,6 +4241,17 @@ def _expand_numeric_table_evidence_units(
             row_column_hits = sum(1 for value in target_columns if value in combined_lower)
             row_number_hits = len(_extract_numeric_value_tokens(row_numbers))
             table_caption = unit.get("table_caption", "") or unit.get("table_id", "")
+            table_scope_backbone = ""
+            if target_backbones and typed_row_unit:
+                table_scope = " ".join(
+                    str(unit.get(key) or "")
+                    for key in ("table_caption", "table_header", "table_id")
+                ).lower()
+                for backbone in sorted(target_backbones, key=len, reverse=True):
+                    if backbone and backbone in table_scope:
+                        table_scope_backbone = backbone
+                        break
+            effective_backbone_hit = focus_backbone_hit or bool(table_scope_backbone)
             lexical = _compute_lexical_evidence_score(
                 query,
                 f"{table_caption} {unit.get('table_header', '')} {focused_text or row_text}",
@@ -3976,18 +4263,24 @@ def _expand_numeric_table_evidence_units(
                 bundle_query
                 and not explicit_comparison_methods
                 and row_column_hits >= max(1, min(len(target_columns), 2))
-                and (not target_backbones or focus_backbone_hit)
+                and (not target_backbones or effective_backbone_hit)
                 and (not target_columns or focus_column_coverage >= min(len(target_columns), 1))
                 and not composite_target_noise
+            )
+            comparison_competitor_row = bool(
+                comparison_query
+                and len(target_methods) >= 1
+                and not row_method_hit
+                and (row_column_hits >= max(1, min(len(target_columns), 1)) if target_columns else True)
             )
             if target_datasets and not strict_dataset_match and not strict_table_match:
                 continue
             if composite_target_noise:
                 continue
             # 显式 comparator 题只保留 query 中明确点名的方法，避免把 CE / 复合方法行混进 bundle。
-            if target_methods and not row_method_hit and not allow_competitor_row:
+            if target_methods and not row_method_hit and not allow_competitor_row and not comparison_competitor_row:
                 continue
-            if target_backbones and row_method_hit and not focus_backbone_hit:
+            if target_backbones and row_method_hit and not effective_backbone_hit:
                 continue
             if target_columns and row_column_hits == 0 and not row_method_hit:
                 continue
@@ -4019,6 +4312,8 @@ def _expand_numeric_table_evidence_units(
                 strength += 0.2
             elif allow_competitor_row:
                 strength += 0.06
+            elif comparison_competitor_row:
+                strength += 0.05
             strength += min(row_column_hits, 3) * 0.04
             if strict_table_match:
                 strength += 0.08
@@ -4075,7 +4370,7 @@ def _expand_numeric_table_evidence_units(
                 "evidence_unit_id": unit.get("evidence_unit_id", ""),
                 "row_id": unit.get("row_id", ""),
                 "table_row_number": unit.get("row_number"),
-                "table_focus_backbone": focused_row.get("matched_backbone", ""),
+                "table_focus_backbone": focused_row.get("matched_backbone", "") or table_scope_backbone,
                 "table_focus_columns": focused_row.get("resolved_columns", []),
                 "table_row_raw_text": row_text,
                 "table_row_boundary_text": row_text,
@@ -4789,6 +5084,38 @@ def _apply_group_pre_cap(results: List[dict], per_group_limit: int = 4) -> Tuple
     }
     if removed > 0:
         logger.info(f"[RerankPreCap] 候选 {len(results)} → {len(kept)}，移除同组冗余 {removed} 条")
+    return kept, stats
+
+
+def _apply_page_pre_cap(results: List[dict], per_page_limit: int = 2) -> Tuple[List[dict], dict]:
+    if not results or per_page_limit <= 0:
+        return results, {}
+
+    kept = []
+    page_counts = {}
+    removed = 0
+    for item in results:
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            count = page_counts.get(page, 0)
+            if count >= per_page_limit:
+                removed += 1
+                continue
+            page_counts[page] = count + 1
+        kept.append(item)
+
+    stats = {
+        "input": len(results),
+        "output": len(kept),
+        "removed": removed,
+        "page_limit": per_page_limit,
+        "unique_pages": len(page_counts),
+    }
+    if removed > 0:
+        logger.info(f"[RerankPagePreCap] 候选 {len(results)} → {len(kept)}，移除同页冗余 {removed} 条")
     return kept, stats
 
 
@@ -5724,9 +6051,32 @@ def _build_retrieval_diagnostics(results: List[dict], query: str) -> dict:
     )
 
     numeric_table_query = "numeric_table" in (_analyze_evidence_need(query) or [])
+    source_counts = Counter()
+    multi_source_count = 0
+    for item in results:
+        sources = _infer_retrieval_sources(item)
+        if len(sources) > 1:
+            multi_source_count += 1
+        for source in sources:
+            source_counts[source] += 1
+    source_total = sum(source_counts.values())
+    source_entropy = 0.0
+    if source_total:
+        for count in source_counts.values():
+            p = count / source_total
+            source_entropy -= p * math.log2(p)
 
     diagnostics = {
         "duplicate_chunk_ratio": round(duplicate_ratio, 4),
+        "dedup_removed": max(0, len(raw_chunks) - unique_chunks),
+        "dedup_ratio": round(duplicate_ratio, 4),
+        "source_mix": dict(source_counts),
+        "source_mix_entropy": round(source_entropy, 4),
+        "multi_source_result_count": multi_source_count,
+        "rerank_applied": any(
+            item.get("reranked") or item.get("rerank_score") is not None or item.get("combined_score") is not None
+            for item in results
+        ),
         "unique_group_count": len(unique_groups),
         "unique_group_coverage": round(len(unique_groups) / max(total, 1), 4),
         "unique_section_count": len(unique_sections),
@@ -5745,6 +6095,111 @@ def _build_retrieval_diagnostics(results: List[dict], query: str) -> dict:
             or any(ch.isdigit() for ch in (item.get("raw_chunk_text") or item.get("chunk", ""))[:400])
         )
         diagnostics["numeric_table_hit_quality"] = round(support_hits / max(total, 1), 4)
+
+    rerank_scores = []
+    for item in results:
+        score = item.get("rerank_score")
+        if score is None:
+            score = item.get("combined_score")
+        if score is None:
+            continue
+        try:
+            rerank_scores.append(float(score))
+        except (TypeError, ValueError):
+            continue
+    if rerank_scores:
+        ordered_scores = sorted(rerank_scores)
+        diagnostics["rerank_score_distribution"] = {
+            "count": len(rerank_scores),
+            "min": round(ordered_scores[0], 4),
+            "max": round(ordered_scores[-1], 4),
+            "avg": round(sum(ordered_scores) / len(ordered_scores), 4),
+            "p25": round(ordered_scores[int((len(ordered_scores) - 1) * 0.25)], 4),
+            "p50": round(ordered_scores[int((len(ordered_scores) - 1) * 0.50)], 4),
+            "p75": round(ordered_scores[int((len(ordered_scores) - 1) * 0.75)], 4),
+        }
+    chunk_refs = []
+    for idx, item in enumerate(results[:20]):
+        ref = {
+            "rank": idx + 1,
+            "chunk_id": item.get("chunk_id"),
+            "parent_id": item.get("parent_id"),
+            "doc_id": item.get("doc_id"),
+            "page": item.get("page"),
+            "group_id": item.get("group_id"),
+        }
+        if any(value not in (None, "") for value in ref.values()):
+            chunk_refs.append(ref)
+    if chunk_refs:
+        diagnostics["ranked_chunk_refs"] = chunk_refs
+
+    pool_pages: list[int] = []
+    pool_ids: list[str] = []
+    pool_group_ids: list[str] = []
+    pool_chunk_ids: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        page = item.get("page")
+        try:
+            page_int = int(page) if page not in (None, "") else 0
+        except (TypeError, ValueError):
+            page_int = 0
+        if page_int and page_int not in pool_pages:
+            pool_pages.append(page_int)
+        for key in ("context_id", "evidence_id", "chunk_id", "child_chunk_id", "parent_id", "doc_id"):
+            value = str(item.get(key) or "").strip()
+            if value and value not in pool_ids:
+                pool_ids.append(value)
+            if key in {"chunk_id", "child_chunk_id"} and value and value not in pool_chunk_ids:
+                pool_chunk_ids.append(value)
+        group_id = str(item.get("group_id") or "").strip()
+        if group_id:
+            if group_id not in pool_group_ids:
+                pool_group_ids.append(group_id)
+            if group_id not in pool_ids:
+                pool_ids.append(group_id)
+        chunk_idx = item.get("chunk_idx")
+        if chunk_idx not in (None, ""):
+            label = f"chunk:{chunk_idx}"
+            if label not in pool_ids:
+                pool_ids.append(label)
+        if page_int:
+            label = f"page:{page_int}"
+            if label not in pool_ids:
+                pool_ids.append(label)
+    if pool_pages or pool_ids or pool_group_ids:
+        diagnostics["candidate_pool"] = {
+            "pages": pool_pages[:80],
+            "ids": pool_ids[:160],
+            "group_ids": pool_group_ids[:80],
+            "chunk_ids": pool_chunk_ids[:80],
+            "selected_pages": pool_pages[:80],
+            "selected_ids": pool_ids[:160],
+            "selected_group_ids": pool_group_ids[:80],
+            "selected_chunk_ids": pool_chunk_ids[:80],
+            "selected_count": total,
+            "candidate_count": total,
+            "by_tool": [
+                {
+                    "tool": "non_agent_retrieval",
+                    "round": 1,
+                    "pages": pool_pages[:80],
+                    "ids": pool_ids[:160],
+                    "group_ids": pool_group_ids[:80],
+                    "chunk_ids": pool_chunk_ids[:80],
+                    "selected_pages": pool_pages[:80],
+                    "selected_ids": pool_ids[:160],
+                    "selected_group_ids": pool_group_ids[:80],
+                    "selected_chunk_ids": pool_chunk_ids[:80],
+                    "selected_count": total,
+                    "candidate_count": total,
+                }
+            ],
+        }
+    precap_stats = next((item.get("_rerank_precap_stats") for item in results if item.get("_rerank_precap_stats")), None)
+    if isinstance(precap_stats, dict):
+        diagnostics["rerank_precap"] = precap_stats
 
     # Focus Mode 压缩统计（仅当有条目被压缩时计算）
     compressed_items = [item for item in results if "focus_compression_ratio" in item]
@@ -5772,6 +6227,78 @@ def _build_retrieval_diagnostics(results: List[dict], query: str) -> dict:
     diagnostics["path_diversity_ratio"] = round(unique_paths / max(total, 1), 4)
 
     return diagnostics
+
+
+def _append_retrieval_source(item: dict, source: str) -> dict:
+    if not isinstance(item, dict):
+        return item
+    candidates = [v.strip() for v in str(source or "").replace(",", "+").split("+") if v.strip()]
+    sources = []
+    existing = item.get("retrieval_sources")
+    if isinstance(existing, list):
+        sources = [str(v).strip() for v in existing if str(v).strip()]
+    elif isinstance(existing, str) and existing.strip():
+        sources = [v.strip() for v in existing.replace(",", "+").split("+") if v.strip()]
+    for normalized in candidates:
+        if normalized not in sources:
+            sources.append(normalized)
+    if sources:
+        item["retrieval_sources"] = sources
+        item["retrieval_source"] = "+".join(sources)
+    return item
+
+
+def _mark_retrieval_source(results: List[dict], source: str) -> List[dict]:
+    for item in results or []:
+        _append_retrieval_source(item, source)
+    return results
+
+
+def _infer_retrieval_sources(item: dict) -> list[str]:
+    if not isinstance(item, dict):
+        return ["unknown"]
+    sources = []
+    existing = item.get("retrieval_sources")
+    if isinstance(existing, list):
+        sources.extend(str(v).strip() for v in existing if str(v).strip())
+    elif isinstance(existing, str) and existing.strip():
+        sources.extend(v.strip() for v in existing.replace(",", "+").split("+") if v.strip())
+    if item.get("bm25") and "bm25" not in sources:
+        sources.append("bm25")
+    if item.get("table_augmented") and "table_augment" not in sources:
+        sources.append("table_augment")
+    if item.get("hybrid") and not sources:
+        sources.append("hybrid")
+    if item.get("semantic_group_id") or item.get("group_id"):
+        if "semantic_group" not in sources and item.get("rrf_score"):
+            sources.append("semantic_group")
+    if not sources:
+        sources.append("vector")
+    return sources
+
+
+def _build_context_assembly_diagnostics(
+    results: List[dict],
+    context_text: str,
+    *,
+    token_budget: int = 0,
+    hierarchical_stats: dict = None,
+) -> dict:
+    retrieval_diag = _build_retrieval_diagnostics(results, "")
+    token_used = _estimate_embedding_tokens(context_text or "")
+    diag = {
+        "source_mix": retrieval_diag.get("source_mix", {}),
+        "source_mix_entropy": retrieval_diag.get("source_mix_entropy", 0.0),
+        "dedup_removed": retrieval_diag.get("dedup_removed", 0),
+        "dedup_ratio": retrieval_diag.get("dedup_ratio", 0.0),
+        "rerank_applied": retrieval_diag.get("rerank_applied", False),
+        "token_budget_used": token_used,
+        "token_budget_limit": max(0, int(token_budget or 0)),
+        "token_budget_ratio": round(token_used / token_budget, 4) if token_budget else 0.0,
+    }
+    if hierarchical_stats:
+        diag["hierarchical"] = hierarchical_stats
+    return diag
 
 
 def _apply_rerank(
@@ -6967,6 +7494,7 @@ def _apply_chunk_metadata(item: dict, metadata: Optional[dict]) -> None:
 
 
 _PAGE_TEXT_TABLE_CAPTION_RE = re.compile(r"Table\s*\d+\s*:", re.IGNORECASE)
+_YOLO_FALLBACK_TABLE_MARKER = "[TABLE_YOLO_FALLBACK]"
 
 
 def _trim_page_text_table_segment(segment: str, max_lines: int = 28) -> str:
@@ -6979,7 +7507,11 @@ def _trim_page_text_table_segment(segment: str, max_lines: int = 28) -> str:
         if len(lines) >= max_lines:
             break
         table_like = bool(
-            re.search(r"\d|[%±×∆τ]|method|all|many|few|med\.|acc|fid|resnet|cifar|imagenet", line, re.IGNORECASE)
+            re.search(
+                r"\d|[%±×∆τ]|method|model|group|all|overall|many|few|med\.|acc|fid|auc|f1|map|score",
+                line,
+                re.IGNORECASE,
+            )
         )
         if lines and not table_like:
             narrative_run += 1
@@ -7020,8 +7552,8 @@ def _estimate_runtime_table_row_numeric_span(segment: str) -> tuple[int, int]:
         if (
             not normalized_row_id
             or normalized_row_id in {"method", "model", "group", "statistics"}
-            or normalized_row_id.startswith("cifar")
-            or normalized_row_id.startswith("imagenet")
+            or bool(re.search(r"(?:^|[-_])(?:lt|dataset|data)$", normalized_row_id, re.IGNORECASE))
+            or bool(re.search(r"(?:19|20)\d{2}$", normalized_row_id))
         ):
             continue
         row_numbers = match.group(2).strip()
@@ -7046,8 +7578,6 @@ def _build_runtime_page_text_table_header(table_id: str, header: str) -> str:
         lead_column = "Method"
     elif {"FID", "Acc"} & header_keys:
         lead_column = "Model"
-    elif table_id and "table 3" in table_id.lower():
-        lead_column = "Group"
     else:
         lead_column = "Row"
     return " | ".join([lead_column, *header_columns])
@@ -7141,6 +7671,85 @@ def _build_runtime_page_text_table_body(segment: str, evidence_units: List[dict]
     return segment
 
 
+def _split_yolo_fallback_table_segments(page_text: str) -> List[str]:
+    if _YOLO_FALLBACK_TABLE_MARKER not in (page_text or ""):
+        return []
+    segments: List[str] = []
+    parts = page_text.split(_YOLO_FALLBACK_TABLE_MARKER)
+    for raw_part in parts[1:]:
+        lines: List[str] = [_YOLO_FALLBACK_TABLE_MARKER]
+        for raw_line in raw_part.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if len(lines) > 1:
+                    break
+                continue
+            if line == _YOLO_FALLBACK_TABLE_MARKER:
+                break
+            if line.startswith("[") and line.endswith("]") and line != _YOLO_FALLBACK_TABLE_MARKER:
+                break
+            lines.append(line)
+            if len(lines) >= 18:
+                break
+        segment = "\n".join(lines).strip()
+        if len(segment) >= 40:
+            segments.append(segment)
+    return segments
+
+
+def _build_yolo_fallback_table_id(segment: str, page_num: int, index: int) -> tuple[str, str]:
+    caption = _extract_table_caption_from_text(segment)
+    table_id = _extract_table_id(caption)
+    if table_id:
+        return table_id, caption or table_id
+    return f"YOLO Table p{page_num}-{index}", f"YOLO fallback table on page {page_num}"
+
+
+def _extract_yolo_fallback_table_bundles(page_text: str, page_num: int, seen_table_ids: set[str]) -> List[dict]:
+    bundles: List[dict] = []
+    for idx, raw_segment in enumerate(_split_yolo_fallback_table_segments(page_text), start=1):
+        segment = raw_segment.replace(_YOLO_FALLBACK_TABLE_MARKER, "").strip()
+        if len(segment) < 30:
+            continue
+        numeric_count = len(_extract_numeric_value_tokens(segment))
+        if numeric_count < 2 and not re.search(r"\b(table|method|model|dataset|acc|all|many|few|med)\b", segment, re.IGNORECASE):
+            continue
+        table_id, caption = _build_yolo_fallback_table_id(segment, page_num, idx)
+        table_key = table_id.lower()
+        if table_key in seen_table_ids:
+            continue
+        raw_header = _extract_table_header_snippet(segment)
+        normalized_header = _build_runtime_page_text_table_header(table_id, raw_header)
+        evidence_units = _build_runtime_page_text_evidence_units(
+            segment,
+            table_id,
+            caption,
+            normalized_header or raw_header,
+            page_num,
+        )
+        table_body = _build_runtime_page_text_table_body(segment, evidence_units)
+        bundles.append({
+            "bundle_id": f"yolo-page-text:p{page_num}:table:{idx}",
+            "table_id": table_id,
+            "table_caption": caption,
+            "table_header": normalized_header or raw_header,
+            "table_body_markdown": table_body,
+            "html_table": "",
+            "table_footnote": "",
+            "page_start": page_num,
+            "page_end": page_num,
+            "pages": [page_num],
+            "page_index": page_num - 1,
+            "page_uid": _build_page_uid(page_num),
+            "page_uids": [_build_page_uid(page_num)],
+            "source_ids": [],
+            "evidence_units": evidence_units,
+            "source": "doclayout_yolo_fallback",
+        })
+        seen_table_ids.add(table_key)
+    return bundles
+
+
 def _normalize_sparse_bundle_row_key(row_id: str, row_text: str) -> str:
     normalized_row_id = _normalize_numeric_table_method_token(row_id or "")
     if normalized_row_id:
@@ -7153,6 +7762,14 @@ def _normalize_sparse_bundle_row_key(row_id: str, row_text: str) -> str:
 def _extract_structured_bundle_body_rows(bundle: dict) -> List[dict]:
     body = (bundle.get("table_body_markdown") or "").strip()
     if not body:
+        chunk_text = (bundle.get("chunk") or bundle.get("raw_chunk_text") or "").strip()
+        if chunk_text:
+            return _extract_serialized_structured_bundle_body_rows(
+                chunk_text,
+                table_id=(bundle.get("table_id") or "").strip(),
+                table_caption=(bundle.get("table_caption") or "").strip(),
+                table_header=(bundle.get("table_header") or "").strip(),
+            )
         return []
     rows = _extract_markdown_table_rows(body)
     if rows:
@@ -7160,7 +7777,7 @@ def _extract_structured_bundle_body_rows(bundle: dict) -> List[dict]:
     table_id = (bundle.get("table_id") or "").strip()
     header = (bundle.get("table_header") or "").strip()
     hints = _build_runtime_page_text_table_hints(table_id, header)
-    return _extract_plain_table_rows(body, hints)
+    return _extract_plain_table_rows(body, hints, query="")
 
 
 def _merge_sparse_bundle_evidence_units(
@@ -7263,6 +7880,16 @@ def _maybe_upgrade_sparse_structured_bundle(
 
     table_id = str(metadata.get("table_id") or "").strip()
     if not table_id:
+        return chunk_text, metadata
+
+    existing_row_units = [
+        unit for unit in (metadata.get("evidence_units") or [])
+        if isinstance(unit, dict)
+        and (unit.get("evidence_unit_type") or "").strip().lower() == "table_row"
+        and (unit.get("row_text") or unit.get("content") or "").strip()
+    ]
+    existing_body = str(metadata.get("table_body_markdown") or "").strip()
+    if len(existing_row_units) >= 2 and existing_body:
         return chunk_text, metadata
 
     page_text = (page_payload.get("content") or page_payload.get("text") or "").strip()
@@ -7410,6 +8037,10 @@ def _extract_page_text_table_bundles(pages: Optional[List[dict]]) -> List[dict]:
         page_text = (page.get("content") or page.get("text") or "").strip()
         if not page_text:
             continue
+
+        yolo_bundles = _extract_yolo_fallback_table_bundles(page_text, page_num, seen_table_ids)
+        if yolo_bundles:
+            bundles.extend(yolo_bundles)
 
         matches = list(_PAGE_TEXT_TABLE_CAPTION_RE.finditer(page_text))
         if not matches:
@@ -7741,10 +8372,7 @@ def _build_semantic_group_index(
         logger.info(f"[{doc_id}] 生成了 {len(groups)} 个语义意群")
 
         # 确定意群数据存储目录
-        # vector_store_dir 的父目录是 data/，意群存储在 data/semantic_groups/
-        data_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(os.path.dirname(data_dir), "data")
-        groups_store_dir = os.path.join(data_dir, "semantic_groups")
+        groups_store_dir = _get_semantic_groups_dir()
         os.makedirs(groups_store_dir, exist_ok=True)
 
         # 保存意群数据为 JSON
@@ -7835,7 +8463,7 @@ def _run_async(coro):
 def _load_group_index(doc_id: str) -> Optional[dict]:
     """加载意群级别 FAISS 索引和元数据
 
-    从 data/semantic_groups/ 目录加载意群的 FAISS 索引文件和 pkl 元数据文件。
+    从运行时 semantic_groups 目录加载意群的 FAISS 索引文件和 pkl 元数据文件。
     如果文件不存在或加载失败，返回 None。
 
     Args:
@@ -7845,9 +8473,7 @@ def _load_group_index(doc_id: str) -> Optional[dict]:
         包含 index、digest_texts、group_ids 的字典，加载失败时返回 None
     """
     # 确定意群数据存储目录
-    data_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(os.path.dirname(data_dir), "data")
-    groups_store_dir = os.path.join(data_dir, "semantic_groups")
+    groups_store_dir = _get_semantic_groups_dir()
 
     group_index_path = os.path.join(groups_store_dir, f"{doc_id}_groups.index")
     group_meta_path = os.path.join(groups_store_dir, f"{doc_id}_groups.pkl")
@@ -7897,9 +8523,7 @@ def _load_group_data(doc_id: str) -> Optional[dict]:
     Returns:
         group_id -> chunk_indices 的映射字典，加载失败时返回 None
     """
-    data_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(os.path.dirname(data_dir), "data")
-    groups_json_path = os.path.join(data_dir, "semantic_groups", f"{doc_id}.json")
+    groups_json_path = os.path.join(_get_semantic_groups_dir(), f"{doc_id}.json")
 
     if not os.path.exists(groups_json_path):
         return None
@@ -8013,6 +8637,7 @@ def _rrf_merge_chunk_and_group(
         rrf_scores[chunk_text] = rrf_scores.get(chunk_text, 0.0) + rrf_score
         if chunk_text not in chunk_data:
             chunk_data[chunk_text] = item.copy()
+        _append_retrieval_source(chunk_data[chunk_text], item.get("retrieval_source") or "vector")
 
     # 步骤 2：将意群级别结果展开为 chunk 级别，计算 RRF 分数
     if group_results and group_chunk_map:
@@ -8045,6 +8670,7 @@ def _rrf_merge_chunk_and_group(
                             "highlights": highlights,
                             "reranked": False,
                         }
+                    _append_retrieval_source(chunk_data[chunk_text], "semantic_group")
 
     # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 2 个
     if chunk_group_map:
@@ -8353,7 +8979,7 @@ def _apply_query_intent_boost(results: List[dict], query: str) -> List[dict]:
                 factor *= 0.6
 
         if wants_experiment:
-            if importance >= 1.3 or any(token in sample for token in ("dataset", "datasets", "baseline", "baselines", "experiment", "evaluation", "cifar", "imagenet", "数据集", "基线", "实验", "评估")):
+            if importance >= 1.3 or any(token in sample for token in ("dataset", "datasets", "baseline", "baselines", "experiment", "evaluation", "数据集", "基线", "实验", "评估")):
                 factor *= 1.2
             if _is_reference_like_text(chunk_text):
                 factor *= 0.35
@@ -8392,19 +9018,24 @@ def _looks_like_numeric_table_support(chunk_text: str, chunk_type: str = "") -> 
     sample_lower = sample.lower()
     if chunk_type in {"table", "table_row"} or _is_likely_table(sample):
         return True
-    column_hit = bool(re.search(r'\b(all|many|medium|med\.?|few)\b', sample_lower))
-    number_hit = len(re.findall(r'\d+\.?\d*', sample_lower)) >= 4
-    method_hit = bool(re.search(r'\b(resnet-\d+|diffult|crt|adrw|ride)\b', sample_lower))
-    return column_hit and number_hit and method_hit
-
-
-_NUMERIC_TABLE_DATASET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
-    (re.compile(r"\bimagenet[-\s]?lt\b", re.IGNORECASE), "imagenet-lt"),
-    (re.compile(r"\bcifar[-\s]?100[-\s]?lt\b", re.IGNORECASE), "cifar100-lt"),
-    (re.compile(r"\bcifar[-\s]?10[-\s]?lt\b", re.IGNORECASE), "cifar10-lt"),
-    (re.compile(r"\bplaces[-\s]?lt\b", re.IGNORECASE), "places-lt"),
-    (re.compile(r"\binaturalist(?:18|19)?\b|\binat(?:18|19)?\b", re.IGNORECASE), "inaturalist"),
-)
+    column_hit = bool(
+        re.search(
+            r'\b(all|overall|many|medium|med\.?|few|fid|acc(?:uracy)?|auc|f1|map|score|'
+            r'precision|recall|bleu|rouge|em)\b',
+            sample_lower,
+        )
+    )
+    number_hit = len(re.findall(r'[-+]?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*[%±x×])?', sample_lower)) >= 4
+    row_anchor_hit = bool(
+        re.search(
+            r'(?:^|\n|\|)\s*[A-Za-z][A-Za-z0-9.+/_+() -]{1,48}\s*(?:\||\s{2,})?\s*'
+            r'[-+]?\d+(?:\.\d+)?',
+            sample,
+        )
+    )
+    header_hit = bool(re.search(r'\b(method|model|approach|group|dataset|metric|score)\b', sample_lower))
+    separator_hit = sample.count("|") >= 4 or len(re.findall(r"\s{2,}", sample)) >= 4
+    return column_hit and number_hit and (row_anchor_hit or header_hit or separator_hit)
 
 
 def _build_numeric_table_evidence_text(item: dict) -> str:
@@ -8433,9 +9064,19 @@ def _extract_numeric_table_dataset_mentions(text: str) -> set[str]:
     sample = re.sub(r"\s+", " ", text or "").strip()
     if not sample:
         return mentions
-    for pattern, canonical in _NUMERIC_TABLE_DATASET_PATTERNS:
-        if pattern.search(sample):
-            mentions.add(canonical)
+    token_pattern = re.compile(
+        r'\b(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:19|20)?\d{0,2}\b'
+    )
+    for match in token_pattern.finditer(sample):
+        token = match.group(0).strip(" ,.;:[]{}")
+        if not token:
+            continue
+        if (
+            re.search(r"(?:^|[-_])(?:LT|Dataset|Data)$", token, re.IGNORECASE)
+            or re.search(r"(?:19|20)\d{2}$", token)
+            or re.search(r"(?:^|[-_])(?:INat|Nat|Bench|Corpus|Set)(?:[-_]|$)", token, re.IGNORECASE)
+        ):
+            mentions.add(re.sub(r"\s+", "-", token).lower())
     return mentions
 
 
@@ -8920,6 +9561,22 @@ def _should_enable_query_expansion(query_type: str, evidence_need: List[str], co
     return query_type in allowed_types or bool(evidence_set & allowed_evidence)
 
 
+def _select_multi_query_merge_mode(query_type: str, evidence_need: List[str], config) -> str:
+    """P3.3c 选择多查询合并策略。
+
+    - numeric_table / extraction 类查询走 intersection（高 precision）
+    - 其他查询走 rrf（鲁棒性强）
+    """
+    intersection_types = _csv_to_set(getattr(config, "query_expansion_intersection_types", ""))
+    evidence_set = set(evidence_need or [])
+    if query_type in intersection_types or bool(evidence_set & intersection_types):
+        return "intersection"
+    default_mode = (getattr(config, "query_expansion_merge_mode", "rrf") or "rrf").strip().lower()
+    if default_mode not in {"rrf", "intersection", "weighted_avg", "union"}:
+        return "rrf"
+    return default_mode
+
+
 def _should_force_conditional_rerank(
     query_type: str,
     evidence_need: List[str],
@@ -9097,6 +9754,10 @@ def _compute_lexical_evidence_score(query: str, chunk_text: str) -> float:
     chunk_lower = chunk_text.lower()
     hit_count = sum(1 for t in query_terms if t in chunk_lower)
     base_score = hit_count / len(query_terms)
+    if looks_formula_like(query) or looks_formula_like(chunk_text):
+        formula_hits = sum(1 for term in query_terms if formula_term_matches(term, chunk_text))
+        if formula_hits:
+            base_score = min(1.0, base_score + min(0.35, formula_hits / max(len(query_terms), 1) * 0.5))
 
     # 数字匹配奖励
     query_digits = set(_re.findall(r'\d+\.?\d*', query))
@@ -9271,6 +9932,11 @@ def search_document_chunks(
     use_hybrid: bool = True,
     selected_text: Optional[str] = None,  # 新增：用于查询改写中的指示代词解析
     progress_callback: Optional[Callable[[dict], None]] = None,
+    enable_query_expansion_override: Optional[bool] = None,
+    query_expansion_api_key: Optional[str] = None,
+    query_expansion_model: str = "",
+    query_expansion_provider: str = "",
+    query_expansion_endpoint: str = "",
 ) -> Tuple[List[dict], dict]:
     """检索文档 chunk，返回检索结果和各阶段耗时。
 
@@ -9425,7 +10091,11 @@ def search_document_chunks(
 
     # HyDE：用假设文档的 embedding 替代原始查询 embedding
     hyde_passage = None
-    hyde_enabled = _should_enable_hyde(query_type, evidence_need, _search_rag_config)
+    hyde_enabled = (
+        False
+        if enable_query_expansion_override is False
+        else _should_enable_hyde(query_type, evidence_need, _search_rag_config)
+    )
     if hyde_enabled and api_key:
         try:
             _emit_retrieval_progress(progress_callback, "hyde_start", "正在生成语义扩展（HyDE）...")
@@ -9638,6 +10308,7 @@ def search_document_chunks(
         query,
         evidence_need=evidence_need,
     )
+    _mark_retrieval_source(primary_results, "hyde" if hyde_vector is not None else "vector")
 
     # HyDE 双路 RRF 融合：合并 HyDE 路和原始查询路的结果
     if D_orig is not None and I_orig is not None:
@@ -9646,6 +10317,7 @@ def search_document_chunks(
             query,
             evidence_need=evidence_need,
         )
+        _mark_retrieval_source(orig_results, "vector")
         vector_results = _hybrid_search.reciprocal_rank_fusion(
             primary_results, orig_results,
             k=60, top_k=search_k, chunk_key='chunk'
@@ -9662,35 +10334,75 @@ def search_document_chunks(
     for item in vector_results:
         vector_chunk_set.add(item.get("chunk", ""))
 
-    # --- 多查询扩展 RRF 融合 ---
-    query_expansion_enabled = _should_enable_query_expansion(query_type, evidence_need, _search_rag_config)
-    if query_expansion_enabled and api_key and query_vector is not None:
+    # --- 多查询扩展融合（P3.3a-c：放宽 gate + simplify + intersection mode） ---
+    query_expansion_enabled = (
+        bool(enable_query_expansion_override)
+        if enable_query_expansion_override is not None
+        else _should_enable_query_expansion(query_type, evidence_need, _search_rag_config)
+    )
+    if query_expansion_enabled and query_vector is not None and not query_expansion_api_key:
+        logger.info(
+            f"[{doc_id}] 跳过多查询扩展：未提供专用 LLM 参数，避免复用 embedding key"
+        )
+        query_expansion_enabled = False
+
+    if query_expansion_enabled and query_expansion_api_key and query_vector is not None:
         try:
             _emit_retrieval_progress(progress_callback, "query_expansion_start", "正在扩展检索问题，补充同义查询...")
             from services.query_expander import expand_query
+            # P3.3b 查询简化：原查询 > 50 字符时走简化版本（移除冗余前缀/填充词）
+            simplified_query = query
+            if getattr(_search_rag_config, "enable_query_simplify", True):
+                try:
+                    from services.query_simplifier import simplify_query_local
+                    min_chars = int(getattr(_search_rag_config, "query_simplify_min_chars", 50))
+                    if len(query) >= min_chars:
+                        simp = simplify_query_local(query)
+                        if simp and simp != query and len(simp) < len(query):
+                            simplified_query = simp
+                            logger.info(f"[{doc_id}] 查询简化: '{query[:40]}' → '{simp[:40]}'")
+                except Exception as _e_simp:
+                    logger.warning(f"[{doc_id}] 查询简化失败: {_e_simp}")
+
             expanded_queries = _run_async(
-                expand_query(query, api_key, n=_search_rag_config.query_expansion_n)
+                expand_query(
+                    simplified_query,
+                    query_expansion_api_key,
+                    n=_search_rag_config.query_expansion_n,
+                    model=query_expansion_model,
+                    provider=query_expansion_provider,
+                    endpoint=query_expansion_endpoint,
+                )
             )
             if expanded_queries:
                 expansion_result_lists = [vector_results]
                 for eq in expanded_queries:
                     eq_vector = _normalize_query_vector(embed_fn([eq]))
                     D_eq, I_eq = _search_faiss(index, eq_vector, search_k)
-                    expansion_result_lists.append(
-                        filter_reference_trap_results(
-                            _build_results_from_faiss(D_eq, I_eq),
-                            query,
-                            evidence_need=evidence_need,
-                        )
+                    expanded_results = filter_reference_trap_results(
+                        _build_results_from_faiss(D_eq, I_eq),
+                        query,
+                        evidence_need=evidence_need,
                     )
-                vector_results = _hybrid_search.reciprocal_rank_fusion(
-                    *expansion_result_lists, k=60, top_k=search_k, chunk_key='chunk'
+                    _mark_retrieval_source(expanded_results, "multi_query")
+                    expansion_result_lists.append(expanded_results)
+                # P3.3c 按 query_type 选择合并策略：numeric_table/extraction → intersection，其他 → rrf
+                merge_mode = _select_multi_query_merge_mode(query_type, evidence_need, _search_rag_config)
+                vector_results = _hybrid_search.merge_multi_query_results(
+                    expansion_result_lists,
+                    mode=merge_mode,
+                    top_k=search_k,
+                    chunk_key='chunk',
+                    rrf_k=60,
                 )
-                logger.info(f"[{doc_id}] 多查询扩展启用，生成 {len(expanded_queries)} 个查询")
+                logger.info(
+                    f"[{doc_id}] 多查询扩展启用 (mode={merge_mode}): "
+                    f"{len(expanded_queries)} 个扩展查询, 合并后 {len(vector_results)} 条"
+                )
                 _emit_retrieval_progress(
                     progress_callback,
                     "query_expansion_done",
-                    f"多查询扩展完成，生成 {len(expanded_queries)} 个扩展查询。",
+                    f"多查询扩展完成，生成 {len(expanded_queries)} 个扩展查询（合并 {merge_mode}）。",
                 )
         except Exception as e:
             logger.warning(f"[{doc_id}] 多查询扩展失败，跳过: {e}")
@@ -9706,6 +10418,7 @@ def search_document_chunks(
                 query,
                 evidence_need=evidence_need,
             )
+            _mark_retrieval_source(bm25_results, "bm25")
         except Exception as e:
             logger.warning(f"[{doc_id}] BM25 检索失败，跳过混合检索: {e}")
             bm25_results = []
@@ -9816,6 +10529,16 @@ def search_document_chunks(
     results = _sanitize_by_chunk_type(results, analysis_query)
     if use_rerank:
         results, pre_cap_stats = _apply_group_pre_cap(results)
+        page_capped_results, page_pre_cap_stats = _apply_page_pre_cap(results)
+        if len(page_capped_results) >= max(top_k, min(len(results), top_k * 2)):
+            results = page_capped_results
+        else:
+            page_pre_cap_stats["recovered_due_to_small_pool"] = True
+        if results and (pre_cap_stats or page_pre_cap_stats):
+            results[0]["_rerank_precap_stats"] = {
+                "group": pre_cap_stats,
+                "page": page_pre_cap_stats,
+            }
     results = _finalize_with_optional_rerank(
         query=analysis_query,
         results=results,
@@ -9951,6 +10674,10 @@ def get_relevant_context(
     model_context_window: int = 0,  # 动态 Token 预算：LLM 模型的上下文窗口大小
     answer_max_tokens: int = 0,  # 期望的输出 Token 数，用于上下文预算感知
     progress_callback: Optional[Callable[[dict], None]] = None,
+    query_expansion_api_key: Optional[str] = None,
+    query_expansion_model: str = "",
+    query_expansion_provider: str = "",
+    query_expansion_endpoint: str = "",
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -10002,6 +10729,10 @@ def get_relevant_context(
         rerank_endpoint=rerank_endpoint,
         selected_text=selected_text,  # 传递 selected_text 用于查询改写
         progress_callback=progress_callback,
+        query_expansion_api_key=query_expansion_api_key,
+        query_expansion_model=query_expansion_model,
+        query_expansion_provider=query_expansion_provider,
+        query_expansion_endpoint=query_expansion_endpoint,
     )
 
     config = _rag_config_singleton
@@ -10070,6 +10801,82 @@ def get_relevant_context(
                 }
             )
 
+    # P3.2 Hierarchical retrieval: 在 fallback 路径中用所属 semantic group 的 digest/full_text
+    # 增强 layered_entries（小 chunk 命中 → 拼 parent group 上下文）
+    _hier_stats = None
+    # P3.2 升级：
+    #   - 按 query_type 选择粒度：overview/analytical → full_text，其他 → digest
+    #   - 单 group ≤ 6000 字符（防止单意群占满预算）
+    #   - 总 hierarchical 升级体量 ≤ 18000 字符（提前截断）
+    #   - 同 group 第二次出现仍保留原 chunk_text（避免重复）
+    if not prefer_raw_chunk_context:
+        try:
+            _hier_groups_dir = _get_semantic_groups_dir()
+            from services.semantic_group_service import SemanticGroupService as _SGS_h
+            _hier_groups = _SGS_h().load_groups(doc_id, _hier_groups_dir)
+            if _hier_groups:
+                _hier_group_map = {g.group_id: g for g in _hier_groups}
+                _hier_first_seen_groups: set = set()
+                _hier_enriched_count = 0
+                _hier_total_chars = 0
+                _HIER_PER_GROUP_CAP = 6000
+                _HIER_TOTAL_CAP = 18000
+                # 按 query_type 决定升级粒度
+                _prefer_full_text = query_type in ("overview", "analytical")
+                # 第一遍：按出现顺序，为每个 group 第一次出现的 chunk 升级为 parent text
+                for entry in layered_entries:
+                    item = entry.get("item") or {}
+                    group_id = (item.get("group_id") or "").strip()
+                    if not group_id:
+                        continue
+                    g = _hier_group_map.get(group_id)
+                    if not g:
+                        continue
+                    if _prefer_full_text:
+                        parent_text = (g.full_text or g.digest or "").strip()
+                        granularity_label = "full_text" if g.full_text else "digest"
+                    else:
+                        parent_text = (g.digest or g.full_text or "").strip()
+                        granularity_label = "digest" if g.digest else "full_text"
+                    if not parent_text:
+                        continue
+                    # 单 group 字符上限
+                    if len(parent_text) > _HIER_PER_GROUP_CAP:
+                        parent_text = parent_text[:_HIER_PER_GROUP_CAP] + "...(单意群截断)"
+                    if group_id not in _hier_first_seen_groups:
+                        # 总体预算检查
+                        if _hier_total_chars + len(parent_text) > _HIER_TOTAL_CAP:
+                            logger.info(
+                                f"[{doc_id}] hierarchical fallback: 达到总预算上限 {_HIER_TOTAL_CAP} 字符，停止升级"
+                            )
+                            _hier_first_seen_groups.add(group_id)
+                            continue
+                        # 该 group 第一次出现：升级为 parent_text
+                        if len(parent_text) > len(entry.get("text", "")):
+                            entry["text"] = parent_text
+                            entry["_parent_group_text"] = parent_text
+                            entry["_parent_group_id"] = group_id
+                            entry["_hierarchical_granularity"] = granularity_label
+                            _hier_enriched_count += 1
+                            _hier_total_chars += len(parent_text)
+                        _hier_first_seen_groups.add(group_id)
+                    # 同 group 的后续 chunks 保持 chunk_text 不变，避免冗余
+                logger.info(
+                    f"[{doc_id}] hierarchical fallback (P3.2): enriched {_hier_enriched_count} entries "
+                    f"({len(_hier_first_seen_groups)} unique groups, {_hier_total_chars} chars, "
+                    f"prefer_full_text={_prefer_full_text}, query_type={query_type})"
+                )
+                _hier_stats = {
+                    "enriched_count": _hier_enriched_count,
+                    "unique_groups": len(_hier_first_seen_groups),
+                    "total_chars": _hier_total_chars,
+                    "prefer_full_text": _prefer_full_text,
+                    "per_group_cap": _HIER_PER_GROUP_CAP,
+                    "total_cap": _HIER_TOTAL_CAP,
+                }
+        except Exception as e:
+            logger.warning(f"[{doc_id}] hierarchical fallback 增强失败: {e}")
+
     relevant_chunks = [entry["text"] for entry in layered_entries]
     context_string = "\n\n...\n\n".join(relevant_chunks)
 
@@ -10087,6 +10894,13 @@ def get_relevant_context(
             context_role=entry.get("context_role", ""),
         )
         if citation:
+            # P2.1 hierarchical：附加 context_segment_text 用 parent group 全文
+            # _build_citation_context_text 优先使用 context_segment_text
+            parent_text = entry.get("_parent_group_text")
+            if parent_text:
+                citation["context_segment_text"] = parent_text
+                citation["source_text"] = parent_text
+                citation["_full_text"] = parent_text
             fallback_citations.append(citation)
 
     # 质量阈值检查（需求 8.1, 8.4）
@@ -10130,7 +10944,15 @@ def get_relevant_context(
     )
     _retrieval_logger_singleton.log_trace(trace)
     retrieval_meta = _retrieval_logger_singleton.to_retrieval_meta(trace)
-    retrieval_meta["diagnostics"] = {"retrieval": _build_retrieval_diagnostics(results, query)}
+    retrieval_meta["diagnostics"] = {
+        "retrieval": _build_retrieval_diagnostics(results, query),
+        "context_assembly": _build_context_assembly_diagnostics(
+            results,
+            context_string,
+            token_budget=config.max_token_budget,
+            hierarchical_stats=_hier_stats,
+        ),
+    }
     retrieval_meta["query_type"] = query_type
     retrieval_meta["evidence_need"] = list(evidence_need)
     retrieval_meta["search_query"] = query
@@ -10169,9 +10991,14 @@ def get_relevant_context(
     retrieval_meta["_context_segments"] = [
         {
             "ref": idx + 1,
+            "evidence_id": f"{doc_id}:fallback:{idx + 1}",
+            "doc_id": doc_id,
+            "chunk_id": entry["item"].get("chunk_id"),
             "text": entry["text"],
             "page_range": entry["item"].get("page_range") or [entry["item"].get("page", 0), entry["item"].get("page", 0)],
             "group_id": entry["item"].get("group_id", f"chunk-{idx}"),
+            "modality": entry["item"].get("modality") or entry["item"].get("chunk_type") or "text",
+            "score": entry["item"].get("similarity", entry["item"].get("score", 0.0)),
             "context_role": entry.get("context_role", ""),
         }
         for idx, entry in enumerate(layered_entries)
@@ -10278,6 +11105,94 @@ def _build_fallback_citation_from_result(
     if has_typed_table_evidence:
         citation["context_segment_text"] = chunk_text
     return citation
+
+
+def _format_layered_context(
+    context_string: str,
+    fitted_selections: list,
+    raw_chunks: List[dict],
+    query_type: str,
+) -> Tuple[str, dict]:
+    """P3.4 三层上下文格式化（借鉴 paper-burner-x streaming-multi-hop）
+
+    将 ContextBuilder 输出的 context_string 重新组织为：
+    - 【🎯 命中片段】top-3 raw chunk（精确证据）
+    - 【📖 重点意群】granularity=full 的意群（完整章节）
+    - 【📋 背景意群】granularity=digest/summary 的意群（关联摘要）
+
+    仅在 query_type ∈ {overview, analytical} 且存在多种粒度时生效；
+    保留原有 [N] 引用编号，不破坏 citation 链路。
+
+    Returns:
+        (formatted_context, layer_stats)
+        layer_stats: {"layered": bool, "n_focus": int, "n_background": int, "n_chunks": int}
+    """
+    layer_stats = {"layered": False, "n_focus": 0, "n_background": 0, "n_chunks": 0}
+    if query_type not in ("overview", "analytical"):
+        return context_string, layer_stats
+    if not fitted_selections or not context_string:
+        return context_string, layer_stats
+
+    pattern = re.compile(r"^\[(\d+)\]【.*?】", re.MULTILINE)
+    matches = list(pattern.finditer(context_string))
+    if not matches:
+        return context_string, layer_stats
+
+    blocks = []
+    for i, m in enumerate(matches):
+        ref = int(m.group(1))
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(context_string)
+        blocks.append({"ref": ref, "text": context_string[start:end].rstrip()})
+
+    gran_by_ref = {idx + 1: sel.get("granularity", "full") for idx, sel in enumerate(fitted_selections)}
+    focus_blocks = [b for b in blocks if gran_by_ref.get(b["ref"]) in ("full",)]
+    background_blocks = [b for b in blocks if gran_by_ref.get(b["ref"]) in ("digest", "summary")]
+
+    # 至少需要两种粒度才分层；否则保留原结构
+    if not focus_blocks or not background_blocks:
+        return context_string, layer_stats
+
+    parts: list[str] = []
+    # Layer 1: 命中片段（top-3 raw chunks）
+    if raw_chunks:
+        top_chunks = []
+        seen_chunks: set = set()
+        for r in raw_chunks[:8]:
+            ct = (r.get("chunk") or "").strip() if isinstance(r, dict) else ""
+            if not ct:
+                continue
+            key = ct[:120]
+            if key in seen_chunks:
+                continue
+            seen_chunks.add(key)
+            page = r.get("page", 0) if isinstance(r, dict) else 0
+            preview = ct[:400] + ("..." if len(ct) > 400 else "")
+            top_chunks.append(f"(p.{page}) {preview}")
+            if len(top_chunks) >= 3:
+                break
+        if top_chunks:
+            parts.append(
+                "【🎯 命中片段】(检索 top-3 chunk，作为精确证据)\n\n"
+                + "\n\n".join(top_chunks)
+            )
+            layer_stats["n_chunks"] = len(top_chunks)
+
+    parts.append(
+        "【📖 重点意群】(query 命中的完整章节内容)\n\n"
+        + "\n\n".join(b["text"] for b in focus_blocks)
+    )
+    parts.append(
+        "【📋 背景意群】(关联章节摘要，提供全局视角)\n\n"
+        + "\n\n".join(b["text"] for b in background_blocks)
+    )
+
+    layer_stats.update({
+        "layered": True,
+        "n_focus": len(focus_blocks),
+        "n_background": len(background_blocks),
+    })
+    return "\n\n---\n\n".join(parts), layer_stats
 
 
 def _build_context_with_groups(
@@ -10392,6 +11307,35 @@ def _build_context_with_groups(
         fitted_selections, group_best_chunks=group_best_chunks, query=query
     )
 
+    # P3.4 三层上下文格式化（仅 overview/analytical 启用，多粒度时生效）
+    # 通过 settings.enable_p34_layered_context 总开关控制（默认 ON，仅 ablation 时关闭）
+    layered_context_stats = {"layered": False}
+    try:
+        from config import settings as _global_settings
+        _p34_enabled = getattr(_global_settings, "enable_p34_layered_context", True)
+    except Exception:
+        _p34_enabled = True
+    if _p34_enabled:
+        try:
+            formatted_context, layered_context_stats = _format_layered_context(
+                context_string=context_string,
+                fitted_selections=fitted_selections,
+                raw_chunks=results,
+                query_type=selection_info.query_type,
+            )
+            if layered_context_stats.get("layered"):
+                context_string = formatted_context
+                logger.info(
+                    f"[{doc_id}] P3.4 三层上下文格式化生效: "
+                    f"focus={layered_context_stats.get('n_focus', 0)}, "
+                    f"background={layered_context_stats.get('n_background', 0)}, "
+                    f"chunks={layered_context_stats.get('n_chunks', 0)}"
+                )
+        except Exception as _e_layered:
+            logger.warning(f"[{doc_id}] P3.4 三层上下文格式化失败: {_e_layered}")
+    else:
+        logger.debug(f"[{doc_id}] P3.4 layered context 已 ablation 关闭")
+
     # 步骤 6：计算实际使用的 Token 数
     token_used = sum(item.get("tokens", 0) for item in fitted_selections)
 
@@ -10441,7 +11385,16 @@ def _build_context_with_groups(
     )
     retrieval_logger.log_trace(trace)
     retrieval_meta = retrieval_logger.to_retrieval_meta(trace)
-    retrieval_meta["diagnostics"] = {"retrieval": _build_retrieval_diagnostics(results, query)}
+    retrieval_meta["diagnostics"] = {
+        "retrieval": _build_retrieval_diagnostics(results, query),
+        "context_assembly": _build_context_assembly_diagnostics(
+            results,
+            context_string,
+            token_budget=config.max_token_budget,
+        ),
+    }
+    if layered_context_stats.get("layered"):
+        retrieval_meta["diagnostics"]["layered_context"] = layered_context_stats
     retrieval_meta["evidence_need"] = list(evidence_need)
     retrieval_meta["search_query"] = query
 
@@ -10475,9 +11428,14 @@ def _build_context_with_groups(
         text = getattr(group, text_attr, "")
         _context_segments.append({
             "ref": idx + 1,
+            "evidence_id": f"{doc_id}:group:{idx + 1}",
+            "doc_id": doc_id,
+            "chunk_id": None,
             "text": text,
             "page_range": [group.page_range[0], group.page_range[1]],
             "group_id": group.group_id,
+            "modality": "text",
+            "score": selection.get("score", 0.0),
         })
     retrieval_meta["_context_segments"] = _context_segments
 

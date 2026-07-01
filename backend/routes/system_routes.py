@@ -6,12 +6,19 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
+from runtime_mode import runtime
+
 router = APIRouter()
 
-# Align storage paths with project root (same as app.py/document_routes)
-BASE_DIR = Path(__file__).resolve().parents[2]
-UPLOADS_DIR = BASE_DIR / "uploads"
-DATA_DIR = BASE_DIR / "data"
+# 目录策略与 app.py/document_routes.py 保持一致：
+# - desktop: 使用 Electron 传入的 runtime.data_dir
+# - server: 使用项目根目录 data/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if runtime.is_desktop:
+    DATA_DIR = Path(runtime.data_dir)
+else:
+    DATA_DIR = PROJECT_ROOT / "data"
+UPLOADS_DIR = DATA_DIR / "uploads"
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORES_DIR = DATA_DIR / "vector_stores"
 

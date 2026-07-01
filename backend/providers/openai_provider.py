@@ -23,6 +23,7 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: Optional[float] = None,
         custom_params: Optional[Dict] = None,
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[dict]] = None,
     ) -> dict:
         # 构建请求体，仅在参数非 None 时添加对应字段
         body = {
@@ -38,6 +39,10 @@ class OpenAICompatibleProvider(BaseProvider):
             body["top_p"] = top_p
         if reasoning_effort is not None:
             body["reasoning_effort"] = reasoning_effort
+        # 透传 tools 参数，设置 tool_choice="auto"
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
         # 合并自定义参数（不覆盖已有核心字段由调用方保证）
         if custom_params:
             body.update(custom_params)

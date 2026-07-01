@@ -148,6 +148,44 @@ def convert_response_to_json(response: str) -> dict:
         return {}
 
 
+def validate_embedding_result(embeddings, expected_dim: int, model_name: str = "") -> None:
+    """校验 embedding 返回结果的维度和格式，在进入存储层之前报出清晰错误
+
+    Raises:
+        ValueError: 维度不匹配或格式异常
+    """
+    import numpy as np
+
+    if embeddings is None:
+        raise ValueError(f"[GraphRAG] Embedding 返回 None，模型 {model_name} 可能不可用")
+
+    if not isinstance(embeddings, np.ndarray):
+        raise TypeError(f"[GraphRAG] Embedding 返回类型异常: {type(embeddings)}，预期 np.ndarray")
+
+    if embeddings.ndim != 2:
+        raise ValueError(
+            f"[GraphRAG] Embedding 维度数异常: ndim={embeddings.ndim}，预期 2 "
+            f"(batch_size, embedding_dim)"
+        )
+
+    if embeddings.shape[0] == 0:
+        raise ValueError("[GraphRAG] Embedding 返回空批次")
+
+    actual_dim = int(embeddings.shape[1])
+    if actual_dim != expected_dim:
+        raise ValueError(
+            f"[GraphRAG] Embedding 维度不匹配: 模型 {model_name} "
+            f"预期 {expected_dim}，接口返回 {actual_dim}。"
+            f"请检查 embedding 模型配置是否正确。"
+        )
+
+    # 检查 NaN/Inf
+    if np.any(np.isnan(embeddings)):
+        raise ValueError(f"[GraphRAG] Embedding 包含 NaN 值，模型 {model_name} 可能输出异常")
+    if np.any(np.isinf(embeddings)):
+        raise ValueError(f"[GraphRAG] Embedding 包含 Inf 值，模型 {model_name} 可能输出异常")
+
+
 # ── 类型定义 ──
 
 @dataclass

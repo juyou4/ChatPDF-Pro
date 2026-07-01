@@ -259,7 +259,7 @@ class ContextBuilder:
             # 在 best_start 前30字符范围内找句子边界
             search_start = max(0, best_start - 30)
             boundary_chars = '。\n.！？!?；;'
-            best_boundary = best_start
+            best_boundary = 0 if search_start == 0 else best_start
             for i in range(best_start - 1, search_start - 1, -1):
                 if text[i] in boundary_chars:
                     best_boundary = i + 1
@@ -334,6 +334,15 @@ class ContextBuilder:
             return raw
 
         start = max(0, best_pos - max_len // 4)
+        if start > 0:
+            boundary_chars = '。\n.！？!?；;'
+            search_start = max(0, start - 30)
+            aligned_start = 0 if search_start == 0 else start
+            for i in range(start - 1, search_start - 1, -1):
+                if text[i] in boundary_chars:
+                    aligned_start = i + 1
+                    break
+            start = aligned_start
         return text[start:start + max_len].strip()
 
     @staticmethod

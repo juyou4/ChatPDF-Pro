@@ -4,9 +4,12 @@
 """
 import re
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field, asdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -227,7 +230,7 @@ class GlossaryService:
             self._rebuild_matcher()
             
         except Exception as e:
-            print(f"[Glossary] Failed to load glossary sets: {e}")
+            logger.warning("[Glossary] Failed to load glossary sets: %s", e)
     
     def _save_glossary_sets(self):
         """保存术语集到磁盘"""
@@ -251,7 +254,7 @@ class GlossaryService:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                     
         except Exception as e:
-            print(f"[Glossary] Failed to save glossary sets: {e}")
+            logger.warning("[Glossary] Failed to save glossary sets: %s", e)
     
     def _rebuild_matcher(self):
         """重建匹配器"""
