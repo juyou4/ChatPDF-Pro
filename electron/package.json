@@ -1,17 +1,17 @@
 {
   "name": "chatpdf-desktop",
   "productName": "ChatPDF Pro",
-  "version": "3.0.1",
-  "description": "Smart PDF Assistant - Chat with your documents",
+  "version": "3.0.2",
+  "description": "Agentic RAG paper and PDF reader",
   "main": "dist/main.js",
   "scripts": {
     "dev": "tsc && electron .",
     "build": "tsc",
     "start": "electron .",
-    "package": "npm run build && electron-builder build --publish never",
-    "package:win": "npm run build && electron-builder build --win --publish never",
-    "package:mac": "npm run build && electron-builder build --mac --publish never",
-    "package:linux": "npm run build && electron-builder build --linux --publish never"
+    "package": "npm run build && electron-builder build --publish never --config.electronDist=node_modules/electron/dist",
+    "package:win": "npm run build && electron-builder build --win --publish never --config.electronDist=node_modules/electron/dist",
+    "package:mac": "npm run build && electron-builder build --mac --publish never --config.electronDist=node_modules/electron/dist",
+    "package:linux": "npm run build && electron-builder build --linux --publish never --config.electronDist=node_modules/electron/dist"
   },
   "author": "ChatPDF Team",
   "license": "MIT",

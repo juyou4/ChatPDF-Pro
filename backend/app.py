@@ -228,7 +228,7 @@ async def get_capabilities():
 
     return {
         "mode": runtime.mode_name,
-        "version": "3.0.1",
+        "version": "3.0.2",
         "has_local_embedding": _HAS_SENTENCE_TRANSFORMERS,
         "has_local_rerank": _HAS_CROSS_ENCODER,
         "embedding_providers": embedding_providers,
