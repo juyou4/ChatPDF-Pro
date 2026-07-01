@@ -95,7 +95,8 @@ def crop_figure_image(
 
 def generate_display_and_model_images(
     pdf_doc,
-    figure: LogicalFigureSchema
+    figure: LogicalFigureSchema,
+    render_mode: str = "raw",
 ) -> FigureImageOutput:
     """为一个 Figure 生成展示图和分析图
     
@@ -120,11 +121,12 @@ def generate_display_and_model_images(
     if not display_bbox:
         raise ValueError(f"No bbox available for figure {figure.figure_id}")
     
-    # 借鉴 MinerU ImageBody 思想：收紧到纯图像区域
-    page = pdf_doc[page_idx]
-    tight_bbox = _tighten_bbox_to_images(page, display_bbox)
-    if tight_bbox:
-        display_bbox = tight_bbox
+    if render_mode == "yolo":
+        # 借鉴 MinerU ImageBody 思想：收紧到纯图像区域
+        page = pdf_doc[page_idx]
+        tight_bbox = _tighten_bbox_to_images(page, display_bbox, mode=render_mode)
+        if tight_bbox:
+            display_bbox = tight_bbox
     
     # 添加边距
     padded_display_bbox = _add_padding(display_bbox, cfg["padding"])
@@ -180,7 +182,8 @@ def generate_display_and_model_images(
 def render_figure(
     pdf_doc,
     figure: LogicalFigureSchema,
-    padding: int = 5
+    padding: int = 5,
+    render_mode: str = "raw",
 ) -> RenderResult:
     """渲染单个 Figure，返回 RenderResult
     
@@ -198,12 +201,14 @@ def render_figure(
             error_message=f"No bbox available for figure {figure.figure_id}"
         )
     
-    # 借鉴 MinerU ImageBody 思想：收紧到纯图像区域
-    # 用 full_bbox 作为搜索范围（覆盖所有子图），body_bbox 可能只覆盖部分子图
-    page = pdf_doc[page_idx]
-    search_bbox = figure.full_bbox_page_pts or render_bbox
-    tight_bbox = _tighten_bbox_to_images(page, search_bbox)
-    display_bbox = tight_bbox if tight_bbox else render_bbox
+    display_bbox = render_bbox
+    if render_mode == "yolo":
+        # 借鉴 MinerU ImageBody 思想：收紧到纯图像区域
+        # 用 full_bbox 作为搜索范围（覆盖所有子图），body_bbox 可能只覆盖部分子图
+        page = pdf_doc[page_idx]
+        search_bbox = figure.full_bbox_page_pts or render_bbox
+        tight_bbox = _tighten_bbox_to_images(page, search_bbox, mode=render_mode)
+        display_bbox = tight_bbox if tight_bbox else render_bbox
     
     # 添加边距
     padded_bbox = _add_padding(display_bbox, padding)
@@ -260,7 +265,8 @@ def render_figure(
 def _tighten_bbox_to_images(
     page,
     bbox_page_pts: List[float],
-    min_coverage: float = 0.05
+    min_coverage: float = 0.05,
+    mode: str = "yolo",
 ) -> Optional[List[float]]:
     """收紧 bbox 到纯图像区域
 
@@ -278,10 +284,11 @@ def _tighten_bbox_to_images(
     if not bbox_page_pts or len(bbox_page_pts) != 4:
         return None
 
-    # 优先尝试 DocLayout-YOLO
-    yolo_result = _tighten_bbox_with_layout_model(page, bbox_page_pts)
-    if yolo_result is not None:
-        return yolo_result
+    if mode == "yolo":
+        # 优先尝试 DocLayout-YOLO
+        yolo_result = _tighten_bbox_with_layout_model(page, bbox_page_pts)
+        if yolo_result is not None:
+            return yolo_result
 
     # 回退到 get_image_info
     return _tighten_bbox_with_image_info(page, bbox_page_pts, min_coverage)

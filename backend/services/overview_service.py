@@ -97,6 +97,7 @@ class OverviewTask(BaseModel):
     created_at: float
     updated_at: float
     use_mineru_figures: bool = False
+    figure_render_mode: str = "raw"
 
 
 # ============ 配置 ============
@@ -110,6 +111,16 @@ OVERVIEW_CACHE_VERSION = "v11"
 overview_tasks: Dict[str, OverviewTask] = {}
 overview_cache: Dict[str, OverviewData] = {}
 overview_inflight: Dict[str, asyncio.Task] = {}
+
+VALID_FIGURE_RENDER_MODES = {"raw", "yolo"}
+
+
+def _normalize_figure_render_mode(mode: str = "raw") -> str:
+    """标准化速览图表预览模式。"""
+    normalized = (mode or "raw").strip().lower()
+    if normalized not in VALID_FIGURE_RENDER_MODES:
+        return "raw"
+    return normalized
 
 # 深度配置
 DEPTH_CONFIG = {
@@ -963,6 +974,7 @@ def _render_figure_crop_from_pdf(
     figure_bbox: Optional[Any] = None,
     caption_bbox: Optional[Any] = None,
     previous_caption_bbox: Optional[Any] = None,
+    figure_render_mode: str = "raw",
 ) -> Optional[str]:
     """根据 figure 的 bbox 或图片 bbox，从原 PDF 页面渲染整图裁切结果。"""
     if not pdf_url or page_num <= 0:
@@ -1000,14 +1012,15 @@ def _render_figure_crop_from_pdf(
         if not clip_bbox:
             return None
 
-        # 使用 DocLayout-YOLO 收紧到纯图像区域（与 figure_render 一致）
-        try:
-            from services.figure_render import _tighten_bbox_to_images
-            tight = _tighten_bbox_to_images(page, list(clip_bbox))
-            if tight:
-                clip_bbox = tight
-        except Exception as e:
-            logger.debug(f"YOLO tighten failed in old path: {e}")
+        if _normalize_figure_render_mode(figure_render_mode) == "yolo":
+            # 使用 DocLayout-YOLO 收紧到纯图像区域（与 figure_render 一致）
+            try:
+                from services.figure_render import _tighten_bbox_to_images
+                tight = _tighten_bbox_to_images(page, list(clip_bbox), mode="yolo")
+                if tight:
+                    clip_bbox = tight
+            except Exception as e:
+                logger.debug(f"YOLO tighten failed in old path: {e}")
 
         clip = fitz.Rect(*clip_bbox)
         pix = page.get_pixmap(dpi=FIGURE_RENDER_DPI, clip=clip, annots=False)
@@ -1237,7 +1250,8 @@ def _extract_figures_via_pipeline(
 
 def _render_figures_with_pipeline(
     pdf_doc,
-    figures: List[LogicalFigureSchema]
+    figures: List[LogicalFigureSchema],
+    figure_render_mode: str = "raw",
 ) -> List[Dict]:
     """
     使用 Figure Render + Validation 渲染 figures
@@ -1246,13 +1260,15 @@ def _render_figures_with_pipeline(
         List[Dict]: 包含 image_base64 和渲染结果的 dict 列表
     """
     results = []
+    render_mode = _normalize_figure_render_mode(figure_render_mode)
     
     for figure in figures:
         # 渲染
         render_result = validate_and_fallback(
             figure,
             pdf_doc,
-            render_figure
+            render_figure,
+            render_kwargs={"render_mode": render_mode},
         )
         
         results.append({
@@ -1443,27 +1459,32 @@ async def _generate_single_figure_analysis(
         return None
 
 
-def _get_cache_key(doc_id: str, depth: str) -> str:
+def _get_cache_key(doc_id: str, depth: str, figure_render_mode: str = "raw") -> str:
     """生成缓存 key"""
-    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}"
+    render_mode = _normalize_figure_render_mode(figure_render_mode)
+    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}"
 
 
-def _get_cache_path(doc_id: str, depth: str) -> Path:
+def _get_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") -> Path:
     """获取缓存文件路径"""
-    key = _get_cache_key(doc_id, depth)
+    key = _get_cache_key(doc_id, depth, figure_render_mode)
     return CACHE_DIR / f"{key}.json"
 
 
-async def get_cached_overview(doc_id: str, depth: str) -> Optional[OverviewData]:
+async def get_cached_overview(
+    doc_id: str,
+    depth: str,
+    figure_render_mode: str = "raw",
+) -> Optional[OverviewData]:
     """获取缓存的速览"""
-    cache_key = _get_cache_key(doc_id, depth)
+    cache_key = _get_cache_key(doc_id, depth, figure_render_mode)
     
     # 内存缓存
     if cache_key in overview_cache:
         return overview_cache[cache_key]
     
     # 文件缓存
-    cache_path = _get_cache_path(doc_id, depth)
+    cache_path = _get_cache_path(doc_id, depth, figure_render_mode)
     if cache_path.exists():
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
@@ -1479,13 +1500,14 @@ async def get_cached_overview(doc_id: str, depth: str) -> Optional[OverviewData]
 
 async def save_overview_cache(overview: OverviewData):
     """保存速览到缓存"""
-    cache_key = _get_cache_key(overview.doc_id, overview.depth)
+    figure_render_mode = (overview.figure_meta or {}).get("render_mode", "raw")
+    cache_key = _get_cache_key(overview.doc_id, overview.depth, figure_render_mode)
     
     # 内存缓存
     overview_cache[cache_key] = overview
     
     # 文件缓存
-    cache_path = _get_cache_path(overview.doc_id, overview.depth)
+    cache_path = _get_cache_path(overview.doc_id, overview.depth, figure_render_mode)
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(overview.model_dump(), f, ensure_ascii=False, indent=2)
@@ -1502,9 +1524,11 @@ async def generate_overview_content(
     provider: str = "openai",
     endpoint: str = "",
     use_mineru_figures: bool = False,
+    figure_render_mode: str = "raw",
 ) -> OverviewData:
     """生成速览内容（调用 LLM）"""
     from services.chat_service import call_ai_api
+    figure_render_mode = _normalize_figure_render_mode(figure_render_mode)
     
     # 获取文档信息
     doc_info = await get_document_info(doc_id)
@@ -1597,7 +1621,11 @@ async def generate_overview_content(
                         from routes.document_routes import UPLOAD_DIR as _upload_dir2
                         _pdf_path = _upload_dir2 / pdf_url.split("/")[-1]
                         pdf_doc = fitz.open(str(_pdf_path))
-                        rendered_figures = _render_figures_with_pipeline(pdf_doc, logical_figures)
+                        rendered_figures = _render_figures_with_pipeline(
+                            pdf_doc,
+                            logical_figures,
+                            figure_render_mode=figure_render_mode,
+                        )
 
                         analysis_tasks = [
                             _generate_figure_analysis_via_pipeline(
@@ -1644,6 +1672,7 @@ async def generate_overview_content(
                         figure_bbox=fig.get("figure_bbox"),
                         caption_bbox=fig.get("caption_bbox"),
                         previous_caption_bbox=fig.get("previous_caption_bbox"),
+                        figure_render_mode=figure_render_mode,
                     )
                     item = await _generate_single_figure_analysis(
                         figure_id=fig["figure_id"],
@@ -1675,6 +1704,7 @@ async def generate_overview_content(
             overview.figure_meta = {
                 "source": figure_source,
                 "count": len(key_figures_list),
+                "render_mode": figure_render_mode,
             }
                 
         except Exception as e:
@@ -1698,6 +1728,7 @@ async def create_overview_task(
     provider: str = "openai",
     endpoint: str = "",
     use_mineru_figures: bool = False,
+    figure_render_mode: str = "raw",
 ) -> OverviewTask:
     """创建异步任务"""
     task_id = str(uuid.uuid4())
@@ -1714,6 +1745,7 @@ async def create_overview_task(
         created_at=time.time(),
         updated_at=time.time(),
         use_mineru_figures=use_mineru_figures,
+        figure_render_mode=_normalize_figure_render_mode(figure_render_mode),
     )
     
     overview_tasks[task_id] = task
@@ -1738,7 +1770,8 @@ async def _process_overview_task(task_id: str):
         
         # 检查缓存
         _use_mineru = getattr(task, 'use_mineru_figures', False)
-        cached = await get_cached_overview(task.doc_id, task.depth)
+        _render_mode = _normalize_figure_render_mode(getattr(task, 'figure_render_mode', 'raw'))
+        cached = await get_cached_overview(task.doc_id, task.depth, _render_mode)
         if cached:
             if _use_mineru and (cached.figure_meta or {}).get("source") != "mineru":
                 logger.info(f"[Overview] task: 缓存非 MinerU，跳过")
@@ -1756,6 +1789,7 @@ async def _process_overview_task(task_id: str):
             provider=task.provider,
             endpoint=task.endpoint,
             use_mineru_figures=getattr(task, 'use_mineru_figures', False),
+            figure_render_mode=_render_mode,
         )
         
         task.result = result
@@ -1784,11 +1818,13 @@ async def _generate_or_wait_overview(
     provider: str = "openai",
     endpoint: str = "",
     use_mineru_figures: bool = False,
+    figure_render_mode: str = "raw",
 ) -> OverviewData:
     """相同 doc/depth 的 overview 只生成一次，其余请求直接复用。"""
-    cache_key = _get_cache_key(doc_id, depth)
+    render_mode = _normalize_figure_render_mode(figure_render_mode)
+    cache_key = _get_cache_key(doc_id, depth, render_mode)
 
-    cached = await get_cached_overview(doc_id, depth)
+    cached = await get_cached_overview(doc_id, depth, render_mode)
     if cached:
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
             logger.info(f"[Overview] _generate_or_wait: 缓存非 MinerU，跳过")
@@ -1813,6 +1849,7 @@ async def _generate_or_wait_overview(
             provider=provider,
             endpoint=endpoint,
             use_mineru_figures=use_mineru_figures,
+            figure_render_mode=render_mode,
         )
 
     task = asyncio.create_task(_runner())
@@ -1832,10 +1869,12 @@ async def get_or_create_overview(
     provider: str = "openai",
     endpoint: str = "",
     use_mineru_figures: bool = False,
+    figure_render_mode: str = "raw",
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
+    render_mode = _normalize_figure_render_mode(figure_render_mode)
     # 先检查缓存
-    cached = await get_cached_overview(doc_id, depth)
+    cached = await get_cached_overview(doc_id, depth, render_mode)
     if cached:
         return cached
 
@@ -1849,6 +1888,7 @@ async def get_or_create_overview(
                 provider=provider,
                 endpoint=endpoint,
                 use_mineru_figures=use_mineru_figures,
+                figure_render_mode=render_mode,
             ),
             timeout=180,
         )

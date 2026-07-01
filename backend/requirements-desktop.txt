@@ -1,8 +1,25 @@
 # ==================== 桌面应用模式专用依赖 ====================
-# 不包含本地 ML 模型（sentence-transformers/torch），体积更轻
+# 不包含本地 embedding 模型（sentence-transformers），体积更轻
 # 使用方式：pip install -r requirements-desktop.txt
 
 -r requirements-base.txt
+
+# 速览图表 YOLO 预览模式
+torch>=2.4,<2.5
+torchvision>=0.19,<0.20
+doclayout_yolo>=0.0.2
+huggingface_hub>=0.20.0
+opencv-python>=4.10,<5
+matplotlib>=3.7
+pandas>=2.0
+psutil>=5.9
+py-cpuinfo>=9.0
+pyyaml>=6.0
+requests>=2.31
+scipy>=1.10
+seaborn>=0.13
+thop>=0.1.1
+tqdm>=4.66
 
 # 桌面专用（可选）
 # platformdirs>=4.0.0  # 跨平台数据目录（目前 runtime_mode.py 自行处理）

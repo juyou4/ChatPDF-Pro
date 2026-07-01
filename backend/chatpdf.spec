@@ -8,7 +8,8 @@ PyInstaller spec 文件 - ChatPDF 桌面后端打包配置
   pip install pyinstaller
   pyinstaller chatpdf.spec
 
-目标：onedir 模式，体积 ≤ 250MB
+目标：onedir 模式。含 CPU 版 torch / DocLayout-YOLO 运行库（已剥离 CUDA GPU 库），
+不内置 YOLO 权重（桌面端在设置页按需下载）。
 """
 
 import os
@@ -123,6 +124,7 @@ a = Analysis(
     datas=[
         # pdfminer 资源文件
         *collect_data_files('tiktoken', include_py_files=False),
+        # DocLayout-YOLO 权重不内置到安装包；桌面端在设置页下载到用户数据目录或手动指定。
     ],
     hiddenimports=[
         *project_hiddenimports,
@@ -188,6 +190,23 @@ a = Analysis(
         # 中文检索
         'jieba',
 
+        # 速览图表 YOLO 预览模式
+        'torch',
+        'torchvision',
+        'doclayout_yolo',
+        'doclayout_yolo.engine.model',
+        'doclayout_yolo.engine.predictor',
+        'doclayout_yolo.engine.results',
+        'doclayout_yolo.models.yolov10.model',
+        'doclayout_yolo.models.yolov10.predict',
+        'doclayout_yolo.nn.tasks',
+        'doclayout_yolo.nn.modules',
+        'doclayout_yolo.utils',
+        'doclayout_yolo.utils.ops',
+        'doclayout_yolo.utils.torch_utils',
+        'huggingface_hub',
+        'cv2',
+
         # 其他
         'multipart',
         'python_multipart',
@@ -196,15 +215,14 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 排除重量级 ML / OCR 布局模型依赖（桌面模式不内置本地模型）
-        'torch', 'torchvision', 'torchaudio',
+        # 排除未使用的重量级 ML 依赖；DocLayout-YOLO 预览模式依赖 torch/torchvision 运行库，保留。
+        'torchaudio',
         'sentence_transformers', 'transformers', 'tokenizers',
-        'huggingface_hub', 'safetensors',
-        'doclayout_yolo', 'ultralytics', 'lapx',
+        'safetensors',
+        'ultralytics', 'lapx',
 
-        # 排除 Anaconda 附带的科学计算/可视化库
-        'matplotlib', 'pandas',
-        'cv2', 'opencv',                      # OpenCV (~95MB)
+        # 排除 Anaconda 附带但当前桌面包未使用的可视化/分析库
+        'opencv',                             # 保留 cv2 给 DocLayout-YOLO；仅排除旧命名占位
         'llvmlite', 'numba',                  # LLVM/Numba (~65MB)
         'bokeh', 'panel', 'holoviews',        # 可视化 (~100MB)
         'plotly', 'altair', 'xarray',
@@ -248,6 +266,18 @@ a = Analysis(
     noarchive=False,
 )
 
+# 剥离 CUDA / cuDNN 运行库：桌面端 DocLayout-YOLO 仅做 CPU 推理
+# （_get_device() 默认 CPU），避免把 CUDA 版 torch 的 ~2.5GB GPU 库打进安装包。
+import re as _re
+_CUDA_LIB_RE = _re.compile(
+    r"(cudnn|cublas|cudart|cufft|curand|cusolver|cusparse|nvrtc|nvtx|"
+    r"nvtoolsext|nccl|cupti|cusparselt|torch_cuda|c10_cuda|caffe2_nvrtc)",
+    _re.IGNORECASE,
+)
+_before = len(a.binaries)
+a.binaries = [b for b in a.binaries if not _CUDA_LIB_RE.search(os.path.basename(b[0]))]
+print(f"[chatpdf.spec] Stripped {_before - len(a.binaries)} CUDA binaries (CPU-only desktop build)")
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -268,11 +298,15 @@ exe = EXE(
     entitlements_file=None,
 )
 
+# 过滤运行时用户数据，防止打包泄露个人论文缓存
+_user_data_prefixes = ('data/overviews', 'data/cache', 'data/graphrag')
+clean_datas = [d for d in a.datas if not any(d[0].startswith(p) for p in _user_data_prefixes)]
+
 coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
-    a.datas,
+    clean_datas,
     strip=False,
     upx=True,
     upx_exclude=[],

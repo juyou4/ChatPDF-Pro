@@ -317,7 +317,7 @@ describe('useDocumentState', () => {
     });
 
     const [url, options] = mockFetch.mock.calls.at(-1);
-    expect(url).toBe('/documents/doc-overview/overview?depth=standard');
+    expect(url).toBe('/documents/doc-overview/overview?depth=standard&use_mineru_figures=true');
     expect(options.headers).toMatchObject({
       'X-ChatPDF-Provider': 'deepseek',
       'X-ChatPDF-Model': 'deepseek-chat',
@@ -325,6 +325,40 @@ describe('useDocumentState', () => {
       'X-ChatPDF-Api-Host': 'https://api.deepseek.com/v1',
     });
     expect(result.current.overview).toEqual({ full_text_summary: 'ok' });
+  });
+
+  it('fetchOverview 在 YOLO 预览模式下透传 figure_render_mode', async () => {
+    localStorage.setItem('ocrSettings', JSON.stringify({
+      mode: 'auto',
+      backend: 'auto',
+      mineruFigureEnhance: true,
+      figureRenderMode: 'yolo',
+    }));
+    mockGetChatCredentials.mockReturnValue({
+      providerId: 'local',
+      modelId: 'qwen-local',
+      apiKey: '',
+    });
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ full_text_summary: 'ok' }),
+    });
+
+    const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await act(async () => {});
+
+    act(() => {
+      result.current.setDocId('doc-overview');
+    });
+
+    await act(async () => {
+      await result.current.fetchOverview('standard');
+    });
+
+    const [url] = mockFetch.mock.calls.at(-1);
+    expect(url).toBe('/documents/doc-overview/overview?depth=standard&use_mineru_figures=true&figure_render_mode=yolo');
   });
 
   it('fetchOverview 在远程 provider 缺少 API Key 时直接给出提示', async () => {

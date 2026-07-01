@@ -11,14 +11,18 @@ const loadOCRSettings = () => {
       const parsed = JSON.parse(raw);
       const validModes = ['auto', 'always', 'never'];
       const validBackends = ['auto', 'tesseract', 'paddleocr', 'mistral', 'mineru', 'doc2x'];
+      const validFigureRenderModes = ['raw', 'yolo'];
       return {
         mode: validModes.includes(parsed.mode) ? parsed.mode : 'auto',
         backend: validBackends.includes(parsed.backend) ? parsed.backend : 'auto',
         mineruFigureEnhance: typeof parsed.mineruFigureEnhance === 'boolean' ? parsed.mineruFigureEnhance : true,
+        figureRenderMode: validFigureRenderModes.includes(parsed.figureRenderMode)
+          ? parsed.figureRenderMode
+          : 'raw',
       };
     }
   } catch { /* ignore */ }
-  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true };
+  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true, figureRenderMode: 'raw' };
 };
 
 // API base URL
@@ -113,7 +117,8 @@ export function useDocumentState({
     if (!currentDocId) return '';
     const ocrCfg = loadOCRSettings();
     const mineruFlag = ocrCfg.mineruFigureEnhance ? '1' : '0';
-    return `${currentDocId}:${depth}:m${mineruFlag}`;
+    const renderMode = ocrCfg.figureRenderMode || 'raw';
+    return `${currentDocId}:${depth}:m${mineruFlag}:r${renderMode}`;
   }, []);
 
   /**
@@ -391,6 +396,9 @@ export function useDocumentState({
       const params = new URLSearchParams({ depth });
       if (ocrSettings.mineruFigureEnhance) {
         params.set('use_mineru_figures', 'true');
+      }
+      if (ocrSettings.figureRenderMode === 'yolo') {
+        params.set('figure_render_mode', 'yolo');
       }
       const headers = {};
       if (chatCredentials) {

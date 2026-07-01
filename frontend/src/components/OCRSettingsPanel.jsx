@@ -4,13 +4,17 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
+  Crop,
+  Download,
   Eye,
   EyeOff,
   FileSearch,
+  FolderOpen,
   Globe,
   Info,
   Key,
   Loader2,
+  RefreshCw,
   Save,
   ScanText,
   Wifi,
@@ -113,6 +117,11 @@ const VALID_MODES = ['auto', 'always', 'never']
 const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral', 'mineru', 'doc2x']
 
 /**
+ * 合法的速览图表预览模式
+ */
+const VALID_FIGURE_RENDER_MODES = ['raw', 'yolo']
+
+/**
  * 从 localStorage 读取 OCR 设置
  * @returns {object} OCR 设置对象，包含 mode 和 backend
  */
@@ -121,7 +130,12 @@ export function loadOCRSettings() {
     const raw = localStorage.getItem(OCR_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      const result = { mode: 'auto', backend: 'auto', mineruFigureEnhance: true }
+      const result = {
+        mode: 'auto',
+        backend: 'auto',
+        mineruFigureEnhance: true,
+        figureRenderMode: 'raw',
+      }
       // 校验 mode 值是否合法
       if (VALID_MODES.includes(parsed.mode)) {
         result.mode = parsed.mode
@@ -134,12 +148,16 @@ export function loadOCRSettings() {
       if (typeof parsed.mineruFigureEnhance === 'boolean') {
         result.mineruFigureEnhance = parsed.mineruFigureEnhance
       }
+      // 速览图表预览模式
+      if (VALID_FIGURE_RENDER_MODES.includes(parsed.figureRenderMode)) {
+        result.figureRenderMode = parsed.figureRenderMode
+      }
       return result
     }
   } catch (err) {
     console.error('读取 OCR 设置失败:', err)
   }
-  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true }
+  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true, figureRenderMode: 'raw' }
 }
 
 /**
@@ -151,6 +169,15 @@ export function saveOCRSettings(settings) {
     localStorage.setItem(OCR_SETTINGS_KEY, JSON.stringify(settings))
   } catch (err) {
     console.error('保存 OCR 设置失败:', err)
+  }
+}
+
+const getApiErrorMessage = async (res, fallback) => {
+  try {
+    const data = await res.json()
+    return data?.detail || data?.message || fallback
+  } catch {
+    return fallback
   }
 }
 
@@ -221,6 +248,18 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [mineruExpanded, setMineruExpanded] = useState(false)
   // MinerU 图表增强识别开关
   const [mineruFigureEnhance, setMineruFigureEnhance] = useState(true)
+  // 速览图表预览模式：raw 更快，yolo 更准
+  const [figureRenderMode, setFigureRenderMode] = useState('raw')
+  // YOLO 资源状态
+  const [yoloStatus, setYoloStatus] = useState(null)
+  // YOLO 权重安装目录
+  const [yoloInstallDir, setYoloInstallDir] = useState('')
+  // 手动指定的 YOLO 权重路径
+  const [yoloModelPath, setYoloModelPath] = useState('')
+  // YOLO 资源操作状态
+  const [yoloBusy, setYoloBusy] = useState(false)
+  const [yoloMessage, setYoloMessage] = useState('')
+  const [yoloMessageType, setYoloMessageType] = useState(null)
 
   // ---- Doc2X OCR 配置状态 ----
   // Doc2X Worker URL
@@ -255,6 +294,11 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       setMode(settings.mode)
       setBackend(settings.backend)
       setMineruFigureEnhance(settings.mineruFigureEnhance !== false)
+      setFigureRenderMode(
+        VALID_FIGURE_RENDER_MODES.includes(settings.figureRenderMode)
+          ? settings.figureRenderMode
+          : 'raw'
+      )
     }
   }, [isOpen])
 
@@ -271,11 +315,38 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       }
       const data = await res.json()
       setOcrStatus(data)
+      if (data?.figure_preview?.yolo) {
+        setYoloStatus(data.figure_preview.yolo)
+        setYoloInstallDir((current) => current || data.figure_preview.yolo.default_install_dir || '')
+        setYoloModelPath((current) => current || data.figure_preview.yolo.configured_model_path || data.figure_preview.yolo.model_path || '')
+      }
     } catch (err) {
       console.error('获取 OCR 状态失败:', err)
       setError('无法获取 OCR 状态，请检查后端服务是否运行')
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  /**
+   * 单独获取 YOLO 资源状态
+   */
+  const fetchYoloStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/layout/yolo/status`)
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      setYoloStatus(data)
+      setYoloInstallDir((current) => current || data.default_install_dir || '')
+      setYoloModelPath((current) => current || data.configured_model_path || data.model_path || '')
+      return data
+    } catch (err) {
+      console.error('获取 YOLO 资源状态失败:', err)
+      setYoloMessageType('error')
+      setYoloMessage('无法获取 YOLO 资源状态')
+      return null
     }
   }, [])
 
@@ -564,14 +635,131 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   }, [doc2xWorkerUrl, doc2xAuthKey, doc2xTokenMode, doc2xToken, fetchOnlineConfig, fetchOCRStatus])
 
   /**
+   * 选择 YOLO 权重安装目录（桌面端弹系统目录选择器，Web 端保留手动输入）
+   */
+  const handleSelectYoloInstallDir = useCallback(async () => {
+    if (!window.chatpdfDesktop?.selectDirectory) return
+    const dir = await window.chatpdfDesktop.selectDirectory()
+    if (dir) setYoloInstallDir(dir)
+  }, [])
+
+  /**
+   * 选择已有 YOLO 权重文件
+   */
+  const handleSelectYoloModelFile = useCallback(async () => {
+    if (!window.chatpdfDesktop?.selectFile) return
+    const filePath = await window.chatpdfDesktop.selectFile({
+      filters: [{ name: 'PyTorch Weights', extensions: ['pt'] }],
+    })
+    if (filePath) setYoloModelPath(filePath)
+  }, [])
+
+  /**
+   * 一键下载 YOLO 权重
+   */
+  const handleDownloadYoloModel = useCallback(async () => {
+    setYoloBusy(true)
+    setYoloMessageType(null)
+    setYoloMessage('正在下载 YOLO 权重，请保持网络连接')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/layout/yolo/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          install_dir: yoloInstallDir.trim(),
+        }),
+      })
+      if (!res.ok) {
+        throw new Error(await getApiErrorMessage(res, `下载失败 (HTTP ${res.status})`))
+      }
+      const data = await res.json()
+      setYoloStatus(data)
+      setYoloModelPath(data.model_path || '')
+      setYoloInstallDir(data.default_install_dir || yoloInstallDir)
+      setYoloMessageType('success')
+      setYoloMessage(data.downloaded === false ? '权重已存在，配置已启用' : 'YOLO 权重已下载并启用')
+      fetchOCRStatus()
+    } catch (err) {
+      console.error('下载 YOLO 权重失败:', err)
+      setYoloMessageType('error')
+      setYoloMessage(err.message || '下载失败，请检查网络或手动指定权重路径')
+    } finally {
+      setYoloBusy(false)
+    }
+  }, [yoloInstallDir, fetchOCRStatus])
+
+  /**
+   * 保存手动指定的 YOLO 权重路径
+   */
+  const handleSaveYoloModelPath = useCallback(async () => {
+    if (!yoloModelPath.trim()) return
+    setYoloBusy(true)
+    setYoloMessageType(null)
+    setYoloMessage('')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/layout/yolo/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_path: yoloModelPath.trim() }),
+      })
+      if (!res.ok) {
+        throw new Error(await getApiErrorMessage(res, `保存失败 (HTTP ${res.status})`))
+      }
+      const data = await res.json()
+      setYoloStatus(data)
+      setYoloModelPath(data.configured_model_path || data.model_path || yoloModelPath)
+      setYoloMessageType('success')
+      setYoloMessage('YOLO 权重路径已保存')
+      fetchOCRStatus()
+    } catch (err) {
+      console.error('保存 YOLO 权重路径失败:', err)
+      setYoloMessageType('error')
+      setYoloMessage(err.message || '保存失败，请检查路径')
+    } finally {
+      setYoloBusy(false)
+    }
+  }, [yoloModelPath, fetchOCRStatus])
+
+  /**
+   * 清除手动 YOLO 路径配置
+   */
+  const handleResetYoloModelPath = useCallback(async () => {
+    setYoloBusy(true)
+    setYoloMessageType(null)
+    setYoloMessage('')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/layout/yolo/reset`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        throw new Error(await getApiErrorMessage(res, `重置失败 (HTTP ${res.status})`))
+      }
+      const data = await res.json()
+      setYoloStatus(data)
+      setYoloModelPath(data.model_path || '')
+      setYoloInstallDir(data.default_install_dir || '')
+      setYoloMessageType('success')
+      setYoloMessage('已恢复默认 YOLO 权重目录')
+      fetchOCRStatus()
+    } catch (err) {
+      console.error('重置 YOLO 权重路径失败:', err)
+      setYoloMessageType('error')
+      setYoloMessage(err.message || '重置失败')
+    } finally {
+      setYoloBusy(false)
+    }
+  }, [fetchOCRStatus])
+
+  /**
    * 面板打开时获取 OCR 状态和在线配置
    */
   useEffect(() => {
     if (isOpen) {
       fetchOCRStatus()
       fetchOnlineConfig()
+      fetchYoloStatus()
     }
-  }, [isOpen, fetchOCRStatus, fetchOnlineConfig])
+  }, [isOpen, fetchOCRStatus, fetchOnlineConfig, fetchYoloStatus])
 
   /**
    * 切换 OCR 模式并持久化到 localStorage
@@ -579,7 +767,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
    */
   const handleModeChange = (newMode) => {
     setMode(newMode)
-    saveOCRSettings({ mode: newMode, backend })
+    const settings = loadOCRSettings()
+    saveOCRSettings({ ...settings, mode: newMode, backend })
   }
 
   /**
@@ -588,8 +777,39 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
    */
   const handleBackendChange = (newBackend) => {
     setBackend(newBackend)
-    saveOCRSettings({ mode, backend: newBackend })
+    const settings = loadOCRSettings()
+    saveOCRSettings({ ...settings, mode, backend: newBackend })
   }
+
+  /**
+   * 切换速览图表预览模式并持久化
+   * @param {'raw'|'yolo'} nextMode - 新的预览模式
+   */
+  const handleFigureRenderModeChange = (nextMode) => {
+    if (!VALID_FIGURE_RENDER_MODES.includes(nextMode)) return
+    setFigureRenderMode(nextMode)
+    const settings = loadOCRSettings()
+    saveOCRSettings({ ...settings, figureRenderMode: nextMode })
+    if (nextMode === 'yolo' && yoloStatus && !yoloStatus.available) {
+      setYoloMessageType('error')
+      setYoloMessage(
+        !yoloStatus.dependencies_available
+          ? '当前后端缺少 YOLO 运行依赖，请使用桌面完整包或安装依赖后再启用'
+          : 'YOLO 权重尚未配置，请先一键下载或手动指定 .pt 权重'
+      )
+    }
+  }
+
+  const yoloReady = yoloStatus?.available === true
+  const yoloDependencyMissing = yoloStatus && yoloStatus.dependencies_available === false
+  const yoloInstalled = yoloStatus?.model_installed === true
+  const yoloStatusLabel = yoloReady
+    ? '已就绪'
+    : yoloDependencyMissing
+      ? '依赖缺失'
+      : yoloInstalled
+        ? '待验证'
+        : '未安装'
 
   return (
     <AnimatePresence initial={false}>
@@ -1345,6 +1565,187 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       }`}
                     />
                   </button>
+                </div>
+
+                {/* 速览图表预览模式 */}
+                <div className="mt-4 px-1">
+                  <div className="flex items-start gap-2 mb-2">
+                    <Crop className="w-3.5 h-3.5 text-gray-500 mt-0.5 shrink-0" />
+                    <div>
+                      <span className="text-xs font-medium text-gray-700">速览图表预览模式</span>
+                      <p className="text-[11px] text-gray-400 mt-0.5">控制关键图表卡片的裁切方式</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => handleFigureRenderModeChange('raw')}
+                      className={`text-left rounded-xl border px-3 py-2 transition-all ${
+                        figureRenderMode === 'raw'
+                          ? 'border-[#8871e4]/45 bg-[#8871e4]/8 text-[#5d45c8]'
+                          : 'border-gray-100 bg-gray-50/70 text-gray-600 hover:bg-gray-100/70'
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold">原始</span>
+                      <span className="block text-[11px] text-gray-400 mt-0.5">更快，直接按 PDF 区域预览</span>
+                    </button>
+                    <button
+                      onClick={() => handleFigureRenderModeChange('yolo')}
+                      className={`text-left rounded-xl border px-3 py-2 transition-all ${
+                        figureRenderMode === 'yolo'
+                          ? 'border-[#8871e4]/45 bg-[#8871e4]/8 text-[#5d45c8]'
+                          : 'border-gray-100 bg-gray-50/70 text-gray-600 hover:bg-gray-100/70'
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold">YOLO</span>
+                      <span className="block text-[11px] text-gray-400 mt-0.5">更准，使用本地图像主体检测</span>
+                    </button>
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-gray-100 bg-gray-50/70 p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium text-gray-700">YOLO 资源</span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                              yoloReady
+                                ? 'bg-green-50 border-green-100 text-green-700'
+                                : yoloDependencyMissing
+                                  ? 'bg-red-50 border-red-100 text-red-700'
+                                  : 'bg-amber-50 border-amber-100 text-amber-700'
+                            }`}
+                          >
+                            {yoloStatusLabel}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-gray-400 mt-0.5">
+                          软件包不内置权重，可下载到用户目录或指定已有 .pt 文件
+                        </p>
+                      </div>
+                      <button
+                        onClick={fetchYoloStatus}
+                        disabled={yoloBusy}
+                        className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-lg border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${yoloBusy ? 'animate-spin' : ''}`} />
+                        刷新
+                      </button>
+                    </div>
+
+                    {yoloStatus?.model_path && (
+                      <div className="min-w-0 rounded-lg bg-white/80 border border-gray-100 px-3 py-2">
+                        <div className="text-[10px] text-gray-400 mb-1">当前权重路径</div>
+                        <div className="font-mono text-[11px] text-gray-600 break-all">{yoloStatus.model_path}</div>
+                      </div>
+                    )}
+
+                    {yoloDependencyMissing && (
+                      <div className="flex items-start gap-2 px-3 py-2 rounded-xl bg-red-50/70 border border-red-100 text-xs text-red-700">
+                        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span>当前后端缺少 YOLO 运行依赖。桌面完整包会保留运行库，但权重需在软件内下载或指定。</span>
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <label className="block text-[11px] font-medium text-gray-500">一键下载到目录</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={yoloInstallDir}
+                          onChange={(e) => setYoloInstallDir(e.target.value)}
+                          placeholder={yoloStatus?.default_install_dir || '默认用户数据目录'}
+                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#8871e4]/50"
+                        />
+                        {window.chatpdfDesktop?.selectDirectory && (
+                          <button
+                            onClick={handleSelectYoloInstallDir}
+                            disabled={yoloBusy}
+                            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            选择
+                          </button>
+                        )}
+                        <button
+                          onClick={handleDownloadYoloModel}
+                          disabled={yoloBusy}
+                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        >
+                          {yoloBusy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          下载
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="block text-[11px] font-medium text-gray-500">手动指定已有权重</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={yoloModelPath}
+                          onChange={(e) => setYoloModelPath(e.target.value)}
+                          placeholder="选择或输入 doclayout_yolo_*.pt 路径"
+                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#8871e4]/50"
+                        />
+                        {window.chatpdfDesktop?.selectFile && (
+                          <button
+                            onClick={handleSelectYoloModelFile}
+                            disabled={yoloBusy}
+                            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            选择
+                          </button>
+                        )}
+                        <button
+                          onClick={handleSaveYoloModelPath}
+                          disabled={yoloBusy || !yoloModelPath.trim()}
+                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          保存
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[11px] text-gray-400">
+                        默认目录：{yoloStatus?.default_install_dir || '读取中'}
+                      </span>
+                      <button
+                        onClick={handleResetYoloModelPath}
+                        disabled={yoloBusy}
+                        className="text-[11px] text-gray-500 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        恢复默认
+                      </button>
+                    </div>
+
+                    {yoloMessage && (
+                      <div
+                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
+                          yoloMessageType === 'success'
+                            ? 'bg-green-50/70 border border-green-100 text-green-700'
+                            : yoloMessageType === 'error'
+                              ? 'bg-red-50/70 border border-red-100 text-red-700'
+                              : 'bg-blue-50/70 border border-blue-100 text-blue-700'
+                        }`}
+                      >
+                        {yoloMessageType === 'success' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+                        ) : yoloMessageType === 'error' ? (
+                          <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                        ) : (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                        )}
+                        <span>{yoloMessage}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
