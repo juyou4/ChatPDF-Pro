@@ -268,11 +268,15 @@ exe = EXE(
     entitlements_file=None,
 )
 
+# 过滤运行时用户数据，防止打包泄露个人论文缓存
+_user_data_prefixes = ('data/overviews', 'data/cache', 'data/graphrag')
+clean_datas = [d for d in a.datas if not any(d[0].startswith(p) for p in _user_data_prefixes)]
+
 coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
-    a.datas,
+    clean_datas,
     strip=False,
     upx=True,
     upx_exclude=[],
