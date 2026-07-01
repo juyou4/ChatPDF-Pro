@@ -913,7 +913,8 @@ export function useMessageState({
           beginRealThinking();
           markThinkingActivity();
           currentThinking += text;
-          thinkingStream.addChunk(text);
+          // 思考过程不能落后于正文流式队列，否则会出现正文开始后思考才继续展开。
+          thinkingStream.replace(currentThinking);
           setMessages(prev => prev.map(m =>
             m.id === tempMsgId
               ? { ...m, thinking: currentThinking }
