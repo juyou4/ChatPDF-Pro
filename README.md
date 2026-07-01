@@ -51,6 +51,10 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 基于 Electron 构建的独立桌面应用，使用 PyInstaller 将 Python 后端打包为单可执行文件，开箱即用、无需配置 Python 或 Node.js 环境。
 
+- **CPU-only 精简打包** — 自动剥离 CUDA / cuDNN 运行库（~2.5 GB），安装包仅 ~440 MB
+- **YOLO 按需下载** — DocLayout-YOLO 权重不内置，在 OCR 设置面板中一键下载或手动指定本地路径
+- **安全隔离** — 桌面模式通过 `X-ChatPDF-Token` 认证中间件保护所有 API，自动绑定 `127.0.0.1`
+
 ---
 
 ## 核心功能
@@ -217,10 +221,12 @@ ChatPDF/
 │   │   ├── query_analyzer.py             # 查询意图分析
 │   │   ├── query_rewriter.py             # 多轮指代消解
 │   │   ├── overview_service.py           # 速览卡片生成
+│   │   ├── layout_service.py            # DocLayout-YOLO 布局检测与资源管理
 │   │   └── table_aware_service.py        # 表格结构化检测
+│   ├── chatpdf.spec                      # PyInstaller 打包配置（CUDA 剥离 + 数据过滤）
 │   └── requirements.txt
 ├── electron/                         # Electron 桌面端
-│   ├── src/main.ts                       # 主进程：窗口管理、后端拉起
+│   ├── src/main.ts                       # 主进程：窗口管理、后端拉起、IPC
 │   └── package.json
 ├── scripts/                          # 构建脚本
 ├── start.bat / start.sh              # 一键启动
@@ -250,7 +256,7 @@ A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，
 
 ## 更新日志
 
-### v3.0.2（Agentic RAG 泛化）
+### v3.0.2（Agentic RAG 泛化 + 桌面打包优化）
 - **Agentic RAG 工具链** — 新增工具化 agent 检索、子问题追踪、树形分解检索，前端新增 AgentTracePanel 展示调用路径
 - **引用溯源增强** — 表格数值锚定 + 公式 LaTeX/OCR 归一化，减少引用漂移
 - **RAGAS 回归验证** — 多论文 baseline/holdout manifest，四项核心指标均相对 pre-agent baseline 提升
@@ -259,6 +265,8 @@ A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，
 - **双模型策略** — 查询改写 / 问题分解 / 追问 / 答案自审等辅助任务独立走廉价模型
 - **LLM 查询改写 + 答案自审** — 多轮消解指代；回答后幻觉检测 + 警告横幅
 - **请求级 Feature Flag** — 前端 GlobalSettings 新增"检索增强调优"面板，无需重启后端即可三态切换
+- **DocLayout-YOLO 资源管理** — OCR 设置面板新增 YOLO 模型一键下载、手动路径配置、重置；权重不再内置于安装包
+- **桌面打包瘦身** — PyInstaller spec 自动剥离 CUDA/cuDNN 库，安装包从 ~3 GB 降至 ~440 MB；过滤用户数据防止隐私泄露
 
 ### v3.0.1（桌面客户端）
 - **桌面客户端发布** — Windows 独立应用，Electron 28 + PyInstaller 打包
