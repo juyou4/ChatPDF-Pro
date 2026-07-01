@@ -21,9 +21,9 @@ DECOMPOSE_PROMPT = """你是一个问题分析专家。请判断以下用户问�
 直接输出 JSON 格式，不要加任何前缀或解释。
 
 输出格式：
-{"needs_decompose": true, "sub_questions": ["子问题1", "子问题2", "子问题3"]}
+{{"needs_decompose": true, "sub_questions": ["子问题1", "子问题2", "子问题3"]}}
 或
-{"needs_decompose": false, "sub_questions": []}
+{{"needs_decompose": false, "sub_questions": []}}
 
 用户问题：{question}
 """
@@ -47,6 +47,64 @@ def should_decompose(question: str) -> bool:
     if len(question) < 10:
         return False
     return bool(_DECOMPOSE_TRIGGERS.search(question))
+
+
+def _extract_json_payload(content: str) -> object:
+    """从 LLM 文本中提取 JSON，兼容 markdown 代码块和前后解释文本。"""
+    text = str(content or "").strip()
+    if not text:
+        return {}
+
+    if "```" in text:
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if fenced:
+            text = fenced.group(1).strip()
+
+    candidates = [text]
+    for start_token, end_token in (("{", "}"), ("[", "]")):
+        start = text.find(start_token)
+        end = text.rfind(end_token)
+        if start >= 0 and end > start:
+            candidates.append(text[start:end + 1])
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    return {}
+
+
+def _normalize_decompose_payload(parsed: object) -> tuple[bool, list[str]]:
+    if isinstance(parsed, list):
+        subs = parsed
+        needs_decompose = bool(subs)
+    elif isinstance(parsed, dict):
+        subs = (
+            parsed.get("sub_questions")
+            or parsed.get("subQuestions")
+            or parsed.get("sub_queries")
+            or parsed.get("subqueries")
+            or parsed.get("questions")
+            or []
+        )
+        needs_value = (
+            parsed.get("needs_decompose")
+            if "needs_decompose" in parsed
+            else parsed.get("needsDecompose")
+        )
+        needs_decompose = bool(subs) if needs_value is None else bool(needs_value)
+    else:
+        return False, []
+
+    if not isinstance(subs, list):
+        return False, []
+    normalized = [q.strip() for q in subs if isinstance(q, str) and q.strip()]
+    return needs_decompose and bool(normalized), normalized[:3]
 
 
 async def decompose_question(
@@ -93,29 +151,25 @@ async def decompose_question(
         if isinstance(response, dict):
             if response.get("error"):
                 return []
+            content = response.get("content", "")
             choices = response.get("choices", [])
-            if choices:
+            if not content and choices:
                 content = choices[0].get("message", {}).get("content", "")
+        else:
+            content = str(response) if response else ""
 
         content = content.strip()
         if not content:
             return []
 
-        # 处理可能的 markdown 代码块
-        if "```" in content:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                content = content[start:end]
-
-        parsed = json.loads(content)
-        if not parsed.get("needs_decompose"):
+        parsed = _extract_json_payload(content)
+        needs_decompose, subs = _normalize_decompose_payload(parsed)
+        if not needs_decompose:
             return []
 
-        subs = parsed.get("sub_questions", [])
-        if isinstance(subs, list) and all(isinstance(q, str) for q in subs):
+        if subs:
             logger.info(f"[Decompose] 问题分解为 {len(subs)} 个子问题: {subs}")
-            return subs[:3]
+            return subs
 
         return []
 

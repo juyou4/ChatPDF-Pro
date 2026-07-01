@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 from pydantic import Field, field_validator
 try:
     from pydantic_settings import BaseSettings
@@ -8,7 +8,35 @@ except ImportError:  # 兼容旧版依赖
     from pydantic import BaseSettings
     AliasChoices = None  # type: ignore
 
+# 自定义 env source：对 Agent 触发白名单这种"CSV 风格"的列表字段
+# 关闭默认的 JSON 解码，将原始字符串透传给 _split_csv field_validator
+try:
+    from pydantic_settings.sources import EnvSettingsSource as _EnvSettingsSource
+except ImportError:  # 极旧版本兜底
+    _EnvSettingsSource = None  # type: ignore
+
+# 这些字段在 ENV 中以"逗号分隔字符串"形式出现，应交由 _split_csv 处理
+# 而非由 pydantic-settings 默认尝试 JSON 解析
+_CSV_FIELDS_FOR_LIST = {
+    "agent_trigger_query_types",
+    "agent_trigger_evidence_needs",
+}
+
 logger = logging.getLogger(__name__)
+
+
+if _EnvSettingsSource is not None:
+
+    class _CsvAwareEnvSettingsSource(_EnvSettingsSource):
+        """对 _CSV_FIELDS_FOR_LIST 中的字段跳过 JSON 解码，直接返回原始字符串，
+        由 AppSettings 上 ``mode="before"`` 的 _split_csv 校验器完成 CSV 拆分。"""
+
+        def decode_complex_value(self, field_name: str, field: Any, value: Any) -> Any:
+            if field_name in _CSV_FIELDS_FOR_LIST and isinstance(value, str):
+                return value
+            return super().decode_complex_value(field_name, field, value)
+else:  # pragma: no cover - 仅极旧 pydantic_settings 才会落到此分支
+    _CsvAwareEnvSettingsSource = None  # type: ignore
 
 
 class AppSettings(BaseSettings):
@@ -45,15 +73,107 @@ class AppSettings(BaseSettings):
     # ==================== Agent 检索配置 ====================
     # Agent 检索最大轮数
     agent_max_rounds: int = Field(
-        default=5,
+        default=3,  # P1.4 优化：5→3，实测 2-3 轮足够获取概览类上下文，减少 planner 串行延迟
         validation_alias=AliasChoices("agent_max_rounds", "CHATPDF_AGENT_MAX_ROUNDS"),
-        description="Agent 检索最大轮数，范围 1-10"
+        description="Agent 检索最大轮数，范围 1-10（默认 3，复杂问题可调高）"
     )
     # Agent planner 模型温度
     agent_planner_temperature: float = Field(
         default=0.3,
         validation_alias=AliasChoices("agent_planner_temperature", "CHATPDF_AGENT_PLANNER_TEMPERATURE"),
         description="Agent planner LLM 温度参数"
+    )
+    agent_planner_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("agent_planner_retries", "CHATPDF_AGENT_PLANNER_RETRIES"),
+        description="Agent planner JSON 解析失败后的重试次数"
+    )
+    agent_context_max_tokens: int = Field(
+        default=12000,
+        validation_alias=AliasChoices("agent_context_max_tokens", "CHATPDF_AGENT_CONTEXT_MAX_TOKENS"),
+        description="Agent 最终检索上下文最大 token 数"
+    )
+    agent_max_iterations: int = Field(
+        default=3,
+        validation_alias=AliasChoices("agent_max_iterations", "CHATPDF_AGENT_MAX_ITERATIONS"),
+        description="Agent 检索最大迭代次数，范围 1-10"
+    )
+    agent_max_tool_calls: int = Field(
+        default=12,
+        validation_alias=AliasChoices("agent_max_tool_calls", "CHATPDF_AGENT_MAX_TOOL_CALLS"),
+        description="Agent 单次检索最大工具调用数"
+    )
+    agent_context_compress_threshold: int = Field(
+        default=16000,
+        validation_alias=AliasChoices("agent_context_compress_threshold", "CHATPDF_AGENT_CONTEXT_COMPRESS_THRESHOLD"),
+        description="Agent planner 已取材上下文压缩阈值（字符数）"
+    )
+    agent_tool_max_concurrency: int = Field(
+        default=5,
+        validation_alias=AliasChoices("agent_tool_max_concurrency", "CHATPDF_AGENT_TOOL_MAX_CONCURRENCY"),
+        description="Agent 同轮工具最大并发数，范围 1-5"
+    )
+    # Agent planner 单次 LLM 调用超时（秒），防止单次模型推理卡死整个 Agent
+    # 参考 agentic-rag-for-dummies 的硬上限思路；不设置 ENV 默认 30 秒
+    agent_planner_timeout: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("agent_planner_timeout", "CHATPDF_AGENT_PLANNER_TIMEOUT"),
+        description="Agent planner 单次 LLM 调用的最大等待秒数，最小 15s"
+    )
+    agent_total_timeout: float = Field(
+        default=75.0,
+        validation_alias=AliasChoices("agent_total_timeout", "CHATPDF_AGENT_TOTAL_TIMEOUT"),
+        description="Agent 单次检索整体最大等待秒数，超时后使用已取材内容降级"
+    )
+    # Agent 单次工具调用超时（秒），参考 ragflow `COMPONENT_EXEC_TIMEOUT=12`
+    # 单工具卡住时仅丢弃该工具结果，不拖垮整轮 Agent；候选池 trace 仍能积累。
+    agent_tool_timeout: float = Field(
+        default=12.0,
+        validation_alias=AliasChoices("agent_tool_timeout", "CHATPDF_AGENT_TOOL_TIMEOUT"),
+        description="Agent 单次工具调用的最大等待秒数，超时后该工具返回空结果但不影响其他工具"
+    )
+    agent_external_rerank_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("agent_external_rerank_enabled", "CHATPDF_AGENT_EXT_RERANK"),
+        description="是否允许 Agent 在最终上下文构造阶段调用外部/本地 rerank_service 做终选重排"
+    )
+
+    # ==================== Agent 触发白名单与增强开关 ====================
+    # 允许进入 Agent 路径的 query_type 集合；ENV 可传逗号分隔字符串
+    agent_trigger_query_types: list[str] = Field(
+        default=["overview", "specific", "extraction", "analytical"],
+        validation_alias=AliasChoices(
+            "agent_trigger_query_types",
+            "AGENT_TRIGGER_QUERY_TYPES",
+        ),
+        description="允许进入 Agent 路径的 query_type 集合（CSV 字符串自动拆分）"
+    )
+    # 允许进入 Agent 路径的 evidence_need 集合；ENV 可传逗号分隔字符串
+    agent_trigger_evidence_needs: list[str] = Field(
+        default=["section_explanation", "comparison_multi_aspect", "reference_meta", "analysis_explanation"],
+        validation_alias=AliasChoices(
+            "agent_trigger_evidence_needs",
+            "AGENT_TRIGGER_EVIDENCE_NEEDS",
+        ),
+        description="允许进入 Agent 路径的 evidence_need 集合"
+    )
+    # 是否在每轮命中后自动回填父级语义组 digest
+    enable_parent_backfill: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_parent_backfill",
+            "AGENT_ENABLE_PARENT_BACKFILL",
+        ),
+        description="是否在每轮命中后自动回填父级语义组 digest"
+    )
+    # Planner_LLM 是否优先使用原生 function calling
+    use_native_tools: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "use_native_tools",
+            "AGENT_USE_NATIVE_TOOLS",
+        ),
+        description="Planner_LLM 是否优先使用原生 function calling，不支持时回退 JSON 文本解析"
     )
 
     # ==================== OCR 配置 ====================
@@ -137,6 +257,18 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("graphrag_max_async", "CHATPDF_GRAPHRAG_MAX_ASYNC"),
         description="GraphRAG LLM 最大并发请求数"
     )
+    # GraphRAG 查询模式: auto / local / global / hybrid
+    graphrag_query_mode: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("graphrag_query_mode", "CHATPDF_GRAPHRAG_QUERY_MODE"),
+        description="GraphRAG 查询模式: auto(按query_type自动选择) / local / global / hybrid"
+    )
+    # GraphRAG 上下文最大 token 数（防止拼接后超出 LLM 上下文窗口）
+    graphrag_context_max_tokens: int = Field(
+        default=2000,
+        validation_alias=AliasChoices("graphrag_context_max_tokens", "CHATPDF_GRAPHRAG_CONTEXT_MAX_TOKENS"),
+        description="GraphRAG 上下文最大 token 数，超限时截断"
+    )
 
     # ==================== BM25 分词配置 ====================
     # 是否使用 jieba 分词增强 BM25（中文检索质量更高）
@@ -203,9 +335,67 @@ class AppSettings(BaseSettings):
         description="是否启用答案自审（检测幻觉，增加延迟）"
     )
 
+    # ==================== P3.6 引用增强（two-pass citation injection）====================
+    # 启用后，answer 引用覆盖率 < 阈值时会触发二次 LLM 调用补全 [N] 引文
+    enable_citation_enhancer: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("enable_citation_enhancer", "CHATPDF_ENABLE_CITATION_ENHANCER"),
+        description="是否启用 citation_plus 二次引用注入（提升 faithfulness，增加 3-5s 延迟）"
+    )
+    citation_enhancer_coverage_threshold: float = Field(
+        default=0.7,
+        validation_alias=AliasChoices(
+            "citation_enhancer_coverage_threshold",
+            "CHATPDF_CITATION_ENHANCER_COVERAGE_THRESHOLD",
+        ),
+        description="原答案引用覆盖率低于此阈值才触发二次注入，范围 0.0-1.0；参考 ragflow 默认对所有答案做二次对齐，Chatpdf 取 0.7 平衡延迟与 selector gap"
+    )
+    # ==================== P3.4 / P3.5 ablation flags（默认 ON，仅评估时关闭）====================
+    enable_p34_layered_context: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_p34_layered_context",
+            "CHATPDF_ENABLE_P34_LAYERED_CONTEXT",
+        ),
+        description="P3.4 三层上下文格式化总开关（关闭则不重组 context_string，用于 ablation）"
+    )
+    enable_p35_citation_prompt: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_p35_citation_prompt",
+            "CHATPDF_ENABLE_P35_CITATION_PROMPT",
+        ),
+        description="P3.5 详细引用规则手册总开关（关闭则不注入 _build_faithfulness_guard_prompt，用于 ablation）"
+    )
+
+    # ==================== P3.7 树式递归查询分解 + sufficiency_check ====================
+    # 启用后，对 analytical/overview/comparison 类问题，首轮检索 < 5 chunks 时
+    # 触发 sufficiency_check + multi-query gen + 并行递归子查询
+    enable_tree_decomposition: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("enable_tree_decomposition", "CHATPDF_ENABLE_TREE_DECOMPOSITION"),
+        description="是否启用树式递归查询分解（提升复杂查询召回，仅在首轮 chunks < 5 时触发）"
+    )
+    tree_decomposition_max_depth: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "tree_decomposition_max_depth",
+            "CHATPDF_TREE_DECOMPOSITION_MAX_DEPTH",
+        ),
+        description="树式递归最大深度，建议 1-3"
+    )
+    tree_decomposition_k_per_level: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "tree_decomposition_k_per_level",
+            "CHATPDF_TREE_DECOMPOSITION_K_PER_LEVEL",
+        ),
+        description="每层生成的子查询数，建议 2-5"
+    )
+
     # ==================== numeric_table 专项检索增强 ====================
     # 是否启用 numeric_table 专项检索增强（针对表格数值比较类查询，如
-    # "第二好的方法"、"Table 7 | DiffuLT | Few=29.7"）
+    # "第二好的方法"、"Table N | Method | Metric=value"）
     # 关闭后：不做 numeric_table hard gate / evidence slot / structured
     # bundle 升级等专项处理，走通用主链路。用于 A/B 验证专项逻辑对通用
     # 场景（纯文本、overview、非表格 extraction）是否存在退化影响。
@@ -305,6 +495,19 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_injection_token_budget", "CHATPDF_MEMORY_INJECTION_TOKEN_BUDGET"),
         description="注入 token 预算，范围 100-5000"
     )
+
+    @field_validator(
+        "agent_trigger_query_types",
+        "agent_trigger_evidence_needs",
+        mode="before",
+    )
+    @classmethod
+    def _split_csv(cls, v):
+        """支持环境变量以逗号分隔字符串形式覆盖列表配置；
+        空白与重复逗号被忽略；非字符串类型直接透传。"""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
     @field_validator("memory_keyword_threshold")
     @classmethod
@@ -450,6 +653,31 @@ class AppSettings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        """注入 _CsvAwareEnvSettingsSource，使逗号分隔的 ENV 列表配置可被 _split_csv 处理。
+
+        其他字段行为保持与默认 EnvSettingsSource 完全一致。"""
+        if _CsvAwareEnvSettingsSource is None:
+            return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+        custom_env = _CsvAwareEnvSettingsSource(
+            settings_cls,
+            case_sensitive=env_settings.case_sensitive,
+            env_prefix=env_settings.env_prefix,
+            env_nested_delimiter=env_settings.env_nested_delimiter,
+            env_ignore_empty=env_settings.env_ignore_empty,
+            env_parse_none_str=env_settings.env_parse_none_str,
+            env_parse_enums=env_settings.env_parse_enums,
+        )
+        return (init_settings, custom_env, dotenv_settings, file_secret_settings)
 
 
 settings = AppSettings()

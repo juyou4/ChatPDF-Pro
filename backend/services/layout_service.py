@@ -182,6 +182,31 @@ def get_image_body_bboxes(
     ]
 
 
+def get_table_bboxes(
+    page_image: Image.Image,
+    conf: float = 0.15,
+    include_caption: bool = False,
+    include_footnote: bool = False,
+) -> List[Dict[str, Any]]:
+    """返回 DocLayout-YOLO 检测到的表格相关 bbox。
+
+    默认只返回 TableBody；caption/footnote 只用于需要更宽裁剪区域的 fallback
+    场景，避免把正文段落误当作表格内容进入索引。
+    """
+    allowed = {5}  # TableBody
+    if include_caption:
+        allowed.add(6)
+    if include_footnote:
+        allowed.add(7)
+
+    detections = detect_layout(page_image, conf=conf)
+    return [
+        det
+        for det in detections
+        if det.get("category_id") in allowed
+    ]
+
+
 def pixel_bbox_to_page_pts(
     pixel_bbox: List[float],
     page_width_px: int,

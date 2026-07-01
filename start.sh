@@ -239,6 +239,22 @@ else
     show_success "Java 已安装，ODL 去脏功能已启用"
 fi
 
+# ==================== GraphRAG 依赖 (知识图谱) ====================
+show_progress "检查 GraphRAG 依赖..."
+
+if ! python3 -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
+    show_progress "安装 GraphRAG 依赖 (graspologic/networkx/tiktoken，首次约 3-5 分钟)..."
+    pip3 install -q "graspologic>=3.3.0" "networkx>=3.0" "tiktoken>=0.5.0" 2>/dev/null
+    if python3 -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
+        show_success "GraphRAG 依赖安装成功"
+    else
+        echo -e "${YELLOW}  [!] GraphRAG 依赖安装失败，GraphRAG 知识图谱功能将不可用${NC}"
+        echo -e "${YELLOW}  [!] 如需启用，请手动运行: pip install 'graspologic>=3.3.0'${NC}"
+    fi
+else
+    show_success "GraphRAG 依赖已安装"
+fi
+
 # 前端依赖
 cd frontend
 if [ ! -d "node_modules" ]; then

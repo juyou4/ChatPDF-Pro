@@ -116,6 +116,97 @@ def _find_table_caption(page_text: str, table_bbox: tuple, page_height: float) -
     return ""
 
 
+def _plain_table_text_to_markdown(region_text: str, caption: str = "") -> str:
+    """把 bbox 裁出的表格区域文本包装成弱结构 Markdown。
+
+    YOLO fallback 只能定位表格区域，不能恢复单元格结构；这里保留原始行，交给
+    后续 structured/page-text bundle 回补逻辑继续处理。
+    """
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (region_text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    parts = ["[TABLE_YOLO_FALLBACK]"]
+    if caption:
+        parts.append(caption)
+    parts.extend(lines)
+    return "\n".join(parts)
+
+
+def _extract_tables_with_yolo_fallback(page, page_text: str, page_num: int) -> List[dict]:
+    """当 PyMuPDF find_tables() 未命中时，用 DocLayout-YOLO 定位表格区域。
+
+    该路径只作为弱 fallback：YOLO 给 bbox，文本仍由 PyMuPDF 从 bbox 内抽取。
+    不做 OCR、不下载模型失败重试，任何异常都静默降级为空列表。
+    """
+    try:
+        from services.layout_service import get_table_bboxes, pixel_bbox_to_page_pts
+    except Exception as import_err:
+        logger.debug(f"[Table] 页面 {page_num} YOLO fallback 不可用: {import_err}")
+        return []
+
+    try:
+        import fitz
+
+        zoom = 2.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        from PIL import Image
+        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        detections = get_table_bboxes(image, conf=0.18)
+    except Exception as detect_err:
+        logger.debug(f"[Table] 页面 {page_num} YOLO 表格检测失败: {detect_err}")
+        return []
+
+    if not detections:
+        return []
+
+    results: List[dict] = []
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
+    seen: set[str] = set()
+    for idx, det in enumerate(detections, start=1):
+        bbox_px = det.get("bbox") if isinstance(det, dict) else None
+        if not isinstance(bbox_px, list) or len(bbox_px) < 4:
+            continue
+        try:
+            bbox_pts = pixel_bbox_to_page_pts(
+                bbox_px,
+                image.width,
+                image.height,
+                page_width,
+                page_height,
+            )
+            rect = fitz.Rect(*bbox_pts[:4])
+            region_text = page.get_textbox(rect)
+        except Exception as text_err:
+            logger.debug(f"[Table] 页面 {page_num} YOLO bbox 文本抽取失败: {text_err}")
+            continue
+
+        normalized = re.sub(r"\s+", " ", region_text or "").strip()
+        if len(normalized) < 20 or normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+
+        caption = _find_table_caption(page_text, tuple(bbox_pts[:4]), page_height)
+        md = _plain_table_text_to_markdown(region_text, caption)
+        if not md:
+            continue
+        results.append({
+            "markdown": md,
+            "bbox": tuple(bbox_pts[:4]),
+            "caption": caption,
+            "page": page_num,
+            "rows": max(1, len([line for line in region_text.splitlines() if line.strip()])),
+            "cols": 0,
+            "source": "doclayout_yolo_fallback",
+            "layout_score": det.get("score"),
+        })
+
+    if results:
+        logger.info(f"[Table] 页面 {page_num} YOLO fallback 检测到 {len(results)} 个表格区域")
+    return results
+
+
 def extract_tables_from_page(page, page_text: str, page_num: int) -> List[dict]:
     """从 PyMuPDF 页面对象中提取表格并转换为 Markdown
 
@@ -138,7 +229,7 @@ def extract_tables_from_page(page, page_text: str, page_num: int) -> List[dict]:
         return []
 
     if not tables or not tables.tables:
-        return []
+        return _extract_tables_with_yolo_fallback(page, page_text, page_num)
 
     results = []
     page_height = page.rect.height
@@ -184,7 +275,10 @@ def extract_tables_from_page(page, page_text: str, page_num: int) -> List[dict]:
     if results:
         logger.info(f"[Table] 页面 {page_num} 检测到 {len(results)} 个表格")
 
-    return results
+    if results:
+        return results
+
+    return _extract_tables_with_yolo_fallback(page, page_text, page_num)
 
 
 def inject_tables_into_text(page_text: str, tables: List[dict]) -> str:

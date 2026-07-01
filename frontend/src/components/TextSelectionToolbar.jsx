@@ -256,7 +256,6 @@ const TextSelectionToolbar = ({
               start: { x: e.clientX, y: e.clientY },
               originScale: initialScale
             };
-            console.log('🔍 开始缩放，初始 scale:', initialScale); // 调试信息
 
             const handleResize = (ev) => {
               if (!resizeState.current.resizing) return;

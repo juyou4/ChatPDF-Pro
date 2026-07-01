@@ -29,7 +29,6 @@ async function initDesktopMode() {
     _apiBaseUrl = await window.chatpdfDesktop.getApiBaseUrl();
     _backendToken = await window.chatpdfDesktop.getBackendToken();
     _initialized = true;
-    console.log(`[Desktop] Connected to backend: ${_apiBaseUrl}`);
   } catch (err) {
     console.error('[Desktop] Failed to initialize:', err);
   }

@@ -3,14 +3,16 @@ OCR Service for PDF text extraction
 Supports both local Tesseract OCR and cloud OCR APIs
 """
 import io
+import ipaddress
 import os
 import re
 import time
 import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
+from typing import Callable, List, Optional, Tuple, Dict
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 # ============================================================
@@ -34,6 +36,137 @@ class OCRResult:
     errors: Dict[int, str] = field(default_factory=dict)      # 页码 -> 错误信息
     backend: str = ""                                         # 使用的后端名称
     layout_figures: List[Dict] = field(default_factory=list)  # MinerU 版面分析提取的 figure 数据
+
+
+def select_ocr_target_pages(
+    enable_ocr: Optional[str],
+    total_pages: int,
+    pages_needing_ocr: List[int],
+) -> List[int]:
+    """根据 OCR 模式决定需要执行 OCR 的 0-based 页码列表。
+
+    保持历史兼容：未知模式按 auto 处理，仅对质量评估标记的页面执行 OCR。
+    """
+    mode = (enable_ocr or "auto").strip().lower()
+    if mode == "never":
+        return []
+    if mode == "always":
+        return list(range(max(total_pages, 0)))
+    return list(pages_needing_ocr or [])
+
+
+def apply_ocr_result_to_pages(
+    result: dict,
+    pages: List[dict],
+    ocr_result: OCRResult,
+    ocr_target_pages: List[int],
+    rebuild_text: Optional[Callable[..., str]] = None,
+    *,
+    is_cjk: bool = False,
+    min_replacement_ratio: float = 0.8,
+) -> dict:
+    """将 OCR 结果合并回 PDF 提取结果。
+
+    page_numbers 在适配器接口中使用 0-based，PageOCRResult.page_number 使用
+    1-based；这里统一转换，避免路由层重复页码映射和部分失败处理。
+    """
+    rebuild = rebuild_text or (lambda text, **_: text)
+    ocr_page_map = {
+        page_ocr.page_number - 1: page_ocr.text
+        for page_ocr in ocr_result.pages
+        if page_ocr.success
+    }
+
+    merged_text_parts = []
+    for index, page in enumerate(pages):
+        if index in ocr_page_map:
+            ocr_content = ocr_page_map[index]
+            original_content = page.get("content", "")
+
+            if len(ocr_content) > len(original_content) * min_replacement_ratio:
+                page["content"] = rebuild(ocr_content, is_cjk=is_cjk)
+                page["source"] = "ocr"
+                page["ocr_backend"] = ocr_result.backend
+                result["ocr_used"] = True
+
+        merged_text_parts.append(page.get("content", ""))
+
+    if result.get("ocr_used"):
+        result["full_text"] = "\n\n".join(merged_text_parts)
+        result["ocr_backend"] = ocr_result.backend
+        result["ocr_pages"] = ocr_target_pages
+
+    failed_pages = list(ocr_result.failed_pages or [])
+    if failed_pages:
+        failed_info = ", ".join(str(page) for page in failed_pages)
+        result["ocr_warning"] = f"部分页面 OCR 失败（页码: {failed_info}）"
+
+    if ocr_target_pages and len(failed_pages) == len(ocr_target_pages):
+        result["ocr_warning"] = "所有需要 OCR 的页面均处理失败，已保留原始提取文本"
+        result["ocr_used"] = False
+
+    if ocr_result.layout_figures:
+        result["ocr_result"] = {
+            "figures": ocr_result.layout_figures,
+            "backend": ocr_result.backend,
+        }
+
+    return result
+
+
+def _allow_private_ocr_urls() -> bool:
+    value = os.environ.get("CHATPDF_ALLOW_PRIVATE_OCR_URLS", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_external_ocr_service_url(
+    url: str,
+    *,
+    service_name: str = "在线 OCR 服务",
+    allow_private: Optional[bool] = None,
+) -> str:
+    """校验在线 OCR 上游地址，降低误连内网/本机的风险。
+
+    默认仅允许 HTTPS 公网地址。确需本地 Worker 的桌面或开发环境，可设置
+    CHATPDF_ALLOW_PRIVATE_OCR_URLS=true 放行 HTTP 和私网地址。
+    """
+    cleaned = (url or "").strip().rstrip("/")
+    if not cleaned:
+        raise ValueError(f"{service_name} URL 不能为空")
+
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{service_name} URL 格式无效")
+
+    private_allowed = _allow_private_ocr_urls() if allow_private is None else allow_private
+    if not private_allowed and parsed.scheme != "https":
+        raise ValueError(f"{service_name} URL 必须使用 HTTPS")
+
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ValueError(f"{service_name} URL 缺少主机名")
+
+    local_hosts = {"localhost", "localhost.localdomain"}
+    if not private_allowed and (host in local_hosts or host.endswith(".local")):
+        raise ValueError(f"{service_name} URL 不允许指向本机或局域网主机")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip is not None and not private_allowed:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"{service_name} URL 不允许指向私网、保留或本机地址")
+
+    return cleaned
 
 
 class BaseOCRAdapter(ABC):
@@ -626,7 +759,15 @@ class WorkerOCRAdapter(BaseOCRAdapter):
             token: 各 OCR 服务的 API Token
             token_mode: Token 传递模式，"frontend"（前端透传）或 "worker"（Worker 配置）
         """
-        self._worker_url = worker_url.rstrip("/") if worker_url else ""
+        self._worker_url = ""
+        if worker_url:
+            try:
+                self._worker_url = validate_external_ocr_service_url(
+                    worker_url,
+                    service_name="OCR Worker",
+                )
+            except ValueError as exc:
+                logger.warning("OCR Worker URL 已被拒绝: %s", exc)
         self._auth_key = auth_key
         self._token = token
         self._token_mode = token_mode  # "frontend" 或 "worker"
@@ -1329,7 +1470,15 @@ class MistralAdapter(BaseOCRAdapter):
             base_url: Mistral API 基础 URL（默认 https://api.mistral.ai）
         """
         self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
+        self._base_url = ""
+        if base_url:
+            try:
+                self._base_url = validate_external_ocr_service_url(
+                    base_url,
+                    service_name="Mistral OCR Base URL",
+                )
+            except ValueError as exc:
+                logger.warning("Mistral OCR Base URL 已被拒绝: %s", exc)
 
     @property
     def name(self) -> str:
@@ -1338,7 +1487,7 @@ class MistralAdapter(BaseOCRAdapter):
 
     def is_available(self) -> bool:
         """API Key 已配置则视为可用"""
-        return bool(self._api_key)
+        return bool(self._api_key and self._base_url)
 
     def ocr_image(self, image) -> str:
         """在线 OCR 不支持单图模式，返回空字符串"""
@@ -1784,7 +1933,7 @@ class OCRService:
         if self.backend == "none":
             raise RuntimeError("No OCR backend available. Install pytesseract or paddleocr")
         
-        print(f"Starting OCR with backend: {self.backend}")
+        logger.info("Starting OCR with backend: %s", self.backend)
         
         # Convert PDF to images (with poppler path if available)
         try:
@@ -1808,7 +1957,7 @@ class OCRService:
         full_text_parts = []
         
         for i, image in enumerate(images):
-            print(f"OCR processing page {i + 1}/{total_pages}...")
+            logger.debug("OCR processing page %s/%s...", i + 1, total_pages)
             
             page_text = self.ocr_image(image)
             page_text = clean_ocr_text(page_text)

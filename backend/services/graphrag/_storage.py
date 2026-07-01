@@ -110,6 +110,13 @@ class NanoVectorDBStorage(BaseVectorStorage):
             *[self.embedding_func(batch) for batch in batches]
         )
         embeddings = np.concatenate(embeddings_list)
+        # 校验 embedding 结果：维度、NaN、Inf
+        from ._utils import validate_embedding_result
+        validate_embedding_result(
+            embeddings,
+            expected_dim=self.embedding_func.embedding_dim,
+            model_name=self.namespace,
+        )
         for i, d in enumerate(list_data):
             d["__vector__"] = embeddings[i]
         results = self._client.upsert(datas=list_data)

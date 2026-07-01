@@ -77,15 +77,6 @@ export default function ProviderAvatar({
   const logoIsImage = isImageUrl(displayLogo)
   const logoIsEmoji = displayLogo && !logoIsImage && String(displayLogo).length <= 4
 
-  // 调试输出
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`Provider ${safeProvider.name}:`, {
-      logo: displayLogo,
-      logoType: logoIsImage ? 'image' : logoIsEmoji ? 'emoji' : 'fallback',
-      logoValue: typeof displayLogo
-    })
-  }
-
   return (
     <div
       className={`relative flex items-center justify-center rounded-lg overflow-hidden ${className}`}

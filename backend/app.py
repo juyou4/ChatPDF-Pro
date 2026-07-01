@@ -4,6 +4,7 @@ ChatPDF backend - main app entry mounting all routers.
 
 import os
 import time
+import logging
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,8 @@ from routes.feedback_routes import router as feedback_router
 from routes import feedback_routes
 from services.memory_service import MemoryService
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # 应用启动时间戳
 _startup_time = time.time()
@@ -188,7 +191,7 @@ def _kill_port(port: int):
                 if pid != os.getpid():
                     subprocess.run(f'taskkill /F /PID {pid}', shell=True,
                                    capture_output=True)
-                    print(f"  已清理旧进程 PID={pid}")
+                    logger.info("已清理旧进程 PID=%s", pid)
         else:
             result = subprocess.run(
                 f'lsof -ti:{port}', capture_output=True, text=True, shell=True
@@ -197,7 +200,7 @@ def _kill_port(port: int):
                 pid = int(pid_str)
                 if pid != os.getpid():
                     os.kill(pid, signal.SIGTERM)
-                    print(f"  已清理旧进程 PID={pid}")
+                    logger.info("已清理旧进程 PID=%s", pid)
     except Exception:
         pass
 

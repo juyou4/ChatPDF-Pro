@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -19,11 +20,60 @@ FOLLOWUP_PROMPT = """基于以下对话历史，生成 3 到 5 个用户可能�
 - 直接输出 JSON 格式，不要加任何前缀或解释
 
 输出格式示例：
-{"questions": ["问题1", "问题2", "问题3"]}
+{{"questions": ["问题1", "问题2", "问题3"]}}
 
 对话历史：
 {history}
 """
+
+
+def _extract_json_payload(content: str) -> object:
+    """从 LLM 文本中提取 JSON，兼容 markdown 代码块和前后解释文本。"""
+    text = str(content or "").strip()
+    if not text:
+        return {}
+
+    if "```" in text:
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if fenced:
+            text = fenced.group(1).strip()
+
+    candidates = [text]
+    for start_token, end_token in (("{", "}"), ("[", "]")):
+        start = text.find(start_token)
+        end = text.rfind(end_token)
+        if start >= 0 and end > start:
+            candidates.append(text[start:end + 1])
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    return {}
+
+
+def _normalize_questions_payload(parsed: object) -> list[str]:
+    if isinstance(parsed, list):
+        questions = parsed
+    elif isinstance(parsed, dict):
+        questions = (
+            parsed.get("questions")
+            or parsed.get("followup_questions")
+            or parsed.get("followups")
+            or parsed.get("items")
+            or []
+        )
+    else:
+        questions = []
+    if not isinstance(questions, list):
+        return []
+    normalized = [q.strip() for q in questions if isinstance(q, str) and q.strip()]
+    return normalized[:5]
 
 
 async def generate_followup_questions(
@@ -92,19 +142,11 @@ async def generate_followup_questions(
         if not content:
             return []
 
-        # 尝试从响应中提取 JSON
-        # 处理可能的 markdown 代码块包裹
-        if "```" in content:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                content = content[start:end]
-
-        parsed = json.loads(content)
-        questions = parsed.get("questions", [])
-        if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+        parsed = _extract_json_payload(content)
+        questions = _normalize_questions_payload(parsed)
+        if questions:
             logger.info(f"[FollowupService] 生成 {len(questions)} 个追问建议")
-            return questions[:5]
+            return questions
 
         return []
 

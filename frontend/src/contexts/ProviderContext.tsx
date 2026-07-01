@@ -85,13 +85,10 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
 
         // 版本不匹配时尝试迁移旧数据
         if (savedVersion !== CONFIG_VERSION) {
-            console.log('🔄 Upgrading to version', CONFIG_VERSION)
-
             // 尝试从旧数据迁移用户配置
             if (saved) {
                 const migrated = migrateProviders(saved)
                 if (migrated) {
-                    console.log('✅ 成功从旧版本迁移 Provider 配置')
                     localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
                     // 清除旧架构的键名
                     OLD_KEYS.forEach(key => localStorage.removeItem(key))
@@ -115,12 +112,10 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
                 const cachedIds = new Set(parsed.map(p => p.id))
                 const missing = SYSTEM_PROVIDERS.filter(sp => !cachedIds.has(sp.id))
                 if (missing.length > 0) {
-                    console.log(`🔧 补全 ${missing.length} 个缺失的系统 Provider:`, missing.map(p => p.id))
                     const reconciled = [...parsed, ...missing]
                     localStorage.setItem(STORAGE_KEY, JSON.stringify(reconciled))
                     return reconciled
                 }
-                console.log('✅ Loaded providers from cache (v' + CONFIG_VERSION + ')')
                 return parsed
             } catch (error) {
                 console.warn('Failed to parse saved providers, using defaults')

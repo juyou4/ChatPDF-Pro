@@ -114,6 +114,7 @@ async def call_ai_api(
     top_p: Optional[float] = None,
     custom_params: Optional[Dict] = None,
     reasoning_effort: Optional[str] = None,
+    tools: Optional[List[dict]] = None,
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
     # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
@@ -156,6 +157,7 @@ async def call_ai_api(
                 top_p=top_p,
                 custom_params=custom_params,
                 reasoning_effort=reasoning_effort,
+                tools=tools,
             )
             # 如果上游返回错误结构，同样走重试逻辑
             if isinstance(response, dict) and response.get("error"):
@@ -285,104 +287,111 @@ async def call_ai_api_stream(
         _logprobs_sum = 0.0
         _logprobs_count = 0
 
-        async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
-                logger.debug(f"[Stream] HTTP {resp.status_code}")
-                if resp.status_code != 200:
-                    err_text = await resp.aread()
-                    err_body = err_text.decode("utf-8", errors="ignore")
-                    logger.warning(f"[Stream] Error body: {err_body[:500]}")
-                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
-                    return
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
+                async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
+                    logger.debug(f"[Stream] HTTP {resp.status_code}")
+                    if resp.status_code != 200:
+                        err_text = await resp.aread()
+                        err_body = err_text.decode("utf-8", errors="ignore")
+                        logger.warning(f"[Stream] Error body: {err_body[:500]}")
+                        yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
+                        return
 
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    # 前 3 行原始 SSE 打印，帮助诊断格式问题
-                    if _chunk_count < 3:
-                        logger.debug(f"[Stream] raw[{_chunk_count}]: {line[:200]}")
-                    # 兼容 "data: " 和 "data:" 两种 SSE 前缀（某些代理/服务商省略空格）
-                    if line.startswith("data: "):
-                        data = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data = line[5:].strip()
-                    else:
-                        data = line.strip()
-                    if data == "[DONE]":
-                        logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                        _done_payload = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
-                        if _logprobs_count > 0:
-                            import math
-                            _done_payload["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
-                        yield _done_payload
-                        return
-                    try:
-                        chunk = _json.loads(data)
-                    except Exception:
-                        continue
-                    # Detect API-level errors embedded inside HTTP-200 SSE bodies
-                    # (e.g. Doubao / volcengine returns {"error": {...}} with status 200)
-                    api_error = chunk.get("error")
-                    if api_error:
-                        if isinstance(api_error, dict):
-                            err_msg = api_error.get("message") or api_error.get("msg") or str(api_error)
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        # 前 3 行原始 SSE 打印，帮助诊断格式问题
+                        if _chunk_count < 3:
+                            logger.debug(f"[Stream] raw[{_chunk_count}]: {line[:200]}")
+                        # 兼容 "data: " 和 "data:" 两种 SSE 前缀（某些代理/服务商省略空格）
+                        if line.startswith("data: "):
+                            data = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
                         else:
-                            err_msg = str(api_error)
-                        logger.warning(f"[Stream] API error in SSE: {err_msg}")
-                        yield {"error": err_msg, "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
-                        return
-                    # 防止 choices 为空列表时 [0] 抛 IndexError
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or choice.get("message") or {}
-                    content = delta.get("content") or ""
-                    reasoning_content = extract_reasoning_content(delta)
-                    # MiniMax 的思考内容在 reasoning_details 字段中
-                    if not reasoning_content:
-                        reasoning_details = delta.get("reasoning_details") or choice.get("reasoning_details")
-                        if reasoning_details:
-                            reasoning_content = extract_reasoning_content(reasoning_details)
-                    # 收集 logprobs 用于置信度评分
-                    chunk_logprobs = choice.get("logprobs")
-                    if chunk_logprobs and isinstance(chunk_logprobs, dict):
-                        for token_info in (chunk_logprobs.get("content") or []):
-                            lp = token_info.get("logprob")
-                            if lp is not None and isinstance(lp, (int, float)):
-                                _logprobs_sum += lp
-                                _logprobs_count += 1
-                    # 只要有内容或推理内容，就 yield。
-                    if content or reasoning_content:
-                        _chunk_count += 1
-                        _content_chars += len(content)
-                        _reasoning_chars += len(reasoning_content)
-                        if reasoning_content and _reasoning_chars <= 500:
-                            import time as _time
-                            logger.info(f"[Stream] REASONING chunk#{_chunk_count} t={_time.time():.3f} len={len(reasoning_content)} first40={reasoning_content[:40]!r}")
-                        yield {
-                            "content": content,
-                            "reasoning_content": reasoning_content,
-                            "done": False,
-                            "used_provider": provider,
-                            "used_model": model,
-                            "fallback_used": False
-                        }
-                    elif _chunk_count == 0:
-                        # 发送一个空的心跳包，防止前端因长时间拿不到第一个 chunk 而判定超时/无响应
-                        yield {
-                            "content": "",
-                            "done": False,
-                            "used_provider": provider,
-                            "used_model": model,
-                            "fallback_used": False
-                        }
-                logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                _done_payload2 = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
-                if _logprobs_count > 0:
-                    import math
-                    _done_payload2["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
-                yield _done_payload2
+                            data = line.strip()
+                        if data == "[DONE]":
+                            logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
+                            _done_payload = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                            if _logprobs_count > 0:
+                                import math
+                                _done_payload["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                            yield _done_payload
+                            return
+                        try:
+                            chunk = _json.loads(data)
+                        except Exception:
+                            continue
+                        # Detect API-level errors embedded inside HTTP-200 SSE bodies
+                        # (e.g. Doubao / volcengine returns {"error": {...}} with status 200)
+                        api_error = chunk.get("error")
+                        if api_error:
+                            if isinstance(api_error, dict):
+                                err_msg = api_error.get("message") or api_error.get("msg") or str(api_error)
+                            else:
+                                err_msg = str(api_error)
+                            logger.warning(f"[Stream] API error in SSE: {err_msg}")
+                            yield {"error": err_msg, "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                            return
+                        # 防止 choices 为空列表时 [0] 抛 IndexError
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or choice.get("message") or {}
+                        content = delta.get("content") or ""
+                        reasoning_content = extract_reasoning_content(delta)
+                        # MiniMax 的思考内容在 reasoning_details 字段中
+                        if not reasoning_content:
+                            reasoning_details = delta.get("reasoning_details") or choice.get("reasoning_details")
+                            if reasoning_details:
+                                reasoning_content = extract_reasoning_content(reasoning_details)
+                        # 收集 logprobs 用于置信度评分
+                        chunk_logprobs = choice.get("logprobs")
+                        if chunk_logprobs and isinstance(chunk_logprobs, dict):
+                            for token_info in (chunk_logprobs.get("content") or []):
+                                lp = token_info.get("logprob")
+                                if lp is not None and isinstance(lp, (int, float)):
+                                    _logprobs_sum += lp
+                                    _logprobs_count += 1
+                        # 只要有内容或推理内容，就 yield。
+                        if content or reasoning_content:
+                            _chunk_count += 1
+                            _content_chars += len(content)
+                            _reasoning_chars += len(reasoning_content)
+                            if reasoning_content and _reasoning_chars <= 500:
+                                import time as _time
+                                logger.info(f"[Stream] REASONING chunk#{_chunk_count} t={_time.time():.3f} len={len(reasoning_content)} first40={reasoning_content[:40]!r}")
+                            yield {
+                                "content": content,
+                                "reasoning_content": reasoning_content,
+                                "done": False,
+                                "used_provider": provider,
+                                "used_model": model,
+                                "fallback_used": False
+                            }
+                        elif _chunk_count == 0:
+                            # 发送一个空的心跳包，防止前端因长时间拿不到第一个 chunk 而判定超时/无响应
+                            yield {
+                                "content": "",
+                                "done": False,
+                                "used_provider": provider,
+                                "used_model": model,
+                                "fallback_used": False
+                            }
+                    logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
+                    _done_payload2 = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                    if _logprobs_count > 0:
+                        import math
+                        _done_payload2["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                    yield _done_payload2
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as e:
+            logger.warning(f"[Stream] connection interrupted: {type(e).__name__}: {e}")
+            yield {"error": f"LLM API connection interrupted: {type(e).__name__}", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+        except Exception as e:
+            logger.warning(f"[Stream] unknown error: {type(e).__name__}: {e}")
+            yield {"error": f"LLM API call failed: {type(e).__name__}", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
         return
 
     # Anthropic 流式

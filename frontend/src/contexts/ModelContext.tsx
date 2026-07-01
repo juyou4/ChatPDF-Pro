@@ -76,12 +76,9 @@ export function ModelProvider({ children }: { children: ReactNode }) {
 
         // 版本不匹配时尝试迁移用户模型
         if (saved && savedVersion !== CONFIG_VERSION) {
-            console.log('🔄 Upgrading user model collection to version', CONFIG_VERSION)
-
             // 尝试从旧数据迁移用户手动添加的模型
             const migrated = migrateUserModels(saved)
             if (migrated) {
-                console.log('✅ 成功迁移用户模型，保留', migrated.length, '个用户添加的模型')
                 localStorage.setItem(VERSION_KEY, CONFIG_VERSION)
                 localStorage.removeItem(LAST_SYNC_KEY)
                 return migrated
@@ -98,7 +95,6 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 const parsed = JSON.parse(saved) as Model[]
                 // 仅保留用户真正添加的模型，过滤掉之前缓存的系统模型
                 const filtered = parsed.filter(m => m.isUserAdded || !m.isSystem)
-                console.log('✅ Loaded user model collection (v' + CONFIG_VERSION + ')')
                 return filtered
             } catch (error) {
                 console.warn('Failed to parse saved user models')
@@ -270,7 +266,6 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 localStorage.setItem(LAST_SYNC_KEY, JSON.stringify(lastSync))
             }
 
-            console.log(`✅ Fetched ${models.length} models from ${provider.name}`)
             return models
         } catch (error) {
             const message = error instanceof Error ? error.message : '获取模型失败'

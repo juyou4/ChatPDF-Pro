@@ -1,5 +1,8 @@
 import json
 import logging
+import os
+import threading
+import time
 from typing import List, Optional
 
 import httpx
@@ -14,16 +17,37 @@ from services import rerank_api_service
 logger = logging.getLogger(__name__)
 
 
+class LocalRerankModelUnavailable(RuntimeError):
+    """本地 rerank 模型当前不可用，可直接降级到原始排序。"""
+
+
 class RerankService:
     """重排服务：支持本地 CrossEncoder + 云端 Cohere/Jina"""
 
+    LOCAL_LOAD_FAILURE_TTL_SECONDS = 300.0
+    LOCAL_ALLOW_DOWNLOAD_ENV = "CHATPDF_LOCAL_RERANK_ALLOW_DOWNLOAD"
+
     def __init__(self):
         self._cache = {}
+        self._load_failures = {}
+        self._load_lock = threading.RLock()
 
     @staticmethod
     def _candidate_text(item: dict) -> str:
         text = (item.get("rerank_text") or item.get("chunk") or "").strip()
         return text or (item.get("chunk") or "")
+
+    @classmethod
+    def _allow_local_model_download(cls) -> bool:
+        raw = os.environ.get(cls.LOCAL_ALLOW_DOWNLOAD_ENV, "")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _compact_error(exc: Exception) -> str:
+        text = " ".join(str(exc).split())
+        if len(text) > 300:
+            return text[:297] + "..."
+        return text or exc.__class__.__name__
 
     def _get_model(self, model_name: str):
         if not _HAS_CROSS_ENCODER:
@@ -32,15 +56,47 @@ class RerankService:
                 "请使用远程 rerank API（Cohere/Jina/硅基流动等），"
                 "或安装完整依赖: pip install -r requirements.txt"
             )
-        if model_name not in self._cache:
-            logger.info(f"[RerankService] 加载本地模型: {model_name}（首次加载可能需要下载）")
-            try:
-                self._cache[model_name] = CrossEncoder(model_name)
-                logger.info(f"[RerankService] 模型 {model_name} 加载完成")
-            except Exception as e:
-                logger.error(f"[RerankService] 模型 {model_name} 加载失败: {e}")
-                raise
-        return self._cache[model_name]
+        with self._load_lock:
+            failure = self._load_failures.get(model_name)
+            now = time.monotonic()
+            if failure:
+                expires_at = float(failure.get("expires_at") or 0.0)
+                if now < expires_at:
+                    remaining = max(1, int(round(expires_at - now)))
+                    reason = failure.get("reason") or "unknown error"
+                    raise LocalRerankModelUnavailable(
+                        f"本地 rerank 模型 {model_name} 最近加载失败，"
+                        f"{remaining}s 内跳过重复加载: {reason}"
+                    )
+                self._load_failures.pop(model_name, None)
+            if model_name not in self._cache:
+                allow_download = self._allow_local_model_download()
+                local_files_only = not allow_download
+                suffix = (
+                    "允许自动下载"
+                    if allow_download
+                    else f"仅使用本地缓存；设置 {self.LOCAL_ALLOW_DOWNLOAD_ENV}=1 可允许自动下载"
+                )
+                logger.info(f"[RerankService] 加载本地模型: {model_name}（{suffix}）")
+                try:
+                    self._cache[model_name] = CrossEncoder(
+                        model_name,
+                        local_files_only=local_files_only,
+                    )
+                    logger.info(f"[RerankService] 模型 {model_name} 加载完成")
+                except Exception as e:
+                    reason = self._compact_error(e)
+                    self._load_failures[model_name] = {
+                        "expires_at": now + self.LOCAL_LOAD_FAILURE_TTL_SECONDS,
+                        "reason": reason,
+                    }
+                    if allow_download:
+                        logger.error(f"[RerankService] 模型 {model_name} 加载失败: {reason}")
+                    else:
+                        logger.info(f"[RerankService] 本地模型 {model_name} 未命中缓存，已跳过联网加载: {reason}")
+                    raise LocalRerankModelUnavailable(reason) from e
+            self._load_failures.pop(model_name, None)
+            return self._cache[model_name]
 
     @staticmethod
     def _normalize_rerank_scores(candidates: List[dict]) -> None:
@@ -267,7 +323,10 @@ class RerankService:
             return self._rerank_local(query, candidates, model_name)
         except Exception as e:
             # 记录错误日志后回退到原有排序
-            logger.warning(f"[RerankService] 重排序失败 (provider={provider}): {e}", exc_info=True)
+            if isinstance(e, LocalRerankModelUnavailable):
+                logger.info(f"[RerankService] 重排序降级 (provider={provider}): {e}")
+            else:
+                logger.warning(f"[RerankService] 重排序失败 (provider={provider}): {e}", exc_info=True)
             return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
 
 

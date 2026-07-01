@@ -173,6 +173,10 @@ async def vector_context(
     selected_text: Optional[str] = None,  # 框选文本，用于融合检索
     answer_max_tokens: int = 0,  # 期望的输出 Token 数，传入 RAG 预算感知
     progress_callback=None,
+    query_expansion_api_key: Optional[str] = None,
+    query_expansion_model: str = "",
+    query_expansion_provider: str = "",
+    query_expansion_endpoint: str = "",
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -220,6 +224,10 @@ async def vector_context(
                 selected_text=selected_text,  # 透传框选文本
                 answer_max_tokens=answer_max_tokens,
                 progress_callback=progress_callback,
+                query_expansion_api_key=query_expansion_api_key,
+                query_expansion_model=query_expansion_model,
+                query_expansion_provider=query_expansion_provider,
+                query_expansion_endpoint=query_expansion_endpoint,
             ),
             timeout=60.0  # 60 秒超时
         )

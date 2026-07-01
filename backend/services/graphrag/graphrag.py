@@ -7,11 +7,14 @@
 
 import asyncio
 import os
+import json
 import logging
+import hashlib
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Type, cast, List, Union
+from typing import Type, cast, List, Union, Optional
 
 from ._op import (
     chunking_by_token_size,
@@ -47,6 +50,70 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["TOKENIZERS_PARALLELISM"] = "TRUE"
 
 
+# ── 构建进度追踪 ──
+
+@dataclass
+class BuildProgress:
+    """GraphRAG 构建进度与元数据"""
+    # 构建状态: pending / building / done / failed
+    status: str = "pending"
+    # 当前阶段: chunking / extracting / clustering / reporting / persisting
+    stage: str = ""
+    # 进度百分比（0-100）
+    progress: int = 0
+    # 最近错误信息
+    last_error: str = ""
+    # 构建开始时间
+    build_start: str = ""
+    # 构建完成时间
+    build_end: str = ""
+    # 构建/查询使用的模型
+    model: str = ""
+    # LLM provider 与 endpoint（不含密钥）
+    provider: str = ""
+    endpoint: str = ""
+    # embedding 模型
+    embedding_model: str = ""
+    # embedding provider 与 endpoint（不含密钥）
+    embedding_provider: str = ""
+    embedding_endpoint: str = ""
+    # embedding 维度
+    embedding_dim: int = 0
+    # 配置哈希（用于检测配置变更后是否需要重建）
+    config_hash: str = ""
+    # 实体数
+    num_nodes: int = 0
+    # 关系数
+    num_edges: int = 0
+    # 文档数
+    num_docs: int = 0
+    # 块数
+    num_chunks: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BuildProgress":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+def _compute_config_hash(config: GraphRAGConfig, chunk_token_size: int, max_gleaning: int) -> str:
+    """计算配置哈希，用于检测配置变更后是否需要重建"""
+    hash_input = json.dumps({
+        "model": config.model,
+        "provider": config.provider,
+        "endpoint": config.endpoint,
+        "embedding_model": config.embedding_model,
+        "embedding_provider": config.embedding_provider,
+        "embedding_endpoint": config.embedding_endpoint,
+        "embedding_dim": config.embedding_dim,
+        "chunk_token_size": chunk_token_size,
+        "max_gleaning": max_gleaning,
+    }, sort_keys=True)
+    return hashlib.md5(hash_input.encode()).hexdigest()[:12]
+
+
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
     """获取或创建事件循环"""
     try:
@@ -76,6 +143,15 @@ class GraphRAGConfig:
     embedding_provider: str = ""
     embedding_endpoint: str = ""
     embedding_dim: int = 1536
+
+    def safe_hash_dict(self) -> dict:
+        """返回不含 api_key 的配置字典，用于哈希和展示"""
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "embedding_model": self.embedding_model,
+            "embedding_dim": self.embedding_dim,
+        }
 
 
 async def _chatpdf_llm_complete(
@@ -147,6 +223,7 @@ async def _chatpdf_embedding_func(
     model: str = "",
     provider: str = "",
     endpoint: str = "",
+    expected_dim: int = 1536,
 ) -> "np.ndarray":
     """通过 OpenAI 兼容 API 获取 embedding"""
     import numpy as np
@@ -154,10 +231,11 @@ async def _chatpdf_embedding_func(
     from models.api_key_selector import select_api_key
 
     sanitized_key = select_api_key(api_key) or (api_key.strip() if api_key else "")
+    expected_dim = int(expected_dim or 1536)
 
     if not endpoint:
         logger.error("[GraphRAG] Embedding endpoint 未配置")
-        return np.zeros((len(texts), 1536), dtype=np.float32)
+        raise ValueError("GraphRAG Embedding endpoint 未配置")
 
     # 确保 endpoint 以 /embeddings 结尾
     embed_url = endpoint.rstrip("/")
@@ -178,9 +256,17 @@ async def _chatpdf_embedding_func(
         resp = await client.post(embed_url, headers=headers, json=body)
         if resp.status_code != 200:
             logger.error(f"[GraphRAG] Embedding API 错误: {resp.status_code} {resp.text[:200]}")
-            return np.zeros((len(texts), 1536), dtype=np.float32)
+            raise ValueError(f"GraphRAG Embedding API 错误: {resp.status_code} {resp.text[:200]}")
         result = resp.json()
-        return np.array([dp["embedding"] for dp in result["data"]], dtype=np.float32)
+        embeddings = np.array([dp["embedding"] for dp in result["data"]], dtype=np.float32)
+        if embeddings.ndim != 2:
+            raise ValueError(f"GraphRAG Embedding 返回格式异常，ndim={embeddings.ndim}")
+        actual_dim = int(embeddings.shape[1]) if embeddings.shape[0] else expected_dim
+        if actual_dim != expected_dim:
+            raise ValueError(
+                f"GraphRAG Embedding 维度不匹配：模型 {model} 预期 {expected_dim}，接口返回 {actual_dim}"
+            )
+        return embeddings
 
 
 @dataclass
@@ -231,6 +317,10 @@ class GraphRAG:
     addon_params: dict = field(default_factory=dict)
     convert_response_to_json_func: callable = convert_response_to_json
 
+    # 查询上下文缓存（避免重复组装上下文，尤其 hybrid 模式检索开销大）
+    _query_context_cache: dict = field(default_factory=dict)
+    _query_cache_max_size: int = 128
+
     def __post_init__(self):
         logger.info(f"[GraphRAG] 初始化，working_dir={self.working_dir}")
 
@@ -258,6 +348,7 @@ class GraphRAG:
             model=cfg.embedding_model,
             provider=cfg.embedding_provider or cfg.provider,
             endpoint=cfg.embedding_endpoint or cfg.endpoint,
+            expected_dim=cfg.embedding_dim,
         ))
 
         # 构建 LLM 函数
@@ -302,6 +393,27 @@ class GraphRAG:
             embedding_func=embedding_func,
             meta_fields={"entity_name"},
         )
+        # 关系向量库：用于 hybrid/global 查询时增强关系召回
+        self.relationships_vdb = self.vector_db_storage_cls(
+            namespace="relationships",
+            global_config=self._global_config,
+            embedding_func=embedding_func,
+            meta_fields={"src_id", "tgt_id"},
+        )
+
+        # 构建进度追踪
+        self._build_progress = BuildProgress()
+        self._config_hash = _compute_config_hash(
+            self.config, self.chunk_token_size, self.entity_extract_max_gleaning
+        )
+        self._build_progress.config_hash = self._config_hash
+        self._build_progress.model = self.config.model
+        self._build_progress.provider = self.config.provider
+        self._build_progress.endpoint = self.config.endpoint
+        self._build_progress.embedding_model = self.config.embedding_model
+        self._build_progress.embedding_provider = self.config.embedding_provider
+        self._build_progress.embedding_endpoint = self.config.embedding_endpoint
+        self._build_progress.embedding_dim = self.config.embedding_dim
 
         # 应用并发限流
         self.embedding_func = limit_async_func_call(self.embedding_func_max_async)(
@@ -331,8 +443,21 @@ class GraphRAG:
         return loop.run_until_complete(self.aquery(query, param))
 
     async def aquery(self, query: str, param: QueryParam = QueryParam()) -> str:
-        """异步查询，支持 local / global / hybrid 三种模式。"""
+        """异步查询，支持 local / global / hybrid 三种模式。
+
+        如果 only_output_context=True（aquery_context 调用），启用查询上下文缓存，
+        避免同一查询反复组装上下文（尤其 hybrid 模式检索开销大）。
+        """
         mode = getattr(param, "mode", "local")
+
+        # 上下文缓存：仅缓存 only_output_context=True 的组装结果
+        if param.only_output_context:
+            cache_key = f"ctx_{mode}_{hashlib.md5(query.encode()).hexdigest()[:12]}"
+            cached = self._query_context_cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"[GraphRAG] 命中查询上下文缓存: {cache_key}")
+                return cached
+
         if mode == "global":
             response = await global_query(
                 query,
@@ -345,6 +470,7 @@ class GraphRAG:
                 query,
                 self.chunk_entity_relation_graph,
                 self.entities_vdb,
+                self.relationships_vdb,
                 self.community_reports,
                 self.text_chunks,
                 param,
@@ -360,6 +486,17 @@ class GraphRAG:
                 param,
                 self._global_config,
             )
+
+        # 写入上下文缓存（控制大小避免内存无限膨胀）
+        if param.only_output_context and response:
+            if len(self._query_context_cache) >= self._query_cache_max_size:
+                # LRU 简单清理：清空一半
+                keys = list(self._query_context_cache.keys())
+                for k in keys[: len(keys) // 2]:
+                    del self._query_context_cache[k]
+            cache_key = f"ctx_{mode}_{hashlib.md5(query.encode()).hexdigest()[:12]}"
+            self._query_context_cache[cache_key] = response
+
         await self._query_done()
         return response
 
@@ -374,28 +511,63 @@ class GraphRAG:
         return context
 
     async def ainsert(self, string_or_strings: Union[str, List[str]]):
-        """异步插入文档"""
+        """异步插入文档（带进度追踪）"""
+        self._build_progress.status = "building"
+        self._build_progress.build_start = datetime.now().isoformat()
+        self._build_progress.last_error = ""
+        self._save_metadata()
         try:
             if isinstance(string_or_strings, str):
                 string_or_strings = [string_or_strings]
             # 去重检测
+            self._build_progress.stage = "chunking"
+            self._build_progress.progress = 10
             new_docs = await self._prepare_new_docs(string_or_strings)
             if not new_docs:
+                self._build_progress.status = "done"
+                self._build_progress.stage = "skipped"
+                self._build_progress.progress = 100
+                self._build_progress.build_end = datetime.now().isoformat()
+                self._save_metadata()
                 return
             logger.info(f"[GraphRAG] 插入 {len(new_docs)} 个新文档")
 
             # 分块
             inserting_chunks = await self._prepare_inserting_chunks(new_docs)
             if not inserting_chunks:
+                self._build_progress.status = "done"
+                self._build_progress.stage = "skipped"
+                self._build_progress.progress = 100
+                self._build_progress.build_end = datetime.now().isoformat()
+                self._save_metadata()
                 return
             logger.info(f"[GraphRAG] 插入 {len(inserting_chunks)} 个新块")
 
-            # 实体提取 + 社区聚类 + 社区报告
+            # 实体提取
+            self._build_progress.stage = "extracting"
+            self._build_progress.progress = 30
+            self._save_metadata()
             await self._process_entities_and_clusters(inserting_chunks)
 
             # 持久化
+            self._build_progress.stage = "persisting"
+            self._build_progress.progress = 90
+            self._save_metadata()
             await self.full_docs.upsert(new_docs)
             await self.text_chunks.upsert(inserting_chunks)
+
+            self._build_progress.status = "done"
+            self._build_progress.stage = "done"
+            self._build_progress.progress = 100
+            self._build_progress.build_end = datetime.now().isoformat()
+            self._update_progress_stats()
+            self._save_metadata()
+        except Exception as e:
+            self._build_progress.status = "failed"
+            self._build_progress.last_error = str(e)
+            self._build_progress.build_end = datetime.now().isoformat()
+            self._save_metadata()
+            raise
         finally:
             await self._insert_done()
 
@@ -433,22 +605,47 @@ class GraphRAG:
         return inserting_chunks
 
     async def _process_entities_and_clusters(self, inserting_chunks):
-        await self.community_reports.drop()
         logger.info("[GraphRAG] 实体提取中...")
         maybe_new_kg = await extract_entities(
             inserting_chunks,
             knwoledge_graph_inst=self.chunk_entity_relation_graph,
             entity_vdb=self.entities_vdb,
+            relationships_vdb=self.relationships_vdb,
             global_config=self._global_config,
         )
         if maybe_new_kg is None:
             logger.warning("[GraphRAG] 未发现新实体")
             return
         self.chunk_entity_relation_graph = maybe_new_kg
+
+        # 分阶段持久化：实体提取完成后先持久化图和实体向量库
+        await asyncio.gather(
+            self.chunk_entity_relation_graph.index_done_callback(),
+            self.entities_vdb.index_done_callback(),
+            self.relationships_vdb.index_done_callback(),
+        )
+        logger.info("[GraphRAG] 实体/关系已持久化")
+
+        # 聚类
+        self._build_progress.stage = "clustering"
+        self._build_progress.progress = 60
+        self._save_metadata()
         logger.info("[GraphRAG] 社区聚类中...")
         await self.chunk_entity_relation_graph.clustering(self.graph_cluster_algorithm)
+
+        # 聚类完成后持久化图（社区信息已写入节点）
+        await self.chunk_entity_relation_graph.index_done_callback()
+
+        # 社区报告
+        self._build_progress.stage = "reporting"
+        self._build_progress.progress = 75
+        self._save_metadata()
         logger.info("[GraphRAG] 社区报告生成中...")
+        await self.community_reports.drop()
         await generate_community_report(self.community_reports, self.chunk_entity_relation_graph, self._global_config)
+
+        # 报告生成完成后持久化社区报告
+        await self.community_reports.index_done_callback()
 
     async def _insert_done(self):
         tasks = [cast(StorageNameSpace, storage_inst).index_done_callback() for storage_inst in [
@@ -457,6 +654,7 @@ class GraphRAG:
             self.llm_response_cache,
             self.community_reports,
             self.entities_vdb,
+            self.relationships_vdb,
             self.chunk_entity_relation_graph,
         ] if storage_inst is not None]
         await asyncio.gather(*tasks)
@@ -468,12 +666,103 @@ class GraphRAG:
         await asyncio.gather(*tasks)
 
     def stats(self) -> dict:
-        """返回 GraphRAG 索引统计信息"""
+        """返回 GraphRAG 索引统计信息（含构建元数据）"""
         graph = self.chunk_entity_relation_graph._graph
-        return {
+        result = {
             "working_dir": self.working_dir,
             "num_nodes": graph.number_of_nodes(),
             "num_edges": graph.number_of_edges(),
             "num_docs": len(self.full_docs._data) if hasattr(self.full_docs, '_data') else 0,
             "num_chunks": len(self.text_chunks._data) if hasattr(self.text_chunks, '_data') else 0,
         }
+        # 附加构建元数据
+        result["build_meta"] = self._build_progress.to_dict()
+        return result
+
+    def get_build_progress(self) -> BuildProgress:
+        """获取当前构建进度"""
+        return self._build_progress
+
+    def _update_progress_stats(self):
+        """从实际存储更新进度中的统计数字"""
+        graph = self.chunk_entity_relation_graph._graph
+        self._build_progress.num_nodes = graph.number_of_nodes()
+        self._build_progress.num_edges = graph.number_of_edges()
+        self._build_progress.num_docs = len(self.full_docs._data) if hasattr(self.full_docs, '_data') else 0
+        self._build_progress.num_chunks = len(self.text_chunks._data) if hasattr(self.text_chunks, '_data') else 0
+
+    def _save_metadata(self):
+        """持久化构建元数据到 working_dir"""
+        meta_path = os.path.join(self.working_dir, "build_meta.json")
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(self._build_progress.to_dict(), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[GraphRAG] 保存构建元数据失败: {e}")
+
+    @staticmethod
+    def load_metadata(working_dir: str) -> Optional[BuildProgress]:
+        """从磁盘加载构建元数据"""
+        meta_path = os.path.join(working_dir, "build_meta.json")
+        if not os.path.exists(meta_path):
+            return None
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return BuildProgress.from_dict(data)
+        except Exception as e:
+            logger.warning(f"[GraphRAG] 加载构建元数据失败: {e}")
+            return None
+
+    @staticmethod
+    def has_persisted_index(working_dir: str) -> bool:
+        """检查 working_dir 是否存在已持久化的 GraphRAG 索引"""
+        graph_file = os.path.join(working_dir, "graph_chunk_entity_relation.graphml")
+        return os.path.exists(graph_file)
+
+    @staticmethod
+    async def load_from_disk(working_dir: str, config: GraphRAGConfig,
+                             chunk_token_size: int = 2000,
+                             entity_extract_max_gleaning: int = 1,
+                             best_model_max_async: int = 16,
+                             cheap_model_max_async: int = 16) -> Optional["GraphRAG"]:
+        """从磁盘加载已持久化的 GraphRAG 实例（不重新构建）
+
+        如果 working_dir 不存在或索引不完整，返回 None。
+        如果 config_hash 与磁盘不一致，打印警告但仍加载（调用方决定是否重建）。
+        """
+        if not GraphRAG.has_persisted_index(working_dir):
+            return None
+
+        # 检查配置哈希
+        disk_meta = GraphRAG.load_metadata(working_dir)
+        current_hash = _compute_config_hash(config, chunk_token_size, entity_extract_max_gleaning)
+        if disk_meta and disk_meta.config_hash and disk_meta.config_hash != current_hash:
+            logger.warning(
+                f"[GraphRAG] 配置哈希不匹配: 磁盘={disk_meta.config_hash}, 当前={current_hash}，"
+                f"可能需要重建索引"
+            )
+
+        rag = GraphRAG(
+            working_dir=working_dir,
+            config=config,
+            chunk_token_size=chunk_token_size,
+            entity_extract_max_gleaning=entity_extract_max_gleaning,
+            best_model_max_async=best_model_max_async,
+            cheap_model_max_async=cheap_model_max_async,
+        )        # 从磁盘元数据恢复进度状态
+        if disk_meta:
+            rag._build_progress = disk_meta
+        else:
+            # 无元数据但有索引文件，标记为 done
+            rag._build_progress.status = "done"
+            rag._build_progress.stage = "done"
+            rag._build_progress.progress = 100
+            rag._build_progress.config_hash = current_hash
+            rag._update_progress_stats()
+            rag._save_metadata()
+        logger.info(
+            f"[GraphRAG] 从磁盘加载: {rag._build_progress.num_nodes} 节点, "
+            f"{rag._build_progress.num_edges} 边, 状态={rag._build_progress.status}"
+        )
+        return rag

@@ -231,7 +231,8 @@ async def extract_entities(
         chunks: dict[str, TextChunkSchema],
         knwoledge_graph_inst: BaseGraphStorage,
         entity_vdb: BaseVectorStorage,
-        global_config: dict,
+        relationships_vdb: BaseVectorStorage = None,
+        global_config: dict = None,
 ) -> Union[BaseGraphStorage, None]:
     """从文本块中提取实体和关系（含 gleaning 多轮补全）"""
     use_llm_func: callable = global_config["best_model_func"]
@@ -313,9 +314,24 @@ async def extract_entities(
         return dict(maybe_nodes), dict(maybe_edges)
 
     # 并发处理所有 chunk（受 limit_async_func_call 限流控制）
+    # return_exceptions=True 允许部分失败，失败 chunk 单独记录并跳过
     results = await asyncio.gather(
-        *[_process_single_content(c) for c in ordered_chunks]
+        *[_process_single_content(c) for c in ordered_chunks],
+        return_exceptions=True,
     )
+    # 过滤失败的 chunk
+    valid_results = []
+    failed_count = 0
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            failed_count += 1
+            chunk_key = ordered_chunks[i][0]
+            logger.warning(f"[GraphRAG] 块 {chunk_key[:20]}... 实体提取失败: {r}")
+        else:
+            valid_results.append(r)
+    if failed_count:
+        logger.warning(f"[GraphRAG] {failed_count}/{len(results)} 个块提取失败，继续处理成功部分")
+    results = valid_results
     maybe_nodes = defaultdict(list)
     maybe_edges = defaultdict(list)
     for m_nodes, m_edges in results:
@@ -347,6 +363,23 @@ async def extract_entities(
             for dp in all_entities_data
         }
         await entity_vdb.upsert(data_for_vdb)
+    # 关系向量库：索引关系描述，用于 hybrid/global 查询增强召回
+    if relationships_vdb is not None and maybe_edges:
+        rel_data_for_vdb = {}
+        for (src, tgt), edge_list in maybe_edges.items():
+            # 合并同源同目标的关系描述
+            merged_desc = "; ".join(sorted(set(e["description"] for e in edge_list if e.get("description"))))
+            if not merged_desc:
+                continue
+            rel_id = compute_mdhash_id(f"{src}->{tgt}", prefix="rel-")
+            rel_data_for_vdb[rel_id] = {
+                "content": f"{src} -> {tgt}: {merged_desc}",
+                "src_id": src,
+                "tgt_id": tgt,
+            }
+        if rel_data_for_vdb:
+            await relationships_vdb.upsert(rel_data_for_vdb)
+            logger.info(f"[GraphRAG] 索引 {len(rel_data_for_vdb)} 条关系到 relationships_vdb")
     return knwoledge_graph_inst
 
 
@@ -941,15 +974,17 @@ async def hybrid_query(
         query,
         knowledge_graph_inst: BaseGraphStorage,
         entities_vdb: BaseVectorStorage,
-        community_reports: BaseKVStorage[CommunitySchema],
-        text_chunks_db: BaseKVStorage[TextChunkSchema],
-        query_param: QueryParam,
-        global_config: dict,
+        relationships_vdb: BaseVectorStorage = None,
+        community_reports: BaseKVStorage[CommunitySchema] = None,
+        text_chunks_db: BaseKVStorage[TextChunkSchema] = None,
+        query_param: QueryParam = None,
+        global_config: dict = None,
 ) -> str:
     """执行 Hybrid Query：融合 Local（实体级别）和 Global（社区报告）两路上下文。
 
     仿 LightRAG hybrid 模式：并行获取 local context 和 global context，
     合并后用统一 prompt 生成更全面的回答。
+    如果 relationships_vdb 可用，在 local 路径中额外召回关系向量。
     """
     use_model_func = global_config["best_model_func"]
 
@@ -962,17 +997,50 @@ async def hybrid_query(
         _build_global_query_context(community_reports, query_param),
     )
 
+    # 关系向量库增强：如果 relationships_vdb 可用，额外召回相关关系
+    rel_context = None
+    if relationships_vdb is not None:
+        try:
+            rel_results = await relationships_vdb.query(query, top_k=query_param.top_k)
+            if rel_results:
+                rel_section_list = [["id", "source", "target", "description", "distance"]]
+                for i, r in enumerate(rel_results):
+                    rel_section_list.append([
+                        i,
+                        r.get("src_id", "?"),
+                        r.get("tgt_id", "?"),
+                        r.get("content", "")[:200],
+                        round(r.get("distance", 0), 4),
+                    ])
+                rel_context = list_of_list_to_csv(rel_section_list)
+        except Exception as e:
+            logger.warning(f"[GraphRAG][hybrid] 关系向量库查询失败: {e}")
+
     if query_param.only_output_context:
-        return f"[LOCAL]\n{local_context or ''}\n\n[GLOBAL]\n{global_context or ''}"
+        parts = [f"[LOCAL]\n{local_context or ''}"]
+        if rel_context:
+            parts.append(f"[RELATIONSHIPS]\n{rel_context}")
+        parts.append(f"[GLOBAL]\n{global_context or ''}")
+        return "\n\n".join(parts)
 
     if not local_context and not global_context:
         return PROMPTS["fail_response"]
+
+    # 构建增强 hybrid prompt
+    rel_section = ""
+    if rel_context:
+        rel_section = f"\n---Related Relationships---\n```csv\n{rel_context}\n```"
 
     sys_prompt = PROMPTS["hybrid_rag_response"].format(
         local_context=local_context or "（无实体级别上下文）",
         global_context=global_context or "（无社区报告上下文）",
         response_type=query_param.response_type,
     )
+    if rel_section:
+        sys_prompt = sys_prompt.replace(
+            "---Global Context",
+            f"{rel_section}\n\n---Global Context",
+        )
     logger.debug(
         f"[GraphRAG][hybrid] query: {query}, "
         f"local_ctx={len(local_context or '')}, global_ctx={len(global_context or '')}"

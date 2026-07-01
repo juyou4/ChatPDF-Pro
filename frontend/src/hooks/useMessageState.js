@@ -383,6 +383,183 @@ export const ensureAssistantInlineCitationFallback = (content, citations) => {
   return `${String(content).trimEnd()}\n\n参考来源：${allRefs}`;
 };
 
+// 检索代理执行轨迹的初始结构（与 AgentTracePanel 的 props 对齐）
+export const createInitialAgentTrace = () => ({
+  enabled: false,
+  fallback: false,
+  startedAt: null,
+  endedAt: null,
+  rounds: [],
+  finalMessage: '',
+  searchHistory: [],
+  taskStatus: { completed: [], current: '', pending: [] },
+  agentDetail: [],
+  contextChars: 0,
+  agentMode: false,
+  agentGate: null,
+  error: '',
+  fallbackReason: '',
+  diagnostics: null,
+});
+
+// 后端 retrieval_agent 会发出的 phase
+const AGENT_PHASES = new Set([
+  'agent_start',
+  'round_start',
+  'planning',
+  'planner_error',
+  'executing',
+  'tool_result',
+  'complete',
+  'agent_mode',
+]);
+
+// 在 trace 中找到指定轮次，没有就创建并 push
+const ensureTraceRound = (trace, round) => {
+  let entry = trace.rounds.find((r) => r.round === round);
+  if (!entry) {
+    entry = { round, message: '', planningMessage: '', operations: [] };
+    trace.rounds.push(entry);
+  }
+  return entry;
+};
+
+// 把 retrieval_progress 事件累积到 agentTrace；只对 agent 相关 phase 生效
+export const applyAgentTraceEvent = (trace, payload) => {
+  if (!trace || !payload) return trace;
+  const phase = payload.phase;
+  if (!phase) return trace;
+  // 只识别 agent 相关 phase 或显式带 round 字段的事件，避免吞掉普通 retrieval_progress
+  if (!AGENT_PHASES.has(phase) && !Number.isFinite(Number(payload.round))) return trace;
+
+  if (phase === 'agent_start' || phase === 'agent_mode') {
+    trace.enabled = true;
+    if (!trace.startedAt) trace.startedAt = Date.now();
+    return trace;
+  }
+
+  if (phase === 'planner_error') {
+    trace.enabled = true;
+    trace.error = payload.error || payload.message || '检索规划失败';
+  }
+
+  if (phase === 'complete') {
+    trace.finalMessage = payload.message || '检索完成';
+    if (!trace.endedAt) trace.endedAt = Date.now();
+    return trace;
+  }
+
+  trace.enabled = true;
+  const fallbackRound = trace.rounds.length > 0
+    ? trace.rounds[trace.rounds.length - 1].round
+    : 1;
+  const round = Number.isFinite(Number(payload.round))
+    ? Number(payload.round)
+    : fallbackRound;
+
+  if (phase === 'round_start') {
+    if (!trace.rounds.some((r) => r.round === round)) {
+      trace.rounds.push({
+        round,
+        message: payload.message || '',
+        planningMessage: '',
+        operations: [],
+      });
+    }
+    return trace;
+  }
+
+  const entry = ensureTraceRound(trace, round);
+
+  if (phase === 'planning') {
+    entry.planningMessage = payload.message || 'LLM 规划中...';
+    return trace;
+  }
+
+  if (phase === 'executing') {
+    entry.operations.push({
+      tool: payload.tool || '',
+      message: payload.message || '',
+      status: 'executing',
+    });
+    return trace;
+  }
+
+  if (phase === 'tool_result') {
+    // 找到最后一个匹配 tool 且仍在 executing 的 op，回填结果；找不到就直接 push 一条
+    let matched = false;
+    for (let i = entry.operations.length - 1; i >= 0; i--) {
+      const op = entry.operations[i];
+      if (op.tool === payload.tool && op.status !== 'done') {
+        op.resultMessage = payload.message || '';
+        op.resultCount = Number.isFinite(Number(payload.result_count))
+          ? Number(payload.result_count)
+          : (op.resultCount ?? null);
+        op.elapsedMs = Number.isFinite(Number(payload.elapsed_ms))
+          ? Number(payload.elapsed_ms)
+          : (op.elapsedMs ?? null);
+        op.status = 'done';
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      entry.operations.push({
+        tool: payload.tool || '',
+        message: '',
+        resultMessage: payload.message || '',
+        resultCount: Number.isFinite(Number(payload.result_count))
+          ? Number(payload.result_count)
+          : null,
+        elapsedMs: Number.isFinite(Number(payload.elapsed_ms))
+          ? Number(payload.elapsed_ms)
+          : null,
+        status: 'done',
+      });
+    }
+  }
+
+  return trace;
+};
+
+// 流末事件附带的 retrieval_meta 中的 agent 详情合并到 trace（agent_search_history/task_status/agent_detail 等）
+export const mergeAgentMetaIntoTrace = (trace, meta) => {
+  if (!trace || !meta) return trace;
+  if (meta.agent_mode) {
+    trace.enabled = true;
+    trace.agentMode = true;
+  }
+  if (meta.agent_fallback) trace.fallback = true;
+  if (meta.agent_error) trace.error = String(meta.agent_error);
+  if (meta.agent_fallback_reason) trace.fallbackReason = String(meta.agent_fallback_reason);
+  if (Number.isFinite(Number(meta.agent_context_chars))) {
+    trace.contextChars = Number(meta.agent_context_chars);
+  }
+  if (meta.agent_gate && typeof meta.agent_gate === 'object') {
+    trace.agentGate = meta.agent_gate;
+    if (meta.agent_gate.agent_mode || meta.agent_gate.use_agent) {
+      trace.enabled = true;
+    }
+  }
+  if (meta.diagnostics?.agent && typeof meta.diagnostics.agent === 'object') {
+    trace.diagnostics = meta.diagnostics.agent;
+  }
+  if (Array.isArray(meta.agent_search_history)) {
+    trace.searchHistory = meta.agent_search_history;
+  }
+  if (meta.task_status && typeof meta.task_status === 'object') {
+    trace.taskStatus = {
+      completed: Array.isArray(meta.task_status.completed) ? meta.task_status.completed : [],
+      current: typeof meta.task_status.current === 'string' ? meta.task_status.current : '',
+      pending: Array.isArray(meta.task_status.pending) ? meta.task_status.pending : [],
+    };
+  }
+  if (Array.isArray(meta.agent_detail)) {
+    trace.agentDetail = meta.agent_detail;
+  }
+  return trace;
+};
+
 export const finalizeThinkingDurationMs = ({
   thinkingStartTime,
   thinkingLastUpdateTime,
@@ -427,6 +604,8 @@ export function useMessageState({
   enableVectorSearch = false,
   embeddingApiKey = '',
   enableGraphRAG = false,
+  enableAgentRetrieval = false,
+  forceAgentRetrieval = false,
   enableJiebaBM25 = true,
   numExpandContextChunk = 1,
   enableBlurReveal = false,
@@ -464,6 +643,7 @@ export function useMessageState({
   const streamWebSearchStatusRef = useRef(null);
   const streamMemoryHitsRef = useRef(null);
   const streamMemoryMetaRef = useRef(null);
+  const streamAgentTraceRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -585,6 +765,8 @@ export function useMessageState({
       enable_vector_search: enableVectorSearch,
       embedding_api_key: embeddingApiKey || null,
       enable_graphrag: enableGraphRAG,
+      enable_agent_retrieval: enableAgentRetrieval,
+      force_agent_retrieval: forceAgentRetrieval,
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
@@ -623,6 +805,7 @@ export function useMessageState({
     streamWebSearchStatusRef.current = null;
     streamMemoryHitsRef.current = null;
     streamMemoryMetaRef.current = null;
+    streamAgentTraceRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -761,7 +944,7 @@ export function useMessageState({
           if (data === '[DONE]') { sseDone = true; return; }
           try {
             const p = JSON.parse(data);
-            if (p.error) {
+            if (p.error && p.type !== 'retrieval_progress') {
               const em = `❌ ${p.error}`;
               currentText = em;
               contentStream.addChunk(em);
@@ -772,7 +955,14 @@ export function useMessageState({
             if (thinkingStageEvent) {
               appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
             }
-            if (p.type === 'retrieval_progress') return;
+            if (p.type === 'retrieval_progress') {
+              // 聚合到 agentTrace（只对 agent 相关 phase 生效）
+              if (!streamAgentTraceRef.current) {
+                streamAgentTraceRef.current = createInitialAgentTrace();
+              }
+              applyAgentTraceEvent(streamAgentTraceRef.current, p);
+              return;
+            }
             if (p.type === 'web_search_status') {
               streamWebSearchStatusRef.current = { phase: p.phase, count: p.count ?? null };
               setMessages(prev => prev.map(m =>
@@ -835,6 +1025,13 @@ export function useMessageState({
               }
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
+              if (p.retrieval_meta && (p.retrieval_meta.agent_mode || p.retrieval_meta.agent_search_history)) {
+                if (!streamAgentTraceRef.current) {
+                  streamAgentTraceRef.current = createInitialAgentTrace();
+                }
+                mergeAgentMetaIntoTrace(streamAgentTraceRef.current, p.retrieval_meta);
+                if (!streamAgentTraceRef.current.endedAt) streamAgentTraceRef.current.endedAt = Date.now();
+              }
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
               if (Object.prototype.hasOwnProperty.call(p, 'memory_hits')) streamMemoryHitsRef.current = p.memory_hits;
@@ -900,7 +1097,7 @@ export function useMessageState({
         );
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -928,10 +1125,20 @@ export function useMessageState({
           data.answer,
           data.retrieval_meta?.citations
         );
+        let nonStreamAgentTrace = null;
+        if (data.retrieval_meta && (data.retrieval_meta.agent_mode || data.retrieval_meta.agent_gate)) {
+          nonStreamAgentTrace = createInitialAgentTrace();
+          mergeAgentMetaIntoTrace(nonStreamAgentTrace, data.retrieval_meta);
+          nonStreamAgentTrace.enabled = Boolean(
+            data.retrieval_meta.agent_mode ||
+            data.retrieval_meta.agent_gate?.use_agent ||
+            data.retrieval_meta.agent_gate?.requested_enabled
+          );
+        }
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace }
             : m
         ));
         setStreamingMessageId(null);
@@ -955,6 +1162,7 @@ export function useMessageState({
     }
   }, [
     docId, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
+    enableAgentRetrieval,
     getChatCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,

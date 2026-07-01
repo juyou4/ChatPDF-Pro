@@ -5,9 +5,18 @@ RAG 系统配置模块
 包括语义意群、Token 预算和粒度选择等功能的默认设置。
 """
 
+import os
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """读取 env var 转 bool，用于 ablation 时关闭某 RAG 功能。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
 @dataclass
@@ -50,11 +59,23 @@ class RAGConfig:
     hyde_query_types: str = "analytical,overview"  # 默认仅对分析/概览类问题启用
     hyde_evidence_allowlist: str = "section_explanation,comparison_multi_aspect"
     hyde_evidence_blocklist: str = "numeric_table,reference_trap,reference_meta"
-    enable_query_expansion: bool = True       # 多查询扩展，LLM 生成多个改写查询合并检索
-    query_expansion_n: int = 3               # 多查询扩展数量
-    query_expansion_query_types: str = "analytical,overview"
+    # P3.3 ablation: env CHATPDF_ENABLE_QUERY_EXPANSION=0 可关闭
+    enable_query_expansion: bool = field(
+        default_factory=lambda: _env_bool("CHATPDF_ENABLE_QUERY_EXPANSION", True)
+    )
+    query_expansion_n: int = 4               # P3.3a: 3→4，更多召回路径
+    # P3.3a: 放宽 gate，覆盖 specific/extraction 类（实测召回不足）
+    query_expansion_query_types: str = "analytical,overview,specific,extraction"
     query_expansion_evidence_allowlist: str = "section_explanation,comparison_multi_aspect"
-    query_expansion_evidence_blocklist: str = "numeric_table,reference_trap,reference_meta"
+    # P3.3a: 移除 numeric_table 黑名单，允许 numeric_table 类查询走 multi-query
+    query_expansion_evidence_blocklist: str = "reference_trap,reference_meta"
+    # P3.3b: 查询简化（移除冗余词），仅在原查询长度 > 50 时触发
+    enable_query_simplify: bool = True
+    query_simplify_min_chars: int = 50
+    # P3.3c: 多查询合并策略：rrf(默认) / intersection / weighted_avg / union
+    # numeric_table 和 extraction 类查询走 intersection（高 precision）
+    query_expansion_merge_mode: str = "rrf"
+    query_expansion_intersection_types: str = "numeric_table,extraction"
     enable_contextual_chunking: bool = False  # 上下文增强分块，chunk 前注入章节标题
     enable_lost_in_middle_reorder: bool = True   # Lost-in-the-Middle 缓解，交替排列上下文
     enable_parent_child_retrieval: bool = True   # Parent-Child 分块：用小 chunk 检索，返回大 parent chunk

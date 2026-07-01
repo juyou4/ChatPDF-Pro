@@ -1,9 +1,12 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 import asyncio
+import logging
 import time
 import os
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class BaseMiddleware(ABC):
@@ -23,11 +26,15 @@ class LoggingMiddleware(BaseMiddleware):
 
     async def before_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["_ts"] = time.time()
-        print(f"[Middleware] -> Sending request to provider={payload.get('provider')} model={payload.get('model')}")
+        logger.debug(
+            "[Middleware] -> Sending request to provider=%s model=%s",
+            payload.get("provider"),
+            payload.get("model"),
+        )
         return payload
 
     async def after_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        print("[Middleware] <- Response received")
+        logger.debug("[Middleware] <- Response received")
         return response
 
 

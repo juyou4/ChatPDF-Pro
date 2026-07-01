@@ -18,6 +18,7 @@ class BaseProvider(ABC):
         top_p: Optional[float] = None,
         custom_params: Optional[Dict] = None,
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[dict]] = None,
     ) -> dict:
         """调用 AI 模型进行对话
 
@@ -32,5 +33,6 @@ class BaseProvider(ABC):
             top_p: 核采样参数，None 表示使用模型默认值
             custom_params: 自定义参数字典，直接合并到请求体
             reasoning_effort: 深度思考力度（'low'|'medium'|'high'），None 表示不启用
+            tools: 工具定义列表（OpenAI function 格式），None 表示不使用工具
         """
         raise NotImplementedError

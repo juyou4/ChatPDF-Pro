@@ -55,33 +55,16 @@ class QueryRewriter:
         '这段', '那段', '这里', '那里', '它',
     ]
 
-    NUMERIC_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
-        'many': ('many',),
-        'medium': ('medium', 'med.', 'med'),
-        'few': ('few', 'few-shot', 'tail'),
-        'all': ('all', 'overall', 'total'),
-        'fid': ('fid',),
-        'acc': ('acc', 'accuracy', 'acc.', '分类准确率', '准确率'),
-        'd_gen': ('d_gen', 'dgen'),
-    }
-    NUMERIC_COLUMN_PATTERNS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
-        (
-            re.compile(
-                r'(?:[Δ∆△]|delta)\s*acc(?:uracy)?\s*/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)'
-                r'|(?:平均)?每样本(?:性能)?(?:提升|增益)'
-                r'|average(?:\s+\w+){0,2}\s+per\s+sample'
-                r'|per\s+sample\s+(?:gain|improvement)',
-                re.IGNORECASE,
-            ),
-            ('ΔAcc/||D_gen||',),
-        ),
-        (re.compile(r'\bfid\b', re.IGNORECASE), ('FID',)),
-        (re.compile(r'(?:\|\||∥)\s*D\s*[_ ]?gen\s*(?:\|\||∥)', re.IGNORECASE), ('||D_gen||',)),
-        (re.compile(r'\bacc(?:uracy)?\b|分类准确率|准确率', re.IGNORECASE), ('Acc',)),
-        (re.compile(r'\bmany\b', re.IGNORECASE), ('Many',)),
-        (re.compile(r'\bmedium\b|\bmed\.?\b|中等|中尾', re.IGNORECASE), ('Medium', 'Med.')),
-        (re.compile(r'\bfew(?:-shot)?\b|尾类|少样本', re.IGNORECASE), ('Few',)),
-        (re.compile(r'\ball\b|overall|总体|整体|总准确率|总体准确率', re.IGNORECASE), ('All',)),
+    GENERIC_METRIC_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+        (re.compile(r'\baccuracy\b|分类准确率|准确率', re.IGNORECASE), 'Acc'),
+        (re.compile(r'\bprecision\b|精确率', re.IGNORECASE), 'Precision'),
+        (re.compile(r'\brecall\b|召回率', re.IGNORECASE), 'Recall'),
+        (re.compile(r'\bf1(?:[-_ ]?score)?\b', re.IGNORECASE), 'F1'),
+        (re.compile(r'\bauc\b|\bauroc\b', re.IGNORECASE), 'AUC'),
+        (re.compile(r'\b(?:mAP|mean average precision)\b', re.IGNORECASE), 'mAP'),
+        (re.compile(r'\b(?:BLEU|ROUGE|METEOR|WER|CER)\b', re.IGNORECASE), 'TextMetric'),
+        (re.compile(r'\b(?:latency|runtime|throughput|flops|params?)\b|推理时间|耗时|吞吐|参数量|开销', re.IGNORECASE), 'CostMetric'),
+        (re.compile(r'\b(?:overall|total|macro|micro|weighted)\b|总体|整体|宏平均|微平均', re.IGNORECASE), 'Aggregate'),
     )
     NUMERIC_COMPARISON_PATTERNS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
         (
@@ -94,11 +77,8 @@ class QueryRewriter:
         ),
     )
     _GENERIC_NUMERIC_STOPWORDS: set[str] = {
-        'table', 'tables', 'many', 'medium', 'med', 'few', 'few-shot', 'all',
-        'overall', 'accuracy', 'results', 'result', 'dataset', 'datasets',
-        'baseline', 'method', 'methods', 'metric', 'metrics', 'imagenet',
-        'cifar', 'places', 'table8', 'table1', 'table3', 'resnet',
-        'fid', 'acc', 'acc.', 'd_gen', 'dgen', 'deltaacc',
+        'table', 'tables', 'overall', 'accuracy', 'results', 'result', 'dataset', 'datasets',
+        'baseline', 'method', 'methods', 'metric', 'metrics',
         'flops', 'flop', 'runtime', 'latency', 'overhead', 'cost',
         'inference', 'training', 'time', 'appendix', 'limitation',
         'limitations',
@@ -252,6 +232,9 @@ class QueryRewriter:
         if (
             {"second-best", "nearest competitor"} & comparison_aliases
             and len(hints.get("methods", [])) <= 1
+        ) or (
+            "second-best" in comparison_aliases
+            and len(hints.get("columns", [])) >= 3
         ):
             return query
 
@@ -275,7 +258,7 @@ class QueryRewriter:
         if hints["datasets"]:
             parts.append(f"数据集 {' '.join(hints['datasets'])}")
         if hints["backbones"]:
-            parts.append(f"骨干网络 {' '.join(hints['backbones'])}")
+            parts.append(f"模型结构 {' '.join(hints['backbones'])}")
         if hints["methods"]:
             parts.append(f"方法名 {' '.join(hints['methods'])}")
         if hints["columns"]:
@@ -311,8 +294,8 @@ class QueryRewriter:
             }
 
         table_labels = self._dedupe_preserve_order(self._extract_table_labels(query))
-        datasets, backbones, methods = self._extract_named_anchors(query)
         columns = self._extract_column_aliases(query)
+        datasets, backbones, methods = self._extract_named_anchors(query, column_aliases=columns)
         comparison = self._extract_comparison_aliases(query)
         return {
             "table_labels": table_labels,
@@ -332,27 +315,51 @@ class QueryRewriter:
 
     def _extract_column_aliases(self, query: str) -> list[str]:
         aliases: list[str] = []
-        for pattern, values in self.NUMERIC_COLUMN_PATTERNS:
-            if pattern.search(query):
-                aliases.extend(values)
-        delta_metric_query = bool(re.search(
-            r'(?:[Δ∆△]|delta)\s*acc(?:uracy)?\s*/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)'
-            r'|(?:平均)?每样本(?:性能)?(?:提升|增益)'
-            r'|average(?:\s+\w+){0,2}\s+per\s+sample'
-            r'|per\s+sample\s+(?:gain|improvement)',
-            query,
+        sample = query or ""
+        for match in re.finditer(r'[`"“”\'‘’]([^`"“”\'‘’]{1,48})[`"“”\'‘’]', sample):
+            token = re.sub(r"\s+", " ", match.group(1)).strip(" ,.;:[]{}")
+            if token and not self._is_numeric_column_token(token):
+                aliases.append(token)
+
+        for match in re.finditer(r'([A-Za-z][A-Za-z0-9_.+\-/]{0,48})\s*(?:指标|列|列名|metric|column)', sample, re.IGNORECASE):
+            aliases.extend(self._split_column_phrase(match.group(1)))
+        for match in re.finditer(r'(?:对应的?|对应|分别为|分别是)\s*([A-Za-zΔ∆△\u4e00-\u9fff][A-Za-z0-9_.+\-/|∥\s\u4e00-\u9fff]{0,80}?)(?:分别|是多少|为多少|？|\?|,|，|。|$)', sample, re.IGNORECASE):
+            aliases.extend(self._split_column_phrase(match.group(1)))
+        for match in re.finditer(r'的\s*([A-Za-z][A-Za-z0-9_.+\-/、，,\s]{1,80}?)\s*分别', sample, re.IGNORECASE):
+            aliases.extend(self._split_column_phrase(match.group(1)))
+        for match in re.finditer(r'在\s*([A-Za-z][A-Za-z0-9_.+\-/\s]{1,80}?)\s*(?:子集|groups?|subsets?)', sample, re.IGNORECASE):
+            aliases.extend(self._split_column_phrase(match.group(1)))
+
+        formula_metric_pattern = re.compile(
+            r'(?:[Δ∆△A-Za-z][A-Za-z0-9]*)(?:\s*/\s*(?:\|\||∥)?\s*[A-Za-z][A-Za-z0-9_ ]*(?:\|\||∥)?)+',
             re.IGNORECASE,
-        ))
-        quantity_query = bool(re.search(
-            r'数量|样本数|多少(?:个)?样本|sample\s+count|how\s+many|quantit(?:y|ies)',
-            query,
-            re.IGNORECASE,
-        ))
-        if delta_metric_query:
-            aliases = [alias for alias in aliases if alias != '||D_gen||' or quantity_query]
-            if 'ΔAcc/||D_gen||' not in aliases:
-                aliases.insert(0, 'ΔAcc/||D_gen||')
-        return self._dedupe_preserve_order(aliases)
+        )
+        for match in formula_metric_pattern.finditer(sample):
+            token = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
+            if token and not self._is_numeric_column_token(token):
+                aliases.append(token)
+
+        compact_metric_pattern = re.compile(
+            r'\b(?:[A-Z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|[A-Za-z]+[-_][A-Za-z0-9]+)(?:[-_/][A-Za-z0-9]+)*\b'
+        )
+        for match in compact_metric_pattern.finditer(sample):
+            token = match.group(0).strip(" ,.;:[]{}")
+            lowered = token.lower()
+            if lowered.startswith(("table", "figure", "fig")):
+                continue
+            if self._looks_like_dataset_anchor(token) or self._looks_like_model_family_anchor(token):
+                continue
+            if re.fullmatch(r"[A-Za-z]*[A-Z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*", token):
+                continue
+            if "/" in token and not re.search(r"(?:\|\||∥)", token):
+                aliases.extend(self._split_column_phrase(token))
+            elif not self._is_numeric_column_token(token):
+                aliases.append(token)
+
+        for pattern, label in self.GENERIC_METRIC_PATTERNS:
+            if pattern.search(sample):
+                aliases.append(label)
+        return self._remove_composite_column_parts(self._dedupe_preserve_order(aliases))
 
     def _extract_comparison_aliases(self, query: str) -> list[str]:
         aliases: list[str] = []
@@ -393,51 +400,130 @@ class QueryRewriter:
         if compact in self._GENERIC_NUMERIC_STOPWORDS:
             return True
 
-        alias_compacts = {
-            re.sub(r"\s+", "", alias).lower()
-            for aliases in self.NUMERIC_COLUMN_ALIASES.values()
-            for alias in aliases
-        }
-        if compact in alias_compacts:
+        if re.fullmatch(r"(?:table|fig(?:ure)?|section|appendix)\s*\d+[a-z]?", normalized):
             return True
+        return False
 
-        parts = [
-            part.strip(". ")
-            for part in re.split(r"[/|,&+]+", compact)
-            if part.strip(". ")
+    def _split_column_phrase(self, phrase: str) -> list[str]:
+        text = re.sub(r"\s+", " ", str(phrase or "")).strip(" ,.;:[]{}，。；：、")
+        if not text:
+            return []
+        expanded: list[str] = []
+        expanded.extend(self._extract_generic_column_aliases(text))
+        pieces = [
+            part.strip(" ,.;:[]{}，。；：、")
+            for part in re.split(r"[、，,]|(?:\s+and\s+)|和", text, flags=re.IGNORECASE)
         ]
-        numeric_columns = {
-            "all",
-            "overall",
-            "total",
-            "many",
-            "medium",
-            "med",
-            "few",
-            "few-shot",
-            "tail",
-            "fid",
-            "acc",
-            "accuracy",
-            "d_gen",
-            "dgen",
-            "deltaacc",
-        }
-        return len(parts) >= 1 and all(part in numeric_columns for part in parts)
+        for piece in pieces:
+            piece = self._normalize_column_alias(piece)
+            if not piece:
+                continue
+            if not self._looks_like_column_alias(piece):
+                continue
+            if "/" in piece and not re.search(r"(?:\|\||∥)", piece):
+                expanded.extend(
+                    normalized
+                    for part in piece.split("/")
+                    if (normalized := self._normalize_column_alias(part))
+                )
+            else:
+                if not expanded or piece not in expanded:
+                    expanded.append(piece)
+        column_items = [item for item in expanded if item and not self._is_numeric_column_token(item)]
+        return self._remove_composite_column_parts(column_items)
 
-    def _extract_named_anchors(self, query: str) -> tuple[list[str], list[str], list[str]]:
+    def _looks_like_column_alias(self, value: str) -> bool:
+        sample = re.sub(r"\s+", " ", str(value or "")).strip(" ,.;:[]{}，。；：、")
+        if not sample:
+            return False
+        if sample in {"Acc", "FID", "All", "Many", "Med.", "Few", "||D_gen||", "ΔAcc/||D_gen||"}:
+            return True
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+\-/]*", sample):
+            return True
+        if re.fullmatch(r"[Δ∆△][A-Za-z0-9_.+\-/]*", sample):
+            return True
+        if re.fullmatch(r"[A-Za-z0-9_]+(?:[-_][A-Za-z0-9_]+)+", sample):
+            return True
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,8}", sample):
+            return True
+        return False
+
+    def _extract_generic_column_aliases(self, text: str) -> list[str]:
+        aliases: list[str] = []
+        patterns = (
+            r"\b(?:all|overall|total)\b|总体|整体",
+            r"\b(?:many)\b",
+            r"\b(?:medium|med\.?)\b|中等|中尾",
+            r"\b(?:few(?:-shot)?|tail)\b|少样本|尾类",
+            r"\b(?:accuracy|acc(?:\.?)?)\b|分类准确率|准确率",
+            r"\bfid\b",
+            r"(?:[Δ∆△]\s*acc(?:/\s*(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥))?)",
+            r"(?:\|\||∥)\s*d\s*[_ ]?gen\s*(?:\|\||∥)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                alias = self._normalize_column_name(match.group(0))
+                if alias and not self._is_numeric_column_token(alias):
+                    aliases.append(alias)
+        return self._dedupe_preserve_order(aliases)
+
+    def _normalize_column_name(self, value: str) -> str:
+        sample = re.sub(r"\s+", "", str(value or "").strip())
+        if not sample:
+            return ""
+        return self._normalize_column_alias(sample)
+
+    def _normalize_column_alias(self, value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip(" ,.;:[]{}，。；：、")
+        text = re.sub(
+            r"(?:\s*(?:分别)?(?:是|为)?多少(?:个百分点|分|点)?|\s*(?:子集|groups?|subsets?).*|\s*(?:提升|增加|高).*)$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:[]{}，。；：、")
+        text = re.sub(r"(?:分别)?(?:是|为)?多少$", "", text, flags=re.IGNORECASE).strip(" ,.;:[]{}，。；：、")
+        text = re.sub(r"(?:是多少|为多少|是什么|分别)$", "", text, flags=re.IGNORECASE).strip(" ,.;:[]{}，。；：、")
+        if not text:
+            return ""
+        normalized = re.sub(r"\s+", "", text).lower()
+        if normalized in {"准确率", "分类准确率", "accuracy", "acc", "acc."}:
+            return "Acc"
+        return text
+
+    def _remove_composite_column_parts(self, column_items: list[str]) -> list[str]:
+        expanded: list[str] = []
+        for item in column_items:
+            if "/" in item and not re.search(r"(?:\|\||∥)", item):
+                expanded.extend(
+                    normalized
+                    for part in re.split(r"[/|,&+]+", item)
+                    if (normalized := self._normalize_column_alias(part))
+                )
+                continue
+            expanded.append(item)
+        return self._dedupe_preserve_order(expanded)
+
+    def _extract_named_anchors(
+        self,
+        query: str,
+        column_aliases: Optional[list[str]] = None,
+    ) -> tuple[list[str], list[str], list[str]]:
         datasets: list[str] = []
         backbones: list[str] = []
         methods: list[str] = []
-
-        for match in re.finditer(r'\b(?:ResNet|DenseNet|ViT|Swin|ConvNeXt)[-_ ]?\d+\b', query, re.IGNORECASE):
-            token = match.group(0).strip()
-            canonical = re.sub(r'\s+', '-', token)
-            backbones.append(canonical)
+        column_keys = {
+            re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").lower())
+            for value in (column_aliases or [])
+            if str(value or "").strip()
+        }
+        for value in column_aliases or []:
+            for part in re.split(r"[/|,&+]+", str(value or "")):
+                part_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", part.lower())
+                if part_key:
+                    column_keys.add(part_key)
 
         token_pattern = re.compile(
-            r'\b(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:\s*\(\d+\s*experts?\))?',
-            re.IGNORECASE,
+            r'\b(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:\s*\(\d+\s*experts?\))?'
         )
         for match in token_pattern.finditer(query):
             token = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
@@ -445,24 +531,61 @@ class QueryRewriter:
                 continue
             lowered = token.lower()
             compact = lowered.replace(" ", "")
+            if "/" in token:
+                continue
             if compact in self._GENERIC_NUMERIC_STOPWORDS:
+                continue
+            token_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", lowered)
+            if token_key and token_key in column_keys:
                 continue
             if self._is_numeric_column_token(token):
                 continue
             if lowered.startswith("table"):
                 continue
-            if lowered in {"diffult", "crt", "adrw"} or re.search(r'[A-Z]', token):
-                if any(alias in lowered for alias in ("imagenet-lt", "cifar", "places-lt", "inaturalist", "inat")):
-                    datasets.append(token)
-                elif lowered.startswith(("resnet", "densenet", "vit", "swin", "convnext")):
-                    backbones.append(token)
-                else:
-                    methods.append(token)
+            if self._looks_like_dataset_anchor(token):
+                datasets.append(token)
+            elif self._looks_like_model_family_anchor(token):
+                backbones.append(token)
+            elif self._looks_like_method_anchor(token):
+                methods.append(token)
 
         return (
             self._dedupe_preserve_order(datasets),
             self._dedupe_preserve_order(backbones),
             self._dedupe_preserve_order(methods),
+        )
+
+    def _looks_like_dataset_anchor(self, token: str) -> bool:
+        sample = (token or "").strip()
+        if not sample:
+            return False
+        return bool(
+            re.search(r"(?:^|[-_])(?:LT|Dataset|Data)$", sample)
+            or re.search(r"(?:19|20)\d{2}$", sample)
+            or re.search(r"(?:^|[-_])(?:INat|Nat|Bench|Corpus|Set)(?:[-_]|$)", sample, re.IGNORECASE)
+        )
+
+    def _looks_like_method_anchor(self, token: str) -> bool:
+        sample = (token or "").strip()
+        if not sample:
+            return False
+        if self._looks_like_dataset_anchor(sample):
+            return False
+        if self._looks_like_model_family_anchor(sample):
+            return False
+        return bool(
+            re.search(r"[A-Z]", sample)
+            or re.search(r"[A-Za-z]+(?:[-_+/][A-Za-z0-9]+)+", sample)
+            or re.search(r"\(\s*\d+\s*[^)]*\)", sample)
+        )
+
+    def _looks_like_model_family_anchor(self, token: str) -> bool:
+        sample = (token or "").strip()
+        if not sample:
+            return False
+        return bool(
+            re.fullmatch(r"[A-Za-z][A-Za-z0-9]*[-_ ]?\d+[A-Za-z0-9]*", sample)
+            or re.fullmatch(r"[A-Za-z]+(?:Net|Former|Encoder|Decoder|Backbone)[-_ ]?\d+[A-Za-z0-9]*", sample)
         )
 
     def _dedupe_preserve_order(self, items: list[str]) -> list[str]:

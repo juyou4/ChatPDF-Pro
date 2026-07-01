@@ -222,6 +222,24 @@ if errorlevel 1 (
     echo   [✓] Java 已安装，ODL 去脏功能已启用
 )
 
+:: ==================== GraphRAG 依赖 (知识图谱) ====================
+echo   [▶] 检查 GraphRAG 依赖...
+
+python -c "import graspologic, networkx, tiktoken" >nul 2>&1
+if errorlevel 1 (
+    echo   [▶] 安装 GraphRAG 依赖 ^(graspologic/networkx/tiktoken，首次约 3-5 分钟^)...
+    python -m pip install -q "graspologic>=3.3.0" "networkx>=3.0" "tiktoken>=0.5.0" >nul 2>&1
+    python -c "import graspologic, networkx, tiktoken" >nul 2>&1
+    if errorlevel 1 (
+        echo   [!] GraphRAG 依赖安装失败，GraphRAG 知识图谱功能将不可用
+        echo   [!] 如需启用，请手动运行: pip install graspologic^>=3.3.0
+    ) else (
+        echo   [✓] GraphRAG 依赖安装成功
+    )
+) else (
+    echo   [✓] GraphRAG 依赖已安装
+)
+
 :: 前端依赖
 if not exist "frontend\node_modules" (
     echo   [▶] 首次运行，安装前端依赖 ^(需要1-2分钟^)...

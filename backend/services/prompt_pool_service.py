@@ -5,11 +5,14 @@
 import json
 import time
 import random
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class PromptStatus(str, Enum):
@@ -122,7 +125,7 @@ class PromptPoolService:
                 self.prompts[prompt.id] = prompt
                 
         except Exception as e:
-            print(f"[PromptPool] Failed to load prompts: {e}")
+            logger.warning("[PromptPool] Failed to load prompts: %s", e)
     
     def _load_config(self):
         """加载配置"""
@@ -142,7 +145,7 @@ class PromptPoolService:
                 switch_on_failure=data.get("switch_on_failure", True)
             )
         except Exception as e:
-            print(f"[PromptPool] Failed to load config: {e}")
+            logger.warning("[PromptPool] Failed to load config: %s", e)
     
     def _save_prompts(self):
         """保存提示词"""
@@ -185,7 +188,7 @@ class PromptPoolService:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            print(f"[PromptPool] Failed to save prompts: {e}")
+            logger.warning("[PromptPool] Failed to save prompts: %s", e)
     
     def _save_config(self):
         """保存配置"""
@@ -194,7 +197,7 @@ class PromptPoolService:
             with open(self.storage_path / "config.json", 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[PromptPool] Failed to save config: {e}")
+            logger.warning("[PromptPool] Failed to save config: %s", e)
     
     def add_prompt(self, name: str, system_prompt: str, user_prompt_template: str,
                    description: str = "", category: str = "general",
@@ -333,13 +336,17 @@ class PromptPoolService:
             # 恢复健康状态
             if health.status == PromptStatus.DEGRADED:
                 health.status = PromptStatus.HEALTHY
-                print(f"[PromptPool] Prompt {prompt.name} recovered to healthy")
+                logger.info("[PromptPool] Prompt %s recovered to healthy", prompt.name)
         else:
             health.failure_count += 1
             health.consecutive_failures += 1
             health.last_failure = now
             
-            print(f"[PromptPool] Prompt {prompt.name} failed, consecutive: {health.consecutive_failures}")
+            logger.warning(
+                "[PromptPool] Prompt %s failed, consecutive: %s",
+                prompt.name,
+                health.consecutive_failures,
+            )
             
             # 更新健康状态
             self._update_health_status(prompt_id)
@@ -364,11 +371,15 @@ class PromptPoolService:
             health.deactivation_reason = f"连续失败{health.consecutive_failures}次"
             prompt.is_active = False
             
-            print(f"[PromptPool] Prompt {prompt.name} deactivated: {health.deactivation_reason}")
+            logger.warning(
+                "[PromptPool] Prompt %s deactivated: %s",
+                prompt.name,
+                health.deactivation_reason,
+            )
             
         elif health.consecutive_failures >= config.max_consecutive_failures // 2:
             health.status = PromptStatus.DEGRADED
-            print(f"[PromptPool] Prompt {prompt.name} degraded")
+            logger.warning("[PromptPool] Prompt %s degraded", prompt.name)
     
     def check_resurrection(self):
         """检查并复活失活的提示词"""
@@ -393,7 +404,7 @@ class PromptPoolService:
                 prompt.health_status.deactivated_at = None
                 prompt.health_status.deactivation_reason = None
                 
-                print(f"[PromptPool] Prompt {prompt.name} resurrected")
+                logger.info("[PromptPool] Prompt %s resurrected", prompt.name)
         
         self._save_prompts()
     
