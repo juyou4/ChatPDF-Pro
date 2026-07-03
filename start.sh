@@ -1,5 +1,13 @@
 #!/bin/bash
 
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$BASE_DIR" || exit 1
+
+APP_VERSION="$(grep -E '"version"' version.json 2>/dev/null | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+if [ -z "$APP_VERSION" ]; then
+    APP_VERSION="3.0.2"
+fi
+
 # 颜色和样式定义
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -13,10 +21,12 @@ clear
 
 # 打印 Banner
 echo -e "${BLUE}${BOLD}"
-cat << "EOF"
+cat << EOF
   ╔═══════════════════════════════════════╗
   ║                                       ║
-  ║     ChatPDF Pro v2.0.2                ║
+EOF
+printf "  ║%-39s║\n" "     ChatPDF Pro v${APP_VERSION}"
+cat << EOF
   ║     智能文档助手                      ║
   ║                                       ║
   ╚═══════════════════════════════════════╝
@@ -36,11 +46,80 @@ show_error() {
     echo -e "\r${RED}  ✗${NC} $1"
 }
 
+command_exists() {
+    command -v "$1" > /dev/null 2>&1
+}
+
+python_version() {
+    "$1" -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>/dev/null
+}
+
+python_is_supported() {
+    "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+}
+
+select_python() {
+    local candidates=()
+    if [ -n "${PYTHON:-}" ]; then
+        candidates+=("$PYTHON")
+    fi
+    candidates+=(
+        "python3.12"
+        "python3.11"
+        "python3.10"
+        "$HOME/miniforge3/bin/python"
+        "$HOME/miniconda3/bin/python"
+        "$HOME/anaconda3/bin/python"
+        "/opt/homebrew/bin/python3"
+        "/usr/local/bin/python3"
+        "python3"
+        "python"
+    )
+
+    local candidate resolved
+    for candidate in "${candidates[@]}"; do
+        if [[ "$candidate" == */* ]]; then
+            [ -x "$candidate" ] || continue
+            resolved="$candidate"
+        else
+            resolved="$(command -v "$candidate" 2>/dev/null || true)"
+            [ -n "$resolved" ] || continue
+        fi
+
+        if python_is_supported "$resolved"; then
+            PYTHON_CMD="$resolved"
+            return 0
+        fi
+    done
+    return 1
+}
+
+node_is_supported() {
+    node - <<'NODE' >/dev/null 2>&1
+const parts = process.versions.node.split('.').map(Number);
+const [major, minor, patch] = parts;
+const ok =
+  (major === 20 && (minor > 19 || (minor === 19 && patch >= 0))) ||
+  (major === 22 && (minor > 12 || (minor === 12 && patch >= 0))) ||
+  major > 22;
+process.exit(ok ? 0 : 1);
+NODE
+}
+
+cleanup_backend() {
+    if [ -n "${BACKEND_PID:-}" ] && ps -p "$BACKEND_PID" > /dev/null 2>&1; then
+        kill "$BACKEND_PID" 2>/dev/null
+    fi
+}
+
 # ==================== 自动更新 ====================
 show_progress "检查代码更新..."
 
 # 获取当前分支名
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 
 # 只在main分支时自动更新，其他分支跳过
 if [ "$CURRENT_BRANCH" = "main" ]; then
@@ -51,31 +130,58 @@ if [ "$CURRENT_BRANCH" = "main" ]; then
         show_success "已是最新版本 (或更新跳过)"
     fi
 else
-    show_success "当前在分支 $CURRENT_BRANCH (跳过自动更新)"
+    if [ -n "$CURRENT_BRANCH" ]; then
+        show_success "当前在分支 $CURRENT_BRANCH (跳过自动更新)"
+    else
+        show_success "跳过更新检查"
+    fi
 fi
 
 # ==================== 环境检查 ====================
 show_progress "检查运行环境..."
 
 # 检查 Python
-if ! command -v python3 &> /dev/null; then
-    show_error "未找到 Python3，请先安装"
+if ! select_python; then
+    show_error "未找到 Python 3.10+，请先安装或设置 PYTHON=/path/to/python"
     exit 1
 fi
 
 # 检查 Node.js
-if ! command -v node &> /dev/null; then
+if ! command_exists node; then
     show_error "未找到 Node.js，请先安装"
     exit 1
 fi
 
-show_success "环境检查通过"
+if ! command_exists npm; then
+    show_error "未找到 npm，请先安装 Node.js/npm"
+    exit 1
+fi
+
+if ! node_is_supported; then
+    show_error "Node.js 版本不兼容，当前 $(node --version)，需要 ^20.19.0 或 >=22.12.0"
+    exit 1
+fi
+
+if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
+    show_progress "安装 pip..."
+    "$PYTHON_CMD" -m ensurepip --upgrade > /dev/null 2>&1
+fi
+
+if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
+    show_error "当前 Python 缺少 pip：$PYTHON_CMD"
+    exit 1
+fi
+
+show_success "环境检查通过 (Python $(python_version "$PYTHON_CMD"), Node $(node --version))"
 
 # ==================== 清理旧进程 ====================
 show_progress "清理旧进程..."
 
 # 清理端口 8000
-lsof -ti :8000 | xargs kill -9 2>/dev/null
+PORT_PIDS=$(lsof -ti :8000 2>/dev/null || true)
+if [ -n "$PORT_PIDS" ]; then
+    echo "$PORT_PIDS" | xargs kill -9 2>/dev/null
+fi
 pkill -f "python.*backend/app.py" 2>/dev/null
 find backend -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
 
@@ -85,15 +191,17 @@ show_success "清理完成"
 show_progress "检查依赖..."
 
 # 后端依赖（静默安装）
-pip3 install -q -r backend/requirements.txt 2>&1 | grep -i "error" || true
+if ! "$PYTHON_CMD" -m pip install -q -r backend/requirements.txt; then
+    echo -e "${YELLOW}  [!] 后端依赖安装出现警告，尝试继续...${NC}"
+fi
 
 # ==================== 安装 OCR 依赖 ====================
 show_progress "检查 OCR 依赖..."
 
 # 检查 pdf2image 是否已安装
-if ! python3 -c "import pdf2image" 2>/dev/null; then
+if ! "$PYTHON_CMD" -c "import pdf2image" 2>/dev/null; then
     show_progress "安装 OCR Python 库..."
-    pip3 install -q pdf2image pytesseract pillow 2>/dev/null
+    "$PYTHON_CMD" -m pip install -q pdf2image pytesseract pillow 2>/dev/null
 fi
 
 # OCR 工具目录
@@ -163,7 +271,7 @@ if [ -f "$MODEL_FILE" ]; then
 else
     show_progress "下载 DocLayout-YOLO 模型 (~30MB)..."
     # 优先尝试 HF 镜像（国内加速）
-    HF_ENDPOINT=https://hf-mirror.com python3 -c "
+    HF_ENDPOINT=https://hf-mirror.com "$PYTHON_CMD" -c "
 from huggingface_hub import hf_hub_download
 import shutil
 p = hf_hub_download(repo_id='opendatalab/PDF-Extract-Kit-1.0', filename='models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt')
@@ -198,10 +306,10 @@ fi
 show_progress "检查 OpenDataLoader PDF 解析器..."
 
 # 检查并安装 opendataloader_pdf Python 包
-if ! python3 -c "import opendataloader_pdf" 2>/dev/null; then
+if ! "$PYTHON_CMD" -c "import opendataloader_pdf" 2>/dev/null; then
     show_progress "安装 opendataloader-pdf..."
-    pip3 install -q opendataloader-pdf 2>/dev/null
-    if python3 -c "import opendataloader_pdf" 2>/dev/null; then
+    "$PYTHON_CMD" -m pip install -q opendataloader-pdf 2>/dev/null
+    if "$PYTHON_CMD" -c "import opendataloader_pdf" 2>/dev/null; then
         show_success "opendataloader-pdf 安装成功"
     else
         echo -e "${YELLOW}  [!] opendataloader-pdf 安装失败，将使用 pdfplumber 解析${NC}"
@@ -242,10 +350,10 @@ fi
 # ==================== GraphRAG 依赖 (知识图谱) ====================
 show_progress "检查 GraphRAG 依赖..."
 
-if ! python3 -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
+if ! "$PYTHON_CMD" -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
     show_progress "安装 GraphRAG 依赖 (graspologic/networkx/tiktoken，首次约 3-5 分钟)..."
-    pip3 install -q "graspologic>=3.3.0" "networkx>=3.0" "tiktoken>=0.5.0" 2>/dev/null
-    if python3 -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
+    "$PYTHON_CMD" -m pip install -q "graspologic>=3.3.0" "networkx>=3.0" "tiktoken>=0.5.0" 2>/dev/null
+    if "$PYTHON_CMD" -c "import graspologic, networkx, tiktoken" 2>/dev/null; then
         show_success "GraphRAG 依赖安装成功"
     else
         echo -e "${YELLOW}  [!] GraphRAG 依赖安装失败，GraphRAG 知识图谱功能将不可用${NC}"
@@ -271,15 +379,34 @@ show_success "依赖检查完成"
 
 # ==================== 启动服务 ====================
 show_progress "启动后端服务..."
-nohup python3 backend/app.py > /dev/null 2>&1 &
+BACKEND_LOG="$BASE_DIR/backend/backend_startup.log"
+nohup "$PYTHON_CMD" backend/app.py > "$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
-sleep 2
+
+trap cleanup_backend EXIT INT TERM
 
 # 检查后端是否成功启动
-if ps -p $BACKEND_PID > /dev/null; then
+BACKEND_READY=0
+for i in $(seq 1 90); do
+    if command_exists curl && curl -fsS --max-time 2 http://127.0.0.1:8000/health > /dev/null 2>&1; then
+        BACKEND_READY=1
+        break
+    fi
+    if ! ps -p "$BACKEND_PID" > /dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if [ "$BACKEND_READY" = "1" ]; then
     show_success "后端服务启动成功 (PID: $BACKEND_PID)"
 else
-    show_error "后端启动失败"
+    show_error "后端启动失败或超时"
+    if [ -f "$BACKEND_LOG" ]; then
+        echo ""
+        echo -e "${YELLOW}  后端错误日志:${NC}"
+        tail -80 "$BACKEND_LOG"
+    fi
     exit 1
 fi
 
@@ -287,7 +414,7 @@ show_progress "启动前端服务..."
 cd frontend
 
 # 延迟打开浏览器（等待前端服务完全启动）
-(sleep 3 && python3 -m webbrowser http://localhost:3000 2>/dev/null || \
+(sleep 3 && "$PYTHON_CMD" -m webbrowser http://localhost:3000 2>/dev/null || \
  open http://localhost:3000 2>/dev/null || \
  xdg-open http://localhost:3000 2>/dev/null) &
 
@@ -302,11 +429,11 @@ echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
-# 启动前端（过滤大部分输出，只保留关键信息）
-npm run dev 2>&1 | grep -E "Local:|Network:|ready in|error|Error|ERROR" || npm run dev
+# 启动前端（前台运行，按 Ctrl+C 停止后会清理后端）
+npm run dev
 
 # ==================== 清理 ====================
 echo ""
 show_progress "正在停止服务..."
-kill $BACKEND_PID 2>/dev/null
+cleanup_backend
 show_success "已停止所有服务"
