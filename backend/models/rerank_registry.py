@@ -28,7 +28,7 @@ RERANK_PROVIDERS = {
     "aliyun": {
         "name": "Aliyun Rerank",
         "requires_api_key": True,
-        "default_model": "gte-rerank-v2",
+        "default_model": "qwen3-rerank",
         "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/rerank"
     }
 }

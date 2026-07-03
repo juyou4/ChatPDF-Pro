@@ -40,6 +40,10 @@ def get_model_provider(model_id: str) -> str:
         return "zhipu"
     if "minimax" in model_id_lower:
         return "minimax"
+    if "deepseek" in model_id_lower:
+        return "deepseek"
+    if "grok" in model_id_lower:
+        return "grok"
     if "qwen" in model_id_lower or "alibaba" in model_id_lower:
         return "openai"
     if model_id_lower.startswith("gpt") or model_id_lower.startswith("text-embedding"):
@@ -125,17 +129,20 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^(o3|o4)(-|$)', lower_id):
         # OpenAI o3/o4 推理模型同样支持视觉输入
         tags.append("vision")
-    elif re.search(r'^claude-(3|sonnet-4|opus-4|haiku-3|haiku-4)', lower_id):
-        # Anthropic Claude 3+ 全系（含 claude-haiku-3.x）均支持视觉
+    elif re.search(r'^claude-(3|fable|mythos|sonnet|opus|haiku)', lower_id):
+        # Anthropic Claude 3+ / 4 / 5 系列均支持视觉
         tags.append("vision")
     elif re.search(r'^gemini-(2|[3-9])', lower_id):
         # Google Gemini 2+ 系列均支持视觉
         tags.append("vision")
-    elif re.search(r'^(qwen-vl|qwen-max|qwen3\.5)', lower_id):
-        # 阿里云 Qwen-VL、Qwen-Max 和 Qwen3.5 系列（Qwen3.5 原生多模态）
+    elif re.search(r'^(qwen-vl|qwen-max|qwen3\.[567])', lower_id):
+        # 阿里云 Qwen-VL、Qwen-Max 和 Qwen3.5+ 系列
         tags.append("vision")
     elif re.search(r'^(grok-vision|grok-4)', lower_id):
         # xAI Grok 视觉模型和 Grok-4 系列
+        tags.append("vision")
+    elif re.search(r'^grok-build', lower_id):
+        # xAI Grok Build 系列
         tags.append("vision")
     elif re.search(r'^(doubao-1\.5-pro|doubao-seed)', lower_id):
         # 字节跳动豆包：1.5-Pro 及全部 Seed 系列（Seed 均为多模态）
@@ -145,6 +152,9 @@ def infer_model_tags(model_id: str) -> list[str]:
         tags.append("vision")
     elif re.search(r'kimi-(latest|k2)', lower_id):
         # Kimi 最新系 / K2 系列支持视觉输入
+        tags.append("vision")
+    elif re.search(r'^minimax-m3', lower_id):
+        # MiniMax M3 多模态旗舰
         tags.append("vision")
 
     # 中文优化标签
@@ -169,26 +179,29 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'gpt-5', lower_id):
         # OpenAI GPT-5 系列（gpt-5, gpt-5-mini, gpt-5-nano）
         tags.append("reasoning")
-    elif re.search(r'glm-4\.[5-9]', lower_id):
-        # 智谱 GLM-4.5+ 系列支持思考模式
+    elif re.search(r'glm-4\.[5-9]|glm-5', lower_id):
+        # 智谱 GLM-4.5+ / GLM-5 系列支持思考模式
         tags.append("reasoning")
-    elif re.search(r'minimax-m2', lower_id):
-        # MiniMax M2 系列原生支持思考
+    elif re.search(r'minimax-m[23]', lower_id):
+        # MiniMax M2/M3 系列原生支持思考
         tags.append("reasoning")
-    elif "deepseek-r" in lower_id:
-        # DeepSeek-R1 等推理模型
+    elif "deepseek-r" in lower_id or "deepseek-v4" in lower_id:
+        # DeepSeek-R1 / V4 等推理模型
         tags.append("reasoning")
-    elif re.search(r'^grok-[34]', lower_id):
-        # xAI Grok 3/4 系列支持推理能力
+    elif re.search(r'^(grok-[34]|grok-build)', lower_id):
+        # xAI Grok 3/4/Build 系列支持推理能力
         tags.append("reasoning")
     elif re.search(r'kimi-thinking-preview', lower_id):
         # Kimi Thinking Preview 支持 Thinking 推理模式
         tags.append("reasoning")
-    elif re.search(r'qwen3(\.5)?', lower_id):
-        # Qwen3 / Qwen3.5 系列支持推理
+    elif re.search(r'kimi-k2(\.\d+)?', lower_id):
+        # Kimi K2 系列支持思考/推理
         tags.append("reasoning")
-    elif re.search(r'minimax-m2', lower_id):
-        # MiniMax M2 系列原生支持思考
+    elif re.search(r'qwen3(\.\d+)?', lower_id):
+        # Qwen3 / Qwen3.x 系列支持推理
+        tags.append("reasoning")
+    elif re.search(r'claude-(fable|mythos|opus|sonnet|haiku)-(4|5)', lower_id):
+        # Claude 4/5 系列支持扩展思考能力
         tags.append("reasoning")
 
     return tags

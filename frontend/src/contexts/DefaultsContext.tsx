@@ -16,51 +16,92 @@ interface DefaultsContextType {
 
 const DefaultsContext = createContext<DefaultsContextType | undefined>(undefined)
 
-const CONFIG_VERSION = '4.0'
+const CONFIG_VERSION = '4.1'
 const STORAGE_KEY = 'defaultModels'
 const VERSION_KEY = 'defaultModelsVersion'
 
 const DEPRECATED_EMBEDDING_MODEL_ALIASES: Record<string, string> = {
     'Qwen/Qwen-Embedding-8B': 'Qwen/Qwen3-Embedding-8B',
     'text-embedding-ada-002': 'text-embedding-3-small',
+    'text-embedding-v3': 'text-embedding-v4',
     'embo-01': 'minimax-embedding-v2',
 }
 
 const DEPRECATED_ASSISTANT_MODEL_ALIASES: Record<string, string> = {
-    'gpt-5.4': 'gpt-5.2',
-    'gpt-5.4-pro': 'gpt-5.2',
-    'gpt-5.4-mini': 'gpt-5-mini',
-    'gpt-5.4-nano': 'gpt-5-nano',
-    'Doubao-Seed-1.6-lite': 'doubao-seed-2-0-lite-260215',
-    'doubao-seed-1.6-lite': 'doubao-seed-2-0-lite-260215',
-    'doubao-seed-2-0-pro': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-2.0-pro': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-2-0-lite': 'doubao-seed-2-0-lite-260215',
-    'doubao-seed-2.0-lite': 'doubao-seed-2-0-lite-260215',
-    'doubao-seed-2-0-mini': 'doubao-seed-2-0-mini-260215',
-    'doubao-seed-2.0-mini': 'doubao-seed-2-0-mini-260215',
-    'doubao-seed-2-0-code-preview-260215': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-2.0-code-preview': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-code-preview': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-code-preview-latest': 'doubao-seed-2-0-pro-260215',
-    'claude-haiku-4-5': 'claude-3-5-haiku-20241022',
-    'claude-opus-4-6': 'claude-opus-4-1-20250805',
-    'claude-sonnet-4-6': 'claude-sonnet-4-20250514',
-    'claude-opus-4-5': 'claude-opus-4-20250514',
-    'claude-sonnet-4-5': 'claude-sonnet-4-20250514',
-    'claude-haiku-3-5': 'claude-3-5-haiku-20241022',
-    'gemini-3.1-pro': 'gemini-3-pro-preview',
-    'gemini-3.1-pro-preview': 'gemini-3-pro-preview',
-    'gemini-3-flash': 'gemini-3-flash-preview',
-    'kimi-k2.5': 'kimi-thinking-preview',
-    'kimi-k2': 'kimi-k2-0905-preview',
-    'grok-4.20': 'grok-4.20-beta-latest-non-reasoning',
-    'grok-4-1-fast': 'grok-4-1-fast-reasoning',
-    'MiniMax-Text-01': 'MiniMax-M2.5',
-    'abab6.5s-chat': 'MiniMax-M2.1',
+    'gpt-5.2': 'gpt-5.5',
+    'gpt-5.1': 'gpt-5.5',
+    'gpt-5-mini': 'gpt-5.4-mini',
+    'gpt-5-nano': 'gpt-5.4-nano',
+    'Doubao-Seed-1.6-lite': 'doubao-seed-2-1-turbo-260628',
+    'doubao-seed-1.6-lite': 'doubao-seed-2-1-turbo-260628',
+    'doubao-seed-2-0-pro': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2.0-pro': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-0-pro-260215': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-0-lite': 'doubao-seed-2-0-lite-260428',
+    'doubao-seed-2.0-lite': 'doubao-seed-2-0-lite-260428',
+    'doubao-seed-2-0-lite-260215': 'doubao-seed-2-0-lite-260428',
+    'doubao-seed-2-0-mini': 'doubao-seed-2-0-mini-260428',
+    'doubao-seed-2.0-mini': 'doubao-seed-2-0-mini-260428',
+    'doubao-seed-2-0-mini-260215': 'doubao-seed-2-0-mini-260428',
+    'doubao-seed-2-0-code-preview-260215': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2.0-code-preview': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-code-preview': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-code-preview-latest': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-1-pro': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2.1-pro': 'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-1-turbo': 'doubao-seed-2-1-turbo-260628',
+    'doubao-seed-2.1-turbo': 'doubao-seed-2-1-turbo-260628',
+    'claude-fable-5-20260701': 'claude-fable-5',
+    'claude-opus-4-8-20260219': 'claude-opus-4-8',
+    'claude-sonnet-5-20260614': 'claude-sonnet-5',
+    'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
+    'claude-opus-4-6': 'claude-opus-4-8',
+    'claude-sonnet-4-6': 'claude-sonnet-5',
+    'claude-opus-4-5': 'claude-opus-4-8',
+    'claude-sonnet-4-5': 'claude-sonnet-5',
+    'claude-opus-4-1-20250805': 'claude-opus-4-8',
+    'claude-opus-4-20250514': 'claude-opus-4-8',
+    'claude-sonnet-4-20250514': 'claude-sonnet-5',
+    'claude-3-7-sonnet-20250219': 'claude-sonnet-5',
+    'claude-haiku-3-5': 'claude-haiku-4-5-20251001',
+    'claude-3-5-haiku-20241022': 'claude-haiku-4-5-20251001',
+    'gemini-3-pro-preview': 'gemini-3.1-pro-preview',
+    'gemini-3.1-pro': 'gemini-3.1-pro-preview',
+    'gemini-3-flash': 'gemini-3.5-flash',
+    'gemini-3-flash-preview': 'gemini-3.5-flash',
+    'kimi-latest': 'kimi-k2.6',
+    'kimi-thinking-preview': 'kimi-k2.6',
+    'kimi-k2-0905-preview': 'kimi-k2.6',
+    'kimi-k2-turbo-preview': 'kimi-k2.6',
+    'kimi-k2': 'kimi-k2.6',
+    'grok-4.20': 'grok-4.3',
+    'grok-4.20-beta-latest-non-reasoning': 'grok-4.3',
+    'grok-4-1-fast': 'grok-4.3',
+    'grok-4-1-fast-reasoning': 'grok-4.3',
+    'MiniMax-Text-01': 'MiniMax-M3',
+    'minimax-text-01': 'MiniMax-M3',
+    'MiniMax-M2.5': 'MiniMax-M3',
+    'minimax-m2.5': 'MiniMax-M3',
+    'abab6.5s-chat': 'MiniMax-M3',
+    'glm-5': 'glm-5.2',
+    'glm-4.7': 'glm-5.2',
+    'glm-4.6': 'glm-5.2',
+    'glm-4.5': 'glm-5.2',
     'glm-4-air': 'glm-4-air-250414',
-    'deepseek-ai/DeepSeek-V3': 'deepseek-ai/DeepSeek-V3.2',
+    'qwen3-max': 'qwen3.7-max',
+    'qwen3.5-plus': 'qwen3.7-plus',
+    'qwen3.5-flash': 'qwen3.6-flash',
+    'qwen-max': 'qwen3.7-max',
+    'qwen-plus': 'qwen3.7-plus',
+    'deepseek-chat': 'deepseek-v4-flash',
+    'deepseek-reasoner': 'deepseek-v4-pro',
+    'deepseek-v3.2': 'deepseek-v4-flash',
+    'deepseek-ai/DeepSeek-V3': 'deepseek-ai/DeepSeek-V4-Flash',
+    'deepseek-ai/DeepSeek-V3.2': 'deepseek-ai/DeepSeek-V4-Flash',
+    'deepseek-ai/deepseek-v3': 'deepseek-ai/DeepSeek-V4-Flash',
+    'deepseek-ai/deepseek-v3.2': 'deepseek-ai/DeepSeek-V4-Flash',
     'Qwen/Qwen3-235B-A22B': 'Qwen/Qwen3-32B',
+    'qwen/qwen3-235b-a22b': 'Qwen/Qwen3-32B',
 }
 
 /**
@@ -71,7 +112,9 @@ const normalizeEmbeddingKey = (value?: string | null) => {
     if (!value) return undefined
 
     const mapModelId = (modelId: string) =>
-        DEPRECATED_EMBEDDING_MODEL_ALIASES[modelId] || modelId
+        DEPRECATED_EMBEDDING_MODEL_ALIASES[modelId] ||
+        DEPRECATED_EMBEDDING_MODEL_ALIASES[modelId.toLowerCase()] ||
+        modelId
 
     // provider:modelId 格式
     if (value.includes(':')) {
@@ -106,7 +149,7 @@ export const normalizeAssistantKey = (value?: string | null) => {
 const INITIAL_DEFAULTS: DefaultModels = {
     embeddingModel: 'local:all-MiniLM-L6-v2',  // 本地模型作为默认（带前缀）
     rerankModel: undefined,                    // rerank为可选
-    assistantModel: 'deepseek:deepseek-chat',  // 默认 Chat 模型
+    assistantModel: 'deepseek:deepseek-v4-pro',  // 默认 Chat 模型
 }
 
 /**

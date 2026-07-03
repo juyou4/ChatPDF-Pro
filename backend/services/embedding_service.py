@@ -571,6 +571,7 @@ def _select_fallback_embedding_model(
         "Qwen/Qwen3-Embedding-8B",
         "text-embedding-3-small",
         "text-embedding-3-large",
+        "text-embedding-v4",
         "text-embedding-v3",
         "minimax-embedding-v2",
         "deepseek-embedding-v1",

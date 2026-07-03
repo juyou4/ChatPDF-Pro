@@ -137,7 +137,7 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
                 { nil: undefined }
             ),
             assistantModel: fc.option(
-                fc.constantFrom('deepseek:deepseek-chat', 'openai:gpt-4o', 'moonshot:moonshot-v1-8k'),
+                fc.constantFrom('deepseek:deepseek-v4-pro', 'openai:gpt-5.5', 'moonshot:kimi-k2.6'),
                 { nil: undefined }
             ),
             rerankModel: fc.option(
@@ -180,6 +180,7 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
         const result = migrateDefaults(oldData)
         expect(result).not.toBeNull()
         expect(result?.embeddingModel).toBe('openai:text-embedding-3-small')
+        expect(result?.assistantModel).toBe('deepseek:deepseek-v4-flash')
 
         const oldData2 = JSON.stringify({
             embeddingModel: 'minimax:embo-01',
@@ -188,6 +189,7 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
         const result2 = migrateDefaults(oldData2)
         expect(result2).not.toBeNull()
         expect(result2?.embeddingModel).toBe('minimax:minimax-embedding-v2')
+        expect(result2?.assistantModel).toBe('deepseek:deepseek-v4-flash')
     })
 })
 

@@ -77,7 +77,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
   // ========== 深度思考相关 ==========
   // 已知支持通过参数开启思考模式的 provider（非推理模型也能开启）
   const THINKING_CAPABLE_PROVIDERS = new Set([
-    'deepseek',  // deepseek-chat 支持 thinking 参数
+    'deepseek',  // DeepSeek V4 支持 thinking 参数
     'zhipu',     // GLM-4.5+ 支持 thinking 参数
     'openai',    // GPT-5/o3/o4 支持 reasoning_effort
     'minimax',   // M2 系列支持 reasoning_split
@@ -100,7 +100,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
       'o3', 'o4-mini', 'o3-mini', 'o1', 'o1-mini',  // OpenAI 推理系列
       'deepseek-reasoner',                             // DeepSeek R1
       'kimi-thinking-preview',                         // Kimi Thinking Preview
-      'grok-4', 'grok-4-1-fast-reasoning', 'grok-3', 'grok-3-mini',  // Grok 推理系列
+      'grok-4.3', 'grok-build-0.1', 'grok-4', 'grok-4-1-fast-reasoning', 'grok-3', 'grok-3-mini',  // Grok 推理系列
     ])
     if (nativeReasoningIds.has(currentModel.id)) return true
     // 硅基流动托管的推理模型

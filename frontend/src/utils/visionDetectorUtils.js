@@ -15,20 +15,22 @@
 export const VISION_CAPABLE_RULES = {
   // OpenAI: GPT-4o/4-Turbo/4.1/5 系列 + o3/o4 推理模型均支持视觉
   openai: /^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)/i,
-  // Anthropic: Claude 3 系列全系 + Claude 4 Sonnet/Opus/Haiku（含 haiku-3.x）
-  anthropic: /^(claude-3|claude-sonnet-4|claude-opus-4|claude-haiku-3|claude-haiku-4)/i,
+  // Anthropic: Claude 3+、Claude 4/5、Fable/Mythos/Opus/Sonnet/Haiku 系列
+  anthropic: /^(claude-3|claude-(fable|mythos|sonnet|opus|haiku))/i,
   // Google Gemini 2+ 全系均支持视觉
   gemini: /^gemini-(2|[3-9])/i,
   // 通义千问 VL 和 Max 系列
   qwen: /^(qwen-vl|qwen-max)/i,
+  // 阿里云通义 3.x 多模态系列
+  aliyun: /^(qwen-vl|qwen-max|qwen3\.[567]|qwen3\.5-omni)/i,
   // xAI Grok 4 系列及专用视觉模型
   grok: /^(grok-vision|grok-4)/i,
-  // MiniMax abab6.5 系列
-  minimax: /^abab6\.5/i,
+  // MiniMax M3 / abab6.5 系列
+  minimax: /^(MiniMax-M3|abab6\.5)/i,
   // 豆包：1.5-Pro 系列及全部 Seed 系列（Seed 1.x / 2.0 Pro / Lite / Mini 均为多模态通用模型）
   doubao: /^(doubao-1\.5-pro|doubao-seed)/i,
-  // Moonshot：moonshot-v1 系列支持图片输入
-  moonshot: /^moonshot-v1/i,
+  // Moonshot：moonshot-v1 / Kimi K2 多模态系列支持图片输入
+  moonshot: /^(moonshot-v1|kimi-k2)/i,
 }
 
 /**

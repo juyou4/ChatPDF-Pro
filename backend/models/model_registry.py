@@ -41,6 +41,16 @@ EMBEDDING_MODELS = {
         "description": "Best value"
     },
     # Alibaba
+    "text-embedding-v4": {
+        "name": "Alibaba: text-embedding-v4",
+        "provider": "openai",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "embedding_endpoint": "/embeddings",
+        "dimension": 1024,
+        "max_tokens": 8192,
+        "price": "CNY 0.000514/1K tokens",
+        "description": "Qwen3-Embedding based multilingual embedding model"
+    },
     "text-embedding-v3": {
         "name": "Alibaba: text-embedding-v3",
         "provider": "openai",
@@ -50,6 +60,16 @@ EMBEDDING_MODELS = {
         "max_tokens": 8192,
         "price": "$0.007/M tokens",
         "description": "Chinese optimized, cheapest"
+    },
+    "qwen3-rerank": {
+        "name": "Alibaba: qwen3-rerank",
+        "provider": "openai",
+        "type": "rerank",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "rerank_endpoint": "/rerank",
+        "max_tokens": 4000,
+        "price": "CNY 0.0005/1K tokens",
+        "description": "Qwen3 multilingual rerank model"
     },
     # SiliconFlow
     "BAAI/bge-m3": {

@@ -86,13 +86,15 @@ export function detectModelTags(modelId: string): string[] {
         /vision|visual|\bvl\b|vl-|vlm|multimodal/.test(id) ||
         /gpt-4o|gpt-4\.1|gpt-5/.test(id) ||
         /\bo[34]\b/.test(id) ||
-        /claude-(3|opus|sonnet|haiku)/.test(id) ||
+        /claude-(3|opus|sonnet|haiku|fable|mythos)/.test(id) ||
         /gemini/.test(id) ||
         /grok-[34]/.test(id) ||
+        /grok-build/.test(id) ||
         /kimi-(latest|k2)/.test(id) ||
         /doubao-seed/.test(id) ||
         /moonshot-v1/.test(id) ||
-        /qwen3\.5/.test(id)
+        /qwen3\.[567]/.test(id) ||
+        /minimax-m3/.test(id)
     if (hasVision) tags.push('vision')
 
     // 推理能力检测（含思维链/深度推理）
@@ -100,18 +102,18 @@ export function detectModelTags(modelId: string): string[] {
         /reasoning|reasoner/.test(id) ||
         /\bthink(ing)?\b/.test(id) ||
         /\bqwq\b|\bqvq\b/.test(id) ||
-        /deepseek-r\d|deepseek-reasoner/.test(id) ||
+        /deepseek-r\d|deepseek-reasoner|deepseek-v4/.test(id) ||
         /\bo[1-9](-mini|-preview|-pro)?\b/.test(id) ||
         /gemini-2\.5|gemini-3/.test(id) ||
         /grok-[34]/.test(id) ||
-        /grok-3/.test(id) ||
-        /claude-(opus|sonnet)-4/.test(id) ||
+        /grok-build/.test(id) ||
+        /claude-(fable|mythos|opus|sonnet|haiku)-(4|5)/.test(id) ||
         /glm-[45]\.\d|glm-5/.test(id) ||
         /doubao-seed-2/.test(id) ||
         /kimi-thinking-preview/.test(id) ||
-        /kimi-k2\.5|k2\.5/.test(id) ||
-        /qwen3(\.5)?/.test(id) ||
-        /minimax-m2/.test(id)
+        /kimi-k2(\.\d+)?|k2\.\d+/.test(id) ||
+        /qwen3(\.\d+)?/.test(id) ||
+        /minimax-m[23]/.test(id)
     if (hasReasoning) tags.push('reasoning')
 
     return tags
