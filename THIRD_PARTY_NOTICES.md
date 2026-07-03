@@ -53,6 +53,7 @@ ChatPDF 使用的主要开源依赖及其许可证：
 | Vite | MIT |
 | Tailwind CSS | MIT |
 | mermaid | MIT |
+| @lobehub/icons-static-svg（Provider logo 资源） | MIT |
 
 > 注意：PyMuPDF 使用 AGPL-3.0 许可证。如果 ChatPDF 作为网络服务部署，
 > 需要遵守 AGPL-3.0 的源代码公开要求（Section 13）。

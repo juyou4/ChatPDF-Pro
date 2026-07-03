@@ -47,6 +47,10 @@ vector_stores/
 *.faiss
 *.pkl
 images/
+!frontend/src/assets/
+!frontend/src/assets/images/
+!frontend/src/assets/images/providers/
+!frontend/src/assets/images/providers/*.svg
 data/
 backend/data/
 
