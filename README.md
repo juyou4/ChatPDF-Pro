@@ -47,6 +47,30 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 回答中的 `[1]` `[2]` 引文可点击直接跳转到 PDF 对应页；行内 / 块级公式实时渲染；深度思考过程默认折叠；回答下方自动生成追问建议与可选的幻觉自审提示。
 
+### 沉浸式阅读 — AI 总结
+
+<div align="center">
+<img src="docs/summary.png" alt="ChatPDF Pro AI 结构化总结" width="880" />
+</div>
+
+右侧「解析」Tab 按当前页自动生成 AI 结构化笔记，每条笔记附带证据数量标记；左侧大纲面板以分级树形展示论文标题层级，点击即跳转 PDF 对应位置。
+
+### 沉浸式阅读 — 大纲导航
+
+<div align="center">
+<img src="docs/outline.png" alt="ChatPDF Pro 树形大纲导航" width="880" />
+</div>
+
+左侧「大纲」Tab 自动识别论文多级标题（Introduction → Motivation → Training → Experiments ...），当前阅读章节高亮显示。右侧解析面板同步展示当前页原文与图注的 AI 解读，图表区域自动提取 caption 并生成翻译。
+
+### 沉浸式阅读 — 悬浮翻译
+
+<div align="center">
+<img src="docs/Floating Translation.png" alt="ChatPDF Pro 悬浮翻译" width="880" />
+</div>
+
+鼠标悬停 PDF 文本块即弹出逐段中文翻译浮层，翻译结果按块缓存，再次悬停零延迟。右侧解析面板同步展示当前页原文块与翻译状态，红色标注为 AI 补充的结构化提示。支持一键"翻译当页"批量预翻译。
+
 ### 独立桌面客户端
 
 基于 Electron 构建的独立桌面应用，使用 PyInstaller 将 Python 后端打包为单可执行文件，开箱即用、无需配置 Python 或 Node.js 环境。
