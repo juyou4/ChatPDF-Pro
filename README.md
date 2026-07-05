@@ -317,12 +317,6 @@ A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，
 
 ---
 
-## 致谢
-
-本项目的 RAG 系统优化方案借鉴了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 的设计理念（语义意群、三层粒度、智能粒度选择等概念）；沉浸式阅读功能的翻译管线与大纲交互设计参考了 [PaperQuay](https://github.com/WangQrkkk/PaperQuay) 的产品方案（块级翻译并发策略、失败容忍架构、双语显示模式等）。两者均采用 AGPL-3.0 许可证，版权分别归 Feather-2 及 WangQrkkk 及各自贡献者所有。ChatPDF Pro 的所有实现代码为独立编写，未复制其源代码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
----
-
 ## 贡献指南
 
 欢迎提交 Issue 和 Pull Request！
