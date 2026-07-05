@@ -28,6 +28,28 @@ ChatPDF 的 RAG 系统优化方案借鉴了 Paper Burner X 项目的设计理念
 
 ---
 
+### PaperQuay
+
+ChatPDF 的沉浸式阅读功能（翻译管线与大纲交互）参考了 PaperQuay 项目的产品设计。
+
+- **项目地址**：https://github.com/WangQrkkk/PaperQuay
+- **许可证**：AGPL-3.0
+- **版权**：Copyright (C) 2024-2025 WangQrkkk and contributors
+
+**借鉴的设计概念**（非代码）：
+- 块级翻译并发策略——worker-pool 共享游标 + AbortController 可取消架构
+- 失败容忍（best-effort）——单块失败不中断全文，failedBlocksById 精确重试
+- 翻译缓存与恢复——resume-from-cache merge 后仅翻译未缓存块
+- 双语显示模式（TranslationDisplayMode）——original / translated / bilingual 持久切换
+
+**重要说明**：
+- ChatPDF 的所有实现代码均为独立编写的 Python + React 代码
+- 未复制、翻译或移植 PaperQuay 的 TypeScript 源代码
+- 借鉴的是公开的设计概念和交互模式
+- ChatPDF 继续使用 MIT 许可证
+
+---
+
 ## 依赖库许可证
 
 ChatPDF 使用的主要开源依赖及其许可证：

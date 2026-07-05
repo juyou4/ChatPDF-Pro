@@ -1,13 +1,13 @@
-# ChatPDF Pro v3.0.2
+# ChatPDF Pro v3.1.0
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.2-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.1.0-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
-**面向学术论文的本地 AI 阅读助手 — Agentic RAG · 引用溯源 · 全程离线** · [English](README_EN.md)
+**面向学术论文的本地 AI 阅读助手 — 沉浸式阅读 · Agentic RAG · 引用溯源 · 全程离线** · [English](README_EN.md)
 
 [快速开始](#快速开始) • [核心功能](#核心功能) • [评测](#ragas-评测) • [技术栈](#技术栈) • [项目结构](#项目结构)
 
@@ -17,7 +17,7 @@
 
 ## 项目简介
 
-ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅读助手。左侧原生 PDF 阅读器 + 右侧 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF** 的检索管线和 **Agentic RAG 工具链**，让模型既能做高层次综述、也能精确定位到某张表格的某一行数值。所有请求指向用户自带的 OpenAI / Anthropic / Gemini / DeepSeek / Ollama 接口，文档与对话历史全程留在本地。
+ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅读助手。左侧原生 PDF 阅读器 + 右侧 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF** 的检索管线、**Agentic RAG 工具链**以及 **沉浸式阅读**（AI 大纲 · 章节总结 · 悬浮翻译 · 全文预翻译），让模型既能做高层次综述、也能精确定位到某张表格的某一行数值，同时提供逐块母语化阅读体验。所有请求指向用户自带的 OpenAI / Anthropic / Gemini / DeepSeek / Ollama 接口，文档与对话历史全程留在本地。
 
 ---
 
@@ -67,7 +67,7 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 ### Agentic RAG 检索
 
-v3.0.2 引入工具化 Agent 检索——对综述、章节解释、公式框架、多跳证据等复杂问题，自动激活 agent 模式，组合以下工具并把子问题、命中路径和引用候选回传给前端 Trace 面板：
+对综述、章节解释、公式框架、多跳证据等复杂问题，自动激活 agent 模式，组合以下工具并把子问题、命中路径和引用候选实时流式推送到前端 Trace 面板（含检索动画与进度可视化）：
 
 | 工具 | 说明 |
 |------|------|
@@ -89,6 +89,14 @@ v3.0.2 引入工具化 Agent 检索——对综述、章节解释、公式框架
 - **公式归一化** — 公式类问题做通用的 LaTeX / OCR 归一化，减少引用漂移
 - **答案自审** — 回答结束后用 cheap_model 对照原文片段检测幻觉，命中时展示红色警告横幅
 
+### 沉浸式阅读（v3.1.0 新增）
+- **块级索引** — PyMuPDF `get_text("dict")` 逐页提取文本块 bbox，自动识别段落 / 标题 / 表格 / 公式 / caption 类型，为后续大纲与翻译提供坐标基础
+- **AI 阅读大纲** — 基于启发式标题检测（字号 / 加粗 / 编号 / 全大写）+ LLM 章节树双路构建，树形分级展示并可点击跳转 PDF 对应位置；当前阅读位置自动高亮为浮动白色卡片
+- **AI 章节总结** — 按大纲章节生成摘要卡片，每节显示核心要点与关键发现；支持重新生成、回退本地启发式总结
+- **悬浮翻译** — 鼠标悬停/点击 PDF 文本块即显示逐块译文浮层，翻译结果按 `{lang}:{block_id}` 缓存，已翻译的块再次悬停零延迟
+- **全文预翻译** — 一键触发全文档批量翻译，后端 `asyncio.Semaphore(5)` 并发控制，单块纯文本调用（非批量 JSON），支持取消、进度条、失败块精确重试
+- **翻译容错** — 单块失败不影响其余，返回 `failed_block_ids` 精确定位；provider 层 JSON 解析异常捕获并附 body preview
+
 ### 一键速览
 - **五卡结构化导读** — 全文概述 / 术语解释 / 论文速读 / 关键图表解读 / 论文总结
 - **图表抽取 Adapter 链** — PDF 原生图层（PyMuPDF 取图 + Figure 标题空间匹配）→ 矢量图 caption-only 路径 → MinerU 云端 OCR（通过 Cloudflare Worker 代理）
@@ -103,6 +111,11 @@ v3.0.2 引入工具化 Agent 检索——对综述、章节解释、公式框架
 - **可视化图表** — 自动渲染 AI 生成的 Mermaid 流程图与思维导图
 - **双模型策略** — 查询改写 / 问题分解 / 追问建议 / 答案自审等辅助任务走廉价模型，与主回答模型解耦，节省 40–60% tokens
 - **联网搜索** — 允许 AI 作答时获取实时网络信息，回答底部展示带来源链接的引用标签
+
+### UI / UX
+- **极光弥散背景** — 双层 radial-gradient + CSS 动画慢速漂移，`prefers-reduced-motion` 自适应
+- **Agent 检索动画** — 实时进度条、执行中呼吸光效、弹跳点"规划中"提示；检索过程 trace 流式推送到前端
+- **Provider 彩色 Logo** — 26 家供应商原色品牌标识，模型切换器一目了然
 
 ---
 
@@ -150,7 +163,9 @@ npm run dev
 ### 高效阅读
 1. **划词问答** — 在 PDF 中选中文本后，对话框里的提问会自动关联选中内容
 2. **预设问题** — 文档加载后点击预设按钮快速获取总结、公式、方法等信息
-3. **调整布局** — 拖动中间分隔线调整 PDF 和对话区域的比例
+3. **大纲导航** — 左侧大纲面板显示论文层级结构，点击跳转，当前位置自动高亮
+4. **悬浮翻译** — 悬停 PDF 文本块即显示译文，开启"预翻译"后全文译文预加载，悬停零延迟
+5. **调整布局** — 拖动中间分隔线调整 PDF 和对话区域的比例
 
 ### 智能检索
 1. **自动粒度** — 问"总结全文"返回更多意群摘要，问"具体数据"返回少量意群全文
@@ -191,12 +206,15 @@ ChatPDF/
 │   │   │   ├── ChatPDF.jsx               # 主应用组件
 │   │   │   ├── PDFViewer.jsx             # PDF 渲染
 │   │   │   ├── AgentTracePanel.jsx       # Agent 子问题 / 工具调用 Trace
+│   │   │   ├── DocumentOutline.jsx       # 沉浸式阅读 — 树形大纲导航
+│   │   │   ├── ReadingSummaryPanel.jsx   # 沉浸式阅读 — 章节总结卡片
+│   │   │   ├── ReadingAnalysisPanel.jsx  # 沉浸式阅读 — 预翻译控制
 │   │   │   ├── OverviewPanel.jsx         # 一键速览面板
 │   │   │   ├── StreamingMarkdown.jsx     # Markdown + 公式 + Mermaid
 │   │   │   ├── ThinkingBlock.jsx         # 深度思考可视化
 │   │   │   ├── VirtualMessageList.jsx    # 虚拟化消息列表
 │   │   │   └── GlobalSettings.jsx        # 全局设置（含检索调优）
-│   │   ├── contexts/                 # React Context（模型 / 参数 / Provider）
+│   │   ├── contexts/                 # React Context（模型 / 参数 / Provider / 阅读设置）
 │   │   └── hooks/                    # 消息状态、流式输出、PDF 等 Hooks
 │   └── vite.config.js
 ├── backend/                          # FastAPI 后端
@@ -221,7 +239,11 @@ ChatPDF/
 │   │   ├── query_analyzer.py             # 查询意图分析
 │   │   ├── query_rewriter.py             # 多轮指代消解
 │   │   ├── overview_service.py           # 速览卡片生成
-│   │   ├── layout_service.py            # DocLayout-YOLO 布局检测与资源管理
+│   │   ├── layout_service.py             # DocLayout-YOLO 布局检测与资源管理
+│   │   ├── block_index_service.py        # 块级索引构建（标题/段落/表格分类）
+│   │   ├── reading_outline_service.py    # AI 阅读大纲生成
+│   │   ├── section_outline_service.py    # AI 章节大纲 + 总结
+│   │   ├── block_translation_service.py  # 逐块翻译 + 缓存 + 并发控制
 │   │   └── table_aware_service.py        # 表格结构化检测
 │   ├── chatpdf.spec                      # PyInstaller 打包配置（CUDA 剥离 + 数据过滤）
 │   └── requirements.txt
@@ -256,6 +278,15 @@ A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，
 
 ## 更新日志
 
+### v3.1.0（沉浸式阅读 + 翻译管线重构 + UI 焕新）
+- **沉浸式阅读** — 块级索引 → AI 阅读大纲（启发式 + LLM 双路）→ 章节总结卡片 → 悬浮翻译 → 全文预翻译，文档打开即构建完整阅读辅助层
+- **翻译管线重构** — 废弃批量 JSON 模式，改为单块纯文本 + `asyncio.Semaphore(5)` 并发，每块独立 try/except 互不影响；新增 `failed_block_ids` 返回与精确重试；provider 层 JSON 解析异常捕获
+- **树形大纲导航** — DocumentOutline 组件，按字号/加粗/编号多级分层，当前阅读位置浮动白色卡片高亮，已读琥珀标记，点击跳转 PDF 坐标
+- **Agent 检索动画** — 实时 trace 流式推送（`setMessages` 浅拷贝刷新），执行中呼吸光效、进度条扫光、弹跳点规划提示
+- **极光弥散背景** — 双层 radial-gradient + `aurora-drift` CSS 动画慢速漂移，`prefers-reduced-motion` 自适应
+- **Provider 彩色 Logo** — 26 家供应商原色品牌标识（SVG），模型切换器与设置面板显示供应商 logo
+- **Provider 模型默认值更新** — systemModels.ts 大幅扩充各供应商最新可用模型列表
+
 ### v3.0.2（Agentic RAG 泛化 + 桌面打包优化）
 - **Agentic RAG 工具链** — 新增工具化 agent 检索、子问题追踪、树形分解检索，前端新增 AgentTracePanel 展示调用路径
 - **引用溯源增强** — 表格数值锚定 + 公式 LaTeX/OCR 归一化，减少引用漂移
@@ -288,7 +319,7 @@ A: 在左下角设置面板中切换 KaTeX / MathJax 引擎。KaTeX 渲染快，
 
 ## 致谢
 
-本项目的 RAG 系统优化方案借鉴了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 的设计理念（语义意群、三层粒度、智能粒度选择等概念）。Paper Burner X 采用 AGPL-3.0 许可证，版权归 Feather-2 及贡献者所有。ChatPDF Pro 的所有实现代码为独立编写，未复制其源代码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目的 RAG 系统优化方案借鉴了 [Paper Burner X](https://github.com/Feather-2/paper-burner-x) 的设计理念（语义意群、三层粒度、智能粒度选择等概念）；沉浸式阅读功能的翻译管线与大纲交互设计参考了 [PaperQuay](https://github.com/WangQrkkk/PaperQuay) 的产品方案（块级翻译并发策略、失败容忍架构、双语显示模式等）。两者均采用 AGPL-3.0 许可证，版权分别归 Feather-2 及 WangQrkkk 及各自贡献者所有。ChatPDF Pro 的所有实现代码为独立编写，未复制其源代码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 
