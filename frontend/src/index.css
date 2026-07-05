@@ -64,23 +64,49 @@
     font-family: var(--global-font-family);
 }
 
-#root::before {
+/* 品牌极光背景（方案 D）：两层大色域斜向流动 + 极慢漂移动画，
+   静止帧本身就是完整构图，reduced-motion 用户只是看不到漂移，不影响可用性。 */
+#root::before,
+#root::after {
     content: '';
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    inset: -20%;
     z-index: -1;
-    background-image:
-        radial-gradient(circle at 15% 40%, rgba(235, 225, 255, 1) 0%, rgba(240, 232, 255, 0.5) 40%, transparent 70%),
-        radial-gradient(circle at 85% 20%, rgba(255, 230, 240, 1) 0%, rgba(255, 240, 245, 0.5) 40%, transparent 70%),
-        radial-gradient(circle at 50% 85%, rgba(255, 245, 220, 1) 0%, rgba(255, 250, 230, 0.5) 40%, transparent 70%),
-        radial-gradient(circle at 10% 90%, rgba(240, 245, 255, 0.8) 0%, rgba(245, 248, 255, 0.4) 40%, transparent 70%),
-        radial-gradient(circle at 90% 90%, rgba(245, 235, 255, 0.8) 0%, rgba(250, 242, 255, 0.4) 40%, transparent 70%);
-    filter: blur(60px);
-    opacity: 0.85;
+    filter: blur(70px);
     pointer-events: none;
+    will-change: transform;
+}
+
+#root::before {
+    background-image:
+        radial-gradient(ellipse 60% 55% at 24% 14%, rgba(196, 181, 253, 0.6), transparent 70%),
+        radial-gradient(ellipse 42% 38% at 8% 88%, rgba(196, 181, 253, 0.32), transparent 72%);
+}
+
+#root::after {
+    background-image:
+        radial-gradient(ellipse 55% 50% at 82% 58%, rgba(167, 226, 208, 0.42), transparent 72%),
+        radial-gradient(ellipse 50% 45% at 55% 96%, rgba(255, 214, 232, 0.4), transparent 72%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    #root::before {
+        animation: aurora-drift-a 16s ease-in-out infinite;
+    }
+
+    #root::after {
+        animation: aurora-drift-b 20s ease-in-out infinite;
+    }
+}
+
+@keyframes aurora-drift-a {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50% { transform: translate(4%, -3%) scale(1.06); }
+}
+
+@keyframes aurora-drift-b {
+    0%, 100% { transform: translate(0, 0) scale(1.05); }
+    50% { transform: translate(-3%, 3%) scale(1); }
 }
 
 /* 页面缩放由 JS 控制 document.body.style.zoom，此处不设置 */
@@ -1198,4 +1224,52 @@
     --tw-prose-pre-bg: #111827;    /* gray-900 */
     --tw-prose-th-borders: #4b5563;/* gray-600 */
     --tw-prose-td-borders: #374151;/* gray-700 */
+}
+
+/* ==================== Agent 检索轨迹动画 ==================== */
+@keyframes agentFadeSlideIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+}
+
+.agent-op-enter {
+    animation: agentFadeSlideIn 0.28s ease-out both;
+}
+
+@keyframes agentShimmerSweep {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(320%); }
+}
+
+.agent-progress-track {
+    position: relative;
+    overflow: hidden;
+}
+
+.agent-progress-sweep {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 38%;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.75), transparent);
+    animation: agentShimmerSweep 1.4s ease-in-out infinite;
+}
+
+@keyframes agentBreath {
+    0%, 100% { background-color: rgba(139, 92, 246, 0.04); }
+    50% { background-color: rgba(139, 92, 246, 0.12); }
+}
+
+.agent-op-running {
+    animation: agentBreath 1.6s ease-in-out infinite;
+}
+
+.dark .agent-op-running {
+    animation-name: agentBreathDark;
+}
+
+@keyframes agentBreathDark {
+    0%, 100% { background-color: rgba(139, 92, 246, 0.08); }
+    50% { background-color: rgba(139, 92, 246, 0.18); }
 }

@@ -1365,6 +1365,7 @@ class RetrievalAgent:
                         max_tokens=2000,
                         temperature=self.temperature,
                         tools=tools,
+                        purpose="agent",
                     ),
                     timeout=_planner_timeout,
                 )

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 class FigureSource(str, Enum):
     """Figure 来源枚举"""
     MINERU = "mineru"
+    YOLO = "yolo"
     PDF_NATIVE = "pdf_native"
     FALLBACK = "fallback"
 

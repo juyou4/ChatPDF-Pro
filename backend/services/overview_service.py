@@ -105,7 +105,7 @@ class OverviewTask(BaseModel):
 # 缓存目录
 CACHE_DIR = Path(__file__).parent.parent / "data" / "overviews"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v11"
+OVERVIEW_CACHE_VERSION = "v12"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -1097,7 +1097,9 @@ def _extract_figures_for_overview(
             image_data_list = [img.get("data", "") for img in image_items if img.get("data")]
             image_bboxes = [img.get("bbox") for img in image_items if _is_positioned_page_bbox(img.get("bbox"))]
 
-            if not image_data_list:
+            caption_bbox = fig.get("caption_bbox") or fig.get("bbox")
+            has_pdf_crop_source = bool(fig.get("figure_bbox") or caption_bbox)
+            if not image_data_list and not has_pdf_crop_source:
                 continue
 
             # 页面文本片段
@@ -1111,11 +1113,12 @@ def _extract_figures_for_overview(
                 "image_data_list": image_data_list,
                 "image_bboxes": image_bboxes,
                 "figure_bbox": fig.get("figure_bbox"),
-                "caption_bbox": fig.get("caption_bbox") or fig.get("bbox"),
+                "caption_bbox": caption_bbox,
                 "previous_caption_bbox": previous_caption_bbox_by_ref.get(id(fig)),
                 "page_num": page_num,
                 "page_content_snippet": page_content,
                 "figure_label": fig.get("label", ""),
+                "caption": fig.get("caption") or fig.get("label", ""),
             })
 
         if result:
@@ -1281,6 +1284,65 @@ def _render_figures_with_pipeline(
     return results
 
 
+def _build_key_figure_from_rendered(
+    figure_data: Dict,
+    index: int,
+    reason: str = "analysis_unavailable",
+) -> Optional[KeyFigureItem]:
+    """图表已裁剪但多模态解析失败时，保留图片和图注给前端展示。"""
+    figure = figure_data.get("figure")
+    render_result = figure_data.get("render_result")
+
+    if not figure or not render_result or not render_result.success:
+        return None
+
+    image_b64 = render_result.display_image_base64 or render_result.model_image_base64
+    if not image_b64:
+        return None
+
+    caption = (
+        (figure.caption_text or "").strip()
+        or (figure.figure_index or "").strip()
+        or f"图表 {index + 1}"
+    )
+    image_data = f"data:image/jpeg;base64,{image_b64}"
+
+    if reason == "analysis_unavailable":
+        analysis = "图表已识别并裁剪完成。当前模型未返回可用的图表解析，可切换支持图片输入的模型后重新生成速览。"
+    else:
+        analysis = "图表已识别并裁剪完成，暂未生成详细解析。"
+
+    return KeyFigureItem(
+        figure_id=figure.figure_id,
+        caption=caption,
+        image_base64=image_data,
+        analysis=analysis,
+    )
+
+
+def _build_key_figure_from_legacy_crop(
+    fig: Dict,
+    index: int,
+    display_image_data: Optional[str],
+) -> Optional[KeyFigureItem]:
+    """旧图表路径的展示兜底：PDF 裁剪成功时不要丢图。"""
+    if not display_image_data:
+        return None
+
+    caption = (
+        (fig.get("caption") or "").strip()
+        or (fig.get("figure_label") or "").strip()
+        or f"图表 {index + 1}"
+    )
+
+    return KeyFigureItem(
+        figure_id=fig.get("figure_id", f"fig-{index + 1}"),
+        caption=caption,
+        image_base64=display_image_data,
+        analysis="图表已识别并裁剪完成。当前模型未返回可用的图表解析，可切换支持图片输入的模型后重新生成速览。",
+    )
+
+
 async def _generate_figure_analysis_via_pipeline(
     figure_data: Dict,
     api_key: str,
@@ -1379,7 +1441,10 @@ async def _generate_single_figure_analysis(
     - 支持子图组提示
     """
     if not image_data_list:
-        return None
+        if display_image_data:
+            image_data_list = [display_image_data]
+        else:
+            return None
 
     from services.chat_service import call_ai_api
 
@@ -1427,6 +1492,7 @@ async def _generate_single_figure_analysis(
             endpoint=endpoint,
             max_tokens=FIGURE_ANALYSIS_MAX_TOKENS,
             temperature=0.3,
+            purpose="figure_analysis",
         )
 
         if isinstance(response, dict) and response.get("error"):
@@ -1469,6 +1535,18 @@ def _get_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") ->
     """获取缓存文件路径"""
     key = _get_cache_key(doc_id, depth, figure_render_mode)
     return CACHE_DIR / f"{key}.json"
+
+
+async def clear_overview_cache(doc_id: str, depth: str, figure_render_mode: str = "raw") -> None:
+    """删除指定速览缓存，用于强制重新生成。"""
+    cache_key = _get_cache_key(doc_id, depth, figure_render_mode)
+    overview_cache.pop(cache_key, None)
+    cache_path = _get_cache_path(doc_id, depth, figure_render_mode)
+    try:
+        if cache_path.exists():
+            cache_path.unlink()
+    except Exception as e:
+        logger.warning(f"删除速览缓存失败: {e}")
 
 
 async def get_cached_overview(
@@ -1556,6 +1634,7 @@ async def generate_overview_content(
                 depth,
                 OVERVIEW_OUTPUT_MAX_TOKENS[OverviewDepth.STANDARD],
             ),
+            purpose="overview",
         )
         
         if isinstance(response, dict) and response.get("error"):
@@ -1613,7 +1692,11 @@ async def generate_overview_content(
                     logger.info("[Overview] 已有 MinerU 数据，强制重建 figure extraction")
 
                 logical_figures = build_logical_figures_for_overview(
-                    doc_id, doc, depth, force_rebuild=force_rebuild
+                    doc_id,
+                    doc,
+                    depth,
+                    force_rebuild=force_rebuild,
+                    prefer_yolo=figure_render_mode == "yolo",
                 )
                 if logical_figures and pdf_url:
                     try:
@@ -1636,11 +1719,24 @@ async def generate_overview_content(
 
                         analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
-                        for result in analysis_results:
+                        for idx, result in enumerate(analysis_results):
                             if isinstance(result, KeyFigureItem):
                                 key_figures_list.append(result)
                             elif isinstance(result, Exception):
                                 logger.warning(f"Figure analysis failed: {result}")
+                                fallback_item = _build_key_figure_from_rendered(
+                                    rendered_figures[idx],
+                                    idx,
+                                )
+                                if fallback_item:
+                                    key_figures_list.append(fallback_item)
+                            else:
+                                fallback_item = _build_key_figure_from_rendered(
+                                    rendered_figures[idx],
+                                    idx,
+                                )
+                                if fallback_item:
+                                    key_figures_list.append(fallback_item)
                     except Exception as e:
                         logger.warning(f"New figure pipeline failed: {e}")
                     finally:
@@ -1690,6 +1786,14 @@ async def generate_overview_content(
                     )
                     if item:
                         key_figures_list.append(item)
+                    else:
+                        fallback_item = _build_key_figure_from_legacy_crop(
+                            fig,
+                            i,
+                            display_image_data,
+                        )
+                        if fallback_item:
+                            key_figures_list.append(fallback_item)
             
             if key_figures_list:
                 overview.key_figures = key_figures_list
@@ -1819,20 +1923,24 @@ async def _generate_or_wait_overview(
     endpoint: str = "",
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
+    force: bool = False,
 ) -> OverviewData:
     """相同 doc/depth 的 overview 只生成一次，其余请求直接复用。"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     cache_key = _get_cache_key(doc_id, depth, render_mode)
 
+    if force:
+        await clear_overview_cache(doc_id, depth, render_mode)
+
     cached = await get_cached_overview(doc_id, depth, render_mode)
-    if cached:
+    if cached and not force:
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
             logger.info(f"[Overview] _generate_or_wait: 缓存非 MinerU，跳过")
         else:
             return cached
 
     inflight = overview_inflight.get(cache_key)
-    if inflight:
+    if inflight and not force:
         return await asyncio.shield(inflight)
 
     async def _runner() -> OverviewData:
@@ -1870,12 +1978,16 @@ async def get_or_create_overview(
     endpoint: str = "",
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
+    force: bool = False,
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     # 先检查缓存
+    if force:
+        await clear_overview_cache(doc_id, depth, render_mode)
+
     cached = await get_cached_overview(doc_id, depth, render_mode)
-    if cached:
+    if cached and not force:
         return cached
 
     try:
@@ -1889,6 +2001,7 @@ async def get_or_create_overview(
                 endpoint=endpoint,
                 use_mineru_figures=use_mineru_figures,
                 figure_render_mode=render_mode,
+                force=force,
             ),
             timeout=180,
         )

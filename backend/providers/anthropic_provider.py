@@ -88,7 +88,13 @@ class AnthropicProvider(BaseProvider):
                     detail=f"Anthropic API错误: {response.text}"
                 )
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as exc:
+                preview = response.text[:500].replace("\n", "\\n")
+                raise RuntimeError(
+                    f"Anthropic API返回了无效JSON: {exc}; body_preview={preview}"
+                ) from exc
             return self._normalize_response(result)
 
     def _normalize_response(self, result: dict) -> dict:
@@ -119,4 +125,7 @@ class AnthropicProvider(BaseProvider):
         if tool_calls:
             message["tool_calls"] = tool_calls
 
-        return {"choices": [{"message": message}]}
+        normalized = {"choices": [{"message": message}]}
+        if result.get("usage"):
+            normalized["usage"] = result.get("usage")
+        return normalized

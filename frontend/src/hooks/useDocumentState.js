@@ -109,6 +109,10 @@ export function useDocumentState({
   const overviewCacheRef = useRef(new Map());
   const overviewInflightRef = useRef(new Map());
   const currentOverviewKeyRef = useRef('');
+  const getOverviewFigureMode = useCallback(() => {
+    const ocrCfg = loadOCRSettings();
+    return ocrCfg.figureRenderMode || 'raw';
+  }, []);
 
   // 文件输入引用
   const fileInputRef = useRef(null);
@@ -120,6 +124,27 @@ export function useDocumentState({
     const renderMode = ocrCfg.figureRenderMode || 'raw';
     return `${currentDocId}:${depth}:m${mineruFlag}:r${renderMode}`;
   }, []);
+
+  const clearOverviewCache = useCallback((currentDocId = docId) => {
+    if (!currentDocId) {
+      overviewCacheRef.current.clear();
+      overviewInflightRef.current.clear();
+    } else {
+      [...overviewCacheRef.current.keys()].forEach((key) => {
+        if (key.startsWith(`${currentDocId}:`)) {
+          overviewCacheRef.current.delete(key);
+        }
+      });
+      [...overviewInflightRef.current.keys()].forEach((key) => {
+        if (key.startsWith(`${currentDocId}:`)) {
+          overviewInflightRef.current.delete(key);
+        }
+      });
+    }
+    currentOverviewKeyRef.current = '';
+    setOverview(null);
+    setOverviewError(null);
+  }, [docId]);
 
   /**
    * 获取存储信息
@@ -352,20 +377,22 @@ export function useDocumentState({
   /**
    * 获取速览数据
    * @param {string} depth - 速览深度: brief(简介) / standard(标准) / detailed(详细)
+   * @param {{force?: boolean}} options - force=true 时绕过本地和后端缓存重新生成
    */
-  const fetchOverview = useCallback(async (depth = 'standard') => {
+  const fetchOverview = useCallback(async (depth = 'standard', options = {}) => {
     if (!docId) {
       setOverviewError('请先上传文档');
       return;
     }
+    const force = Boolean(options?.force);
 
     const overviewKey = buildOverviewKey(docId, depth);
-    if (currentOverviewKeyRef.current === overviewKey && overview) {
+    if (!force && currentOverviewKeyRef.current === overviewKey && overview) {
       return overview;
     }
 
     const cachedOverview = overviewCacheRef.current.get(overviewKey);
-    if (cachedOverview) {
+    if (!force && cachedOverview) {
       currentOverviewKeyRef.current = overviewKey;
       setOverview(cachedOverview);
       setOverviewError(null);
@@ -373,7 +400,7 @@ export function useDocumentState({
     }
 
     const inflightRequest = overviewInflightRef.current.get(overviewKey);
-    if (inflightRequest) {
+    if (!force && inflightRequest) {
       return inflightRequest;
     }
 
@@ -388,6 +415,10 @@ export function useDocumentState({
       return;
     }
 
+    if (force) {
+      overviewCacheRef.current.delete(overviewKey);
+      currentOverviewKeyRef.current = '';
+    }
     setOverviewLoading(true);
     setOverviewError(null);
 
@@ -399,6 +430,9 @@ export function useDocumentState({
       }
       if (ocrSettings.figureRenderMode === 'yolo') {
         params.set('figure_render_mode', 'yolo');
+      }
+      if (force) {
+        params.set('force', 'true');
       }
       const headers = {};
       if (chatCredentials) {
@@ -480,6 +514,8 @@ export function useDocumentState({
     overviewLoading,
     overviewError,
     fetchOverview,
+    clearOverviewCache,
+    overviewFigureMode: getOverviewFigureMode(),
 
     // 引用
     fileInputRef,

@@ -66,4 +66,10 @@ class OpenAICompatibleProvider(BaseProvider):
                     detail=f"OpenAI兼容API错误: {response.text}"
                 )
 
-            return response.json()
+            try:
+                return response.json()
+            except ValueError as exc:
+                preview = response.text[:500].replace("\n", "\\n")
+                raise RuntimeError(
+                    f"OpenAI兼容API返回了无效JSON: {exc}; body_preview={preview}"
+                ) from exc

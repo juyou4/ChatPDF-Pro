@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { HardDrive } from 'lucide-react'
 import { getProviderLogo } from '../config/providerLogos'
 
 /**
@@ -76,6 +77,25 @@ export default function ProviderAvatar({
 
   const logoIsImage = isImageUrl(displayLogo)
   const logoIsEmoji = displayLogo && !logoIsImage && String(displayLogo).length <= 4
+  const isLocalProvider = String(safeProvider.id || '').toLowerCase() === 'local'
+
+  if (isLocalProvider && !displayLogo) {
+    return (
+      <div
+        className={`relative flex items-center justify-center rounded-lg border bg-gradient-to-br from-white to-slate-100 text-slate-600 shadow-[0_8px_18px_rgba(100,116,139,0.14),inset_0_1px_0_rgba(255,255,255,0.95)] ${className}`}
+        style={{
+          width: size,
+          height: size,
+          minWidth: size,
+          minHeight: size,
+          borderColor: 'rgba(148, 163, 184, 0.34)',
+        }}
+        title={safeProvider.name}
+      >
+        <HardDrive size={Math.max(12, size * 0.52)} strokeWidth={2.25} />
+      </div>
+    )
+  }
 
   return (
     <div

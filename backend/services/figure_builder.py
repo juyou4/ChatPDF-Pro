@@ -406,6 +406,8 @@ def compute_confidence(block: FigureBlock) -> float:
     # 来源基础分数
     source_scores = {
         FigureSource.MINERU: 0.9,
+        FigureSource.YOLO: 0.82,
+        "yolo": 0.82,
         FigureSource.PDF_NATIVE: 0.7,
         FigureSource.FALLBACK: 0.3,
     }

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useCallback } from 'react';
 import { FontSettingsProvider, useFontSettings, PRESET_FONTS, FONT_DEFAULT_SETTINGS } from './FontSettingsContext';
 import { ChatParamsProvider, useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from './ChatParamsContext';
 import { useWebSearch, WEB_SEARCH_DEFAULT_SETTINGS } from './WebSearchContext';
+import { ReadingSettingsProvider, useReadingSettings, READING_SETTINGS_DEFAULTS } from './ReadingSettingsContext';
 
 // GlobalSettingsContext —— 聚合层
 // 组合 FontSettingsContext 和 ChatParamsContext，保持向后兼容（需求 2.1）
@@ -16,6 +17,7 @@ export { PRESET_FONTS };
 const DEFAULT_SETTINGS = {
     ...FONT_DEFAULT_SETTINGS,
     ...CHAT_PARAMS_DEFAULT_SETTINGS,
+    ...READING_SETTINGS_DEFAULTS,
 };
 
 export { DEFAULT_SETTINGS };
@@ -27,9 +29,11 @@ export { DEFAULT_SETTINGS };
 export const GlobalSettingsProvider = ({ children }) => (
     <FontSettingsProvider>
         <ChatParamsProvider>
-            <GlobalSettingsBridge>
-                {children}
-            </GlobalSettingsBridge>
+            <ReadingSettingsProvider>
+                <GlobalSettingsBridge>
+                    {children}
+                </GlobalSettingsBridge>
+            </ReadingSettingsProvider>
         </ChatParamsProvider>
     </FontSettingsProvider>
 );
@@ -42,13 +46,15 @@ const GlobalSettingsBridge = ({ children }) => {
     const fontSettings = useFontSettings();
     const chatParams = useChatParams();
     const webSearch = useWebSearch();
+    const readingSettings = useReadingSettings();
 
     // 聚合重置：同时重置字体设置、对话参数和联网搜索
     const resetSettings = useCallback(() => {
         fontSettings.resetFontSettings();
         chatParams.resetChatParams();
         webSearch.resetWebSearch();
-    }, [fontSettings.resetFontSettings, chatParams.resetChatParams, webSearch.resetWebSearch]);
+        readingSettings.resetReadingSettings();
+    }, [fontSettings.resetFontSettings, chatParams.resetChatParams, webSearch.resetWebSearch, readingSettings.resetReadingSettings]);
 
     // 聚合导出：合并所有子 Context 的设置（含联网搜索）
     const exportSettings = useCallback(() => {
@@ -85,6 +91,12 @@ const GlobalSettingsBridge = ({ children }) => {
             webSearchProvider: webSearch.webSearchProvider,
             webSearchApiKey: webSearch.webSearchApiKey,
             webSearchBlacklist: webSearch.webSearchBlacklist,
+            // 智能阅读
+            aiAutoProcess: readingSettings.aiAutoProcess,
+            autoOutlineSummary: readingSettings.autoOutlineSummary,
+            autoPretranslate: readingSettings.autoPretranslate,
+            pretranslateConcurrency: readingSettings.pretranslateConcurrency,
+            overviewDefaultDepth: readingSettings.overviewDefaultDepth,
             exportedAt: new Date().toISOString(),
         };
         return JSON.stringify(settings, null, 2);
@@ -99,6 +111,8 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
         chatParams.messageStyle, chatParams.messageFontSize,
         webSearch.enableWebSearch, webSearch.webSearchProvider, webSearch.webSearchApiKey, webSearch.webSearchBlacklist,
+        readingSettings.aiAutoProcess, readingSettings.autoOutlineSummary, readingSettings.autoPretranslate,
+        readingSettings.pretranslateConcurrency, readingSettings.overviewDefaultDepth,
     ]);
 
     // 聚合导入：将设置分发到对应的子 Context
@@ -137,6 +151,12 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.webSearchProvider !== undefined) webSearch.setWebSearchProvider(settings.webSearchProvider);
             if (settings.webSearchApiKey !== undefined) webSearch.setWebSearchApiKey(settings.webSearchApiKey);
             if (settings.webSearchBlacklist !== undefined) webSearch.setWebSearchBlacklist(settings.webSearchBlacklist);
+            // 智能阅读相关
+            if (settings.aiAutoProcess !== undefined) readingSettings.setAiAutoProcess(settings.aiAutoProcess);
+            if (settings.autoOutlineSummary !== undefined) readingSettings.setAutoOutlineSummary(settings.autoOutlineSummary);
+            if (settings.autoPretranslate !== undefined) readingSettings.setAutoPretranslate(settings.autoPretranslate);
+            if (settings.pretranslateConcurrency !== undefined) readingSettings.setPretranslateConcurrency(settings.pretranslateConcurrency);
+            if (settings.overviewDefaultDepth !== undefined) readingSettings.setOverviewDefaultDepth(settings.overviewDefaultDepth);
             return true;
         } catch (error) {
             console.error('导入设置失败:', error);
@@ -153,13 +173,16 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.setCodeCollapsible, chatParams.setCodeWrappable, chatParams.setCodeShowLineNumbers,
         chatParams.setMessageStyle, chatParams.setMessageFontSize,
         webSearch.setEnableWebSearch, webSearch.setWebSearchProvider, webSearch.setWebSearchApiKey, webSearch.setWebSearchBlacklist,
+        readingSettings.setAiAutoProcess, readingSettings.setAutoOutlineSummary, readingSettings.setAutoPretranslate,
+        readingSettings.setPretranslateConcurrency, readingSettings.setOverviewDefaultDepth,
     ]);
 
     // 聚合 flushSave：同时 flush 两个子 Context
     const flushSave = useCallback(() => {
         fontSettings.flushSave();
         chatParams.flushSave();
-    }, [fontSettings.flushSave, chatParams.flushSave]);
+        readingSettings.flushSave();
+    }, [fontSettings.flushSave, chatParams.flushSave, readingSettings.flushSave]);
 
     // 合并所有值，保持与重构前完全一致的接口
     const value = {
@@ -235,6 +258,19 @@ const GlobalSettingsBridge = ({ children }) => {
         setCheapModel: chatParams.setCheapModel,
         setCheapModelProvider: chatParams.setCheapModelProvider,
         setCheapModelEndpoint: chatParams.setCheapModelEndpoint,
+
+        // 智能阅读状态
+        aiAutoProcess: readingSettings.aiAutoProcess,
+        autoOutlineSummary: readingSettings.autoOutlineSummary,
+        autoPretranslate: readingSettings.autoPretranslate,
+        pretranslateConcurrency: readingSettings.pretranslateConcurrency,
+        overviewDefaultDepth: readingSettings.overviewDefaultDepth,
+        setAiAutoProcess: readingSettings.setAiAutoProcess,
+        setAutoOutlineSummary: readingSettings.setAutoOutlineSummary,
+        setAutoPretranslate: readingSettings.setAutoPretranslate,
+        setPretranslateConcurrency: readingSettings.setPretranslateConcurrency,
+        setOverviewDefaultDepth: readingSettings.setOverviewDefaultDepth,
+        resetReadingSettings: readingSettings.resetReadingSettings,
 
         // 聚合工具方法
         resetSettings,

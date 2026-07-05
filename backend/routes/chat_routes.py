@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
+from services.usage_tracker import build_usage_meta, get_recent_usage, record_usage
 from services.vector_service import vector_context
 from services.selected_text_locator import locate_selected_text
 from services.agent_retrieval_service import (
@@ -1011,6 +1012,12 @@ class ChatRequest(BaseModel):
     override_answer_critic: Optional[bool] = None
     override_llm_query_rewrite: Optional[bool] = None
     override_bm25_synonyms: Optional[bool] = None
+
+
+@router.get("/usage/recent")
+async def get_recent_llm_usage(limit: int = 50):
+    """返回最近 LLM 调用的 token/费用估算记录，用于诊断后台调用消耗。"""
+    return {"items": get_recent_usage(limit)}
 
 
 class ChatVisionRequest(BaseModel):
@@ -6089,6 +6096,7 @@ async def _should_perform_web_search(
             endpoint=endpoint or "",
             max_tokens=5,
             temperature=0,
+            purpose="web_search_intent",
         )
         if result.get("error"):
             raise RuntimeError(result["error"])
@@ -6491,6 +6499,7 @@ async def _retry_generation_after_stream_error(
         top_p=request.top_p,
         custom_params=request.custom_params,
         reasoning_effort=request.reasoning_effort,
+        purpose="chat_stream_retry",
     )
     message = _extract_non_stream_ai_message(response)
     raw_answer = message.get("content") or ""
@@ -6863,6 +6872,7 @@ async def chat_with_pdf(request: ChatRequest):
             middlewares=build_chat_middlewares(), max_tokens=adjusted_max_tokens,
             temperature=request.temperature, top_p=request.top_p,
             custom_params=request.custom_params, reasoning_effort=request.reasoning_effort,
+            purpose="vision" if image_list else "chat",
         )
         message = _extract_non_stream_ai_message(response)
         raw_answer = message.get("content") or ""
@@ -6923,6 +6933,8 @@ async def chat_with_pdf(request: ChatRequest):
             "doc_id": request.doc_id, "question": request.question,
             "timestamp": datetime.now().isoformat(), "used_provider": response.get("_used_provider"),
             "used_model": response.get("_used_model"), "fallback_used": response.get("_fallback_used", False),
+            "usage": response.get("usage"),
+            "usage_meta": response.get("_usage_meta"),
             "retrieval_meta": {
                 **{k: v for k, v in retrieval_meta.items() if not k.startswith("_")},
                 "context_segments": response_context_segments,
@@ -7673,6 +7685,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 max_tokens=adjusted_stream_max_tokens, temperature=request.temperature,
                 top_p=request.top_p, custom_params=request.custom_params,
                 reasoning_effort=request.reasoning_effort,
+                purpose="vision_stream" if image_list else "chat_stream",
             )
             timed_stream = _stream_with_total_timeout(
                 raw_stream,
@@ -7690,6 +7703,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
             stream_done_sent = False
             stream_error_sent = False
             last_stream_chunk: dict = {}
+            stream_usage: Optional[dict] = None
             # D1：并行引文匹配（仿 kotaemon）
             # CITATION LIST 完整后立即在后台线程启动匹配，与 FINAL ANSWER 流式输出并行
             _citation_match_thread: Optional[threading.Thread] = None
@@ -7710,6 +7724,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 passthrough=True,
             ):
                 last_stream_chunk = chunk
+                if isinstance(chunk.get("usage"), dict):
+                    stream_usage = chunk.get("usage")
+                    continue
                 if chunk.get("error"):
                     stream_error_sent = True
                     error_message = str(chunk.get("error") or "LLM stream error")
@@ -7756,7 +7773,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         }
                         if not content_progress_sent:
                             yield f"data: {json.dumps({'content': retry_answer, 'reasoning_content': retry_reasoning, 'done': False}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'error': error_message, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'web_search_sources': web_search_sources, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'error': error_message, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'web_search_sources': web_search_sources, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True, 'usage': retry_response.get('usage'), 'usage_meta': retry_response.get('_usage_meta')}, ensure_ascii=False)}\n\n"
                         break
 
                     fallback_answer = _build_generation_error_fallback_answer(
@@ -7869,6 +7886,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             query=retrieval_meta.get("search_query") or request.question,
                         )
                     response_context_segments = _build_response_context_segments(retrieval_meta)
+                    usage_meta = build_usage_meta(
+                        provider=chunk.get('used_provider') or request.api_provider,
+                        model=chunk.get('used_model') or request.model,
+                        purpose="vision_stream" if image_list else "chat_stream",
+                        messages=messages,
+                        raw_usage=stream_usage,
+                        completion_text=final_answer_text,
+                    )
+                    record_usage(usage_meta)
 
                     # Bug1 兜底：LLM 未输出 FINAL ANSWER 标记时，流式过滤跳过了所有 content，
                     # 此处补发完整回答文本，确保前端不会显示空内容
@@ -7898,6 +7924,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         'web_search_sources': web_search_sources,
                         'memory_hits': memory_hits,
                         'memory_meta': memory_meta,
+                        'usage': {
+                            'prompt_tokens': usage_meta.get('prompt_tokens'),
+                            'completion_tokens': usage_meta.get('completion_tokens'),
+                            'total_tokens': usage_meta.get('total_tokens'),
+                            'estimated': usage_meta.get('estimated'),
+                        },
+                        'usage_meta': usage_meta,
                     }
                     if qa_score_val is not None:
                         chunk_data['qa_score'] = qa_score_val
@@ -8179,6 +8212,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         query=retrieval_meta.get("search_query") or request.question,
                     )
                 response_context_segments = _build_response_context_segments(retrieval_meta)
+                usage_meta = build_usage_meta(
+                    provider=last_stream_chunk.get('used_provider') or request.api_provider,
+                    model=last_stream_chunk.get('used_model') or request.model,
+                    purpose="vision_stream" if image_list else "chat_stream",
+                    messages=messages,
+                    raw_usage=stream_usage,
+                    completion_text=final_answer_text,
+                )
+                record_usage(usage_meta)
                 if has_structured_citations and final_answer_text:
                     fallback_delta = ""
                     if not content_progress_sent:
@@ -8205,6 +8247,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     'web_search_sources': web_search_sources,
                     'memory_hits': memory_hits,
                     'memory_meta': memory_meta,
+                    'usage': {
+                        'prompt_tokens': usage_meta.get('prompt_tokens'),
+                        'completion_tokens': usage_meta.get('completion_tokens'),
+                        'total_tokens': usage_meta.get('total_tokens'),
+                        'estimated': usage_meta.get('estimated'),
+                    },
+                    'usage_meta': usage_meta,
                 }
                 yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Sparkles } from 'lucide-react';
+import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Sparkles, BookOpen } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext';
+import { useReadingSettings } from '../contexts/ReadingSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
@@ -22,8 +23,21 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     } = useChatParams();
     const [showRetrievalTuning, setShowRetrievalTuning] = useState(false);
     const { exportSettings, importSettings } = useGlobalSettings();
+    const {
+        aiAutoProcess,
+        setAiAutoProcess,
+        autoOutlineSummary,
+        setAutoOutlineSummary,
+        autoPretranslate,
+        setAutoPretranslate,
+        pretranslateConcurrency,
+        setPretranslateConcurrency,
+        overviewDefaultDepth,
+        setOverviewDefaultDepth,
+        resetReadingSettings,
+    } = useReadingSettings();
 
-    const resetSettings = () => { resetFontSettings(); resetChatParams(); resetWebSearch(); };
+    const resetSettings = () => { resetFontSettings(); resetChatParams(); resetWebSearch(); resetReadingSettings(); };
 
     const [customFontInput, setCustomFontInput] = useState(customFont);
     const [showMemoryPanel, setShowMemoryPanel] = useState(false);
@@ -206,6 +220,86 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                                 {preset.label}
                                             </button>
                                         ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Intelligent Reading Settings */}
+                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-8 h-8 rounded-full bg-violet-50 text-[#8871e4] flex items-center justify-center">
+                                            <BookOpen className="w-4 h-4" />
+                                        </div>
+                                        <div>
+                                            <h3 className="text-[14px] font-bold text-gray-900">智能阅读</h3>
+                                            <p className="text-[12px] text-gray-500">控制文档打开后是否自动生成 AI 阅读辅助</p>
+                                        </div>
+                                    </div>
+                                    <ToggleSwitch checked={aiAutoProcess} onChange={setAiAutoProcess} color="#8871e4" />
+                                </div>
+
+                                <div className={`pt-3 border-t border-gray-100/50 space-y-3 ${aiAutoProcess ? '' : 'opacity-60'}`}>
+                                    <SmartReadingRow
+                                        title="自动生成大纲与总结"
+                                        desc="打开文档后自动生成左侧 AI 总结和章节大纲；关闭后只读取已有缓存"
+                                        checked={autoOutlineSummary}
+                                        onChange={setAutoOutlineSummary}
+                                        disabled={!aiAutoProcess}
+                                    />
+                                    <SmartReadingRow
+                                        title="自动预翻译全文"
+                                        desc="提前缓存正文、标题和图注翻译，悬浮时直接显示；会产生较多模型调用"
+                                        checked={autoPretranslate}
+                                        onChange={setAutoPretranslate}
+                                        disabled={!aiAutoProcess}
+                                    />
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div>
+                                                    <div className="text-[12px] font-bold text-gray-700">预翻译并发</div>
+                                                    <div className="text-[11px] text-gray-500 mt-0.5">免费或限速模型建议 1-3</div>
+                                                </div>
+                                                <span className="text-[12px] font-bold text-[#8871e4] tabular-nums">{pretranslateConcurrency}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="8"
+                                                step="1"
+                                                value={pretranslateConcurrency}
+                                                onChange={(e) => setPretranslateConcurrency(Number(e.target.value))}
+                                                disabled={!aiAutoProcess}
+                                                className="mt-3 w-full accent-[#8871e4] disabled:opacity-50"
+                                            />
+                                        </div>
+
+                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
+                                            <div className="text-[12px] font-bold text-gray-700">速览默认详细度</div>
+                                            <div className="mt-2 grid grid-cols-3 gap-1 bg-white/80 p-1 rounded-[12px] border border-gray-100">
+                                                {[
+                                                    { id: 'brief', label: '简略' },
+                                                    { id: 'standard', label: '标准' },
+                                                    { id: 'detailed', label: '详细' },
+                                                ].map((item) => (
+                                                    <button
+                                                        key={item.id}
+                                                        onClick={() => setOverviewDefaultDepth(item.id)}
+                                                        disabled={!aiAutoProcess}
+                                                        className={`py-1.5 rounded-[10px] text-[11px] font-bold transition-all disabled:opacity-50 ${
+                                                            overviewDefaultDepth === item.id
+                                                                ? 'bg-[#8871e4] text-white shadow-sm'
+                                                                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                                                        }`}
+                                                    >
+                                                        {item.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <p className="mt-2 text-[11px] text-gray-500">速览仍然按需触发，不会因这个选项自动消耗 token</p>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -440,6 +534,18 @@ const ToggleSwitch = ({ checked, onChange, color = '#8871e4' }) => (
     <button onClick={() => onChange(!checked)} className="relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0" style={{ backgroundColor: checked ? color : '#e5e7eb' }}>
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>
+);
+
+const SmartReadingRow = ({ title, desc, checked, onChange, disabled = false }) => (
+    <div className="flex items-start justify-between gap-4 py-1.5">
+        <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-bold text-gray-800">{title}</div>
+            {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
+        </div>
+        <div className={disabled ? 'opacity-50 pointer-events-none' : ''}>
+            <ToggleSwitch checked={checked} onChange={onChange} color="#8871e4" />
+        </div>
+    </div>
 );
 
 /**

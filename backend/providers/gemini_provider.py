@@ -129,14 +129,23 @@ class GeminiProvider(BaseProvider):
                     detail=f"Gemini API错误: {response.text}"
                 )
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as exc:
+                preview = response.text[:500].replace("\n", "\\n")
+                raise RuntimeError(
+                    f"Gemini API返回了无效JSON: {exc}; body_preview={preview}"
+                ) from exc
             return self._normalize_response(result)
 
     def _normalize_response(self, result: dict) -> dict:
         """将 Gemini 响应规范化为 OpenAI 风格 choices[0].message 结构"""
         candidates = result.get("candidates", [])
         if not candidates:
-            return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+            normalized = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+            if result.get("usageMetadata"):
+                normalized["usage"] = result.get("usageMetadata")
+            return normalized
 
         content = candidates[0].get("content", {})
         parts = content.get("parts", [])
@@ -167,4 +176,7 @@ class GeminiProvider(BaseProvider):
         if tool_calls:
             message["tool_calls"] = tool_calls
 
-        return {"choices": [{"message": message}]}
+        normalized = {"choices": [{"message": message}]}
+        if result.get("usageMetadata"):
+            normalized["usage"] = result.get("usageMetadata")
+        return normalized

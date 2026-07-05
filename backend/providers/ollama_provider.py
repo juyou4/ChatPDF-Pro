@@ -98,7 +98,13 @@ class OllamaProvider(BaseProvider):
                         detail=f"Ollama API错误: {response.text}"
                     )
 
-                result = response.json()
+                try:
+                    result = response.json()
+                except ValueError as exc:
+                    preview = response.text[:500].replace("\n", "\\n")
+                    raise RuntimeError(
+                        f"Ollama API返回了无效JSON: {exc}; body_preview={preview}"
+                    ) from exc
                 return self._normalize_response(result)
         except httpx.ConnectError:
             raise HTTPException(

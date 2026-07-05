@@ -15,6 +15,15 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from services.vector_service import create_index
 from services.url_loader_service import fetch_url_content
 from services.multi_format_loader import is_supported_format, extract_from_file
+from services.block_index_service import ensure_block_index
+from services.block_translation_service import (
+    MAX_BLOCKS_PER_REQUEST,
+    get_cached_translations,
+    get_translation_cache_path,
+    translate_blocks,
+)
+from services.reading_outline_service import get_or_create_reading_outline, get_reading_outline_path
+from services.section_outline_service import get_or_create_section_outline, get_section_outline_path
 from runtime_mode import runtime
 from services.ocr_service import (
     is_ocr_available,
@@ -212,6 +221,34 @@ def load_documents():
     logger.info("Loaded %s documents.", count)
 
 
+def _resolve_document_pdf_path(doc: dict) -> Path | None:
+    """Resolve a stored document's PDF file path when it has one."""
+    pdf_url = (doc or {}).get("pdf_url") or ""
+    if not pdf_url:
+        return None
+    pdf_name = pdf_url.split("/")[-1]
+    if not pdf_name:
+        return None
+    pdf_path = UPLOAD_DIR / pdf_name
+    return pdf_path if pdf_path.exists() else None
+
+
+def _warm_block_index(doc_id: str) -> None:
+    """Best-effort block index build; upload/search must not fail because of it."""
+    try:
+        doc = documents_store.get(doc_id)
+        if not doc:
+            return
+        ensure_block_index(
+            doc_id=doc_id,
+            doc=doc,
+            data_dir=DATA_DIR,
+            pdf_path=_resolve_document_pdf_path(doc),
+        )
+    except Exception as exc:
+        logger.warning("[BlockIndex] warm build failed for %s: %s", doc_id, exc)
+
+
 def migrate_legacy_storage():
     """Move files from old backend/* paths to project root if needed."""
     migrations = [
@@ -240,6 +277,7 @@ def extract_text_from_pdf(
     pdf_file,
     pdf_bytes: Optional[bytes] = None,
     enable_ocr: str = "auto",
+    ocr_backend: str = "auto",
     extract_images: bool = True,
     ocr_dpi: int = 200,
     ocr_language: str = "chi_sim+eng",
@@ -263,6 +301,7 @@ def extract_text_from_pdf(
         pdf_file: pdfplumber 使用的文件对象
         pdf_bytes: PDF 原始字节（OCR 需要）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）
+        ocr_backend: OCR 后端 - "auto"、"tesseract"、"paddleocr"、"mistral"、"mineru" 或 "doc2x"
         extract_images: 是否从 PDF 中提取图片
         ocr_dpi: OCR 图像转换分辨率（DPI），默认 200
         ocr_language: OCR 语言设置（Tesseract 语言代码），默认 "chi_sim+eng"
@@ -1418,12 +1457,17 @@ def extract_text_from_pdf(
         logger.debug("[PDF] 无需执行 OCR 或 OCR 已禁用 (mode=%s, avg_quality=%.1f)", enable_ocr, avg_quality)
         return result
     
-    # 通过注册表获取 OCR 适配器
-    adapter = _ocr_registry.get_adapter(settings.ocr_backend)
+    # 通过注册表获取 OCR 适配器。优先使用本次上传请求的设置，缺省时回退到后端全局配置。
+    selected_ocr_backend = (ocr_backend or settings.ocr_backend or "auto").strip().lower()
+    adapter = _ocr_registry.get_adapter(selected_ocr_backend)
     if adapter is None:
-        logger.warning("[PDF] 需要对 %s 页执行 OCR，但无可用 OCR 后端", len(ocr_target_pages))
-        result["ocr_error"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
-        result["ocr_warning"] = "OCR 未安装，请安装 pytesseract 或 paddleocr"
+        logger.warning(
+            "[PDF] 需要对 %s 页执行 OCR，但后端不可用: %s",
+            len(ocr_target_pages),
+            selected_ocr_backend,
+        )
+        result["ocr_error"] = f"OCR 后端不可用: {selected_ocr_backend}"
+        result["ocr_warning"] = f"OCR 后端不可用: {selected_ocr_backend}"
         return result
     
     if pdf_bytes is None:
@@ -1540,7 +1584,8 @@ async def upload_pdf(
     embedding_api_key: Optional[str] = Form(None),
     embedding_api_host: Optional[str] = Form(None),
     api_key: Optional[str] = Form(None),
-    enable_ocr: Optional[str] = Form(None)
+    enable_ocr: Optional[str] = Form(None),
+    ocr_backend: Optional[str] = Form(None),
 ):
     """
     上传并处理 PDF 文件
@@ -1553,6 +1598,7 @@ async def upload_pdf(
         api_key: 语义意群摘要使用的 LLM API 密钥（可选，默认回退到 embedding_api_key）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
                     缺失时使用后端配置中的 ocr_default_mode 默认值。
+        ocr_backend: OCR 后端。缺失时使用后端配置中的 ocr_backend 默认值。
     """
     filename_lower = file.filename.lower()
     is_pdf = filename_lower.endswith('.pdf')
@@ -1589,6 +1635,7 @@ async def upload_pdf(
                     "pdf_url": None,
                 }
                 save_document(doc_id, documents_store[doc_id])
+                _warm_block_index(doc_id)
                 summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
                 create_index(
                     doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR),
@@ -1623,12 +1670,14 @@ async def upload_pdf(
 
         # 当 enable_ocr 参数缺失时，回退到配置中的默认值
         ocr_mode = enable_ocr if enable_ocr is not None else settings.ocr_default_mode
+        ocr_backend_name = ocr_backend if ocr_backend is not None else settings.ocr_backend
 
         # 使用配置中的 OCR 参数提取文本
         extracted_data = extract_text_from_pdf(
             pdf_file,
             pdf_bytes=content,
             enable_ocr=ocr_mode,
+            ocr_backend=ocr_backend_name,
             ocr_dpi=settings.ocr_dpi,
             ocr_language=settings.ocr_language,
             ocr_quality_threshold=settings.ocr_quality_threshold,
@@ -1685,6 +1734,7 @@ async def upload_pdf(
         _normalize_page_keys(documents_store[doc_id])
 
         save_document(doc_id, documents_store[doc_id])
+        _warm_block_index(doc_id)
 
         summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
         create_index(
@@ -1833,6 +1883,176 @@ async def get_document(doc_id: str):
         "extraction_quality": doc["data"].get("extraction_quality", "unknown"),
         "extraction_method": doc["data"].get("extraction_method", "unknown")
     }
+
+
+@router.get("/documents/{doc_id}/blocks")
+async def get_document_blocks(doc_id: str, force_rebuild: bool = False):
+    """Return page-level blocks, outline and PDF bbox anchors for immersive reading."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    try:
+        return ensure_block_index(
+            doc_id=doc_id,
+            doc=doc,
+            data_dir=DATA_DIR,
+            pdf_path=_resolve_document_pdf_path(doc),
+            force_rebuild=force_rebuild,
+        )
+    except Exception as exc:
+        logger.exception("[BlockIndex] build failed for %s", doc_id)
+        raise HTTPException(status_code=500, detail=f"块索引生成失败: {exc}")
+
+
+@router.get("/documents/{doc_id}/reading-outline")
+async def get_document_reading_outline(doc_id: str, force: bool = False):
+    """Return cached/fallback AI reading outline with evidence block bindings."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+    return await get_or_create_reading_outline(
+        data_dir=DATA_DIR,
+        doc_id=doc_id,
+        doc=doc,
+        block_index=block_index,
+        force=force,
+    )
+
+
+@router.post("/documents/{doc_id}/reading-outline")
+async def create_document_reading_outline(
+    request: Request,
+    doc_id: str,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+    force: bool = False,
+):
+    """Generate or return the structured reading outline used by immersive reading."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    force = bool(body.get("force", force))
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+
+    return await get_or_create_reading_outline(
+        data_dir=DATA_DIR,
+        doc_id=doc_id,
+        doc=doc,
+        block_index=block_index,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=_get_overview_provider_endpoint(provider, api_host),
+        force=force,
+    )
+
+
+@router.get("/documents/{doc_id}/section-outline")
+async def get_document_section_outline(doc_id: str, force: bool = False):
+    """返回 PDF 书签或确定性的启发式章节大纲。"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+    return await get_or_create_section_outline(
+        data_dir=DATA_DIR,
+        doc_id=doc_id,
+        doc=doc,
+        block_index=block_index,
+        force=force,
+    )
+
+
+@router.post("/documents/{doc_id}/section-outline")
+async def create_document_section_outline(
+    request: Request,
+    doc_id: str,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+    force: bool = False,
+):
+    """为左侧“大纲”生成或返回原文章节树。"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    force = bool(body.get("force", force))
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+
+    return await get_or_create_section_outline(
+        data_dir=DATA_DIR,
+        doc_id=doc_id,
+        doc=doc,
+        block_index=block_index,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=_get_overview_provider_endpoint(provider, api_host),
+        force=force,
+    )
 
 
 @router.get("/document/{doc_id}/thumbnail/{page}")
@@ -2748,6 +2968,7 @@ load_documents()
 # ============ 速览（Overview）API ============
 
 from services.overview_service import (
+    clear_overview_cache,
     get_or_create_overview,
     create_overview_task,
     get_task_status,
@@ -2784,6 +3005,219 @@ def _resolve_overview_runtime_params(
     resolved_api_key = (api_key or request.headers.get("X-ChatPDF-Api-Key") or "").strip()
     resolved_api_host = (api_host or request.headers.get("X-ChatPDF-Api-Host") or "").strip()
     return resolved_api_key, resolved_model, resolved_provider, resolved_api_host
+
+
+@router.get("/documents/{doc_id}/blocks/translations")
+async def get_block_translations(
+    doc_id: str,
+    target_lang: str = "zh",
+):
+    """Return cached block translations for the immersive reading panel."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+    return get_cached_translations(
+        data_dir=DATA_DIR,
+        doc_id=doc_id,
+        block_index=block_index,
+        target_lang=target_lang,
+    )
+
+
+@router.post("/documents/{doc_id}/blocks/translate")
+async def translate_document_blocks(
+    request: Request,
+    doc_id: str,
+    target_lang: str = "zh",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+    force: bool = False,
+):
+    """Translate selected block ids and cache the result."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    block_ids = body.get("block_ids", [])
+    if isinstance(block_ids, str):
+        block_ids = [item.strip() for item in block_ids.split(",") if item.strip()]
+    if not isinstance(block_ids, list):
+        raise HTTPException(status_code=400, detail="block_ids 必须是数组")
+    block_ids = [str(item) for item in block_ids if str(item).strip()]
+    if not block_ids:
+        raise HTTPException(status_code=400, detail="缺少 block_ids")
+    if len(block_ids) > MAX_BLOCKS_PER_REQUEST:
+        block_ids = block_ids[:MAX_BLOCKS_PER_REQUEST]
+
+    target_lang = body.get("target_lang") or target_lang
+    force = bool(body.get("force", force))
+
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    provider_lower = (provider or "").lower()
+    if not api_key and provider_lower not in {"local", "ollama"}:
+        raise HTTPException(status_code=400, detail="请先配置用于翻译的对话模型 API Key")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+
+    try:
+        return await translate_blocks(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            block_index=block_index,
+            block_ids=block_ids,
+            target_lang=target_lang,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=_get_overview_provider_endpoint(provider, api_host),
+            force=force,
+        )
+    except Exception as exc:
+        logger.exception("[BlockTranslation] translate failed for %s", doc_id)
+        raise HTTPException(status_code=502, detail=f"段落翻译失败: {exc}")
+
+
+@router.post("/documents/{doc_id}/blocks/pretranslate")
+async def pretranslate_document_blocks(
+    request: Request,
+    doc_id: str,
+    target_lang: str = "zh",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+    force: bool = False,
+    concurrency: int = 5,
+):
+    """批量预翻译文档块，由后端统一控制并发。"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    block_ids = body.get("block_ids", [])
+    if isinstance(block_ids, str):
+        block_ids = [item.strip() for item in block_ids.split(",") if item.strip()]
+    if not isinstance(block_ids, list):
+        raise HTTPException(status_code=400, detail="block_ids 必须是数组")
+    block_ids = [str(item) for item in block_ids if str(item).strip()]
+    if not block_ids:
+        raise HTTPException(status_code=400, detail="缺少 block_ids")
+
+    target_lang = body.get("target_lang") or target_lang
+    force = bool(body.get("force", force))
+    try:
+        concurrency = int(body.get("concurrency", concurrency) or 5)
+    except Exception:
+        concurrency = 5
+
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+    if not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        prov = merged.get(provider, {})
+        api_key = (prov.get("api_key") or "").strip()
+
+    provider_lower = (provider or "").lower()
+    if not api_key and provider_lower not in {"local", "ollama"}:
+        raise HTTPException(status_code=400, detail="请先配置用于翻译的对话模型 API Key")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+
+    try:
+        return await translate_blocks(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            block_index=block_index,
+            block_ids=block_ids,
+            target_lang=target_lang,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=_get_overview_provider_endpoint(provider, api_host),
+            force=force,
+            max_blocks=None,
+            concurrency=concurrency,
+        )
+    except Exception as exc:
+        logger.exception("[BlockTranslation] pretranslate failed for %s", doc_id)
+        raise HTTPException(status_code=502, detail=f"全文预翻译失败: {exc}")
+
+
+@router.delete("/documents/{doc_id}/ai-cache")
+async def clear_document_ai_cache(doc_id: str):
+    """清理当前文档的 AI 辅助缓存，不删除原始文件、向量库或对话历史。"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    removed: list[str] = []
+    cache_paths = {
+        "reading_outline": get_reading_outline_path(DATA_DIR, doc_id),
+        "section_outline": get_section_outline_path(DATA_DIR, doc_id),
+        "block_translations": get_translation_cache_path(DATA_DIR, doc_id),
+    }
+
+    for name, path in cache_paths.items():
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(name)
+        except Exception as exc:
+            logger.warning("[AICache] 删除 %s 缓存失败 doc=%s path=%s err=%s", name, doc_id, path, exc)
+
+    for depth in (OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED):
+        for render_mode in ("raw", "yolo"):
+            await clear_overview_cache(doc_id, depth, render_mode)
+    removed.append("overview")
+
+    return {
+        "doc_id": doc_id,
+        "removed": removed,
+    }
 
 
 @router.post("/documents/{doc_id}/overview")
@@ -2901,6 +3335,7 @@ async def get_overview(
     api_host: Optional[str] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
+    force: bool = False,
 ):
     """
     获取速览（同步接口）
@@ -2913,6 +3348,7 @@ async def get_overview(
         api_key: API Key（可选，默认使用配置）
         model: 模型名称（可选，默认 gpt-4o）
         provider: 模型提供商（可选，默认 openai）
+        force: 是否强制绕过缓存重新生成
 
     Returns:
         速览数据
@@ -2941,11 +3377,12 @@ async def get_overview(
         api_key = (prov.get("api_key") or "").strip()
 
     logger.info(
-        "[Overview-Route] doc=%s depth=%s use_mineru_figures=%s figure_render_mode=%s",
+        "[Overview-Route] doc=%s depth=%s use_mineru_figures=%s figure_render_mode=%s force=%s",
         doc_id,
         depth,
         use_mineru_figures,
         figure_render_mode,
+        force,
     )
     try:
         overview = await get_or_create_overview(
@@ -2957,6 +3394,7 @@ async def get_overview(
             _get_overview_provider_endpoint(provider, api_host),
             use_mineru_figures=use_mineru_figures,
             figure_render_mode=figure_render_mode,
+            force=force,
         )
         return overview.model_dump()
     except TimeoutError:

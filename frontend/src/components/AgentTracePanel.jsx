@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -7,11 +7,11 @@ import {
   Hash,
   Wrench,
   Layers,
+  Loader2,
   Map,
   Sparkles,
   CheckCircle2,
   Circle,
-  Clock,
 } from 'lucide-react';
 
 // 工具到 icon / 中文标签的映射，与后端 retrieval_agent / retrieval_tools 保持一致
@@ -60,9 +60,45 @@ const AGENT_GATE_REASON_LABELS = {
  * 检索代理执行轨迹面板。
  * embedded=true 时作为思考面板内的子区域显示，避免完成后跳到回答下方。
  */
+const BouncingDots = ({ className = 'bg-violet-400' }) => (
+  <span className="ml-1 inline-flex items-center gap-0.5" aria-hidden="true">
+    {[0, 1, 2].map((i) => (
+      <span
+        key={i}
+        className={`h-1 w-1 rounded-full ${className} animate-bounce`}
+        style={{ animationDelay: `${i * 0.15}s` }}
+      />
+    ))}
+  </span>
+);
+
 export default function AgentTracePanel({ trace, embedded = false }) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedRounds, setExpandedRounds] = useState(() => new Set([1]));
+
+  const isRunning = Boolean(trace && trace.enabled && trace.startedAt && !trace.endedAt);
+
+  // 运行中每 500ms 触发一次重绘，让头部计时器实时走动
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return undefined;
+    const id = setInterval(() => setNowTick(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [isRunning]);
+
+  // 新一轮开始时自动展开，让执行过程始终可见
+  const roundsLength = Array.isArray(trace?.rounds) ? trace.rounds.length : 0;
+  useEffect(() => {
+    if (!roundsLength) return;
+    const latest = trace.rounds[roundsLength - 1]?.round;
+    if (latest == null) return;
+    setExpandedRounds((prev) => {
+      if (prev.has(latest)) return prev;
+      const next = new Set(prev);
+      next.add(latest);
+      return next;
+    });
+  }, [roundsLength]);
 
   const stats = useMemo(() => {
     if (!trace) return null;
@@ -88,6 +124,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
   const subQuestions = trace.subQuestions || trace.diagnostics?.sub_questions || [];
   const coverage = trace.taskStatus?.sub_question_coverage || [];
   const duration = formatDuration(trace.startedAt, trace.endedAt);
+  const liveDuration = isRunning ? formatElapsedMs(Math.max(0, nowTick - trace.startedAt)) : '';
   const hasTaskStatus =
     (taskStatus.completed && taskStatus.completed.length > 0) ||
     Boolean(taskStatus.current) ||
@@ -152,8 +189,12 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           </div>
         ))}
         {taskStatus.current && (
-          <div className="flex items-start gap-1.5 text-blue-700 dark:text-blue-400">
-            <Clock className="mt-0.5 h-3 w-3 flex-shrink-0" />
+          <div className="agent-op-enter flex items-start gap-1.5 text-violet-700 dark:text-violet-400">
+            {isRunning ? (
+              <Loader2 className="mt-0.5 h-3 w-3 flex-shrink-0 animate-spin" />
+            ) : (
+              <Circle className="mt-0.5 h-3 w-3 flex-shrink-0" />
+            )}
             <span className="line-clamp-2">{taskStatus.current}</span>
           </div>
         )}
@@ -171,24 +212,38 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     const meta = getToolMeta(op.tool);
     const Icon = meta.icon;
     const isDone = op.status === 'done' || Number.isFinite(op.resultCount);
+    const isExecuting = !isDone;
     const elapsed = formatElapsedMs(op.elapsedMs);
 
     return (
       <div
         key={index}
-        className="flex items-start gap-2 rounded-md border border-gray-200/70 bg-white/75 px-2.5 py-2 text-[11px] dark:border-gray-700 dark:bg-gray-900/30"
+        className={`agent-op-enter flex items-start gap-2 rounded-md border px-2.5 py-2 text-[11px] transition-colors duration-300 ${
+          isExecuting
+            ? 'agent-op-running border-violet-200/80 dark:border-violet-800/50'
+            : 'border-gray-200/70 bg-white/75 dark:border-gray-700 dark:bg-gray-900/30'
+        }`}
       >
-        <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-gray-50 dark:bg-gray-800">
+        <span
+          className={`mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md ${
+            isExecuting ? 'animate-pulse bg-violet-50 dark:bg-violet-950/40' : 'bg-gray-50 dark:bg-gray-800'
+          }`}
+        >
           <Icon className={`h-3.5 w-3.5 ${meta.iconClass}`} />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
             <span className="font-medium text-gray-700 dark:text-gray-200">{meta.label}</span>
             {Number.isFinite(op.resultCount) && (
-              <span className="text-gray-500 dark:text-gray-400">→ {op.resultCount} 个结果</span>
+              <span className="agent-op-enter text-gray-500 dark:text-gray-400">→ {op.resultCount} 个结果</span>
             )}
             {elapsed && <span className="text-gray-400 dark:text-gray-500">· {elapsed}</span>}
-            {!isDone && <span className="text-blue-500 dark:text-blue-400">执行中</span>}
+            {isExecuting && (
+              <span className="inline-flex items-center gap-1 text-violet-500 dark:text-violet-400">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                执行中
+              </span>
+            )}
           </div>
           {(op.resultMessage || op.message) && (
             <div className="mt-1 line-clamp-2 break-words text-gray-500 dark:text-gray-400">
@@ -207,9 +262,17 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     const opCount = operations.length;
     const successCount = operations.filter((op) => Number(op.resultCount) > 0).length;
     const invocationMode = trace.diagnostics?.planner_invocation_mode?.[roundIndex];
+    const isCurrentRound = isRunning && roundIndex === rounds.length - 1;
 
     return (
-      <div key={round} className="overflow-hidden rounded-md border border-gray-200/80 bg-gray-50/40 dark:border-gray-700 dark:bg-gray-900/20">
+      <div
+        key={round}
+        className={`agent-op-enter overflow-hidden rounded-md border transition-colors duration-300 ${
+          isCurrentRound
+            ? 'border-violet-200 bg-violet-50/30 dark:border-violet-800/60 dark:bg-violet-950/10'
+            : 'border-gray-200/80 bg-gray-50/40 dark:border-gray-700 dark:bg-gray-900/20'
+        }`}
+      >
         <button
           type="button"
           onClick={() => toggleRound(round)}
@@ -220,7 +283,11 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           ) : (
             <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
           )}
-          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-violet-100 text-[10px] font-bold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+          <span
+            className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-violet-100 text-[10px] font-bold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300 ${
+              isCurrentRound ? 'animate-pulse ring-2 ring-violet-300/60 dark:ring-violet-700/60' : ''
+            }`}
+          >
             {round}
           </span>
           <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200">
@@ -237,7 +304,10 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             </span>
           )}
           {roundData.planningMessage && !operations.length && (
-            <span className="text-[10px] text-gray-400">规划中</span>
+            <span className="inline-flex items-center text-[10px] text-violet-500 dark:text-violet-400">
+              规划中
+              {isCurrentRound && <BouncingDots />}
+            </span>
           )}
         </button>
         {isExpanded && (
@@ -274,13 +344,24 @@ export default function AgentTracePanel({ trace, embedded = false }) {
         ) : (
           <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" />
         )}
-        <Bot className="h-3.5 w-3.5 flex-shrink-0 text-violet-500" />
+        <span className="relative flex h-3.5 w-3.5 flex-shrink-0" aria-hidden="true">
+          {isRunning && (
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-50" />
+          )}
+          <Bot className="relative h-3.5 w-3.5 text-violet-500" />
+        </span>
         <span className="font-medium">检索轨迹</span>
+        {isRunning && (
+          <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-600 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300">
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            检索中{liveDuration ? ` ${liveDuration}` : ''}
+          </span>
+        )}
         {stats && (
           <span className="truncate text-gray-400 dark:text-gray-500">
             {stats.roundCount} 轮 · {stats.opCount} 次工具
             {stats.totalResults > 0 ? ` · ${stats.totalResults} 个结果` : ''}
-            {duration ? ` · ${duration}` : ''}
+            {!isRunning && duration ? ` · ${duration}` : ''}
           </span>
         )}
         {trace.fallback && (
@@ -289,6 +370,12 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           </span>
         )}
       </button>
+
+      {isRunning && !collapsed && (
+        <div className="agent-progress-track mb-2 h-[3px] w-full rounded-full bg-violet-100/80 dark:bg-violet-950/40" aria-hidden="true">
+          <span className="agent-progress-sweep" />
+        </div>
+      )}
 
       {!collapsed && (
         <div className="flex flex-col gap-2">
@@ -325,7 +412,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           )}
 
           {trace.finalMessage && (
-            <div className="rounded-r-md border-l-2 border-violet-200 bg-violet-50/50 px-2.5 py-1.5 text-[11px] italic text-gray-500 dark:border-violet-900/60 dark:bg-violet-950/20 dark:text-gray-400">
+            <div className="agent-op-enter rounded-r-md border-l-2 border-violet-200 bg-violet-50/50 px-2.5 py-1.5 text-[11px] italic text-gray-500 dark:border-violet-900/60 dark:bg-violet-950/20 dark:text-gray-400">
               {trace.finalMessage}
             </div>
           )}

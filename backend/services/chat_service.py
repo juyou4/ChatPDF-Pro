@@ -17,6 +17,7 @@ from utils.middleware import (
     RetryMiddleware,
     FallbackMiddleware,
 )
+from services.usage_tracker import attach_usage_meta
 
 
 def _sanitize_api_key(api_key: Optional[str]) -> str:
@@ -115,6 +116,7 @@ async def call_ai_api(
     custom_params: Optional[Dict] = None,
     reasoning_effort: Optional[str] = None,
     tools: Optional[List[dict]] = None,
+    purpose: str = "llm",
 ):
     """统一的AI API调用接口，使用 ProviderFactory 分发，可挂载中间件"""
     # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
@@ -186,6 +188,13 @@ async def call_ai_api(
         response["_used_provider"] = payload.get("provider")
         response["_used_model"] = payload.get("model")
         response["_fallback_used"] = fallback_used
+        attach_usage_meta(
+            response,
+            provider=payload.get("provider"),
+            model=payload.get("model"),
+            purpose=purpose,
+            messages=payload.get("messages"),
+        )
 
     response = await apply_middlewares_after(response, middlewares or [])
     return response
@@ -204,6 +213,7 @@ async def call_ai_api_stream(
     top_p: Optional[float] = None,
     custom_params: Optional[Dict] = None,
     reasoning_effort: Optional[str] = None,
+    purpose: str = "chat_stream",
 ):
     """流式调用（OpenAI 兼容走真正流式，其他回退为单次响应拆分）"""
     payload = {
@@ -236,6 +246,8 @@ async def call_ai_api_stream(
             "messages": messages,
             "stream": True,
         }
+        if provider.lower() in OPENAI_NATIVE:
+            body["stream_options"] = {"include_usage": True}
         # 仅在参数非 None 时添加对应字段
         if temperature is not None:
             body["temperature"] = temperature
@@ -335,6 +347,17 @@ async def call_ai_api_stream(
                             yield {"error": err_msg, "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
                             return
                         # 防止 choices 为空列表时 [0] 抛 IndexError
+                        if chunk.get("usage"):
+                            yield {
+                                "content": "",
+                                "reasoning_content": "",
+                                "done": False,
+                                "usage": chunk.get("usage"),
+                                "used_provider": provider,
+                                "used_model": model,
+                                "fallback_used": False,
+                            }
+
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -522,7 +545,8 @@ async def call_ai_api_stream(
     try:
         resp = await call_ai_api(messages, api_key, model, provider, endpoint=endpoint, middlewares=middlewares,
                                 max_tokens=max_tokens, temperature=temperature, top_p=top_p,
-                                custom_params=custom_params, reasoning_effort=reasoning_effort)
+                                custom_params=custom_params, reasoning_effort=reasoning_effort,
+                                purpose=purpose)
         message = resp.get("choices", [{}])[0].get("message", {}) or {}
         answer = message.get("content", "")
         reasoning_text = extract_reasoning_content(message)

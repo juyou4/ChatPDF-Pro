@@ -1,5 +1,7 @@
 import { useState, useCallback } from 'react';
 
+const OVERVIEW_DEPTHS = new Set(['brief', 'standard', 'detailed']);
+
 /**
  * UI 展示状态管理 Hook
  * 管理侧边栏、暗色模式、面板展开/收起、设置弹窗等 UI 展示状态
@@ -27,8 +29,25 @@ export function useUIState() {
   const [enableThinking, setEnableThinking] = useState(false);
 
   // ========== 速览（Overview）功能 ==========
-  const [rightPanelMode, setRightPanelMode] = useState('chat'); // 'overview' | 'chat'
-  const [overviewDepth, setOverviewDepth] = useState('standard'); // 'brief' | 'standard' | 'detailed'
+  const [rightPanelMode, setRightPanelMode] = useState('chat'); // 'overview' | 'analysis' | 'chat'
+  const [overviewDepth, setOverviewDepthState] = useState(() => {
+    try {
+      const saved = localStorage.getItem('overviewDepth');
+      return OVERVIEW_DEPTHS.has(saved) ? saved : 'standard';
+    } catch {
+      return 'standard';
+    }
+  }); // 'brief' | 'standard' | 'detailed'
+
+  const setOverviewDepth = useCallback((value) => {
+    const nextValue = OVERVIEW_DEPTHS.has(value) ? value : 'standard';
+    setOverviewDepthState(nextValue);
+    try {
+      localStorage.setItem('overviewDepth', nextValue);
+    } catch {
+      // 忽略无痕模式或存储不可用场景
+    }
+  }, []);
 
   // ========== 便捷方法 ==========
 

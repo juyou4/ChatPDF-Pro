@@ -9,6 +9,8 @@ Figure Extraction Service - 统一入口
 本模块是 figure 提取的唯一入口，overview_service 只消费这里的结果。
 """
 import logging
+import io
+import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -21,7 +23,7 @@ from services.figure_builder import build_logical_figures, select_top_figures
 logger = logging.getLogger(__name__)
 
 # Schema 版本，用于缓存失效判断
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 def build_logical_figures_for_overview(
@@ -29,6 +31,7 @@ def build_logical_figures_for_overview(
     doc_record: dict,
     depth: str = "standard",
     force_rebuild: bool = False,
+    prefer_yolo: bool = False,
 ) -> List[LogicalFigureSchema]:
     """
     为速览构建标准化 Figure 列表
@@ -61,7 +64,7 @@ def build_logical_figures_for_overview(
             # 检查 schema 版本
             if meta.get("schema_version") == SCHEMA_VERSION:
                 cached = doc_data.get("logical_figures", [])
-                if cached:
+                if cached and not (prefer_yolo and meta.get("source") in {"caption_only", "fallback"}):
                     logger.info(
                         f"[FigureExtraction] Cache hit for doc {doc_id}: "
                         f"{len(cached)} figures"
@@ -73,8 +76,8 @@ def build_logical_figures_for_overview(
     images = doc_data.get("images", [])
     figures = doc_data.get("figures", [])  # 上传阶段提取的 figure 标题
 
-    # 如果没有图片且没有 figure 标题，直接返回空
-    if not images and not figures:
+    # 如果没有图片且没有 figure 标题，raw 路径直接返回空；YOLO 模式仍可从页面版面扫描候选。
+    if not images and not figures and not (prefer_yolo and pdf_url):
         logger.info(f"[FigureExtraction] No images and no figures found for doc {doc_id}")
         _update_status(doc_data, "done", provider="none", count=0)
         return []
@@ -128,7 +131,19 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] MinerU Adapter failed: {e}")
             fallback_used = True
 
-    # 4.2 如果没有 MinerU 结果，使用 PDF Native Adapter（需要光栅图片做空间匹配）
+    # 4.2 YOLO 增强：直接用版面模型 ImageBody/TableBody 作为候选源。
+    if not adapter_results and prefer_yolo and pdf_doc is not None:
+        try:
+            yolo_blocks = _build_figures_from_yolo_layout(pdf_doc, figures)
+            if yolo_blocks:
+                adapter_results.extend(yolo_blocks)
+                source = "yolo"
+                logger.info(f"[FigureExtraction] YOLO Adapter: got {len(yolo_blocks)} blocks")
+        except Exception as e:
+            logger.warning(f"[FigureExtraction] YOLO Adapter failed: {e}")
+            fallback_used = True
+
+    # 4.3 如果没有 MinerU/YOLO 结果，使用 PDF Native Adapter（需要光栅图片做空间匹配）
     if not adapter_results and figures and images:
         try:
             pdf_adapter = FigureAdapterFactory.get_adapter(FigureSource.PDF_NATIVE)
@@ -146,7 +161,7 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] PDF Native Adapter failed: {e}")
             fallback_used = True
 
-    # 4.3 Caption-only fallback: 矢量图 PDF 没有光栅图片但有 figure 标题
+    # 4.4 Caption-only fallback: 矢量图 PDF 没有光栅图片但有 figure 标题
     if not adapter_results and not images and figures:
         try:
             caption_blocks = _build_figures_from_captions(
@@ -163,7 +178,7 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] Caption-only fallback failed: {e}")
             fallback_used = True
 
-    # 4.4 Fallback: 使用图片列表
+    # 4.5 Fallback: 使用图片列表
     if not adapter_results and images:
         try:
             fallback_adapter = FigureAdapterFactory.get_adapter(FigureSource.FALLBACK)
@@ -238,6 +253,217 @@ def build_logical_figures_for_overview(
         pdf_doc.close()
 
     return selected
+
+
+def _build_figures_from_yolo_layout(pdf_doc, figures: list) -> List[FigureBlock]:
+    """用 DocLayout-YOLO 的 ImageBody/TableBody 直接构建候选图表。
+
+    render_mode=yolo 时调用。它与 caption-only 的区别是：body bbox 来自版面模型，
+    caption 只用于命名和补充上下文，不再用“从图注往上猜一块区域”的弱规则。
+    """
+    try:
+        from PIL import Image as PILImage
+        from services.layout_service import detect_layout, is_available, pixel_bbox_to_page_pts
+    except Exception as exc:
+        logger.debug("[FigureExtraction] YOLO layout unavailable: %s", exc)
+        return []
+
+    if not is_available():
+        return []
+
+    caption_pages = {
+        int(fig.get("page") or 0)
+        for fig in figures or []
+        if int(fig.get("page") or 0) > 0
+    }
+    pages_to_scan = sorted(caption_pages) if caption_pages else list(range(1, min(len(pdf_doc), 12) + 1))
+
+    caption_candidates = _caption_candidates_by_page(figures)
+    blocks: List[FigureBlock] = []
+
+    for page_num in pages_to_scan:
+        if page_num <= 0 or page_num > len(pdf_doc):
+            continue
+        page = pdf_doc[page_num - 1]
+        try:
+            pix = page.get_pixmap(dpi=144)
+            page_image = PILImage.open(io.BytesIO(pix.tobytes("png")))
+            detections = detect_layout(page_image, conf=0.12)
+        except Exception as exc:
+            logger.debug("[FigureExtraction] YOLO page %s failed: %s", page_num, exc)
+            continue
+
+        page_width_pts = page.rect.width
+        page_height_pts = page.rect.height
+        yolo_captions = []
+        body_detections = []
+        for det in detections or []:
+            category = det.get("category_name")
+            bbox = det.get("bbox")
+            if category not in {"ImageBody", "TableBody", "ImageCaption", "TableCaption"}:
+                continue
+            bbox_pts = pixel_bbox_to_page_pts(
+                bbox,
+                page_image.width,
+                page_image.height,
+                page_width_pts,
+                page_height_pts,
+            )
+            if category in {"ImageCaption", "TableCaption"}:
+                yolo_captions.append({
+                    "bbox": bbox_pts,
+                    "kind": "table" if category == "TableCaption" else "figure",
+                    "caption": "",
+                    "display_label": "Table" if category == "TableCaption" else "Figure",
+                    "source": "yolo_caption",
+                    "score": float(det.get("score") or 0.0),
+                })
+            else:
+                body_detections.append({
+                    "bbox": bbox_pts,
+                    "kind": "table" if category == "TableBody" else "figure",
+                    "category": category,
+                    "score": float(det.get("score") or 0.0),
+                })
+
+        page_captions = caption_candidates.get(page_num, []) + yolo_captions
+        used_body_keys: set[tuple[int, int, int, int]] = set()
+        for idx, body in enumerate(sorted(body_detections, key=lambda item: (item["bbox"][1], item["bbox"][0])), start=1):
+            body_bbox = _normalize_bbox(body.get("bbox"))
+            if not body_bbox:
+                continue
+            body_key = tuple(round(v) for v in body_bbox)
+            if body_key in used_body_keys:
+                continue
+            used_body_keys.add(body_key)
+
+            caption = _match_caption_to_body(body_bbox, body["kind"], page_captions)
+            caption_bbox = _normalize_bbox(caption.get("bbox")) if caption else None
+            caption_text = (caption or {}).get("caption") or ""
+            display_label = (caption or {}).get("display_label") or _fallback_yolo_label(body["kind"], page_num, idx)
+            figure_id = _stable_yolo_figure_id(body["kind"], display_label, page_num, idx)
+            full_bbox = _merge_bboxes([body_bbox, caption_bbox]) if caption_bbox else body_bbox
+
+            blocks.append(FigureBlock(
+                figure_id=figure_id,
+                page_idx=page_num - 1,
+                figure_index=display_label,
+                caption_text=caption_text or display_label,
+                raw_bboxes=[body_bbox],
+                body_bbox_page_pts=body_bbox,
+                full_bbox_page_pts=full_bbox,
+                source="yolo",
+                confidence=max(0.0, min(float(body.get("score") or 0.0), 1.0)),
+                source_metadata={
+                    "adapter": "doclayout_yolo",
+                    "category": body["category"],
+                    "layout_score": body.get("score"),
+                    "caption_bbox": caption_bbox,
+                    "caption_source": (caption or {}).get("source"),
+                    "page_width": page_width_pts,
+                    "page_height": page_height_pts,
+                },
+            ))
+
+    return blocks
+
+
+def _caption_candidates_by_page(figures: list) -> dict[int, list[dict]]:
+    result: dict[int, list[dict]] = {}
+    for fig in figures or []:
+        page_num = int(fig.get("page") or 0)
+        bbox = _normalize_bbox(fig.get("caption_bbox") or fig.get("bbox"))
+        if page_num <= 0 or not bbox:
+            continue
+        caption = str(fig.get("caption") or fig.get("label") or "").strip()
+        result.setdefault(page_num, []).append({
+            "bbox": bbox,
+            "kind": _caption_kind(caption),
+            "caption": caption,
+            "display_label": fig.get("display_label") or _caption_display_label(caption),
+            "source": "pdf_text_caption",
+            "score": 0.8,
+        })
+    return result
+
+
+def _match_caption_to_body(body_bbox: list[float], body_kind: str, captions: list[dict]) -> Optional[dict]:
+    best: tuple[float, dict] | None = None
+    body_width = max(body_bbox[2] - body_bbox[0], 1.0)
+
+    for caption in captions or []:
+        cap_bbox = _normalize_bbox(caption.get("bbox"))
+        if not cap_bbox:
+            continue
+        kind_penalty = 0.0 if caption.get("kind") == body_kind else 80.0
+        overlap = max(0.0, min(body_bbox[2], cap_bbox[2]) - max(body_bbox[0], cap_bbox[0]))
+        overlap_ratio = overlap / max(min(body_width, cap_bbox[2] - cap_bbox[0]), 1.0)
+        if overlap_ratio < 0.08:
+            continue
+
+        above_gap = body_bbox[1] - cap_bbox[3]
+        below_gap = cap_bbox[1] - body_bbox[3]
+        candidates: list[tuple[float, str]] = []
+        if -12.0 <= above_gap <= 160.0:
+            candidates.append((max(0.0, above_gap), "above"))
+        if -12.0 <= below_gap <= 180.0:
+            candidates.append((max(0.0, below_gap), "below"))
+        if not candidates:
+            continue
+
+        gap, position = min(candidates, key=lambda item: item[0])
+        orientation_penalty = 0.0
+        if body_kind == "table" and position != "above":
+            orientation_penalty = 30.0
+        if body_kind == "figure" and position != "below":
+            orientation_penalty = 20.0
+
+        score = gap + kind_penalty + orientation_penalty - overlap_ratio * 20.0
+        if best is None or score < best[0]:
+            best = (score, caption)
+
+    return best[1] if best else None
+
+
+def _caption_kind(text: str) -> str:
+    return "table" if re.match(r"^\s*(table|表)\b", str(text or ""), re.IGNORECASE) else "figure"
+
+
+def _caption_display_label(text: str) -> str:
+    match = re.match(r"^\s*((?:fig(?:ure)?\.?|图|table|表)\s*[0-9ivxlcdm]+[a-z]?)", str(text or ""), re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _fallback_yolo_label(kind: str, page_num: int, index: int) -> str:
+    prefix = "Table" if kind == "table" else "Figure"
+    return f"{prefix} p{page_num}-{index}"
+
+
+def _stable_yolo_figure_id(kind: str, display_label: str, page_num: int, index: int) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", display_label or "").strip("_").lower()
+    return f"yolo_{kind}_p{page_num}_{slug or 'item'}_{index}"
+
+
+def _normalize_bbox(bbox: object) -> Optional[list[float]]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(v) for v in bbox]
+    except (TypeError, ValueError):
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _merge_bboxes(bboxes: list[Optional[list[float]]]) -> list[float]:
+    valid = [bbox for bbox in bboxes if bbox]
+    return [
+        min(bbox[0] for bbox in valid),
+        min(bbox[1] for bbox in valid),
+        max(bbox[2] for bbox in valid),
+        max(bbox[3] for bbox in valid),
+    ]
 
 
 def _build_figures_from_captions(

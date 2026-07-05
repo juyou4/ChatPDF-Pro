@@ -644,6 +644,8 @@ export function useMessageState({
   const streamMemoryHitsRef = useRef(null);
   const streamMemoryMetaRef = useRef(null);
   const streamAgentTraceRef = useRef(null);
+  const streamUsageRef = useRef(null);
+  const streamCallInfoRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -806,6 +808,8 @@ export function useMessageState({
     streamMemoryHitsRef.current = null;
     streamMemoryMetaRef.current = null;
     streamAgentTraceRef.current = null;
+    streamUsageRef.current = null;
+    streamCallInfoRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -963,6 +967,20 @@ export function useMessageState({
                 streamAgentTraceRef.current = createInitialAgentTrace();
               }
               applyAgentTraceEvent(streamAgentTraceRef.current, p);
+              // 实时把 trace 快照推给正在流式的消息，让检索轨迹面板边执行边更新。
+              // 传入新的顶层对象引用（并浅拷贝 rounds/operations）以触发 React 重渲染。
+              if (streamAgentTraceRef.current.enabled) {
+                const liveTrace = {
+                  ...streamAgentTraceRef.current,
+                  rounds: streamAgentTraceRef.current.rounds.map((r) => ({
+                    ...r,
+                    operations: [...(r.operations || [])],
+                  })),
+                };
+                setMessages(prev => prev.map(m =>
+                  m.id === tempMsgId ? { ...m, agentTrace: liveTrace } : m
+                ));
+              }
               return;
             }
             if (p.type === 'web_search_status') {
@@ -1038,6 +1056,15 @@ export function useMessageState({
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
               if (Object.prototype.hasOwnProperty.call(p, 'memory_hits')) streamMemoryHitsRef.current = p.memory_hits;
               if (Object.prototype.hasOwnProperty.call(p, 'memory_meta')) streamMemoryMetaRef.current = p.memory_meta;
+              if (p.usage_meta || p.usage) streamUsageRef.current = p.usage_meta || p.usage;
+              if (p.used_provider || p.used_model || p.fallback_used !== undefined) {
+                streamCallInfoRef.current = {
+                  provider: p.used_provider,
+                  model: p.used_model,
+                  fallback: p.fallback_used,
+                  usage: p.usage_meta || p.usage || streamUsageRef.current || null,
+                };
+              }
               if (ct) {
                 appendRealThinking(ct);
               }
@@ -1097,9 +1124,15 @@ export function useMessageState({
           streamedContent,
           streamCitationsRef.current
         );
+        if (streamCallInfoRef.current) {
+          setLastCallInfo({
+            ...streamCallInfoRef.current,
+            usage: streamUsageRef.current || streamCallInfoRef.current.usage || null,
+          });
+        }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null }
             : m
         ));
         activeStreamMsgIdRef.current = null;
@@ -1137,10 +1170,10 @@ export function useMessageState({
             data.retrieval_meta.agent_gate?.requested_enabled
           );
         }
-        setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used });
+        setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null }
             : m
         ));
         setStreamingMessageId(null);

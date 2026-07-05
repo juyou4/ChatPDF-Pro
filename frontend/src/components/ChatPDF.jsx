@@ -19,6 +19,7 @@ const ChatSettings = lazy(() => import('./ChatSettings'));
 const OverviewPanel = lazy(() => import('./OverviewPanel'));
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
+import { useReadingSettings } from '../contexts/ReadingSettingsContext';
 import { useDebouncedLocalStorage } from '../hooks/useDebouncedLocalStorage';
 import { useUIState } from '../hooks/useUIState';
 import { useDocumentState } from '../hooks/useDocumentState';
@@ -32,6 +33,9 @@ import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
 import VirtualMessageList from './VirtualMessageList';
 import WebSearchButton from './WebSearchButton';
+import DocumentOutline from './DocumentOutline';
+import ReadingAnalysisPanel from './ReadingAnalysisPanel';
+import ReadingSummaryPanel from './ReadingSummaryPanel';
 import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
 
 const WebSearchSourcesBadge = ({ sources }) => {
@@ -69,6 +73,17 @@ const WebSearchSourcesBadge = ({ sources }) => {
       )}
     </div>
   );
+};
+
+const getUsageTokenSummary = (usage) => {
+  if (!usage || typeof usage !== 'object') return null;
+  const prompt = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokenCount ?? usage.inputTokenCount ?? null;
+  const completion = usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount ?? usage.outputTokenCount ?? null;
+  const total = usage.total_tokens ?? usage.totalTokenCount ?? (
+    Number.isFinite(prompt) && Number.isFinite(completion) ? prompt + completion : null
+  );
+  if (!Number.isFinite(total) && !Number.isFinite(prompt) && !Number.isFinite(completion)) return null;
+  return { prompt, completion, total, estimated: Boolean(usage.estimated), cost: usage.cost || null };
 };
 
 const MEMORY_KIND_LABELS = {
@@ -127,6 +142,26 @@ const PauseIcon = () => (
   </svg>
 );
 
+const SummaryIcon = ({ className = '' }) => (
+  <svg
+    className={className}
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M15 4H7" />
+    <path d="m18 16 3 3-3 3" />
+    <path d="M3 4v13a2 2 0 0 0 2 2h16" />
+    <path d="M7 14h7" />
+    <path d="M7 9h12" />
+  </svg>
+);
+
 // GraphRAG 构建/查询端点使用本常量。其他 fetch 依赖均已在各自 hooks 内部维护同名常量。
 const API_BASE_URL = '';
 
@@ -145,6 +180,94 @@ const UPLOAD_RING_CONFIGS = [
   { s: 300, w: 12, c: 'rgba(150, 50, 200, 0.4)',  br: '44% 56% 51% 49% / 57% 43% 52% 48%', dur: 6.5, del: -4.0, dir: 'reverse', mix: 'overlay' },
 ];
 
+const buildClientReadingFallback = (blockIndex) => {
+  const firstBlock = blockIndex?.pages?.[0]?.blocks?.find((block) => block?.block_id);
+  return {
+    source: 'client_fallback',
+    items: [{
+      id: 'summary_unavailable',
+      type: 'fallback',
+      title: 'AI 总结暂不可用',
+      summary: '当前无法生成结构化总结；PDF 章节目录请切换到“大纲”。',
+      page: firstBlock ? 1 : 1,
+      first_block: firstBlock?.block_id || null,
+      evidence_block_ids: firstBlock?.block_id ? [firstBlock.block_id] : [],
+      evidence: {
+        block_ids: firstBlock?.block_id ? [firstBlock.block_id] : [],
+        pages: [1],
+        primary_page: 1,
+      },
+      children: [],
+    }],
+  };
+};
+
+const SECTION_ANCHOR_BLOCK_TYPES = new Set(['heading', 'paragraph']);
+const TRANSLATABLE_READING_BLOCK_TYPES = new Set(['heading', 'paragraph', 'caption']);
+const PUBLICATION_HEADER_RE = /\b(vol\.?|no\.?|pp\.?|transactions?|journal|proceedings|conference|copyright|authorized|licensed|downloaded|doi|issn|isbn|technical\s+report)\b/i;
+
+const isTranslatableReadingBlock = (block) => {
+  const type = block?.type || 'paragraph';
+  const text = String(block?.text || '').trim();
+  return Boolean(block?.block_id) && text.length > 1 && TRANSLATABLE_READING_BLOCK_TYPES.has(type);
+};
+
+const normalizeOutlineText = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/[^a-z0-9\u4e00-\u9fff]+/g, ' ')
+  .trim()
+  .replace(/\s+/g, ' ');
+
+const stripOutlinePrefix = (value) => {
+  let text = normalizeOutlineText(value);
+  text = text.replace(/^(?:\d+\s+){1,4}/, '').trim();
+  const parts = text.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2 && /^([ivxlcm]+|[a-z])$/i.test(parts[0])) {
+    text = parts.slice(1).join(' ');
+  }
+  return text;
+};
+
+const outlineTextVariants = (value) => {
+  const normalized = normalizeOutlineText(value);
+  const stripped = stripOutlinePrefix(value);
+  return [...new Set([normalized, stripped].filter(Boolean))];
+};
+
+const outlineTitleMatchScore = (title, text) => {
+  const titleVariants = outlineTextVariants(title);
+  const textVariants = outlineTextVariants(text);
+  if (!titleVariants.length || !textVariants.length) return 0;
+  if (titleVariants.some((titleText) => textVariants.includes(titleText))) return 4;
+  for (const titleText of titleVariants) {
+    if (titleText.length < 4) continue;
+    for (const blockText of textVariants) {
+      if (blockText.startsWith(titleText) || titleText.startsWith(blockText)) return 3;
+      if (blockText.includes(titleText)) return 2;
+    }
+  }
+  return 0;
+};
+
+const isPublicationHeaderBlock = (block) => {
+  const text = String(block?.text || '').replace(/\s+/g, ' ').trim();
+  if (!text) return true;
+  if (block?.type === 'artifact') return true;
+  return PUBLICATION_HEADER_RE.test(text) && text.split(/\s+/).length <= 18;
+};
+
+const isUsableSectionAnchor = (block, title, { allowLoose = false } = {}) => {
+  if (!block?.block_id || !SECTION_ANCHOR_BLOCK_TYPES.has(block.type || 'paragraph')) return false;
+  if (isPublicationHeaderBlock(block)) return false;
+  const score = outlineTitleMatchScore(title, block.text);
+  if (score >= 3) return true;
+  if ((block.type || 'paragraph') === 'heading' && score >= 2) return true;
+  if (!allowLoose || score < 2) return false;
+  const titleVariants = outlineTextVariants(title).filter((item) => item.length >= 4);
+  const blockVariants = outlineTextVariants(block.text);
+  return titleVariants.some((titleText) => blockVariants.some((blockText) => blockText.startsWith(titleText)));
+};
+
 const ChatPDF = () => {
   // ========== Context Hooks ==========
   const { getProviderById } = useProvider();
@@ -154,6 +277,15 @@ const ChatPDF = () => {
   const globalSettings = useGlobalSettings();
   const { setReasoningEffort, reasoningEffort, streamOutput, setStreamOutput } = globalSettings;
   const { sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers } = useChatParams();
+  const {
+    aiAutoProcess,
+    autoOutlineSummary,
+    autoPretranslate: enableHoverPretranslate,
+    pretranslateConcurrency,
+    overviewDefaultDepth,
+    setOverviewDefaultDepth,
+  } = useReadingSettings();
+  const shouldAutoPretranslate = aiAutoProcess && enableHoverPretranslate;
 
   // ========== 设置状态 - 使用防抖 localStorage 写入（需求 8.1） ==========
   const [apiKey, setApiKey] = useDebouncedLocalStorage('apiKey', '');
@@ -188,6 +320,38 @@ const ChatPDF = () => {
   const [availableModels, setAvailableModels] = useState({});
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
+  const [sidebarMode, setSidebarMode] = useState('history');
+  const [blockIndex, setBlockIndex] = useState(null);
+  const [blockIndexLoading, setBlockIndexLoading] = useState(false);
+  const [blockIndexError, setBlockIndexError] = useState('');
+  const [readingOutline, setReadingOutline] = useState(null);
+  const [readingOutlineLoading, setReadingOutlineLoading] = useState(false);
+  const [readingOutlineError, setReadingOutlineError] = useState('');
+  const [readingOutlineReloadKey, setReadingOutlineReloadKey] = useState(0);
+  const [sectionOutline, setSectionOutline] = useState(null);
+  const [sectionOutlineLoading, setSectionOutlineLoading] = useState(false);
+  const [sectionOutlineError, setSectionOutlineError] = useState('');
+  const [sectionOutlineReloadKey, setSectionOutlineReloadKey] = useState(0);
+  const [activeReadingNodeId, setActiveReadingNodeId] = useState(null);
+  const [visitedReadingNodeIds, setVisitedReadingNodeIds] = useState(new Set());
+  const [activeSectionNodeId, setActiveSectionNodeId] = useState(null);
+  const [visitedSectionNodeIds, setVisitedSectionNodeIds] = useState(new Set());
+  const [blockTranslations, setBlockTranslations] = useState({});
+  const [blockTranslateLoading, setBlockTranslateLoading] = useState(false);
+  const [blockTranslateError, setBlockTranslateError] = useState('');
+  const [translatingBlockIds, setTranslatingBlockIds] = useState(new Set());
+  const [blockTranslationsLoaded, setBlockTranslationsLoaded] = useState(false);
+  const [pretranslateProgress, setPretranslateProgress] = useState({ running: false, done: 0, total: 0 });
+  const [failedTranslationBlockIds, setFailedTranslationBlockIds] = useState(new Set());
+  const [showAiProcessingPanel, setShowAiProcessingPanel] = useState(false);
+  const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
+  const [pinnedReadingBlockId, setPinnedReadingBlockId] = useState(null);
+  const pretranslateRunRef = useRef(0);
+  const pretranslateStartedDocRef = useRef(null);
+  const pretranslateAbortRef = useRef(null);
+  const readingOutlineRequestRef = useRef(0);
+  const readingOutlineForceRef = useRef(false);
+  const sectionOutlineForceRef = useRef(false);
   const streamConfigMigratedRef = useRef(false);
 
   // 兼容旧配置：streamSpeed 和 streamOutput 过去分别持久化，
@@ -217,6 +381,17 @@ const ChatPDF = () => {
     rightPanelMode, setRightPanelMode,
     overviewDepth, setOverviewDepth,
   } = useUIState();
+
+  useEffect(() => {
+    if (overviewDefaultDepth && overviewDefaultDepth !== overviewDepth) {
+      setOverviewDepth(overviewDefaultDepth);
+    }
+  }, [overviewDefaultDepth, overviewDepth, setOverviewDepth]);
+
+  const handleOverviewDepthChange = useCallback((nextDepth) => {
+    setOverviewDepth(nextDepth);
+    setOverviewDefaultDepth(nextDepth);
+  }, [setOverviewDefaultDepth, setOverviewDepth]);
 
   // ========== 模型/凭证辅助函数 ==========
   const getEmbeddingConfig = useCallback(() => {
@@ -285,6 +460,35 @@ const ChatPDF = () => {
     return { providerId, modelId, apiKey: provider?.apiKey || apiKey };
   }, [getDefaultModel, getCurrentChatModel, getProviderById, apiKey]);
 
+  const getChatRequestConfig = useCallback(() => {
+    const chatCredentials = getChatCredentials?.();
+    const chatProvider = chatCredentials?.providerId || 'openai';
+    const chatModel = chatCredentials?.modelId || 'gpt-4o';
+    const chatApiKey = chatCredentials?.apiKey || '';
+    const chatProviderFull = getProviderById?.(chatProvider);
+    const providerLower = String(chatProvider || '').toLowerCase();
+    const canCallModel = Boolean(chatApiKey) || providerLower === 'local' || providerLower === 'ollama';
+    const headers = { 'Content-Type': 'application/json' };
+
+    if (chatCredentials) {
+      headers['X-ChatPDF-Provider'] = chatProvider;
+      headers['X-ChatPDF-Model'] = chatModel;
+      if (chatApiKey) {
+        headers['X-ChatPDF-Api-Key'] = chatApiKey;
+      }
+      if (chatProviderFull?.apiHost) {
+        headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
+      }
+    }
+
+    return {
+      headers,
+      providerId: chatProvider,
+      providerName: chatProviderFull?.name || chatProvider,
+      canCallModel,
+    };
+  }, [getChatCredentials, getProviderById]);
+
   const getCurrentRerankModel = useCallback(() => {
     const rrk = getDefaultModel('rerankModel');
     if (rrk) {
@@ -348,7 +552,7 @@ const ChatPDF = () => {
     fileInputRef,
     handleFileUpload, startNewChat, loadSession, deleteSession,
     saveCurrentSession, fetchStorageInfo,
-    overview, overviewLoading, overviewError, fetchOverview,
+    overview, overviewLoading, overviewError, fetchOverview, clearOverviewCache, overviewFigureMode,
   } = documentState;
 
   // ========== PDF 状态 Hook（需求 1.1） ==========
@@ -377,6 +581,729 @@ const ChatPDF = () => {
     handleSearch, focusResult, handleCitationClick,
     formatSimilarity, renderHighlightedSnippet,
   } = pdfState;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!docId) {
+      setBlockIndex(null);
+      setBlockIndexError('');
+      setBlockIndexLoading(false);
+      setReadingOutline(null);
+      setReadingOutlineError('');
+      setReadingOutlineLoading(false);
+      setSectionOutline(null);
+      setSectionOutlineError('');
+      setSectionOutlineLoading(false);
+      setActiveReadingNodeId(null);
+      setVisitedReadingNodeIds(new Set());
+      setActiveSectionNodeId(null);
+      setVisitedSectionNodeIds(new Set());
+      setBlockTranslations({});
+      setBlockTranslateError('');
+      setBlockTranslateLoading(false);
+      setTranslatingBlockIds(new Set());
+      setBlockTranslationsLoaded(false);
+      setPretranslateProgress({ running: false, done: 0, total: 0 });
+      setFailedTranslationBlockIds(new Set());
+      setHoveredReadingBlockId(null);
+      setPinnedReadingBlockId(null);
+      pretranslateRunRef.current += 1;
+      pretranslateAbortRef.current?.abort();
+      pretranslateAbortRef.current = null;
+      pretranslateStartedDocRef.current = null;
+      setSidebarMode('history');
+      return () => {};
+    }
+
+    setBlockIndex(null);
+    setBlockIndexError('');
+    setBlockIndexLoading(true);
+    setReadingOutline(null);
+    setReadingOutlineError('');
+    setReadingOutlineLoading(false);
+    setSectionOutline(null);
+    setSectionOutlineError('');
+    setSectionOutlineLoading(false);
+    setActiveReadingNodeId(null);
+    setVisitedReadingNodeIds(new Set());
+    setActiveSectionNodeId(null);
+    setVisitedSectionNodeIds(new Set());
+    setBlockTranslations({});
+    setBlockTranslateError('');
+    setBlockTranslateLoading(false);
+    setTranslatingBlockIds(new Set());
+    setBlockTranslationsLoaded(false);
+    setPretranslateProgress({ running: false, done: 0, total: 0 });
+    setFailedTranslationBlockIds(new Set());
+    setHoveredReadingBlockId(null);
+    setPinnedReadingBlockId(null);
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    pretranslateStartedDocRef.current = null;
+
+    fetch(`${API_BASE_URL}/documents/${docId}/blocks?t=${Date.now()}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          throw new Error(detail?.detail || `HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setBlockIndex(data);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[ImmersiveReading] blocks 加载失败', error);
+          setBlockIndexError('大纲加载失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setBlockIndexLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!docId || !blockIndex) {
+      setReadingOutline(null);
+      setReadingOutlineError('');
+      setReadingOutlineLoading(false);
+      return () => {};
+    }
+
+    const requestId = readingOutlineRequestRef.current + 1;
+    readingOutlineRequestRef.current = requestId;
+    const { headers, canCallModel } = getChatRequestConfig();
+    const shouldForce = canCallModel && readingOutlineForceRef.current;
+    readingOutlineForceRef.current = false;
+    const shouldGenerate = canCallModel && (shouldForce || (aiAutoProcess && autoOutlineSummary));
+    const method = shouldGenerate ? 'POST' : 'GET';
+    const url = shouldGenerate
+      ? `${API_BASE_URL}/documents/${docId}/reading-outline`
+      : `${API_BASE_URL}/documents/${docId}/reading-outline?t=${Date.now()}`;
+    const requestOptions = shouldGenerate
+      ? {
+          method,
+          headers,
+          body: JSON.stringify({ force: shouldForce }),
+        }
+      : { method };
+
+    setReadingOutlineLoading(true);
+    setReadingOutlineError('');
+    fetch(url, requestOptions)
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+        return data;
+      })
+      .then((data) => {
+        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+          setReadingOutline(data);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+          console.warn('[ImmersiveReading] AI 大纲加载失败', error);
+          setReadingOutline(buildClientReadingFallback(blockIndex));
+          setReadingOutlineError('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+          setReadingOutlineLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docId, blockIndex, getChatRequestConfig, readingOutlineReloadKey, aiAutoProcess, autoOutlineSummary]);
+
+  const handleRegenerateReadingOutline = useCallback(() => {
+    const { canCallModel, providerName } = getChatRequestConfig();
+    if (!canCallModel) {
+      setReadingOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
+      return;
+    }
+    readingOutlineForceRef.current = true;
+    setReadingOutlineReloadKey((value) => value + 1);
+  }, [getChatRequestConfig]);
+
+  const handleRegenerateSectionOutline = useCallback(() => {
+    const { canCallModel, providerName } = getChatRequestConfig();
+    if (!canCallModel) {
+      setSectionOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
+      return;
+    }
+    sectionOutlineForceRef.current = true;
+    setSectionOutlineReloadKey((value) => value + 1);
+  }, [getChatRequestConfig]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!docId || !blockIndex) {
+      setSectionOutline(null);
+      setSectionOutlineError('');
+      setSectionOutlineLoading(false);
+      return () => {};
+    }
+
+    const { headers, canCallModel } = getChatRequestConfig();
+    const shouldForce = canCallModel && sectionOutlineForceRef.current;
+    sectionOutlineForceRef.current = false;
+    const shouldGenerate = canCallModel && (shouldForce || (aiAutoProcess && autoOutlineSummary));
+    const method = shouldGenerate ? 'POST' : 'GET';
+    const url = shouldGenerate
+      ? `${API_BASE_URL}/documents/${docId}/section-outline`
+      : `${API_BASE_URL}/documents/${docId}/section-outline?t=${Date.now()}`;
+
+    setSectionOutlineLoading(true);
+    setSectionOutlineError('');
+    fetch(url, shouldGenerate ? {
+      method,
+      headers,
+      body: JSON.stringify({ force: shouldForce }),
+    } : { method })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+        return data;
+      })
+      .then((data) => {
+        if (!cancelled) setSectionOutline(data);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[ImmersiveReading] 章节大纲加载失败，回退启发式大纲', error);
+          setSectionOutline(null);
+          setSectionOutlineError('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSectionOutlineLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docId, blockIndex, getChatRequestConfig, sectionOutlineReloadKey, aiAutoProcess, autoOutlineSummary]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!docId || !blockIndex) {
+      setBlockTranslations({});
+      setBlockTranslationsLoaded(false);
+      setFailedTranslationBlockIds(new Set());
+      return () => {};
+    }
+    setBlockTranslationsLoaded(false);
+    setFailedTranslationBlockIds(new Set());
+
+    fetch(`${API_BASE_URL}/documents/${docId}/blocks/translations?target_lang=zh&t=${Date.now()}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setBlockTranslations(data?.items || {});
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[ImmersiveReading] 翻译缓存加载失败', error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setBlockTranslationsLoaded(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docId, blockIndex]);
+
+  const blockMap = useMemo(() => {
+    const result = {};
+    (blockIndex?.pages || []).forEach((page) => {
+      (page.blocks || []).forEach((block) => {
+        if (block?.block_id) {
+          result[block.block_id] = { ...block, page: Number(page.page) || 1 };
+        }
+      });
+    });
+    return result;
+  }, [blockIndex]);
+
+  const resolveSectionOutlineAnchor = useCallback((item) => {
+    if (!item) return null;
+    const title = item.title || item.label || item.name || '';
+    const targetPage = Number(item.evidence?.primary_page || item.page || 0) || null;
+    const blocks = Object.values(blockMap);
+    const rawIds = [
+      item.first_block,
+      item.block_id,
+      ...(item.evidence?.block_ids || []),
+      ...(item.evidence_block_ids || []),
+    ].filter(Boolean);
+
+    const findByTitle = ({ page = null, headingOnly = false, allowLoose = false } = {}) => {
+      for (const block of blocks) {
+        if (page && Number(block.page) !== Number(page)) continue;
+        if (headingOnly && block.type !== 'heading') continue;
+        if (isUsableSectionAnchor(block, title, { allowLoose })) {
+          return block.block_id;
+        }
+      }
+      return null;
+    };
+
+    return (
+      findByTitle({ page: targetPage, headingOnly: true })
+      || findByTitle({ headingOnly: true })
+      || rawIds.find((blockId) => isUsableSectionAnchor(blockMap[blockId], title))
+      || findByTitle({ page: targetPage, allowLoose: true })
+      || findByTitle({ allowLoose: true })
+      || blocks.find((block) => (
+        targetPage
+        && Number(block.page) === Number(targetPage)
+        && block.type === 'heading'
+        && !isPublicationHeaderBlock(block)
+      ))?.block_id
+      || rawIds.find((blockId) => {
+        const block = blockMap[blockId];
+        return block?.block_id && block.type !== 'artifact' && !isPublicationHeaderBlock(block);
+      })
+      || null
+    );
+  }, [blockMap]);
+
+  const readingOutlineItems = useMemo(() => readingOutline?.items || [], [readingOutline]);
+  const sectionOutlineItems = useMemo(() => sectionOutline?.items || [], [sectionOutline]);
+  const pdfOutlineItems = useMemo(() => {
+    return sectionOutlineItems.length > 0 ? sectionOutlineItems : (blockIndex?.outline || []);
+  }, [blockIndex, sectionOutlineItems]);
+  const pdfOutlineSource = sectionOutline?.source || (
+    (blockIndex?.outline || []).some((item) => item?.source === 'toc') ? 'toc' : 'heuristic'
+  );
+  const pdfOutlineLoading = blockIndexLoading || (sectionOutlineLoading && pdfOutlineItems.length === 0);
+  const pdfOutlineError = blockIndexError || (pdfOutlineItems.length === 0 ? sectionOutlineError : '');
+
+  const readingOutlineFlat = useMemo(() => {
+    const result = [];
+    const walk = (nodes, level = 1) => {
+      (nodes || []).forEach((node) => {
+        if (!node) return;
+        result.push({ ...node, level });
+        if (Array.isArray(node.children) && node.children.length > 0) {
+          walk(node.children, level + 1);
+        }
+      });
+    };
+    walk(readingOutlineItems);
+    return result;
+  }, [readingOutlineItems]);
+
+  const readingNodeById = useMemo(() => {
+    const result = {};
+    readingOutlineFlat.forEach((item) => {
+      if (item?.id) result[item.id] = item;
+    });
+    return result;
+  }, [readingOutlineFlat]);
+
+  const blockToReadingNode = useMemo(() => {
+    const result = {};
+    readingOutlineFlat.forEach((item) => {
+      const ids = item.evidence?.block_ids || item.evidence_block_ids || [];
+      ids.forEach((blockId) => {
+        if (!result[blockId]) result[blockId] = item;
+      });
+    });
+    return result;
+  }, [readingOutlineFlat]);
+
+  const inlineBlockTranslations = useMemo(() => {
+    const result = { ...blockTranslations };
+    readingOutlineFlat.forEach((item) => {
+      const ids = item.evidence?.block_ids || item.evidence_block_ids || [];
+      ids.forEach((blockId) => {
+        if (!result[blockId] && item.summary) {
+          result[blockId] = {
+            block_id: blockId,
+            target_lang: 'zh',
+            translation: item.summary,
+            summary: item.title,
+            source: 'reading_outline',
+          };
+        }
+      });
+    });
+    return result;
+  }, [blockTranslations, readingOutlineFlat]);
+
+  const activeReadingNode = activeReadingNodeId ? readingNodeById[activeReadingNodeId] : null;
+  const focusedReadingBlockIds = useMemo(() => {
+    const ids = activeReadingNode?.evidence?.block_ids || activeReadingNode?.evidence_block_ids || [];
+    const primaryBlockId = activeReadingNode?.first_block || ids[0] || pinnedReadingBlockId;
+    return primaryBlockId ? [primaryBlockId] : [];
+  }, [activeReadingNode, pinnedReadingBlockId]);
+
+  const activeReadingBlockId = hoveredReadingBlockId || focusedReadingBlockIds[0] || pinnedReadingBlockId;
+
+  const allTranslatableReadingBlocks = useMemo(() => {
+    return (blockIndex?.pages || []).flatMap((page) => {
+      const pageNumber = Number(page.page) || 1;
+      return (page.blocks || [])
+        .filter(isTranslatableReadingBlock)
+        .map((block) => ({ ...block, page: pageNumber }));
+    });
+  }, [blockIndex]);
+
+  const translatedReadingBlockCount = useMemo(() => {
+    return allTranslatableReadingBlocks.filter((block) => blockTranslations[block.block_id]).length;
+  }, [allTranslatableReadingBlocks, blockTranslations]);
+  const pendingReadingBlockCount = Math.max(0, allTranslatableReadingBlocks.length - translatedReadingBlockCount);
+  const failedReadingBlockCount = useMemo(() => {
+    if (!failedTranslationBlockIds || failedTranslationBlockIds.size === 0) return 0;
+    const validIds = new Set(allTranslatableReadingBlocks.map((block) => block.block_id));
+    return [...failedTranslationBlockIds].filter((blockId) => validIds.has(blockId)).length;
+  }, [allTranslatableReadingBlocks, failedTranslationBlockIds]);
+
+  useEffect(() => {
+    if (!pretranslateProgress.running || !docId || !blockIndex || allTranslatableReadingBlocks.length === 0) {
+      return () => {};
+    }
+
+    let cancelled = false;
+    const pollCachedTranslations = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/documents/${docId}/blocks/translations?target_lang=zh&t=${Date.now()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+
+        const items = data?.items || {};
+        setBlockTranslations((prev) => ({ ...prev, ...items }));
+        const done = allTranslatableReadingBlocks.filter((block) => items[block.block_id]).length;
+        setPretranslateProgress((prev) => (
+          prev.running
+            ? { ...prev, done: Math.max(prev.done || 0, Math.min(done, prev.total || allTranslatableReadingBlocks.length)) }
+            : prev
+        ));
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[ImmersiveReading] 预翻译进度同步失败', error);
+        }
+      }
+    };
+
+    pollCachedTranslations();
+    const timer = window.setInterval(pollCachedTranslations, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [allTranslatableReadingBlocks, blockIndex, docId, pretranslateProgress.running]);
+
+  const currentPageBlocks = useMemo(() => {
+    const page = blockIndex?.pages?.find((item) => Number(item.page) === Number(currentPage));
+    const blocks = page?.blocks || [];
+    return blocks
+      .filter((block) => {
+        const type = block?.type || 'paragraph';
+        const text = String(block?.text || '').trim();
+        return text.length > 1 && ['heading', 'paragraph', 'caption', 'figure', 'table'].includes(type);
+      })
+      .slice(0, 24);
+  }, [blockIndex, currentPage]);
+
+  const currentPageReadingNotes = useMemo(() => {
+    return readingOutlineFlat.filter((item) => {
+      const pages = item.evidence?.pages || [];
+      if (pages.includes(Number(currentPage))) return true;
+      return Number(item.page) === Number(currentPage);
+    });
+  }, [currentPage, readingOutlineFlat]);
+
+  const handleOutlineJump = useCallback((item) => {
+    if (!item) return;
+    const targetPage = item.evidence?.primary_page || item.page;
+    if (targetPage) {
+      setCurrentPage(Number(targetPage));
+    }
+    const firstBlock = item.first_block || item.evidence?.block_ids?.[0] || item.evidence_block_ids?.[0] || null;
+    setActiveReadingNodeId(item.id || null);
+    if (item.id) {
+      setVisitedReadingNodeIds((prev) => {
+        const next = new Set(prev);
+        next.add(item.id);
+        return next;
+      });
+    }
+    setPinnedReadingBlockId(firstBlock);
+    setHoveredReadingBlockId(null);
+  }, [setCurrentPage]);
+
+  const handleSectionOutlineJump = useCallback((item) => {
+    if (!item) return;
+    const firstBlock = resolveSectionOutlineAnchor(item);
+    const resolvedBlock = firstBlock ? blockMap[firstBlock] : null;
+    const targetPage = resolvedBlock?.page || item.evidence?.primary_page || item.page;
+    if (targetPage) {
+      setCurrentPage(Number(targetPage));
+    }
+    const nodeId = item.id || item.section_id || null;
+    setActiveReadingNodeId(null);
+    setActiveSectionNodeId(nodeId);
+    if (nodeId) {
+      setVisitedSectionNodeIds((prev) => {
+        const next = new Set(prev);
+        next.add(nodeId);
+        return next;
+      });
+    }
+    setPinnedReadingBlockId(firstBlock);
+    setHoveredReadingBlockId(null);
+  }, [blockMap, resolveSectionOutlineAnchor, setCurrentPage]);
+
+  const handleReadingBlockHover = useCallback((block) => {
+    setHoveredReadingBlockId(block?.block_id || null);
+  }, []);
+
+  const handleReadingBlockClick = useCallback((block) => {
+    const blockId = block?.block_id || null;
+    const node = blockId ? blockToReadingNode[blockId] : null;
+    if (node) {
+      handleOutlineJump(node);
+      return;
+    }
+    setActiveReadingNodeId(null);
+    setPinnedReadingBlockId(blockId);
+  }, [blockToReadingNode, handleOutlineJump]);
+
+  const translateReadingBlocks = useCallback(async (blocksToTranslate, options = {}) => {
+    const selectedBlocks = (blocksToTranslate || []).filter((block) => block?.block_id);
+    if (!docId || selectedBlocks.length === 0) return null;
+    const blockIds = selectedBlocks.map((block) => block.block_id);
+
+    const chatCredentials = getChatCredentials?.();
+    const chatProvider = chatCredentials?.providerId || 'openai';
+    const chatModel = chatCredentials?.modelId || 'gpt-4o';
+    const chatApiKey = chatCredentials?.apiKey || '';
+    const chatProviderFull = getProviderById?.(chatProvider);
+
+    if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
+      setBlockTranslateError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
+      return null;
+    }
+
+    if (options.showPanelLoading) {
+      setBlockTranslateLoading(true);
+    }
+    setBlockTranslateError('');
+    setTranslatingBlockIds((prev) => {
+      const next = new Set(prev);
+      blockIds.forEach((blockId) => next.add(blockId));
+      return next;
+    });
+
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (chatCredentials) {
+        headers['X-ChatPDF-Provider'] = chatProvider;
+        headers['X-ChatPDF-Model'] = chatModel;
+        if (chatApiKey) {
+          headers['X-ChatPDF-Api-Key'] = chatApiKey;
+        }
+        if (chatProviderFull?.apiHost) {
+          headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
+        }
+      }
+
+      const endpoint = options.bulk ? 'pretranslate' : 'translate';
+      const requestBody = {
+        block_ids: blockIds,
+        target_lang: 'zh',
+        force: Boolean(options.force),
+      };
+      if (options.bulk) {
+        requestBody.concurrency = pretranslateConcurrency;
+      }
+
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/blocks/${endpoint}`, {
+        method: 'POST',
+        headers,
+        signal: options.signal,
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ detail: '段落翻译失败' }));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const translatedItems = data?.items || {};
+      const translatedIds = Object.keys(translatedItems);
+      setBlockTranslations((prev) => ({ ...prev, ...translatedItems }));
+      const failedBlockIds = Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : [];
+      setFailedTranslationBlockIds((prev) => {
+        const next = new Set(prev);
+        translatedIds.forEach((blockId) => next.delete(blockId));
+        failedBlockIds.forEach((blockId) => next.add(blockId));
+        return next;
+      });
+      if (failedBlockIds.length > 0) {
+        setBlockTranslateError(`有 ${failedBlockIds.length} 个段落暂未翻译成功，可稍后补齐`);
+      }
+      return options.returnRaw ? data : translatedItems;
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        return null;
+      }
+      setBlockTranslateError(error.message || '段落翻译失败');
+      return null;
+    } finally {
+      setTranslatingBlockIds((prev) => {
+        const next = new Set(prev);
+        blockIds.forEach((blockId) => next.delete(blockId));
+        return next;
+      });
+      if (options.showPanelLoading) {
+        setBlockTranslateLoading(false);
+      }
+    }
+  }, [docId, getChatCredentials, getProviderById, pretranslateConcurrency]);
+
+  const handleTranslateCurrentPage = useCallback(() => {
+    translateReadingBlocks(currentPageBlocks, { showPanelLoading: true });
+  }, [currentPageBlocks, translateReadingBlocks]);
+
+  const pretranslateReadingDocument = useCallback(async ({ force = false, retryFailed = false } = {}) => {
+    if (!docId || allTranslatableReadingBlocks.length === 0) {
+      setPretranslateProgress({ running: false, done: 0, total: 0 });
+      return;
+    }
+
+    const { canCallModel, providerName } = getChatRequestConfig();
+    if (!canCallModel) {
+      setBlockTranslateError(`请先为 ${providerName} 配置 API Key，再开启悬浮预翻译`);
+      return;
+    }
+
+    const translatedIds = new Set(Object.keys(blockTranslations || {}));
+    const failedIds = new Set(failedTranslationBlockIds || []);
+    const pendingBlocks = allTranslatableReadingBlocks.filter((block) => {
+      if (retryFailed) return failedIds.has(block.block_id);
+      return force || !translatedIds.has(block.block_id);
+    });
+    const total = allTranslatableReadingBlocks.length;
+    const initialDone = force ? 0 : translatedReadingBlockCount;
+
+    if (pendingBlocks.length === 0) {
+      setBlockTranslateError('');
+      setPretranslateProgress({ running: false, done: translatedReadingBlockCount, total });
+      return;
+    }
+
+    const runId = pretranslateRunRef.current + 1;
+    pretranslateRunRef.current = runId;
+    pretranslateAbortRef.current?.abort();
+    const abortController = new AbortController();
+    pretranslateAbortRef.current = abortController;
+    setBlockTranslateError('');
+    setPretranslateProgress({ running: true, done: initialDone, total });
+
+    const data = await translateReadingBlocks(pendingBlocks, {
+      force,
+      bulk: true,
+      returnRaw: true,
+      signal: abortController.signal,
+    });
+
+    if (pretranslateRunRef.current === runId) {
+      pretranslateAbortRef.current = null;
+      if (!data && abortController.signal.aborted) {
+        pretranslateStartedDocRef.current = docId;
+        setPretranslateProgress({ running: false, done: initialDone, total });
+        setBlockTranslateError(`已取消预翻译，已保留 ${initialDone}/${total} 个缓存译文`);
+        return;
+      }
+      const successCount = Object.keys(data?.items || {}).length;
+      const failedCount = Array.isArray(data?.failed_block_ids) ? data.failed_block_ids.length : pendingBlocks.length;
+      const done = Math.min(total, force ? successCount : initialDone + successCount);
+      setPretranslateProgress({ running: false, done, total });
+      if (!data || failedCount > 0) {
+        pretranslateStartedDocRef.current = docId;
+        setBlockTranslateError(`部分段落暂未翻译成功，已保留 ${done}/${total} 个缓存译文，可稍后继续补齐`);
+      }
+    }
+  }, [
+    allTranslatableReadingBlocks,
+    blockTranslations,
+    docId,
+    failedTranslationBlockIds,
+    getChatRequestConfig,
+    translatedReadingBlockCount,
+    translateReadingBlocks,
+  ]);
+
+  const cancelPretranslateReadingDocument = useCallback(() => {
+    const wasRunning = pretranslateProgress.running;
+    pretranslateRunRef.current += 1;
+    pretranslateStartedDocRef.current = docId || null;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    setPretranslateProgress((prev) => (
+      prev.running ? { ...prev, running: false } : prev
+    ));
+    setTranslatingBlockIds(new Set());
+    if (wasRunning) {
+      setBlockTranslateError('已取消预翻译，已完成的译文缓存会保留');
+    }
+  }, [docId, pretranslateProgress.running]);
+
+  useEffect(() => {
+    if (shouldAutoPretranslate) return;
+    cancelPretranslateReadingDocument();
+  }, [cancelPretranslateReadingDocument, shouldAutoPretranslate]);
+
+  useEffect(() => {
+    if (!shouldAutoPretranslate || !docId || !blockIndex || !blockTranslationsLoaded) return;
+    if (pretranslateStartedDocRef.current === docId) return;
+    const { canCallModel } = getChatRequestConfig();
+    if (!canCallModel) return;
+
+    const hasPendingBlocks = allTranslatableReadingBlocks.some((block) => !blockTranslations[block.block_id]);
+    if (!hasPendingBlocks) {
+      pretranslateStartedDocRef.current = docId;
+      setPretranslateProgress({
+        running: false,
+        done: allTranslatableReadingBlocks.length,
+        total: allTranslatableReadingBlocks.length,
+      });
+      return;
+    }
+
+    pretranslateStartedDocRef.current = docId;
+    pretranslateReadingDocument();
+  }, [
+    allTranslatableReadingBlocks,
+    blockIndex,
+    blockTranslations,
+    blockTranslationsLoaded,
+    docId,
+    shouldAutoPretranslate,
+    getChatRequestConfig,
+    pretranslateReadingDocument,
+  ]);
 
   // ========== 截图状态 Hook（需求 1.1） ==========
   // textareaRef 来自 useMessageState（后续初始化），通过代理 ref 桥接
@@ -760,6 +1687,44 @@ const ChatPDF = () => {
     pdfState.setSearchHistory?.([]);
   }, [docId, pdfState]);
 
+  const handleClearDocumentAICache = useCallback(async () => {
+    if (!docId) return;
+    if (!window.confirm('只清理当前文档的 AI 辅助缓存，不会删除原始 PDF、向量索引或对话历史。确定继续吗？')) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/ai-cache`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ detail: '清理缓存失败' }));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+      }
+      setReadingOutline(null);
+      setReadingOutlineError('');
+      setReadingOutlineReloadKey((prev) => prev + 1);
+      setSectionOutline(null);
+      setSectionOutlineError('');
+      setSectionOutlineReloadKey((prev) => prev + 1);
+      setBlockTranslations({});
+      setFailedTranslationBlockIds(new Set());
+      setBlockTranslateError('');
+      setBlockTranslationsLoaded(false);
+      setPretranslateProgress({ running: false, done: 0, total: 0 });
+      pretranslateRunRef.current += 1;
+      pretranslateStartedDocRef.current = null;
+      clearOverviewCache?.(docId);
+      setShowAiProcessingPanel(false);
+      alert('当前文档 AI 缓存已清理');
+    } catch (error) {
+      alert(error.message || '清理缓存失败');
+    }
+  }, [clearOverviewCache, docId]);
+
+  const handleRegenerateOverview = useCallback(() => {
+    if (!docId) return;
+    fetchOverview?.(overviewDepth, { force: true }).catch(() => {});
+    setRightPanelMode('overview');
+  }, [docId, fetchOverview, overviewDepth, setRightPanelMode]);
+
   // ========== 预设问题（useMemo 缓存计算结果） ==========
   const showPresetQuestions = useMemo(() => docId && messages.filter(
     msg => msg.type === 'user' || msg.type === 'assistant'
@@ -985,6 +1950,123 @@ const ChatPDF = () => {
     setFeedbackTarget(null);
   }, [feedbackTarget, messages, docId]);
 
+  const sidebarTabs = [
+    { id: 'history', label: '会话', Icon: History },
+    { id: 'summary', label: '总结', Icon: SummaryIcon },
+    { id: 'outline', label: '大纲', Icon: ListFilter },
+  ];
+  const activeSidebarTabIndex = Math.max(0, sidebarTabs.findIndex((item) => item.id === sidebarMode));
+  const rightPanelTabs = [
+    { id: 'overview', label: '速览' },
+    { id: 'analysis', label: '解析' },
+    { id: 'chat', label: '对话' },
+  ];
+  const activeRightPanelTabIndex = Math.max(0, rightPanelTabs.findIndex((item) => item.id === rightPanelMode));
+  const aiProcessingRunning = readingOutlineLoading || sectionOutlineLoading || overviewLoading || pretranslateProgress.running;
+  const aiProcessingStatusText = aiAutoProcess
+    ? (autoOutlineSummary || enableHoverPretranslate ? '自动处理开启' : '按需生成')
+    : '自动处理已关闭';
+  const aiProcessingItems = useMemo(() => {
+    const summaryStatus = readingOutlineLoading
+      ? '生成中'
+      : readingOutlineItems.length > 0
+        ? (readingOutline?.source === 'fallback' ? '基础结果' : '已完成')
+        : (aiAutoProcess && autoOutlineSummary ? '等待生成' : '自动已关');
+    const outlineStatus = sectionOutlineLoading
+      ? '生成中'
+      : sectionOutlineItems.length > 0
+        ? (sectionOutline?.source === 'fallback' || sectionOutline?.source === 'heuristic' ? '基础大纲' : '已完成')
+        : (aiAutoProcess && autoOutlineSummary ? '等待生成' : '自动已关');
+    const overviewStatus = overviewLoading
+      ? '生成中'
+      : overview
+        ? '已完成'
+        : '按需生成';
+    const translationStatus = pretranslateProgress.running
+      ? `${Math.min(pretranslateProgress.done, pretranslateProgress.total)}/${pretranslateProgress.total || allTranslatableReadingBlocks.length}`
+      : failedReadingBlockCount > 0
+        ? `失败 ${failedReadingBlockCount}`
+        : translatedReadingBlockCount > 0
+          ? `${translatedReadingBlockCount}/${allTranslatableReadingBlocks.length}`
+          : (aiAutoProcess && enableHoverPretranslate ? '等待缓存' : '未开始');
+
+    return [
+      {
+        id: 'summary',
+        title: 'AI 总结',
+        desc: '左侧总结栏的结构化论文梳理',
+        status: summaryStatus,
+        busy: readingOutlineLoading,
+        actionLabel: readingOutlineLoading ? '生成中' : (readingOutlineItems.length > 0 ? '重新生成' : '立即生成'),
+        onAction: handleRegenerateReadingOutline,
+        disabled: readingOutlineLoading || !docId,
+      },
+      {
+        id: 'outline',
+        title: '章节大纲',
+        desc: '左侧大纲栏的原文章节树',
+        status: outlineStatus,
+        busy: sectionOutlineLoading,
+        actionLabel: sectionOutlineLoading ? '生成中' : (sectionOutlineItems.length > 0 ? '重新生成' : '立即生成'),
+        onAction: handleRegenerateSectionOutline,
+        disabled: sectionOutlineLoading || !docId,
+      },
+      {
+        id: 'overview',
+        title: '速览',
+        desc: `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`,
+        status: overviewStatus,
+        busy: overviewLoading,
+        actionLabel: overviewLoading ? '生成中' : (overview ? '重新生成' : '生成速览'),
+        onAction: handleRegenerateOverview,
+        disabled: overviewLoading || !docId,
+      },
+      {
+        id: 'translation',
+        title: '悬浮翻译',
+        desc: '预缓存段落翻译，悬浮时直接显示',
+        status: translationStatus,
+        busy: pretranslateProgress.running,
+        actionLabel: pretranslateProgress.running
+          ? '取消'
+          : failedReadingBlockCount > 0
+            ? '补齐失败'
+            : translatedReadingBlockCount > 0
+              ? '补齐全文'
+              : '开始缓存',
+        onAction: pretranslateProgress.running
+          ? cancelPretranslateReadingDocument
+          : () => pretranslateReadingDocument({ retryFailed: failedReadingBlockCount > 0 }),
+        disabled: !docId || allTranslatableReadingBlocks.length === 0,
+      },
+    ];
+  }, [
+    aiAutoProcess,
+    allTranslatableReadingBlocks.length,
+    autoOutlineSummary,
+    cancelPretranslateReadingDocument,
+    docId,
+    enableHoverPretranslate,
+    failedReadingBlockCount,
+    handleRegenerateOverview,
+    handleRegenerateReadingOutline,
+    handleRegenerateSectionOutline,
+    overview,
+    overviewDepth,
+    overviewLoading,
+    pretranslateProgress.done,
+    pretranslateProgress.running,
+    pretranslateProgress.total,
+    pretranslateReadingDocument,
+    readingOutline?.source,
+    readingOutlineItems.length,
+    readingOutlineLoading,
+    sectionOutline?.source,
+    sectionOutlineItems.length,
+    sectionOutlineLoading,
+    translatedReadingBlockCount,
+  ]);
+
   // ========== 渲染 ==========
   return (
     <div
@@ -1045,43 +2127,114 @@ const ChatPDF = () => {
             <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
           </div>
 
-          <div className="flex-1 overflow-y-auto px-8">
-            <h2 className="text-[11px] font-bold text-gray-500 tracking-wider mb-4 pl-4">
-              HISTORY
-            </h2>
-            <ul className="space-y-2 relative">
-              {history.map((item, idx) => {
-                const isActive = item.id === docId;
+          <div className="px-6 mb-4">
+            <div className={`relative grid grid-cols-3 overflow-hidden rounded-[22px] p-1 border shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] backdrop-blur-xl ${
+              darkMode
+                ? 'bg-white/[0.05] border-white/10'
+                : 'bg-white/35 border-white/70 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_8px_24px_rgba(148,163,184,0.10)]'
+            }`}>
+              <motion.div
+                className={`absolute top-1 bottom-1 left-1 rounded-[18px] ${
+                  darkMode
+                    ? 'bg-white/12 shadow-[0_8px_22px_rgba(0,0,0,0.22)]'
+                    : 'bg-white/90 shadow-[0_10px_24px_rgba(139,124,200,0.14),0_2px_6px_rgba(31,41,55,0.06),inset_0_1px_0_rgba(255,255,255,0.95)]'
+                }`}
+                initial={false}
+                style={{ width: 'calc((100% - 0.5rem) / 3)' }}
+                animate={{ x: `${activeSidebarTabIndex * 100}%` }}
+                transition={{ type: 'spring', stiffness: 430, damping: 34, mass: 0.72 }}
+              />
+              {sidebarTabs.map(({ id, label, Icon }) => {
+                const isActive = sidebarMode === id;
                 return (
-                  <li key={idx}>
-                    <div
-                      onClick={() => loadSession(item)}
-                      className={`w-full flex items-center justify-between px-5 py-4 rounded-3xl cursor-pointer group transition-all duration-300 ${
-                        isActive
-                          ? (darkMode ? 'bg-white/10 backdrop-blur-md border border-white/10 text-white font-bold shadow-[0_10px_25px_rgba(0,0,0,0.2)]' : 'bg-white/80 backdrop-blur-md border border-white/80 text-gray-900 font-bold shadow-[0_10px_25px_rgba(0,0,0,0.06)]')
-                          : (darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40')
-                      }`}
-                    >
-                      <div className="flex items-center gap-4 overflow-hidden">
-                        <MessageSquare 
-                          size={22} 
-                          className={`${isActive ? 'text-[#9333ea]' : 'text-gray-500'} transition-colors flex-shrink-0`}
-                          strokeWidth={isActive ? 2.5 : 2}
-                        />
-                        <span className="text-[15px] truncate">{item.filename}</span>
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
-                        className={`opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-red-50 hover:text-red-500 transition-all flex-shrink-0 ${isActive ? 'text-gray-400' : 'text-gray-400'}`}
-                      >
-                        <Trash2 size={18} strokeWidth={2} />
-                      </button>
-                    </div>
-                  </li>
+                  <motion.button
+                    key={id}
+                    type="button"
+                    onClick={() => setSidebarMode(id)}
+                    whileTap={{ scale: 0.97 }}
+                    className={`relative z-10 flex h-10 items-center justify-center gap-2 rounded-[18px] text-[13px] font-semibold transition-colors duration-200 ${
+                      isActive
+                        ? (darkMode ? 'text-white' : 'text-[#8b7cc8]')
+                        : (darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600')
+                    }`}
+                  >
+                    <Icon className={`h-4 w-4 transition-all duration-200 ${isActive ? 'scale-105' : 'scale-100 opacity-80'}`} />
+                    <span>{label}</span>
+                  </motion.button>
                 );
               })}
-            </ul>
+            </div>
           </div>
+
+          {sidebarMode === 'history' ? (
+            <div className="flex-1 overflow-y-auto px-8">
+              <h2 className="text-[11px] font-bold text-gray-500 tracking-wider mb-4 pl-4">
+                会话历史
+              </h2>
+              <ul className="space-y-2 relative">
+                {history.map((item, idx) => {
+                  const isActive = item.id === docId;
+                  return (
+                    <li key={idx}>
+                      <div
+                        onClick={() => loadSession(item)}
+                        className={`w-full flex items-center justify-between px-5 py-4 rounded-3xl cursor-pointer group transition-all duration-300 ${
+                          isActive
+                            ? (darkMode ? 'bg-white/10 backdrop-blur-md border border-white/10 text-white font-bold shadow-[0_10px_25px_rgba(0,0,0,0.2)]' : 'bg-white/80 backdrop-blur-md border border-white/80 text-gray-900 font-bold shadow-[0_10px_25px_rgba(0,0,0,0.06)]')
+                            : (darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40')
+                        }`}
+                      >
+                        <div className="flex items-center gap-4 overflow-hidden">
+                          <MessageSquare
+                            size={22}
+                            className={`${isActive ? 'text-[#9333ea]' : 'text-gray-500'} transition-colors flex-shrink-0`}
+                            strokeWidth={isActive ? 2.5 : 2}
+                          />
+                          <span className="text-[15px] truncate">{item.filename}</span>
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
+                          className={`opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-red-50 hover:text-red-500 transition-all flex-shrink-0 ${isActive ? 'text-gray-400' : 'text-gray-400'}`}
+                        >
+                          <Trash2 size={18} strokeWidth={2} />
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : sidebarMode === 'summary' ? (
+            <div className="flex-1 min-h-0 px-5 overflow-hidden">
+              <ReadingSummaryPanel
+                items={readingOutlineItems}
+                loading={readingOutlineLoading}
+                error={readingOutlineError}
+                activeNodeId={activeReadingNodeId}
+                visitedNodeIds={[...visitedReadingNodeIds]}
+                onJump={handleOutlineJump}
+                onRetry={handleRegenerateReadingOutline}
+                source={readingOutline?.source || ''}
+                retrying={readingOutlineLoading}
+                darkMode={darkMode}
+              />
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 px-5 overflow-hidden">
+              <DocumentOutline
+                outline={pdfOutlineItems}
+                loading={pdfOutlineLoading}
+                error={pdfOutlineError}
+                source={pdfOutlineSource}
+                currentPage={currentPage}
+                activeBlockId={activeReadingBlockId}
+                activeNodeId={activeSectionNodeId}
+                visitedNodeIds={[...visitedSectionNodeIds]}
+                onJump={handleSectionOutlineJump}
+                darkMode={darkMode}
+              />
+            </div>
+          )}
 
           <div className="px-8 py-6">
             <button 
@@ -1132,6 +2285,15 @@ const ChatPDF = () => {
                     darkMode={darkMode}
                     onTextSelect={handlePdfTextSelect}
                     onToggleSidebar={() => setShowSidebar(prev => !prev)}
+                    blockIndex={blockIndex}
+                    activeBlockId={activeReadingBlockId}
+                    focusedBlockIds={focusedReadingBlockIds}
+                    visitedBlockIds={[]}
+                    inlineTranslationBlockIds={[]}
+                    onBlockHover={handleReadingBlockHover}
+                    onBlockClick={handleReadingBlockClick}
+                    blockTranslations={inlineBlockTranslations}
+                    translatingBlockIds={[...translatingBlockIds]}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
                   <>
@@ -1208,44 +2370,147 @@ const ChatPDF = () => {
             <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-purple-500/50 transition-colors duration-200" />
           </div>
 
-          {/* 右侧：聊天/速览区域 */}
+          {/* 右侧：聊天/速览/解析区域 */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`soft-panel flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+            className={`soft-panel relative flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            {/* 顶部导航：速览 / 对话 */}
+            <div className="absolute right-5 top-5 z-30">
+              <button
+                type="button"
+                onClick={() => setShowAiProcessingPanel((prev) => !prev)}
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-[0_10px_24px_rgba(148,163,184,0.14),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all hover:-translate-y-0.5 ${
+                  darkMode
+                    ? 'border-white/10 bg-white/[0.06] text-gray-200 hover:bg-white/[0.09]'
+                    : 'border-white/70 bg-white/75 text-gray-600 hover:text-[#8871e4]'
+                }`}
+              >
+                <span className={`relative flex h-2 w-2 rounded-full ${aiProcessingRunning ? 'bg-[#8871e4]' : aiAutoProcess ? 'bg-emerald-400' : 'bg-gray-300'}`}>
+                  {aiProcessingRunning && <span className="absolute inset-0 animate-ping rounded-full bg-[#8871e4]/50" />}
+                </span>
+                AI 处理
+              </button>
+
+              {showAiProcessingPanel && (
+                <div
+                  className={`absolute right-0 top-12 w-[340px] rounded-[24px] border p-4 shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl ${
+                    darkMode
+                      ? 'border-white/10 bg-[#1f2329]/95 text-gray-100'
+                      : 'border-white/80 bg-white/95 text-gray-900'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[14px] font-bold">当前文档 AI 处理</div>
+                      <div className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{aiProcessingStatusText}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAiProcessingPanel(false)}
+                      className={`rounded-full p-1.5 transition-colors ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600'}`}
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="mt-4 space-y-2.5">
+                    {aiProcessingItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className={`rounded-[18px] border p-3 ${
+                          darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-100 bg-gray-50/70'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[13px] font-bold">{item.title}</span>
+                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                item.busy
+                                  ? 'bg-[#8871e4]/10 text-[#8871e4]'
+                                  : darkMode ? 'bg-white/10 text-gray-300' : 'bg-white text-gray-500'
+                              }`}>
+                                {item.status}
+                              </span>
+                            </div>
+                            <div className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{item.desc}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={item.onAction}
+                            disabled={item.disabled}
+                            className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                              item.busy
+                                ? darkMode ? 'bg-white/10 text-gray-300' : 'bg-gray-200 text-gray-500'
+                                : darkMode ? 'bg-white/10 text-gray-100 hover:bg-white/15' : 'bg-white text-gray-700 shadow-sm hover:text-[#8871e4]'
+                            }`}
+                          >
+                            {item.actionLabel}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    {!aiAutoProcess && (
+                      <span className={`text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>自动关闭时不会主动消耗 token</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleClearDocumentAICache}
+                      disabled={!docId}
+                      className={`ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        darkMode ? 'text-gray-300 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+                      }`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      清理缓存
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 顶部导航：速览 / 解析 / 对话 */}
               <div className="pt-6 pb-2 flex justify-center shrink-0">
-                <div className="relative flex bg-gray-100/80 rounded-full p-1 border border-gray-200/50 shadow-sm">
-                  {/* 滑动背景块 */}
+                <div className={`relative grid w-[240px] grid-cols-3 overflow-hidden rounded-[22px] p-1 border shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] backdrop-blur-xl ${
+                  darkMode
+                    ? 'bg-white/[0.05] border-white/10'
+                    : 'bg-white/35 border-white/70 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_8px_24px_rgba(148,163,184,0.10)]'
+                }`}>
                   <motion.div
-                    className="absolute top-1 bottom-1 w-[72px] bg-white rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.05)] z-0"
+                    className={`absolute top-1 bottom-1 left-1 rounded-[18px] z-0 ${
+                      darkMode
+                        ? 'bg-white/12 shadow-[0_8px_22px_rgba(0,0,0,0.22)]'
+                        : 'bg-white/90 shadow-[0_10px_24px_rgba(139,124,200,0.14),0_2px_6px_rgba(31,41,55,0.06),inset_0_1px_0_rgba(255,255,255,0.95)]'
+                    }`}
                     initial={false}
-                    animate={{ x: rightPanelMode === 'overview' ? 0 : 72 }}
-                    transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                    style={{ width: 'calc((100% - 0.5rem) / 3)' }}
+                    animate={{ x: `${activeRightPanelTabIndex * 100}%` }}
+                    transition={{ type: 'spring', stiffness: 430, damping: 34, mass: 0.72 }}
                   />
-                  
-                  <button
-                    onClick={() => setRightPanelMode('overview')}
-                    className={`relative z-10 w-[72px] py-1.5 text-xs font-medium rounded-full transition-colors duration-200 ${
-                      rightPanelMode === 'overview'
-                        ? 'text-purple-600'
-                        : 'text-gray-500 hover:text-gray-700'
-                    }`}
-                  >
-                    速览
-                  </button>
-                  <button
-                    onClick={() => setRightPanelMode('chat')}
-                    className={`relative z-10 w-[72px] py-1.5 text-xs font-medium rounded-full transition-colors duration-200 ${
-                      rightPanelMode === 'chat'
-                        ? 'text-purple-600'
-                        : 'text-gray-500 hover:text-gray-700'
-                    }`}
-                  >
-                    对话
-                  </button>
+
+                  {rightPanelTabs.map(({ id, label }) => {
+                    const isActive = rightPanelMode === id;
+                    return (
+                      <motion.button
+                        key={id}
+                        type="button"
+                        onClick={() => setRightPanelMode(id)}
+                        whileTap={{ scale: 0.97 }}
+                        className={`relative z-10 h-9 rounded-[18px] text-[13px] font-semibold transition-colors duration-200 ${
+                          isActive
+                            ? (darkMode ? 'text-white' : 'text-[#8b7cc8]')
+                            : (darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600')
+                        }`}
+                      >
+                        {label}
+                      </motion.button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1264,10 +2529,30 @@ const ChatPDF = () => {
                     loading={overviewLoading}
                     error={overviewError}
                     depth={overviewDepth}
-                    onDepthChange={setOverviewDepth}
+                    figureMode={overviewFigureMode}
+                    onDepthChange={handleOverviewDepthChange}
                     onFetch={fetchOverview}
                   />
                 </Suspense>
+              ) : rightPanelMode === 'analysis' ? (
+                <ReadingAnalysisPanel
+                  blocks={currentPageBlocks}
+                  translations={blockTranslations}
+                  loading={blockTranslateLoading}
+                  error={blockTranslateError}
+                  pretranslateProgress={pretranslateProgress}
+                  currentPage={currentPage}
+                  activeBlockId={activeReadingBlockId}
+                  notes={currentPageReadingNotes}
+                  activeNodeId={activeReadingNodeId}
+                  visitedNodeIds={[...visitedReadingNodeIds]}
+                  onTranslate={handleTranslateCurrentPage}
+                  onPretranslate={pretranslateReadingDocument}
+                  onBlockHover={handleReadingBlockHover}
+                  onBlockClick={handleReadingBlockClick}
+                  onNoteClick={handleOutlineJump}
+                  darkMode={darkMode}
+                />
               ) : (
                 <>
                   {/* 预设问题 */}
@@ -1288,7 +2573,8 @@ const ChatPDF = () => {
               )}
             </div>
 
-            {/* 输入区域 */}
+            {/* 输入区域：仅在对话模式显示，避免遮挡速览/解析内容 */}
+            {rightPanelMode === 'chat' && (
             <div className="p-6 pt-0 bg-transparent relative z-10">
               <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_12px_40px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/80 rounded-[2rem] p-2.5 z-20">
                 {/* 截图预览 - 嵌入输入框顶部，避免被遮挡 */}
@@ -1374,6 +2660,7 @@ const ChatPDF = () => {
                 </div>
               </div>
             </div>
+            )}
           </motion.div>
         </div>
       </div>
@@ -1683,6 +2970,26 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+
+                  <div className={`rounded-[18px] border px-4 py-3 ${darkMode ? 'bg-white/[0.04] border-white/10' : 'bg-gray-50/80 border-gray-200/70'}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <h4 className={`text-[13px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>智能阅读自动处理</h4>
+                        <p className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          大纲、总结、悬浮预翻译和速览默认值已统一到全局设置的「智能阅读」分组。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }}
+                        className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                          darkMode ? 'bg-white/10 text-gray-100 hover:bg-white/15' : 'bg-white text-gray-700 shadow-sm hover:text-[#8871e4]'
+                        }`}
+                      >
+                        去设置
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Toolbar and Storage Settings Area */}
@@ -1760,6 +3067,31 @@ const ChatPDF = () => {
                         <p className="text-[11px] text-gray-500 mt-2 px-1">
                           在 {storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'} 中打开以管理文件
                         </p>
+                        <div className={`mt-3 rounded-[16px] border p-3 ${darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-200/70 bg-white/60'}`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                                当前文档 AI 缓存
+                              </div>
+                              <div className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                                清理总结、大纲、速览和悬浮翻译缓存
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleClearDocumentAICache}
+                              disabled={!docId}
+                              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                                darkMode
+                                  ? 'bg-white/10 text-gray-100 hover:bg-white/15'
+                                  : 'bg-gray-900 text-white hover:bg-gray-800'
+                              }`}
+                            >
+                              <Trash2 size={13} />
+                              清理
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     ) : (
                       <div className="text-[12px] text-gray-500 py-2">加载中...</div>
@@ -1828,6 +3160,33 @@ const ChatPDF = () => {
                         <span className="text-gray-500">模型</span>
                         <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.model || '未返回'}</strong>
                       </div>
+                      {(() => {
+                        const usage = getUsageTokenSummary(lastCallInfo.usage);
+                        if (!usage) return null;
+                        return (
+                          <>
+                          <div className="mt-1.5 flex justify-between items-center">
+                            <span className="text-gray-500">Token</span>
+                            <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                              {Number.isFinite(usage.total) ? usage.total : '-'}
+                              <span className="ml-1 font-normal text-gray-400">
+                                ({Number.isFinite(usage.prompt) ? usage.prompt : '-'} / {Number.isFinite(usage.completion) ? usage.completion : '-'})
+                              </span>
+                              {usage.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
+                            </strong>
+                          </div>
+                          {usage.cost && Number.isFinite(usage.cost.amount) && (
+                            <div className="mt-1.5 flex justify-between items-center">
+                              <span className="text-gray-500">费用</span>
+                              <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                                {usage.cost.currency} {usage.cost.amount}
+                                {usage.cost.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
+                              </strong>
+                            </div>
+                          )}
+                          </>
+                        );
+                      })()}
                       {lastCallInfo.fallback && (
                         <div className="mt-2 pt-2 border-t border-gray-200/50 text-amber-600 font-medium flex items-center justify-center gap-1.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
