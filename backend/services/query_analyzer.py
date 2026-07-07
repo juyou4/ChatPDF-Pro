@@ -328,22 +328,30 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     if is_analysis_explanation_query(query):
         evidence_need.append('analysis_explanation')
 
-    numeric_table_scope_patterns = [
+    numeric_table_table_scope_patterns = [
         '表', '表格', 'table', 'tables', 'caption',
-        '数据集', 'dataset', 'baseline', '基线', 'metric', '指标',
-        '实验', '阈值', 'threshold', '比率', 'ratio', 'percentage',
+    ]
+    numeric_table_metric_scope_patterns = [
+        'baseline', '基线', 'metric', '指标', '阈值', 'threshold',
+        '比率', 'ratio', 'percentage', 'accuracy', 'acc', 'score',
+        'f1', 'bleu', 'rouge', 'precision', 'recall', 'asr', 'lpips',
+        'fid', 'map', 'ap50', 'ap75',
     ]
     numeric_table_value_patterns = [
         'accuracy', 'acc', 'score', 'f1', 'bleu', 'rouge', 'precision', 'recall',
         '提升', '下降', '差值', '差距', '相比', '对比', '分别', '多少',
-        'many', 'medium', 'few', '数值', '数字', '准确率', '百分点',
+        'many', 'medium', 'few', '数值', '准确率', '百分点',
     ]
     if (
         cost_query
         or
         _contains_any(query_lower, ['many', 'medium', 'few'])
         or (
-            _contains_any(query_lower, numeric_table_scope_patterns)
+            _contains_any(query_lower, numeric_table_table_scope_patterns)
+            and _contains_any(query_lower, numeric_table_value_patterns)
+        )
+        or (
+            _contains_any(query_lower, numeric_table_metric_scope_patterns)
             and _contains_any(query_lower, numeric_table_value_patterns)
         )
     ):

@@ -1570,6 +1570,70 @@ def test_cleanup_numeric_table_context_entries_keeps_same_table_comparator_rows_
     assert all("Table 9: Another benchmark." not in text for text in texts)
 
 
+def test_cleanup_numeric_table_context_entries_keeps_one_explanatory_background_with_rows():
+    query = "Table 3 中 Baseline 和 AttnRes 在 MMLU、GPQA-Diamond、HumanEval、C-Eval 上分别是多少？"
+    explanatory = _make_numeric_candidate(
+        "The benchmark evaluates reasoning, knowledge, and coding abilities across multiple datasets before reporting the table.",
+        0.80,
+        page=10,
+        chunk_type="text",
+        block_type="text",
+    )
+    off_topic = _make_numeric_candidate(
+        "Appendix implementation notes mention a UI demo and unrelated configuration details.",
+        0.79,
+        page=2,
+        chunk_type="text",
+        block_type="text",
+    )
+    baseline = _make_numeric_candidate(
+        "Baseline | MMLU=60.1 | GPQA-Diamond=32.0 | HumanEval=45.0 | C-Eval=70.0",
+        0.72,
+        page=10,
+        chunk_type="table_row",
+        block_type="table_row",
+        table_id="Table 3",
+        table_caption="Table 3: Benchmark results.",
+        table_header="Method | MMLU | GPQA-Diamond | HumanEval | C-Eval",
+        row_id="Baseline",
+        table_row_evidence=True,
+        table_row_slice_kind="exact",
+        table_row_boundary_text="Baseline 60.1 32.0 45.0 70.0",
+        table_row_raw_text="Baseline 60.1 32.0 45.0 70.0",
+    )
+    attnres = _make_numeric_candidate(
+        "AttnRes | MMLU=63.5 | GPQA-Diamond=34.2 | HumanEval=48.1 | C-Eval=72.4",
+        0.71,
+        page=10,
+        chunk_type="table_row",
+        block_type="table_row",
+        table_id="Table 3",
+        table_caption="Table 3: Benchmark results.",
+        table_header="Method | MMLU | GPQA-Diamond | HumanEval | C-Eval",
+        row_id="AttnRes",
+        table_row_evidence=True,
+        table_row_slice_kind="exact",
+        table_row_boundary_text="AttnRes 63.5 34.2 48.1 72.4",
+        table_row_raw_text="AttnRes 63.5 34.2 48.1 72.4",
+    )
+
+    layered = _cleanup_numeric_table_context_entries(
+        [
+            (baseline, _build_context_text_for_result(baseline, query=query)),
+            (attnres, _build_context_text_for_result(attnres, query=query)),
+            (explanatory, _build_context_text_for_result(explanatory, query=query)),
+            (off_topic, _build_context_text_for_result(off_topic, query=query)),
+        ],
+        query,
+    )
+
+    roles = [entry["context_role"] for entry in layered]
+    texts = [entry["text"] for entry in layered]
+    assert roles.count("background") == 1
+    assert any("benchmark evaluates reasoning" in text for text in texts)
+    assert all("UI demo" not in text for text in texts)
+
+
 def test_cleanup_numeric_table_context_entries_prefers_same_table_exact_row_over_wrong_table_winner_block():
     query = "实验结果表中哪个方法在 Few-shot 子集上取得最高准确率？具体数值是多少？"
     wrong_table = _make_numeric_candidate(

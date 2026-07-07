@@ -12,6 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import services.embedding_service as embedding_service
 from services.odl_parser_service import _attach_structured_bundles_to_pages, _build_structured_table_bundles
+from services.table_aware_service import (
+    bind_nearest_table_captions,
+    build_structured_table_bundle,
+    extract_table_caption_candidates_from_text_dict,
+    merge_pdf_native_structured_table_bundles,
+)
 
 
 EMBED_DIM = 16
@@ -64,6 +70,9 @@ def _make_evidence_units(bundle_key="id:100", table_id="Table 7", table_caption=
                     "page": page,
                     "row_idx": 1,
                     "col_idx": 1,
+                    "col_id": "Method",
+                    "column_header": "Method",
+                    "header_path": "Method",
                     "row_span": 1,
                     "col_span": 1,
                     "bbox": [1, 2, 2, 4],
@@ -80,6 +89,9 @@ def _make_evidence_units(bundle_key="id:100", table_id="Table 7", table_caption=
                     "page": page,
                     "row_idx": 1,
                     "col_idx": 2,
+                    "col_id": "All",
+                    "column_header": "All",
+                    "header_path": "All",
                     "row_span": 1,
                     "col_span": 1,
                     "bbox": [2, 2, 3, 4],
@@ -211,9 +223,87 @@ def test_odl_structured_table_bundles_include_typed_evidence_units():
     assert row_unit["cell_evidence_units"][0]["evidence_unit_type"] == "table_cell"
     assert row_unit["cell_evidence_units"][0]["evidence_unit_id"] == "id:100::table_cell::source:100::r1::c1"
     assert row_unit["cell_evidence_units"][0]["col_idx"] == 1
+    assert row_unit["cell_evidence_units"][0]["col_id"] == "Method"
+    assert row_unit["cell_evidence_units"][0]["column_header"] == "Method"
+    assert row_unit["cell_evidence_units"][0]["header_path"] == "Method"
     assert row_unit["cell_evidence_units"][0]["bbox"] == [1, 2, 2, 4]
     assert row_unit["cell_evidence_units"][1]["content"] == "All"
+    assert row_unit["cell_evidence_units"][1]["header_path"] == "All"
     assert row_unit["cell_evidence_units"][1]["col_span"] == 1
+
+
+def test_odl_structured_table_bundles_expand_spans_into_header_paths():
+    elements = [
+        {
+            "type": "caption",
+            "id": 10,
+            "page number": 1,
+            "linked content id": 100,
+            "content": "Table 8: Results on ImageNet-LT.",
+        },
+        {
+            "type": "table",
+            "id": 100,
+            "page number": 1,
+            "bounding box": [1, 2, 8, 9],
+            "rows": [
+                {
+                    "type": "table row",
+                    "row number": 1,
+                    "cells": [
+                        {"type": "table cell", "row number": 1, "column number": 1, "content": ""},
+                        {
+                            "type": "table cell",
+                            "row number": 1,
+                            "column number": 2,
+                            "column span": 2,
+                            "content": "ResNet-10",
+                        },
+                        {
+                            "type": "table cell",
+                            "row number": 1,
+                            "column number": 4,
+                            "column span": 2,
+                            "content": "ResNet-50",
+                        },
+                    ],
+                },
+                {
+                    "type": "table row",
+                    "row number": 2,
+                    "cells": [
+                        {"type": "table cell", "row number": 2, "column number": 1, "content": "Method"},
+                        {"type": "table cell", "row number": 2, "column number": 2, "content": "All"},
+                        {"type": "table cell", "row number": 2, "column number": 3, "content": "Many"},
+                        {"type": "table cell", "row number": 2, "column number": 4, "content": "All"},
+                        {"type": "table cell", "row number": 2, "column number": 5, "content": "Many"},
+                    ],
+                },
+                {
+                    "type": "table row",
+                    "row number": 3,
+                    "cells": [
+                        {"type": "table cell", "row number": 3, "column number": 1, "content": "DiffuLT"},
+                        {"type": "table cell", "row number": 3, "column number": 2, "content": "56.4"},
+                        {"type": "table cell", "row number": 3, "column number": 3, "content": "63.3"},
+                        {"type": "table cell", "row number": 3, "column number": 4, "content": "55.6"},
+                        {"type": "table cell", "row number": 3, "column number": 5, "content": "39.4"},
+                    ],
+                },
+            ],
+        },
+    ]
+
+    bundle = _build_structured_table_bundles(elements)[0]
+
+    assert bundle["table_header"] == "Method | ResNet-10 All | ResNet-10 Many | ResNet-50 All | ResNet-50 Many"
+    data_row = bundle["evidence_units"][2]
+    assert data_row["row_id"] == "DiffuLT"
+    cells = data_row["cell_evidence_units"]
+    assert cells[1]["header_path"] == "ResNet-10 All"
+    assert cells[2]["header_path"] == "ResNet-10 Many"
+    assert cells[3]["header_path"] == "ResNet-50 All"
+    assert "ResNet-50 | ResNet-50" in bundle["table_body_markdown"]
 
 
 def test_attach_structured_table_bundles_to_pages_injects_bundle_text():
@@ -254,6 +344,187 @@ def test_attach_structured_table_bundles_to_pages_injects_bundle_text():
     assert "[Structured Table Bundle]" in updated_pages[0]["text"]
     assert "Table 7: Main results" in updated_pages[0]["text"]
     assert "[Structured Table Bundle]" in full_text
+
+
+def test_pdf_native_table_info_builds_structured_bundle_with_typed_rows():
+    bundle = build_structured_table_bundle(
+        {
+            "markdown": "| Method | All |\n| --- | --- |\n| Ours | 55.5 |",
+            "data": [["Method", "All"], ["Ours", "55.5"]],
+            "bbox": (10, 20, 200, 120),
+            "caption": "Table 7: Main results",
+            "page": 3,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=2,
+    )
+
+    assert bundle["source"] == "pymupdf_table"
+    assert bundle["table_id"] == "Table 7"
+    assert bundle["table_caption"] == "Table 7: Main results"
+    assert bundle["table_header"] == "Method | All"
+    assert bundle["pages"] == [3]
+    assert bundle["bounding_box"] == [10.0, 20.0, 200.0, 120.0]
+    assert bundle["evidence_units"][0]["is_header_row"] is True
+    assert bundle["evidence_units"][1]["content"] == "Ours | 55.5"
+    assert bundle["evidence_units"][1]["cell_evidence_units"][1]["content"] == "55.5"
+    assert "[Structured Table Bundle]" in bundle["bundle_text"]
+
+
+def test_pdf_native_table_bundle_flattens_multilevel_headers_into_cell_schema():
+    bundle = build_structured_table_bundle(
+        {
+            "markdown": "",
+            "data": [
+                ["", "ResNet-10", "", "ResNet-50", ""],
+                ["Method", "All", "Many", "All", "Many"],
+                ["DiffuLT", "56.4", "63.3", "55.6", "39.4"],
+            ],
+            "bbox": (10, 20, 300, 160),
+            "caption": "Table 8: Results on ImageNet-LT.",
+            "page": 9,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=1,
+    )
+
+    assert bundle["table_header"] == "Method | ResNet-10 All | ResNet-10 Many | ResNet-50 All | ResNet-50 Many"
+    data_row = bundle["evidence_units"][2]
+    assert data_row["row_id"] == "DiffuLT"
+    cells = data_row["cell_evidence_units"]
+    assert cells[0]["header_path"] == "Method"
+    assert cells[1]["header_path"] == "ResNet-10 All"
+    assert cells[3]["header_path"] == "ResNet-50 All"
+    assert cells[3]["col_id"] == "ResNet-50 All"
+    assert cells[3]["row_number"] == 3
+
+
+def test_pdf_native_table_bundle_uses_cell_level_bboxes_when_available():
+    bundle = build_structured_table_bundle(
+        {
+            "markdown": "",
+            "data": [["Method", "All"], ["Ours", "55.5"]],
+            "bbox": (10, 20, 210, 120),
+            "cell_bboxes": [
+                [[10, 20, 110, 50], [110, 20, 210, 50]],
+                [[10, 50, 110, 90], [110, 50, 210, 90]],
+            ],
+            "caption": "Table 7: Main results",
+            "page": 3,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=1,
+    )
+
+    row = bundle["evidence_units"][1]
+    assert row["bbox"] == [10.0, 50.0, 210.0, 90.0]
+    assert row["bounding_box"] == [10.0, 50.0, 210.0, 90.0]
+    assert row["cell_evidence_units"][0]["bbox"] == [10.0, 50.0, 110.0, 90.0]
+    assert row["cell_evidence_units"][1]["bbox"] == [110.0, 50.0, 210.0, 90.0]
+    assert row["cell_evidence_units"][1]["header_path"] == "All"
+
+
+def test_pdf_native_structured_bundles_merge_uncaptioned_next_page_continuation():
+    first = build_structured_table_bundle(
+        {
+            "markdown": "",
+            "data": [["Method", "All"], ["Baseline", "52.1"]],
+            "bbox": (10, 80, 220, 730),
+            "caption": "Table 7: Main results",
+            "page": 1,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=1,
+    )
+    second = build_structured_table_bundle(
+        {
+            "markdown": "",
+            "data": [["Method", "All"], ["Ours", "55.5"]],
+            "bbox": (12, 40, 222, 160),
+            "caption": "",
+            "page": 2,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=1,
+    )
+
+    merged = merge_pdf_native_structured_table_bundles([first, second])
+
+    assert len(merged) == 1
+    bundle = merged[0]
+    assert bundle["table_id"] == "Table 7"
+    assert bundle["table_caption"] == "Table 7: Main results"
+    assert bundle["pages"] == [1, 2]
+    assert bundle["page_start"] == 1
+    assert bundle["page_end"] == 2
+    assert "Baseline" in bundle["table_body_markdown"]
+    assert "Ours" in bundle["table_body_markdown"]
+    assert bundle["table_body_markdown"].count("| Method | All |") == 1
+    rows = bundle["evidence_units"]
+    assert [row["row_id"] for row in rows] == ["Method", "Baseline", "Ours"]
+    assert rows[-1]["table_bundle_id"] == bundle["bundle_id"]
+    assert rows[-1]["cell_evidence_units"][1]["header_path"] == "All"
+
+
+def test_extract_table_caption_candidates_from_text_dict_uses_line_bbox():
+    text_dict = {
+        "blocks": [
+            {
+                "lines": [
+                    {
+                        "spans": [
+                            {"text": "Table 12: ODinW benchmark results", "bbox": [40, 310, 360, 326]},
+                        ]
+                    },
+                    {
+                        "spans": [
+                            {"text": "ordinary paragraph", "bbox": [40, 340, 260, 356]},
+                        ]
+                    },
+                ]
+            }
+        ]
+    }
+
+    candidates = extract_table_caption_candidates_from_text_dict(text_dict, page_num=4)
+
+    assert len(candidates) == 1
+    assert candidates[0]["table_id"] == "Table 12"
+    assert candidates[0]["caption"] == "Table 12: ODinW benchmark results"
+    assert candidates[0]["bbox"] == [40.0, 310.0, 360.0, 326.0]
+
+
+def test_pdf_native_nearest_caption_binding_handles_below_table_caption():
+    bundle = build_structured_table_bundle(
+        {
+            "markdown": "",
+            "data": [["Dataset", "AP50"], ["LVIS minival", "52.4"]],
+            "bbox": (40, 120, 360, 300),
+            "caption": "",
+            "page": 4,
+            "source": "pymupdf_table",
+        },
+        index_in_doc=1,
+    )
+    candidates = [
+        {
+            "caption": "Table 12: ODinW benchmark results",
+            "table_id": "Table 12",
+            "page": 4,
+            "bbox": [44, 310, 355, 328],
+        }
+    ]
+
+    bound = bind_nearest_table_captions([bundle], candidates)
+
+    assert len(bound) == 1
+    table = bound[0]
+    assert table["table_id"] == "Table 12"
+    assert table["table_caption"] == "Table 12: ODinW benchmark results"
+    assert "Table 12: ODinW benchmark results" in table["bundle_text"]
+    assert table["evidence_units"][1]["table_id"] == "Table 12"
+    assert table["evidence_units"][1]["table_caption"] == "Table 12: ODinW benchmark results"
+    assert table["evidence_units"][1]["cell_evidence_units"][1]["table_id"] == "Table 12"
 
 
 def test_build_vector_index_appends_structured_table_bundle_chunks(tmp_path, monkeypatch):
@@ -312,15 +583,31 @@ def test_build_vector_index_appends_structured_table_bundle_chunks(tmp_path, mon
     with open(tmp_path / f"{doc_id}.pkl", "rb") as f:
         data = pickle.load(f)
 
-    assert data["chunk_types"][-1] == "table"
-    assert data["chunk_metadata"][-1]["structured_table_bundle"] is True
-    assert data["chunk_metadata"][-1]["table_id"] == "Table 7"
-    assert data["chunk_metadata"][-1]["page_range"] == [1, 2]
-    assert data["chunk_metadata"][-1]["html_table"].startswith("<table>")
-    assert data["chunk_metadata"][-1]["evidence_units"][0]["evidence_unit_type"] == "table_row"
-    assert data["chunk_metadata"][-1]["evidence_units"][0]["cell_evidence_units"][0]["col_idx"] == 1
-    assert "[Structured Table Bundle]" in data["chunks"][-1]
-    assert "Table 7: Main results" in data["chunks"][-1]
+    table_indices = [
+        idx for idx, chunk_type in enumerate(data["chunk_types"])
+        if chunk_type == "table" and data["chunk_metadata"][idx].get("structured_table_bundle")
+    ]
+    assert table_indices
+    table_idx = table_indices[-1]
+    assert data["chunk_metadata"][table_idx]["table_id"] == "Table 7"
+    assert data["chunk_metadata"][table_idx]["page_range"] == [1, 2]
+    assert data["chunk_metadata"][table_idx]["html_table"].startswith("<table>")
+    assert data["chunk_metadata"][table_idx]["evidence_units"][0]["evidence_unit_type"] == "table_row"
+    assert data["chunk_metadata"][table_idx]["evidence_units"][0]["cell_evidence_units"][0]["col_idx"] == 1
+    assert "[Structured Table Bundle]" in data["chunks"][table_idx]
+    assert "Table 7: Main results" in data["chunks"][table_idx]
+    assert any(
+        metadata.get("table_row_slice_kind") == "exact"
+        and metadata.get("numeric_table_exact_context_row_text")
+        for metadata in data["chunk_metadata"]
+    )
+    exact_row = next(
+        metadata
+        for metadata in data["chunk_metadata"]
+        if metadata.get("table_row_slice_kind") == "exact"
+    )
+    assert exact_row["cell_evidence_units"][1]["header_path"] == "All"
+    assert exact_row["cell_evidence_units"][1]["col_id"] == "All"
 
 
 def test_search_document_chunks_hydrates_structured_table_bundle_metadata(tmp_path, monkeypatch):

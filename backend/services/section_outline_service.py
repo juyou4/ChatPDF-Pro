@@ -18,7 +18,7 @@ from services.chat_service import call_ai_api
 
 logger = logging.getLogger(__name__)
 
-SECTION_OUTLINE_VERSION = 4
+SECTION_OUTLINE_VERSION = 8
 MAX_CANDIDATES = 180
 MAX_CANDIDATE_TEXT = 260
 
@@ -42,9 +42,38 @@ _RE_PUBLICATION_HEADER_CUE = re.compile(
     r"authorized|licensed|downloaded|doi|issn|isbn|technical\s+report)\b",
     re.IGNORECASE,
 )
+_GENERIC_BOOKMARK_TITLES = {
+    "全文",
+    "全文书签",
+    "full text",
+    "fulltext",
+    "document",
+    "article",
+    "paper",
+    "contents",
+    "content",
+}
 _RE_ALGORITHM_LINE = re.compile(
     r"^\s*(input|output|require|ensure|initialize|initialise|update|repeat|return|for\s+each|for\s+"
     r"|while\s+|if\s+|else\b|end\b|stage\s*\d+)\b",
+    re.IGNORECASE,
+)
+_RE_EMAIL_OR_URL = re.compile(r"(@|https?://|www\.)", re.IGNORECASE)
+_RE_AFFILIATION_CUE = re.compile(
+    r"\b(dept\.?|department|institute|university|college|school|academy|laborator(?:y|ies)|lab|"
+    r"research|center|centre|faculty|campus|microsoft|google|meta|amazon|tencent|alibaba|"
+    r"tsinghua|stanford|mit|berkeley|hong\s+kong|shenzhen|beijing|redmond)\b",
+    re.IGNORECASE,
+)
+_RE_REFERENCE_ENTRY = re.compile(
+    r"^\s*(?:\[\d+\]|\d+[\.)])\s+"
+    r"(?:[A-Z][A-Za-z'\-]+,\s+(?:[A-Z]\.|[A-Z][A-Za-z'\-]+)|"
+    r"(?:[A-Z]\.\s*)?[A-Z][A-Za-z'\-]+(?:\s+et\s+al\.?))",
+    re.IGNORECASE,
+)
+_RE_KEYWORDS_LINE = re.compile(r"^\s*keywords?\s*[:：]\s+.+", re.IGNORECASE)
+_RE_AUTHOR_INITIAL_REFERENCE = re.compile(
+    r"^\s*\d+[\.)]\s+[A-Z][A-Za-z'\-]+,\s+(?:[A-Z]\.\s*)+",
     re.IGNORECASE,
 )
 
@@ -99,36 +128,60 @@ async def get_or_create_section_outline(
 ) -> dict[str, Any]:
     """按 PDF 书签 -> AI -> 启发式的顺序返回文档章节树。"""
     source_hash = _source_hash(block_index)
-    bookmark_outline = _build_bookmark_outline(
-        doc_id=doc_id,
-        doc=doc,
-        block_index=block_index,
-        source_hash=source_hash,
-    )
-    if bookmark_outline:
-        return bookmark_outline
-
-    provider_lower = (provider or "").lower()
-    can_call_model = bool(api_key) or provider_lower in {"local", "ollama"}
     fallback = build_fallback_section_outline(
         doc_id=doc_id,
         doc=doc,
         block_index=block_index,
         source_hash=source_hash,
     )
+    bookmark_outline = _build_bookmark_outline(
+        doc_id=doc_id,
+        doc=doc,
+        block_index=block_index,
+        source_hash=source_hash,
+    )
+    if bookmark_outline and _bookmark_outline_quality_ok(bookmark_outline, fallback):
+        return bookmark_outline
+    if bookmark_outline:
+        logger.info("[SectionOutline] Ignore low-quality PDF bookmark outline for %s", doc_id)
+
+    provider_lower = (provider or "").lower()
+    can_call_model = bool(api_key) or provider_lower in {"local", "ollama"}
     cached = None if force else load_section_outline(data_dir, doc_id)
     if cached and cached.get("source_hash") == source_hash:
         if cached.get("source") == "ai":
             if _section_outline_quality_ok(cached, fallback):
+                logger.info(
+                    "[AI-Audit] purpose=section_outline doc=%s provider=%s model=%s status=cache_hit",
+                    doc_id,
+                    cached.get("provider") or "",
+                    cached.get("model") or "",
+                )
                 return cached
             logger.info("[SectionOutline] Ignore low-quality cached AI outline for %s", doc_id)
         elif not can_call_model:
             return cached
+    if cached and cached.get("source") == "ai":
+        if _section_outline_quality_ok(cached, fallback):
+            logger.info(
+                "[AI-Audit] purpose=section_outline doc=%s provider=%s model=%s status=cache_hit_hash_drift",
+                doc_id,
+                cached.get("provider") or "",
+                cached.get("model") or "",
+            )
+            return cached
+        logger.info("[SectionOutline] Ignore low-quality cached AI outline for %s", doc_id)
 
     if not can_call_model:
         return fallback
 
     try:
+        logger.info(
+            "[AI-Audit] purpose=section_outline doc=%s provider=%s model=%s status=start",
+            doc_id,
+            provider,
+            model,
+        )
         generated = await _generate_ai_section_outline(
             doc_id=doc_id,
             doc=doc,
@@ -153,10 +206,24 @@ async def get_or_create_section_outline(
         if not _section_outline_quality_ok(outline, fallback):
             raise ValueError("low-quality section outline")
         save_section_outline(data_dir, doc_id, outline)
+        logger.info(
+            "[AI-Audit] purpose=section_outline doc=%s provider=%s model=%s status=success",
+            doc_id,
+            provider,
+            model,
+        )
         return outline
     except Exception as exc:
-        logger.warning("[SectionOutline] AI generation failed for %s: %s", doc_id, exc)
+        logger.warning(
+            "[AI-Audit] purpose=section_outline doc=%s provider=%s model=%s status=failed error=%s",
+            doc_id,
+            provider,
+            model,
+            exc,
+        )
         fallback.setdefault("meta", {})["generation_error"] = str(exc)
+        fallback.setdefault("meta", {})["provider"] = provider
+        fallback.setdefault("meta", {})["model"] = model
         return fallback
 
 
@@ -178,7 +245,11 @@ def build_fallback_section_outline(
             "level": item.get("level") or 1,
             "page": item.get("page") or 1,
             "first_block": item.get("first_block"),
+            "source": item.get("source"),
         })
+
+    if not _outline_items_quality_ok(raw_items):
+        raw_items = _heading_outline_items_from_blocks(block_index)
 
     raw = {"items": raw_items}
     return _normalize_section_outline(
@@ -191,6 +262,62 @@ def build_fallback_section_outline(
         model="",
         provider="",
     )
+
+
+def _heading_outline_items_from_blocks(block_index: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    references_seen = False
+    for page in block_index.get("pages", []) or []:
+        page_num = int(page.get("page") or 1)
+        for block in page.get("blocks", []) or []:
+            if block.get("type") != "heading":
+                continue
+            title = _clean_title(block.get("text"))
+            if not title or _is_generic_outline_title(title) or _is_noise_text(title):
+                continue
+            if references_seen and _looks_like_post_references_noise(title):
+                continue
+            if _looks_like_non_section_title(title):
+                continue
+            if re.match(r"^\s*(references|bibliography)\s*$", title, re.IGNORECASE):
+                references_seen = True
+            items.append({
+                "id": f"section_{len(items) + 1}",
+                "section_id": f"s{len(items) + 1}",
+                "title": title,
+                "level": _safe_level(block.get("level"), 1),
+                "page": page_num,
+                "first_block": block.get("block_id"),
+            })
+            if len(items) >= 80:
+                return items
+    return items
+
+
+def _outline_items_quality_ok(items: list[dict[str, Any]]) -> bool:
+    if not items:
+        return False
+    titles = [
+        _clean_title(item.get("title"))
+        for item in items
+        if isinstance(item, dict) and _clean_title(item.get("title"))
+    ]
+    if not titles:
+        return False
+    if len(titles) < 2:
+        return False
+    sources = {
+        str(item.get("source") or "").lower()
+        for item in items
+        if isinstance(item, dict)
+    }
+    if sources == {"toc"} and len(titles) < 3:
+        return False
+    useful_titles = [title for title in titles if not _is_generic_outline_title(title)]
+    if not useful_titles:
+        return False
+    suspicious_count = sum(1 for title in useful_titles if _looks_like_non_section_title(title))
+    return suspicious_count < max(1, len(useful_titles) // 2)
 
 
 def _build_bookmark_outline(
@@ -247,12 +374,15 @@ async def _generate_ai_section_outline(
         "  ]\n"
         "}\n\n"
         "规则：\n"
-        "1. title 尽量保留原文标题和编号；可包含论文题名作为第一个 level 1 节点。\n"
+        "1. title 尽量保留原文标题和编号；不要输出论文题名、作者、单位等首页元信息，通常从 Abstract/Introduction 开始。\n"
         "2. 必须使用候选里的 block_id 作为 first_block，不允许编造 ID。\n"
         "3. 过滤页眉页脚、页码、LPIPS/PSNR 等纯指标数值行、Fig/Table 标签和表格标题。\n"
         "4. 正确识别罗马数字章节（II.）为 level 1，字母子节（A.）通常为 level 2。\n"
         "5. 算法伪代码步骤（Input/Output/Update/Initialize/Return 等）和图内标注不是章节。\n"
-        "6. 若不确定，宁可少输出，不要把正文句子当章节标题。\n\n"
+        "6. 不要输出作者姓名、作者单位、邮箱、通讯作者脚注、会议/期刊页眉、参考文献条目；References 章节标题本身可以保留，但 References 下面的编号文献不是子章节。\n"
+        "7. 若候选 signals 包含 layout_title，说明它来自 DocLayout-YOLO Title 区域；优先保留其文本，只判断层级和父子关系。\n"
+        "8. 层级必须连续，不要从 level 1 直接跳到 level 3；最多 4 级。\n"
+        "9. 若不确定，宁可少输出，不要把正文句子当章节标题。\n\n"
         f"文档名：{doc.get('filename', doc_id)}\n"
         f"候选块：{json.dumps(candidates, ensure_ascii=False)}"
     )
@@ -304,6 +434,8 @@ def _normalize_section_outline(
         raw_first_block = _valid_first_block(node.get("first_block") or node.get("block_id"), block_map)
         evidence_ids = _valid_block_ids(node.get("evidence_block_ids") or node.get("block_ids"), block_map)
         requested_page = _safe_page(node.get("page"), block_map.get(raw_first_block) if raw_first_block else None)
+        if requested_page == 1 and _looks_like_front_matter_title(title):
+            return None
         first_block = _resolve_section_anchor(
             title=title,
             requested_page=requested_page,
@@ -407,14 +539,45 @@ def _section_outline_quality_ok(outline: dict[str, Any], fallback: dict[str, Any
     return True
 
 
+def _bookmark_outline_quality_ok(outline: dict[str, Any], fallback: dict[str, Any]) -> bool:
+    items = outline.get("flat_items") or _flatten_outline_items(outline.get("items") or [])
+    fallback_items = fallback.get("flat_items") or _flatten_outline_items(fallback.get("items") or [])
+    item_count = len(items)
+    fallback_count = len(fallback_items)
+    if item_count <= 0:
+        return False
+    titles = [str(item.get("title") or "").strip() for item in items]
+    normalized_titles = {
+        re.sub(r"\s+", " ", title.lower()).strip()
+        for title in titles
+        if title
+    }
+    if item_count == 1:
+        return False
+    if fallback_count >= 6 and item_count < max(3, int(fallback_count * 0.5)):
+        return False
+    suspicious_count = sum(1 for title in titles if _looks_like_non_section_title(title))
+    if suspicious_count and suspicious_count >= max(1, item_count // 3):
+        return False
+    return True
+
+
 def _select_section_candidates(block_index: dict[str, Any]) -> list[dict[str, Any]]:
     ordered = list(_flatten_blocks(block_index).values())
     selected: dict[str, dict[str, Any]] = {}
+    yolo_primary = any(
+        block.get("layout_primary_classifier") == "doclayout_yolo"
+        for block in ordered
+    )
 
     def add(block: dict[str, Any], signal: str) -> None:
         block_id = str(block.get("block_id") or "")
         text = str(block.get("text") or "").strip()
         if not block_id or not text or _is_noise_text(text):
+            return
+        if yolo_primary and block.get("layout_region") != "Title":
+            return
+        if yolo_primary and int(block.get("page") or 1) == 1 and _looks_like_front_matter_title(text):
             return
         item = selected.get(block_id)
         if not item:
@@ -426,6 +589,8 @@ def _select_section_candidates(block_index: dict[str, Any]) -> list[dict[str, An
                 "font_size": block.get("font_size"),
                 "is_bold": bool(block.get("is_bold")),
                 "level_hint": block.get("level"),
+                "layout_region": block.get("layout_region") or "",
+                "layout_score": block.get("layout_score"),
                 "signals": [],
             }
             selected[block_id] = item
@@ -433,25 +598,30 @@ def _select_section_candidates(block_index: dict[str, Any]) -> list[dict[str, An
             item["signals"].append(signal)
 
     for block in ordered:
-        for signal in _candidate_signals(block):
+        for signal in _candidate_signals(block, yolo_primary=yolo_primary):
             add(block, signal)
 
-    seen_pages: set[int] = set()
-    for block in ordered:
-        page = int(block.get("page") or 1)
-        if page in seen_pages or block.get("type") == "artifact":
-            continue
-        text = str(block.get("text") or "").strip()
-        if text and not _is_noise_text(text):
-            add(block, "page_first_block")
-            seen_pages.add(page)
+    if not yolo_primary:
+        seen_pages: set[int] = set()
+        for block in ordered:
+            page = int(block.get("page") or 1)
+            if page in seen_pages or block.get("type") == "artifact":
+                continue
+            text = str(block.get("text") or "").strip()
+            if text and not _is_noise_text(text):
+                add(block, "page_first_block")
+                seen_pages.add(page)
 
     return list(selected.values())[:MAX_CANDIDATES]
 
 
-def _candidate_signals(block: dict[str, Any]) -> list[str]:
+def _candidate_signals(block: dict[str, Any], *, yolo_primary: bool = False) -> list[str]:
     text = " ".join(str(block.get("text") or "").split())
     if not text or _is_noise_text(text):
+        return []
+    if yolo_primary:
+        if block.get("type") == "heading" and block.get("layout_region") == "Title":
+            return ["layout_title"]
         return []
     signals = []
     if block.get("type") == "heading":
@@ -773,14 +943,116 @@ def _is_noise_text(text: str) -> bool:
     return False
 
 
+def _is_generic_outline_title(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    return normalized in _GENERIC_BOOKMARK_TITLES
+
+
 def _looks_like_non_section_title(text: str) -> bool:
     stripped = " ".join(str(text or "").split())
     if not stripped:
         return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    if _RE_KEYWORDS_LINE.match(stripped):
+        return True
+    numbered = _RE_NUMBERED_HEADING.match(stripped)
+    if numbered:
+        try:
+            first_number = int(numbered.group(1).split(".")[0])
+        except ValueError:
+            first_number = 0
+        if first_number > 50 or len(numbered.group(2).strip()) > 80:
+            return True
     if _RE_ALGORITHM_LINE.match(stripped):
         return True
     if re.search(r"\b(stage|step)\s*\d+\b", stripped, re.IGNORECASE) and re.search(r"\b(update|initialize|input|output)\b", stripped, re.IGNORECASE):
         return True
+    if _looks_like_reference_entry(stripped):
+        return True
+    if _looks_like_affiliation_or_author_line(stripped):
+        return True
+    if _looks_like_run_in_paragraph_heading(stripped):
+        return True
+    return False
+
+
+def _looks_like_front_matter_title(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    if _RE_NUMBERED_HEADING.match(stripped) or _RE_ROMAN_HEADING.match(stripped) or _RE_ALPHA_HEADING.match(stripped):
+        return False
+    return True
+
+
+def _looks_like_run_in_paragraph_heading(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return False
+    if _RE_CANONICAL_HEADING.match(stripped) or _RE_NUMBERED_HEADING.match(stripped) or _RE_ROMAN_HEADING.match(stripped) or _RE_ALPHA_HEADING.match(stripped):
+        return False
+    words = stripped.split()
+    if len(words) > 12:
+        return True
+    if stripped.endswith(".") and len(words) >= 4:
+        return True
+    if re.search(r"\.\s+[A-Z]", stripped):
+        return True
+    if len(words) >= 9 and re.search(r"\[[0-9,\s]+\].*\b(is|are|was|were|has|have)\b", stripped, re.IGNORECASE):
+        return True
+    if len(words) >= 9 and re.search(r"\b(is|are|was|were)\s+(a|an|the|more)\b", stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+def _looks_like_reference_entry(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if _RE_REFERENCE_ENTRY.match(stripped):
+        return True
+    if _RE_AUTHOR_INITIAL_REFERENCE.match(stripped):
+        return True
+    numbered = _RE_NUMBERED_HEADING.match(stripped)
+    if numbered:
+        try:
+            first_number = int(numbered.group(1).split(".")[0])
+        except ValueError:
+            first_number = 0
+        if first_number > 50:
+            return True
+        if len(numbered.group(2)) > 80 and re.search(r"\bet\s+al\.?\b|,\s+[A-Z]\.", stripped, re.IGNORECASE):
+            return True
+    return bool(re.match(r"^\s*\d+[\.)]?\s+", stripped) and re.search(r"\bet\s+al\.?\b", stripped, re.IGNORECASE))
+
+
+def _looks_like_post_references_noise(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    return bool(_looks_like_reference_entry(stripped) or re.match(r"^\s*(?:\[\d+\]|\d+[\.)])\s+", stripped))
+
+
+def _looks_like_affiliation_or_author_line(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if _RE_EMAIL_OR_URL.search(stripped):
+        return True
+    words = stripped.split()
+    if not words:
+        return False
+    if _RE_AFFILIATION_CUE.search(stripped):
+        return True
+    comma_count = stripped.count(",")
+    if comma_count >= 2 and re.search(r"[A-Za-z][\w'\-]*\s*\d*(?:\*|†)?\s*,", stripped):
+        return True
+    if re.match(r"^\s*\d+\s+[A-Z]", stripped) and len(words) <= 18:
+        institution_words = {"dept", "department", "institute", "university", "college", "school", "academy", "research", "center", "centre", "laboratory", "lab"}
+        normalized = re.sub(r"[^a-z\s]", " ", stripped.lower())
+        if any(word in normalized.split() for word in institution_words):
+            return True
     return False
 
 
@@ -799,11 +1071,11 @@ def _looks_like_numeric_measurement_line(text: str) -> bool:
 
 
 def _source_hash(block_index: dict[str, Any]) -> str:
-    parts = [f"version:{block_index.get('version')}"]
+    parts = [f"pages:{len(block_index.get('pages', []) or [])}"]
     for block in _flatten_blocks(block_index).values():
-        parts.append(
-            f"{block.get('block_id')}:{block.get('type')}:{block.get('level')}:{block.get('is_bold')}:{block.get('text')}"
-        )
+        text = " ".join(str(block.get("text") or "").split())
+        if text:
+            parts.append(text)
     payload = "\n".join(parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 

@@ -180,6 +180,39 @@ const UPLOAD_RING_CONFIGS = [
   { s: 300, w: 12, c: 'rgba(150, 50, 200, 0.4)',  br: '44% 56% 51% 49% / 57% 43% 52% 48%', dur: 6.5, del: -4.0, dir: 'reverse', mix: 'overlay' },
 ];
 
+const UPLOAD_STATUS_META = {
+  uploading: {
+    label: 'Uploading',
+    title: '正在上传文档...',
+    desc: '文件传输完成后会进入本地解析和索引阶段',
+  },
+  extracting: {
+    label: 'Extracting',
+    title: '正在提取 PDF 文本...',
+    desc: '检测页面文本、OCR 和版面清理，这一步耗时取决于页数',
+  },
+  indexing: {
+    label: 'Preparing',
+    title: '正在准备阅读视图...',
+    desc: '整理页面文本和结构信息，检索索引会在后台继续完成',
+  },
+  finalizing: {
+    label: 'Finalizing',
+    title: '正在保存解析结果...',
+    desc: '马上进入阅读界面，增强索引会后台准备',
+  },
+  loading_document: {
+    label: 'Loading',
+    title: '正在加载文档信息...',
+    desc: '即将打开阅读界面',
+  },
+  ready: {
+    label: 'Ready',
+    title: '文档准备完成',
+    desc: '正在进入阅读界面',
+  },
+};
+
 const buildClientReadingFallback = (blockIndex) => {
   const firstBlock = blockIndex?.pages?.[0]?.blocks?.find((block) => block?.block_id);
   return {
@@ -210,6 +243,49 @@ const isTranslatableReadingBlock = (block) => {
   const type = block?.type || 'paragraph';
   const text = String(block?.text || '').trim();
   return Boolean(block?.block_id) && text.length > 1 && TRANSLATABLE_READING_BLOCK_TYPES.has(type);
+};
+
+const isValidBlockTranslationText = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (/^\s*[\{\[]?['"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['"]?\s*[:=]/s.test(text)) {
+    return false;
+  }
+  if (text.includes('_used_provider') && text.includes('_usage_meta')) return false;
+  if (text.includes('completion_tokens') && text.includes('prompt_tokens')) return false;
+  return true;
+};
+
+const filterValidBlockTranslations = (items = {}) => {
+  const result = {};
+  Object.entries(items || {}).forEach(([blockId, item]) => {
+    if (item && isValidBlockTranslationText(item.translation)) {
+      result[blockId] = item;
+    }
+  });
+  return result;
+};
+
+const sanitizeTranslationError = (message, fallback = '段落翻译失败，请稍后重试或更换翻译模型') => {
+  const text = String(message || '').trim();
+  if (!text) return fallback;
+  if (
+    text.includes('模型未返回译文正文')
+    || text.includes('模型返回了无效译文')
+    || text.includes('no usable content')
+    || text.includes('empty')
+    || text.includes('Expecting value')
+    || text.includes('JSONDecodeError')
+  ) {
+    return '模型没有返回可用译文，已保留成功缓存；可稍后补齐失败段落或更换翻译模型';
+  }
+  if (text.includes('429') || /rate limit|too many requests/i.test(text)) {
+    return '翻译请求触发限速，已保留成功缓存；请降低并发或稍后补齐失败段落';
+  }
+  if (text.includes('timeout') || text.includes('timed out') || text.includes('超时')) {
+    return '翻译请求超时，已保留成功缓存；可稍后继续补齐';
+  }
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text;
 };
 
 const normalizeOutlineText = (value) => String(value || '')
@@ -268,6 +344,32 @@ const isUsableSectionAnchor = (block, title, { allowLoose = false } = {}) => {
   return titleVariants.some((titleText) => blockVariants.some((blockText) => blockText.startsWith(titleText)));
 };
 
+const GENERIC_OUTLINE_TITLES = new Set(['全文', '全文书签', 'full text', 'fulltext', 'document', 'article', 'paper', 'contents', 'content']);
+
+const flattenOutlineNodes = (items = []) => {
+  const result = [];
+  const walk = (nodes) => {
+    (nodes || []).forEach((node) => {
+      if (!node) return;
+      result.push(node);
+      if (node.children?.length) walk(node.children);
+    });
+  };
+  walk(items);
+  return result;
+};
+
+const isUsefulOutline = (items = [], source = '') => {
+  const flat = flattenOutlineNodes(items);
+  if (flat.length === 0) return false;
+  if (flat.length === 1) {
+    const title = String(flat[0]?.title || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (GENERIC_OUTLINE_TITLES.has(title)) return false;
+    return source !== 'toc' && flat[0]?.source !== 'toc';
+  }
+  return true;
+};
+
 const ChatPDF = () => {
   // ========== Context Hooks ==========
   const { getProviderById } = useProvider();
@@ -324,6 +426,7 @@ const ChatPDF = () => {
   const [blockIndex, setBlockIndex] = useState(null);
   const [blockIndexLoading, setBlockIndexLoading] = useState(false);
   const [blockIndexError, setBlockIndexError] = useState('');
+  const [blockIndexReloadKey, setBlockIndexReloadKey] = useState(0);
   const [readingOutline, setReadingOutline] = useState(null);
   const [readingOutlineLoading, setReadingOutlineLoading] = useState(false);
   const [readingOutlineError, setReadingOutlineError] = useState('');
@@ -343,12 +446,19 @@ const ChatPDF = () => {
   const [blockTranslationsLoaded, setBlockTranslationsLoaded] = useState(false);
   const [pretranslateProgress, setPretranslateProgress] = useState({ running: false, done: 0, total: 0 });
   const [failedTranslationBlockIds, setFailedTranslationBlockIds] = useState(new Set());
+  const [pretranslateNotice, setPretranslateNotice] = useState('');
   const [showAiProcessingPanel, setShowAiProcessingPanel] = useState(false);
+  const [deepParseStatus, setDeepParseStatus] = useState(null);
+  const [deepParseNotice, setDeepParseNotice] = useState('');
+  const [ragIndexStatus, setRagIndexStatus] = useState(null);
+  const [ragIndexBusy, setRagIndexBusy] = useState(false);
+  const [ragIndexNotice, setRagIndexNotice] = useState('');
   const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
   const [pinnedReadingBlockId, setPinnedReadingBlockId] = useState(null);
   const pretranslateRunRef = useRef(0);
   const pretranslateStartedDocRef = useRef(null);
   const pretranslateAbortRef = useRef(null);
+  const prevShouldAutoPretranslateRef = useRef(shouldAutoPretranslate);
   const readingOutlineRequestRef = useRef(0);
   const readingOutlineForceRef = useRef(false);
   const sectionOutlineForceRef = useRef(false);
@@ -601,11 +711,14 @@ const ChatPDF = () => {
       setVisitedSectionNodeIds(new Set());
       setBlockTranslations({});
       setBlockTranslateError('');
+      setPretranslateNotice('');
       setBlockTranslateLoading(false);
       setTranslatingBlockIds(new Set());
       setBlockTranslationsLoaded(false);
       setPretranslateProgress({ running: false, done: 0, total: 0 });
       setFailedTranslationBlockIds(new Set());
+      setDeepParseStatus(null);
+      setDeepParseNotice('');
       setHoveredReadingBlockId(null);
       setPinnedReadingBlockId(null);
       pretranslateRunRef.current += 1;
@@ -631,11 +744,17 @@ const ChatPDF = () => {
     setVisitedSectionNodeIds(new Set());
     setBlockTranslations({});
     setBlockTranslateError('');
+    setPretranslateNotice('');
     setBlockTranslateLoading(false);
     setTranslatingBlockIds(new Set());
     setBlockTranslationsLoaded(false);
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setFailedTranslationBlockIds(new Set());
+    setDeepParseStatus(null);
+    setDeepParseNotice('');
+    setRagIndexStatus(null);
+    setRagIndexNotice('');
+    setRagIndexBusy(false);
     setHoveredReadingBlockId(null);
     setPinnedReadingBlockId(null);
     pretranslateRunRef.current += 1;
@@ -667,7 +786,254 @@ const ChatPDF = () => {
     return () => {
       cancelled = true;
     };
+  }, [docId, blockIndexReloadKey]);
+
+  const refreshDeepParseStatus = useCallback(async () => {
+    if (!docId) return null;
+    const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse/status?t=${Date.now()}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    setDeepParseStatus(data);
+    if (data?.rag_index) setRagIndexStatus(data.rag_index);
+    return data;
   }, [docId]);
+
+  const refreshRagIndexStatus = useCallback(async () => {
+    if (!docId) return null;
+    const res = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/status?t=${Date.now()}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    setRagIndexStatus(data);
+    return data;
+  }, [docId]);
+
+  const refreshReadingBlocksAfterDeepParse = useCallback(() => {
+    setBlockTranslations({});
+    setBlockTranslationsLoaded(false);
+    setFailedTranslationBlockIds(new Set());
+    setTranslatingBlockIds(new Set());
+    setBlockTranslateError('');
+    setPretranslateNotice('');
+    setPretranslateProgress({ running: false, done: 0, total: 0 });
+    setReadingOutline(null);
+    setSectionOutline(null);
+    setReadingOutlineReloadKey((value) => value + 1);
+    setSectionOutlineReloadKey((value) => value + 1);
+    setActiveReadingNodeId(null);
+    setVisitedReadingNodeIds(new Set());
+    setActiveSectionNodeId(null);
+    setVisitedSectionNodeIds(new Set());
+    setPinnedReadingBlockId(null);
+    setHoveredReadingBlockId(null);
+    setBlockIndexReloadKey((value) => value + 1);
+    // 深度解析完成后后端已让 logical_figures 缓存失效，这里同步清掉前端的
+    // 速览缓存，避免用户已经打开过速览时仍显示深度解析前的旧图表结果。
+    clearOverviewCache?.(docId);
+  }, [clearOverviewCache, docId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!docId) return () => {};
+    refreshDeepParseStatus().catch((error) => {
+      if (!cancelled) {
+        console.warn('[DeepParse] 状态加载失败', error);
+      }
+    });
+    refreshRagIndexStatus().catch((error) => {
+      if (!cancelled) {
+        console.warn('[RagIndex] 状态加载失败', error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [docId, refreshDeepParseStatus, refreshRagIndexStatus]);
+
+  useEffect(() => {
+    if (!docId || !['queued', 'running'].includes(deepParseStatus?.status)) {
+      return () => {};
+    }
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const data = await refreshDeepParseStatus();
+        if (cancelled || !data) return;
+        if (data.status === 'ready' && data.active_mineru) {
+          setDeepParseNotice(
+            data.recommend_rag_index_rebuild
+              ? 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
+              : 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新'
+          );
+          refreshReadingBlocksAfterDeepParse();
+          window.clearInterval(timer);
+        } else if (data.status === 'failed') {
+          setDeepParseNotice(data.error || 'MinerU 深度解析失败');
+          window.clearInterval(timer);
+        } else if (data.status === 'cancelled') {
+          setDeepParseNotice('MinerU 深度解析已取消');
+          window.clearInterval(timer);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setDeepParseNotice(error.message || 'MinerU 深度解析状态同步失败');
+        }
+      }
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [deepParseStatus?.status, docId, refreshDeepParseStatus, refreshReadingBlocksAfterDeepParse]);
+
+  const handleStartMinerUDeepParse = useCallback(async () => {
+    if (!docId || ['queued', 'running'].includes(deepParseStatus?.status)) return;
+    const activeMinerU = Boolean(deepParseStatus?.active_mineru);
+    const parseTarget = deepParseStatus?.access_mode === 'direct'
+      ? 'MinerU 官方 API'
+      : '你配置的 MinerU Worker 服务';
+    const confirmed = window.confirm(
+      activeMinerU
+        ? `重新运行 MinerU 深度解析会把当前 PDF 上传到${parseTarget}，并替换阅读块、大纲、翻译缓存和速览图表。是否继续？`
+        : `MinerU 深度解析会把当前 PDF 上传到${parseTarget}，用于生成带坐标的结构化解析结果，速览图表也会随之升级。是否继续？`
+    );
+    if (!confirmed) return;
+
+    setDeepParseNotice('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'mineru', force: activeMinerU }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      setDeepParseStatus(data);
+      if (data.status === 'ready' && data.active_mineru) {
+        setDeepParseNotice(
+          data.recommend_rag_index_rebuild
+            ? 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
+            : 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新'
+        );
+        refreshReadingBlocksAfterDeepParse();
+      } else {
+        setDeepParseNotice('MinerU 深度解析已开始，可继续阅读，完成后阅读结构与速览图表会自动刷新');
+      }
+    } catch (error) {
+      setDeepParseNotice(error.message || 'MinerU 深度解析启动失败');
+      setDeepParseStatus((prev) => ({ ...(prev || {}), status: 'failed', error: error.message || '启动失败' }));
+    }
+  }, [deepParseStatus?.access_mode, deepParseStatus?.active_mineru, deepParseStatus?.status, docId, refreshReadingBlocksAfterDeepParse]);
+
+  const handleCancelMinerUDeepParse = useCallback(async () => {
+    if (!docId || !['queued', 'running'].includes(deepParseStatus?.status)) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse/cancel`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      setDeepParseStatus(data);
+      setDeepParseNotice('MinerU 深度解析已取消');
+    } catch (error) {
+      setDeepParseNotice(error.message || 'MinerU 深度解析取消失败');
+    }
+  }, [deepParseStatus?.status, docId]);
+
+  const handleRebuildMinerURagIndex = useCallback(async () => {
+    if (!docId || ragIndexBusy) return;
+    if (!deepParseStatus?.active_mineru) {
+      setRagIndexNotice('请先完成 MinerU 深度解析');
+      return;
+    }
+    const embedConfig = getEmbeddingConfig?.() || {};
+    if (!embedConfig.isValid) {
+      setRagIndexNotice('请先在模型设置里选择可用的 Embedding 模型');
+      return;
+    }
+    const embeddingModel = embedConfig.compositeKey || getDefaultModel('embeddingModel') || 'local-minilm';
+    const embeddingApiKeyValue = getEmbeddingApiKey?.() || '';
+    const embeddingApiHost = embedConfig.provider?.apiHost || '';
+
+    setRagIndexBusy(true);
+    setRagIndexNotice('正在评估 MinerU 问答索引重建成本...');
+    try {
+      const estimateRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ estimate_only: true }),
+      });
+      const estimateData = await estimateRes.json().catch(() => ({}));
+      if (!estimateRes.ok) {
+        const detail = estimateData?.detail;
+        throw new Error(typeof detail === 'string' ? detail : detail?.message || `HTTP ${estimateRes.status}`);
+      }
+      if (!estimateData.can_rebuild) {
+        const failures = (estimateData.quality_failures || []).join('、') || '质量门未通过';
+        throw new Error(`MinerU 结果暂不能重建问答索引：${failures}`);
+      }
+      const estimate = estimateData.estimate || {};
+      const confirmed = window.confirm(
+        `将使用 MinerU 结构化结果重建问答索引。\n\n`
+        + `预计重新嵌入约 ${estimate.estimated_embedding_tokens || 0} tokens，约 ${estimate.estimated_chunk_count || 0} 个分块，表格 ${estimate.structured_table_count || 0} 个，耗时约 1-3 分钟。\n`
+        + `历史对话中的引用可能发生偏移；阅读侧翻译、大纲和速览不受影响。\n`
+        + `重建期间旧问答索引会继续可用。是否继续？`
+      );
+      if (!confirmed) {
+        setRagIndexNotice('已取消问答索引重建');
+        return;
+      }
+      setRagIndexNotice('正在重建 MinerU 问答索引...');
+      const rebuildRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          embedding_model: embeddingModel,
+          embedding_api_key: embeddingApiKeyValue,
+          embedding_api_host: embeddingApiHost,
+        }),
+      });
+      const rebuildData = await rebuildRes.json().catch(() => ({}));
+      if (!rebuildRes.ok) {
+        const detail = rebuildData?.detail;
+        throw new Error(typeof detail === 'string' ? detail : detail?.message || `HTTP ${rebuildRes.status}`);
+      }
+      setRagIndexStatus(rebuildData.rag_index || null);
+      setRagIndexNotice('MinerU 问答索引已重建，表格问答会优先使用结构化证据');
+      refreshDeepParseStatus().catch(() => {});
+    } catch (error) {
+      setRagIndexNotice(error.message || 'MinerU 问答索引重建失败，已保留原索引');
+    } finally {
+      setRagIndexBusy(false);
+    }
+  }, [
+    deepParseStatus?.active_mineru,
+    docId,
+    getDefaultModel,
+    getEmbeddingApiKey,
+    getEmbeddingConfig,
+    ragIndexBusy,
+    refreshDeepParseStatus,
+  ]);
+
+  const handleRollbackRagIndex = useCallback(async () => {
+    if (!docId || ragIndexBusy) return;
+    const confirmed = window.confirm('将回退到本地 PDF 解析生成的问答索引。阅读侧 MinerU 解析不受影响。是否继续？');
+    if (!confirmed) return;
+    setRagIndexBusy(true);
+    setRagIndexNotice('正在回退问答索引...');
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rollback`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      setRagIndexStatus(data.rag_index || null);
+      setRagIndexNotice('已回退到本地问答索引');
+      refreshDeepParseStatus().catch(() => {});
+    } catch (error) {
+      setRagIndexNotice(error.message || '问答索引回退失败');
+    } finally {
+      setRagIndexBusy(false);
+    }
+  }, [docId, ragIndexBusy, refreshDeepParseStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -813,7 +1179,7 @@ const ChatPDF = () => {
         return res.json();
       })
       .then((data) => {
-        if (!cancelled) setBlockTranslations(data?.items || {});
+        if (!cancelled) setBlockTranslations(filterValidBlockTranslations(data?.items || {}));
       })
       .catch((error) => {
         if (!cancelled) {
@@ -886,12 +1252,19 @@ const ChatPDF = () => {
 
   const readingOutlineItems = useMemo(() => readingOutline?.items || [], [readingOutline]);
   const sectionOutlineItems = useMemo(() => sectionOutline?.items || [], [sectionOutline]);
+  const blockOutlineItems = useMemo(() => blockIndex?.outline || [], [blockIndex]);
   const pdfOutlineItems = useMemo(() => {
-    return sectionOutlineItems.length > 0 ? sectionOutlineItems : (blockIndex?.outline || []);
-  }, [blockIndex, sectionOutlineItems]);
-  const pdfOutlineSource = sectionOutline?.source || (
-    (blockIndex?.outline || []).some((item) => item?.source === 'toc') ? 'toc' : 'heuristic'
-  );
+    if (isUsefulOutline(sectionOutlineItems, sectionOutline?.source)) return sectionOutlineItems;
+    if (isUsefulOutline(blockOutlineItems)) return blockOutlineItems;
+    return [];
+  }, [blockOutlineItems, sectionOutline?.source, sectionOutlineItems]);
+  const pdfOutlineSource = isUsefulOutline(sectionOutlineItems, sectionOutline?.source)
+    ? sectionOutline?.source
+    : (
+      isUsefulOutline(blockOutlineItems)
+        ? (blockOutlineItems.some((item) => item?.source === 'toc') ? 'toc' : 'heuristic')
+        : ''
+    );
   const pdfOutlineLoading = blockIndexLoading || (sectionOutlineLoading && pdfOutlineItems.length === 0);
   const pdfOutlineError = blockIndexError || (pdfOutlineItems.length === 0 ? sectionOutlineError : '');
 
@@ -933,8 +1306,21 @@ const ChatPDF = () => {
     const result = { ...blockTranslations };
     readingOutlineFlat.forEach((item) => {
       const ids = item.evidence?.block_ids || item.evidence_block_ids || [];
+      const outlineSummary = (item.summary || item.title || '').trim();
       ids.forEach((blockId) => {
-        if (!result[blockId] && item.summary) {
+        if (!blockId || !outlineSummary) return;
+        if (result[blockId]) {
+          const currentSummary = String(result[blockId]?.summary || '').trim();
+          if (!currentSummary) {
+            result[blockId] = {
+              ...result[blockId],
+              summary: outlineSummary,
+              summary_source: 'reading_outline',
+            };
+          }
+          return;
+        }
+        if (item.summary) {
           result[blockId] = {
             block_id: blockId,
             target_lang: 'zh',
@@ -1150,10 +1536,14 @@ const ChatPDF = () => {
       }
 
       const data = await res.json();
-      const translatedItems = data?.items || {};
+      const translatedItems = filterValidBlockTranslations(data?.items || {});
       const translatedIds = Object.keys(translatedItems);
+      const invalidReturnedIds = Object.keys(data?.items || {}).filter((blockId) => !translatedItems[blockId]);
       setBlockTranslations((prev) => ({ ...prev, ...translatedItems }));
-      const failedBlockIds = Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : [];
+      const failedBlockIds = [
+        ...(Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : []),
+        ...invalidReturnedIds,
+      ].filter((blockId, index, arr) => blockId && arr.indexOf(blockId) === index);
       setFailedTranslationBlockIds((prev) => {
         const next = new Set(prev);
         translatedIds.forEach((blockId) => next.delete(blockId));
@@ -1163,12 +1553,13 @@ const ChatPDF = () => {
       if (failedBlockIds.length > 0) {
         setBlockTranslateError(`有 ${failedBlockIds.length} 个段落暂未翻译成功，可稍后补齐`);
       }
-      return options.returnRaw ? data : translatedItems;
+      const normalizedData = { ...(data || {}), items: translatedItems, failed_block_ids: failedBlockIds };
+      return options.returnRaw ? normalizedData : translatedItems;
     } catch (error) {
       if (error?.name === 'AbortError') {
         return null;
       }
-      setBlockTranslateError(error.message || '段落翻译失败');
+      setBlockTranslateError(sanitizeTranslationError(error.message));
       return null;
     } finally {
       setTranslatingBlockIds((prev) => {
@@ -1186,15 +1577,34 @@ const ChatPDF = () => {
     translateReadingBlocks(currentPageBlocks, { showPanelLoading: true });
   }, [currentPageBlocks, translateReadingBlocks]);
 
+  const handleRetranslateReadingBlock = useCallback(async (block) => {
+    if (!block?.block_id) return;
+    setPretranslateNotice(`正在重译 ${block.block_id}`);
+    const data = await translateReadingBlocks([block], {
+      force: true,
+      returnRaw: true,
+    });
+    const translated = data?.items?.[block.block_id]?.translation;
+    if (isValidBlockTranslationText(translated)) {
+      setPretranslateNotice(`已重译 ${block.block_id}`);
+      setBlockTranslateError('');
+      return;
+    }
+    setPretranslateNotice(`重译失败：${block.block_id} 可稍后再试`);
+    setBlockTranslateError(sanitizeTranslationError(data?.error || '模型没有返回可用译文'));
+  }, [translateReadingBlocks]);
+
   const pretranslateReadingDocument = useCallback(async ({ force = false, retryFailed = false } = {}) => {
     if (!docId || allTranslatableReadingBlocks.length === 0) {
       setPretranslateProgress({ running: false, done: 0, total: 0 });
+      setPretranslateNotice('当前文档还没有可缓存的文本块');
       return;
     }
 
     const { canCallModel, providerName } = getChatRequestConfig();
     if (!canCallModel) {
       setBlockTranslateError(`请先为 ${providerName} 配置 API Key，再开启悬浮预翻译`);
+      setPretranslateNotice(`请先为 ${providerName} 配置 API Key`);
       return;
     }
 
@@ -1209,6 +1619,7 @@ const ChatPDF = () => {
 
     if (pendingBlocks.length === 0) {
       setBlockTranslateError('');
+      setPretranslateNotice('全文翻译缓存已是最新');
       setPretranslateProgress({ running: false, done: translatedReadingBlockCount, total });
       return;
     }
@@ -1219,6 +1630,7 @@ const ChatPDF = () => {
     const abortController = new AbortController();
     pretranslateAbortRef.current = abortController;
     setBlockTranslateError('');
+    setPretranslateNotice(`正在缓存 ${pendingBlocks.length} 个段落译文`);
     setPretranslateProgress({ running: true, done: initialDone, total });
 
     const data = await translateReadingBlocks(pendingBlocks, {
@@ -1234,6 +1646,7 @@ const ChatPDF = () => {
         pretranslateStartedDocRef.current = docId;
         setPretranslateProgress({ running: false, done: initialDone, total });
         setBlockTranslateError(`已取消预翻译，已保留 ${initialDone}/${total} 个缓存译文`);
+        setPretranslateNotice(`已取消，保留 ${initialDone}/${total} 个缓存译文`);
         return;
       }
       const successCount = Object.keys(data?.items || {}).length;
@@ -1243,6 +1656,9 @@ const ChatPDF = () => {
       if (!data || failedCount > 0) {
         pretranslateStartedDocRef.current = docId;
         setBlockTranslateError(`部分段落暂未翻译成功，已保留 ${done}/${total} 个缓存译文，可稍后继续补齐`);
+        setPretranslateNotice(`部分完成：${done}/${total}`);
+      } else {
+        setPretranslateNotice(`缓存完成：${done}/${total}`);
       }
     }
   }, [
@@ -1267,12 +1683,21 @@ const ChatPDF = () => {
     setTranslatingBlockIds(new Set());
     if (wasRunning) {
       setBlockTranslateError('已取消预翻译，已完成的译文缓存会保留');
+      setPretranslateNotice('已取消，已完成的译文缓存会保留');
     }
   }, [docId, pretranslateProgress.running]);
 
+  const handleStartPretranslate = useCallback((options = {}) => {
+    const retryFailed = options.retryFailed ?? failedReadingBlockCount > 0;
+    pretranslateReadingDocument({ ...options, retryFailed });
+  }, [failedReadingBlockCount, pretranslateReadingDocument]);
+
   useEffect(() => {
-    if (shouldAutoPretranslate) return;
-    cancelPretranslateReadingDocument();
+    const wasEnabled = prevShouldAutoPretranslateRef.current;
+    prevShouldAutoPretranslateRef.current = shouldAutoPretranslate;
+    if (wasEnabled && !shouldAutoPretranslate) {
+      cancelPretranslateReadingDocument();
+    }
   }, [cancelPretranslateReadingDocument, shouldAutoPretranslate]);
 
   useEffect(() => {
@@ -1708,7 +2133,8 @@ const ChatPDF = () => {
       setFailedTranslationBlockIds(new Set());
       setBlockTranslateError('');
       setBlockTranslationsLoaded(false);
-      setPretranslateProgress({ running: false, done: 0, total: 0 });
+      setPretranslateProgress({ running: false, done: 0, total: allTranslatableReadingBlocks.length });
+      setPretranslateNotice(allTranslatableReadingBlocks.length > 0 ? '缓存已清理，可重新开始全文缓存' : '');
       pretranslateRunRef.current += 1;
       pretranslateStartedDocRef.current = null;
       clearOverviewCache?.(docId);
@@ -1717,7 +2143,7 @@ const ChatPDF = () => {
     } catch (error) {
       alert(error.message || '清理缓存失败');
     }
-  }, [clearOverviewCache, docId]);
+  }, [allTranslatableReadingBlocks.length, clearOverviewCache, docId]);
 
   const handleRegenerateOverview = useCallback(() => {
     if (!docId) return;
@@ -1962,7 +2388,8 @@ const ChatPDF = () => {
     { id: 'chat', label: '对话' },
   ];
   const activeRightPanelTabIndex = Math.max(0, rightPanelTabs.findIndex((item) => item.id === rightPanelMode));
-  const aiProcessingRunning = readingOutlineLoading || sectionOutlineLoading || overviewLoading || pretranslateProgress.running;
+  const deepParseRunning = ['queued', 'running'].includes(deepParseStatus?.status);
+  const aiProcessingRunning = readingOutlineLoading || sectionOutlineLoading || overviewLoading || pretranslateProgress.running || deepParseRunning;
   const aiProcessingStatusText = aiAutoProcess
     ? (autoOutlineSummary || enableHoverPretranslate ? '自动处理开启' : '按需生成')
     : '自动处理已关闭';
@@ -1989,8 +2416,93 @@ const ChatPDF = () => {
         : translatedReadingBlockCount > 0
           ? `${translatedReadingBlockCount}/${allTranslatableReadingBlocks.length}`
           : (aiAutoProcess && enableHoverPretranslate ? '等待缓存' : '未开始');
+    const deepParseStatusText = deepParseRunning
+      ? (deepParseStatus?.poll_attempt && deepParseStatus?.poll_total
+        ? `等待处理 ${deepParseStatus.poll_attempt}/${deepParseStatus.poll_total}`
+        : deepParseStatus?.stage === 'requesting_upload'
+          ? '申请上传中'
+          : deepParseStatus?.stage === 'uploading'
+            ? '上传中'
+            : deepParseStatus?.stage === 'polling'
+              ? '等待处理'
+              : deepParseStatus?.stage === 'downloading'
+                ? '下载结果中'
+                : deepParseStatus?.stage === 'building_index'
+                  ? '重建索引中'
+                  : '解析中')
+      : deepParseStatus?.status === 'ready' && deepParseStatus?.active_mineru
+        ? '已完成'
+      : deepParseStatus?.status === 'failed'
+        ? '失败'
+        : deepParseStatus?.status === 'cancelled'
+          ? '已取消'
+        : deepParseStatus?.configured === false
+          ? '未配置'
+          : '按需解析';
+
+    const deepParseRecommended = Boolean(
+      !deepParseStatus?.active_mineru && !deepParseRunning && deepParseStatus?.recommend_deep_parse
+    );
+    const ragIndexSource = ragIndexStatus?.index_source || (ragIndexStatus?.ready ? 'pdf_native' : '');
+    const ragIndexIsMinerU = ragIndexSource === 'mineru';
+    const ragIndexRecommended = Boolean(deepParseStatus?.recommend_rag_index_rebuild && !ragIndexBusy);
+    const ragIndexStatusText = ragIndexBusy
+      ? '处理中'
+      : !ragIndexStatus?.ready
+        ? '未就绪'
+        : ragIndexIsMinerU
+          ? 'MinerU'
+          : ragIndexRecommended
+            ? '建议重建'
+            : '本地';
+    const ragIndexDesc = !deepParseStatus?.active_mineru
+      ? '先完成 MinerU 深度解析后，才能把问答索引升级为同源结构化结果'
+      : ragIndexIsMinerU
+        ? `问答检索已使用 MinerU 结构化结果${ragIndexStatus?.table_chunk_count ? `，${ragIndexStatus.table_chunk_count} 个结构化表格块` : ''}`
+        : deepParseStatus?.recommend_rag_index_reason
+          || '当前问答仍使用本地 PDF 解析索引，建议重建为 MinerU 结构化问答索引以改善表格和双栏问答';
 
     return [
+      {
+        id: 'deep_parse',
+        title: 'MinerU 深度解析',
+        recommended: deepParseRecommended,
+        desc: deepParseStatus?.active_mineru
+          ? `当前阅读结构、大纲与速览图表均来自 MinerU${deepParseStatus?.block_count ? `，${deepParseStatus.block_count} 个块` : ''}${deepParseStatus?.figure_count ? `，${deepParseStatus.figure_count} 个图表` : ''}`
+          : deepParseRunning && deepParseStatus?.message
+            ? deepParseStatus.message
+            : deepParseStatus?.status === 'failed' && deepParseStatus?.error
+              ? deepParseStatus.error
+              : deepParseRecommended
+                ? deepParseStatus.recommend_reason
+                : `用 MinerU 重建带坐标的阅读块、大纲和速览图表，手动触发才会上传 PDF${deepParseStatus?.access_mode === 'direct' ? '到官方 API' : '到 Worker'}`,
+        status: deepParseStatusText,
+        busy: deepParseRunning,
+        actionLabel: deepParseRunning
+          ? '取消'
+          : deepParseStatus?.active_mineru
+            ? '重新解析'
+            : '开始解析',
+        onAction: deepParseRunning ? handleCancelMinerUDeepParse : handleStartMinerUDeepParse,
+        disabled: !docId || deepParseStatus?.configured === false,
+      },
+      {
+        id: 'rag_index',
+        title: '问答索引',
+        recommended: ragIndexRecommended,
+        desc: ragIndexDesc,
+        status: ragIndexStatusText,
+        busy: ragIndexBusy,
+        actionLabel: ragIndexBusy
+          ? '处理中'
+          : ragIndexIsMinerU
+            ? '回退'
+            : deepParseStatus?.active_mineru
+              ? '重建'
+              : '需解析',
+        onAction: ragIndexIsMinerU ? handleRollbackRagIndex : handleRebuildMinerURagIndex,
+        disabled: !docId || ragIndexBusy || (!deepParseStatus?.active_mineru && !ragIndexIsMinerU) || (ragIndexIsMinerU && !ragIndexStatus?.can_rollback),
+      },
       {
         id: 'summary',
         title: 'AI 总结',
@@ -2036,7 +2548,7 @@ const ChatPDF = () => {
               : '开始缓存',
         onAction: pretranslateProgress.running
           ? cancelPretranslateReadingDocument
-          : () => pretranslateReadingDocument({ retryFailed: failedReadingBlockCount > 0 }),
+          : handleStartPretranslate,
         disabled: !docId || allTranslatableReadingBlocks.length === 0,
       },
     ];
@@ -2046,18 +2558,39 @@ const ChatPDF = () => {
     autoOutlineSummary,
     cancelPretranslateReadingDocument,
     docId,
+    deepParseRunning,
+    deepParseStatus?.active_mineru,
+    deepParseStatus?.access_mode,
+    deepParseStatus?.recommend_deep_parse,
+    deepParseStatus?.recommend_rag_index_rebuild,
+    deepParseStatus?.recommend_rag_index_reason,
+    deepParseStatus?.recommend_reason,
+    deepParseStatus?.block_count,
+    deepParseStatus?.figure_count,
+    deepParseStatus?.configured,
+    deepParseStatus?.stage,
+    deepParseStatus?.status,
     enableHoverPretranslate,
     failedReadingBlockCount,
+    handleRebuildMinerURagIndex,
+    handleRollbackRagIndex,
+    handleStartPretranslate,
     handleRegenerateOverview,
     handleRegenerateReadingOutline,
     handleRegenerateSectionOutline,
+    handleCancelMinerUDeepParse,
+    handleStartMinerUDeepParse,
     overview,
     overviewDepth,
     overviewLoading,
     pretranslateProgress.done,
     pretranslateProgress.running,
     pretranslateProgress.total,
-    pretranslateReadingDocument,
+    ragIndexBusy,
+    ragIndexStatus?.can_rollback,
+    ragIndexStatus?.index_source,
+    ragIndexStatus?.ready,
+    ragIndexStatus?.table_chunk_count,
     readingOutline?.source,
     readingOutlineItems.length,
     readingOutlineLoading,
@@ -2066,6 +2599,15 @@ const ChatPDF = () => {
     sectionOutlineLoading,
     translatedReadingBlockCount,
   ]);
+  const hasAiRecommendation = aiProcessingItems.some((item) => item.recommended);
+
+  const uploadStatusMeta = UPLOAD_STATUS_META[uploadStatus] || UPLOAD_STATUS_META.uploading;
+  const uploadProgressLabel = Math.max(0, Math.min(100, Math.round(Number(uploadProgress) || 0)));
+  const deepParsePanelNotice = deepParseNotice || (
+    deepParseStatus?.status === 'ready' && deepParseStatus?.active_mineru
+      ? 'MinerU 深度解析已完成，阅读结构、大纲与速览图表均已切换为 MinerU'
+      : ''
+  );
 
   // ========== 渲染 ==========
   return (
@@ -2215,6 +2757,7 @@ const ChatPDF = () => {
                 onJump={handleOutlineJump}
                 onRetry={handleRegenerateReadingOutline}
                 source={readingOutline?.source || ''}
+                generationError={readingOutline?.meta?.generation_error || ''}
                 retrying={readingOutlineLoading}
                 darkMode={darkMode}
               />
@@ -2380,21 +2923,32 @@ const ChatPDF = () => {
             <div className="absolute right-5 top-5 z-30">
               <button
                 type="button"
-                onClick={() => setShowAiProcessingPanel((prev) => !prev)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setShowAiProcessingPanel((prev) => !prev);
+                }}
                 className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-[0_10px_24px_rgba(148,163,184,0.14),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all hover:-translate-y-0.5 ${
                   darkMode
                     ? 'border-white/10 bg-white/[0.06] text-gray-200 hover:bg-white/[0.09]'
                     : 'border-white/70 bg-white/75 text-gray-600 hover:text-[#8871e4]'
                 }`}
               >
-                <span className={`relative flex h-2 w-2 rounded-full ${aiProcessingRunning ? 'bg-[#8871e4]' : aiAutoProcess ? 'bg-emerald-400' : 'bg-gray-300'}`}>
+                <span className={`relative flex h-2 w-2 rounded-full ${
+                  aiProcessingRunning
+                    ? 'bg-[#8871e4]'
+                    : hasAiRecommendation
+                      ? 'bg-amber-400'
+                      : aiAutoProcess ? 'bg-emerald-400' : 'bg-gray-300'
+                }`}>
                   {aiProcessingRunning && <span className="absolute inset-0 animate-ping rounded-full bg-[#8871e4]/50" />}
+                  {!aiProcessingRunning && hasAiRecommendation && <span className="absolute inset-0 animate-ping rounded-full bg-amber-400/60" />}
                 </span>
                 AI 处理
               </button>
 
               {showAiProcessingPanel && (
                 <div
+                  onClick={(event) => event.stopPropagation()}
                   className={`absolute right-0 top-12 w-[340px] rounded-[24px] border p-4 shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl ${
                     darkMode
                       ? 'border-white/10 bg-[#1f2329]/95 text-gray-100'
@@ -2420,13 +2974,20 @@ const ChatPDF = () => {
                       <div
                         key={item.id}
                         className={`rounded-[18px] border p-3 ${
-                          darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-100 bg-gray-50/70'
+                          item.recommended
+                            ? darkMode ? 'border-[#8871e4]/40 bg-[#8871e4]/[0.08]' : 'border-[#8871e4]/30 bg-[#8871e4]/[0.05]'
+                            : darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-100 bg-gray-50/70'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-[13px] font-bold">{item.title}</span>
+                              {item.recommended && (
+                                <span className="rounded-full bg-[#8871e4] px-2 py-0.5 text-[10px] font-semibold text-white">
+                                  推荐
+                                </span>
+                              )}
                               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                                 item.busy
                                   ? 'bg-[#8871e4]/10 text-[#8871e4]'
@@ -2439,7 +3000,10 @@ const ChatPDF = () => {
                           </div>
                           <button
                             type="button"
-                            onClick={item.onAction}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              item.onAction?.();
+                            }}
                             disabled={item.disabled}
                             className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                               item.busy
@@ -2470,6 +3034,27 @@ const ChatPDF = () => {
                       清理缓存
                     </button>
                   </div>
+                  {pretranslateNotice && (
+                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
+                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
+                    }`}>
+                      {pretranslateNotice}
+                    </div>
+                  )}
+                  {deepParsePanelNotice && (
+                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
+                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
+                    }`}>
+                      {deepParsePanelNotice}
+                    </div>
+                  )}
+                  {ragIndexNotice && (
+                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
+                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
+                    }`}>
+                      {ragIndexNotice}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2538,8 +3123,10 @@ const ChatPDF = () => {
                 <ReadingAnalysisPanel
                   blocks={currentPageBlocks}
                   translations={blockTranslations}
+                  translatingBlockIds={[...translatingBlockIds]}
                   loading={blockTranslateLoading}
                   error={blockTranslateError}
+                  notice={pretranslateNotice}
                   pretranslateProgress={pretranslateProgress}
                   currentPage={currentPage}
                   activeBlockId={activeReadingBlockId}
@@ -2547,7 +3134,8 @@ const ChatPDF = () => {
                   activeNodeId={activeReadingNodeId}
                   visitedNodeIds={[...visitedReadingNodeIds]}
                   onTranslate={handleTranslateCurrentPage}
-                  onPretranslate={pretranslateReadingDocument}
+                  onRetranslateBlock={handleRetranslateReadingBlock}
+                  onPretranslate={handleStartPretranslate}
                   onBlockHover={handleReadingBlockHover}
                   onBlockClick={handleReadingBlockClick}
                   onNoteClick={handleOutlineJump}
@@ -2693,10 +3281,10 @@ const ChatPDF = () => {
                   alignItems: 'center', justifyContent: 'center', zIndex: 10, pointerEvents: 'none',
                 }}>
                   <span style={{ color: 'rgba(255, 255, 255, 0.9)', fontSize: '2.5rem', fontWeight: 200, letterSpacing: '2px', textShadow: '0 0 15px rgba(255, 255, 255, 0.3)', fontVariantNumeric: 'tabular-nums' }}>
-                    {uploadProgress}%
+                    {uploadProgressLabel}%
                   </span>
                   <span style={{ color: 'rgba(255, 255, 255, 0.55)', fontSize: '0.7rem', letterSpacing: '4px', textTransform: 'uppercase', marginTop: '6px' }}>
-                    {uploadStatus === 'uploading' ? 'Uploading' : 'Processing'}
+                    {uploadStatusMeta.label}
                   </span>
                 </div>
               </div>
@@ -2706,7 +3294,15 @@ const ChatPDF = () => {
                 animate={{ opacity: 1, y: 0 }}
                 style={{ color: 'rgba(255, 255, 255, 0.6)', fontSize: '0.9rem', fontWeight: 300, letterSpacing: '0.5px', marginTop: '8px' }}
               >
-                {uploadStatus === 'uploading' ? '正在上传文档...' : 'AI 正在构建知识库索引'}
+                {uploadStatusMeta.title}
+              </motion.p>
+              <motion.p
+                key={`${uploadStatus}-desc`}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{ color: 'rgba(255, 255, 255, 0.38)', fontSize: '0.75rem', fontWeight: 300, letterSpacing: '0.2px', marginTop: '6px', maxWidth: 340, textAlign: 'center', lineHeight: 1.6 }}
+              >
+                {uploadStatusMeta.desc}
               </motion.p>
             </motion.div>
           </div>
@@ -3209,7 +3805,7 @@ const ChatPDF = () => {
                   </button>
                   <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
                     <ScanText className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
-                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>OCR设置</span>
+                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>解析设置</span>
                   </button>
                 </div>
               </div>

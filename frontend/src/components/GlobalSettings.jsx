@@ -260,14 +260,14 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             <div className="flex items-center justify-between gap-3">
                                                 <div>
                                                     <div className="text-[12px] font-bold text-gray-700">预翻译并发</div>
-                                                    <div className="text-[11px] text-gray-500 mt-0.5">免费或限速模型建议 1-3</div>
+                                                    <div className="text-[11px] text-gray-500 mt-0.5">限速模型建议 3-6，付费高速模型可用 8-16</div>
                                                 </div>
                                                 <span className="text-[12px] font-bold text-[#8871e4] tabular-nums">{pretranslateConcurrency}</span>
                                             </div>
                                             <input
                                                 type="range"
                                                 min="1"
-                                                max="8"
+                                                max="16"
                                                 step="1"
                                                 value={pretranslateConcurrency}
                                                 onChange={(e) => setPretranslateConcurrency(Number(e.target.value))}

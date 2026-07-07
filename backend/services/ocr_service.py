@@ -10,7 +10,7 @@ import time
 import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple, Dict
+from typing import Any, Callable, List, Optional, Tuple, Dict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -209,6 +209,7 @@ class BaseOCRAdapter(ABC):
 
 import json
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,7 @@ _ENV_VAR_MAP = {
         "worker_url": "CHATPDF_MINERU_WORKER_URL",
         "auth_key": "CHATPDF_MINERU_AUTH_KEY",
         "token": "CHATPDF_MINERU_TOKEN",
+        "base_url": "CHATPDF_MINERU_BASE_URL",
     },
     "doc2x": {
         "worker_url": "CHATPDF_DOC2X_WORKER_URL",
@@ -247,11 +249,13 @@ _DEFAULT_CONFIG = {
         "base_url": "https://api.mistral.ai",
     },
     "mineru": {
+        "access_mode": "worker",
+        "base_url": "https://mineru.net/api/v4",
         "worker_url": "",
         "auth_key": "",
         "token_mode": "frontend",
         "token": "",
-        "enable_ocr": True,
+        "enable_ocr": False,
         "enable_formula": True,
         "enable_table": True,
     },
@@ -835,6 +839,11 @@ class WorkerOCRAdapter(BaseOCRAdapter):
             error_detail = "未知错误"
         if status_code in (401, 403):
             raise RuntimeError(f"{self.name} {step}失败: 认证失败 (HTTP {status_code})")
+        if status_code == 404:
+            raise RuntimeError(
+                f"{self.name} {step}失败: Worker 路由不存在 (HTTP 404)，"
+                "请检查 Worker URL 是否填到了 pb-ocr-proxy 部署地址，且已部署 /health、/mineru/upload 等路由"
+            )
         raise RuntimeError(f"{self.name} {step}失败 (HTTP {status_code}): {error_detail}")
 
 
@@ -901,7 +910,7 @@ class MinerUAdapter(WorkerOCRAdapter):
 
     def __init__(self, worker_url: str, auth_key: str = "",
                  token: str = "", token_mode: str = "frontend",
-                 enable_ocr: bool = True, enable_formula: bool = True,
+                 enable_ocr: bool = False, enable_formula: bool = True,
                  enable_table: bool = True):
         """
         初始化 MinerU OCR 适配器
@@ -958,42 +967,32 @@ class MinerUAdapter(WorkerOCRAdapter):
         import httpx
 
         try:
-            with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
-                # 步骤 1：上传 PDF
-                logger.info("MinerU OCR: 开始上传 PDF 文件...")
-                batch_id = self._upload_pdf(client, pdf_bytes)
-                logger.info(f"MinerU OCR: 上传成功，batch_id={batch_id}")
+            payload = self.analyze_pdf(pdf_bytes)
+            markdown_content = payload.get("full_md", "")
+            layout_figures = payload.get("layout_figures", [])
+            logger.info(f"MinerU OCR: 结果下载并解压成功，提取到 {len(layout_figures)} 个 figure 区域")
 
-                # 步骤 2：轮询结果
-                logger.info("MinerU OCR: 开始轮询处理结果...")
-                full_zip_url = self._poll_result(client, batch_id)
-                logger.info("MinerU OCR: 处理完成，开始下载结果...")
+            # 步骤 4：将 Markdown 转换为纯文本
+            text = _markdown_to_text(markdown_content)
+            text = clean_ocr_text(text)
 
-                # 步骤 3：下载 ZIP 并解压提取 full.md + 版面分析数据
-                markdown_content, layout_figures = self._download_and_extract(client, full_zip_url)
-                logger.info(f"MinerU OCR: 结果下载并解压成功，提取到 {len(layout_figures)} 个 figure 区域")
+            # 步骤 5：构建 OCRResult（MinerU 返回整个文档的文本，按页分配）
+            pages_result: List[PageOCRResult] = []
+            for page_num in page_numbers:
+                display_page = page_num + 1  # 用于显示的页码（从 1 开始）
+                pages_result.append(PageOCRResult(
+                    page_number=display_page,
+                    text=text,
+                    success=True,
+                ))
 
-                # 步骤 4：将 Markdown 转换为纯文本
-                text = _markdown_to_text(markdown_content)
-                text = clean_ocr_text(text)
-
-                # 步骤 5：构建 OCRResult（MinerU 返回整个文档的文本，按页分配）
-                pages_result: List[PageOCRResult] = []
-                for page_num in page_numbers:
-                    display_page = page_num + 1  # 用于显示的页码（从 1 开始）
-                    pages_result.append(PageOCRResult(
-                        page_number=display_page,
-                        text=text,
-                        success=True,
-                    ))
-
-                return OCRResult(
-                    pages=pages_result,
-                    failed_pages=[],
-                    errors={},
-                    backend=self.name,
-                    layout_figures=layout_figures,
-                )
+            return OCRResult(
+                pages=pages_result,
+                failed_pages=[],
+                errors={},
+                backend=self.name,
+                layout_figures=layout_figures,
+            )
 
         except httpx.TimeoutException as e:
             logger.error(f"MinerU OCR: 网络连接超时: {e}")
@@ -1027,6 +1026,30 @@ class MinerUAdapter(WorkerOCRAdapter):
             backend=self.name,
         )
 
+    def analyze_pdf(self, pdf_bytes: bytes, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancel_event: Any = None) -> Dict[str, Any]:
+        """运行 MinerU Worker 并返回 full.md / middle.json / content_list.json 等完整解析载荷。"""
+        import httpx
+
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            if progress_callback:
+                progress_callback({"stage": "uploading", "message": "上传 PDF 到 MinerU Worker"})
+            logger.info("MinerU OCR: 开始上传 PDF 文件...")
+            batch_id = self._upload_pdf(client, pdf_bytes)
+            logger.info(f"MinerU OCR: 上传成功，batch_id={batch_id}")
+
+            if progress_callback:
+                progress_callback({"stage": "polling", "message": "等待 MinerU 处理", "batch_id": batch_id})
+            logger.info("MinerU OCR: 开始轮询处理结果...")
+            full_zip_url = self._poll_result(client, batch_id, progress_callback=progress_callback, cancel_event=cancel_event)
+            logger.info("MinerU OCR: 处理完成，开始下载结果...")
+
+            if progress_callback:
+                progress_callback({"stage": "downloading", "message": "下载 MinerU 解析结果", "batch_id": batch_id})
+            payload = self._download_and_extract_payload(client, full_zip_url)
+            payload["batch_id"] = batch_id
+            payload["full_zip_url"] = full_zip_url
+            return payload
+
     def _upload_pdf(self, client, pdf_bytes: bytes) -> str:
         """
         上传 PDF 到 MinerU Worker 代理
@@ -1057,7 +1080,7 @@ class MinerUAdapter(WorkerOCRAdapter):
             raise RuntimeError("MinerU 上传成功但未返回 batch_id")
         return batch_id
 
-    def _poll_result(self, client, batch_id: str) -> str:
+    def _poll_result(self, client, batch_id: str, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancel_event: Any = None) -> str:
         """
         轮询 MinerU 处理结果
 
@@ -1070,10 +1093,12 @@ class MinerUAdapter(WorkerOCRAdapter):
             RuntimeError: 处理失败或超时时抛出
         """
         headers = self._build_headers()
-        max_attempts = 100
+        max_attempts = 300
         poll_interval = 3  # 秒
 
         for attempt in range(max_attempts):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("MinerU 深度解析已取消")
             response = client.get(
                 f"{self._worker_url}/mineru/result/{batch_id}",
                 headers=headers,
@@ -1092,6 +1117,15 @@ class MinerUAdapter(WorkerOCRAdapter):
                 raise RuntimeError(f"MinerU 处理失败: {error_msg}")
 
             # 继续等待
+            if progress_callback:
+                progress_callback({
+                    "stage": "polling",
+                    "message": f"等待 MinerU 处理（{attempt + 1}/{max_attempts}）",
+                    "batch_id": batch_id,
+                    "poll_attempt": attempt + 1,
+                    "poll_total": max_attempts,
+                    "remote_state": state,
+                })
             logger.debug(
                 f"MinerU OCR: 轮询中 ({attempt + 1}/{max_attempts})，"
                 f"当前状态: {state}"
@@ -1114,6 +1148,11 @@ class MinerUAdapter(WorkerOCRAdapter):
         异常:
             RuntimeError: 下载失败、解压失败或未找到 full.md 时抛出
         """
+        payload = self._download_and_extract_payload(client, zip_url)
+        return payload.get("full_md", ""), payload.get("layout_figures", [])
+
+    def _download_and_extract_payload(self, client, zip_url: str) -> Dict[str, Any]:
+        """下载 ZIP 并保留 MinerU 的完整 JSON 结果，供深度解析适配器使用。"""
         headers = self._build_headers()
         response = client.get(zip_url, headers=headers)
         self._check_worker_response(response, "下载 ZIP")
@@ -1121,7 +1160,6 @@ class MinerUAdapter(WorkerOCRAdapter):
         try:
             zip_data = io.BytesIO(response.content)
             with zipfile.ZipFile(zip_data, "r") as zf:
-                # 查找 full.md 文件
                 full_md_path = None
                 middle_json_path = None
                 content_list_path = None
@@ -1139,17 +1177,21 @@ class MinerUAdapter(WorkerOCRAdapter):
                         f"ZIP 包含: {zf.namelist()}"
                     )
 
-                content = zf.read(full_md_path).decode("utf-8")
+                full_md = zf.read(full_md_path).decode("utf-8")
+                middle_json = None
+                content_list_json = None
+                if middle_json_path:
+                    middle_json = json.loads(zf.read(middle_json_path).decode("utf-8"))
+                if content_list_path:
+                    content_list_json = json.loads(zf.read(content_list_path).decode("utf-8"))
 
-                # 提取版面分析中的 figure 数据
                 layout_figures = []
-                layout_json_path = middle_json_path or content_list_path
-                if layout_json_path:
+                layout_source = middle_json if middle_json is not None else content_list_json
+                if layout_source is not None:
                     try:
-                        layout_raw = zf.read(layout_json_path).decode("utf-8")
-                        layout_figures = self._parse_layout_figures(layout_raw)
+                        layout_figures = self._parse_layout_figures(json.dumps(layout_source, ensure_ascii=False))
                         logger.info(
-                            f"MinerU: 从 {layout_json_path} 提取到 "
+                            f"MinerU: 从 {middle_json_path or content_list_path} 提取到 "
                             f"{len(layout_figures)} 个 figure 区域"
                         )
                     except Exception as e:
@@ -1160,7 +1202,18 @@ class MinerUAdapter(WorkerOCRAdapter):
                         f"跳过版面分析。ZIP 包含: {zf.namelist()}"
                     )
 
-                return content, layout_figures
+                return {
+                    "full_md": full_md,
+                    "middle_json": middle_json,
+                    "content_list_json": content_list_json,
+                    "layout_figures": layout_figures,
+                    "zip_entries": zf.namelist(),
+                    "paths": {
+                        "full_md": full_md_path,
+                        "middle_json": middle_json_path,
+                        "content_list_json": content_list_path,
+                    },
+                }
         except zipfile.BadZipFile as e:
             raise RuntimeError(f"MinerU ZIP 文件解压失败: {e}")
 
@@ -1274,6 +1327,249 @@ class MinerUAdapter(WorkerOCRAdapter):
             "figure_id": f"mineru_fig_p{page_idx}_{id(item) % 10000}",
             "confidence": item.get("score", 0.8),
         }
+
+
+class MinerUDirectAdapter(MinerUAdapter):
+    """MinerU 官方 API 直连适配器，不依赖 Cloudflare Worker 代理。"""
+
+    def __init__(
+        self,
+        token: str,
+        base_url: str = "https://mineru.net/api/v4",
+        enable_ocr: bool = False,
+        enable_formula: bool = True,
+        enable_table: bool = True,
+    ):
+        self._base_url = ""
+        if base_url:
+            try:
+                self._base_url = validate_external_ocr_service_url(
+                    base_url,
+                    service_name="MinerU API Base URL",
+                ).rstrip("/")
+            except ValueError as exc:
+                logger.warning("MinerU API Base URL 已被拒绝: %s", exc)
+        super().__init__(
+            worker_url=self._base_url or "https://mineru.net/api/v4",
+            auth_key="",
+            token=token,
+            token_mode="frontend",
+            enable_ocr=enable_ocr,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+        )
+
+    @property
+    def name(self) -> str:
+        return "mineru"
+
+    def is_available(self) -> bool:
+        return bool(self._base_url and self._token)
+
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._token}"}
+
+    def analyze_pdf(self, pdf_bytes: bytes, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancel_event: Any = None) -> Dict[str, Any]:
+        """通过 MinerU 官方 API 运行解析并返回完整结果载荷。"""
+        import httpx
+
+        if not self.is_available():
+            raise RuntimeError("MinerU 直连模式未配置 Token 或 Base URL")
+
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            if progress_callback:
+                progress_callback({"stage": "requesting_upload", "message": "申请 MinerU 上传链接"})
+            logger.info("MinerU Direct: 开始申请上传链接...")
+            data_id = f"chatpdf_{uuid.uuid4().hex}"
+            batch_id, upload_url = self._create_upload_url(client, data_id=data_id)
+
+            if progress_callback:
+                progress_callback({"stage": "uploading", "message": "上传 PDF 到 MinerU", "batch_id": batch_id, "data_id": data_id})
+            logger.info("MinerU Direct: 开始上传 PDF 到 MinerU OSS...")
+            upload_response = client.put(upload_url, content=pdf_bytes)
+            if not upload_response.is_success:
+                raise RuntimeError(
+                    f"MinerU OSS 上传失败 (HTTP {upload_response.status_code}): "
+                    f"{upload_response.text[:300]}"
+                )
+
+            if progress_callback:
+                progress_callback({"stage": "polling", "message": "等待 MinerU 处理", "batch_id": batch_id, "data_id": data_id})
+            logger.info("MinerU Direct: 上传成功，batch_id=%s data_id=%s，开始轮询结果...", batch_id, data_id)
+            full_zip_url = self._poll_direct_result(
+                client,
+                batch_id,
+                data_id=data_id,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+            if progress_callback:
+                progress_callback({"stage": "downloading", "message": "下载 MinerU 解析结果", "batch_id": batch_id, "data_id": data_id})
+            payload = self._download_direct_zip(client, full_zip_url)
+            payload["batch_id"] = batch_id
+            payload["data_id"] = data_id
+            payload["full_zip_url"] = full_zip_url
+            payload["access_mode"] = "direct"
+            return payload
+
+    def _create_upload_url(self, client, *, data_id: str) -> tuple[str, str]:
+        response = client.post(
+            f"{self._base_url}/file-urls/batch",
+            headers={**self._auth_headers(), "Content-Type": "application/json"},
+            json={
+                "enable_formula": self._enable_formula,
+                "enable_table": self._enable_table,
+                "language": "ch",
+                "files": [{
+                    "name": "document.pdf",
+                    "data_id": data_id,
+                    "is_ocr": self._enable_ocr,
+                }],
+            },
+        )
+        if not response.is_success:
+            raise RuntimeError(f"MinerU 申请上传链接失败 (HTTP {response.status_code}): {response.text[:300]}")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"MinerU 申请上传链接失败: {data.get('msg') or data}")
+        batch_id = data.get("data", {}).get("batch_id")
+        file_urls = data.get("data", {}).get("file_urls") or []
+        upload_url = file_urls[0] if file_urls else ""
+        if not batch_id or not upload_url:
+            raise RuntimeError("MinerU 申请上传链接成功但未返回 batch_id 或 file_urls")
+        return batch_id, upload_url
+
+    def _poll_direct_result(
+        self,
+        client,
+        batch_id: str,
+        *,
+        data_id: str = "",
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_event: Any = None,
+    ) -> str:
+        max_attempts = 300
+        poll_interval = 3
+        for attempt in range(max_attempts):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("MinerU 深度解析已取消")
+            response = client.get(
+                f"{self._base_url}/extract-results/batch/{batch_id}",
+                headers=self._auth_headers(),
+            )
+            if not response.is_success:
+                raise RuntimeError(f"MinerU 查询结果失败 (HTTP {response.status_code}): {response.text[:300]}")
+            data = response.json()
+            if data.get("code") != 0:
+                raise RuntimeError(f"MinerU 查询结果失败: {data.get('msg') or data}")
+            result = self._select_direct_extract_result(data, data_id=data_id)
+            state = result.get("state", "")
+            if state == "done":
+                full_zip_url = result.get("full_zip_url")
+                if not full_zip_url:
+                    raise RuntimeError("MinerU 处理完成但未返回 full_zip_url")
+                return full_zip_url
+            if state == "failed":
+                raise RuntimeError(f"MinerU 处理失败: {result.get('err_msg') or result.get('error') or '未知错误'}")
+            if progress_callback:
+                progress_callback({
+                    "stage": "polling",
+                    "message": f"等待 MinerU 处理（{attempt + 1}/{max_attempts}）",
+                    "batch_id": batch_id,
+                    "data_id": data_id,
+                    "poll_attempt": attempt + 1,
+                    "poll_total": max_attempts,
+                    "remote_state": state,
+                })
+            logger.debug("MinerU Direct: 轮询中 (%s/%s)，当前状态: %s", attempt + 1, max_attempts, state)
+            if cancel_event is not None:
+                if cancel_event.wait(poll_interval):
+                    raise RuntimeError("MinerU 深度解析已取消")
+            else:
+                time.sleep(poll_interval)
+        raise RuntimeError(f"MinerU 处理超时: 已轮询 {max_attempts} 次（共 {max_attempts * poll_interval} 秒）")
+
+    @staticmethod
+    def _select_direct_extract_result(data: Dict[str, Any], *, data_id: str = "") -> Dict[str, Any]:
+        """Return the per-file result from MinerU batch status response."""
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            return {}
+
+        extract_result = payload.get("extract_result")
+        if isinstance(extract_result, list):
+            candidates = [item for item in extract_result if isinstance(item, dict)]
+            if data_id:
+                for item in candidates:
+                    if item.get("data_id") == data_id:
+                        return item
+            return candidates[0] if candidates else {}
+        if isinstance(extract_result, dict):
+            return extract_result
+
+        return payload
+
+    def _download_direct_zip(self, client, zip_url: str) -> Dict[str, Any]:
+        last_error: Exception | None = None
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.get(zip_url)
+                if response.is_success:
+                    break
+                last_error = RuntimeError(f"MinerU ZIP 下载失败 (HTTP {response.status_code}): {response.text[:300]}")
+            except Exception as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+        if response is None or not response.is_success:
+            raise RuntimeError(f"MinerU ZIP 下载失败: {last_error}")
+        try:
+            zip_data = io.BytesIO(response.content)
+            with zipfile.ZipFile(zip_data, "r") as zf:
+                full_md_path = None
+                middle_json_path = None
+                content_list_path = None
+                for name in zf.namelist():
+                    if name.endswith("full.md"):
+                        full_md_path = name
+                    elif name.endswith("middle.json"):
+                        middle_json_path = name
+                    elif name.endswith("content_list.json"):
+                        content_list_path = name
+
+                if full_md_path is None:
+                    raise RuntimeError(
+                        "MinerU ZIP 中未找到 full.md 文件，"
+                        f"ZIP 包含: {zf.namelist()}"
+                    )
+
+                full_md = zf.read(full_md_path).decode("utf-8")
+                middle_json = json.loads(zf.read(middle_json_path).decode("utf-8")) if middle_json_path else None
+                content_list_json = json.loads(zf.read(content_list_path).decode("utf-8")) if content_list_path else None
+
+                layout_figures = []
+                layout_source = middle_json if middle_json is not None else content_list_json
+                if layout_source is not None:
+                    try:
+                        layout_figures = self._parse_layout_figures(json.dumps(layout_source, ensure_ascii=False))
+                    except Exception as exc:
+                        logger.warning("MinerU Direct: 解析版面 figure 数据失败: %s", exc)
+
+                return {
+                    "full_md": full_md,
+                    "middle_json": middle_json,
+                    "content_list_json": content_list_json,
+                    "layout_figures": layout_figures,
+                    "zip_entries": zf.namelist(),
+                    "paths": {
+                        "full_md": full_md_path,
+                        "middle_json": middle_json_path,
+                        "content_list_json": content_list_path,
+                    },
+                }
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError(f"MinerU ZIP 文件解压失败: {exc}")
 
 
 # ============================================================
@@ -1451,7 +1747,11 @@ class Doc2XAdapter(WorkerOCRAdapter):
                 f"Doc2X OCR: 轮询中 ({attempt + 1}/{max_attempts})，"
                 f"当前状态: {state}"
             )
-            time.sleep(poll_interval)
+            if cancel_event is not None:
+                if cancel_event.wait(poll_interval):
+                    raise RuntimeError("MinerU 深度解析已取消")
+            else:
+                time.sleep(poll_interval)
 
         raise RuntimeError(
             f"Doc2X 处理超时: 已轮询 {max_attempts} 次（共 {max_attempts * poll_interval} 秒）"
@@ -1997,15 +2297,24 @@ _ocr_registry.register(MistralAdapter(
 
 # 注册在线 OCR 适配器：加载 MinerU OCR 配置并注册
 _mineru_config = _load_online_ocr_config("mineru")
-_ocr_registry.register(MinerUAdapter(
-    worker_url=_mineru_config.get("worker_url", ""),
-    auth_key=_mineru_config.get("auth_key", ""),
-    token=_mineru_config.get("token", ""),
-    token_mode=_mineru_config.get("token_mode", "frontend"),
-    enable_ocr=_mineru_config.get("enable_ocr", True),
-    enable_formula=_mineru_config.get("enable_formula", True),
-    enable_table=_mineru_config.get("enable_table", True),
-))
+if _mineru_config.get("access_mode") == "direct":
+    _ocr_registry.register(MinerUDirectAdapter(
+        token=_mineru_config.get("token", ""),
+        base_url=_mineru_config.get("base_url", "https://mineru.net/api/v4"),
+        enable_ocr=_mineru_config.get("enable_ocr", False),
+        enable_formula=_mineru_config.get("enable_formula", True),
+        enable_table=_mineru_config.get("enable_table", True),
+    ))
+else:
+    _ocr_registry.register(MinerUAdapter(
+        worker_url=_mineru_config.get("worker_url", ""),
+        auth_key=_mineru_config.get("auth_key", ""),
+        token=_mineru_config.get("token", ""),
+        token_mode=_mineru_config.get("token_mode", "frontend"),
+        enable_ocr=_mineru_config.get("enable_ocr", False),
+        enable_formula=_mineru_config.get("enable_formula", True),
+        enable_table=_mineru_config.get("enable_table", True),
+    ))
 
 # 注册在线 OCR 适配器：加载 Doc2X OCR 配置并注册
 _doc2x_config = _load_online_ocr_config("doc2x")

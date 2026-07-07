@@ -104,23 +104,87 @@ def is_odl_available() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_table_matrix(element: dict) -> list[list[str]]:
-    """提取 table 元素中的二维单元格文本矩阵。"""
+    """提取 table 元素中的二维单元格文本矩阵，并展开 row/column span。"""
     rows_data = element.get("rows", [])
     if not rows_data:
         return []
 
     matrix: list[list[str]] = []
+    pending: dict[tuple[int, int], str] = {}
 
-    for row_obj in rows_data:
+    for row_index, row_obj in enumerate(rows_data, start=1):
         if not isinstance(row_obj, dict):
             continue
         cells = row_obj.get("cells", [])
-        cell_texts = []
+        row_cells: dict[int, str] = {
+            col_idx: text
+            for (pending_row, col_idx), text in list(pending.items())
+            if pending_row == row_index
+        }
+        for key in [key for key in pending if key[0] == row_index]:
+            pending.pop(key, None)
+
+        cursor = 1
         for cell in cells:
-            cell_texts.append(_extract_table_cell_text(cell))
-        matrix.append(cell_texts)
+            if not isinstance(cell, dict):
+                continue
+            explicit_col = _normalize_optional_int(cell.get("column number")) or _normalize_optional_int(cell.get("col idx"))
+            col_idx = explicit_col or cursor
+            while col_idx in row_cells:
+                col_idx += 1
+
+            text = _extract_table_cell_text(cell)
+            row_span = _normalize_optional_int(cell.get("row span")) or _normalize_optional_int(cell.get("row_span")) or 1
+            col_span = _normalize_optional_int(cell.get("column span")) or _normalize_optional_int(cell.get("col_span")) or 1
+
+            for dx in range(max(1, col_span)):
+                row_cells[col_idx + dx] = text
+            for dy in range(1, max(1, row_span)):
+                for dx in range(max(1, col_span)):
+                    pending[(row_index + dy, col_idx + dx)] = text
+            cursor = col_idx + max(1, col_span)
+
+        if row_cells:
+            max_col = max(row_cells)
+            matrix.append([row_cells.get(col_idx, "") for col_idx in range(1, max_col + 1)])
 
     return matrix
+
+
+def _detect_odl_header_depth(matrix: list[list[str]]) -> int:
+    if len(matrix) < 2:
+        return 1
+    first = [str(cell or "").strip() for cell in matrix[0]]
+    second = [str(cell or "").strip() for cell in matrix[1]]
+    first_values = [cell for cell in first if cell]
+    second_values = [cell for cell in second if cell]
+    if not first_values or not second_values:
+        return 1
+    repeated_parent = len(set(first_values)) < len(first_values)
+    second_numeric = sum(
+        1
+        for cell in second_values
+        if re.fullmatch(r"[-+−]?\d+(?:[.,]\d+)?%?", cell)
+    )
+    second_numeric_ratio = second_numeric / len(second_values)
+    return 2 if repeated_parent and second_numeric_ratio < 0.45 else 1
+
+
+def _odl_column_header_paths(matrix: list[list[str]]) -> list[str]:
+    if not matrix:
+        return []
+    header_depth = max(1, min(_detect_odl_header_depth(matrix), len(matrix)))
+    header_rows = matrix[:header_depth]
+    max_cols = max(len(row) for row in matrix)
+    paths: list[str] = []
+    for col_idx in range(max_cols):
+        parts: list[str] = []
+        for row in header_rows:
+            part = str(row[col_idx] if col_idx < len(row) else "").strip()
+            if part and (not parts or parts[-1] != part):
+                parts.append(part)
+        paths.append(" ".join(parts).strip() or f"Column {col_idx + 1}")
+    return paths
 
 
 def _extract_table_cell_text(cell: dict) -> str:
@@ -239,6 +303,9 @@ def _build_table_evidence_units(
         if not isinstance(element, dict):
             continue
 
+        matrix = _extract_table_matrix(element)
+        header_paths = _odl_column_header_paths(matrix)
+        header_depth = _detect_odl_header_depth(matrix)
         page_num = _normalize_optional_int(element.get("page number")) or 1
         source_id = _normalize_optional_int(element.get("id"))
         source_label = f"source:{source_id}" if source_id is not None else f"page:{page_num}"
@@ -270,6 +337,7 @@ def _build_table_evidence_units(
                 cell_row_idx = _normalize_optional_int(cell.get("row number")) or row_idx
                 cell_row_span = _normalize_optional_int(cell.get("row span")) or _normalize_optional_int(cell.get("row_span"))
                 cell_col_span = _normalize_optional_int(cell.get("column span")) or _normalize_optional_int(cell.get("col_span"))
+                header_path = header_paths[col_idx - 1] if col_idx and col_idx - 1 < len(header_paths) else f"Column {col_idx}"
 
                 cell_units.append({
                     "evidence_unit_id": _build_evidence_unit_id(bundle_key, "table_cell", source_label, row_idx, col_idx),
@@ -284,13 +352,16 @@ def _build_table_evidence_units(
                     "row_number": cell_row_idx,
                     "col_idx": col_idx,
                     "column_number": col_idx,
+                    "col_id": header_path,
+                    "column_header": header_path,
+                    "header_path": header_path,
                     "row_span": cell_row_span,
                     "col_span": cell_col_span,
                     "bbox": cell_bbox,
                     "bounding_box": cell_bbox,
                     "cell_text": cell_text,
                     "content": cell_text,
-                    "is_header_row": is_header_row,
+                    "is_header_row": row_index <= header_depth,
                     "source": "odl",
                 })
 
@@ -314,7 +385,7 @@ def _build_table_evidence_units(
                 "row_text": row_text,
                 "row_numbers": " ".join(text for text in cell_texts[1:] if text),
                 "content": row_text,
-                "is_header_row": is_header_row,
+                "is_header_row": row_index <= header_depth,
                 "cell_count": len(cell_units),
                 "cell_evidence_unit_ids": [
                     cell.get("evidence_unit_id")
@@ -481,7 +552,8 @@ def _build_structured_table_bundles(elements: list) -> list[dict]:
                 continue
             html_table = _table_to_html(element)
             matrix = _extract_table_matrix(element)
-            header = " | ".join(matrix[0]).strip() if matrix else ""
+            header_paths = _odl_column_header_paths(matrix)
+            header = " | ".join(header_paths).strip() if header_paths else ""
             page_num = int(element.get("page number", 1) or 1)
             pages.append(page_num)
             markdown_parts.append(markdown)

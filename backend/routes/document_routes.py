@@ -3,7 +3,10 @@ import os
 import glob
 import hashlib
 import logging
+import pickle
+import re
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -15,7 +18,25 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from services.vector_service import create_index
 from services.url_loader_service import fetch_url_content
 from services.multi_format_loader import is_supported_format, extract_from_file
-from services.block_index_service import ensure_block_index
+from services.block_index_service import ensure_block_index, load_block_index, save_block_index
+from services.mineru_block_index_service import (
+    MINERU_BLOCK_INDEX_SOURCE,
+    build_block_index_from_mineru_payload,
+    get_mineru_result_path,
+    load_mineru_result,
+    save_mineru_result,
+)
+from services.mineru_text_normalizer import (
+    MINERU_RAG_INDEX_SOURCE,
+    normalize_mineru_for_rag,
+    utc_now_iso,
+    validate_mineru_rag_data,
+)
+from services.embedding_service import (
+    _build_semantic_group_index_async,
+    _index_cache,
+    get_embedding_function,
+)
 from services.block_translation_service import (
     MAX_BLOCKS_PER_REQUEST,
     get_cached_translations,
@@ -42,6 +63,7 @@ from services.ocr_service import (
     MinerUAdapter,
     Doc2XAdapter,
     WorkerOCRAdapter,
+    MinerUDirectAdapter,
 )
 from services.layout_service import (
     configure_yolo_model_path,
@@ -78,6 +100,11 @@ LEGACY_BACKEND_UPLOAD_DIR = BACKEND_ROOT / "uploads"
 LEGACY_PROJECT_UPLOAD_DIR = PROJECT_ROOT / "uploads"
 
 documents_store = {}
+_INDEX_STATUS_LOCK = threading.Lock()
+_DOCUMENT_INDEX_STATUS: dict[str, dict] = {}
+_DEEP_PARSE_LOCK = threading.Lock()
+_DEEP_PARSE_TASKS: dict[str, dict] = {}
+_DEEP_PARSE_CANCEL_EVENTS: dict[str, threading.Event] = {}
 
 
 def _normalize_page_keys(data: dict):
@@ -247,6 +274,969 @@ def _warm_block_index(doc_id: str) -> None:
         )
     except Exception as exc:
         logger.warning("[BlockIndex] warm build failed for %s: %s", doc_id, exc)
+
+
+def _vector_index_ready(doc_id: str) -> bool:
+    return (VECTOR_STORE_DIR / f"{doc_id}.index").exists() and (VECTOR_STORE_DIR / f"{doc_id}.pkl").exists()
+
+
+def _vector_index_paths(doc_id: str, base_dir: Path | None = None) -> tuple[Path, Path]:
+    root = base_dir or VECTOR_STORE_DIR
+    return root / f"{doc_id}.index", root / f"{doc_id}.pkl"
+
+
+def _semantic_group_paths(doc_id: str) -> dict[str, Path]:
+    root = DATA_DIR / "semantic_groups"
+    return {
+        "json": root / f"{doc_id}.json",
+        "index": root / f"{doc_id}_groups.index",
+        "pkl": root / f"{doc_id}_groups.pkl",
+    }
+
+
+def _semantic_group_backup_path(doc_id: str, source: str, kind: str) -> Path:
+    root = DATA_DIR / "semantic_groups"
+    safe_source = _safe_index_source_name(source)
+    suffix = {
+        "json": "semantic.json",
+        "index": "semantic.index",
+        "pkl": "semantic.pkl",
+    }.get(kind, f"semantic.{kind}")
+    return root / f"{doc_id}.{safe_source}.bak.{suffix}"
+
+
+def _read_vector_index_meta(doc_id: str, base_dir: Path | None = None) -> dict:
+    _index_path, chunks_path = _vector_index_paths(doc_id, base_dir)
+    if not chunks_path.exists():
+        return {}
+    try:
+        with open(chunks_path, "rb") as f:
+            data = pickle.load(f)
+    except Exception as exc:
+        logger.warning("[RagIndex] failed to read vector pkl meta for %s: %s", doc_id, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {"index_source": "pdf_native"}
+    return {
+        "index_source": data.get("index_source") or "pdf_native",
+        "source_hash": data.get("source_hash") or "",
+        "rebuilt_at": data.get("rebuilt_at") or "",
+        "previous_index_source": data.get("previous_index_source") or "",
+        "normalizer_version": data.get("normalizer_version") or "",
+        "chunk_count": len(data.get("chunks") or []),
+        "table_chunk_count": sum(
+            1
+            for item in (data.get("chunk_metadata") or [])
+            if isinstance(item, dict) and item.get("structured_table_bundle")
+        ),
+    }
+
+
+def _get_rag_index_status(doc_id: str) -> dict:
+    ready = _vector_index_ready(doc_id)
+    meta = _read_vector_index_meta(doc_id) if ready else {}
+    source = meta.get("index_source") or ("pdf_native" if ready else "")
+    return {
+        "ready": ready,
+        "index_source": source,
+        "source_hash": meta.get("source_hash", ""),
+        "rebuilt_at": meta.get("rebuilt_at", ""),
+        "previous_index_source": meta.get("previous_index_source", ""),
+        "normalizer_version": meta.get("normalizer_version", ""),
+        "chunk_count": meta.get("chunk_count", 0),
+        "table_chunk_count": meta.get("table_chunk_count", 0),
+        "can_rollback": (
+            (VECTOR_STORE_DIR / f"{doc_id}.pdf_native.bak.index").exists()
+            and (VECTOR_STORE_DIR / f"{doc_id}.pdf_native.bak.pkl").exists()
+        ),
+    }
+
+
+def _set_document_index_status(doc_id: str, status: str, *, stage: str = "", error: str = "") -> None:
+    with _INDEX_STATUS_LOCK:
+        _DOCUMENT_INDEX_STATUS[doc_id] = {
+            "doc_id": doc_id,
+            "status": status,
+            "stage": stage,
+            "error": error,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+
+def _get_document_index_status(doc_id: str) -> dict:
+    with _INDEX_STATUS_LOCK:
+        current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+    if _vector_index_ready(doc_id):
+        current.update({
+            "doc_id": doc_id,
+            "status": "ready",
+            "stage": "ready",
+            "error": "",
+        })
+    elif not current:
+        current = {
+            "doc_id": doc_id,
+            "status": "missing",
+            "stage": "not_started",
+            "error": "",
+        }
+    current["vector_ready"] = _vector_index_ready(doc_id)
+    current["rag_index"] = _get_rag_index_status(doc_id)
+    return current
+
+
+def _build_document_indexes(
+    doc_id: str,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+) -> None:
+    try:
+        doc = documents_store.get(doc_id)
+        if not doc:
+            raise RuntimeError("文档记录不存在，无法构建索引")
+
+        _set_document_index_status(doc_id, "running", stage="block_index")
+        _warm_block_index(doc_id)
+
+        if _vector_index_ready(doc_id):
+            _set_document_index_status(doc_id, "ready", stage="ready")
+            return
+
+        data = doc.get("data") or {}
+        _set_document_index_status(doc_id, "running", stage="vector_index")
+        create_index(
+            doc_id,
+            data.get("full_text", ""),
+            str(VECTOR_STORE_DIR),
+            embedding_model,
+            embedding_api_key,
+            embedding_api_host,
+            pages=data.get("pages"),
+            structured_table_bundles=data.get("structured_table_bundles"),
+            summary_api_key=summary_api_key,
+        )
+        _set_document_index_status(doc_id, "ready", stage="ready")
+        logger.info("[Upload] background index ready for %s", doc_id)
+    except Exception as exc:
+        logger.exception("[Upload] background index failed for %s: %s", doc_id, exc)
+        _set_document_index_status(doc_id, "failed", stage="failed", error=str(exc))
+
+
+def _queue_document_indexes(
+    doc_id: str,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+) -> dict:
+    current = _get_document_index_status(doc_id)
+    if current.get("status") in {"queued", "running", "ready"}:
+        return current
+
+    _set_document_index_status(doc_id, "queued", stage="queued")
+    thread = threading.Thread(
+        target=_build_document_indexes,
+        args=(doc_id, embedding_model, embedding_api_key, embedding_api_host, summary_api_key),
+        name=f"chatpdf-index-{doc_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return _get_document_index_status(doc_id)
+
+
+def _mineru_configured() -> bool:
+    config = _load_online_ocr_config("mineru")
+    access_mode = str(config.get("access_mode") or "worker").strip().lower()
+    worker_url = str(config.get("worker_url") or "").strip()
+    token_mode = str(config.get("token_mode") or "frontend").strip().lower()
+    token = str(config.get("token") or "").strip()
+    if access_mode == "direct":
+        return bool(token)
+    return bool(worker_url and (token_mode == "worker" or token))
+
+
+def _validate_mineru_access(config: dict) -> tuple[bool, str]:
+    """Fast preflight check before uploading a PDF to MinerU."""
+    import httpx
+
+    access_mode = str(config.get("access_mode") or "worker").strip().lower()
+    token = str(config.get("token") or "").strip()
+    if access_mode == "direct":
+        if not token:
+            return False, "直连模式下必须提供 MinerU Token"
+        base_url = str(config.get("base_url") or "https://mineru.net/api/v4").strip()
+        try:
+            base_url = validate_external_ocr_service_url(
+                base_url,
+                service_name="MinerU API Base URL",
+            ).rstrip("/")
+        except ValueError as exc:
+            return False, str(exc)
+        try:
+            with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+                response = client.post(
+                    f"{base_url}/file-urls/batch",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "enable_formula": False,
+                        "enable_table": False,
+                        "language": "ch",
+                        "files": [{
+                            "name": "health_check.pdf",
+                            "is_ocr": True,
+                        }],
+                    },
+                )
+            if response.status_code in (401, 403):
+                return False, "MinerU Token 无效或已过期"
+            if not response.is_success:
+                return False, f"MinerU API 不可达 (HTTP {response.status_code})"
+            data = response.json()
+            if data.get("code") != 0:
+                return False, f"MinerU Token 验证失败: {data.get('msg') or data}"
+            return True, "MinerU 直连 API 可达且 Token 有效"
+        except httpx.TimeoutException:
+            return False, "连接超时，请检查网络或 Base URL"
+        except httpx.ConnectError:
+            return False, "连接失败，请检查网络或 Base URL"
+        except httpx.RequestError:
+            return False, "网络连接失败，请检查网络设置"
+        except Exception as exc:
+            return False, f"MinerU 直连验证失败: {exc}"
+
+    worker_url = str(config.get("worker_url") or "").strip()
+    auth_key = str(config.get("auth_key") or "").strip()
+    token_mode = str(config.get("token_mode") or "frontend").strip().lower()
+    if not worker_url:
+        return False, "Worker 代理模式下必须提供 Worker URL"
+    try:
+        worker_url = validate_external_ocr_service_url(
+            worker_url,
+            service_name="MinerU Worker",
+        )
+    except ValueError as exc:
+        return False, str(exc)
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            headers = {}
+            if auth_key:
+                headers["X-Auth-Key"] = auth_key
+            health_resp = client.get(f"{worker_url}/health", headers=headers)
+            if health_resp.status_code in (401, 403):
+                return False, "Auth Key 无效，请检查 Auth Key 是否正确"
+            if health_resp.status_code == 404:
+                return False, "MinerU Worker 路由不存在，请检查是否部署了 pb-ocr-proxy 的 /health 和 /mineru/upload 路由"
+            if not health_resp.is_success:
+                return False, f"Worker 不可达 (HTTP {health_resp.status_code})"
+
+            if token_mode == "frontend":
+                if not token:
+                    return False, "前端透传模式下必须提供 MinerU Token"
+                token_headers = dict(headers)
+                token_headers["X-MinerU-Key"] = token
+                token_resp = client.get(f"{worker_url}/mineru/result/__health__", headers=token_headers)
+                if token_resp.status_code in (401, 403):
+                    return False, "MinerU Token 无效或缺失，请检查 Token 是否正确"
+                if token_resp.status_code == 404:
+                    return False, "MinerU Worker 缺少 /mineru/result/__health__ 路由，请重新部署 pb-ocr-proxy"
+                if not token_resp.is_success:
+                    return False, f"MinerU Token 验证失败 (HTTP {token_resp.status_code})"
+            return True, "MinerU Worker 可达"
+    except httpx.TimeoutException:
+        return False, "连接超时，请检查 Worker URL 是否正确"
+    except httpx.ConnectError:
+        return False, "连接失败，请检查 Worker URL 是否正确"
+    except httpx.RequestError:
+        return False, "网络连接失败，请检查网络设置"
+    except Exception as exc:
+        return False, f"MinerU Worker 验证失败: {exc}"
+
+
+def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> list[str]:
+    """Delete AI artifacts that bind to old block ids after deep parsing."""
+    removed: list[str] = []
+    cache_paths = {
+        "reading_outline": get_reading_outline_path(DATA_DIR, doc_id),
+        "section_outline": get_section_outline_path(DATA_DIR, doc_id),
+        "block_translations": get_translation_cache_path(DATA_DIR, doc_id),
+    }
+    for name, path in cache_paths.items():
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(name)
+        except Exception as exc:
+            logger.warning("[DeepParse] 删除 %s 缓存失败 doc=%s path=%s err=%s", name, doc_id, path, exc)
+
+    # 速览图表解读缓存是内存态（doc["data"]["logical_figures*"]），不是文件，
+    # 需要单独失效，否则深度解析完成后速览仍会命中旧的 pdf_native/caption_only 结果。
+    target_doc = doc if doc is not None else documents_store.get(doc_id)
+    if isinstance(target_doc, dict):
+        doc_data = target_doc.get("data")
+        if isinstance(doc_data, dict) and doc_data.pop("logical_figures_status", None) is not None:
+            doc_data.pop("logical_figures_meta", None)
+            doc_data.pop("logical_figures", None)
+            removed.append("logical_figures")
+
+    return removed
+
+
+def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: str = "", **extra) -> None:
+    with _DEEP_PARSE_LOCK:
+        current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
+        current.update({
+            "doc_id": doc_id,
+            "provider": "mineru",
+            "status": status,
+            "stage": stage,
+            "error": error,
+            "updated_at": datetime.now().isoformat(),
+            **extra,
+        })
+        _DEEP_PARSE_TASKS[doc_id] = current
+
+
+def _get_deep_parse_status(doc_id: str) -> dict:
+    with _DEEP_PARSE_LOCK:
+        current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
+
+    mineru_config = _load_online_ocr_config("mineru")
+    access_mode = str(mineru_config.get("access_mode") or "worker").strip().lower()
+    mineru_result_exists = get_mineru_result_path(DATA_DIR, doc_id).exists()
+    block_index = load_block_index(DATA_DIR, doc_id)
+    active_source = block_index.get("source") if isinstance(block_index, dict) else ""
+    active_mineru = active_source == MINERU_BLOCK_INDEX_SOURCE
+
+    if not current:
+        status = "ready" if active_mineru else "idle"
+        current = {
+            "doc_id": doc_id,
+            "provider": "mineru",
+            "status": status,
+            "stage": "ready" if active_mineru else "not_started",
+            "error": "",
+        }
+
+    current.update({
+        "configured": _mineru_configured(),
+        "access_mode": access_mode,
+        "mineru_result_exists": mineru_result_exists,
+        "active_source": active_source,
+        "active_mineru": active_mineru,
+    })
+    rag_index = _get_rag_index_status(doc_id)
+    current["rag_index"] = rag_index
+    if active_mineru and current.get("status") not in {"queued", "running", "failed"}:
+        current["status"] = "ready"
+        current["stage"] = "ready"
+
+    current.update(_assess_deep_parse_recommendation(doc_id, active_mineru, block_index, rag_index=rag_index))
+    return current
+
+
+def _assess_deep_parse_recommendation(
+    doc_id: str,
+    active_mineru: bool,
+    block_index: dict | None,
+    rag_index: dict | None = None,
+) -> dict:
+    """基于本地解析质量给出"是否建议深度解析"的信号，不做自动上传。
+
+    质量门只读已有信号（上传阶段算好的 extraction_quality、本地大纲候选数），
+    不重新跑一遍质量评估，成本几乎为零。已经在用 MinerU 结果时不再建议。
+    """
+    if active_mineru:
+        rag_index = rag_index if isinstance(rag_index, dict) else _get_rag_index_status(doc_id)
+        rag_source = str(rag_index.get("index_source") or ("pdf_native" if rag_index.get("ready") else "")).strip()
+        recommend_rag_rebuild = bool(rag_index.get("ready") and rag_source != MINERU_RAG_INDEX_SOURCE)
+        return {
+            "recommend_deep_parse": False,
+            "recommend_reason": "",
+            "recommend_rag_index_rebuild": recommend_rag_rebuild,
+            "recommend_rag_index_reason": (
+                "MinerU 深度解析已完成，但问答索引仍使用本地 PDF 解析；建议重建问答索引以启用结构化表格证据"
+                if recommend_rag_rebuild else ""
+            ),
+        }
+
+    doc = documents_store.get(doc_id)
+    doc_data = doc.get("data") if isinstance(doc, dict) else None
+    extraction_quality = str((doc_data or {}).get("extraction_quality") or "unknown")
+    total_pages = int((doc_data or {}).get("total_pages") or 0)
+
+    if extraction_quality == "poor":
+        return {
+            "recommend_deep_parse": True,
+            "recommend_reason": "本地文本提取质量较差（可能是扫描件或版式复杂），建议用 MinerU 深度解析改善阅读体验",
+            "recommend_rag_index_rebuild": False,
+            "recommend_rag_index_reason": "",
+        }
+
+    # load_block_index 对版本不匹配的缓存会直接返回 None（见 block_index_service.py），
+    # 所以 block_index 非 None 才代表"当前代码版本刚构建出的新鲜结果"。缓存过旧或
+    # 尚未构建时 block_index 也是 None，这种"未知"不能当成"大纲为空"来推荐深度解析，
+    # 否则纯粹因为缓存版本升级就会对一堆本来解析得很好的旧文档触发误报。
+    if isinstance(block_index, dict):
+        outline_count = len(block_index.get("outline") or [])
+        if outline_count == 0 and total_pages > 3:
+            return {
+                "recommend_deep_parse": True,
+                "recommend_reason": "本地未能识别出章节大纲，建议用 MinerU 深度解析重建带坐标的阅读结构",
+                "recommend_rag_index_rebuild": False,
+                "recommend_rag_index_reason": "",
+            }
+
+    return {
+        "recommend_deep_parse": False,
+        "recommend_reason": "",
+        "recommend_rag_index_rebuild": False,
+        "recommend_rag_index_reason": "",
+    }
+
+
+def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
+    try:
+        doc = documents_store.get(doc_id)
+        if not doc:
+            raise RuntimeError("文档记录不存在")
+
+        pdf_path = _resolve_document_pdf_path(doc)
+        if not pdf_path or not pdf_path.exists():
+            raise RuntimeError("当前文档没有可用于 MinerU 深度解析的 PDF 原文件")
+
+        config = _load_online_ocr_config("mineru")
+        access_mode = str(config.get("access_mode") or "worker").strip().lower()
+        if access_mode == "direct":
+            adapter = MinerUDirectAdapter(
+                token=config.get("token", ""),
+                base_url=config.get("base_url", "https://mineru.net/api/v4"),
+                enable_ocr=config.get("enable_ocr", False),
+                enable_formula=config.get("enable_formula", True),
+                enable_table=config.get("enable_table", True),
+            )
+        else:
+            adapter = MinerUAdapter(
+                worker_url=config.get("worker_url", ""),
+                auth_key=config.get("auth_key", ""),
+                token=config.get("token", ""),
+                token_mode=config.get("token_mode", "frontend"),
+                enable_ocr=config.get("enable_ocr", False),
+                enable_formula=config.get("enable_formula", True),
+                enable_table=config.get("enable_table", True),
+            )
+        if not adapter.is_available():
+            raise RuntimeError("MinerU 未配置或不可用，请先在 OCR 设置中配置 Worker/直连模式和 Token")
+
+        def _on_mineru_progress(progress: dict) -> None:
+            if not isinstance(progress, dict):
+                return
+            stage = str(progress.get("stage") or "running")
+            message = str(progress.get("message") or "")
+            extra = {
+                key: value
+                for key, value in progress.items()
+                if key not in {"stage", "message"}
+            }
+            _set_deep_parse_status(
+                doc_id,
+                "running",
+                stage=stage,
+                message=message,
+                access_mode=access_mode,
+                **extra,
+            )
+
+        _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
+        pdf_bytes = pdf_path.read_bytes()
+        payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
+        if cancel_event.is_set():
+            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            return
+        save_mineru_result(DATA_DIR, doc_id, payload)
+
+        _set_deep_parse_status(doc_id, "running", stage="building_index", message="重建阅读块和大纲")
+        if cancel_event.is_set():
+            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            return
+        block_index = build_block_index_from_mineru_payload(
+            doc_id=doc_id,
+            doc=doc,
+            payload=payload,
+            pdf_path=pdf_path,
+        )
+        save_block_index(DATA_DIR, doc_id, block_index)
+        removed = _clear_block_dependent_ai_cache(doc_id, doc)
+
+        block_count = sum(len(page.get("blocks") or []) for page in block_index.get("pages", []))
+        outline_count = len(block_index.get("outline") or [])
+        figure_count = sum(
+            1
+            for page in block_index.get("pages", [])
+            for block in (page.get("blocks") or [])
+            if block.get("type") in ("figure", "table")
+        )
+        _set_deep_parse_status(
+            doc_id,
+            "ready",
+            stage="ready",
+            block_count=block_count,
+            outline_count=outline_count,
+            figure_count=figure_count,
+            cache_removed=removed,
+            active_source=MINERU_BLOCK_INDEX_SOURCE,
+            active_mineru=True,
+            access_mode=access_mode,
+        )
+        logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
+    except Exception as exc:
+        if cancel_event.is_set() or "已取消" in str(exc):
+            logger.info("[DeepParse] MinerU deep parse cancelled for %s", doc_id)
+            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
+            return
+        logger.exception("[DeepParse] MinerU deep parse failed for %s: %s", doc_id, exc)
+        _set_deep_parse_status(doc_id, "failed", stage="failed", error=str(exc))
+    finally:
+        with _DEEP_PARSE_LOCK:
+            _DEEP_PARSE_CANCEL_EVENTS.pop(doc_id, None)
+
+
+def _queue_mineru_deep_parse(doc_id: str, *, force: bool = False) -> dict:
+    current = _get_deep_parse_status(doc_id)
+    if current.get("status") in {"queued", "running"}:
+        return current
+    if current.get("active_mineru") and not force:
+        return current
+
+    cancel_event = threading.Event()
+    with _DEEP_PARSE_LOCK:
+        _DEEP_PARSE_CANCEL_EVENTS[doc_id] = cancel_event
+    _set_deep_parse_status(doc_id, "queued", stage="queued", error="")
+    thread = threading.Thread(
+        target=_run_mineru_deep_parse,
+        args=(doc_id, cancel_event),
+        name=f"chatpdf-mineru-{doc_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return _get_deep_parse_status(doc_id)
+
+
+def _cancel_mineru_deep_parse(doc_id: str) -> dict:
+    current = _get_deep_parse_status(doc_id)
+    if current.get("status") not in {"queued", "running"}:
+        return current
+    with _DEEP_PARSE_LOCK:
+        event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
+        if event:
+            event.set()
+    _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
+    return _get_deep_parse_status(doc_id)
+
+
+def _estimate_text_tokens(text: str) -> int:
+    # Conservative mixed CJK/English estimate for user-facing cost hints.
+    return max(1, int(len(text or "") / 2.2))
+
+
+def _estimate_chunk_count(text: str, *, chunk_chars: int = 1200, overlap_chars: int = 200) -> int:
+    value = str(text or "")
+    if not value.strip():
+        return 0
+    step = max(1, chunk_chars - overlap_chars)
+    return max(1, int((len(value) + step - 1) / step))
+
+
+def _safe_index_source_name(source: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", source or "pdf_native").strip("_") or "pdf_native"
+
+
+def _backup_current_vector_index(doc_id: str, source: str) -> dict:
+    index_path, pkl_path = _vector_index_paths(doc_id)
+    if not index_path.exists() or not pkl_path.exists():
+        return {"backed_up": False}
+    safe_source = _safe_index_source_name(source)
+    backup_index = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.index"
+    backup_pkl = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.pkl"
+    shutil.copy2(index_path, backup_index)
+    shutil.copy2(pkl_path, backup_pkl)
+    return {
+        "backed_up": True,
+        "source": safe_source,
+        "index_path": str(backup_index),
+        "pkl_path": str(backup_pkl),
+    }
+
+
+def _backup_current_semantic_groups(doc_id: str, source: str) -> dict:
+    paths = _semantic_group_paths(doc_id)
+    backed_up: dict[str, str] = {}
+    existing = {kind: path for kind, path in paths.items() if path.exists()}
+    if not existing:
+        return {"backed_up": False}
+    for kind, path in existing.items():
+        backup_path = _semantic_group_backup_path(doc_id, source, kind)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup_path)
+        backed_up[kind] = str(backup_path)
+    return {
+        "backed_up": True,
+        "source": _safe_index_source_name(source),
+        "paths": backed_up,
+    }
+
+
+def _remove_current_semantic_groups(doc_id: str) -> dict:
+    removed: list[str] = []
+    for path in _semantic_group_paths(doc_id).values():
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except Exception as exc:
+            logger.warning("[RagIndex] failed to remove stale semantic group artifact for %s: %s", doc_id, exc)
+    _index_cache.invalidate(doc_id)
+    return {"removed": removed}
+
+
+def _restore_semantic_group_backup(doc_id: str, source: str) -> dict:
+    paths = _semantic_group_paths(doc_id)
+    restored: dict[str, str] = {}
+    for kind, target_path in paths.items():
+        backup_path = _semantic_group_backup_path(doc_id, source, kind)
+        if not backup_path.exists():
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup_path, target_path)
+        restored[kind] = str(target_path)
+    _index_cache.invalidate(doc_id)
+    return {"restored": bool(restored), "paths": restored}
+
+
+def _document_backup_path(doc_id: str, source: str) -> Path:
+    return DOCS_DIR / f"{doc_id}.{_safe_index_source_name(source)}.bak.doc.json"
+
+
+def _backup_current_document_data(doc_id: str, source: str) -> dict:
+    doc = documents_store.get(doc_id)
+    if not isinstance(doc, dict):
+        return {"backed_up": False}
+    path = _document_backup_path(doc_id, source)
+    try:
+        import json
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        return {"backed_up": True, "source": _safe_index_source_name(source), "path": str(path)}
+    except Exception as exc:
+        logger.warning("[RagIndex] failed to backup document data for %s: %s", doc_id, exc)
+        return {"backed_up": False, "error": str(exc)}
+
+
+def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
+    doc = documents_store.get(doc_id)
+    if not isinstance(doc, dict):
+        raise RuntimeError("文档记录不存在，无法切换问答数据源")
+    data = dict(doc.get("data") or {})
+    pages = []
+    for page in normalized.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page_copy = dict(page)
+        content = str(page_copy.get("content") or page_copy.get("text") or "")
+        page_copy["content"] = content
+        page_copy["text"] = content
+        page_copy["source"] = MINERU_RAG_INDEX_SOURCE
+        pages.append(page_copy)
+
+    structured_table_bundles = normalized.get("structured_table_bundles") or []
+    data.update({
+        "full_text": normalized.get("full_text", ""),
+        "pages": pages,
+        "total_pages": len(pages) or data.get("total_pages", 0),
+        "structured_table_bundles": structured_table_bundles,
+        "structured_table_count": len(structured_table_bundles),
+        "rag_index_source": MINERU_RAG_INDEX_SOURCE,
+        "rag_source_hash": normalized.get("source_hash", ""),
+        "rag_normalizer_version": normalized.get("normalizer_version", ""),
+        "rag_quality_report": normalized.get("quality_report") or {},
+        "extraction_method": data.get("extraction_method", "pdf_native"),
+    })
+    doc["data"] = data
+    _normalize_page_keys(doc)
+    save_document(doc_id, doc)
+
+
+def _restore_document_backup(doc_id: str, source: str = "pdf_native") -> dict:
+    path = _document_backup_path(doc_id, source)
+    if not path.exists():
+        return {"restored": False}
+    try:
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            restored_doc = json.load(f)
+        _normalize_page_keys(restored_doc)
+        documents_store[doc_id] = restored_doc
+        save_document(doc_id, restored_doc)
+        return {"restored": True, "path": str(path)}
+    except Exception as exc:
+        logger.warning("[RagIndex] failed to restore document backup for %s: %s", doc_id, exc)
+        return {"restored": False, "error": str(exc)}
+
+
+def _replace_vector_index_from_temp(doc_id: str, temp_dir: Path) -> None:
+    temp_index, temp_pkl = _vector_index_paths(doc_id, temp_dir)
+    if not temp_index.exists() or not temp_pkl.exists():
+        raise RuntimeError("临时问答索引未生成完整 index/pkl 文件")
+    index_path, pkl_path = _vector_index_paths(doc_id)
+    os.replace(str(temp_index), str(index_path))
+    os.replace(str(temp_pkl), str(pkl_path))
+    _index_cache.invalidate(doc_id)
+
+
+def _validate_temp_vector_index(doc_id: str, temp_dir: Path) -> tuple[bool, list[str]]:
+    _index_path, chunks_path = _vector_index_paths(doc_id, temp_dir)
+    failures: list[str] = []
+    if not chunks_path.exists():
+        return False, ["temp_pkl_missing"]
+    try:
+        with open(chunks_path, "rb") as f:
+            data = pickle.load(f)
+    except Exception as exc:
+        return False, [f"temp_pkl_unreadable:{exc}"]
+    if not isinstance(data, dict):
+        return False, ["temp_pkl_legacy_shape"]
+    if data.get("index_source") != MINERU_RAG_INDEX_SOURCE:
+        failures.append("temp_index_source_not_mineru")
+    chunks = data.get("chunks") or []
+    if not chunks:
+        failures.append("temp_chunks_empty")
+    for chunk in chunks:
+        if re.search(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", str(chunk or ""), re.IGNORECASE):
+            failures.append("html_tag_in_temp_chunks")
+            break
+    metadata = data.get("chunk_metadata") or []
+    for item in metadata:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("table_body_markdown") or "")
+        if body and re.search(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", body, re.IGNORECASE):
+            failures.append("html_tag_in_temp_table_markdown")
+            break
+    return not failures, failures
+
+
+def _prepare_semantic_group_rebuild(
+    doc_id: str,
+    temp_dir: Path,
+    *,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+    summary_model: str = "gpt-4o-mini",
+    summary_provider: str = "openai",
+    summary_api_host: str = "",
+) -> dict:
+    """Prepare the post-swap semantic group rebuild from the validated temp index.
+
+    MinerU rebuild writes the vector index into a temp directory first, so
+    create_index(..., build_semantic_groups=False) cannot build semantic groups
+    yet. Preparing here keeps failures before the active index is replaced.
+    """
+    _index_path, chunks_path = _vector_index_paths(doc_id, temp_dir)
+    with open(chunks_path, "rb") as f:
+        data = pickle.load(f)
+    if not isinstance(data, dict):
+        raise RuntimeError("临时问答索引格式异常，无法准备意群索引重建")
+    chunks = [str(chunk or "") for chunk in (data.get("chunks") or []) if str(chunk or "").strip()]
+    if not chunks:
+        raise RuntimeError("临时问答索引分块为空，无法准备意群索引重建")
+    effective_embedding_model = data.get("embedding_model") or embedding_model
+    embed_fn = get_embedding_function(effective_embedding_model, embedding_api_key, embedding_api_host)
+    return {
+        "chunks": chunks,
+        "embed_fn": embed_fn,
+        # Do not silently reuse the embedding key for semantic-group summaries.
+        # Rebuild/evaluation jobs often use a dedicated embedding provider whose
+        # key cannot call chat completions; passing it here makes the background
+        # task spend minutes failing before falling back.  A missing summary key
+        # intentionally selects SemanticGroupService's deterministic truncation.
+        "api_key": summary_api_key,
+        "model": summary_model or "gpt-4o-mini",
+        "provider": summary_provider or "openai",
+        "endpoint": summary_api_host or "",
+        "embedding_model": effective_embedding_model,
+    }
+
+
+def _restore_vector_index_backup(doc_id: str, source: str = "pdf_native") -> dict:
+    safe_source = _safe_index_source_name(source)
+    backup_index = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.index"
+    backup_pkl = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.pkl"
+    if not backup_index.exists() or not backup_pkl.exists():
+        raise RuntimeError("没有可回退的本地问答索引备份")
+    index_path, pkl_path = _vector_index_paths(doc_id)
+    shutil.copy2(backup_index, index_path)
+    shutil.copy2(backup_pkl, pkl_path)
+    doc_restore = _restore_document_backup(doc_id, safe_source)
+    semantic_restore = _restore_semantic_group_backup(doc_id, safe_source)
+    _index_cache.invalidate(doc_id)
+    _set_document_index_status(doc_id, "ready", stage="ready")
+    status = _get_rag_index_status(doc_id)
+    status["document_restore"] = doc_restore
+    status["semantic_group_restore"] = semantic_restore
+    return status
+
+
+def _rebuild_mineru_rag_index(
+    doc_id: str,
+    *,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+    summary_model: str = "gpt-4o-mini",
+    summary_provider: str = "openai",
+    summary_api_host: str = "",
+) -> dict:
+    if doc_id not in documents_store:
+        raise RuntimeError("文档记录不存在")
+    payload = load_mineru_result(DATA_DIR, doc_id)
+    if not payload:
+        raise RuntimeError("没有缓存的 MinerU 解析结果，请先执行深度解析")
+
+    doc = documents_store[doc_id]
+    original_data = doc.get("data") or {}
+    previous_meta = _read_vector_index_meta(doc_id)
+    previous_source = previous_meta.get("index_source") or "pdf_native"
+
+    normalized = normalize_mineru_for_rag(payload)
+    ok, failures = validate_mineru_rag_data(
+        normalized,
+        original_full_text=original_data.get("full_text", ""),
+    )
+    quality_report = dict(normalized.get("quality_report") or {})
+    if failures:
+        quality_report["failure_reasons"] = sorted(set((quality_report.get("failure_reasons") or []) + failures))
+        raise RuntimeError(f"MinerU 问答索引重建失败，已保留原索引: {', '.join(failures)}")
+
+    full_text = normalized.get("full_text", "")
+    pages = normalized.get("pages") or []
+    structured_table_bundles = normalized.get("structured_table_bundles") or []
+    if not full_text or not pages:
+        raise RuntimeError("MinerU 规范化结果为空，已保留原索引")
+
+    temp_dir = VECTOR_STORE_DIR / "_tmp" / f"{doc_id}.mineru"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    _set_document_index_status(doc_id, "running", stage="rebuilding_rag_index")
+    backup = {}
+    doc_backup = {}
+    semantic_backup = {}
+    semantic_cleanup = {}
+    replaced_current_index = False
+    try:
+        create_index(
+            doc_id,
+            full_text,
+            str(temp_dir),
+            embedding_model,
+            embedding_api_key,
+            embedding_api_host,
+            pages=pages,
+            structured_table_bundles=structured_table_bundles,
+            summary_api_key=summary_api_key,
+            index_source=MINERU_RAG_INDEX_SOURCE,
+            index_meta={
+                "source_hash": normalized.get("source_hash", ""),
+                "rebuilt_at": utc_now_iso(),
+                "previous_index_source": previous_source,
+                "normalizer_version": normalized.get("normalizer_version", ""),
+            },
+            build_semantic_groups=False,
+        )
+        temp_meta = _read_vector_index_meta(doc_id, temp_dir)
+        if temp_meta.get("index_source") != MINERU_RAG_INDEX_SOURCE:
+            raise RuntimeError("临时索引缺少 MinerU 来源标记")
+        temp_ok, temp_failures = _validate_temp_vector_index(doc_id, temp_dir)
+        if not temp_ok:
+            raise RuntimeError(f"MinerU 问答索引质量门失败，已保留原索引: {', '.join(temp_failures)}")
+        semantic_rebuild = _prepare_semantic_group_rebuild(
+            doc_id,
+            temp_dir,
+            embedding_model=embedding_model,
+            embedding_api_key=embedding_api_key,
+            embedding_api_host=embedding_api_host,
+            summary_api_key=summary_api_key,
+            summary_model=summary_model,
+            summary_provider=summary_provider,
+            summary_api_host=summary_api_host,
+        )
+        backup = _backup_current_vector_index(doc_id, previous_source)
+        doc_backup = _backup_current_document_data(doc_id, previous_source)
+        semantic_backup = _backup_current_semantic_groups(doc_id, previous_source)
+        _replace_vector_index_from_temp(doc_id, temp_dir)
+        replaced_current_index = True
+        semantic_cleanup = _remove_current_semantic_groups(doc_id)
+        _apply_mineru_rag_document_data(doc_id, normalized)
+        _build_semantic_group_index_async(
+            doc_id=doc_id,
+            chunks=semantic_rebuild["chunks"],
+            pages=pages,
+            embed_fn=semantic_rebuild["embed_fn"],
+            api_key=semantic_rebuild["api_key"],
+            model=semantic_rebuild["model"],
+            provider=semantic_rebuild["provider"],
+            endpoint=semantic_rebuild["endpoint"],
+        )
+        _set_document_index_status(doc_id, "ready", stage="ready")
+    except Exception as exc:
+        if replaced_current_index and backup.get("backed_up"):
+            try:
+                _restore_vector_index_backup(doc_id, previous_source)
+            except Exception as restore_exc:
+                logger.error(
+                    "[RagIndex] failed to restore previous index after MinerU rebuild error for %s: %s",
+                    doc_id,
+                    restore_exc,
+                )
+        _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error="MinerU 问答索引重建失败，已保留原索引")
+        raise exc
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return {
+        "status": "ready",
+        "message": "MinerU 问答索引已重建",
+        "rag_index": _get_rag_index_status(doc_id),
+        "quality_report": quality_report,
+        "normalized": {
+            "page_count": len(pages),
+            "full_text_chars": len(full_text),
+            "estimated_embedding_tokens": _estimate_text_tokens(full_text),
+            "estimated_chunk_count": _estimate_chunk_count(full_text),
+            "structured_table_count": len(structured_table_bundles),
+        },
+        "backup": {
+            **backup,
+            "document": doc_backup,
+            "semantic_groups": semantic_backup,
+            "semantic_group_cleanup": semantic_cleanup,
+        },
+        "semantic_group_rebuild": {
+            "queued": True,
+            "chunk_count": len(semantic_rebuild["chunks"]),
+            "embedding_model": semantic_rebuild["embedding_model"],
+        },
+    }
 
 
 def migrate_legacy_storage():
@@ -1076,10 +2066,35 @@ def extract_text_from_pdf(
                 page_text = clean_text(page_text)
 
                 # ==================== 表格检测与 Markdown 注入 ====================
+                page_table_bundles = []
                 try:
-                    from services.table_aware_service import extract_tables_from_page, inject_tables_into_text
+                    from services.table_aware_service import (
+                        bind_nearest_table_captions,
+                        extract_table_caption_candidates_from_text_dict,
+                        extract_tables_from_page,
+                        inject_tables_into_text,
+                    )
                     page_tables = extract_tables_from_page(page, page_text, page_num + 1)
                     if page_tables:
+                        page_table_bundles = [
+                            table.get("structured_bundle")
+                            for table in page_tables
+                            if isinstance(table, dict) and table.get("structured_bundle")
+                        ]
+                        caption_candidates = extract_table_caption_candidates_from_text_dict(text_dict, page_num + 1)
+                        if caption_candidates and page_table_bundles:
+                            bound_bundles = bind_nearest_table_captions(page_table_bundles, caption_candidates)
+                            if len(bound_bundles) == len(page_table_bundles):
+                                page_table_bundles = bound_bundles
+                                bundle_iter = iter(bound_bundles)
+                                for table in page_tables:
+                                    if not isinstance(table, dict) or not table.get("structured_bundle"):
+                                        continue
+                                    bound = next(bundle_iter, None)
+                                    if isinstance(bound, dict):
+                                        table["structured_bundle"] = bound
+                                        if bound.get("table_body_markdown"):
+                                            table["markdown"] = bound["table_body_markdown"]
                         page_text = inject_tables_into_text(page_text, page_tables)
                 except Exception as table_err:
                     pass  # 表格检测失败不影响主流程
@@ -1181,13 +2196,16 @@ def extract_text_from_pdf(
                 quality = assess_page_quality(page_text, 1, ocr_quality_threshold)  # block_count设为1，因为我们不再使用blocks
                 page_qualities.append(quality)
                 
-                pages.append({
+                page_payload = {
                     "page": page_num + 1,
                     "content": page_text,
                     "quality_score": quality["score"],
                     "image_count": len(page_images),
                     "source": "pymupdf_dict"
-                })
+                }
+                if page_table_bundles:
+                    page_payload["table_bundles"] = page_table_bundles
+                pages.append(page_payload)
                 full_text_parts.append(page_text)
             
             # 批间休息，释放内存
@@ -1426,6 +2444,19 @@ def extract_text_from_pdf(
     full_text = heuristic_rebuild(full_text, is_cjk)
     for page in pages:
         page["content"] = heuristic_rebuild(page["content"], is_cjk)
+    structured_table_bundles = [
+        bundle
+        for page in pages
+        if isinstance(page, dict)
+        for bundle in (page.get("table_bundles") or [])
+        if isinstance(bundle, dict)
+    ]
+    try:
+        from services.table_aware_service import merge_pdf_native_structured_table_bundles
+        structured_table_bundles = merge_pdf_native_structured_table_bundles(structured_table_bundles)
+    except Exception as merge_err:
+        logger.debug("[PDF] pdf_native structured table merge skipped: %s", merge_err)
+    structured_table_bundles = _clean_structured_table_bundles(structured_table_bundles)
     
     # 获取总页数
     pdf_file.seek(0)
@@ -1448,7 +2479,9 @@ def extract_text_from_pdf(
         "extraction_quality": "good" if avg_quality >= 80 else ("acceptable" if avg_quality >= 60 else "poor"),
         "extraction_method": extraction_method,
         "avg_quality_score": round(avg_quality, 1),
-        "pages_needing_ocr": pages_needing_ocr
+        "pages_needing_ocr": pages_needing_ocr,
+        "structured_table_bundles": structured_table_bundles,
+        "structured_table_count": len(structured_table_bundles),
     }
     
     ocr_target_pages = select_ocr_target_pages(enable_ocr, total_pages, pages_needing_ocr)
@@ -1635,13 +2668,13 @@ async def upload_pdf(
                     "pdf_url": None,
                 }
                 save_document(doc_id, documents_store[doc_id])
-                _warm_block_index(doc_id)
                 summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
-                create_index(
-                    doc_id, extracted_data["full_text"], str(VECTOR_STORE_DIR),
-                    embedding_model, embedding_api_key, embedding_api_host,
-                    pages=extracted_data.get("pages"),
-                    summary_api_key=summary_api_key,
+                index_status = _queue_document_indexes(
+                    doc_id,
+                    embedding_model,
+                    embedding_api_key,
+                    embedding_api_host,
+                    summary_api_key,
                 )
                 return {
                     "message": "文档上传成功",
@@ -1650,6 +2683,7 @@ async def upload_pdf(
                     "total_pages": extracted_data["total_pages"],
                     "total_chars": len(extracted_data["full_text"]),
                     "source_type": extracted_data.get("source_type", "unknown"),
+                    "indexing_status": index_status.get("status", "queued"),
                 }
             finally:
                 os.unlink(tmp_path)
@@ -1734,19 +2768,14 @@ async def upload_pdf(
         _normalize_page_keys(documents_store[doc_id])
 
         save_document(doc_id, documents_store[doc_id])
-        _warm_block_index(doc_id)
 
         summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
-        create_index(
+        index_status = _queue_document_indexes(
             doc_id,
-            extracted_data["full_text"],
-            str(VECTOR_STORE_DIR),
             embedding_model,
             embedding_api_key,
             embedding_api_host,
-            pages=extracted_data.get("pages"),
-            structured_table_bundles=extracted_data.get("structured_table_bundles"),
-            summary_api_key=summary_api_key,
+            summary_api_key,
         )
 
         response = {
@@ -1761,6 +2790,7 @@ async def upload_pdf(
             "ocr_backend": extracted_data.get("ocr_backend"),
             "extraction_quality": extracted_data.get("extraction_quality", "unknown"),
             "extraction_method": extracted_data.get("extraction_method", "unknown"),
+            "indexing_status": index_status.get("status", "queued"),
         }
         if extracted_data.get("extraction_method") == "odl":
             response["odl_element_count"] = extracted_data.get("odl_element_count", 0)
@@ -1881,8 +2911,210 @@ async def get_document(doc_id: str):
         "ocr_used": doc["data"].get("ocr_used", False),
         "ocr_backend": doc["data"].get("ocr_backend"),
         "extraction_quality": doc["data"].get("extraction_quality", "unknown"),
-        "extraction_method": doc["data"].get("extraction_method", "unknown")
+        "extraction_method": doc["data"].get("extraction_method", "unknown"),
+        "indexing": _get_document_index_status(doc_id),
     }
+
+
+@router.get("/document/{doc_id}/index-status")
+async def get_document_index_status(doc_id: str):
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    return _get_document_index_status(doc_id)
+
+
+@router.get("/documents/{doc_id}/deep-parse/status")
+async def get_document_deep_parse_status(doc_id: str):
+    """Return current MinerU deep-parse task status for this document."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    return _get_deep_parse_status(doc_id)
+
+
+@router.post("/documents/{doc_id}/deep-parse")
+async def start_document_deep_parse(request: Request, doc_id: str):
+    """Manually run MinerU deep parsing and replace the current block index."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    provider = str(body.get("provider") or "mineru").strip().lower()
+    if provider != "mineru":
+        raise HTTPException(status_code=400, detail="当前仅支持 MinerU 深度解析")
+
+    if not _mineru_configured():
+        raise HTTPException(status_code=400, detail="请先在 OCR 设置中配置 MinerU Worker/直连模式和 Token")
+
+    doc = documents_store[doc_id]
+    pdf_path = _resolve_document_pdf_path(doc)
+    if not pdf_path or not pdf_path.exists():
+        raise HTTPException(status_code=400, detail="当前文档没有可用于 MinerU 深度解析的 PDF 原文件")
+
+    access_ok, access_message = _validate_mineru_access(_load_online_ocr_config("mineru"))
+    if not access_ok:
+        raise HTTPException(status_code=400, detail=access_message)
+
+    force = bool(body.get("force", False))
+    return _queue_mineru_deep_parse(doc_id, force=force)
+
+
+@router.post("/documents/{doc_id}/deep-parse/cancel")
+async def cancel_document_deep_parse(doc_id: str):
+    """Stop local waiting for an in-flight MinerU deep-parse task."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    return _cancel_mineru_deep_parse(doc_id)
+
+
+@router.post("/documents/{doc_id}/deep-parse/rebuild")
+async def rebuild_document_deep_parse_index(doc_id: str):
+    """Rebuild block index from the cached MinerU raw payload without re-uploading.
+
+    用于适配器逻辑（如页码映射、类型识别）修复后，让已解析过的文档
+    不必重新烧一次云端解析即可用上修复。
+    """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    payload = load_mineru_result(DATA_DIR, doc_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="没有缓存的 MinerU 解析结果，请先执行深度解析")
+
+    doc = documents_store[doc_id]
+    pdf_path = _resolve_document_pdf_path(doc)
+    try:
+        block_index = build_block_index_from_mineru_payload(
+            doc_id=doc_id,
+            doc=doc,
+            payload=payload,
+            pdf_path=pdf_path,
+        )
+        save_block_index(DATA_DIR, doc_id, block_index)
+        removed = _clear_block_dependent_ai_cache(doc_id, doc)
+    except Exception as exc:
+        logger.exception("[DeepParse] rebuild-from-cache failed for %s: %s", doc_id, exc)
+        raise HTTPException(status_code=500, detail=f"从缓存重建索引失败: {exc}")
+
+    block_count = sum(len(page.get("blocks") or []) for page in block_index.get("pages", []))
+    outline_count = len(block_index.get("outline") or [])
+    figure_count = sum(
+        1
+        for page in block_index.get("pages", [])
+        for block in (page.get("blocks") or [])
+        if block.get("type") in ("figure", "table")
+    )
+    _set_deep_parse_status(
+        doc_id,
+        "ready",
+        stage="ready",
+        block_count=block_count,
+        outline_count=outline_count,
+        figure_count=figure_count,
+        cache_removed=removed,
+        active_source=MINERU_BLOCK_INDEX_SOURCE,
+        active_mineru=True,
+        message="已从缓存的 MinerU 结果重建索引",
+    )
+    return _get_deep_parse_status(doc_id)
+
+
+@router.get("/documents/{doc_id}/rag-index/status")
+async def get_document_rag_index_status(doc_id: str):
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    return _get_rag_index_status(doc_id)
+
+
+@router.post("/documents/{doc_id}/rag-index/rebuild")
+async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    payload = load_mineru_result(DATA_DIR, doc_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="没有缓存的 MinerU 解析结果，请先执行深度解析")
+
+    doc = documents_store[doc_id]
+    normalized = normalize_mineru_for_rag(payload)
+    ok, failures = validate_mineru_rag_data(
+        normalized,
+        original_full_text=(doc.get("data") or {}).get("full_text", ""),
+    )
+    estimate = {
+        "page_count": len(normalized.get("pages") or []),
+        "full_text_chars": len(normalized.get("full_text") or ""),
+        "estimated_embedding_tokens": _estimate_text_tokens(normalized.get("full_text") or ""),
+        "estimated_chunk_count": _estimate_chunk_count(normalized.get("full_text") or ""),
+        "structured_table_count": len(normalized.get("structured_table_bundles") or []),
+        "source_hash": normalized.get("source_hash", ""),
+        "normalizer_version": normalized.get("normalizer_version", ""),
+    }
+    if body.get("estimate_only"):
+        return {
+            "status": "estimated",
+            "can_rebuild": ok,
+            "estimate": estimate,
+            "quality_report": normalized.get("quality_report") or {},
+            "quality_failures": failures,
+            "rag_index": _get_rag_index_status(doc_id),
+        }
+    if not ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "MinerU 问答索引重建失败，已保留原索引",
+                "quality_failures": failures,
+                "quality_report": normalized.get("quality_report") or {},
+            },
+        )
+
+    embedding_model = str(body.get("embedding_model") or "local-minilm").strip() or "local-minilm"
+    embedding_api_key = (body.get("embedding_api_key") or body.get("api_key") or "").strip() or None
+    embedding_api_host = (body.get("embedding_api_host") or body.get("api_host") or "").strip() or None
+    summary_api_key = (body.get("summary_api_key") or "").strip() or None
+    summary_model = str(body.get("summary_model") or body.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    summary_provider = str(body.get("summary_provider") or body.get("provider") or "openai").strip() or "openai"
+    summary_api_host = (body.get("summary_api_host") or body.get("api_host") or "").strip()
+
+    try:
+        return _rebuild_mineru_rag_index(
+            doc_id,
+            embedding_model=embedding_model,
+            embedding_api_key=embedding_api_key,
+            embedding_api_host=embedding_api_host,
+            summary_api_key=summary_api_key,
+            summary_model=summary_model,
+            summary_provider=summary_provider,
+            summary_api_host=summary_api_host,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[RagIndex] MinerU rebuild failed for %s: %s", doc_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/documents/{doc_id}/rag-index/rollback")
+async def rollback_document_rag_index(doc_id: str):
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    try:
+        return {
+            "status": "ready",
+            "message": "已回退到本地问答索引",
+            "rag_index": _restore_vector_index_backup(doc_id, "pdf_native"),
+        }
+    except Exception as exc:
+        logger.exception("[RagIndex] rollback failed for %s: %s", doc_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/documents/{doc_id}/blocks")
@@ -1917,6 +3149,7 @@ async def get_document_reading_outline(doc_id: str, force: bool = False):
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
+        force_rebuild=force,
     )
     return await get_or_create_reading_outline(
         data_dir=DATA_DIR,
@@ -1965,6 +3198,7 @@ async def create_document_reading_outline(
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
+        force_rebuild=force,
     )
 
     return await get_or_create_reading_outline(
@@ -1992,6 +3226,7 @@ async def get_document_section_outline(doc_id: str, force: bool = False):
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
+        force_rebuild=force,
     )
     return await get_or_create_section_outline(
         data_dir=DATA_DIR,
@@ -2040,6 +3275,7 @@ async def create_document_section_outline(
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
+        force_rebuild=force,
     )
 
     return await get_or_create_section_outline(
@@ -2404,17 +3640,20 @@ async def get_ocr_status():
     for provider in _SUPPORTED_ONLINE_OCR_PROVIDERS:
         provider_config = _load_online_ocr_config(provider)
         if provider in ("mineru", "doc2x"):
-            # Worker 代理模式：通过 worker_url 和 token 判断配置状态
+            # MinerU 支持 Worker 代理和直连 API；Doc2X 仍为 Worker 代理。
+            access_mode = provider_config.get("access_mode", "worker")
             worker_url = provider_config.get("worker_url", "")
             token = provider_config.get("token", "")
             token_mode = provider_config.get("token_mode", "frontend")
-            # 配置完成条件：worker_url 非空且（worker 模式或 frontend 模式有 token）
-            configured = bool(worker_url) and (token_mode == "worker" or bool(token))
+            configured = bool(token) if provider == "mineru" and access_mode == "direct" else (
+                bool(worker_url) and (token_mode == "worker" or bool(token))
+            )
             adapter = _ocr_registry.get_adapter(provider)
             available = adapter.is_available() if adapter else False
             online_services[provider] = {
                 "configured": configured,
                 "available": available,
+                "access_mode": access_mode,
             }
         else:
             # Mistral 等直接 API 调用模式
@@ -2590,27 +3829,37 @@ async def save_online_ocr_config(request: Request):
     # 根据 provider 类型构建配置字典
     if provider in ("mineru", "doc2x"):
         # Worker 代理模式配置
+        existing_config = _load_online_ocr_config(provider)
+        access_mode = body.get("access_mode", "worker").strip() if provider == "mineru" else "worker"
+        if access_mode not in ("worker", "direct"):
+            raise HTTPException(status_code=400, detail="access_mode 必须为 'worker' 或 'direct'")
         worker_url = body.get("worker_url", "").strip()
         auth_key = body.get("auth_key", "").strip()
         token_mode = body.get("token_mode", "frontend").strip()
         token = body.get("token", "").strip()
+        if not auth_key:
+            auth_key = existing_config.get("auth_key", "")
+        if not token:
+            token = existing_config.get("token", "")
 
         # 校验 worker_url 参数
-        if not worker_url:
+        if access_mode == "worker" and not worker_url:
             raise HTTPException(status_code=400, detail="缺少 worker_url 参数")
-        try:
-            worker_url = validate_external_ocr_service_url(
-                worker_url,
-                service_name=f"{provider} Worker",
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        if worker_url:
+            try:
+                worker_url = validate_external_ocr_service_url(
+                    worker_url,
+                    service_name=f"{provider} Worker",
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
         # 校验 token_mode 参数
         if token_mode not in ("frontend", "worker"):
             raise HTTPException(status_code=400, detail="token_mode 必须为 'frontend' 或 'worker'")
 
         config: dict = {
+            "access_mode": access_mode,
             "worker_url": worker_url,
             "auth_key": auth_key,
             "token_mode": token_mode,
@@ -2619,17 +3868,28 @@ async def save_online_ocr_config(request: Request):
 
         # MinerU 特有选项
         if provider == "mineru":
-            config["enable_ocr"] = body.get("enable_ocr", True)
+            base_url = body.get("base_url", "https://mineru.net/api/v4").strip() or "https://mineru.net/api/v4"
+            try:
+                base_url = validate_external_ocr_service_url(
+                    base_url,
+                    service_name="MinerU API Base URL",
+                ).rstrip("/")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            config["base_url"] = base_url
+            config["enable_ocr"] = body.get("enable_ocr", False)
             config["enable_formula"] = body.get("enable_formula", True)
             config["enable_table"] = body.get("enable_table", True)
     else:
         # Mistral 等直接 API 调用模式
         api_key = body.get("api_key", "").strip()
         base_url = body.get("base_url", "").strip()
+        current_config = _load_online_ocr_config(provider)
 
-        # 校验 api_key 参数
         if not api_key:
-            raise HTTPException(status_code=400, detail="缺少 api_key 参数")
+            api_key = str(current_config.get("api_key") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="缺少 api_key 参数，请先填写或保存 API Key")
 
         config = {"api_key": api_key}
         if base_url:
@@ -2669,15 +3929,24 @@ async def save_online_ocr_config(request: Request):
             # 从注册表中移除旧的 mineru 适配器（如果存在）
             _ocr_registry._adapters.pop("mineru", None)
             # 创建新的 MinerUAdapter 实例并注册
-            new_adapter = MinerUAdapter(
-                worker_url=full_config.get("worker_url", ""),
-                auth_key=full_config.get("auth_key", ""),
-                token=full_config.get("token", ""),
-                token_mode=full_config.get("token_mode", "frontend"),
-                enable_ocr=full_config.get("enable_ocr", True),
-                enable_formula=full_config.get("enable_formula", True),
-                enable_table=full_config.get("enable_table", True),
-            )
+            if full_config.get("access_mode") == "direct":
+                new_adapter = MinerUDirectAdapter(
+                    token=full_config.get("token", ""),
+                    base_url=full_config.get("base_url", "https://mineru.net/api/v4"),
+                    enable_ocr=full_config.get("enable_ocr", False),
+                    enable_formula=full_config.get("enable_formula", True),
+                    enable_table=full_config.get("enable_table", True),
+                )
+            else:
+                new_adapter = MinerUAdapter(
+                    worker_url=full_config.get("worker_url", ""),
+                    auth_key=full_config.get("auth_key", ""),
+                    token=full_config.get("token", ""),
+                    token_mode=full_config.get("token_mode", "frontend"),
+                    enable_ocr=full_config.get("enable_ocr", False),
+                    enable_formula=full_config.get("enable_formula", True),
+                    enable_table=full_config.get("enable_table", True),
+                )
             _ocr_registry.register(new_adapter)
             logger.info(f"MinerUAdapter 已重新注册，可用: {new_adapter.is_available()}")
         elif provider == "doc2x":
@@ -2746,11 +4015,15 @@ async def get_online_ocr_config():
         if provider in ("mineru", "doc2x"):
             # Worker 代理模式：返回 worker_url、auth_key/token 脱敏信息
             worker_url = config.get("worker_url", "")
+            access_mode = config.get("access_mode", "worker")
+            base_url = config.get("base_url", "https://mineru.net/api/v4")
             auth_key = config.get("auth_key", "")
             token_mode = config.get("token_mode", "frontend")
             token = config.get("token", "")
 
             provider_result = {
+                "access_mode": access_mode,
+                "base_url": base_url,
                 "worker_url": worker_url,
                 "auth_key_configured": bool(auth_key),
                 "auth_key_preview": _mask_api_key(auth_key),
@@ -2761,7 +4034,7 @@ async def get_online_ocr_config():
 
             # MinerU 特有选项
             if provider == "mineru":
-                provider_result["enable_ocr"] = config.get("enable_ocr", True)
+                provider_result["enable_ocr"] = config.get("enable_ocr", False)
                 provider_result["enable_formula"] = config.get("enable_formula", True)
                 provider_result["enable_table"] = config.get("enable_table", True)
 
@@ -2828,13 +4101,18 @@ async def validate_ocr_key(request: Request):
     if provider == "mistral":
         api_key = body.get("api_key", "").strip()
 
-        # 校验 api_key 参数
-        if not api_key:
-            raise HTTPException(status_code=400, detail="缺少 api_key 参数")
-
-        # 加载当前配置获取 base_url（如果用户已配置过自定义 base_url）
+        # 优先验证当前表单里的 Base URL；未传时再回退到已保存配置。
         current_config = _load_online_ocr_config("mistral")
-        base_url = (current_config.get("base_url", "") or "https://api.mistral.ai").rstrip("/")
+        if not api_key:
+            api_key = str(current_config.get("api_key") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="缺少 api_key 参数，请先填写或保存 Mistral API Key")
+
+        base_url = (
+            body.get("base_url")
+            or current_config.get("base_url", "")
+            or "https://api.mistral.ai"
+        ).strip().rstrip("/")
         try:
             base_url = validate_external_ocr_service_url(
                 base_url,
@@ -2864,20 +4142,80 @@ async def validate_ocr_key(request: Request):
 
         except httpx.TimeoutException:
             logger.warning("Mistral API Key 验证超时")
-            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
-        except httpx.ConnectError:
-            logger.warning("Mistral API Key 验证连接失败")
-            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+            return {"valid": False, "message": "连接 Mistral 超时，请检查网络代理或 Base URL"}
+        except httpx.ConnectError as e:
+            logger.warning("Mistral API Key 验证连接失败: %s", e)
+            return {"valid": False, "message": f"无法连接到 Mistral 服务：{str(e) or '连接失败'}"}
+        except httpx.TransportError as e:
+            logger.warning("Mistral API Key 验证传输错误: %s", e)
+            return {"valid": False, "message": f"Mistral 网络/SSL 连接失败：{str(e) or '传输错误'}"}
         except httpx.RequestError as e:
             logger.warning(f"Mistral API Key 验证网络错误: {e}")
-            return {"valid": False, "message": "网络连接失败，请检查网络设置"}
+            return {"valid": False, "message": f"Mistral 请求失败：{str(e) or '网络错误'}"}
 
     elif provider in ("mineru", "doc2x"):
         # Worker 代理模式验证：分两步——先测试 Worker 可达性，再测试 Token 有效性
+        current_config = _load_online_ocr_config(provider)
+        access_mode = body.get("access_mode", current_config.get("access_mode", "worker")).strip() if provider == "mineru" else "worker"
         worker_url = body.get("worker_url", "").strip()
         auth_key = body.get("auth_key", "").strip()
         token = body.get("token", "").strip()
-        token_mode = body.get("token_mode", "frontend").strip()
+        token_mode = body.get("token_mode", current_config.get("token_mode", "frontend")).strip()
+        base_url = body.get("base_url", current_config.get("base_url", "https://mineru.net/api/v4")).strip() or "https://mineru.net/api/v4"
+        provider_label = "MinerU" if provider == "mineru" else "Doc2X"
+        if not worker_url:
+            worker_url = current_config.get("worker_url", "")
+        if not auth_key:
+            auth_key = current_config.get("auth_key", "")
+        if not token:
+            token = current_config.get("token", "")
+
+        if provider == "mineru" and access_mode == "direct":
+            if not token:
+                raise HTTPException(status_code=400, detail="直连模式下必须提供 MinerU Token")
+            try:
+                base_url_clean = validate_external_ocr_service_url(
+                    base_url,
+                    service_name="MinerU API Base URL",
+                ).rstrip("/")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            try:
+                with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+                    token_resp = client.post(
+                        f"{base_url_clean}/file-urls/batch",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "enable_formula": False,
+                            "enable_table": False,
+                            "language": "ch",
+                            "files": [{
+                                "name": "health_check.pdf",
+                                "is_ocr": True,
+                            }],
+                        },
+                    )
+                if token_resp.status_code in (401, 403):
+                    return {"valid": False, "message": "MinerU Token 无效或已过期"}
+                if not token_resp.is_success:
+                    return {"valid": False, "message": f"MinerU API 不可达 (HTTP {token_resp.status_code})"}
+                token_data = token_resp.json()
+                if token_data.get("code") != 0:
+                    return {"valid": False, "message": f"MinerU Token 验证失败: {token_data.get('msg') or token_data}"}
+                logger.info("MinerU 直连 Token 验证成功")
+                return {"valid": True, "message": "MinerU 直连 API 可达且 Token 有效"}
+            except httpx.TimeoutException:
+                logger.warning("MinerU 直连验证超时")
+                return {"valid": False, "message": "连接超时，请检查网络或 Base URL"}
+            except httpx.ConnectError:
+                logger.warning("MinerU 直连连接失败")
+                return {"valid": False, "message": "连接失败，请检查网络或 Base URL"}
+            except httpx.RequestError as e:
+                logger.warning(f"MinerU 直连验证网络错误: {e}")
+                return {"valid": False, "message": "网络连接失败，请检查网络设置"}
 
         # 校验 worker_url 参数
         if not worker_url:
@@ -2890,8 +4228,6 @@ async def validate_ocr_key(request: Request):
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        provider_label = "MinerU" if provider == "mineru" else "Doc2X"
-
         try:
             with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
                 # 第一步：测试 Worker 可达性（GET /health，仅带 Auth Key）
@@ -3117,7 +4453,7 @@ async def pretranslate_document_blocks(
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
     force: bool = False,
-    concurrency: int = 5,
+    concurrency: int = 8,
 ):
     """批量预翻译文档块，由后端统一控制并发。"""
     if doc_id not in documents_store:
@@ -3140,9 +4476,9 @@ async def pretranslate_document_blocks(
     target_lang = body.get("target_lang") or target_lang
     force = bool(body.get("force", force))
     try:
-        concurrency = int(body.get("concurrency", concurrency) or 5)
+        concurrency = int(body.get("concurrency", concurrency) or 8)
     except Exception:
-        concurrency = 5
+        concurrency = 8
 
     api_key, model, provider, api_host = _resolve_overview_runtime_params(
         request,

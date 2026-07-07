@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { CheckCircle2, Circle, FileText, Languages, Loader2 } from 'lucide-react';
+import { CheckCircle2, Circle, FileText, Languages, Loader2, RefreshCw } from 'lucide-react';
 
 const TYPE_LABEL = {
   heading: '标题',
@@ -12,8 +12,10 @@ const TYPE_LABEL = {
 function ReadingAnalysisPanel({
   blocks = [],
   translations = {},
+  translatingBlockIds = [],
   loading = false,
   error = '',
+  notice = '',
   pretranslateProgress = { running: false, done: 0, total: 0 },
   onPretranslate,
   currentPage = 1,
@@ -22,6 +24,7 @@ function ReadingAnalysisPanel({
   activeNodeId = null,
   visitedNodeIds = [],
   onTranslate,
+  onRetranslateBlock,
   onBlockHover,
   onBlockClick,
   onNoteClick,
@@ -29,6 +32,7 @@ function ReadingAnalysisPanel({
 }) {
   const translatableCount = blocks.filter((block) => block?.block_id && block?.text).length;
   const visitedSet = new Set(visitedNodeIds || []);
+  const translatingSet = new Set(translatingBlockIds || []);
   const pretranslateTotal = Number(pretranslateProgress?.total || 0);
   const pretranslateDone = Math.min(pretranslateTotal, Number(pretranslateProgress?.done || 0));
   const pretranslatePercent = pretranslateTotal > 0 ? Math.round((pretranslateDone / pretranslateTotal) * 100) : 0;
@@ -72,6 +76,11 @@ function ReadingAnalysisPanel({
                 <div className={`mt-0.5 text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                   {pretranslateProgress.running ? '正在补齐全文缓存' : '已缓存可悬浮翻译'} · {pretranslateDone}/{pretranslateTotal}
                 </div>
+                {notice && !error && (
+                  <div className={`mt-1 text-[10px] font-medium ${darkMode ? 'text-[#b8adff]' : 'text-[#8871e4]'}`}>
+                    {notice}
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -83,7 +92,7 @@ function ReadingAnalysisPanel({
                     : 'bg-gray-900 text-white hover:bg-gray-800'
                 }`}
               >
-                {pretranslateProgress.running ? '处理中' : '补齐全文'}
+                {pretranslateProgress.running ? '处理中' : pretranslateDone > 0 ? '补齐全文' : '开始缓存'}
               </button>
             </div>
             <div className={`mt-2 h-1.5 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-gray-100'}`}>
@@ -160,6 +169,7 @@ function ReadingAnalysisPanel({
           {blocks.map((block) => {
             const item = translations[block.block_id];
             const isActive = activeBlockId === block.block_id;
+            const isTranslatingBlock = translatingSet.has(block.block_id);
             return (
               <article
                 key={block.block_id}
@@ -172,13 +182,35 @@ function ReadingAnalysisPanel({
                     : (darkMode ? 'border-white/10 bg-white/[0.04] hover:bg-white/[0.07]' : 'border-gray-100 bg-white/80 hover:border-gray-200 hover:bg-white')
                 }`}
               >
-                <div className="flex items-center justify-between gap-3 mb-2">
-                  <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${darkMode ? 'bg-white/10 text-gray-300' : 'bg-gray-100 text-gray-500'}`}>
-                    {TYPE_LABEL[block.type] || '文本'}
-                  </span>
-                  <span className={`text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                    {block.block_id}
-                  </span>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${darkMode ? 'bg-white/10 text-gray-300' : 'bg-gray-100 text-gray-500'}`}>
+                      {TYPE_LABEL[block.type] || '文本'}
+                    </span>
+                    <span className={`truncate text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                      {block.block_id}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRetranslateBlock?.(block);
+                    }}
+                    disabled={isTranslatingBlock}
+                    className={`shrink-0 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                      darkMode
+                        ? 'bg-white/10 text-gray-200 hover:bg-white/15'
+                        : 'bg-white text-gray-500 shadow-sm ring-1 ring-gray-100 hover:text-[#8871e4] hover:ring-[#d9d1ff]'
+                    }`}
+                  >
+                    {isTranslatingBlock ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3 w-3" />
+                    )}
+                    {isTranslatingBlock ? '翻译中' : item ? '重译' : '翻译本段'}
+                  </button>
                 </div>
                 <div className={`text-[12px] leading-relaxed line-clamp-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                   {block.text}

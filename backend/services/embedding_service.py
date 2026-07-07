@@ -387,9 +387,19 @@ def _truncate_text_to_token_budget(text: str, token_budget: int) -> str:
     return best
 
 
-def _prepare_embedding_batches(texts: List[str], token_budget: int) -> List[List[str]]:
-    """按总 token 预算分批；超长单条文本会自动截断"""
+def _prepare_embedding_batches(
+    texts: List[str],
+    token_budget: int,
+    single_text_token_budget: Optional[int] = None,
+) -> List[List[str]]:
+    """按总 token 预算分批；超长单条文本会自动截断.
+
+    Some OpenAI-compatible providers enforce a stricter per-input limit than
+    their advertised batch context.  Keep the persisted chunk unchanged, but use
+    a safer representative prefix for vectorization.
+    """
     budget = max(1, int(token_budget))
+    single_budget = max(1, int(single_text_token_budget or budget))
     batches: List[List[str]] = []
     current_batch: List[str] = []
     current_tokens = 0
@@ -398,11 +408,11 @@ def _prepare_embedding_batches(texts: List[str], token_budget: int) -> List[List
         text = raw if isinstance(raw, str) else str(raw)
         est = _estimate_embedding_tokens(text)
 
-        if est > budget:
-            truncated = _truncate_text_to_token_budget(text, budget)
+        if est > single_budget:
+            truncated = _truncate_text_to_token_budget(text, single_budget)
             logger.warning(
                 f"[EmbeddingBatch] 文本过长，已截断: idx={idx}, est_tokens={est}, "
-                f"budget={budget}, old_chars={len(text)}, new_chars={len(truncated)}"
+                f"budget={single_budget}, old_chars={len(text)}, new_chars={len(truncated)}"
             )
             text = truncated
             est = _estimate_embedding_tokens(text)
@@ -431,6 +441,52 @@ def _is_token_limit_error(exc: Exception) -> bool:
         "token limit",
     )
     return ("token" in msg) and any(h in msg for h in hints)
+
+
+def _is_retryable_embedding_input_error(exc: Exception, batch: List[str]) -> bool:
+    """Detect provider-side input validation errors that can be fixed by shrinking.
+
+    SiliconFlow may return code 20015 with a generic "parameter is invalid" for
+    overlong embedding inputs, without mentioning token limits.  Only treat it
+    as shrink-retryable when the current request is plausibly too large.
+    """
+    if _is_token_limit_error(exc):
+        return True
+
+    if not batch:
+        return False
+
+    max_est_tokens = max(_estimate_embedding_tokens(item or "") for item in batch)
+    total_est_tokens = sum(_estimate_embedding_tokens(item or "") for item in batch)
+    plausibly_large = len(batch) > 1 or max_est_tokens > 256 or total_est_tokens > 512
+    if not plausibly_large:
+        return False
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                code = str(body.get("code") or "")
+                message = str(body.get("message") or "").lower()
+                if code == "20015" and "parameter" in message and "invalid" in message:
+                    return True
+                err = body.get("error")
+                if isinstance(err, dict):
+                    ecode = str(err.get("code") or "")
+                    emsg = str(err.get("message") or "").lower()
+                    if ecode == "20015" and "parameter" in emsg and "invalid" in emsg:
+                        return True
+        except Exception:
+            pass
+
+    msg = str(exc).lower()
+    return (
+        "code" in msg
+        and "20015" in msg
+        and "parameter" in msg
+        and "invalid" in msg
+    )
 
 
 def _is_model_not_found_error(exc: Exception) -> bool:
@@ -612,7 +668,7 @@ def _embed_batch_with_auto_shrink(
             )
         return [item.embedding for item in data]
     except Exception as exc:
-        if not _is_token_limit_error(exc):
+        if not _is_retryable_embedding_input_error(exc, batch):
             raise
 
         # 多条场景：二分拆批，避免整批失败
@@ -628,7 +684,7 @@ def _embed_batch_with_auto_shrink(
 
         # 单条场景：继续缩短文本并重试
         original = batch[0]
-        reduced_budget = max(64, int(token_budget * 0.85))
+        reduced_budget = max(64, int(token_budget * 0.65))
         truncated = _truncate_text_to_token_budget(original, reduced_budget)
         if len(truncated) >= len(original):
             fallback_len = max(1, len(original) // 2)
@@ -786,6 +842,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     cfg = EMBEDDING_MODELS.get(embedding_model_id, {})
     max_tokens = int(cfg.get("max_tokens") or 8192)
     request_token_budget = max(128, int(max_tokens * 0.9))
+    single_text_token_budget = max(256, min(request_token_budget, int(max_tokens * 0.25), 2048))
     # 优先使用 model_name 作为真实请求模型 ID（动态模型场景下 key != model_id）
     model_for_request = model_name or embedding_model_id
     fallback_checked = False
@@ -801,7 +858,11 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
         if not text_list:
             return np.array([])
 
-        batches = _prepare_embedding_batches(text_list, request_token_budget)
+        batches = _prepare_embedding_batches(
+            text_list,
+            request_token_budget,
+            single_text_token_budget=single_text_token_budget,
+        )
         if len(batches) > 1:
             logger.info(
                 f"[EmbeddingBatch] 模型={embedding_model_id}, 文本数={len(text_list)}, "
@@ -2291,8 +2352,24 @@ def _cleanup_numeric_table_context_entries(
     role_limits = {
         "anchor": None,
         "focus": 1 if cost_query else 2,
-        "background": 0 if anchor_candidates else 2,
+        "background": 1 if anchor_candidates else 2,
     }
+
+    def _should_keep_explanatory_background(entry: dict) -> bool:
+        item = entry["item"]
+        chunk_type = _chunk_type(item)
+        if chunk_type in {"table", "caption", "table_row", "table_cell"}:
+            return False
+        if entry.get("table_id") and item.get("numeric_table_keep_support"):
+            return False
+        if primary_anchor_pages and entry["page"] not in primary_anchor_pages:
+            return False
+        text = re.sub(r"\s+", " ", str(entry.get("text") or item.get("chunk") or "")).strip()
+        if len(text) < 40:
+            return False
+        if not re.search(r"[A-Za-z\u4e00-\u9fff]", text):
+            return False
+        return True
 
     for entry in provisional_entries:
         role = _classify_numeric_table_context_role(
@@ -2303,7 +2380,9 @@ def _cleanup_numeric_table_context_entries(
             primary_anchor_pages=primary_anchor_pages,
         )
         if anchor_candidates and role == "background":
-            if keep_row_projection and _chunk_type(entry["item"]) == "table_row":
+            if _should_keep_explanatory_background(entry):
+                role = "background"
+            elif keep_row_projection and _chunk_type(entry["item"]) == "table_row":
                 if _table_key(entry) in bundle_row_keys_by_table:
                     role = "anchor"
                 else:
@@ -2617,6 +2696,12 @@ def _fallback_page_text_table_bundle_id(table_id: str) -> str:
 
 def _slice_text_to_requested_table(text: str, preferred_labels: Optional[List[str]] = None) -> str:
     mentions = _extract_table_mentions(text)
+    if not mentions and preferred_labels:
+        normalized_text = re.sub(r"\b(Table)(\d+)\b", r"\1 \2", text or "", flags=re.IGNORECASE)
+        normalized_text = re.sub(r"(表)(\d+)", r"\1 \2", normalized_text)
+        if normalized_text != (text or ""):
+            mentions = _extract_table_mentions(normalized_text)
+            text = normalized_text
     if not mentions or not preferred_labels:
         return text
 
@@ -3213,6 +3298,29 @@ def _is_numeric_table_column_noise(value: str) -> bool:
     }
 
 
+def _normalize_numeric_table_focus_hints(hints: Optional[dict[str, List[str]]]) -> dict[str, List[str]]:
+    normalized_hints = dict(hints or {})
+    methods = list(normalized_hints.get("methods", []) or [])
+    columns = list(normalized_hints.get("columns", []) or [])
+    column_keys = {
+        _normalize_numeric_column_name(value).lower()
+        for value in columns
+        if value
+    }
+    kept_methods = []
+    for method in methods:
+        if _is_numeric_table_column_noise(method):
+            canonical = _normalize_numeric_column_name(method)
+            if canonical and canonical.lower() not in column_keys:
+                columns.append(canonical)
+                column_keys.add(canonical.lower())
+            continue
+        kept_methods.append(method)
+    normalized_hints["methods"] = kept_methods
+    normalized_hints["columns"] = columns
+    return normalized_hints
+
+
 def _normalize_numeric_table_method_token(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").lower())
 
@@ -3596,6 +3704,8 @@ def _resolve_numeric_table_effective_top_k(
     hints = hints or _query_rewriter_singleton.extract_numeric_table_hints(query)
     target_methods = _extract_numeric_table_row_method_targets(hints)
     explicit_comparison_methods = _is_numeric_table_explicit_comparator_query(query, hints)
+    if bool(hints.get("comparison")) or _is_numeric_table_row_band_query(query, hints):
+        top_k = max(top_k, 3)
     if explicit_comparison_methods:
         available_methods = {
             _normalize_numeric_table_method_token(item.get("row_id", ""))
@@ -4277,6 +4387,8 @@ def _expand_numeric_table_evidence_units(
             if target_datasets and not strict_dataset_match and not strict_table_match:
                 continue
             if composite_target_noise:
+                continue
+            if explicit_comparison_methods and target_methods and not row_method_hit:
                 continue
             # 显式 comparator 题只保留 query 中明确点名的方法，避免把 CE / 复合方法行混进 bundle。
             if target_methods and not row_method_hit and not allow_competitor_row and not comparison_competitor_row:
@@ -5862,6 +5974,15 @@ def _ensure_numeric_table_evidence_slots(
                 _prefer_exact_slice_support(_prioritize_numeric_table_results(items, query))
             )
         )
+        if not cost_query and any(_chunk_type(item) == "table_row" and _is_support(item) for item in finalized):
+            finalized = [
+                item
+                for item in finalized
+                if not (
+                    item.get("table_augmented_scope") == "page_content"
+                    and not _is_support(item)
+                )
+            ]
         return finalized[:effective_top_k]
 
     for item in required_supports:
@@ -6872,6 +6993,283 @@ def _augment_with_table_chunks(
     return results + augmented
 
 
+def _ensure_structured_table_row_shard_results(
+    results: List[dict],
+    chunks: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    query: str,
+    top_k: int,
+    max_shards: int = 2,
+) -> List[dict]:
+    """Promote precise structured-table row shards into final numeric contexts.
+
+    Large MinerU table bundles are kept as whole-table chunks for broad table
+    semantics, but their embeddings can be dominated by the caption/header. This
+    pass uses the already-persisted row shards as a same-table evidence sidecar
+    so table-specific questions are not answered from a truncated/generic table
+    context only.
+    """
+    if not should_apply_numeric_table_specialization():
+        return results[:top_k] if top_k > 0 else []
+    if not results or top_k <= 0 or max_shards <= 0:
+        return results[:top_k] if top_k > 0 else []
+    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+        return results[:top_k]
+    if not chunks or not isinstance(chunk_metadata, list):
+        return results[:top_k]
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    target_tables = {
+        value.lower()
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        table_id.lower()
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    if not target_tables:
+        return results[:top_k]
+
+    def _norm(value: object) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    selected_table_ids: set[str] = set()
+    selected_bundle_ids: set[str] = set()
+    existing_chunk_ids: set[int] = set()
+    existing_texts: set[str] = set()
+    selected_has_row_shard = False
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        try:
+            existing_chunk_ids.add(int(item.get("chunk_id")))
+        except (TypeError, ValueError):
+            pass
+        text = str(item.get("chunk") or item.get("raw_chunk_text") or "")
+        if text:
+            existing_texts.add(text)
+        if item.get("table_row_shard") or (item.get("chunk_type") or "").lower() == "table_row":
+            selected_has_row_shard = True
+        for key in ("table_id", "table_caption", "numeric_table_exact_context_caption"):
+            table_id = _extract_table_id(str(item.get(key) or ""))
+            if table_id:
+                selected_table_ids.add(table_id.lower())
+        for key in ("table_bundle_id", "parent_table_bundle_id"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                selected_bundle_ids.add(value)
+
+    # If the final context already contains a row shard, keep it. The helper is
+    # intentionally conservative and only fills the common "whole table only"
+    # gap observed in MinerU numeric-table evaluations.
+    if selected_has_row_shard:
+        return results[:top_k]
+
+    query_lower = _norm(query)
+    group_values: dict[str, list[str]] = {
+        "datasets": [_norm(v) for v in hints.get("datasets", []) if _norm(v)],
+        "backbones": [_norm(v) for v in hints.get("backbones", []) if _norm(v)],
+        "methods": [_norm(v) for v in hints.get("methods", []) if _norm(v)],
+        "columns": [_norm(v) for v in hints.get("columns", []) if _norm(v)],
+    }
+    # Single-letter/very short method hints such as "T", "L", "I", "O" are too
+    # noisy unless the table label already matched, so they get a tiny weight.
+    short_method_values = {value for value in group_values["methods"] if len(value) <= 2}
+    short_column_values = {value for value in group_values["columns"] if len(value) <= 2}
+
+    def _has_target_table(ref_text: str) -> bool:
+        ref_lower = _norm(ref_text)
+        return any(table and table in ref_lower for table in target_tables)
+
+    def _score_row_shard(text: str, metadata: dict) -> tuple[float, list[str]]:
+        ref_text = " ".join(
+            str(metadata.get(key) or "")
+            for key in ("table_id", "table_caption", "table_header", "parent_table_bundle_id")
+        )
+        combined = _norm(f"{ref_text}\n{text}")
+        table_hit = _has_target_table(combined)
+        parent_bundle = str(metadata.get("parent_table_bundle_id") or metadata.get("table_bundle_id") or "").strip()
+        table_id = _extract_table_id(str(metadata.get("table_id") or metadata.get("table_caption") or ""))
+        selected_bundle_hit = bool(parent_bundle and parent_bundle in selected_bundle_ids)
+        selected_table_hit = bool(table_id and table_id.lower() in selected_table_ids)
+        if not (table_hit or selected_bundle_hit or selected_table_hit):
+            return 0.0, []
+
+        score = 5.0 if table_hit else 2.5
+        if selected_bundle_hit:
+            score += 1.2
+        if selected_table_hit:
+            score += 1.0
+        hits: list[str] = []
+        for group_name, weight in (
+            ("datasets", 1.0),
+            ("backbones", 1.0),
+            ("methods", 0.9),
+            ("columns", 0.8),
+        ):
+            for value in group_values.get(group_name, []):
+                if not value:
+                    continue
+                if value in combined:
+                    adjusted = weight
+                    if value in short_method_values or value in short_column_values:
+                        adjusted = min(adjusted, 0.2)
+                    score += adjusted
+                    hits.append(value)
+        if metadata.get("row_start") is not None and metadata.get("row_end") is not None:
+            score += 0.25
+        if re.search(r"\d", text or ""):
+            score += 0.25
+        if any(token and token in combined for token in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", query_lower)[:12]):
+            score += 0.2
+        return score, list(dict.fromkeys(hits))
+
+    scored: list[tuple[float, int, dict]] = []
+    for idx, chunk_text in enumerate(chunks):
+        if idx in existing_chunk_ids or chunk_text in existing_texts:
+            continue
+        metadata = chunk_metadata[idx] if idx < len(chunk_metadata) and isinstance(chunk_metadata[idx], dict) else {}
+        chunk_type = (chunk_types[idx] if idx < len(chunk_types) else metadata.get("chunk_type") or "").strip().lower()
+        if not (
+            metadata.get("table_row_shard")
+            or metadata.get("table_row_slice_kind") == "shard"
+            or chunk_type == "table_row"
+            or "[structured table row shard]" in str(chunk_text).lower()
+        ):
+            continue
+        score, hits = _score_row_shard(str(chunk_text), metadata)
+        if score < 5.2:
+            continue
+        page = _resolve_primary_page_from_metadata(metadata)
+        if page <= 0 and idx < len(chunk_pages):
+            page = chunk_pages[idx]
+        candidate = {
+            "chunk": chunk_text,
+            "raw_chunk_text": chunk_text,
+            "page": page,
+            "score": 0.0,
+            "similarity": 0.78 + min(score * 0.01, 0.12),
+            "similarity_percent": round((0.78 + min(score * 0.01, 0.12)) * 100, 2),
+            "snippet": str(chunk_text)[:200],
+            "highlights": [],
+            "reranked": False,
+            "chunk_id": idx,
+            "chunk_type": "table_row",
+            "block_type": "table_row",
+            "table_augmented": True,
+            "table_augmented_scope": "structured_row_shard",
+            "numeric_table_anchor_hits": hits,
+            "numeric_table_priority": score,
+        }
+        _apply_chunk_metadata(candidate, metadata)
+        _apply_page_provenance(candidate, metadata)
+        scored.append((score, idx, candidate))
+
+    if not scored:
+        return results[:top_k]
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    final = list(results[:top_k])
+    max_shards = _resolve_structured_table_row_shard_limit(query, max_shards)
+
+    def _result_chunk_type(item: dict) -> str:
+        return (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+
+    def _is_row_candidate(item: dict) -> bool:
+        return bool(item.get("table_row_shard") or _result_chunk_type(item) == "table_row")
+
+    def _is_table_support(item: dict) -> bool:
+        return _result_chunk_type(item) in {"table", "caption", "table_cell"}
+
+    def _same_table_support(item: dict, candidate: dict) -> bool:
+        item_table = _extract_table_id(
+            str(
+                item.get("table_id")
+                or item.get("table_caption")
+                or item.get("numeric_table_exact_context_caption")
+                or ""
+            )
+        ).lower()
+        candidate_table = _extract_table_id(
+            str(
+                candidate.get("table_id")
+                or candidate.get("table_caption")
+                or candidate.get("numeric_table_exact_context_caption")
+                or ""
+            )
+        ).lower()
+        if item_table and candidate_table and item_table == candidate_table:
+            return True
+        item_bundle = str(item.get("table_bundle_id") or item.get("parent_table_bundle_id") or "").strip()
+        candidate_bundle = str(candidate.get("table_bundle_id") or candidate.get("parent_table_bundle_id") or "").strip()
+        return bool(item_bundle and candidate_bundle and item_bundle == candidate_bundle)
+
+    def _replacement_index(candidate: dict) -> Optional[int]:
+        # Prefer replacing redundant table supports from the same table, but keep
+        # at least one caption/bundle context around row shards for faithfulness.
+        table_support_indices = [
+            idx for idx, item in enumerate(final)
+            if isinstance(item, dict) and _is_table_support(item) and _same_table_support(item, candidate)
+        ]
+        if len(table_support_indices) > 1:
+            return table_support_indices[-1]
+
+        non_table_indices = [
+            idx for idx, item in enumerate(final)
+            if isinstance(item, dict) and not (_is_row_candidate(item) or _is_table_support(item))
+        ]
+        if len(non_table_indices) > 1:
+            return non_table_indices[-1]
+
+        row_indices = [
+            idx for idx, item in enumerate(final)
+            if isinstance(item, dict) and _is_row_candidate(item)
+        ]
+        if len(row_indices) > max(1, max_shards):
+            return row_indices[-1]
+        return None
+
+    for _score, _idx, candidate in scored[:max_shards]:
+        key = str(candidate.get("chunk") or "")
+        if not key or any(str(item.get("chunk") or "") == key for item in final if isinstance(item, dict)):
+            continue
+        if len(final) < top_k:
+            final.append(candidate)
+            continue
+        replace_idx = _replacement_index(candidate)
+        if replace_idx is None:
+            continue
+        final[replace_idx] = candidate
+    return final[:top_k]
+
+
+def _resolve_structured_table_row_shard_limit(query: str, default_limit: int = 2) -> int:
+    """Use more row shards for explicit numeric comparisons, but keep a cap."""
+    if default_limit <= 0:
+        return default_limit
+    try:
+        hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    except Exception:
+        hints = {}
+    methods = {
+        _normalize_numeric_table_method_token(value)
+        for value in hints.get("methods", [])
+        if _normalize_numeric_table_method_token(value)
+    }
+    backbones = {str(value or "").strip().lower() for value in hints.get("backbones", []) if str(value or "").strip()}
+    columns = {_normalize_numeric_column_name(value) for value in hints.get("columns", []) if value}
+    comparison_query = bool(hints.get("comparison")) or _is_numeric_table_row_band_query(query, hints)
+    if not comparison_query and len(methods) <= 1:
+        return default_limit
+    desired = max(default_limit, len(methods), min(len(columns), 3), min(len(backbones), 2))
+    if comparison_query:
+        desired = max(desired, 3)
+    return min(max(desired, 1), 4)
+
+
 def structure_aware_split(
     text: str,
     chunk_size: int = 1200,
@@ -7340,6 +7738,257 @@ def _build_structured_table_bundle_chunk(bundle: dict) -> str:
     return "\n".join(lines).strip()
 
 
+_STRUCTURED_TABLE_ROW_SHARD_SIZE = 10
+
+
+def _split_structured_table_cells(text: str) -> List[str]:
+    value = str(text or "").strip()
+    if not value:
+        return []
+    if "|" in value:
+        return [
+            re.sub(r"\s+", " ", part.replace("\\|", "|")).strip()
+            for part in value.strip("|").split("|")
+        ]
+    if ";" in value and ":" in value:
+        return [re.sub(r"\s+", " ", part).strip() for part in value.split(";")]
+    return [re.sub(r"\s+", " ", value).strip()]
+
+
+def _structured_table_header_cells(unit: dict) -> List[str]:
+    header = str(unit.get("table_header") or unit.get("numeric_table_exact_context_header") or "").strip()
+    cells = [cell for cell in _split_structured_table_cells(header) if cell]
+    return cells
+
+
+def _structured_table_cell_values(unit: dict) -> List[str]:
+    cells = unit.get("cell_evidence_units")
+    if isinstance(cells, list):
+        values = [
+            re.sub(r"\s+", " ", str(cell.get("content") or cell.get("text") or cell.get("cell_text") or "")).strip()
+            for cell in cells
+            if isinstance(cell, dict)
+        ]
+        values = [value for value in values if value]
+        if values:
+            return values
+    for key in ("raw_row_text", "row_text", "content", "row_numbers", "table_row_boundary_text"):
+        value = re.sub(r"\s+", " ", str(unit.get(key) or "")).strip()
+        if value:
+            return [part for part in _split_structured_table_cells(value) if part]
+    return []
+
+
+def _looks_header_bound_row_text(text: str) -> bool:
+    sample = str(text or "")
+    if ":" not in sample:
+        return False
+    pairs = [part for part in re.split(r";|\n", sample) if ":" in part]
+    return len(pairs) >= 2 or bool(re.search(r"\b(?:AP|AP50|Acc|All|Many|Med|Few|Backbone|Method|Pre-?train|Dataset)\b\s*:", sample, re.I))
+
+
+def _structured_table_header_bound_row_text(unit: dict) -> str:
+    headers = _structured_table_header_cells(unit)
+    values = _structured_table_cell_values(unit)
+    if not values:
+        return ""
+    if not headers:
+        return ""
+    parts: List[str] = []
+    for idx, value in enumerate(values):
+        value = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not value:
+            continue
+        header = re.sub(r"\s+", " ", str(headers[idx] if idx < len(headers) else "")).strip()
+        if not header:
+            header = f"Column {idx + 1}"
+        if header == value:
+            parts.append(value)
+        else:
+            parts.append(f"{header}: {value}")
+    return "; ".join(parts).strip()
+
+
+def _structured_table_row_text(unit: dict) -> str:
+    if not isinstance(unit, dict):
+        return ""
+    for key in ("row_text", "content", "row_numbers", "table_row_boundary_text"):
+        value = unit.get(key)
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if text:
+            if _looks_header_bound_row_text(text):
+                return text
+            bound = _structured_table_header_bound_row_text(unit)
+            return bound or text
+    cells = unit.get("cell_evidence_units")
+    if isinstance(cells, list):
+        parts = [
+            re.sub(r"\s+", " ", str(cell.get("content") or cell.get("text") or cell.get("cell_text") or "")).strip()
+            for cell in cells
+            if isinstance(cell, dict)
+        ]
+        parts = [part for part in parts if part]
+        if parts:
+            bound = _structured_table_header_bound_row_text(unit)
+            return bound or " | ".join(parts)
+    return ""
+
+
+def _extract_structured_table_row_shard_units(bundle: dict) -> List[dict]:
+    evidence_units = bundle.get("evidence_units")
+    if not isinstance(evidence_units, list):
+        return []
+    rows: List[dict] = []
+    for index, unit in enumerate(evidence_units):
+        if not isinstance(unit, dict):
+            continue
+        unit_type = str(unit.get("evidence_unit_type") or "").strip().lower()
+        if unit_type != "table_row":
+            continue
+        if unit.get("is_header_row"):
+            continue
+        row = dict(unit)
+        row.setdefault("table_header", bundle.get("table_header", ""))
+        row.setdefault("table_caption", bundle.get("table_caption", ""))
+        row.setdefault("table_id", bundle.get("table_id", ""))
+        row.setdefault("table_bundle_id", bundle.get("bundle_id", "") or bundle.get("table_bundle_id", ""))
+        row_text = _structured_table_row_text(row)
+        if not row_text:
+            continue
+        row.setdefault("row_index", index)
+        row["row_text"] = row_text
+        row["content"] = row_text
+        rows.append(row)
+    return rows
+
+
+def _build_structured_table_row_shard_chunk(
+    bundle: dict,
+    rows: List[dict],
+    shard_index: int,
+    row_start: int,
+    row_end: int,
+) -> str:
+    caption = (bundle.get("table_caption") or bundle.get("table_id") or "").strip()
+    table_id = (bundle.get("table_id") or "").strip()
+    header = (bundle.get("table_header") or "").strip()
+    bundle_id = (bundle.get("bundle_id") or "").strip()
+    page_start = bundle.get("page_start")
+    page_end = bundle.get("page_end")
+
+    hint_parts = []
+    if table_id:
+        hint_parts.append(f"table_id={table_id}")
+    if bundle_id:
+        hint_parts.append(f"bundle_id={bundle_id}")
+    hint_parts.append(f"shard={shard_index + 1}")
+    hint_parts.append(f"rows={row_start}-{row_end}")
+    if isinstance(page_start, int) and page_start > 0:
+        if isinstance(page_end, int) and page_end > page_start:
+            hint_parts.append(f"pages={page_start}-{page_end}")
+        else:
+            hint_parts.append(f"page={page_start}")
+
+    row_lines = [_structured_table_row_text(row) for row in rows]
+    row_lines = [line for line in row_lines if line]
+
+    lines = ["[Structured Table Row Shard]"]
+    if caption:
+        lines.extend(["", caption])
+    if hint_parts:
+        lines.extend(["", "[Hints]", "; ".join(hint_parts)])
+    if header:
+        lines.extend(["", "[Header]", header])
+    if row_lines:
+        lines.extend(["", "[Rows]", *row_lines])
+    return "\n".join(lines).strip()
+
+
+def _structured_table_exact_row_pages(row: dict, fallback_page: int) -> List[int]:
+    pages: List[int] = []
+    for key in ("page", "page_start", "page_index"):
+        value = row.get(key)
+        if isinstance(value, int):
+            page = value + 1 if key == "page_index" and value >= 0 else value
+            if page > 0:
+                pages.append(page)
+                break
+    if not pages:
+        pages = [fallback_page]
+    return sorted(set(pages))
+
+
+def _structured_table_row_bboxes(row: dict, bundle: dict) -> List[list]:
+    bboxes: List[list] = []
+    for key in ("bounding_box", "bbox", "table_bbox"):
+        value = row.get(key)
+        if isinstance(value, list) and len(value) >= 4:
+            bboxes.append(value)
+    value = row.get("bounding_boxes")
+    if isinstance(value, list):
+        bboxes.extend([box for box in value if isinstance(box, list) and len(box) >= 4])
+    cells = row.get("cell_evidence_units")
+    if isinstance(cells, list):
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            for key in ("bounding_box", "bbox"):
+                box = cell.get(key)
+                if isinstance(box, list) and len(box) >= 4:
+                    bboxes.append(box)
+                    break
+    if not bboxes:
+        fallback = bundle.get("bounding_box")
+        if isinstance(fallback, list) and len(fallback) >= 4:
+            bboxes.append(fallback)
+    return bboxes
+
+
+def _build_structured_table_exact_row_chunk(bundle: dict, row: dict, row_number: int) -> str:
+    caption = (bundle.get("table_caption") or bundle.get("table_id") or "").strip()
+    table_id = (bundle.get("table_id") or "").strip()
+    header = (bundle.get("table_header") or "").strip()
+    bundle_id = (bundle.get("bundle_id") or "").strip()
+    row_id = re.sub(r"\s+", " ", str(row.get("row_id") or f"row {row_number}")).strip()
+    row_text = _structured_table_row_text(row)
+    if not row_text:
+        return ""
+
+    hint_parts = []
+    if table_id:
+        hint_parts.append(f"table_id={table_id}")
+    if bundle_id:
+        hint_parts.append(f"bundle_id={bundle_id}")
+    if row_id:
+        hint_parts.append(f"row_id={row_id}")
+    hint_parts.append(f"row={row_number}")
+
+    lines = ["[Structured Table Exact Row]"]
+    if caption:
+        lines.extend(["", caption])
+    if hint_parts:
+        lines.extend(["", "[Hints]", "; ".join(hint_parts)])
+    if header:
+        lines.extend(["", "[Header]", header])
+    lines.extend(["", "[Row]", row_text])
+    return "\n".join(lines).strip()
+
+
+def _structured_table_row_shard_pages(rows: List[dict], fallback_page: int) -> List[int]:
+    pages: List[int] = []
+    for row in rows:
+        for key in ("page", "page_start", "page_index"):
+            value = row.get(key)
+            if isinstance(value, int):
+                page = value + 1 if key == "page_index" and value >= 0 else value
+                if page > 0:
+                    pages.append(page)
+                    break
+    if not pages:
+        pages = [fallback_page]
+    return sorted(set(pages))
+
+
 def _append_structured_table_bundle_chunks(
     doc_id: str,
     chunks: List[str],
@@ -7354,6 +8003,8 @@ def _append_structured_table_bundle_chunks(
         return
 
     appended = 0
+    appended_exact_rows = 0
+    appended_row_shards = 0
     seen_bundle_ids = set()
     for bundle in structured_table_bundles:
         sanitized = _sanitize_structured_table_bundle(bundle)
@@ -7409,8 +8060,129 @@ def _append_structured_table_bundle_chunks(
             seen_bundle_ids.add(bundle_id)
         appended += 1
 
+        row_units = _extract_structured_table_row_shard_units(sanitized)
+        if not row_units:
+            continue
+
+        heading_base = sanitized.get("table_caption") or sanitized.get("table_id") or "Structured Table"
+        for row_offset, row in enumerate(row_units):
+            row_number = row_offset + 1
+            exact_row_text = _structured_table_row_text(row)
+            exact_row_chunk = _build_structured_table_exact_row_chunk(sanitized, row, row_number)
+            if not exact_row_text or not exact_row_chunk:
+                continue
+            row_pages = _structured_table_exact_row_pages(row, primary_page)
+            row_primary_page = row_pages[0]
+            row_page_indices = [page - 1 for page in row_pages]
+            row_page_uids = [_build_page_uid(page) for page in row_pages]
+            row_id = re.sub(r"\s+", " ", str(row.get("row_id") or f"row {row_number}")).strip()
+            exact_id = f"{bundle_id or sanitized.get('table_id') or 'table'}:row:{row_number}"
+            row_bboxes = _structured_table_row_bboxes(row, sanitized)
+
+            chunk_metadata.append({
+                "structured_table_bundle": True,
+                "table_row_evidence": True,
+                "table_row_slice_kind": "exact",
+                "parent_table_bundle_id": bundle_id,
+                "table_bundle_id": bundle_id,
+                "evidence_unit_id": exact_id,
+                "row_id": row_id,
+                "row_start": row_number,
+                "row_end": row_number,
+                "row_count": 1,
+                "row_text": exact_row_text,
+                "table_row_boundary_text": exact_row_text,
+                "numeric_table_exact_context_row_text": exact_row_text,
+                "numeric_table_exact_context_caption": sanitized.get("table_caption", ""),
+                "numeric_table_exact_context_header": sanitized.get("table_header", ""),
+                "table_id": sanitized.get("table_id", ""),
+                "table_caption": sanitized.get("table_caption", ""),
+                "table_header": sanitized.get("table_header", ""),
+                "table_body_markdown": exact_row_text,
+                "html_table": "",
+                "table_footnote": sanitized.get("table_footnote", ""),
+                "page_range": [row_pages[0], row_pages[-1]],
+                "table_pages": row_pages,
+                "page_index": row_primary_page - 1,
+                "page_uid": _build_page_uid(row_primary_page),
+                "table_page_indices": row_page_indices,
+                "table_page_uids": row_page_uids,
+                "table_bbox": row_bboxes[0] if row_bboxes else sanitized.get("bounding_box", []),
+                "table_bboxes": row_bboxes or sanitized.get("bounding_boxes", []),
+                "table_source_ids": sanitized.get("source_ids", []),
+                "evidence_units": [row],
+                "cell_evidence_units": row.get("cell_evidence_units", []),
+                "source": sanitized.get("source", "odl"),
+            })
+            chunks.append(exact_row_chunk)
+            chunk_headings.append(f"{heading_base} row {row_number}")
+            chunk_pages.append(row_primary_page)
+            chunk_types.append("table_row")
+            appended_exact_rows += 1
+
+        for shard_index, offset in enumerate(range(0, len(row_units), _STRUCTURED_TABLE_ROW_SHARD_SIZE)):
+            shard_rows = row_units[offset:offset + _STRUCTURED_TABLE_ROW_SHARD_SIZE]
+            row_start = offset + 1
+            row_end = offset + len(shard_rows)
+            shard_text = _build_structured_table_row_shard_chunk(
+                sanitized,
+                shard_rows,
+                shard_index,
+                row_start,
+                row_end,
+            )
+            if not shard_text:
+                continue
+            shard_pages = _structured_table_row_shard_pages(shard_rows, primary_page)
+            shard_primary_page = shard_pages[0]
+            shard_page_indices = [page - 1 for page in shard_pages]
+            shard_page_uids = [_build_page_uid(page) for page in shard_pages]
+            shard_body = "\n".join(_structured_table_row_text(row) for row in shard_rows if _structured_table_row_text(row))
+            shard_row_text = "\n".join(_structured_table_row_text(row) for row in shard_rows if _structured_table_row_text(row))
+            shard_id = f"{bundle_id or sanitized.get('table_id') or 'table'}:rows:{row_start}-{row_end}"
+
+            chunk_metadata.append({
+                "structured_table_bundle": True,
+                "table_row_shard": True,
+                "table_row_slice_kind": "shard",
+                "parent_table_bundle_id": bundle_id,
+                "table_bundle_id": bundle_id,
+                "evidence_unit_id": shard_id,
+                "row_id": f"rows {row_start}-{row_end}",
+                "row_start": row_start,
+                "row_end": row_end,
+                "row_count": len(shard_rows),
+                "row_text": shard_row_text,
+                "table_row_boundary_text": shard_row_text,
+                "table_id": sanitized.get("table_id", ""),
+                "table_caption": sanitized.get("table_caption", ""),
+                "table_header": sanitized.get("table_header", ""),
+                "table_body_markdown": shard_body,
+                "html_table": "",
+                "table_footnote": sanitized.get("table_footnote", ""),
+                "page_range": [shard_pages[0], shard_pages[-1]],
+                "table_pages": shard_pages,
+                "page_index": shard_primary_page - 1,
+                "page_uid": _build_page_uid(shard_primary_page),
+                "table_page_indices": shard_page_indices,
+                "table_page_uids": shard_page_uids,
+                "table_bbox": sanitized.get("bounding_box", []),
+                "table_bboxes": sanitized.get("bounding_boxes", []),
+                "table_source_ids": sanitized.get("source_ids", []),
+                "evidence_units": shard_rows,
+                "source": sanitized.get("source", "odl"),
+            })
+            chunks.append(shard_text)
+            chunk_headings.append(f"{heading_base} rows {row_start}-{row_end}")
+            chunk_pages.append(shard_primary_page)
+            chunk_types.append("table_row")
+            appended_row_shards += 1
+
     if appended > 0:
-        logger.info(f"[{doc_id}] 追加 {appended} 个 structured table bundle chunks")
+        logger.info(
+            f"[{doc_id}] 追加 {appended} 个 structured table bundle chunks，"
+            f"{appended_exact_rows} 个 exact table rows，{appended_row_shards} 个 table row shards"
+        )
 
 
 def _maybe_append_runtime_structured_table_bundle_chunks(
@@ -7598,7 +8370,7 @@ def _build_runtime_page_text_evidence_units(
     if min_span > 0:
         parse_hints["_numeric_span_override"] = [min_span, max_span]
     row_units = _extract_plain_table_rows(segment, parse_hints)
-    focus_hints = focus_hints or parse_hints
+    focus_hints = _normalize_numeric_table_focus_hints(focus_hints or parse_hints)
     if focus_hints is not parse_hints:
         focus_row_units = _extract_plain_table_rows(segment, focus_hints)
         if focus_row_units:
@@ -7890,7 +8662,30 @@ def _maybe_upgrade_sparse_structured_bundle(
         and (unit.get("row_text") or unit.get("content") or "").strip()
     ]
     existing_body = str(metadata.get("table_body_markdown") or "").strip()
-    if len(existing_row_units) >= 2 and existing_body:
+    query_hints = _query_rewriter_singleton.extract_numeric_table_hints(query) if query else {}
+    focus_tokens = [
+        re.sub(r"\s+", "", str(value or "")).lower()
+        for value in [
+            *(query_hints.get("columns") or []),
+            *(query_hints.get("methods") or []),
+            *(query_hints.get("comparison") or []),
+        ]
+        if value
+    ]
+    existing_search_text = " ".join(
+        [
+            existing_body,
+            *[
+                str(unit.get("row_text") or unit.get("content") or unit.get("row_numbers") or "")
+                for unit in existing_row_units
+            ],
+        ]
+    )
+    existing_search_norm = re.sub(r"\s+", "", existing_search_text).lower()
+    existing_has_focus = bool(
+        focus_tokens and all(token in existing_search_norm for token in focus_tokens)
+    )
+    if len(existing_row_units) >= 2 and existing_body and (not focus_tokens or existing_has_focus):
         return chunk_text, metadata
 
     page_text = (page_payload.get("content") or page_payload.get("text") or "").strip()
@@ -7912,8 +8707,6 @@ def _maybe_upgrade_sparse_structured_bundle(
     segment = _trim_page_text_table_segment(scoped_segment)
     if len(segment) < 40:
         return chunk_text, metadata
-
-    query_hints = _query_rewriter_singleton.extract_numeric_table_hints(query) if query else {}
 
     current_rows = _extract_structured_table_rows(metadata)
     current_body_rows = _extract_structured_bundle_body_rows(metadata)
@@ -8112,6 +8905,12 @@ def build_vector_index(
     pages: List[dict] = None,
     structured_table_bundles: Optional[List[dict]] = None,
     summary_api_key: str = None,
+    summary_model: str = "gpt-4o-mini",
+    summary_provider: str = "openai",
+    summary_api_host: str = "",
+    index_source: str = "pdf_native",
+    index_meta: Optional[dict] = None,
+    build_semantic_groups: bool = True,
 ):
     try:
         logger.info(f"[{doc_id}] Building vector index...")
@@ -8246,6 +9045,8 @@ def build_vector_index(
                 i += 1
             parent_chunks.append("\n\n".join(parent_parts))
 
+        effective_index_meta = dict(index_meta or {})
+        effective_index_source = str(index_source or effective_index_meta.get("index_source") or "pdf_native").strip() or "pdf_native"
         save_data = {
             "chunks": chunks,
             "embedding_model": embedding_model_id,
@@ -8255,6 +9056,12 @@ def build_vector_index(
             "chunk_metadata": chunk_metadata,
             "parent_chunks": parent_chunks,
             "child_to_parent": child_to_parent,
+            "index_source": effective_index_source,
+            "source_hash": effective_index_meta.get("source_hash", ""),
+            "rebuilt_at": effective_index_meta.get("rebuilt_at", ""),
+            "previous_index_source": effective_index_meta.get("previous_index_source", ""),
+            "normalizer_version": effective_index_meta.get("normalizer_version", ""),
+            "index_meta": effective_index_meta,
         }
         with open(chunks_path, "wb") as f:
             pickle.dump(save_data, f)
@@ -8262,13 +9069,17 @@ def build_vector_index(
         logger.info(f"[{doc_id}] Vector index saved to {index_path}")
 
         # ---- 语义意群异步生成与意群级别向量索引构建（需求 6.1）----
-        _build_semantic_group_index_async(
-            doc_id=doc_id,
-            chunks=chunks,
-            pages=pages,
-            embed_fn=embed_fn,
-            api_key=summary_api_key or api_key,
-        )
+        if build_semantic_groups:
+            _build_semantic_group_index_async(
+                doc_id=doc_id,
+                chunks=chunks,
+                pages=pages,
+                embed_fn=embed_fn,
+                api_key=summary_api_key or api_key,
+                model=summary_model,
+                provider=summary_provider,
+                endpoint=summary_api_host,
+            )
 
     except Exception as e:
         logger.error(f"[{doc_id}] Error building vector index: {e}")
@@ -8281,6 +9092,9 @@ def _build_semantic_group_index_async(
     pages: list[dict],
     embed_fn,
     api_key: str = None,
+    model: str = "gpt-4o-mini",
+    provider: str = "openai",
+    endpoint: str = "",
 ):
     """异步启动意群生成任务（需求 6.1, 6.4）
 
@@ -8303,7 +9117,7 @@ def _build_semantic_group_index_async(
 
     def _task():
         try:
-            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key)
+            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key, model=model, provider=provider, endpoint=endpoint)
         except Exception as e:
             # 任务失败时记录日志（需求 6.4），不影响主流程
             logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
@@ -8321,6 +9135,9 @@ def _build_semantic_group_index(
     pages: List[dict],
     embed_fn,
     api_key: str = None,
+    model: str = "gpt-4o-mini",
+    provider: str = "openai",
+    endpoint: str = "",
 ):
     """在分块索引构建完成后，生成语义意群并构建意群级别向量索引
 
@@ -8355,7 +9172,12 @@ def _build_semantic_group_index(
         chunk_pages = _derive_chunk_pages(chunks, pages)
 
         # 创建 SemanticGroupService 实例
-        group_service = SemanticGroupService(api_key=api_key or "")
+        group_service = SemanticGroupService(
+            api_key=api_key or "",
+            model=model or "gpt-4o-mini",
+            provider=provider or "openai",
+            endpoint=endpoint or "",
+        )
 
         # 调用 generate_groups 生成语义意群（异步方法需要在同步上下文中运行）
         groups = _run_async(group_service.generate_groups(
@@ -9212,6 +10034,260 @@ def _apply_numeric_table_boost(results: List[dict], query: str) -> List[dict]:
         adjusted.sort(key=lambda x: x.get("similarity", 0), reverse=True)
         return adjusted
     return results
+
+
+def _normalize_numeric_exact_term(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _augment_with_numeric_exact_row_search(
+    results: List[dict],
+    chunks: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    pages: Optional[List[dict]],
+    page_index,
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+    max_rows: int = 8,
+) -> List[dict]:
+    """Add number-aware exact row candidates for numeric table questions.
+
+    Vector/BM25 retrieval can miss a short exact row when a table caption or
+    surrounding paragraph dominates the query.  This local lane scans typed
+    table-row chunks only, scores them with table/method/column/number anchors,
+    and appends a small set of high-confidence rows to the candidate pool.
+    """
+    if not query or "numeric_table" not in (evidence_need or _analyze_evidence_need(query) or []):
+        return results
+    if not chunks or not isinstance(chunk_metadata, list):
+        return results
+
+    hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
+    target_tables = {
+        _normalize_numeric_exact_term(value)
+        for value in hints.get("table_labels", [])
+        if value
+    } | {
+        _normalize_numeric_exact_term(table_id)
+        for _, _, table_id in _extract_table_mentions(query)
+        if table_id
+    }
+    grouped_terms: dict[str, list[str]] = {
+        "methods": [
+            _normalize_numeric_exact_term(value)
+            for value in hints.get("methods", [])
+            if _normalize_numeric_exact_term(value) and not _is_numeric_table_column_noise(str(value))
+        ],
+        "columns": [
+            _normalize_numeric_exact_term(_normalize_numeric_column_name(value))
+            for value in hints.get("columns", [])
+            if _normalize_numeric_exact_term(value)
+        ],
+        "datasets": [
+            _normalize_numeric_exact_term(value)
+            for value in hints.get("datasets", [])
+            if _normalize_numeric_exact_term(value)
+        ],
+        "backbones": [
+            _normalize_numeric_exact_term(value)
+            for value in hints.get("backbones", [])
+            if _normalize_numeric_exact_term(value)
+        ],
+        "comparison": [
+            _normalize_numeric_exact_term(value)
+            for value in hints.get("comparison", [])
+            if _normalize_numeric_exact_term(value)
+        ],
+    }
+    query_numbers = {
+        _normalize_numeric_exact_term(value)
+        for value in re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", query)
+        if value
+    }
+    query_lower = str(query or "").lower()
+    winner_style_regex_query = bool(
+        grouped_terms["columns"]
+        and re.search(
+            r"(?:最高|最低|最大|最小|最好|最佳|最优|highest|lowest|largest|smallest|best|maximum|minimum)",
+            query_lower,
+            re.IGNORECASE,
+        )
+    )
+    has_non_table_anchor = bool(
+        grouped_terms["methods"]
+        or grouped_terms["datasets"]
+        or grouped_terms["backbones"]
+        or query_numbers
+        or winner_style_regex_query
+    )
+    if not target_tables and not has_non_table_anchor:
+        return results
+
+    existing_chunk_ids: set[int] = set()
+    existing_texts: set[str] = set()
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            existing_chunk_ids.add(int(item.get("chunk_id")))
+        except (TypeError, ValueError):
+            pass
+        text = str(item.get("chunk") or item.get("raw_chunk_text") or "")
+        if text:
+            existing_texts.add(text)
+
+    def _term_hit(term: str, text: str) -> bool:
+        if not term:
+            return False
+        if term in text:
+            return True
+        compact_term = re.sub(r"[\s_\-]+", "", term)
+        compact_text = re.sub(r"[\s_\-]+", "", text)
+        return bool(compact_term and compact_term in compact_text)
+
+    def _score_candidate(chunk_text: str, metadata: dict, chunk_type: str) -> tuple[float, list[str]]:
+        row_text = str(
+            metadata.get("numeric_table_exact_context_row_text")
+            or metadata.get("row_text")
+            or metadata.get("table_row_boundary_text")
+            or chunk_text
+            or ""
+        )
+        ref_text = " ".join(
+            str(metadata.get(key) or "")
+            for key in (
+                "table_id",
+                "table_caption",
+                "numeric_table_exact_context_caption",
+                "table_header",
+                "numeric_table_exact_context_header",
+                "row_id",
+            )
+        )
+        combined = _normalize_numeric_exact_term(f"{ref_text}\n{row_text}\n{chunk_text}")
+        ref_norm = _normalize_numeric_exact_term(ref_text)
+
+        table_hit = False
+        if target_tables:
+            table_hit = any(_term_hit(table, ref_norm) or _term_hit(table, combined) for table in target_tables)
+            if not table_hit:
+                return 0.0, []
+
+        score = 2.0
+        if chunk_type == "table_row":
+            score += 1.0
+        if metadata.get("table_row_slice_kind") == "exact" or metadata.get("numeric_table_exact_context_row_text"):
+            score += 2.0
+        if table_hit:
+            score += 2.5
+
+        hits: list[str] = []
+        weighted_groups = (
+            ("methods", 1.8),
+            ("datasets", 1.0),
+            ("backbones", 1.0),
+            ("columns", 1.1),
+            ("comparison", 0.8),
+        )
+        method_hits = 0
+        column_hits = 0
+        for group_name, weight in weighted_groups:
+            seen_in_group = 0
+            for term in grouped_terms.get(group_name, []):
+                if not term:
+                    continue
+                if _term_hit(term, combined):
+                    seen_in_group += 1
+                    hits.append(term)
+            if seen_in_group:
+                score += min(seen_in_group, 4) * weight
+                if group_name == "methods":
+                    method_hits = seen_in_group
+                if group_name == "columns":
+                    column_hits = seen_in_group
+
+        number_hits = 0
+        for number in query_numbers:
+            if _term_hit(number, combined):
+                number_hits += 1
+                hits.append(number)
+        if number_hits:
+            score += min(number_hits, 3) * 1.0
+
+        score += min(_compute_lexical_evidence_score(query, f"{ref_text}\n{row_text}") * 2.0, 2.0)
+
+        if not target_tables:
+            if method_hits <= 0 and number_hits <= 0 and not (winner_style_regex_query and column_hits > 0):
+                return 0.0, []
+            if grouped_terms["columns"] and column_hits <= 0:
+                score -= 1.0
+        if not re.search(r"\d", row_text):
+            score -= 1.0
+        elif winner_style_regex_query and column_hits > 0:
+            score += 1.5
+            hits.append("regex:column_numeric_row")
+        if metadata.get("table_row_shard") and metadata.get("table_row_slice_kind") != "exact":
+            score -= 1.2
+
+        return score, list(dict.fromkeys(hits))
+
+    scored: list[tuple[float, int, dict]] = []
+    for idx, chunk_text in enumerate(chunks):
+        if idx in existing_chunk_ids or chunk_text in existing_texts:
+            continue
+        metadata = chunk_metadata[idx] if idx < len(chunk_metadata) and isinstance(chunk_metadata[idx], dict) else {}
+        chunk_type = (chunk_types[idx] if idx < len(chunk_types) else metadata.get("chunk_type") or "").strip().lower()
+        if chunk_type != "table_row" and metadata.get("table_row_slice_kind") != "exact":
+            continue
+        score, hits = _score_candidate(str(chunk_text), metadata, chunk_type)
+        if score < (5.8 if target_tables else 5.0):
+            continue
+
+        page_num = chunk_pages[idx] if idx < len(chunk_pages) else 0
+        page_num = _resolve_primary_page_from_metadata(metadata, fallback=page_num)
+        if (not isinstance(page_num, int) or page_num <= 0) and pages:
+            page_num = _find_page_for_chunk(str(chunk_text), pages, page_index=page_index)
+        snippet, highlights = _extract_snippet_and_highlights(str(chunk_text), query)
+        candidate = {
+            "chunk": chunk_text,
+            "raw_chunk_text": chunk_text,
+            "page": page_num,
+            "score": score,
+            "similarity": min(0.86 + min(score * 0.01, 0.10), 0.97),
+            "similarity_percent": round(min(0.86 + min(score * 0.01, 0.10), 0.97) * 100, 2),
+            "snippet": snippet,
+            "highlights": highlights,
+            "reranked": False,
+            "chunk_id": idx,
+            "chunk_heading": metadata.get("table_caption") or metadata.get("table_id") or "",
+            "section_path": metadata.get("table_caption") or metadata.get("table_id") or "",
+            "chunk_type": "table_row",
+            "block_type": "table_row",
+            "numeric_exact_search": True,
+            "retrieval_source": "numeric_exact_row",
+            "numeric_table_priority": score,
+            "numeric_table_anchor_hits": hits,
+            "numeric_regex_locator": any(str(hit).startswith("regex:") for hit in hits),
+            "numeric_regex_locator_hits": [hit for hit in hits if str(hit).startswith("regex:")],
+        }
+        _apply_chunk_metadata(candidate, metadata)
+        _apply_page_provenance(candidate, metadata)
+        scored.append((score, idx, candidate))
+
+    if not scored:
+        return results
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    merged = list(results or [])
+    for _score, _idx, candidate in scored[: max(1, int(max_rows or 1))]:
+        chunk_text = str(candidate.get("chunk") or "")
+        if any(str(item.get("chunk") or "") == chunk_text for item in merged if isinstance(item, dict)):
+            continue
+        merged.append(candidate)
+    logger.info("[NumericExactSearch] 补充 %s 个 exact table row 候选", len(merged) - len(results or []))
+    return merged
 
 
 def _prioritize_numeric_table_results(results: List[dict], query: str) -> List[dict]:
@@ -10496,6 +11572,17 @@ def search_document_chunks(
         chunk_pages=chunk_pages,
         chunk_metadata=chunk_metadata,
     )
+    results = _augment_with_numeric_exact_row_search(
+        results,
+        chunks=chunks,
+        chunk_pages=chunk_pages,
+        chunk_types=chunk_types,
+        chunk_metadata=chunk_metadata,
+        pages=pages,
+        page_index=_page_index,
+        query=analysis_query,
+        evidence_need=evidence_need,
+    )
     results = _apply_query_intent_boost(results, analysis_query)
     results = _apply_numeric_table_boost(results, analysis_query)
     results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
@@ -10552,6 +11639,16 @@ def search_document_chunks(
         timings=timings,
         progress_callback=progress_callback,
         conditional_rerank_active=conditional_rerank_active,
+    )
+    results = _prioritize_numeric_table_results(results, analysis_query)
+    results = _ensure_structured_table_row_shard_results(
+        results,
+        chunks=chunks,
+        chunk_pages=chunk_pages,
+        chunk_types=chunk_types,
+        chunk_metadata=chunk_metadata,
+        query=analysis_query,
+        top_k=_resolve_numeric_table_effective_top_k(analysis_query, top_k, results=results),
     )
     results = _prioritize_numeric_table_results(results, analysis_query)
 
@@ -10999,6 +12096,18 @@ def get_relevant_context(
             "page_range": entry["item"].get("page_range") or [entry["item"].get("page", 0), entry["item"].get("page", 0)],
             "group_id": entry["item"].get("group_id", f"chunk-{idx}"),
             "modality": entry["item"].get("modality") or entry["item"].get("chunk_type") or "text",
+            "chunk_type": entry["item"].get("chunk_type", ""),
+            "block_type": entry["item"].get("block_type", entry["item"].get("chunk_type", "")),
+            "table_id": entry["item"].get("table_id", ""),
+            "table_bundle_id": entry["item"].get("table_bundle_id", ""),
+            "evidence_unit_id": entry["item"].get("evidence_unit_id", ""),
+            "table_caption": entry["item"].get("numeric_table_exact_context_caption") or entry["item"].get("table_caption", ""),
+            "table_header": entry["item"].get("numeric_table_exact_context_header") or entry["item"].get("table_header", ""),
+            "numeric_table_exact_context_row_text": entry["item"].get("numeric_table_exact_context_row_text", ""),
+            "numeric_table_exact_context_caption": entry["item"].get("numeric_table_exact_context_caption", ""),
+            "numeric_table_exact_context_header": entry["item"].get("numeric_table_exact_context_header", ""),
+            "table_row_evidence": entry["item"].get("table_row_evidence", False),
+            "table_row_slice_kind": entry["item"].get("table_row_slice_kind", ""),
             "score": entry["item"].get("similarity", entry["item"].get("score", 0.0)),
             "context_role": entry.get("context_role", ""),
         }

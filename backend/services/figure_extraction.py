@@ -110,10 +110,23 @@ def build_logical_figures_for_overview(
         "images": images,
     }
 
+    # 4.0 优先尝试"深度解析"缓存（手动触发的 MinerU deep-parse，
+    # 数据来自 backend/data/mineru_results/{doc_id}.json）。
+    # 这是比上传阶段 OCR figures 更完整的版面结果（figure body + caption 成对给出），
+    # 一旦用户点过深度解析，速览图表解读应当自动升舱使用它。
+    if not adapter_results:
+        deep_parse_figures = _load_deep_parse_figures(doc_id)
+        if deep_parse_figures:
+            adapter_results.extend(deep_parse_figures)
+            source = "mineru_deep_parse"
+            logger.info(
+                f"[FigureExtraction] MinerU deep-parse cache: got {len(deep_parse_figures)} blocks"
+            )
+
     # 4.1 尝试 MinerU Adapter（如果上传阶段有 MinerU 结果）
     # 注意：当前上传阶段不会自动调用 MinerU 获取 figure 数据
     # 这里检查 ocr_result 中是否有 MinerU 格式的数据
-    mineru_figures = doc_data.get("ocr_result", {}).get("figures", [])
+    mineru_figures = [] if adapter_results else doc_data.get("ocr_result", {}).get("figures", [])
     if mineru_figures:
         try:
             mineru_adapter = FigureAdapterFactory.get_adapter(FigureSource.MINERU)
@@ -253,6 +266,87 @@ def build_logical_figures_for_overview(
         pdf_doc.close()
 
     return selected
+
+
+def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
+    """从已重建的 MinerU 深度解析块索引中提取 figure/table，并配对邻近 caption。
+
+    刻意不重新解析 mineru_results 的原始 middle_json/content_list_json：那条
+    payload 的 bbox 坐标系因文档而异（可能是 page points，也可能是本文档特有的
+    0-1000 归一化坐标——取决于 MinerU 是否在结果里带了 width/height），
+    `mineru_block_index_service` 已经按页推断并做了正确缩放（悬浮翻译锚点用的
+    就是这份数据，已验证坐标准确）。这里直接复用它转换好的 block bbox，避免
+    重新实现一遍缩放逻辑、重蹈坐标错位的覆辙。
+    """
+    try:
+        from routes.document_routes import DATA_DIR
+        from services.block_index_service import load_block_index
+        from services.mineru_block_index_service import MINERU_BLOCK_INDEX_SOURCE
+    except Exception as exc:
+        logger.debug("[FigureExtraction] deep-parse figure imports unavailable: %s", exc)
+        return []
+
+    block_index = load_block_index(DATA_DIR, doc_id)
+    if not isinstance(block_index, dict) or block_index.get("source") != MINERU_BLOCK_INDEX_SOURCE:
+        return []
+
+    blocks: List[FigureBlock] = []
+    for page in block_index.get("pages") or []:
+        page_num = int(page.get("page") or 1)
+        page_blocks = page.get("blocks") or []
+
+        body_blocks = [b for b in page_blocks if b.get("type") in ("figure", "table")]
+        if not body_blocks:
+            continue
+
+        caption_candidates = [
+            {
+                "bbox": _normalize_bbox(b.get("bbox")),
+                "kind": "table" if str(b.get("mineru_type") or "").startswith("table") else "figure",
+                "caption": str(b.get("text") or "").strip(),
+                "source": "mineru_caption",
+            }
+            for b in page_blocks
+            if b.get("type") == "caption" and _normalize_bbox(b.get("bbox"))
+        ]
+
+        for idx, body in enumerate(body_blocks):
+            body_bbox = _normalize_bbox(body.get("bbox"))
+            if not body_bbox:
+                continue
+            kind = "table" if body.get("type") == "table" else "figure"
+            caption = _match_caption_to_body(body_bbox, kind, caption_candidates)
+            caption_bbox = caption.get("bbox") if caption else None
+            caption_text = (caption or {}).get("caption") or ""
+            if not caption_text and kind == "figure":
+                # MinerU 的 content_list.json 格式没有独立 caption 块，figure 的
+                # caption 文本直接内嵌在块自己的 text 字段里（_convert_mineru_item
+                # 找不到文本时才会回退成占位符 "Figure"）。table 的 text 字段是
+                # HTML 表体和 caption 拼接后的原始文本，不适合直接当 caption 用，
+                # 表格解读留给 RAG/table_aware_service 处理，这里不取。
+                body_text = str(body.get("text") or "").strip()
+                if body_text and body_text != "Figure":
+                    caption_text = body_text
+            full_bbox = _merge_bboxes([body_bbox, caption_bbox]) if caption_bbox else body_bbox
+
+            blocks.append(FigureBlock(
+                figure_id=body.get("block_id") or f"mineru_deep_{kind}_p{page_num}_{idx}",
+                page_idx=page_num - 1,
+                figure_index=_caption_display_label(caption_text),
+                caption_text=caption_text,
+                raw_bboxes=[body_bbox],
+                body_bbox_page_pts=body_bbox,
+                full_bbox_page_pts=full_bbox,
+                source=FigureSource.MINERU,
+                confidence=0.85,
+                source_metadata={
+                    "adapter": "mineru_deep_parse",
+                    "block_id": body.get("block_id"),
+                    "mineru_type": body.get("mineru_type"),
+                },
+            ))
+
+    return blocks
 
 
 def _build_figures_from_yolo_layout(pdf_doc, figures: list) -> List[FigureBlock]:

@@ -67,6 +67,12 @@ def create_index(
     pages: Optional[list] = None,
     structured_table_bundles: Optional[list] = None,
     summary_api_key: Optional[str] = None,
+    summary_model: str = "gpt-4o-mini",
+    summary_provider: str = "openai",
+    summary_api_host: str = "",
+    index_source: str = "pdf_native",
+    index_meta: Optional[dict] = None,
+    build_semantic_groups: bool = True,
 ):
     """Wrapper to build vector index with validation"""
     embedding_model = validate_embedding_model(embedding_model)
@@ -80,6 +86,12 @@ def create_index(
         pages=pages,
         structured_table_bundles=structured_table_bundles,
         summary_api_key=summary_api_key,
+        summary_model=summary_model,
+        summary_provider=summary_provider,
+        summary_api_host=summary_api_host,
+        index_source=index_source,
+        index_meta=index_meta,
+        build_semantic_groups=build_semantic_groups,
     )
 
 

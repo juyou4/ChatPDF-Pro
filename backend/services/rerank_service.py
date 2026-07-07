@@ -26,6 +26,9 @@ class RerankService:
 
     LOCAL_LOAD_FAILURE_TTL_SECONDS = 300.0
     LOCAL_ALLOW_DOWNLOAD_ENV = "CHATPDF_LOCAL_RERANK_ALLOW_DOWNLOAD"
+    RERANK_CHUNK_CHAR_LIMIT = 1800
+    RERANK_CHUNK_OVERLAP = 180
+    RERANK_MAX_CHUNKS_PER_CANDIDATE = 6
 
     def __init__(self):
         self._cache = {}
@@ -36,6 +39,83 @@ class RerankService:
     def _candidate_text(item: dict) -> str:
         text = (item.get("rerank_text") or item.get("chunk") or "").strip()
         return text or (item.get("chunk") or "")
+
+    @classmethod
+    def _split_long_rerank_text(cls, text: str) -> List[str]:
+        value = " ".join(str(text or "").split())
+        limit = max(400, int(cls.RERANK_CHUNK_CHAR_LIMIT))
+        if len(value) <= limit:
+            return [value] if value else []
+        overlap = max(0, min(int(cls.RERANK_CHUNK_OVERLAP), limit // 3))
+        chunks: List[str] = []
+        start = 0
+        while start < len(value) and len(chunks) < cls.RERANK_MAX_CHUNKS_PER_CANDIDATE:
+            end = min(len(value), start + limit)
+            if end < len(value):
+                boundary = max(value.rfind("。", start, end), value.rfind(".", start, end), value.rfind("\n", start, end))
+                if boundary > start + limit * 0.55:
+                    end = boundary + 1
+            chunk = value[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(value):
+                break
+            start = max(end - overlap, start + 1)
+        return chunks or [value[:limit]]
+
+    @classmethod
+    def _expand_candidates_for_rerank(cls, candidates: List[dict]) -> tuple[List[dict], bool]:
+        expanded: List[dict] = []
+        used_chunking = False
+        for parent_idx, item in enumerate(candidates):
+            text = cls._candidate_text(item)
+            pieces = cls._split_long_rerank_text(text)
+            if len(pieces) > 1:
+                used_chunking = True
+            for chunk_idx, piece in enumerate(pieces or [""]):
+                child = dict(item)
+                child["rerank_text"] = piece
+                child["_rerank_parent_index"] = parent_idx
+                child["_rerank_chunk_index"] = chunk_idx
+                child["_rerank_chunk_count"] = len(pieces)
+                child["_rerank_original_chars"] = len(text)
+                expanded.append(child)
+        return expanded, used_chunking
+
+    @classmethod
+    def _aggregate_chunked_rerank_results(cls, reranked: List[dict], originals: List[dict]) -> List[dict]:
+        best_by_parent: dict[int, dict] = {}
+        for item in reranked:
+            try:
+                parent_idx = int(item.get("_rerank_parent_index"))
+            except (TypeError, ValueError):
+                continue
+            current = best_by_parent.get(parent_idx)
+            score = float(item.get("rerank_score", item.get("similarity", 0.0)) or 0.0)
+            current_score = float(current.get("rerank_score", current.get("similarity", 0.0)) or 0.0) if current else float("-inf")
+            if current is None or score > current_score:
+                best_by_parent[parent_idx] = item
+
+        aggregated: List[dict] = []
+        for parent_idx, original in enumerate(originals):
+            item = dict(original)
+            best = best_by_parent.get(parent_idx)
+            if best:
+                for key in ("rerank_score", "similarity", "similarity_percent", "reranked", "rerank_method", "combined_score"):
+                    if key in best:
+                        item[key] = best[key]
+                chunk_count = int(best.get("_rerank_chunk_count") or 1)
+                if chunk_count > 1:
+                    item["rerank_chunked"] = True
+                    item["rerank_chunk_count"] = chunk_count
+                    item["rerank_best_chunk_index"] = int(best.get("_rerank_chunk_index") or 0)
+                    item["rerank_original_chars"] = int(best.get("_rerank_original_chars") or 0)
+            else:
+                item.setdefault("rerank_score", item.get("similarity", 0.0))
+            aggregated.append(item)
+        aggregated.sort(key=lambda x: x.get("rerank_score", x.get("similarity", 0.0)), reverse=True)
+        cls._normalize_rerank_scores(aggregated)
+        return aggregated
 
     @classmethod
     def _allow_local_model_download(cls) -> bool:
@@ -291,6 +371,16 @@ class RerankService:
 
         model_name = model_name or "BAAI/bge-reranker-base"
         provider = (provider or "local").lower()
+        original_candidates = list(candidates)
+        rerank_candidates, used_chunking = self._expand_candidates_for_rerank(original_candidates)
+        if used_chunking:
+            logger.info(
+                "[RerankService] 长证据切片: 原候选=%s, rerank片段=%s, limit=%s",
+                len(original_candidates),
+                len(rerank_candidates),
+                self.RERANK_CHUNK_CHAR_LIMIT,
+            )
+        candidates_for_provider = rerank_candidates if used_chunking else candidates
 
         try:
             # LLM rerank 模式：使用通用聊天模型评分
@@ -303,7 +393,8 @@ class RerankService:
                 llm_model = model_name
                 if ":" in model_name:
                     llm_provider, llm_model = model_name.split(":", 1)
-                return self._rerank_llm(query, candidates, llm_model, actual_key, endpoint, llm_provider, timeout)
+                result = self._rerank_llm(query, candidates_for_provider, llm_model, actual_key, endpoint, llm_provider, timeout)
+                return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
 
             # 云端 provider 需要 API Key，从 Key 池中随机选择一个有效 Key
             if provider in self.CLOUD_RERANK_PROVIDERS:
@@ -312,15 +403,19 @@ class RerankService:
                     raise ValueError(f"{provider} rerank 需要提供 api_key")
 
                 if provider == "cohere":
-                    return self._rerank_cohere(query, candidates, model_name, actual_key, endpoint, timeout)
+                    result = self._rerank_cohere(query, candidates_for_provider, model_name, actual_key, endpoint, timeout)
+                    return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
                 if provider == "jina":
-                    return self._rerank_jina(query, candidates, model_name, actual_key, endpoint, timeout)
+                    result = self._rerank_jina(query, candidates_for_provider, model_name, actual_key, endpoint, timeout)
+                    return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
 
                 # OpenAI 兼容的云端 rerank provider（硅基流动、阿里云等）
-                return self._rerank_openai_like(query, candidates, model_name, actual_key, endpoint, provider, timeout)
+                result = self._rerank_openai_like(query, candidates_for_provider, model_name, actual_key, endpoint, provider, timeout)
+                return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
 
             # 默认走本地 CrossEncoder
-            return self._rerank_local(query, candidates, model_name)
+            result = self._rerank_local(query, candidates_for_provider, model_name)
+            return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
         except Exception as e:
             # 记录错误日志后回退到原有排序
             if isinstance(e, LocalRerankModelUnavailable):

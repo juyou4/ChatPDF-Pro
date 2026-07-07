@@ -53,9 +53,11 @@ echo   [✓] 环境检查通过
 :: ==================== 清理旧进程 ====================
 echo   [▶] 清理旧进程...
 
-:: 清理端口 8000
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING 2^>nul') do (
-    taskkill /F /PID %%a >nul 2>&1
+:: 清理 Web 开发后端和桌面后端常用端口
+for %%p in (8000 8001 8002 8003 8004 8005) do (
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
+        taskkill /F /PID %%a >nul 2>&1
+    )
 )
 
 :: 清理 Python 缓存
@@ -313,9 +315,11 @@ npm run dev
 echo.
 echo   [▶] 正在停止服务...
 
-:: 清理端口 8000
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING 2^>nul') do (
-    taskkill /F /PID %%a >nul 2>&1
+:: 清理 Web 开发后端和桌面后端常用端口
+for %%p in (8000 8001 8002 8003 8004 8005) do (
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
+        taskkill /F /PID %%a >nul 2>&1
+    )
 )
 
 echo   [✓] 已停止所有服务
@@ -342,8 +346,10 @@ pause
 exit /b 1
 
 :BACKFAIL
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING 2^>nul') do (
-    taskkill /F /PID %%a >nul 2>&1
+for %%p in (8000 8001 8002 8003 8004 8005) do (
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
+        taskkill /F /PID %%a >nul 2>&1
+    )
 )
 echo   [✗] 后端启动失败，请检查错误信息
 echo.

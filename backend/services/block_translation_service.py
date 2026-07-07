@@ -19,14 +19,17 @@ TRANSLATION_CACHE_VERSION = 1
 TRANSLATION_PROMPT_VERSION = 4
 MAX_BLOCKS_PER_REQUEST = 24
 MAX_BLOCK_CHARS = 1800
-TRANSLATION_CONCURRENCY = 5
-MAX_TRANSLATION_CONCURRENCY = 8
+TRANSLATION_CONCURRENCY = 8
+MAX_TRANSLATION_CONCURRENCY = 16
 TABLE_BLOCK_TYPES = {"table"}
 
 _RE_MARKDOWN_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_MARKDOWN_TABLE_SEPARATOR = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
 _RE_LATEX_COMMAND = re.compile(r"\\[A-Za-z]{2,}")
 _RE_EQUATION_SIGNAL = re.compile(r"(?:[_^]=?|[A-Za-z]\s*=|\\(?:frac|sum|prod|int|sqrt|begin|end)\b)")
+_RE_METADATA_DUMP_SIGNAL = re.compile(
+    r"(?s)^\s*[\{\[]?['\"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['\"]?\s*[:=]"
+)
 
 
 def get_translation_cache_dir(data_dir: Path | str) -> Path:
@@ -99,6 +102,8 @@ def get_cached_translations(
             continue
         if cached.get("prompt_version") != TRANSLATION_PROMPT_VERSION:
             continue
+        if not _is_valid_translation_record(cached):
+            continue
         items[block_id] = cached
     return {
         "doc_id": doc_id,
@@ -132,6 +137,23 @@ async def translate_blocks(
     block_map = flatten_blocks(block_index)
     cache = load_translation_cache(data_dir, doc_id)
     cache_items = cache.setdefault("items", {})
+    cache["last_call"] = {
+        "purpose": "block_translation",
+        "provider": provider,
+        "model": model,
+        "target_lang": normalized_target,
+        "requested_count": len(unique_ids),
+        "force": bool(force),
+        "updated_at": time.time(),
+    }
+    logger.info(
+        "[AI-Audit] purpose=block_translation doc=%s provider=%s model=%s requested=%s force=%s",
+        doc_id,
+        provider,
+        model,
+        len(unique_ids),
+        bool(force),
+    )
 
     result_items: dict[str, Any] = {}
     missing: list[dict[str, Any]] = []
@@ -153,9 +175,12 @@ async def translate_blocks(
             and cached.get("prompt_version") == TRANSLATION_PROMPT_VERSION
             and cached.get("model") == model
             and cached.get("provider") == provider
+            and _is_valid_translation_record(cached)
         ):
             result_items[block_id] = cached
             continue
+        if cached and not _is_valid_translation_record(cached):
+            cache_items.pop(cache_key, None)
         missing.append({
             "block_id": block_id,
             "type": block.get("type") or "paragraph",
@@ -179,7 +204,7 @@ async def translate_blocks(
                 if not block:
                     continue
                 translation = str(payload.get("translation") or "").strip()
-                if not translation:
+                if not _is_valid_translation_text(translation):
                     continue
                 record = {
                     "block_id": block_id,
@@ -211,6 +236,14 @@ async def translate_blocks(
                 concurrency=concurrency,
                 on_item=persist_generated_item,
             )
+            logger.info(
+                "[AI-Audit] purpose=block_translation doc=%s provider=%s model=%s status=success generated=%s failed=%s",
+                doc_id,
+                provider,
+                model,
+                len(completed_block_ids),
+                len(missing) - len(completed_block_ids),
+            )
         except asyncio.CancelledError:
             save_translation_cache(data_dir, doc_id, cache)
             raise
@@ -223,6 +256,13 @@ async def translate_blocks(
         save_translation_cache(data_dir, doc_id, cache)
     else:
         failed_block_ids = []
+        logger.info(
+            "[AI-Audit] purpose=block_translation doc=%s provider=%s model=%s status=cache_hit count=%s",
+            doc_id,
+            provider,
+            model,
+            len(result_items),
+        )
 
     return {
         "doc_id": doc_id,
@@ -340,14 +380,20 @@ async def _generate_single_plain_translation(
         model=model,
         provider=provider,
         endpoint=endpoint,
-        max_tokens=max(600, min(4096, len(source) * 2)),
+        max_tokens=_estimate_translation_max_tokens(source),
         temperature=0.2,
         purpose="translation",
     )
     if isinstance(response, dict) and response.get("error"):
         raise RuntimeError(response.get("error"))
 
-    translation = _clean_translation_text(_extract_content(response))
+    content = _extract_content(response)
+    if not content.strip():
+        raise RuntimeError("模型未返回译文正文")
+
+    translation = _clean_translation_text(content)
+    if not _is_valid_translation_text(translation):
+        raise RuntimeError("模型返回了无效译文")
     return {
         block_id: {
             "translation": translation or source,
@@ -364,6 +410,13 @@ def _get_translation_mode(block: dict[str, Any], text: str) -> str:
     if _looks_formula_dense(text):
         return "formula_guard"
     return "plain"
+
+
+def _estimate_translation_max_tokens(source: str) -> int:
+    text = str(source or "")
+    # 英文论文翻译成中文通常不会超过原字符数对应 token 的 1.2-1.5 倍；
+    # 短标题/图注不再给 600 token 的大上限，减少供应商调度延迟。
+    return max(160, min(3072, int(len(text) * 1.45) + 96))
 
 
 def _looks_like_markdown_table(text: str) -> bool:
@@ -401,7 +454,27 @@ def _extract_content(response: Any) -> str:
             message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
             if isinstance(message.get("content"), str):
                 return message["content"]
+        return ""
     return str(response or "")
+
+
+def _is_valid_translation_record(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return _is_valid_translation_text(record.get("translation"))
+
+
+def _is_valid_translation_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if _RE_METADATA_DUMP_SIGNAL.search(text):
+        return False
+    if "_used_provider" in text and "_usage_meta" in text:
+        return False
+    if "completion_tokens" in text and "prompt_tokens" in text and "translation" not in text[:80].lower():
+        return False
+    return True
 
 
 def _strip_markdown_fence(content: str) -> str:

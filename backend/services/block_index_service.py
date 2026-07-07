@@ -16,7 +16,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-BLOCK_INDEX_VERSION = 6
+BLOCK_INDEX_VERSION = 10
+_GENERIC_TOC_TITLES = {
+    "全文",
+    "全文书签",
+    "full text",
+    "fulltext",
+    "document",
+    "article",
+    "paper",
+    "contents",
+    "content",
+}
 
 _RE_NUMBERED_HEADING = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:\.?\s+)(.+)$")
 _RE_ROMAN_HEADING = re.compile(r"^\s*([IVXLCM]+)\.\s+(.+)$")
@@ -42,6 +53,24 @@ _RE_PUBLICATION_HEADER_CUE = re.compile(
 _RE_ALGORITHM_LINE = re.compile(
     r"^\s*(input|output|require|ensure|initialize|initialise|update|repeat|return|for\s+each|for\s+"
     r"|while\s+|if\s+|else\b|end\b|stage\s*\d+)\b",
+    re.IGNORECASE,
+)
+_RE_EMAIL_OR_URL = re.compile(r"(@|https?://|www\.)", re.IGNORECASE)
+_RE_AFFILIATION_CUE = re.compile(
+    r"\b(dept\.?|department|institute|university|college|school|academy|laborator(?:y|ies)|lab|"
+    r"research|center|centre|faculty|campus|microsoft|google|meta|amazon|tencent|alibaba|"
+    r"tsinghua|stanford|mit|berkeley|hong\s+kong|shenzhen|beijing|redmond)\b",
+    re.IGNORECASE,
+)
+_RE_REFERENCE_ENTRY = re.compile(
+    r"^\s*(?:\[\d+\]|\d+[\.)])\s+"
+    r"(?:[A-Z][A-Za-z'\-]+,\s+(?:[A-Z]\.|[A-Z][A-Za-z'\-]+)|"
+    r"(?:[A-Z]\.\s*)?[A-Z][A-Za-z'\-]+(?:\s+et\s+al\.?))",
+    re.IGNORECASE,
+)
+_RE_KEYWORDS_LINE = re.compile(r"^\s*keywords?\s*[:：]\s+.+", re.IGNORECASE)
+_RE_AUTHOR_INITIAL_REFERENCE = re.compile(
+    r"^\s*\d+[\.)]\s+[A-Z][A-Za-z'\-]+,\s+(?:[A-Z]\.\s*)+",
     re.IGNORECASE,
 )
 
@@ -196,49 +225,54 @@ def _extract_page_text_blocks(
             body_font_key=body_font_key,
             page_width=page_width,
         ):
-            text = _block_text(group_lines)
-            if len(text) < 2:
-                continue
+            for region_lines, layout_category in _split_line_group_by_layout_regions(group_lines, layout_regions or []):
+                text = _block_text(region_lines)
+                if len(text) < 2:
+                    continue
 
-            bbox = _merge_bboxes(
-                span.get("bbox")
-                for line in group_lines
-                for span in (line.get("spans", []) or [])
-            ) or _normalize_bbox(raw.get("bbox"))
-            if not bbox:
-                continue
+                bbox = _merge_bboxes(
+                    span.get("bbox")
+                    for line in region_lines
+                    for span in (line.get("spans", []) or [])
+                ) or _normalize_bbox(raw.get("bbox"))
+                if not bbox:
+                    continue
 
-            max_font = max(_collect_font_sizes([{"lines": group_lines}]) or [median_font])
-            is_bold = _line_is_bold(group_lines)
-            block_type, heading_level = _classify_text_block(
-                text,
-                max_font,
-                median_font,
-                bbox=bbox,
-                page_width=page_width,
-                page_height=page_height,
-                lines=group_lines,
-            )
-            if forced_heading and block_type != "heading" and _looks_like_heading_text(text):
-                block_type = "heading"
-                heading_level = _embedded_heading_level(text)
-            block = {
-                "block_id": f"p{page_number}_b{seq}",
-                "type": block_type,
-                "bbox": bbox,
-                "text": _limit_text(text, 2400),
-                "section_id": None,
-                "font_size": round(max_font, 2),
-                "is_bold": is_bold,
-                "line_count": len([line for line in group_lines if line.get("spans")]),
-                "font_key": _dominant_font_key(group_lines),
-            }
-            if forced_heading:
-                block["split_from_mixed_block"] = True
-            if heading_level:
-                block["level"] = heading_level
-            blocks.append(block)
-            seq += 1
+                max_font = max(_collect_font_sizes([{"lines": region_lines}]) or [median_font])
+                is_bold = _line_is_bold(region_lines)
+                block_type, heading_level = _classify_text_block(
+                    text,
+                    max_font,
+                    median_font,
+                    bbox=bbox,
+                    page_width=page_width,
+                    page_height=page_height,
+                    lines=region_lines,
+                )
+                if forced_heading and block_type != "heading" and _looks_like_heading_text(text):
+                    block_type = "heading"
+                    heading_level = _embedded_heading_level(text)
+                block = {
+                    "block_id": f"p{page_number}_b{seq}",
+                    "type": block_type,
+                    "bbox": bbox,
+                    "text": _limit_text(text, 2400),
+                    "section_id": None,
+                    "font_size": round(max_font, 2),
+                    "is_bold": is_bold,
+                    "line_count": len([line for line in region_lines if line.get("spans")]),
+                    "font_key": _dominant_font_key(region_lines),
+                }
+                if forced_heading:
+                    block["split_from_mixed_block"] = True
+                if layout_category:
+                    block["layout_region_hint"] = layout_category
+                    if layout_category != _dominant_line_layout_category(group_lines, layout_regions or []):
+                        block["split_from_layout_region"] = True
+                if heading_level:
+                    block["level"] = heading_level
+                blocks.append(block)
+                seq += 1
 
     _demote_adjacent_table_titles(blocks)
     _apply_layout_regions(blocks, layout_regions or [], page_width, page_height)
@@ -289,7 +323,7 @@ def _mark_repeated_page_artifacts(pages: list[dict[str, Any]]) -> None:
             if not text or not bbox:
                 continue
             y_mid = ((bbox[1] + bbox[3]) / 2.0) / max(page_height, 1.0)
-            if 0.12 < y_mid < 0.88:
+            if 0.18 < y_mid < 0.88:
                 continue
             norm = _normalize_repeated_artifact_text(text)
             if len(norm) < 10:
@@ -298,7 +332,7 @@ def _mark_repeated_page_artifacts(pages: list[dict[str, Any]]) -> None:
 
     for entries in candidates.values():
         page_nums = {page_num for page_num, _y_mid, _block in entries}
-        if len(page_nums) < 2:
+        if len(page_nums) < 3:
             continue
         entries = sorted(entries, key=lambda item: item[1])
         clusters: list[list[tuple[int, float, dict[str, Any]]]] = []
@@ -308,7 +342,7 @@ def _mark_repeated_page_artifacts(pages: list[dict[str, Any]]) -> None:
             else:
                 clusters[-1].append(entry)
         for cluster in clusters:
-            if len({page_num for page_num, _y_mid, _block in cluster}) < 2:
+            if len({page_num for page_num, _y_mid, _block in cluster}) < 3:
                 continue
             for _page_num, _y_mid, block in cluster:
                 block["type"] = "artifact"
@@ -450,17 +484,25 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
     if toc_items:
         for idx, item in enumerate(toc_items):
             page_num = item.get("page", 1)
+            title = _normalize_outline_title(item.get("title", ""))
+            if not title or _looks_like_non_section_noise(title):
+                continue
+            if int(page_num or 1) == 1 and _looks_like_front_matter_title(title):
+                continue
             first_block = _first_block_id_on_page(pages, page_num)
             outline.append({
-                "section_id": f"s{idx + 1}",
-                "title": _limit_text(item.get("title", ""), 180),
+                "section_id": f"s{len(outline) + 1}",
+                "title": _limit_text(title, 180),
                 "level": max(1, min(int(item.get("level", 1)), 6)),
                 "page": page_num,
                 "first_block": first_block,
                 "source": "toc",
             })
-        return outline
+        if _toc_outline_quality_ok(outline):
+            return _merge_bare_outline_labels(outline)
 
+    body_heading_seen = False
+    references_seen = False
     for page in pages:
         page_num = int(page.get("page", 1))
         page_width = float(page.get("width_pts") or 612.0)
@@ -468,11 +510,24 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
         for block in page.get("blocks", []):
             if block.get("type") != "heading":
                 continue
-            title = str(block.get("text") or "").strip()
+            title = _normalize_outline_title(block.get("text"))
             if not title or len(title) > 180:
                 continue
-            if _looks_like_layout_noise(title, _normalize_bbox(block.get("bbox")), page_width, page_height):
+            if references_seen and _looks_like_post_references_noise(title):
+                block["type"] = "artifact"
+                block.pop("level", None)
                 continue
+            if _looks_like_non_section_noise(title):
+                continue
+            if _looks_like_run_in_paragraph_heading(title):
+                continue
+            if page_num == 1 and not body_heading_seen and _looks_like_front_matter_title(title):
+                continue
+            if block.get("source") != "mineru_vlm" and _looks_like_layout_noise(title, _normalize_bbox(block.get("bbox")), page_width, page_height):
+                continue
+            body_heading_seen = True
+            if re.match(r"^\s*(references|bibliography)\s*$", title, re.IGNORECASE):
+                references_seen = True
             outline.append({
                 "section_id": f"s{len(outline) + 1}",
                 "title": title,
@@ -483,7 +538,7 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
             })
 
     if outline:
-        return outline[:80]
+        return _merge_bare_outline_labels(outline)[:80]
 
     first_page = pages[0].get("page", 1) if pages else 1
     return [{
@@ -494,6 +549,61 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
         "first_block": _first_block_id_on_page(pages, first_page),
         "source": "fallback",
     }]
+
+
+def _toc_outline_quality_ok(outline: list[dict[str, Any]]) -> bool:
+    if not outline:
+        return False
+    titles = [str(item.get("title") or "").strip() for item in outline]
+    if len(outline) == 1:
+        return False
+    useful_titles = [
+        title for title in titles
+        if title and re.sub(r"\s+", " ", title.lower()).strip() not in _GENERIC_TOC_TITLES
+    ]
+    return len(useful_titles) >= 2
+
+
+def _merge_bare_outline_labels(outline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(outline):
+        item = dict(outline[idx])
+        title = str(item.get("title") or "").strip()
+        next_item = dict(outline[idx + 1]) if idx + 1 < len(outline) else None
+        if next_item and _outline_items_should_merge(title, item, next_item):
+            next_title = str(next_item.get("title") or "").strip()
+            item["title"] = _limit_text(f"{title} {next_title}".strip(), 180)
+            idx += 1
+            title = str(item.get("title") or "").strip()
+            next_item = dict(outline[idx + 1]) if idx + 1 < len(outline) else None
+            if next_item and _outline_items_should_merge(title, item, next_item):
+                next_title = str(next_item.get("title") or "").strip()
+                item["title"] = _limit_text(f"{title} {next_title}".strip(), 180)
+                idx += 1
+        merged.append(item)
+        idx += 1
+
+    for new_idx, item in enumerate(merged):
+        item["section_id"] = f"s{new_idx + 1}"
+    return merged
+
+
+def _outline_items_should_merge(title: str, item: dict[str, Any], next_item: dict[str, Any]) -> bool:
+    next_title = str(next_item.get("title") or "").strip()
+    if not title or not next_title:
+        return False
+    if int(item.get("page") or 0) != int(next_item.get("page") or -1):
+        return False
+    if int(item.get("level") or 1) != int(next_item.get("level") or 1):
+        return False
+    if _RE_CANONICAL_HEADING.match(next_title) or _RE_NUMBERED_HEADING.match(next_title) or _RE_ROMAN_HEADING.match(next_title) or _RE_ALPHA_HEADING.match(next_title):
+        return False
+    if re.fullmatch(r"[A-Z](?:\.\d+)?|\d+(?:\.\d+)*", title):
+        return True
+    if re.match(r"^[A-Z]\.\d+\s+", title) and re.search(r"\b(of|for|with|and|or|to|from|Object)$", title):
+        return True
+    return False
 
 
 def _assign_sections(pages: list[dict[str, Any]], outline: list[dict[str, Any]]) -> None:
@@ -589,10 +699,29 @@ def _apply_layout_regions(
     if not blocks or not layout_regions:
         return
 
+    if _layout_regions_are_usable(layout_regions):
+        for block in blocks:
+            bbox = _normalize_bbox(block.get("bbox"))
+            text = str(block.get("text") or "").strip()
+            if not bbox or not text:
+                continue
+            region = _best_layout_region_for_bbox(bbox, layout_regions)
+            if not region:
+                block["layout_region"] = "Outside"
+                block["layout_excluded_from_outline"] = True
+                block["type"] = "artifact"
+                block.pop("level", None)
+                continue
+            _apply_yolo_region_type(block, region, page_height)
+        return
+
     title_regions = [r for r in layout_regions if r.get("category_name") == "Title"]
+    text_regions = [r for r in layout_regions if r.get("category_name") == "Text"]
     table_regions = [r for r in layout_regions if r.get("category_name") == "TableBody"]
     image_regions = [r for r in layout_regions if r.get("category_name") == "ImageBody"]
-    excluded_regions = table_regions + image_regions
+    abandon_regions = [r for r in layout_regions if r.get("category_name") == "Abandon"]
+    footnote_regions = [r for r in layout_regions if r.get("category_name") in {"TableFootnote", "EquationNumber"}]
+    excluded_regions = table_regions + image_regions + abandon_regions + footnote_regions
 
     for block in blocks:
         bbox = _normalize_bbox(block.get("bbox"))
@@ -606,12 +735,23 @@ def _apply_layout_regions(
             block["layout_score"] = excluded.get("score")
             block["layout_excluded_from_outline"] = True
             block.pop("level", None)
-            if _looks_like_region_label_noise(text) or block.get("type") == "heading":
+            if excluded.get("category_name") in {"Abandon", "TableFootnote", "EquationNumber"}:
+                block["type"] = "artifact"
+            elif _looks_like_region_label_noise(text) or block.get("type") == "heading":
                 block["type"] = "artifact"
             elif excluded.get("category_name") == "TableBody":
                 block["type"] = "table"
             elif excluded.get("category_name") == "ImageBody":
                 block["type"] = "figure"
+            continue
+
+        text_region = _best_overlapping_region(bbox, text_regions)
+        if text_region and _block_should_demote_inside_text_region(block, text_region):
+            block["layout_region"] = "Text"
+            block["layout_score"] = text_region.get("score")
+            block["layout_excluded_from_outline"] = True
+            block["type"] = "paragraph"
+            block.pop("level", None)
             continue
 
         title = _best_overlapping_region(bbox, title_regions)
@@ -638,6 +778,111 @@ def _best_overlapping_region(
         if best is None or score > best[0]:
             best = (score, region)
     return best[1] if best else None
+
+
+_YOLO_TEXTLIKE_CATEGORIES = {
+    "Title",
+    "Text",
+    "Abandon",
+    "ImageCaption",
+    "TableCaption",
+    "TableFootnote",
+    "EquationNumber",
+    "InterlineEquation",
+}
+_YOLO_KNOWN_CATEGORIES = _YOLO_TEXTLIKE_CATEGORIES | {"ImageBody", "TableBody"}
+_YOLO_STRICT_TEXT_CATEGORIES = {"Title", "Text", "Abandon"}
+
+
+def _layout_regions_are_usable(layout_regions: list[dict[str, Any]]) -> bool:
+    return any(_layout_region_category(region) in _YOLO_STRICT_TEXT_CATEGORIES for region in layout_regions or [])
+
+
+def _layout_region_category(region: dict[str, Any] | None) -> str:
+    return str((region or {}).get("category_name") or "").strip()
+
+
+def _best_layout_region_for_bbox(bbox: list[float], regions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    best: tuple[float, float, dict[str, Any]] | None = None
+    for region in regions or []:
+        category = _layout_region_category(region)
+        if category not in _YOLO_KNOWN_CATEGORIES:
+            continue
+        region_bbox = _normalize_bbox(region.get("bbox"))
+        if not region_bbox:
+            continue
+        coverage = _bbox_intersection_ratio(bbox, region_bbox)
+        center_inside = _bbox_center_inside(bbox, region_bbox)
+        if coverage < 0.10 and not center_inside:
+            continue
+        priority = _layout_category_priority(category)
+        score = coverage + (0.35 if center_inside else 0.0) + priority
+        model_score = float(region.get("score") or 0)
+        if best is None or (score, model_score) > (best[0], best[1]):
+            best = (score, model_score, region)
+    return best[2] if best else None
+
+
+def _layout_category_priority(category: str) -> float:
+    if category == "Abandon":
+        return 0.08
+    if category == "Title":
+        return 0.06
+    if category in {"TableBody", "ImageBody"}:
+        return 0.04
+    if category in {"TableCaption", "ImageCaption"}:
+        return 0.03
+    return 0.0
+
+
+def _apply_yolo_region_type(block: dict[str, Any], region: dict[str, Any], page_height: float) -> None:
+    category = _layout_region_category(region)
+    block["layout_region"] = category
+    block["layout_score"] = region.get("score")
+    block["layout_primary_classifier"] = "doclayout_yolo"
+
+    if category in {"Abandon", "TableFootnote", "EquationNumber"}:
+        block["type"] = "artifact"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
+        return
+
+    if category == "Text":
+        block["type"] = "paragraph"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
+        return
+
+    if category == "Title":
+        text = str(block.get("text") or "").strip()
+        block["type"] = "heading"
+        block["level"] = _layout_title_level(text, _normalize_bbox(block.get("bbox")) or [], page_height)
+        block.pop("layout_excluded_from_outline", None)
+        block["layout_promoted"] = True
+        return
+
+    if category == "TableBody":
+        block["type"] = "table"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
+        return
+
+    if category == "ImageBody":
+        block["type"] = "figure"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
+        return
+
+    if category in {"TableCaption", "ImageCaption"}:
+        block["type"] = "caption"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
+        return
+
+    if category == "InterlineEquation":
+        block["type"] = "paragraph"
+        block["layout_excluded_from_outline"] = True
+        block.pop("level", None)
 
 
 def _block_should_demote_for_layout(block: dict[str, Any], region: dict[str, Any]) -> bool:
@@ -672,6 +917,23 @@ def _block_should_promote_for_layout(
     return coverage >= 0.18 or _bbox_center_inside(bbox, region_bbox)
 
 
+def _block_should_demote_inside_text_region(block: dict[str, Any], region: dict[str, Any]) -> bool:
+    if block.get("type") != "heading" or not block.get("split_from_mixed_block"):
+        return False
+    text = " ".join(str(block.get("text") or "").split())
+    if not text:
+        return True
+    if _RE_CANONICAL_HEADING.match(text) or _RE_NUMBERED_HEADING.match(text) or _RE_ROMAN_HEADING.match(text) or _RE_ALPHA_HEADING.match(text):
+        return False
+    if len(text.split()) > 6:
+        return False
+    bbox = _normalize_bbox(block.get("bbox"))
+    region_bbox = _normalize_bbox(region.get("bbox"))
+    if not bbox or not region_bbox:
+        return False
+    return _bbox_center_inside(bbox, region_bbox) or _bbox_intersection_ratio(bbox, region_bbox) >= 0.60
+
+
 def _layout_title_level(text: str, bbox: list[float], page_height: float) -> int:
     explicit = _embedded_heading_level(text)
     if explicit == 1:
@@ -695,6 +957,53 @@ def _looks_like_region_label_noise(text: str) -> bool:
     if len(stripped) <= 40 and not stripped.endswith("."):
         return True
     return False
+
+
+def _split_line_group_by_layout_regions(
+    lines: list[dict[str, Any]],
+    layout_regions: list[dict[str, Any]],
+) -> list[tuple[list[dict[str, Any]], str]]:
+    valid_lines = [line for line in lines or [] if _line_text(line)]
+    if not valid_lines:
+        return []
+    if not _layout_regions_are_usable(layout_regions):
+        return [(valid_lines, "")]
+
+    groups: list[tuple[list[dict[str, Any]], str]] = []
+    current_lines: list[dict[str, Any]] = []
+    current_category = ""
+    for line in valid_lines:
+        category = _line_layout_category(line, layout_regions)
+        if current_lines and category != current_category:
+            groups.append((current_lines, current_category))
+            current_lines = []
+        current_lines.append(line)
+        current_category = category
+    if current_lines:
+        groups.append((current_lines, current_category))
+    return groups
+
+
+def _line_layout_category(line: dict[str, Any], layout_regions: list[dict[str, Any]]) -> str:
+    bbox = _line_bbox(line)
+    if not bbox:
+        return ""
+    region = _best_layout_region_for_bbox(bbox, layout_regions)
+    return _layout_region_category(region)
+
+
+def _dominant_line_layout_category(lines: list[dict[str, Any]], layout_regions: list[dict[str, Any]]) -> str:
+    if not _layout_regions_are_usable(layout_regions):
+        return ""
+    weights: dict[str, int] = {}
+    for line in lines or []:
+        category = _line_layout_category(line, layout_regions)
+        if not category:
+            continue
+        weights[category] = weights.get(category, 0) + max(1, len(_line_text(line)))
+    if not weights:
+        return ""
+    return max(weights.items(), key=lambda item: item[1])[0]
 
 
 def _bbox_intersection_ratio(inner: list[float], outer: list[float]) -> float:
@@ -854,12 +1163,23 @@ def _heading_level(
         return None
     if _looks_like_algorithm_line(text):
         return None
+    if _looks_like_non_section_noise(text):
+        return None
     if _looks_like_layout_noise(text, bbox, page_width, page_height):
         return None
 
     numbered = _RE_NUMBERED_HEADING.match(text)
     if numbered:
         number = numbered.group(1)
+        try:
+            first_number = int(number.split(".")[0])
+        except ValueError:
+            first_number = 0
+        suffix = numbered.group(2).strip()
+        if first_number > 50:
+            return None
+        if len(suffix) > 80:
+            return None
         if re.match(r"^\d{3,}(?:\.|$)", number) and _looks_like_publication_header_footer(text):
             return None
         return max(1, min(number.count(".") + 1, 4))
@@ -914,6 +1234,8 @@ def _looks_like_layout_noise(
         return True
     if _looks_like_algorithm_line(text):
         return True
+    if _looks_like_non_section_noise(text):
+        return True
     if re.match(r"^\s*\d{3,}\s+[A-Z]", text) and _looks_like_publication_header_footer(text):
         return True
     digit_ratio = sum(ch.isdigit() for ch in compact) / max(len(compact), 1)
@@ -952,6 +1274,116 @@ def _looks_like_algorithm_line(text: str) -> bool:
         return True
     if re.search(r"\b(stage|step)\s*\d+\b", stripped, re.IGNORECASE) and re.search(r"\b(update|initialize|input|output)\b", stripped, re.IGNORECASE):
         return True
+    return False
+
+
+def _looks_like_non_section_noise(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    if _RE_KEYWORDS_LINE.match(stripped):
+        return True
+    numbered = _RE_NUMBERED_HEADING.match(stripped)
+    if numbered:
+        try:
+            first_number = int(numbered.group(1).split(".")[0])
+        except ValueError:
+            first_number = 0
+        if first_number > 50 or len(numbered.group(2).strip()) > 80:
+            return True
+    if _looks_like_reference_entry(stripped):
+        return True
+    if _looks_like_affiliation_or_author_line(stripped):
+        return True
+    return False
+
+
+def _looks_like_front_matter_title(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    if _RE_NUMBERED_HEADING.match(stripped) or _RE_ROMAN_HEADING.match(stripped) or _RE_ALPHA_HEADING.match(stripped):
+        return False
+    return True
+
+
+def _normalize_outline_title(value: Any) -> str:
+    title = " ".join(str(value or "").split())
+    title = re.sub(r"^(\d+(?:\.\d+)*|[A-Z]|[IVXLCM]+)\s+(.+)$", r"\1 \2", title)
+    return _limit_text(title, 180)
+
+
+def _looks_like_run_in_paragraph_heading(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return False
+    if _RE_CANONICAL_HEADING.match(stripped) or _RE_NUMBERED_HEADING.match(stripped) or _RE_ROMAN_HEADING.match(stripped) or _RE_ALPHA_HEADING.match(stripped):
+        return False
+    words = stripped.split()
+    if len(words) > 12:
+        return True
+    if stripped.endswith(".") and len(words) >= 4:
+        return True
+    if re.search(r"\.\s+[A-Z]", stripped):
+        return True
+    if len(words) >= 9 and re.search(r"\[[0-9,\s]+\].*\b(is|are|was|were|has|have)\b", stripped, re.IGNORECASE):
+        return True
+    if len(words) >= 9 and re.search(r"\b(is|are|was|were)\s+(a|an|the|more)\b", stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+def _looks_like_reference_entry(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if _RE_REFERENCE_ENTRY.match(stripped):
+        return True
+    if _RE_AUTHOR_INITIAL_REFERENCE.match(stripped):
+        return True
+    numbered = _RE_NUMBERED_HEADING.match(stripped)
+    if numbered:
+        try:
+            first_number = int(numbered.group(1).split(".")[0])
+        except ValueError:
+            first_number = 0
+        if first_number > 50:
+            return True
+        if len(numbered.group(2)) > 80 and re.search(r"\bet\s+al\.?\b|,\s+[A-Z]\.", stripped, re.IGNORECASE):
+            return True
+    return bool(re.match(r"^\s*\d+[\.)]?\s+", stripped) and re.search(r"\bet\s+al\.?\b", stripped, re.IGNORECASE))
+
+
+def _looks_like_post_references_noise(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if not stripped:
+        return True
+    if _RE_CANONICAL_HEADING.match(stripped):
+        return False
+    return bool(_looks_like_reference_entry(stripped) or re.match(r"^\s*(?:\[\d+\]|\d+[\.)])\s+", stripped))
+
+
+def _looks_like_affiliation_or_author_line(text: str) -> bool:
+    stripped = " ".join(str(text or "").split())
+    if _RE_EMAIL_OR_URL.search(stripped):
+        return True
+    words = stripped.split()
+    if not words:
+        return False
+    if _RE_AFFILIATION_CUE.search(stripped):
+        return True
+    comma_count = stripped.count(",")
+    # Author byline: many comma-separated names, often with superscript digits or *.
+    if comma_count >= 2 and re.search(r"[A-Za-z][\w'\-]*\s*\d*(?:\*|†)?\s*,", stripped):
+        return True
+    # Affiliation footnote line: "1 Dept. of ..." / "4 The Chinese University ..."
+    if re.match(r"^\s*\d+\s+[A-Z]", stripped) and len(words) <= 18:
+        institution_words = {"dept", "department", "institute", "university", "college", "school", "academy", "research", "center", "centre", "laboratory", "lab"}
+        normalized = re.sub(r"[^a-z\s]", " ", stripped.lower())
+        if any(word in normalized.split() for word in institution_words):
+            return True
     return False
 
 

@@ -72,6 +72,23 @@ class _StructuredModelNotFoundClient:
         raise _Exc()
 
 
+class _InvalidParameterUntilShortClient:
+    """SiliconFlow 风格的泛化 400，输入足够短后成功。"""
+
+    def __init__(self, max_chars: int):
+        self.max_chars = max_chars
+        self.calls = []
+        self.embeddings = self
+
+    def create(self, model, input):
+        batch = list(input)
+        self.calls.append({"model": model, "input": batch})
+        if any(len(item) > self.max_chars for item in batch):
+            raise RuntimeError("Error code: 400 - {'code': 20015, 'message': 'The parameter is invalid. Please check again.'}")
+        data = [SimpleNamespace(embedding=[1.0, 2.0]) for _ in batch]
+        return SimpleNamespace(data=data)
+
+
 def test_remote_embedding_batches_large_requests(monkeypatch):
     """大批量文本应自动拆分为多次 embeddings 请求，避免单次 token 超限。"""
     fake_client = _FakeOpenAIClient()
@@ -128,6 +145,33 @@ def test_remote_embedding_truncates_single_oversized_input(monkeypatch):
     assert len(fake_client.calls) == 1
     sent_text = fake_client.calls[0]["input"][0]
     assert len(sent_text) < len(long_text)
+
+
+def test_remote_embedding_shrinks_siliconflow_invalid_parameter_error(monkeypatch):
+    """SiliconFlow code=20015 这类泛化参数错误也应继续缩短单条输入。"""
+    fake_client = _InvalidParameterUntilShortClient(max_chars=1200)
+
+    monkeypatch.setattr(
+        embedding_service_module,
+        "resolve_model_id",
+        lambda _model_id: (
+            "BAAI/bge-m3",
+            {
+                "provider": "openai",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "max_tokens": 8192,
+            },
+        ),
+    )
+    monkeypatch.setattr(embedding_service_module, "select_api_key", lambda _k: "sk-test")
+    monkeypatch.setattr(embedding_service_module, "_get_openai_client", lambda *_args, **_kwargs: fake_client)
+
+    embed_fn = get_embedding_function("silicon:BAAI/bge-m3", api_key="sk-user")
+    vectors = embed_fn(["a" * 30000])
+
+    assert vectors.shape[0] == 1
+    assert len(fake_client.calls) > 1
+    assert len(fake_client.calls[-1]["input"][0]) <= fake_client.max_chars
 
 
 def test_get_chunk_params_respects_small_max_context():

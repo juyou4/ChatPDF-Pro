@@ -23,7 +23,12 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from config import settings
 from services.chat_service import call_ai_api
 from services.formula_text import build_formula_alias_text, looks_formula_like, normalize_formula_text, technical_anchor_matches
-from services.query_analyzer import extract_hl_ll_terms, extract_document_bilingual_terms, analyze_query_type
+from services.query_analyzer import (
+    analyze_evidence_need,
+    analyze_query_type,
+    extract_document_bilingual_terms,
+    extract_hl_ll_terms,
+)
 from services.retrieval_tool_schemas import TOOL_SCHEMAS
 from services.retrieval_tools import DocContext, execute_tool
 from utils.middleware import RetryMiddleware
@@ -2270,6 +2275,16 @@ class RetrievalAgent:
         if not self._doc_ctx or not self._doc_ctx.semantic_groups:
             return chunk
 
+        meta = self._extract_tool_chunk_meta(chunk)
+        chunk_type = str(meta.get("chunk_type") or "").strip().lower()
+        if (
+            chunk_type in {"table", "table_row", "table_cell", "caption"}
+            or meta.get("table_id")
+            or meta.get("table_bundle_id")
+            or "[structured table" in str(chunk or "").lower()
+        ):
+            return chunk
+
         # 从格式化 chunk 中提取 group_id
         import re as _re
         gid_match = _re.search(r"group_id[:：]\s*(\S+)", chunk[:300])
@@ -2336,6 +2351,15 @@ class RetrievalAgent:
             "table_id",
             "table_bundle_id",
             "evidence_unit_id",
+            "table_caption",
+            "table_header",
+            "numeric_table_exact_context_row_text",
+            "numeric_table_exact_context_caption",
+            "numeric_table_exact_context_header",
+            "table_row_boundary_text",
+            "table_row_raw_text",
+            "table_row_evidence",
+            "table_row_slice_kind",
         ):
             value = meta.get(key)
             if value not in (None, ""):
@@ -2678,6 +2702,10 @@ class RetrievalAgent:
         anchors = self._extract_final_context_anchor_terms(question, max_terms=16)
         if len(anchors) < 2 or len(context_parts) < 2:
             return context_parts, context_details, {"applied": False, "anchor_count": len(anchors)}
+        try:
+            numeric_table_query = "numeric_table" in (analyze_evidence_need(question) or [])
+        except Exception:
+            numeric_table_query = bool(re.search(r"\btable\s*\d+\b|表\s*\d+", question or "", re.I))
 
         scored: list[dict[str, Any]] = []
         for idx, part in enumerate(context_parts):
@@ -2688,6 +2716,12 @@ class RetrievalAgent:
                 if technical_anchor_matches(anchor, text)
             ]
             detail = context_details[idx] if idx < len(context_details) else {}
+            chunk_type = str((detail or {}).get("chunk_type") or "").strip().lower()
+            table_evidence = (
+                chunk_type in {"table", "table_row", "table_cell"}
+                or bool((detail or {}).get("table_id") or (detail or {}).get("table_bundle_id"))
+                or "[structured table" in text.lower()
+            )
             scored.append({
                 "idx": idx,
                 "part": part,
@@ -2696,6 +2730,7 @@ class RetrievalAgent:
                 "match_count": len(matched),
                 "page": self._extract_page_no_from_chunk(text),
                 "retrieval_type": str((detail or {}).get("retrieval_type") or ""),
+                "table_evidence": table_evidence,
             })
 
         selected: list[int] = []
@@ -2708,9 +2743,11 @@ class RetrievalAgent:
             for item_idx in remaining:
                 item = scored[item_idx]
                 new_matches = [anchor for anchor in item["matched"] if anchor not in covered]
-                # fetch_group 往往是更完整的语义单元；只在新增锚点相同的情况下轻微优先。
-                fetch_bonus = 1 if item["retrieval_type"] == "agent_fetch_group" else 0
-                key = (len(new_matches), item["match_count"], fetch_bonus, -int(item["idx"]))
+                # fetch_group 往往是更完整的语义单元；但数值表格题更需要表格/表行
+                # 证据进入最终上下文，避免 digest 把精确数值证据挤出 RAGAS/context_segments。
+                table_bonus = 2 if numeric_table_query and item.get("table_evidence") else 0
+                fetch_bonus = 1 if item["retrieval_type"] == "agent_fetch_group" and not numeric_table_query else 0
+                key = (len(new_matches), item["match_count"], table_bonus, fetch_bonus, -int(item["idx"]))
                 if best_key is None or key > best_key:
                     best_key = key
                     best_idx = item_idx

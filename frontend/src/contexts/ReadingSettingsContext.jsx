@@ -6,14 +6,14 @@ export const READING_SETTINGS_DEFAULTS = {
     aiAutoProcess: true,
     autoOutlineSummary: true,
     autoPretranslate: false,
-    pretranslateConcurrency: 5,
+    pretranslateConcurrency: 8,
     overviewDefaultDepth: 'standard',
 };
 
 const clampConcurrency = (value) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return READING_SETTINGS_DEFAULTS.pretranslateConcurrency;
-    return Math.max(1, Math.min(8, Math.round(numeric)));
+    return Math.max(1, Math.min(16, Math.round(numeric)));
 };
 
 const normalizeDepth = (value) => {
@@ -32,13 +32,18 @@ export const ReadingSettingsProvider = ({ children }) => {
 
     useEffect(() => {
         try {
+            const migratedConcurrency = localStorage.getItem('_migrated_pretranslate_concurrency_v2') === '1';
             const saved = localStorage.getItem('readingSettings');
             if (saved) {
                 const settings = JSON.parse(saved);
                 if (settings.aiAutoProcess !== undefined) setAiAutoProcess(Boolean(settings.aiAutoProcess));
                 if (settings.autoOutlineSummary !== undefined) setAutoOutlineSummary(Boolean(settings.autoOutlineSummary));
                 if (settings.autoPretranslate !== undefined) setAutoPretranslateState(Boolean(settings.autoPretranslate));
-                if (settings.pretranslateConcurrency !== undefined) setPretranslateConcurrencyState(clampConcurrency(settings.pretranslateConcurrency));
+                if (settings.pretranslateConcurrency !== undefined) {
+                    const concurrency = clampConcurrency(settings.pretranslateConcurrency);
+                    setPretranslateConcurrencyState(!migratedConcurrency && concurrency === 5 ? 8 : concurrency);
+                    localStorage.setItem('_migrated_pretranslate_concurrency_v2', '1');
+                }
                 if (settings.overviewDefaultDepth !== undefined) setOverviewDefaultDepthState(normalizeDepth(settings.overviewDefaultDepth));
                 return;
             }
@@ -49,7 +54,9 @@ export const ReadingSettingsProvider = ({ children }) => {
             }
             const legacyConcurrency = localStorage.getItem('pretranslateConcurrency');
             if (legacyConcurrency !== null) {
-                setPretranslateConcurrencyState(clampConcurrency(JSON.parse(legacyConcurrency)));
+                const concurrency = clampConcurrency(JSON.parse(legacyConcurrency));
+                setPretranslateConcurrencyState(!migratedConcurrency && concurrency === 5 ? 8 : concurrency);
+                localStorage.setItem('_migrated_pretranslate_concurrency_v2', '1');
             }
             const legacyOverviewDepth = localStorage.getItem('overviewDepth');
             if (legacyOverviewDepth !== null) {

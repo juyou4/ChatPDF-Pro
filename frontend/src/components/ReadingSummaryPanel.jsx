@@ -35,6 +35,7 @@ function ReadingSummaryPanel({
   onJump,
   onRetry,
   source = '',
+  generationError = '',
   retrying = false,
   darkMode = false,
 }) {
@@ -213,9 +214,11 @@ function ReadingSummaryPanel({
             <div className="flex items-start gap-2">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <div className="min-w-0 flex-1">
-                <div className="font-semibold">AI 总结未生成，当前展示基础目录。</div>
+                <div className="font-semibold">AI 总结未生成，当前展示基础结果。</div>
                 <div className={`mt-1 ${darkMode ? 'text-amber-100/70' : 'text-amber-800/75'}`}>
-                  配置模型后可重新生成更完整的中文结构化总结。
+                  {generationError
+                    ? `模型生成失败：${generationError}`
+                    : '可重新生成更完整的中文结构化总结。'}
                 </div>
               </div>
             </div>

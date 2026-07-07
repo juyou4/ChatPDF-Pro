@@ -44,6 +44,7 @@ class DocContext:
         rerank_provider: str = "",
         rerank_api_key: str = "",
         rerank_endpoint: str = "",
+        chunk_metadata: Optional[List[dict]] = None,
     ):
         self.doc_id = doc_id
         self.full_text = full_text
@@ -57,6 +58,7 @@ class DocContext:
         self.rerank_provider = rerank_provider or ""
         self.rerank_api_key = rerank_api_key or ""
         self.rerank_endpoint = rerank_endpoint or ""
+        self.chunk_metadata = chunk_metadata or []
 
 
 def execute_tool(
@@ -395,10 +397,35 @@ def _has_table_evidence(item: dict) -> bool:
     return "[structured table bundle]" in _result_text(item).lower()
 
 
+def _has_table_row_evidence(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    chunk_type = str(item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    if chunk_type == "table_row":
+        return True
+    if item.get("table_row_shard"):
+        return True
+    if any(
+        item.get(key)
+        for key in (
+            "table_row_evidence",
+            "numeric_table_exact_context_row_text",
+            "table_row_boundary_text",
+            "table_row_raw_text",
+            "row_text",
+        )
+    ):
+        return True
+    text = _result_text(item).lower()
+    return "[structured table row shard]" in text
+
+
 def _ensure_table_result_selected(query: str, selected: list[dict], candidates: list[dict], limit: int) -> list[dict]:
     if not _looks_like_table_query(query) or not candidates:
         return selected[:limit]
-    if any(_has_table_evidence(item) for item in selected):
+    selected_has_table = any(_has_table_evidence(item) for item in selected)
+    selected_has_row = any(_has_table_row_evidence(item) for item in selected)
+    if selected_has_row:
         return selected[:limit]
 
     scored_tables: list[tuple[float, int, dict]] = []
@@ -409,6 +436,13 @@ def _ensure_table_result_selected(query: str, selected: list[dict], candidates: 
         if not text:
             continue
         score = _tool_result_score(query, text, item.get("similarity", item.get("score", 0.0)))
+        is_row = _has_table_row_evidence(item)
+        if selected_has_table and not is_row:
+            continue
+        if is_row:
+            score += 0.9
+        if item.get("table_row_shard") or "[structured table row shard]" in text.lower():
+            score += 0.35
         if item.get("structured_table_bundle") or "[structured table bundle]" in text.lower():
             score += 0.45
         if item.get("evidence_units") or item.get("cell_evidence_units"):
@@ -565,6 +599,124 @@ def _build_tool_candidate_meta(
         if table_id:
             meta.setdefault("table_id", table_id)
     return meta
+
+
+def _structured_table_regex_text(chunk_text: str, metadata: dict) -> str:
+    if not isinstance(metadata, dict):
+        metadata = {}
+    parts = [
+        chunk_text,
+        metadata.get("table_id"),
+        metadata.get("table_caption"),
+        metadata.get("table_header"),
+        metadata.get("numeric_table_exact_context_caption"),
+        metadata.get("numeric_table_exact_context_header"),
+        metadata.get("numeric_table_exact_context_row_text"),
+        metadata.get("row_text"),
+        metadata.get("table_row_raw_text"),
+        metadata.get("table_body_markdown"),
+    ]
+    for unit in metadata.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        parts.extend([
+            unit.get("content"),
+            unit.get("row_text"),
+            unit.get("raw_row_text"),
+            unit.get("table_header"),
+        ])
+        for cell in unit.get("cell_evidence_units") or []:
+            if isinstance(cell, dict):
+                parts.extend([
+                    cell.get("header_path"),
+                    cell.get("column_header"),
+                    cell.get("content"),
+                    cell.get("cell_text"),
+                ])
+    for cell in metadata.get("cell_evidence_units") or []:
+        if isinstance(cell, dict):
+            parts.extend([
+                cell.get("header_path"),
+                cell.get("column_header"),
+                cell.get("content"),
+                cell.get("cell_text"),
+            ])
+    return "\n".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def _iter_structured_table_regex_results(
+    pattern: str,
+    ctx: DocContext,
+    *,
+    limit: int,
+    case_insensitive: bool = True,
+) -> list[dict]:
+    if not pattern or not ctx.chunks or not ctx.chunk_metadata:
+        return []
+    flags = re.IGNORECASE if case_insensitive else 0
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error as exc:
+        raise ValueError(str(exc)) from exc
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    for idx, chunk_text in enumerate(ctx.chunks):
+        metadata = ctx.chunk_metadata[idx] if idx < len(ctx.chunk_metadata) and isinstance(ctx.chunk_metadata[idx], dict) else {}
+        if not _has_table_evidence(metadata):
+            continue
+        searchable = _structured_table_regex_text(str(chunk_text or ""), metadata)
+        if not searchable:
+            continue
+        match = compiled.search(searchable)
+        if not match:
+            continue
+        row_text = (
+            metadata.get("numeric_table_exact_context_row_text")
+            or metadata.get("row_text")
+            or metadata.get("table_row_raw_text")
+            or str(chunk_text or "")
+        )
+        snippet = "\n".join(
+            str(part).strip()
+            for part in (
+                metadata.get("table_caption") or metadata.get("numeric_table_exact_context_caption"),
+                metadata.get("table_header") or metadata.get("numeric_table_exact_context_header"),
+                row_text,
+            )
+            if str(part or "").strip()
+        ) or str(chunk_text or "")
+        key = f"{idx}:{snippet[:240].casefold()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        page_range = metadata.get("page_range") if isinstance(metadata.get("page_range"), list) else []
+        page_num = metadata.get("page") or (page_range[0] if page_range else 0)
+        item = {
+            "chunk": snippet,
+            "raw_chunk_text": str(chunk_text or ""),
+            "source": "regex_table",
+            "retrieval_type": "agent_regex_table",
+            "page": page_num,
+            "group_id": metadata.get("group_id") or "",
+            "context_id": metadata.get("context_id") or metadata.get("table_bundle_id") or "",
+            "evidence_id": metadata.get("evidence_id") or metadata.get("evidence_unit_id") or f"regex-table:{idx}",
+            "chunk_id": metadata.get("chunk_id", idx),
+            "score": 1.0,
+            "match_text": match.group(0),
+            "match_offset": match.start(),
+            "chunk_type": metadata.get("chunk_type") or metadata.get("block_type") or "table_row",
+            "block_type": metadata.get("block_type") or metadata.get("chunk_type") or "table_row",
+            "numeric_regex_locator": True,
+            "numeric_regex_locator_hits": [match.group(0)],
+        }
+        for key_name, value in metadata.items():
+            if _has_value(value) and key_name not in item:
+                item[key_name] = value
+        results.append(item)
+        if len(results) >= limit:
+            break
+    return results
 
 
 def _format_structure_lines(structure: Any, chunk_indices: Any = None) -> list[str]:
@@ -854,30 +1006,86 @@ def _exec_grep(args: dict, ctx: DocContext) -> dict:
 def _exec_regex_search(args: dict, ctx: DocContext) -> dict:
     """正则表达式搜索"""
     pattern = args.get("pattern", "")
-    limit = args.get("limit", 10)
+    limit = max(1, min(int(args.get("limit", 10) or 10), 30))
     context = args.get("context", 1500)
+    case_insensitive = bool(args.get("caseInsensitive", True))
 
     if not pattern:
         return {"results": [], "summary": "正则模式为空"}
 
+    structured_results: list[dict] = []
     try:
-        results = _advanced_search.regex_search(
-            pattern=pattern,
-            text=ctx.full_text,
+        structured_results = _iter_structured_table_regex_results(
+            pattern,
+            ctx,
             limit=limit,
-            context_chars=context,
+            case_insensitive=case_insensitive,
         )
     except ValueError as e:
         return {"results": [], "summary": f"正则语法错误: {e}"}
 
+    remaining_limit = max(0, limit - len(structured_results))
+    if remaining_limit > 0:
+        try:
+            results = _advanced_search.regex_search(
+                pattern=pattern,
+                text=ctx.full_text,
+                limit=remaining_limit,
+                context_chars=context,
+            )
+        except ValueError as e:
+            return {"results": [], "summary": f"正则语法错误: {e}"}
+    else:
+        results = []
+
     chunks_found = []
     chunk_meta = []
     candidate_meta = []
+    seen_keys: set[str] = set()
+    for item in structured_results:
+        snippet = item.get("chunk")
+        if not snippet:
+            continue
+        key = f"{item.get('chunk_id')}:{str(snippet)[:240].casefold()}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        chunks_found.append(_format_tool_chunk(
+            snippet,
+            page=item.get("page") or 0,
+            group_id=item.get("group_id") or "",
+            chunk_idx=item.get("chunk_id"),
+            source="regex_table",
+            context_id=item.get("context_id"),
+            evidence_id=item.get("evidence_id"),
+            child_chunk_id=item.get("child_chunk_id"),
+            parent_id=item.get("parent_id"),
+            chunk_type=item.get("chunk_type") or item.get("block_type"),
+            table_id=item.get("table_id"),
+            table_bundle_id=item.get("table_bundle_id"),
+            evidence_unit_id=item.get("evidence_unit_id"),
+        ))
+        meta = _build_tool_candidate_meta(
+            item,
+            ctx=ctx,
+            page=item.get("page") or 0,
+            group_id=item.get("group_id") or "",
+            chunk_idx=item.get("chunk_id"),
+        )
+        meta["numeric_regex_locator"] = True
+        meta["numeric_regex_locator_hits"] = item.get("numeric_regex_locator_hits") or []
+        chunk_meta.append(meta)
+        candidate_meta.append(meta)
+
     for r in results:
         item = _search_result_to_tool_item(r, ctx=ctx, source="regex", query=pattern)
         snippet = item.get("chunk")
         if not snippet:
             continue
+        key = f"{item.get('chunk_id')}:{str(snippet)[:240].casefold()}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         chunks_found.append(_format_tool_chunk(
             snippet,
             page=item.get("page") or 0,
@@ -902,7 +1110,7 @@ def _exec_regex_search(args: dict, ctx: DocContext) -> dict:
         "chunk_meta": chunk_meta,
         "candidate_meta": candidate_meta,
         "result_count": len(chunks_found),
-        "summary": f"正则搜索 \"{pattern}\" 返回 {len(chunks_found)} 个结果",
+        "summary": f"正则搜索 \"{pattern}\" 返回 {len(chunks_found)} 个结果（结构化表格 {len(structured_results)} 个）",
     }
 
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from io import BytesIO
@@ -80,6 +81,7 @@ class OverviewData(BaseModel):
     paper_summary: PaperSummary
     created_at: float
     figure_meta: Optional[dict] = None
+    ai_meta: Optional[dict] = None
 
 
 class OverviewTask(BaseModel):
@@ -102,8 +104,13 @@ class OverviewTask(BaseModel):
 
 # ============ 配置 ============
 
-# 缓存目录
-CACHE_DIR = Path(__file__).parent.parent / "data" / "overviews"
+LEGACY_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "overviews"
+CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "overviews"
+try:
+    from runtime_mode import runtime
+    CACHE_DIR = Path(runtime.data_dir) / "overviews"
+except Exception:
+    pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 OVERVIEW_CACHE_VERSION = "v12"
 
@@ -1537,6 +1544,12 @@ def _get_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") ->
     return CACHE_DIR / f"{key}.json"
 
 
+def _get_legacy_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") -> Path:
+    """旧版 backend/data/overviews 缓存路径，用于一次性兼容迁移。"""
+    key = _get_cache_key(doc_id, depth, figure_render_mode)
+    return LEGACY_CACHE_DIR / f"{key}.json"
+
+
 async def clear_overview_cache(doc_id: str, depth: str, figure_render_mode: str = "raw") -> None:
     """删除指定速览缓存，用于强制重新生成。"""
     cache_key = _get_cache_key(doc_id, depth, figure_render_mode)
@@ -1563,12 +1576,16 @@ async def get_cached_overview(
     
     # 文件缓存
     cache_path = _get_cache_path(doc_id, depth, figure_render_mode)
-    if cache_path.exists():
+    legacy_cache_path = _get_legacy_cache_path(doc_id, depth, figure_render_mode)
+    source_path = cache_path if cache_path.exists() else legacy_cache_path
+    if source_path.exists():
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
+            with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             overview = OverviewData(**data)
             overview_cache[cache_key] = overview
+            if source_path == legacy_cache_path:
+                await save_overview_cache(overview)
             return overview
         except Exception as e:
             logger.warning(f"读取速览缓存失败: {e}")
@@ -1607,6 +1624,14 @@ async def generate_overview_content(
     """生成速览内容（调用 LLM）"""
     from services.chat_service import call_ai_api
     figure_render_mode = _normalize_figure_render_mode(figure_render_mode)
+    logger.info(
+        "[AI-Audit] purpose=overview doc=%s provider=%s model=%s depth=%s render_mode=%s",
+        doc_id,
+        provider,
+        model,
+        depth,
+        figure_render_mode,
+    )
     
     # 获取文档信息
     doc_info = await get_document_info(doc_id)
@@ -1641,18 +1666,23 @@ async def generate_overview_content(
             raise RuntimeError(response.get("error"))
         
         content = _extract_content_from_response(response)
+        if not content or not content.strip():
+            raise RuntimeError("模型返回为空，请稍后重试或切换模型")
         
         # 解析 JSON
         # 尝试提取 JSON 部分
         json_start = content.find("{")
         json_end = content.rfind("}") + 1
         
-        if json_start >= 0 and json_end > json_start:
-            json_str = content[json_start:json_end]
-            data = json.loads(json_str)
-        else:
-            # 尝试直接解析
-            data = json.loads(content)
+        try:
+            if json_start >= 0 and json_end > json_start:
+                json_str = content[json_start:json_end]
+                data = json.loads(json_str)
+            else:
+                data = json.loads(content)
+        except json.JSONDecodeError as exc:
+            preview = content[:240].replace("\n", " ")
+            raise RuntimeError(f"模型返回的速览格式不是有效 JSON: {exc}; preview={preview}") from exc
         
         # 构建返回数据（先不含图表）
         overview = OverviewData(
@@ -1664,7 +1694,21 @@ async def generate_overview_content(
             speed_read=SpeedReadContent(**data.get("speed_read", {})),
             key_figures=[],
             paper_summary=PaperSummary(**data.get("paper_summary", {})),
-            created_at=time.time()
+            created_at=time.time(),
+            ai_meta={
+                "purpose": "overview",
+                "provider": provider,
+                "model": model,
+                "depth": depth,
+                "render_mode": figure_render_mode,
+            },
+        )
+        logger.info(
+            "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=success depth=%s",
+            doc_id,
+            provider,
+            model,
+            depth,
         )
         
         # 关键图表解读：从文档提取图片并用多模态模型生成解析
@@ -1820,8 +1864,76 @@ async def generate_overview_content(
         return overview
         
     except Exception as e:
-        logger.error(f"生成速览失败: {e}")
+        logger.error(
+            "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=failed error=%s",
+            doc_id,
+            provider,
+            model,
+            e,
+        )
         raise
+
+
+async def build_fallback_overview_content(
+    doc_id: str,
+    depth: str,
+    document_text: str,
+    *,
+    model: str = "",
+    provider: str = "",
+    figure_render_mode: str = "raw",
+    error: str = "",
+) -> OverviewData:
+    """模型不可用时的确定性基础速览，避免前端空白报错。"""
+    doc_info = await get_document_info(doc_id)
+    title = doc_info.get("filename", "未知文档") if doc_info else "未知文档"
+    text = " ".join(str(document_text or "").split())
+    if not text:
+        text = "文档文本暂不可用。"
+    summary = text[:520].rstrip()
+    if len(text) > len(summary):
+        summary += "..."
+
+    sentences = [item.strip() for item in re.split(r"(?<=[。.!?])\s+|\n+", text) if item.strip()]
+    first = sentences[0] if sentences else summary
+    second = sentences[1] if len(sentences) > 1 else summary
+
+    overview = OverviewData(
+        doc_id=doc_id,
+        title=title,
+        depth=depth,
+        full_text_summary=summary,
+        terminology=[],
+        speed_read=SpeedReadContent(
+            method=first[:220],
+            experiment_design="模型暂未生成实验设计速览；请检查模型连接后点击重新生成。",
+            problems_solved=second[:220],
+        ),
+        key_figures=[],
+        paper_summary=PaperSummary(
+            strengths="当前展示基础速览，尚未完成 AI 深度总结。",
+            innovations="模型连接恢复后可重新生成完整创新点分析。",
+            future_work="建议稍后重试，或切换更稳定的模型服务商。",
+        ),
+        created_at=time.time(),
+        figure_meta={
+            "source": "fallback",
+            "count": 0,
+            "render_mode": _normalize_figure_render_mode(figure_render_mode),
+            "generation_error": error,
+        },
+        ai_meta={
+            "purpose": "overview",
+            "provider": provider,
+            "model": model,
+            "depth": depth,
+            "render_mode": _normalize_figure_render_mode(figure_render_mode),
+            "fallback": True,
+            "generation_error": error,
+        },
+    )
+    await save_overview_cache(overview)
+    return overview
 
 
 async def create_overview_task(
@@ -1929,9 +2041,6 @@ async def _generate_or_wait_overview(
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     cache_key = _get_cache_key(doc_id, depth, render_mode)
 
-    if force:
-        await clear_overview_cache(doc_id, depth, render_mode)
-
     cached = await get_cached_overview(doc_id, depth, render_mode)
     if cached and not force:
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
@@ -1982,12 +2091,15 @@ async def get_or_create_overview(
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
-    # 先检查缓存
-    if force:
-        await clear_overview_cache(doc_id, depth, render_mode)
-
     cached = await get_cached_overview(doc_id, depth, render_mode)
     if cached and not force:
+        logger.info(
+            "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=cache_hit depth=%s",
+            doc_id,
+            (cached.ai_meta or {}).get("provider", ""),
+            (cached.ai_meta or {}).get("model", ""),
+            depth,
+        )
         return cached
 
     try:
@@ -2006,4 +2118,44 @@ async def get_or_create_overview(
             timeout=180,
         )
     except asyncio.TimeoutError as e:
-        raise TimeoutError("速览生成超时") from e
+        if cached:
+            logger.warning("[Overview] 重新生成超时，返回旧缓存: doc=%s depth=%s", doc_id, depth)
+            logger.info(
+                "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=cache_hit_after_failure depth=%s",
+                doc_id,
+                (cached.ai_meta or {}).get("provider", ""),
+                (cached.ai_meta or {}).get("model", ""),
+                depth,
+            )
+            return cached
+        document_text = await get_document_text(doc_id)
+        return await build_fallback_overview_content(
+            doc_id,
+            depth,
+            document_text,
+            model=model,
+            provider=provider,
+            figure_render_mode=render_mode,
+            error="速览生成超时",
+        )
+    except Exception as e:
+        if cached:
+            logger.warning("[Overview] 重新生成失败，返回旧缓存: doc=%s depth=%s error=%s", doc_id, depth, e)
+            logger.info(
+                "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=cache_hit_after_failure depth=%s",
+                doc_id,
+                (cached.ai_meta or {}).get("provider", ""),
+                (cached.ai_meta or {}).get("model", ""),
+                depth,
+            )
+            return cached
+        document_text = await get_document_text(doc_id)
+        return await build_fallback_overview_content(
+            doc_id,
+            depth,
+            document_text,
+            model=model,
+            provider=provider,
+            figure_render_mode=render_mode,
+            error=str(e),
+        )

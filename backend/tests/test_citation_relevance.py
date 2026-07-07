@@ -320,6 +320,31 @@ class TestCitationDisplayPreparation:
         assert [c["ref"] for c in projected] == [1, 2]
         assert [c["source_ref"] for c in projected] == [5, 8]
 
+    def test_prepare_answer_drops_synthetic_citations_when_original_exists(self):
+        answer = "图 2 显示性能随样本数增加而提升[2]。"
+        citations = [
+            {
+                "ref": 1,
+                "group_id": "figure-2-synthetic",
+                "page_range": [2, 2],
+                "highlight_text": "AI generated figure description with a plausible trend.",
+                "synthetic_description": True,
+            },
+            {
+                "ref": 2,
+                "group_id": "figure-2-caption",
+                "page_range": [2, 2],
+                "highlight_text": "Figure 2: Performance increases as examples grow.",
+                "chunk_type": "caption",
+            },
+        ]
+
+        rewritten, projected = _prepare_answer_and_citations_for_display(answer, citations)
+
+        assert "figure-2-synthetic" not in {citation.get("group_id") for citation in projected}
+        assert [citation.get("group_id") for citation in projected] == ["figure-2-caption"]
+        assert rewritten == "图 2 显示性能随样本数增加而提升[1]。"
+
     def test_prepare_answer_reassigns_single_repeated_ref_by_paragraph(self):
         answer = "语义引导用于保持类别一致。[5]\n\n3D 渲染用于生成可打印伪装。[5]"
         citations = [
@@ -741,11 +766,14 @@ class TestNumericTableCitationContextAssembly:
             }
         )
 
-        assert len(segments) == 1
+        assert len(segments) == 2
+        assert segments[0]["segment_role"] == "numeric_evidence_pack"
         assert "56.4" in segments[0]["text"]
         assert "63.3" in segments[0]["text"]
-        assert "44.8" not in segments[0]["text"]
-        assert "36.3" not in segments[0]["text"]
+        assert "56.4" in segments[1]["text"]
+        assert "63.3" in segments[1]["text"]
+        assert "44.8" not in " ".join(segment["text"] for segment in segments)
+        assert "36.3" not in " ".join(segment["text"] for segment in segments)
 
 
 class TestStreamingFinalAnswerExtraction:

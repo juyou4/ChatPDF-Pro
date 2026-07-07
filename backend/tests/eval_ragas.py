@@ -28,6 +28,7 @@ RAGAS 评估脚本 - 评估 Chatpdf RAG 系统质量
 import argparse
 import asyncio
 import csv
+import hashlib
 import json
 import logging
 import math
@@ -57,6 +58,8 @@ class QuestionItem:
     """单个评估问题"""
     question: str
     ground_truth: Optional[str] = None  # 有则计算 context_recall，无则跳过
+    doc_id: str = ""
+    paper: str = ""
     question_type: str = ""
     note: str = ""
     facet: str = ""
@@ -73,13 +76,19 @@ class CollectedSample:
     ground_truth: Optional[str]
     latency_ms: float
     error: Optional[str] = None
+    error_type: str = ""
     citations_count: int = 0
+    doc_id: str = ""
+    paper: str = ""
+    index_source: str = ""
     question_type: str = ""
     note: str = ""
     facet: str = ""
     difficulty: str = ""
     request_overrides: Dict[str, Any] = field(default_factory=dict)
+    request_overrides_hash: str = ""
     retrieval_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    retrieval_evidence_raw: Dict[str, Any] = field(default_factory=dict)
 
 
 def _metric_value_to_float(value: Any) -> Optional[float]:
@@ -91,6 +100,26 @@ def _metric_value_to_float(value: Any) -> Optional[float]:
     if math.isnan(score):
         return None
     return score
+
+
+class NonRecoverableProviderError(RuntimeError):
+    """Provider-side errors that retries cannot fix, such as exhausted quota."""
+
+
+def _is_non_recoverable_provider_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "insufficient balance",
+            "insufficient_balance",
+            "payment required",
+            "error code: 402",
+            "http/1.1 402",
+            "quota exceeded",
+            "billing",
+        )
+    )
 
 
 def _contains_cjk(text: str) -> bool:
@@ -169,6 +198,115 @@ def _extract_retrieval_diagnostics(sample: CollectedSample) -> Dict[str, Any]:
     return diagnostics if isinstance(diagnostics, dict) else {}
 
 
+def _record_has_numeric_table_evidence(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    chunk_type = str(record.get("chunk_type") or record.get("block_type") or "").strip().lower()
+    if chunk_type in {"table", "table_row", "table_cell"}:
+        return True
+    return any(
+        record.get(key)
+        for key in (
+            "table_id",
+            "table_bundle_id",
+            "numeric_table_exact_context_row_text",
+            "table_row_evidence",
+        )
+    )
+
+
+def _summarize_retrieval_evidence_raw(evidence_raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(evidence_raw, dict) or not evidence_raw:
+        return {}
+    counts = evidence_raw.get("counts") if isinstance(evidence_raw.get("counts"), dict) else {}
+    metadata = evidence_raw.get("metadata") if isinstance(evidence_raw.get("metadata"), dict) else {}
+    limits = metadata.get("limits") if isinstance(metadata.get("limits"), dict) else {}
+    truncated_fields: List[str] = []
+    for key in ("citations", "context_segments", "retrieval_context_segments", "chunks"):
+        try:
+            count = int(counts.get(key) or 0)
+            limit = int(limits.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if limit > 0 and count > limit:
+            truncated_fields.append(key)
+
+    record_groups = (
+        evidence_raw.get("citations") or [],
+        evidence_raw.get("context_segments") or [],
+        evidence_raw.get("retrieval_context_segments") or [],
+        evidence_raw.get("chunks") or [],
+    )
+    has_numeric_table_evidence = any(
+        _record_has_numeric_table_evidence(record)
+        for group in record_groups
+        if isinstance(group, list)
+        for record in group
+    )
+    evidence_need = evidence_raw.get("evidence_need") or []
+    if isinstance(evidence_need, list) and "numeric_table" in evidence_need:
+        has_numeric_table_evidence = True
+
+    agent_pipeline = evidence_raw.get("agent_pipeline") if isinstance(evidence_raw.get("agent_pipeline"), dict) else {}
+    summary = {
+        "schema_version": evidence_raw.get("schema_version"),
+        "source": evidence_raw.get("source") or "",
+        "format": metadata.get("format") or "",
+        "citations_count": counts.get("citations", 0),
+        "context_segments_count": counts.get("context_segments", 0),
+        "retrieval_context_segments_count": counts.get("retrieval_context_segments", 0),
+        "chunks_count": counts.get("chunks", 0),
+        "has_agent_pipeline": bool(agent_pipeline),
+        "likely_bottleneck": agent_pipeline.get("likely_bottleneck") or "",
+        "has_numeric_table_evidence": bool(has_numeric_table_evidence),
+        "truncated_fields": truncated_fields,
+        "is_truncated": bool(truncated_fields),
+    }
+    return {k: v for k, v in summary.items() if v not in (None, "", [], {})}
+
+
+def _summarize_retrieval_evidence_run(samples: List[CollectedSample]) -> Dict[str, Any]:
+    valid_samples = [sample for sample in samples if not sample.error]
+    summaries = [
+        _summarize_retrieval_evidence_raw(sample.retrieval_evidence_raw)
+        for sample in valid_samples
+    ]
+    summaries = [summary for summary in summaries if summary]
+    if not summaries:
+        return {}
+
+    bottleneck_counts: Dict[str, int] = {}
+    truncated_field_counts: Dict[str, int] = {}
+    schema_versions = set()
+    source_values = set()
+    for summary in summaries:
+        if summary.get("schema_version") not in (None, ""):
+            schema_versions.add(str(summary.get("schema_version")))
+        if summary.get("source"):
+            source_values.add(str(summary.get("source")))
+        bottleneck = str(summary.get("likely_bottleneck") or "").strip()
+        if bottleneck:
+            bottleneck_counts[bottleneck] = bottleneck_counts.get(bottleneck, 0) + 1
+        for field in summary.get("truncated_fields") or []:
+            if not field:
+                continue
+            field_key = str(field)
+            truncated_field_counts[field_key] = truncated_field_counts.get(field_key, 0) + 1
+
+    evidence_samples = len(summaries)
+    return {
+        "evidence_raw_samples": evidence_samples,
+        "evidence_raw_coverage_ratio": round(evidence_samples / max(len(valid_samples), 1), 4),
+        "agent_pipeline_samples": sum(1 for summary in summaries if summary.get("has_agent_pipeline")),
+        "numeric_table_evidence_samples": sum(1 for summary in summaries if summary.get("has_numeric_table_evidence")),
+        "truncated_evidence_samples": sum(1 for summary in summaries if summary.get("is_truncated")),
+        "truncated_field_counts": truncated_field_counts,
+        "bottleneck_counts": bottleneck_counts,
+        "schema_versions": sorted(schema_versions),
+        "sources": sorted(source_values),
+    }
+
+
 def _average_diagnostic(samples: List[CollectedSample], key: str) -> Optional[float]:
     values: List[float] = []
     for sample in samples:
@@ -179,6 +317,232 @@ def _average_diagnostic(samples: List[CollectedSample], key: str) -> Optional[fl
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _classify_sample_error(sample: CollectedSample) -> str:
+    """把失败样本归到可行动的错误类型，方便 A/B 后定位瓶颈。"""
+    error_text = (sample.error or "").strip()
+    lower = error_text.lower()
+    if error_text:
+        metric_markers = (
+            "ragas",
+            "metric",
+            "judge",
+            "evaluator",
+            "answercorrectness",
+            "faithfulness",
+            "context_precision",
+            "context_recall",
+        )
+        if any(marker in lower for marker in metric_markers):
+            return "metric_evaluator"
+
+        retrieval_markers = (
+            "retrieval",
+            "vector",
+            "faiss",
+            "index",
+            "no context",
+            "contexts empty",
+            "empty context",
+            "vector_empty_or_failed",
+            "无检索",
+            "检索",
+            "索引",
+            "上下文",
+        )
+        if any(marker in lower for marker in retrieval_markers):
+            return "retrieval_empty"
+
+        provider_markers = (
+            "http 401",
+            "http 403",
+            "http 408",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "timeout",
+            "timed out",
+            "connection",
+            "connecterror",
+            "readtimeout",
+            "quota",
+            "rate limit",
+            "api key",
+            "apikey",
+            "llm",
+            "provider",
+            "模型",
+            "额度",
+            "限流",
+        )
+        if any(marker in lower for marker in provider_markers):
+            return "provider"
+
+        return "unknown"
+
+    if not (sample.answer or "").strip() or not sample.contexts:
+        return "retrieval_empty"
+    return ""
+
+
+def _sample_error_type(sample: CollectedSample) -> str:
+    return (sample.error_type or _classify_sample_error(sample)).strip()
+
+
+def _summarize_samples_by_error_type(samples: List[CollectedSample]) -> Dict[str, Any]:
+    groups: Dict[str, List[CollectedSample]] = {}
+    for sample in samples:
+        error_type = _sample_error_type(sample)
+        if not error_type:
+            continue
+        groups.setdefault(error_type, []).append(sample)
+
+    return {
+        key: {
+            "samples": len(group_samples),
+            "with_backend_error": sum(1 for sample in group_samples if sample.error),
+            "without_answer": sum(1 for sample in group_samples if not (sample.answer or "").strip()),
+            "without_contexts": sum(1 for sample in group_samples if not sample.contexts),
+            "avg_latency_ms": (
+                sum(sample.latency_ms for sample in group_samples) / len(group_samples)
+                if group_samples
+                else 0.0
+            ),
+        }
+        for key, group_samples in sorted(groups.items())
+    }
+
+
+def _summarize_samples_by_index_source(samples: List[CollectedSample]) -> Dict[str, Any]:
+    groups: Dict[str, List[CollectedSample]] = {}
+    for sample in samples:
+        key = str(sample.index_source or "unknown").strip() or "unknown"
+        groups.setdefault(key, []).append(sample)
+
+    summary: Dict[str, Any] = {}
+    for key in sorted(groups):
+        group_samples = groups[key]
+        valid_samples = [sample for sample in group_samples if not sample.error]
+        valid_count = len(valid_samples)
+        group_summary = {
+            "total_samples": len(group_samples),
+            "valid_samples": valid_count,
+            "error_samples": len(group_samples) - valid_count,
+            "avg_contexts": (
+                sum(len(sample.contexts) for sample in valid_samples) / valid_count
+                if valid_count
+                else 0.0
+            ),
+            "avg_latency_ms": (
+                sum(sample.latency_ms for sample in valid_samples) / valid_count
+                if valid_count
+                else 0.0
+            ),
+            "avg_duplicate_chunk_ratio": _average_diagnostic(valid_samples, "duplicate_chunk_ratio"),
+            "avg_unique_group_coverage": _average_diagnostic(valid_samples, "unique_group_coverage"),
+            "avg_reference_pollution_ratio": _average_diagnostic(valid_samples, "reference_pollution_ratio"),
+            "avg_numeric_table_hit_quality": _average_diagnostic(valid_samples, "numeric_table_hit_quality"),
+            "retrieval_evidence_summary": _summarize_retrieval_evidence_run(group_samples),
+        }
+        summary[key] = {k: v for k, v in group_summary.items() if v not in (None, "", [], {})}
+    return summary
+
+
+def _summarize_samples_by_question_type(samples: List[CollectedSample]) -> Dict[str, Any]:
+    groups: Dict[str, List[CollectedSample]] = {}
+    for sample in samples:
+        key = str(sample.question_type or "unknown").strip() or "unknown"
+        groups.setdefault(key, []).append(sample)
+
+    summary: Dict[str, Any] = {}
+    for key in sorted(groups):
+        group_samples = groups[key]
+        valid_samples = [sample for sample in group_samples if not _sample_error_type(sample)]
+        valid_count = len(valid_samples)
+        group_summary = {
+            "total_samples": len(group_samples),
+            "valid_samples": valid_count,
+            "error_samples": len(group_samples) - valid_count,
+            "avg_contexts": (
+                sum(len(sample.contexts) for sample in valid_samples) / valid_count
+                if valid_count
+                else 0.0
+            ),
+            "avg_latency_ms": (
+                sum(sample.latency_ms for sample in valid_samples) / valid_count
+                if valid_count
+                else 0.0
+            ),
+            "avg_duplicate_chunk_ratio": _average_diagnostic(valid_samples, "duplicate_chunk_ratio"),
+            "avg_unique_group_coverage": _average_diagnostic(valid_samples, "unique_group_coverage"),
+            "avg_reference_pollution_ratio": _average_diagnostic(valid_samples, "reference_pollution_ratio"),
+            "avg_numeric_table_hit_quality": _average_diagnostic(valid_samples, "numeric_table_hit_quality"),
+            "retrieval_evidence_summary": _summarize_retrieval_evidence_run(group_samples),
+            "error_type_counts": {
+                error_type: error_summary.get("samples", 0)
+                for error_type, error_summary in _summarize_samples_by_error_type(group_samples).items()
+            },
+        }
+        summary[key] = {k: v for k, v in group_summary.items() if v not in (None, "", [], {})}
+    return summary
+
+
+def _format_csv_metric(value: Any) -> str:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    return "" if value is None else str(value)
+
+
+def _summarize_ragas_eval_samples(samples: List[CollectedSample], ragas_scores: dict) -> Dict[str, int]:
+    meta = ragas_scores.get("_meta") if isinstance(ragas_scores.get("_meta"), dict) else {}
+    ready_count = sum(1 for sample in samples if not _sample_error_type(sample))
+    evaluated_count = meta.get("sample_count")
+    try:
+        evaluated_count = int(evaluated_count)
+    except (TypeError, ValueError):
+        evaluated_count = ready_count if ragas_scores else 0
+    return {
+        "collected_samples": len(samples),
+        "ragas_ready_samples": ready_count,
+        "ragas_evaluated_samples": evaluated_count,
+        "ragas_skipped_samples": max(len(samples) - evaluated_count, 0),
+    }
+
+
+def _stable_json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _hash_request_overrides(overrides: Optional[Dict[str, Any]]) -> str:
+    payload = overrides or {}
+    if not payload:
+        return ""
+    return hashlib.sha256(_stable_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _build_request_overrides_manifest(question_items: List[QuestionItem]) -> Dict[str, Any]:
+    items = []
+    for idx, item in enumerate(question_items, 1):
+        overrides_hash = _hash_request_overrides(item.payload_overrides)
+        items.append({
+            "index": idx,
+            "doc_id": item.doc_id,
+            "paper": item.paper,
+            "question": item.question,
+            "overrides_hash": overrides_hash,
+            "overrides": item.payload_overrides,
+        })
+    manifest_hash = hashlib.sha256(_stable_json_dumps(items).encode("utf-8")).hexdigest() if items else ""
+    return {
+        "manifest_hash": manifest_hash,
+        "overrides_count": sum(1 for item in items if item.get("overrides_hash")),
+        "items": items,
+    }
 
 
 def _build_eval_warnings(question_items: List[QuestionItem], embed_model: str) -> List[str]:
@@ -361,6 +725,7 @@ class ChatpdfClient:
             "enable_graphrag": self.enable_graphrag,
             "enable_agent_retrieval": self.enable_agent_retrieval,
             "enable_web_search": False,
+            "include_evidence_raw": True,
             "chat_history": [],
         }
         if self.api_host:
@@ -457,6 +822,7 @@ class ChatpdfClient:
         contexts = self._extract_contexts(retrieval_meta)
         citations_count = len(retrieval_meta.get("citations") or [])
         retrieval_diagnostics = retrieval_meta.get("diagnostics") or {}
+        retrieval_evidence_raw = retrieval_meta.get("evidence_raw") or {}
 
         return CollectedSample(
             question=question,
@@ -467,7 +833,31 @@ class ChatpdfClient:
             citations_count=citations_count,
             request_overrides=payload_overrides or {},
             retrieval_diagnostics=retrieval_diagnostics,
+            retrieval_evidence_raw=retrieval_evidence_raw,
         )
+
+
+async def fetch_rag_index_status(backend_url: str, doc_id: str) -> Dict[str, Any]:
+    """读取当前文档问答索引来源，保证 A/B 结果可比。"""
+    if not backend_url or not doc_id:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            resp = await client.get(f"{backend_url.rstrip('/')}/documents/{doc_id}/rag-index/status")
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(f"读取 RAG 索引状态失败，评测结果将缺少 index_source: {exc}")
+        return {"error": str(exc)}
+
+
+async def fetch_rag_index_status_map(backend_url: str, doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """读取多个文档问答索引来源，支持多论文 manifest A/B。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    for item_doc_id in sorted({str(value or "").strip() for value in doc_ids if str(value or "").strip()}):
+        result[item_doc_id] = await fetch_rag_index_status(backend_url, item_doc_id)
+    return result
 
 
 # ─────────────────────────────── RAGAS 版本检测 ───────────────────────────────
@@ -582,7 +972,7 @@ def _build_answer_correctness_metric(
             provider="openai",
             client=OpenAI(**llm_client_kwargs),
             temperature=0,
-            max_tokens=2048,
+            max_tokens=8192,
         )
         compatibility_embeddings = (
             _AnswerCorrectnessEmbeddingProxy(fallback_embeddings)
@@ -618,11 +1008,7 @@ def _evaluate_metric_samplewise(
 ) -> tuple[dict, dict]:
     """逐条评估慢指标，避免批量并发时的超时与大输出失控。"""
     from ragas import evaluate, EvaluationDataset
-    try:
-        from ragas.run_config import RunConfig
-        sample_run_cfg = RunConfig(timeout=240, max_retries=1, max_wait=120)
-    except Exception:
-        sample_run_cfg = run_cfg
+    sample_run_cfg = _build_ragas_run_config(timeout=180, max_retries=1, max_wait=30, max_workers=1) or run_cfg
 
     per_metric_values: dict[str, List[Optional[float]]] = {}
 
@@ -645,6 +1031,8 @@ def _evaluate_metric_samplewise(
             )
             single_df = single_result.to_pandas()
         except Exception as e:
+            if _is_non_recoverable_provider_error(e):
+                raise NonRecoverableProviderError(str(e)) from e
             logger.warning(f"{metric_label} 单题评估失败，跳过 idx={original_idx + 1}: {e}")
             continue
 
@@ -669,6 +1057,85 @@ def _evaluate_metric_samplewise(
     return scores, per_metric_values
 
 
+def _build_ragas_run_config(
+    *,
+    timeout: int = 600,
+    max_retries: int = 5,
+    max_wait: int = 120,
+    max_workers: int = 4,
+) -> Any:
+    """Construct RAGAS RunConfig across versions with best-effort concurrency."""
+    try:
+        from ragas.run_config import RunConfig
+    except Exception:
+        return None
+
+    kwargs: dict[str, Any] = {
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "max_wait": max_wait,
+    }
+    try:
+        return RunConfig(**kwargs, max_workers=max_workers)
+    except TypeError:
+        try:
+            return RunConfig(**kwargs)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _evaluate_nan_metric_samplewise(
+    *,
+    metric_label: str,
+    metric_builder,
+    dataset_samples: List[Any],
+    per_sample_scores: List[dict],
+    metric_col: str,
+    non_data_cols: set[str],
+    max_retry_samples: int = 0,
+) -> tuple[Optional[float], dict]:
+    """Retry NaN rows for a metric and backfill per-sample values."""
+    missing_indices = [
+        idx
+        for idx, item in enumerate(per_sample_scores)
+        if item.get(metric_col) is None
+    ]
+    if not missing_indices:
+        values = [item.get(metric_col) for item in per_sample_scores]
+        avg, stats, _ = _series_metric_summary(values)
+        return avg, stats
+
+    retry_indices = missing_indices[: max(0, int(max_retry_samples or 0))]
+    skipped_indices = missing_indices[len(retry_indices):]
+    logger.info(
+        f"{metric_label} 存在 {len(missing_indices)} 条 NaN，开始逐题重跑回填 "
+        f"{len(retry_indices)} 条"
+    )
+    if skipped_indices:
+        logger.warning(
+            f"{metric_label} NaN 回填超过上限，跳过 {len(skipped_indices)} 条: "
+            + ", ".join(str(idx + 1) for idx in skipped_indices[:20])
+        )
+    _scores, per_values = _evaluate_metric_samplewise(
+        metric_label=metric_label,
+        metric_builder=metric_builder,
+        dataset_samples=dataset_samples,
+        sample_indices=retry_indices,
+        run_cfg=_build_ragas_run_config(timeout=600, max_retries=5, max_wait=120, max_workers=4),
+        non_data_cols=non_data_cols,
+    )
+    retried_values = per_values.get(metric_col) or []
+    for local_idx, original_idx in enumerate(retry_indices):
+        if local_idx < len(retried_values) and retried_values[local_idx] is not None:
+            per_sample_scores[original_idx][metric_col] = retried_values[local_idx]
+
+    values = [item.get(metric_col) for item in per_sample_scores]
+    avg, stats, _ = _series_metric_summary(values)
+    return avg, stats
+
+
 def _run_ragas_v2(
     samples: List[CollectedSample],
     judge_model: str,
@@ -677,6 +1144,7 @@ def _run_ragas_v2(
     embed_model: str,
     embed_api_key: str,
     embed_api_base: str,
+    skip_answer_correctness: bool = False,
 ) -> dict:
     """RAGAS 0.2+ / 0.4.x 评估"""
     from ragas import evaluate, EvaluationDataset
@@ -693,7 +1161,15 @@ def _run_ragas_v2(
     ) = _import_ragas_metrics()
 
     # 构建 LLM judge
-    llm_kwargs: dict = {"model": judge_model, "api_key": judge_api_key, "temperature": 0, "request_timeout": 120}
+    llm_kwargs: dict = {
+        "model": judge_model,
+        "api_key": judge_api_key,
+        "temperature": 0,
+        "request_timeout": 120,
+        "timeout": 120,
+        "max_retries": 5,
+        "max_tokens": 1024,
+    }
     if judge_api_base:
         llm_kwargs["base_url"] = judge_api_base
     ragas_llm = LangchainLLMWrapper(ChatOpenAI(**llm_kwargs))
@@ -738,12 +1214,13 @@ def _run_ragas_v2(
         dataset_samples.append(SingleTurnSample(**kwargs))
 
     dataset = EvaluationDataset(samples=dataset_samples)
+    run_cfg = _build_ragas_run_config(timeout=600, max_retries=5, max_wait=120, max_workers=4)
     try:
-        from ragas.run_config import RunConfig
-        run_cfg = RunConfig(timeout=120, max_retries=3, max_wait=60)
-    except Exception:
-        run_cfg = None
-    result = evaluate(dataset=dataset, metrics=metrics, run_config=run_cfg) if run_cfg else evaluate(dataset=dataset, metrics=metrics)
+        result = evaluate(dataset=dataset, metrics=metrics, run_config=run_cfg) if run_cfg else evaluate(dataset=dataset, metrics=metrics)
+    except Exception as e:
+        if _is_non_recoverable_provider_error(e):
+            raise NonRecoverableProviderError(str(e)) from e
+        raise
     # RAGAS 0.4.x: 用 to_pandas() 提取各指标平均分
     df = result.to_pandas()
     non_data_cols = {"user_input", "response", "retrieved_contexts", "reference"}
@@ -764,6 +1241,19 @@ def _run_ragas_v2(
             item[col] = _metric_value_to_float(row.get(col))
         per_sample_scores.append(item)
 
+    if "llm_context_precision_without_reference" in metric_cols:
+        avg_score, stats = _evaluate_nan_metric_samplewise(
+            metric_label="LLMContextPrecisionWithoutReference",
+            metric_builder=lambda: LLMContextPrecisionWithoutReference(llm=ragas_llm),
+            dataset_samples=dataset_samples,
+            per_sample_scores=per_sample_scores,
+            metric_col="llm_context_precision_without_reference",
+            non_data_cols=non_data_cols,
+        )
+        metric_stats["llm_context_precision_without_reference"] = stats
+        if avg_score is not None:
+            scores["llm_context_precision_without_reference"] = avg_score
+
     gt_indices = [idx for idx, sample in enumerate(samples) if (sample.ground_truth or "").strip()]
     if has_gt and gt_indices:
         gt_dataset = EvaluationDataset(samples=[dataset_samples[idx] for idx in gt_indices])
@@ -778,7 +1268,7 @@ def _run_ragas_v2(
                 "LLMContextRecall",
                 lambda: LLMContextRecall(llm=ragas_llm),
             ))
-        if AnswerCorrectness is not None:
+        if AnswerCorrectness is not None and not skip_answer_correctness:
             gt_metric_builders.append((
                 "AnswerCorrectness",
                 lambda: _build_answer_correctness_metric(
@@ -791,31 +1281,6 @@ def _run_ragas_v2(
             ))
 
         for metric_label, metric_builder in gt_metric_builders:
-            if metric_label == "AnswerCorrectness":
-                ac_scores, ac_per_values = _evaluate_metric_samplewise(
-                    metric_label=metric_label,
-                    metric_builder=metric_builder,
-                    dataset_samples=answer_correctness_samples,
-                    sample_indices=list(range(len(answer_correctness_samples))),
-                    run_cfg=run_cfg,
-                    non_data_cols=non_data_cols,
-                )
-                for col, stats in (
-                    (col, {"valid_count": len([v for v in values if v is not None]),
-                           "nan_count": len([v for v in values if v is None]),
-                           "total_count": len(values)})
-                    for col, values in ac_per_values.items()
-                ):
-                    metric_stats[col] = stats
-                for col, avg_score in ac_scores.items():
-                    scores[col] = avg_score
-                for item in per_sample_scores:
-                    item.setdefault("answer_correctness", None)
-                for col, values in ac_per_values.items():
-                    for local_idx, original_idx in enumerate(gt_indices):
-                        per_sample_scores[original_idx][col] = values[local_idx]
-                continue
-
             try:
                 metric = metric_builder()
             except Exception as e:
@@ -826,13 +1291,26 @@ def _run_ragas_v2(
                 continue
 
             try:
+                eval_dataset = (
+                    EvaluationDataset(samples=answer_correctness_samples)
+                    if metric_label == "AnswerCorrectness"
+                    else gt_dataset
+                )
+                gt_run_cfg = _build_ragas_run_config(
+                    timeout=600,
+                    max_retries=1,
+                    max_wait=30,
+                    max_workers=4,
+                ) or run_cfg
                 gt_result = (
-                    evaluate(dataset=gt_dataset, metrics=[metric], run_config=run_cfg)
-                    if run_cfg
-                    else evaluate(dataset=gt_dataset, metrics=[metric])
+                    evaluate(dataset=eval_dataset, metrics=[metric], run_config=gt_run_cfg)
+                    if gt_run_cfg
+                    else evaluate(dataset=eval_dataset, metrics=[metric])
                 )
                 gt_df = gt_result.to_pandas()
             except Exception as e:
+                if _is_non_recoverable_provider_error(e):
+                    raise NonRecoverableProviderError(str(e)) from e
                 logger.warning(f"{metric_label} 评估失败，跳过：{e}")
                 continue
 
@@ -934,6 +1412,7 @@ def run_ragas_evaluation(
     embed_model: str = "text-embedding-3-small",
     embed_api_key: str = "",
     embed_api_base: str = "",
+    skip_answer_correctness: bool = False,
 ) -> dict:
     """运行 RAGAS 评估，自动适配 v1/v2 API"""
     valid = [s for s in samples if not s.error and s.answer and s.contexts]
@@ -949,6 +1428,7 @@ def run_ragas_evaluation(
         return _run_ragas_v2(
             valid, judge_model, judge_api_key, judge_api_base,
             embed_model, embed_api_key, embed_api_base,
+            skip_answer_correctness=skip_answer_correctness,
         )
     else:
         return _run_ragas_v1(
@@ -985,6 +1465,7 @@ def print_summary_table(samples: List[CollectedSample], ragas_scores: dict) -> N
     total = len(samples)
     errors = sum(1 for s in samples if s.error)
     valid = total - errors
+    ragas_ready = sum(1 for s in samples if not _sample_error_type(s))
     valid_samples = [s for s in samples if not s.error]
     avg_ctx = sum(len(s.contexts) for s in valid_samples) / max(valid, 1)
     avg_lat = sum(s.latency_ms for s in valid_samples) / max(valid, 1)
@@ -999,6 +1480,7 @@ def print_summary_table(samples: List[CollectedSample], ragas_scores: dict) -> N
     print(f"  {'总样本数':<22} {total}")
     print(f"  {'有效样本数':<22} {valid}")
     print(f"  {'错误样本数':<22} {errors}")
+    print(f"  {'RAGAS可评样本数':<22} {ragas_ready}")
     print(f"  {'平均检索片段数':<22} {avg_ctx:.1f}")
     print(f"  {'平均响应时间':<22} {avg_lat:.0f} ms")
     if avg_dup is not None:
@@ -1014,8 +1496,89 @@ def print_summary_table(samples: List[CollectedSample], ragas_scores: dict) -> N
     if avg_singleton_paths is not None:
         print(f"  {'平均孤立路径数':<22} {avg_singleton_paths:.1f}")
 
+    by_error_type = _summarize_samples_by_error_type(samples)
+    if by_error_type:
+        print(f"\n  错误类型统计")
+        print(f"  {'类型':<20} {'样本':>5} {'后端错误':>8} {'无答案':>7} {'无上下文':>8} {'延迟ms':>9}")
+        print("  " + "─" * 66)
+        for error_type, error_summary in by_error_type.items():
+            print(
+                f"  {error_type[:20]:<20} "
+                f"{int(error_summary.get('samples') or 0):>5} "
+                f"{int(error_summary.get('with_backend_error') or 0):>8} "
+                f"{int(error_summary.get('without_answer') or 0):>7} "
+                f"{int(error_summary.get('without_contexts') or 0):>8} "
+                f"{float(error_summary.get('avg_latency_ms') or 0):>9.0f}"
+            )
+
+    by_index_source = _summarize_samples_by_index_source(samples)
+    if by_index_source:
+        print(f"\n  索引来源统计")
+        print(f"  {'来源':<18} {'样本':>5} {'片段':>7} {'延迟ms':>9} {'数表质量':>9} {'证据覆盖':>9}")
+        print("  " + "─" * 65)
+        for source, source_summary in by_index_source.items():
+            evidence = source_summary.get("retrieval_evidence_summary") or {}
+            coverage = float(evidence.get("evidence_raw_coverage_ratio") or 0) * 100
+            numeric_quality = source_summary.get("avg_numeric_table_hit_quality")
+            numeric_text = f"{float(numeric_quality):.3f}" if isinstance(numeric_quality, (int, float)) else "-"
+            print(
+                f"  {source[:18]:<18} "
+                f"{int(source_summary.get('total_samples') or 0):>5} "
+                f"{float(source_summary.get('avg_contexts') or 0):>7.1f} "
+                f"{float(source_summary.get('avg_latency_ms') or 0):>9.0f} "
+                f"{numeric_text:>9} "
+                f"{coverage:>8.1f}%"
+            )
+
+    by_question_type = _summarize_samples_by_question_type(samples)
+    if by_question_type:
+        print(f"\n  题型统计")
+        print(f"  {'题型':<18} {'样本':>5} {'有效':>5} {'片段':>7} {'延迟ms':>9} {'数表质量':>9} {'错误类型'}")
+        print("  " + "─" * 78)
+        for question_type, type_summary in by_question_type.items():
+            error_counts = type_summary.get("error_type_counts") or {}
+            error_text = ", ".join(f"{key}:{value}" for key, value in sorted(error_counts.items())) or "-"
+            numeric_quality = type_summary.get("avg_numeric_table_hit_quality")
+            numeric_text = f"{float(numeric_quality):.3f}" if isinstance(numeric_quality, (int, float)) else "-"
+            print(
+                f"  {question_type[:18]:<18} "
+                f"{int(type_summary.get('total_samples') or 0):>5} "
+                f"{int(type_summary.get('valid_samples') or 0):>5} "
+                f"{float(type_summary.get('avg_contexts') or 0):>7.1f} "
+                f"{float(type_summary.get('avg_latency_ms') or 0):>9.0f} "
+                f"{numeric_text:>9} "
+                f"{error_text}"
+            )
+
+    evidence_summary = _summarize_retrieval_evidence_run(samples)
+    if evidence_summary:
+        print(f"\n  证据链统计")
+        print(
+            f"  {'证据包覆盖':<22} "
+            f"{evidence_summary.get('evidence_raw_samples', 0)}/{valid} "
+            f"({float(evidence_summary.get('evidence_raw_coverage_ratio') or 0) * 100:.1f}%)"
+        )
+        print(f"  {'Agent诊断样本':<22} {evidence_summary.get('agent_pipeline_samples', 0)}")
+        print(f"  {'数值表格证据样本':<22} {evidence_summary.get('numeric_table_evidence_samples', 0)}")
+        truncated_samples = int(evidence_summary.get("truncated_evidence_samples") or 0)
+        if truncated_samples:
+            field_counts = evidence_summary.get("truncated_field_counts") or {}
+            fields = ", ".join(f"{key}:{value}" for key, value in sorted(field_counts.items()))
+            print(f"  {'证据截断样本':<22} {truncated_samples} ({fields})")
+        bottleneck_counts = evidence_summary.get("bottleneck_counts") or {}
+        if bottleneck_counts:
+            bottlenecks = ", ".join(f"{key}:{value}" for key, value in sorted(bottleneck_counts.items()))
+            print(f"  {'Agent瓶颈分布':<22} {bottlenecks}")
+
     if ragas_scores:
         print(f"\n  RAGAS 指标（满分 1.0）")
+        ragas_sample_counts = _summarize_ragas_eval_samples(samples, ragas_scores)
+        print(
+            f"  RAGAS样本: 可评 {ragas_sample_counts.get('ragas_ready_samples', 0)}/"
+            f"{ragas_sample_counts.get('collected_samples', 0)}，"
+            f"实际评估 {ragas_sample_counts.get('ragas_evaluated_samples', 0)}，"
+            f"跳过 {ragas_sample_counts.get('ragas_skipped_samples', 0)}"
+        )
         print(f"  {'指标名称':<42} {'分数':>6}  {'进度'}")
         print("  " + "─" * 65)
         metric_stats = (ragas_scores.get("_meta") or {}).get("metric_stats", {})
@@ -1061,6 +1624,9 @@ def save_results(
     avg_group_cov = _average_diagnostic(valid_samples, "unique_group_coverage")
     avg_ref_pollution = _average_diagnostic(valid_samples, "reference_pollution_ratio")
     avg_numeric_hit_quality = _average_diagnostic(valid_samples, "numeric_table_hit_quality")
+    ragas_meta = ragas_scores.get("_meta") if isinstance(ragas_scores.get("_meta"), dict) else {}
+    metric_stats = ragas_meta.get("metric_stats") if isinstance(ragas_meta.get("metric_stats"), dict) else {}
+    ragas_sample_counts = _summarize_ragas_eval_samples(samples, ragas_scores)
     out = {
         "ragas_scores": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in ragas_scores.items()},
         "summary": {
@@ -1083,22 +1649,37 @@ def save_results(
             "avg_path_diversity_ratio": _average_diagnostic(valid_samples, "path_diversity_ratio"),
             "avg_singleton_path_count": _average_diagnostic(valid_samples, "singleton_path_count"),
             "avg_unique_path_count": _average_diagnostic(valid_samples, "unique_path_count"),
+            "retrieval_evidence_summary": _summarize_retrieval_evidence_run(samples),
+            "by_index_source": _summarize_samples_by_index_source(samples),
+            "by_question_type": _summarize_samples_by_question_type(samples),
+            "by_error_type": _summarize_samples_by_error_type(samples),
+            "ragas_eval_samples": ragas_sample_counts,
+            "ragas_metric_stats": metric_stats,
         },
         "samples": [
             {
                 "index": i + 1,
                 "question": s.question,
+                "doc_id": s.doc_id,
+                "paper": s.paper,
+                "index_source": s.index_source,
                 "answer_preview": s.answer[:500] + "..." if len(s.answer) > 500 else s.answer,
+                "answer": s.answer,
                 "answer_length": len(s.answer),
                 "contexts_count": len(s.contexts),
                 "contexts_preview": [c[:300] for c in s.contexts[:3]],
+                "contexts": s.contexts,
                 "ground_truth": s.ground_truth,
                 "question_type": s.question_type,
                 "note": s.note,
                 "request_overrides": s.request_overrides,
+                "request_overrides_hash": s.request_overrides_hash or _hash_request_overrides(s.request_overrides),
                 "latency_ms": s.latency_ms,
                 "error": s.error,
+                "error_type": _sample_error_type(s),
                 "retrieval_diagnostics": s.retrieval_diagnostics,
+                "retrieval_evidence_summary": _summarize_retrieval_evidence_raw(s.retrieval_evidence_raw),
+                "retrieval_evidence_raw": s.retrieval_evidence_raw,
             }
             for i, s in enumerate(samples)
         ],
@@ -1116,13 +1697,15 @@ def save_results(
     csv_path = output_path.replace(".json", ".csv")
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["#", "问题", "题型", "难度", "答案字数", "片段数", "延迟ms", "重复率", "意群覆盖", "参考污染率", "Focus压缩率", "路径多样性", "孤立路径数", "错误", "ground_truth"])
+        writer.writerow(["#", "论文", "doc_id", "index_source", "问题", "题型", "难度", "overrides_hash", "答案字数", "片段数", "延迟ms", "重复率", "意群覆盖", "参考污染率", "Focus压缩率", "路径多样性", "孤立路径数", "证据版本", "Agent证据", "数值表格证据", "证据截断字段", "错误类型", "错误", "ground_truth"])
         for i, s in enumerate(samples):
             diag = _extract_retrieval_diagnostics(s)
+            evidence_summary = _summarize_retrieval_evidence_raw(s.retrieval_evidence_raw)
             writer.writerow([
-                i + 1, s.question,
+                i + 1, s.paper or "", s.doc_id or "", s.index_source or "", s.question,
                 getattr(s, 'question_type', '') or "",
                 getattr(s, 'difficulty', '') or "",
+                s.request_overrides_hash or _hash_request_overrides(s.request_overrides),
                 len(s.answer),
                 len(s.contexts), s.latency_ms,
                 diag.get("duplicate_chunk_ratio", ""),
@@ -1131,15 +1714,154 @@ def save_results(
                 diag.get("focus_mode_avg_compression_ratio", ""),
                 diag.get("path_diversity_ratio", ""),
                 diag.get("singleton_path_count", ""),
+                evidence_summary.get("schema_version", ""),
+                evidence_summary.get("has_agent_pipeline", ""),
+                evidence_summary.get("has_numeric_table_evidence", ""),
+                "|".join(evidence_summary.get("truncated_fields", []) or []),
+                _sample_error_type(s),
                 s.error or "", s.ground_truth or "",
             ])
         if ragas_scores:
             writer.writerow([])
-            writer.writerow(["RAGAS指标", "分数"])
+            writer.writerow(["RAGAS样本统计"])
+            writer.writerow(["收集样本", "可评样本", "实际评估样本", "跳过样本"])
+            writer.writerow([
+                ragas_sample_counts.get("collected_samples", 0),
+                ragas_sample_counts.get("ragas_ready_samples", 0),
+                ragas_sample_counts.get("ragas_evaluated_samples", 0),
+                ragas_sample_counts.get("ragas_skipped_samples", 0),
+            ])
+            writer.writerow([])
+            writer.writerow(["RAGAS指标", "分数", "有效样本", "总样本", "NaN/跳过"])
             for k, v in ragas_scores.items():
                 if isinstance(v, (int, float)):
-                    writer.writerow([_METRIC_LABELS.get(k, k), f"{float(v):.4f}"])
+                    stats = metric_stats.get(k) or {}
+                    writer.writerow([
+                        _METRIC_LABELS.get(k, k),
+                        f"{float(v):.4f}",
+                        stats.get("valid_count", ""),
+                        stats.get("total_count", ""),
+                        stats.get("nan_count", ""),
+                    ])
+        by_error_type = _summarize_samples_by_error_type(samples)
+        if by_error_type:
+            writer.writerow([])
+            writer.writerow(["按错误类型汇总"])
+            writer.writerow(["错误类型", "样本", "后端错误", "无答案", "无上下文", "平均延迟ms"])
+            for error_type, error_summary in by_error_type.items():
+                writer.writerow([
+                    error_type,
+                    error_summary.get("samples", 0),
+                    error_summary.get("with_backend_error", 0),
+                    error_summary.get("without_answer", 0),
+                    error_summary.get("without_contexts", 0),
+                    _format_csv_metric(error_summary.get("avg_latency_ms")),
+                ])
+        by_index_source = _summarize_samples_by_index_source(samples)
+        if by_index_source:
+            writer.writerow([])
+            writer.writerow(["按索引来源汇总"])
+            writer.writerow([
+                "index_source",
+                "总样本",
+                "有效样本",
+                "错误样本",
+                "平均片段数",
+                "平均延迟ms",
+                "重复率",
+                "数值表格命中质量",
+                "证据包覆盖率",
+                "Agent证据样本",
+                "数值表格证据样本",
+                "证据截断样本",
+            ])
+            for source, source_summary in by_index_source.items():
+                evidence_summary = source_summary.get("retrieval_evidence_summary") or {}
+                writer.writerow([
+                    source,
+                    source_summary.get("total_samples", 0),
+                    source_summary.get("valid_samples", 0),
+                    source_summary.get("error_samples", 0),
+                    _format_csv_metric(source_summary.get("avg_contexts")),
+                    _format_csv_metric(source_summary.get("avg_latency_ms")),
+                    _format_csv_metric(source_summary.get("avg_duplicate_chunk_ratio")),
+                    _format_csv_metric(source_summary.get("avg_numeric_table_hit_quality")),
+                    _format_csv_metric(evidence_summary.get("evidence_raw_coverage_ratio")),
+                    evidence_summary.get("agent_pipeline_samples", 0),
+                    evidence_summary.get("numeric_table_evidence_samples", 0),
+                    evidence_summary.get("truncated_evidence_samples", 0),
+                ])
+        by_question_type = _summarize_samples_by_question_type(samples)
+        if by_question_type:
+            writer.writerow([])
+            writer.writerow(["按题型汇总"])
+            writer.writerow([
+                "题型",
+                "总样本",
+                "有效样本",
+                "错误样本",
+                "平均片段数",
+                "平均延迟ms",
+                "重复率",
+                "数值表格命中质量",
+                "证据包覆盖率",
+                "错误类型",
+            ])
+            for question_type, type_summary in by_question_type.items():
+                evidence_summary = type_summary.get("retrieval_evidence_summary") or {}
+                error_counts = type_summary.get("error_type_counts") or {}
+                writer.writerow([
+                    question_type,
+                    type_summary.get("total_samples", 0),
+                    type_summary.get("valid_samples", 0),
+                    type_summary.get("error_samples", 0),
+                    _format_csv_metric(type_summary.get("avg_contexts")),
+                    _format_csv_metric(type_summary.get("avg_latency_ms")),
+                    _format_csv_metric(type_summary.get("avg_duplicate_chunk_ratio")),
+                    _format_csv_metric(type_summary.get("avg_numeric_table_hit_quality")),
+                    _format_csv_metric(evidence_summary.get("evidence_raw_coverage_ratio")),
+                    "|".join(f"{key}:{value}" for key, value in sorted(error_counts.items())),
+                ])
     logger.info(f"CSV 结果已保存  → {csv_path}")
+
+
+def load_samples_from_results(results_path: str) -> tuple[List[CollectedSample], dict, List[str]]:
+    """Load previously collected samples so RAGAS can be rerun without /chat calls."""
+    with open(results_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    raw_samples = data.get("samples") or []
+    samples: List[CollectedSample] = []
+    for item in raw_samples:
+        if not isinstance(item, dict):
+            continue
+        evidence_raw = item.get("retrieval_evidence_raw") or {}
+        raw_contexts = item.get("contexts")
+        if not isinstance(raw_contexts, list):
+            raw_contexts = item.get("contexts_preview") or []
+        contexts = [str(ctx) for ctx in raw_contexts if str(ctx or "").strip()]
+        answer = str(item.get("answer") or item.get("answer_preview") or "")
+        samples.append(CollectedSample(
+            question=str(item.get("question") or ""),
+            answer=answer,
+            contexts=contexts,
+            ground_truth=item.get("ground_truth"),
+            latency_ms=float(item.get("latency_ms") or 0),
+            error=item.get("error"),
+            error_type=str(item.get("error_type") or ""),
+            citations_count=int((evidence_raw.get("counts") or {}).get("citations") or 0),
+            doc_id=str(item.get("doc_id") or ""),
+            paper=str(item.get("paper") or ""),
+            index_source=str(item.get("index_source") or ""),
+            question_type=str(item.get("question_type") or ""),
+            note=str(item.get("note") or ""),
+            request_overrides=item.get("request_overrides") if isinstance(item.get("request_overrides"), dict) else {},
+            request_overrides_hash=str(item.get("request_overrides_hash") or ""),
+            retrieval_diagnostics=item.get("retrieval_diagnostics") if isinstance(item.get("retrieval_diagnostics"), dict) else {},
+            retrieval_evidence_raw=evidence_raw if isinstance(evidence_raw, dict) else {},
+        ))
+    run_config = data.get("run_config") if isinstance(data.get("run_config"), dict) else {}
+    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+    return samples, run_config, [str(item) for item in warnings]
 
 
 # ─────────────────────────────── 主流程 ───────────────────────────────
@@ -1195,6 +1917,49 @@ async def main_async(args: argparse.Namespace) -> None:
     embed_api_base: str = _get("embed_api_base", "") or judge_api_base
     output_path: str = _get("output", "tests/ragas_results.json")
     skip_ragas: bool = bool(_get("skip_ragas", False))
+    expected_overrides_manifest_hash: str = _get("expected_overrides_manifest_hash", "")
+    from_results: str = _get("from_results", "")
+    skip_answer_correctness: bool = str(_get("skip_answer_correctness", False)).lower() in ("true", "1", "yes", "on")
+
+    if from_results:
+        samples, run_config, eval_warnings = load_samples_from_results(from_results)
+        if not samples:
+            logger.error(f"--from-results 未加载到样本: {from_results}")
+            sys.exit(1)
+        logger.info(f"已从结果文件复用样本: {from_results}（{len(samples)} 条）")
+        if judge_api_key and not skip_ragas:
+            logger.info(
+                f"开始 RAGAS 复评 | judge={judge_model} | embed={embed_model}"
+            )
+            try:
+                ragas_scores = run_ragas_evaluation(
+                    samples=samples,
+                    judge_model=judge_model,
+                    judge_api_key=judge_api_key,
+                    judge_api_base=judge_api_base,
+                    embed_model=embed_model,
+                    embed_api_key=embed_api_key,
+                    embed_api_base=embed_api_base,
+                    skip_answer_correctness=skip_answer_correctness,
+                )
+                meta = ragas_scores.setdefault("_meta", {})
+                if isinstance(meta, dict) and eval_warnings:
+                    meta["warnings"] = eval_warnings
+            except ImportError as e:
+                logger.error(f"依赖缺失: {e}")
+                ragas_scores = {}
+            except NonRecoverableProviderError as e:
+                logger.error(f"RAGAS 评估中止（供应商不可恢复错误，已保留样本）: {e}")
+                ragas_scores = {}
+            except Exception as e:
+                logger.error(f"RAGAS 评估失败: {e}", exc_info=True)
+                ragas_scores = {}
+        else:
+            ragas_scores = {}
+            logger.info("复用样本但跳过 RAGAS LLM 评分")
+        print_summary_table(samples, ragas_scores)
+        save_results(samples, ragas_scores, output_path, run_config=run_config, warnings=eval_warnings)
+        return
 
     # ── 加载问题 ──
     questions_data: List[Any] = config.get("questions") or []
@@ -1213,28 +1978,36 @@ async def main_async(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    if not doc_id:
-        logger.error(
-            "未指定 doc_id！请通过 --doc-id 参数或配置文件 doc_id 字段指定。\n"
-            "doc_id 是上传 PDF 后返回的文档 ID，可在前端设置中查看。"
-        )
-        sys.exit(1)
-
     # 解析问题列表
     question_items: List[QuestionItem] = []
     for item in questions_data:
         if isinstance(item, str):
-            question_items.append(QuestionItem(question=item))
+            question_items.append(QuestionItem(question=item, doc_id=doc_id))
         elif isinstance(item, dict):
-            _meta_keys = {"question", "ground_truth", "_type", "_note", "_facet", "_difficulty"}
+            _meta_keys = {
+                "question",
+                "ground_truth",
+                "_type",
+                "_note",
+                "_facet",
+                "_difficulty",
+                "paper",
+                "_paper",
+                "relevant_pages",
+            }
             payload_overrides = {
                 key: value
                 for key, value in item.items()
                 if key not in _meta_keys
             }
+            item_doc_id = str(item.get("doc_id") or doc_id or "").strip()
+            if item_doc_id:
+                payload_overrides["doc_id"] = item_doc_id
             question_items.append(QuestionItem(
                 question=item["question"],
                 ground_truth=item.get("ground_truth"),
+                doc_id=item_doc_id,
+                paper=str(item.get("paper") or item.get("_paper") or ""),
                 question_type=item.get("_type", ""),
                 note=item.get("_note", ""),
                 facet=item.get("_facet", ""),
@@ -1242,13 +2015,52 @@ async def main_async(args: argparse.Namespace) -> None:
                 payload_overrides=payload_overrides,
             ))
 
+    missing_doc_questions = [item.question for item in question_items if not item.doc_id]
+    if missing_doc_questions:
+        logger.error(
+            "未指定 doc_id！请通过 --doc-id 参数、配置文件 doc_id 字段，或在每道题中提供 doc_id。\n"
+            f"缺少 doc_id 的问题数: {len(missing_doc_questions)}"
+        )
+        sys.exit(1)
+
     eval_warnings = _build_eval_warnings(question_items, embed_model)
     for warning in eval_warnings:
         logger.warning(f"[评估告警] {warning}")
 
+    request_overrides_manifest = _build_request_overrides_manifest(question_items)
+    if (
+        expected_overrides_manifest_hash
+        and request_overrides_manifest.get("manifest_hash") != expected_overrides_manifest_hash
+    ):
+        logger.error(
+            "单题检索覆盖参数 manifest hash 不一致，停止评测以避免非单变量对比。\n"
+            f"  expected={expected_overrides_manifest_hash}\n"
+            f"  actual  ={request_overrides_manifest.get('manifest_hash')}"
+        )
+        sys.exit(1)
+
+    document_ids = sorted({item.doc_id for item in question_items if item.doc_id})
+    rag_index_status_by_doc = await fetch_rag_index_status_map(backend_url, document_ids)
+    rag_index_status = rag_index_status_by_doc.get(doc_id) if doc_id else None
+    if not rag_index_status and len(document_ids) == 1:
+        rag_index_status = rag_index_status_by_doc.get(document_ids[0])
+    rag_index_status = rag_index_status or {}
+    index_sources = sorted({
+        str((status or {}).get("index_source") or "")
+        for status in rag_index_status_by_doc.values()
+        if str((status or {}).get("index_source") or "")
+    })
     run_config = {
         "backend_url": backend_url,
-        "doc_id": doc_id,
+        "doc_id": doc_id or (document_ids[0] if len(document_ids) == 1 else ""),
+        "doc_ids": document_ids,
+        "index_source": index_sources[0] if len(index_sources) == 1 else ("mixed" if index_sources else ""),
+        "index_sources": index_sources,
+        "rag_index_status": rag_index_status,
+        "rag_index_status_by_doc": rag_index_status_by_doc,
+        "request_overrides_manifest_hash": request_overrides_manifest.get("manifest_hash", ""),
+        "request_overrides_count": request_overrides_manifest.get("overrides_count", 0),
+        "request_overrides_manifest": request_overrides_manifest.get("items", []),
         "provider": provider,
         "model": model,
         "top_k": top_k,
@@ -1270,7 +2082,7 @@ async def main_async(args: argparse.Namespace) -> None:
     # ── 收集样本 ──
     client = ChatpdfClient(
         backend_url=backend_url,
-        doc_id=doc_id,
+        doc_id=doc_id or document_ids[0],
         api_key=api_key,
         model=model,
         provider=provider,
@@ -1299,22 +2111,30 @@ async def main_async(args: argparse.Namespace) -> None:
         extra_info += " | agent"
     logger.info(
         f"开始收集数据：{len(question_items)} 个问题 | "
-        f"doc_id={doc_id} | model={provider}/{model} | "
+        f"docs={len(document_ids)} | model={provider}/{model} | "
         f"top_k={top_k} | bm25={enable_jieba_bm25} | expand={num_expand_context_chunk}{rerank_info}{extra_info}"
     )
     samples: List[CollectedSample] = []
     for i, qi in enumerate(question_items):
-        logger.info(f"  [{i+1}/{len(question_items)}] {qi.question[:60]}")
+        logger.info(f"  [{i+1}/{len(question_items)}] {qi.paper or qi.doc_id} | {qi.question[:60]}")
         sample = await client.query(qi.question, payload_overrides=qi.payload_overrides)
         sample.ground_truth = qi.ground_truth
+        sample.doc_id = qi.doc_id
+        sample.paper = qi.paper
+        sample.index_source = str((rag_index_status_by_doc.get(qi.doc_id) or {}).get("index_source") or "")
         sample.question_type = qi.question_type
         sample.note = qi.note
         sample.facet = qi.facet
         sample.difficulty = qi.difficulty
         sample.request_overrides = qi.payload_overrides
+        sample.request_overrides_hash = _hash_request_overrides(qi.payload_overrides)
+        sample.error_type = _classify_sample_error(sample)
         samples.append(sample)
         if sample.error:
             logger.warning(f"    ✗ 错误: {sample.error}")
+            if _is_non_recoverable_provider_error(sample.error):
+                logger.error("检测到供应商不可恢复错误，停止后续样本收集以避免无效请求")
+                break
         else:
             logger.info(
                 f"    ✓ 答案: {len(sample.answer)} 字 | "
@@ -1342,12 +2162,15 @@ async def main_async(args: argparse.Namespace) -> None:
                 embed_model=embed_model,
                 embed_api_key=embed_api_key,
                 embed_api_base=embed_api_base,
+                skip_answer_correctness=skip_answer_correctness,
             )
             meta = ragas_scores.setdefault("_meta", {})
             if isinstance(meta, dict) and eval_warnings:
                 meta["warnings"] = eval_warnings
         except ImportError as e:
             logger.error(f"依赖缺失: {e}")
+        except NonRecoverableProviderError as e:
+            logger.error(f"RAGAS 评估中止（供应商不可恢复错误，已保留样本收集结果）: {e}")
         except Exception as e:
             logger.error(f"RAGAS 评估失败: {e}", exc_info=True)
 
@@ -1388,6 +2211,10 @@ def main() -> None:
     parser.add_argument("--embed-api-key", dest="embed_api_key", help="RAGAS embedding API Key")
     parser.add_argument("--embed-api-base", dest="embed_api_base", help="RAGAS embedding API Base URL")
     parser.add_argument("--output", help="结果输出路径（JSON，默认 tests/ragas_results.json）")
+    parser.add_argument("--from-results", dest="from_results", help="复用已有评测 JSON 的 samples，跳过 /chat 收集后重新 RAGAS 评分")
+    parser.add_argument("--skip-answer-correctness", dest="skip_answer_correctness", action="store_true",
+                        help="跳过极慢的 AnswerCorrectness 指标，仅评估 Faithfulness/Relevancy/ContextPrecision/ContextRecall")
+    parser.add_argument("--expected-overrides-manifest-hash", dest="expected_overrides_manifest_hash", help="期望的单题检索覆盖参数 manifest hash，不一致时停止评测")
     parser.add_argument("--skip-ragas", dest="skip_ragas", action="store_true",
                         help="仅收集数据，跳过 RAGAS LLM 评分（节省 API 费用）")
     args = parser.parse_args()

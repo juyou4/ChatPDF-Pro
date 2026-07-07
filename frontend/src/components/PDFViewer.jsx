@@ -895,7 +895,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     {hoverTranslationItem.summary && (
                         <div className={`rounded-lg border px-3 py-2 ${darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-slate-200 bg-slate-50/80'}`}>
                             <div className={`mb-1 text-[10px] font-semibold tracking-wide ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                                要点
+                                要点 / 讲解
                             </div>
                             <div className={`text-[12px] font-semibold leading-relaxed ${darkMode ? 'text-gray-200' : 'text-slate-700'}`}>
                                 <StreamingMarkdown content={hoverTranslationSummaryContent} isStreaming={false} suppressInitialDots />

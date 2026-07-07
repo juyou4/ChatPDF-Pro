@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 
+def _normalize_chat_completions_endpoint(endpoint: str) -> str:
+    """Normalize OpenAI-compatible base URLs to chat completions endpoints."""
+    value = (endpoint or "").strip()
+    if not value:
+        return ""
+    trimmed = value.rstrip("/")
+    if trimmed.endswith("/chat/completions"):
+        return trimmed
+    if trimmed.endswith("/v1") or trimmed.endswith("/api/v3") or trimmed.endswith("/compatible-mode/v1"):
+        return f"{trimmed}/chat/completions"
+    return trimmed
+
+
 @dataclass
 class SemanticGroup:
     """语义意群数据结构
@@ -148,7 +161,7 @@ class SemanticGroupService:
         self.api_key = api_key
         self.model = model
         self.provider = provider
-        self.endpoint = endpoint
+        self.endpoint = _normalize_chat_completions_endpoint(endpoint)
         self.temperature = temperature
         self.prompt_version = prompt_version
 
@@ -480,6 +493,7 @@ class SemanticGroupService:
         if not endpoint:
             provider_cfg = PROVIDER_CONFIG.get(self.provider, {})
             endpoint = provider_cfg.get("endpoint", "https://api.openai.com/v1/chat/completions")
+        endpoint = _normalize_chat_completions_endpoint(endpoint)
 
         messages = [
             {"role": "user", "content": prompt}

@@ -40,11 +40,32 @@ def isolated_storage(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(document_routes_module, "DOCS_DIR", docs_dir)
     monkeypatch.setattr(document_routes_module, "VECTOR_STORE_DIR", vectors_dir)
     monkeypatch.setattr(document_routes_module, "UPLOAD_DIR", uploads_dir)
+    monkeypatch.setattr(document_routes_module, "documents_store", {})
+    document_routes_module._DOCUMENT_INDEX_STATUS.clear()
+    document_routes_module._DEEP_PARSE_TASKS.clear()
+    document_routes_module._DEEP_PARSE_CANCEL_EVENTS.clear()
+
+
+def _run_upload_index_queue_synchronously(monkeypatch):
+    """测试环境中同步执行后台索引，保留 /upload 的排队返回语义。"""
+
+    def sync_queue(doc_id, embedding_model, embedding_api_key, embedding_api_host, summary_api_key):
+        document_routes_module._build_document_indexes(
+            doc_id,
+            embedding_model,
+            embedding_api_key,
+            embedding_api_host,
+            summary_api_key,
+        )
+        return document_routes_module._get_document_index_status(doc_id)
+
+    monkeypatch.setattr(document_routes_module, "_queue_document_indexes", sync_queue)
 
 
 def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_storage):
     """桌面模式下，云端 embedding 的表单字段应透传到 create_index。"""
     monkeypatch.setattr(document_routes_module.runtime, "CHATPDF_MODE", "desktop")
+    _run_upload_index_queue_synchronously(monkeypatch)
 
     monkeypatch.setattr(
         document_routes_module,
@@ -70,6 +91,7 @@ def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_s
         pages=None,
         structured_table_bundles=None,
         summary_api_key=None,
+        **kwargs,
     ):
         captured["doc_id"] = doc_id
         captured["embedding_model"] = embedding_model
@@ -108,6 +130,7 @@ def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_s
 def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, isolated_storage):
     """显式传入 api_key 时，应优先用于语义意群摘要生成。"""
     monkeypatch.setattr(document_routes_module.runtime, "CHATPDF_MODE", "desktop")
+    _run_upload_index_queue_synchronously(monkeypatch)
 
     monkeypatch.setattr(
         document_routes_module,
@@ -133,6 +156,7 @@ def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, 
         pages=None,
         structured_table_bundles=None,
         summary_api_key=None,
+        **kwargs,
     ):
         captured["api_key"] = api_key
         captured["structured_table_bundles"] = structured_table_bundles
@@ -160,6 +184,7 @@ def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, 
 def test_upload_passes_odl_structured_table_bundles_to_index(client, monkeypatch, isolated_storage):
     """ODL 覆盖层应保留结构化 table bundles，并透传给向量索引。"""
     monkeypatch.setattr(document_routes_module.runtime, "CHATPDF_MODE", "desktop")
+    _run_upload_index_queue_synchronously(monkeypatch)
 
     monkeypatch.setattr(
         document_routes_module,
@@ -335,6 +360,7 @@ def test_upload_passes_odl_structured_table_bundles_to_index(client, monkeypatch
         pages=None,
         structured_table_bundles=None,
         summary_api_key=None,
+        **kwargs,
     ):
         captured["doc_id"] = doc_id
         captured["full_text"] = full_text
@@ -393,8 +419,9 @@ def test_upload_blocks_local_embedding_in_desktop_mode(client, monkeypatch, isol
 
 
 def test_upload_returns_400_when_embedding_model_is_invalid(client, monkeypatch, isolated_storage):
-    """向量索引阶段的模型错误应返回 400，避免被包装成 500。"""
+    """后台向量索引阶段的模型错误应写入索引状态，上传本身不阻塞。"""
     monkeypatch.setattr(document_routes_module.runtime, "CHATPDF_MODE", "desktop")
+    _run_upload_index_queue_synchronously(monkeypatch)
 
     monkeypatch.setattr(
         document_routes_module,
@@ -426,5 +453,10 @@ def test_upload_returns_400_when_embedding_model_is_invalid(client, monkeypatch,
         },
     )
 
-    assert resp.status_code == 400
-    assert "Embedding模型" in resp.json()["detail"]
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["doc_id"] == "doc-model-invalid"
+    assert body["indexing_status"] == "failed"
+    status = document_routes_module._get_document_index_status("doc-model-invalid")
+    assert status["status"] == "failed"
+    assert "Embedding模型" in status["error"]

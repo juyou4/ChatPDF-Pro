@@ -96,7 +96,22 @@ async def get_or_create_reading_outline(
     cached = None if force else load_reading_outline(data_dir, doc_id)
     if cached and cached.get("source_hash") == source_hash:
         if cached.get("source") == "ai" or not can_call_model:
+            if cached.get("source") == "ai":
+                logger.info(
+                    "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=cache_hit",
+                    doc_id,
+                    cached.get("provider") or "",
+                    cached.get("model") or "",
+                )
             return cached
+    if cached and cached.get("source") == "ai":
+        logger.info(
+            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=cache_hit_hash_drift",
+            doc_id,
+            cached.get("provider") or "",
+            cached.get("model") or "",
+        )
+        return cached
 
     fallback = build_fallback_reading_outline(
         doc_id=doc_id,
@@ -108,6 +123,12 @@ async def get_or_create_reading_outline(
         return fallback
 
     try:
+        logger.info(
+            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=start",
+            doc_id,
+            provider,
+            model,
+        )
         generated = await _generate_ai_outline(
             doc_id=doc_id,
             doc=doc,
@@ -130,10 +151,24 @@ async def get_or_create_reading_outline(
         if not outline.get("items"):
             raise ValueError("empty outline items")
         save_reading_outline(data_dir, doc_id, outline)
+        logger.info(
+            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=success",
+            doc_id,
+            provider,
+            model,
+        )
         return outline
     except Exception as exc:
-        logger.warning("[ReadingOutline] AI generation failed for %s: %s", doc_id, exc)
+        logger.warning(
+            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=failed error=%s",
+            doc_id,
+            provider,
+            model,
+            exc,
+        )
         fallback.setdefault("meta", {})["generation_error"] = str(exc)
+        fallback.setdefault("meta", {})["provider"] = provider
+        fallback.setdefault("meta", {})["model"] = model
         return fallback
 
 
@@ -607,9 +642,11 @@ def _is_noise_text(text: str) -> bool:
 
 
 def _source_hash(block_index: dict[str, Any]) -> str:
-    parts = []
+    parts = [f"pages:{len(block_index.get('pages', []) or [])}"]
     for block in _flatten_blocks(block_index).values():
-        parts.append(f"{block.get('block_id')}:{block.get('text')}")
+        text = " ".join(str(block.get("text") or "").split())
+        if text:
+            parts.append(text)
     payload = "\n".join(parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
