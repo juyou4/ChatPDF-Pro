@@ -147,10 +147,17 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 使用多论文 manifest 做小规模 RAGAS 回归验证，覆盖 baseline 与 holdout 两个 split；回答模型使用 DeepSeek，嵌入评测使用 SiliconFlow `BAAI/bge-m3`。本组数据用于开发回归，不等同于公开基准。
 
-| Split | Faithfulness | Answer Relevancy | Context Precision | Context Recall |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline | 0.617 | 0.645 | 0.697 | 0.813 |
-| Holdout | 0.666 | 0.645 | 0.708 | 1.000 |
+| Split | index_source | Faithfulness | Answer Relevancy | Context Precision | Context Recall | Answer Correctness |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | pdf_native (historical) | 0.617 | 0.645 | 0.697 | 0.813 | - |
+| Holdout | pdf_native (historical) | 0.666 | 0.645 | 0.708 | 1.000 | - |
+| MinerU A/B A1 | pdf_native | 0.817 | 0.427 | 0.703 | 0.808 | 0.721 |
+| MinerU A/B A2 (initial) | mineru | 0.825 | 0.411 | 0.681 | 0.744 | 0.752 |
+| MinerU current (answer cells guard, 26Q) | mineru | 0.970 | 0.340 | 0.877 | 0.962 | 0.753 |
+
+> 评测结果必须标注 `index_source`。未标注 `pdf_native` / `mineru` 的 RAGAS 数字只可作历史锚点，不可直接与 MinerU 重建后的结果比较。
+
+MinerU current 使用同一 26 题正式 manifest，不包含 4 题 smoke / probe 样本。`numeric_table` 子集 17 题已通过推荐门槛：Faithfulness 0.973、Context Precision 0.953、Context Recall 1.000、Answer Correctness 0.799，均不低于 A1 `pdf_native` 基线（0.830 / 0.814 / 0.882 / 0.760）。因此深度解析完成后，如果问答索引仍是 `pdf_native`，系统会建议重建问答索引以启用 MinerU 结构化表格证据。Answer Relevancy 在各轮表格实验中都偏低，主要受短数值答案与评测口径影响，不作为本轮推荐门槛。
 
 相对 pre-agent baseline 四项指标均为正向提升。Baseline 分别 +0.36 / +0.24 / +0.63 / +0.52，Holdout 分别 +0.47 / +0.29 / +0.58 / +0.75。
 
