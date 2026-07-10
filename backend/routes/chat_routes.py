@@ -2217,16 +2217,17 @@ async def _maybe_add_numeric_table_visual_verification(
         return
 
     try:
+        visual_provider, visual_model, visual_api_key, visual_endpoint = _resolve_numeric_table_visual_model_params(request)
         visual_segment, visual_diag = await maybe_verify_numeric_table_visual(
             query=query or request.question,
             doc_id=request.doc_id,
             doc_data=(doc or {}).get("data") or {},
             pdf_path=_resolve_chat_document_pdf_path(doc),
             segments=base_segments,
-            api_key=request.api_key or "",
-            model=request.model,
-            provider=request.api_provider,
-            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+            api_key=visual_api_key,
+            model=visual_model,
+            provider=visual_provider,
+            endpoint=visual_endpoint,
             custom_params=request.custom_params,
         )
     except Exception as exc:
@@ -2257,6 +2258,41 @@ async def _maybe_add_numeric_table_visual_verification(
         updated["ref"] = idx
         renumbered_existing.append(updated)
     retrieval_meta["citations"] = [visual_citation, *renumbered_existing]
+
+
+def _resolve_numeric_table_visual_model_params(request: ChatRequest) -> tuple[str, str, str, str]:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+
+    def _first(*keys: str) -> str:
+        for key in keys:
+            value = params.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    provider = (
+        _first("numeric_table_visual_provider", "table_visual_provider", "visual_table_provider")
+        or os.getenv("CHATPDF_TABLE_VISUAL_PROVIDER", "")
+        or request.api_provider
+    )
+    model = (
+        _first("numeric_table_visual_model", "table_visual_model", "visual_table_model")
+        or os.getenv("CHATPDF_TABLE_VISUAL_MODEL", "")
+        or request.model
+    )
+    api_key = (
+        _first("numeric_table_visual_api_key", "table_visual_api_key", "visual_table_api_key")
+        or os.getenv("CHATPDF_TABLE_VISUAL_API_KEY", "")
+        or request.api_key
+        or ""
+    )
+    api_host = (
+        _first("numeric_table_visual_api_host", "table_visual_api_host", "visual_table_api_host")
+        or os.getenv("CHATPDF_TABLE_VISUAL_API_HOST", "")
+        or request.api_host
+        or ""
+    )
+    return provider, model, api_key, _get_provider_endpoint(provider, api_host)
 
 
 def _custom_bool(params: Optional[dict], *keys: str) -> bool:

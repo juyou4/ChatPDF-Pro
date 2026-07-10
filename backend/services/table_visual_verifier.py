@@ -6,10 +6,12 @@ PaperQA idea of deferring to the table image when markdown is malformed.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -62,7 +64,8 @@ def looks_vision_capable_model(provider: str = "", model: str = "") -> bool:
     return bool(
         re.search(
             r"vision|visual|\bvl\b|vlm|gpt-4o|gpt-5|o3|o4|gemini|claude-3|"
-            r"qwen.*vl|internvl|glm-4v|kimi.*vision|moonshot.*vision|grok",
+            r"qwen.*vl|internvl|glm-4v|kimi.*vision|moonshot.*vision|grok|"
+            r"doubao[-_ ]?seed[-_ ]?2[-_.]?1",
             model_l,
         )
     )
@@ -185,7 +188,14 @@ async def maybe_verify_numeric_table_visual(
     cache_key = _cache_key(doc_id, query, target, provider, model)
     cached = _VISUAL_CACHE.get(cache_key)
     if cached:
-        diagnostics.update({"triggered": True, "cache_hit": True, **cached.get("diagnostics", {})})
+        cached_diag = cached.get("diagnostics", {}) if isinstance(cached.get("diagnostics"), dict) else {}
+        diagnostics.update({
+            "triggered": True,
+            "cache_hit": True,
+            "confidence": cached_diag.get("confidence"),
+            "used_provider": cached_diag.get("used_provider"),
+            "used_model": cached_diag.get("used_model"),
+        })
         return dict(cached.get("segment") or {}), diagnostics
 
     try:
@@ -213,17 +223,25 @@ async def maybe_verify_numeric_table_visual(
         },
     ]
     diagnostics.update({"triggered": True, "page": page, "crop": crop_meta})
+    timeout_s = _resolve_visual_timeout_seconds(custom_params)
     try:
-        response = await call_ai_api(
-            messages,
-            api_key,
-            model,
-            provider,
-            endpoint=endpoint,
-            max_tokens=700,
-            temperature=0,
-            purpose="numeric_table_visual_verification",
+        response = await asyncio.wait_for(
+            call_ai_api(
+                messages,
+                api_key,
+                model,
+                provider,
+                endpoint=endpoint,
+                max_tokens=700,
+                temperature=0,
+                purpose="numeric_table_visual_verification",
+            ),
+            timeout=timeout_s,
         )
+    except asyncio.TimeoutError:
+        diagnostics["error"] = f"visual_timeout:{timeout_s:.0f}s"
+        diagnostics["rejected_reason"] = "timeout"
+        return {}, diagnostics
     except Exception as exc:
         diagnostics["error"] = f"{type(exc).__name__}: {exc}"
         return {}, diagnostics
@@ -248,8 +266,41 @@ async def maybe_verify_numeric_table_visual(
     diagnostics["confidence"] = segment.get("visual_confidence")
     diagnostics["used_provider"] = response.get("_used_provider")
     diagnostics["used_model"] = response.get("_used_model")
+    min_confidence = _resolve_visual_min_confidence(custom_params)
+    try:
+        confidence_value = float(segment.get("visual_confidence"))
+    except Exception:
+        confidence_value = 0.0
+    if confidence_value < min_confidence:
+        diagnostics["rejected_reason"] = "low_confidence"
+        diagnostics["min_confidence"] = min_confidence
+        return {}, diagnostics
     _VISUAL_CACHE[cache_key] = {"segment": segment, "diagnostics": diagnostics}
     return segment, diagnostics
+
+
+def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
+    value = None
+    if isinstance(custom_params, dict):
+        value = custom_params.get("numeric_table_visual_timeout_s") or custom_params.get("table_visual_timeout_s")
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_TIMEOUT_S", "35")
+    try:
+        return max(8.0, min(90.0, float(value)))
+    except Exception:
+        return 35.0
+
+
+def _resolve_visual_min_confidence(custom_params: Optional[dict]) -> float:
+    value = None
+    if isinstance(custom_params, dict):
+        value = custom_params.get("numeric_table_visual_min_confidence") or custom_params.get("table_visual_min_confidence")
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_MIN_CONFIDENCE", "0.55")
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.55
 
 
 def render_table_crop_base64(pdf_path: Path, page_number: int, bbox: Optional[list[float]], *, dpi: int = 180) -> tuple[str, dict]:
@@ -261,12 +312,13 @@ def render_table_crop_base64(pdf_path: Path, page_number: int, bbox: Optional[li
         page_rect = page.rect
         if bbox and len(bbox) >= 4:
             rect = fitz.Rect(*[float(v) for v in bbox[:4]])
-            x_pad = max(18.0, rect.width * 0.08)
-            y_pad = max(24.0, rect.height * 0.12)
+            x_pad_left = max(72.0, rect.width * 0.35)
+            x_pad_right = max(36.0, rect.width * 0.16)
+            y_pad = max(36.0, rect.height * 0.18)
             clip = fitz.Rect(
-                max(page_rect.x0, rect.x0 - x_pad),
+                max(page_rect.x0, rect.x0 - x_pad_left),
                 max(page_rect.y0, rect.y0 - y_pad),
-                min(page_rect.x1, rect.x1 + x_pad),
+                min(page_rect.x1, rect.x1 + x_pad_right),
                 min(page_rect.y1, rect.y1 + y_pad),
             )
         else:
