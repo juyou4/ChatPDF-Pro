@@ -6371,6 +6371,13 @@ def _sanitize_public_diagnostics(diagnostics: dict) -> dict:
         )
         if locator:
             public["numeric_regex_locator"] = locator
+    if isinstance(diagnostics.get("numeric_table_visual_verification"), dict):
+        visual = _sanitize_public_diagnostics_section(
+            diagnostics.get("numeric_table_visual_verification") or {},
+            set((diagnostics.get("numeric_table_visual_verification") or {}).keys()),
+        )
+        if visual:
+            public["numeric_table_visual_verification"] = visual
     if isinstance(diagnostics.get("agent"), dict):
         agent = _sanitize_public_diagnostics_section(
             diagnostics.get("agent") or {},
@@ -10008,6 +10015,7 @@ async def chat_with_pdf(request: ChatRequest):
         retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
         retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
         retrieval_meta["search_query"] = search_query
+        evidence_need = retrieval_meta.get("evidence_need") or evidence_need
         _maybe_add_numeric_regex_locator_segments(
             request=request,
             doc=doc,
@@ -10775,6 +10783,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
                 retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
                 retrieval_meta["search_query"] = search_query
+                evidence_need = retrieval_meta.get("evidence_need") or evidence_need
                 _maybe_add_numeric_regex_locator_segments(
                     request=request,
                     doc=doc,

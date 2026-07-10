@@ -3,6 +3,7 @@ from services.table_visual_verifier import (
     should_verify_numeric_table_visual,
     looks_vision_capable_model,
 )
+from routes.chat_routes import _sanitize_public_diagnostics
 
 
 def test_resolve_visual_mode_aliases():
@@ -66,3 +67,18 @@ def test_looks_vision_capable_model_for_common_vl_names():
     assert looks_vision_capable_model("silicon", "Qwen2.5-VL-72B-Instruct")
     assert looks_vision_capable_model("gemini", "gemini-2.5-flash")
     assert not looks_vision_capable_model("deepseek", "deepseek-chat")
+
+
+def test_visual_diagnostics_are_publicly_exposed():
+    public = _sanitize_public_diagnostics({
+        "numeric_table_visual_verification": {
+            "enabled": True,
+            "mode": "auto",
+            "triggered": False,
+            "reasons": ["model_not_vision_capable"],
+            "skipped_reason": "model_not_vision_capable",
+        }
+    })
+    assert public["numeric_table_visual_verification"]["enabled"] is True
+    assert public["numeric_table_visual_verification"]["triggered"] is False
+    assert public["numeric_table_visual_verification"]["skipped_reason"] == "model_not_vision_capable"
