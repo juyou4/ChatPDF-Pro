@@ -21,7 +21,9 @@ from services.chat_service import call_ai_api
 logger = logging.getLogger(__name__)
 
 _VISUAL_CACHE: dict[str, dict] = {}
+_VISUAL_PENDING: set[str] = set()
 _VALID_MODES = {"off", "auto", "always"}
+_CACHE_SCHEMA_VERSION = 2
 _TABLE_REF_RE = re.compile(r"\btable\s*\.?\s*(\d+[a-z]?)\b|表\s*\.?\s*(\d+[a-z]?)", re.IGNORECASE)
 _COLUMN_PLACEHOLDER_RE = re.compile(r"\bcolumn\s*\d+\b|列\s*\d+", re.IGNORECASE)
 
@@ -149,6 +151,7 @@ async def maybe_verify_numeric_table_visual(
     provider: str,
     endpoint: str,
     custom_params: Optional[dict] = None,
+    background: bool = False,
 ) -> tuple[dict, dict]:
     mode = resolve_visual_mode(custom_params)
     diagnostics = {
@@ -186,7 +189,7 @@ async def maybe_verify_numeric_table_visual(
         return {}, diagnostics
 
     cache_key = _cache_key(doc_id, query, target, provider, model)
-    cached = _VISUAL_CACHE.get(cache_key)
+    cached = _get_cached_visual_result(cache_key)
     if cached:
         cached_diag = cached.get("diagnostics", {}) if isinstance(cached.get("diagnostics"), dict) else {}
         diagnostics.update({
@@ -198,6 +201,107 @@ async def maybe_verify_numeric_table_visual(
         })
         return dict(cached.get("segment") or {}), diagnostics
 
+    if background and mode == "auto":
+        diagnostics.update({
+            "triggered": True,
+            "background": True,
+            "pending": True,
+            "skipped_reason": "background_pending",
+        })
+        _schedule_visual_background_task(
+            cache_key=cache_key,
+            query=query,
+            target=target,
+            pdf_path=Path(pdf_path),
+            segments=[dict(segment) for segment in (segments or []) if isinstance(segment, dict)],
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            custom_params=dict(custom_params or {}),
+            diagnostics=dict(diagnostics),
+        )
+        return {}, diagnostics
+
+    return await _run_visual_verification(
+        cache_key=cache_key,
+        query=query,
+        target=target,
+        pdf_path=Path(pdf_path),
+        segments=segments,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+        custom_params=custom_params,
+        diagnostics=diagnostics,
+    )
+
+
+def _schedule_visual_background_task(
+    *,
+    cache_key: str,
+    query: str,
+    target: dict,
+    pdf_path: Path,
+    segments: list[dict],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    custom_params: dict,
+    diagnostics: dict,
+) -> None:
+    if cache_key in _VISUAL_PENDING:
+        return
+    _VISUAL_PENDING.add(cache_key)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _VISUAL_PENDING.discard(cache_key)
+        return
+    loop.create_task(_run_visual_verification_background(
+        cache_key=cache_key,
+        query=query,
+        target=target,
+        pdf_path=pdf_path,
+        segments=segments,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+        custom_params={**dict(custom_params or {}), "_numeric_table_visual_background_task": True},
+        diagnostics=diagnostics,
+    ))
+
+
+async def _run_visual_verification_background(**kwargs) -> None:
+    cache_key = str(kwargs.get("cache_key") or "")
+    try:
+        _, diagnostics = await _run_visual_verification(**kwargs)
+        if diagnostics.get("error") or diagnostics.get("rejected_reason"):
+            logger.debug("[TableVisual] background verification skipped: %s", diagnostics)
+    except Exception as exc:
+        logger.debug("[TableVisual] background verification failed: %s", exc)
+    finally:
+        _VISUAL_PENDING.discard(cache_key)
+
+
+async def _run_visual_verification(
+    *,
+    cache_key: str,
+    query: str,
+    target: dict,
+    pdf_path: Path,
+    segments: list[dict],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    custom_params: Optional[dict],
+    diagnostics: dict,
+) -> tuple[dict, dict]:
+    page = target.get("page")
     try:
         image_b64, crop_meta = render_table_crop_base64(pdf_path, page, target.get("bbox"))
     except Exception as exc:
@@ -275,8 +379,64 @@ async def maybe_verify_numeric_table_visual(
         diagnostics["rejected_reason"] = "low_confidence"
         diagnostics["min_confidence"] = min_confidence
         return {}, diagnostics
-    _VISUAL_CACHE[cache_key] = {"segment": segment, "diagnostics": diagnostics}
+    _store_cached_visual_result(cache_key, segment, diagnostics)
     return segment, diagnostics
+
+
+def _get_cached_visual_result(cache_key: str) -> dict:
+    cached = _VISUAL_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    cache_path = _visual_cache_path(cache_key)
+    if not cache_path.exists():
+        return {}
+    try:
+        record = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(record, dict) or record.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        return {}
+    segment = record.get("segment") if isinstance(record.get("segment"), dict) else {}
+    diagnostics = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
+    if not segment:
+        return {}
+    cached = {"segment": segment, "diagnostics": diagnostics}
+    _VISUAL_CACHE[cache_key] = cached
+    return cached
+
+
+def _store_cached_visual_result(cache_key: str, segment: dict, diagnostics: dict) -> None:
+    if not isinstance(segment, dict) or not segment:
+        return
+    safe_diagnostics = {
+        key: value
+        for key, value in (diagnostics or {}).items()
+        if key not in {"raw_preview"}
+    }
+    record = {
+        "schema_version": _CACHE_SCHEMA_VERSION,
+        "segment": segment,
+        "diagnostics": safe_diagnostics,
+    }
+    _VISUAL_CACHE[cache_key] = {"segment": segment, "diagnostics": safe_diagnostics}
+    cache_path = _visual_cache_path(cache_key)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(cache_path)
+    except Exception as exc:
+        logger.debug("[TableVisual] cache write failed: %s", exc)
+
+
+def _visual_cache_path(cache_key: str) -> Path:
+    root = os.getenv("CHATPDF_TABLE_VISUAL_CACHE_DIR", "")
+    if root:
+        cache_dir = Path(root)
+    else:
+        cache_dir = Path(__file__).resolve().parents[2] / "data" / "table_visual_cache"
+    safe_key = re.sub(r"[^a-f0-9]", "", str(cache_key).lower())[:64] or "cache"
+    return cache_dir / f"{safe_key}.json"
 
 
 def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
@@ -284,7 +444,8 @@ def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
     if isinstance(custom_params, dict):
         value = custom_params.get("numeric_table_visual_timeout_s") or custom_params.get("table_visual_timeout_s")
     if value in (None, ""):
-        value = os.getenv("CHATPDF_TABLE_VISUAL_TIMEOUT_S", "35")
+        default_timeout = "75" if isinstance(custom_params, dict) and custom_params.get("_numeric_table_visual_background_task") else "35"
+        value = os.getenv("CHATPDF_TABLE_VISUAL_TIMEOUT_S", default_timeout)
     try:
         return max(8.0, min(90.0, float(value)))
     except Exception:
@@ -553,6 +714,7 @@ def _parse_json_object(text: str) -> dict:
 def _cache_key(doc_id: str, query: str, target: dict, provider: str, model: str) -> str:
     raw = json.dumps(
         {
+            "schema_version": _CACHE_SCHEMA_VERSION,
             "doc_id": doc_id,
             "query": re.sub(r"\s+", " ", query or "").strip().lower(),
             "page": target.get("page"),

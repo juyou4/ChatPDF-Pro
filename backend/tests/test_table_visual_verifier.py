@@ -3,7 +3,11 @@ from services.table_visual_verifier import (
     should_verify_numeric_table_visual,
     looks_vision_capable_model,
 )
-from routes.chat_routes import _resolve_numeric_table_visual_model_params, _sanitize_public_diagnostics
+from routes.chat_routes import (
+    _resolve_numeric_table_visual_model_params,
+    _sanitize_public_diagnostics,
+    _should_background_numeric_table_visual_verification,
+)
 
 
 class _RequestStub:
@@ -103,3 +107,15 @@ def test_visual_model_params_can_use_dedicated_env_model(monkeypatch):
     assert model == "Doubao-Seed-2.1-turbo"
     assert api_key == "visual-key"
     assert endpoint == "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+
+
+def test_visual_background_defaults_to_enabled_and_can_be_overridden(monkeypatch):
+    monkeypatch.delenv("CHATPDF_TABLE_VISUAL_BACKGROUND", raising=False)
+    assert _should_background_numeric_table_visual_verification(_RequestStub()) is True
+
+    monkeypatch.setenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "false")
+    assert _should_background_numeric_table_visual_verification(_RequestStub()) is False
+
+    request = _RequestStub()
+    request.custom_params = {"numeric_table_visual_background": True}
+    assert _should_background_numeric_table_visual_verification(request) is True

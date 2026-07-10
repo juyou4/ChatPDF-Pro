@@ -2229,6 +2229,7 @@ async def _maybe_add_numeric_table_visual_verification(
             provider=visual_provider,
             endpoint=visual_endpoint,
             custom_params=request.custom_params,
+            background=_should_background_numeric_table_visual_verification(request),
         )
     except Exception as exc:
         visual_segment = {}
@@ -2293,6 +2294,18 @@ def _resolve_numeric_table_visual_model_params(request: ChatRequest) -> tuple[st
         or ""
     )
     return provider, model, api_key, _get_provider_endpoint(provider, api_host)
+
+
+def _should_background_numeric_table_visual_verification(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    for key in ("numeric_table_visual_background", "table_visual_background", "visual_table_background"):
+        if key in params:
+            value = params.get(key)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            return bool(value)
+    value = os.getenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "true")
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _custom_bool(params: Optional[dict], *keys: str) -> bool:
