@@ -249,6 +249,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [mineruEnableOcr, setMineruEnableOcr] = useState(false)
   const [mineruEnableFormula, setMineruEnableFormula] = useState(true)
   const [mineruEnableTable, setMineruEnableTable] = useState(true)
+  const [mineruModelVersion, setMineruModelVersion] = useState('vlm')
   // 是否显示 MinerU Auth Key 明文
   const [showMineruAuthKey, setShowMineruAuthKey] = useState(false)
   // 是否显示 MinerU Token 明文
@@ -405,6 +406,9 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         if (data.mineru.enable_table !== undefined) {
           setMineruEnableTable(data.mineru.enable_table)
         }
+        if (data.mineru.model_version) {
+          setMineruModelVersion(data.mineru.model_version)
+        }
       }
       // 加载 Doc2X 已保存配置（回填非敏感字段）
       if (data?.doc2x) {
@@ -514,6 +518,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           auth_key: mineruAuthKey.trim(),
           token: mineruToken.trim(),
           token_mode: mineruTokenMode,
+          model_version: mineruModelVersion,
         }),
       })
       const data = await res.json()
@@ -536,6 +541,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
             auth_key: mineruAuthKey.trim(),
             token: mineruToken.trim(),
             token_mode: mineruTokenMode,
+            model_version: mineruModelVersion,
             enable_ocr: mineruEnableOcr,
             enable_formula: mineruEnableFormula,
             enable_table: mineruEnableTable,
@@ -569,6 +575,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     mineruAuthKey,
     mineruToken,
     mineruTokenMode,
+    mineruModelVersion,
     mineruEnableOcr,
     mineruEnableFormula,
     mineruEnableTable,
@@ -592,6 +599,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         auth_key: mineruAuthKey.trim(),
         token_mode: mineruTokenMode,
         token: mineruToken.trim(),
+        model_version: mineruModelVersion,
         enable_ocr: mineruEnableOcr,
         enable_formula: mineruEnableFormula,
         enable_table: mineruEnableTable,
@@ -623,7 +631,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       // 3 秒后清除保存消息
       setTimeout(() => setMineruSaveMessage(''), 3000)
     }
-  }, [mineruAccessMode, mineruBaseUrl, mineruWorkerUrl, mineruAuthKey, mineruTokenMode, mineruToken, mineruEnableOcr, mineruEnableFormula, mineruEnableTable, fetchOnlineConfig, fetchOCRStatus])
+  }, [mineruAccessMode, mineruBaseUrl, mineruWorkerUrl, mineruAuthKey, mineruTokenMode, mineruToken, mineruModelVersion, mineruEnableOcr, mineruEnableFormula, mineruEnableTable, fetchOnlineConfig, fetchOCRStatus])
 
   /**
    * Doc2X 测试连接：验证 Worker 可达性
@@ -1724,6 +1732,33 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                             />
                           </div>
                         </label>
+                        <div className="px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100">
+                          <div className="flex items-center justify-between gap-3">
+                            <span>
+                              <span className="block text-xs text-gray-700">解析模型</span>
+                              <span className="block text-[10px] text-gray-400 mt-0.5">VLM 适合复杂版式和表格；Pipeline 可作为兼容回退</span>
+                            </span>
+                            <div className="inline-flex rounded-lg border border-gray-200 bg-white/70 p-0.5">
+                              {[
+                                ['vlm', 'VLM'],
+                                ['pipeline', 'Pipeline'],
+                              ].map(([value, label]) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  onClick={() => setMineruModelVersion(value)}
+                                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-all ${
+                                    mineruModelVersion === value
+                                      ? 'bg-[#8871e4] text-white shadow-sm'
+                                      : 'text-gray-500 hover:text-gray-700'
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
 

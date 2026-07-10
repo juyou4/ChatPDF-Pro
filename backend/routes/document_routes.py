@@ -719,6 +719,7 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
                 enable_ocr=config.get("enable_ocr", False),
                 enable_formula=config.get("enable_formula", True),
                 enable_table=config.get("enable_table", True),
+                model_version=config.get("model_version", "vlm"),
             )
         else:
             adapter = MinerUAdapter(
@@ -729,6 +730,7 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
                 enable_ocr=config.get("enable_ocr", False),
                 enable_formula=config.get("enable_formula", True),
                 enable_table=config.get("enable_table", True),
+                model_version=config.get("model_version", "vlm"),
             )
         if not adapter.is_available():
             raise RuntimeError("MinerU 未配置或不可用，请先在 OCR 设置中配置 Worker/直连模式和 Token")
@@ -743,6 +745,7 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
                 for key, value in progress.items()
                 if key not in {"stage", "message"}
             }
+            extra.setdefault("model_version", config.get("model_version", "vlm"))
             _set_deep_parse_status(
                 doc_id,
                 "running",
@@ -755,6 +758,7 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
         _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
         pdf_bytes = pdf_path.read_bytes()
         payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
+        payload.setdefault("model_version", config.get("model_version", "vlm"))
         if cancel_event.is_set():
             _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
             return
@@ -792,6 +796,7 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
             active_source=MINERU_BLOCK_INDEX_SOURCE,
             active_mineru=True,
             access_mode=access_mode,
+            model_version=config.get("model_version", "vlm"),
         )
         logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
     except Exception as exc:
@@ -3880,6 +3885,10 @@ async def save_online_ocr_config(request: Request):
             config["enable_ocr"] = body.get("enable_ocr", False)
             config["enable_formula"] = body.get("enable_formula", True)
             config["enable_table"] = body.get("enable_table", True)
+            model_version = str(body.get("model_version") or "vlm").strip().lower()
+            if model_version not in {"vlm", "pipeline"}:
+                raise HTTPException(status_code=400, detail="model_version 必须为 'vlm' 或 'pipeline'")
+            config["model_version"] = model_version
     else:
         # Mistral 等直接 API 调用模式
         api_key = body.get("api_key", "").strip()
@@ -3936,6 +3945,7 @@ async def save_online_ocr_config(request: Request):
                     enable_ocr=full_config.get("enable_ocr", False),
                     enable_formula=full_config.get("enable_formula", True),
                     enable_table=full_config.get("enable_table", True),
+                    model_version=full_config.get("model_version", "vlm"),
                 )
             else:
                 new_adapter = MinerUAdapter(
@@ -3946,6 +3956,7 @@ async def save_online_ocr_config(request: Request):
                     enable_ocr=full_config.get("enable_ocr", False),
                     enable_formula=full_config.get("enable_formula", True),
                     enable_table=full_config.get("enable_table", True),
+                    model_version=full_config.get("model_version", "vlm"),
                 )
             _ocr_registry.register(new_adapter)
             logger.info(f"MinerUAdapter 已重新注册，可用: {new_adapter.is_available()}")
@@ -4037,6 +4048,7 @@ async def get_online_ocr_config():
                 provider_result["enable_ocr"] = config.get("enable_ocr", False)
                 provider_result["enable_formula"] = config.get("enable_formula", True)
                 provider_result["enable_table"] = config.get("enable_table", True)
+                provider_result["model_version"] = config.get("model_version", "vlm")
 
             result[provider] = provider_result
         else:

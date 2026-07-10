@@ -4212,6 +4212,14 @@ def _expand_numeric_table_evidence_units(
         for _, _, table_id in _extract_table_mentions(query)
         if table_id
     }
+    binary_factor_query = bool(
+        target_datasets
+        and re.search(
+            r"(?:\bIL\b|\bTL\b|image\s+list|text\s+list|combination|both|simultaneously|benefit|effect|同时|组合|都|影响|作用)",
+            query,
+            re.IGNORECASE,
+        )
+    )
     require_explicit_table_anchor = _should_require_explicit_table_anchor(hints)
     preferred_sort_column = _preferred_numeric_table_sort_column(query, hints)
     min_row_number_hits, _ = _get_plain_table_row_numeric_span(hints)
@@ -4223,6 +4231,8 @@ def _expand_numeric_table_evidence_units(
         row_limit = 1 if len(target_methods) <= 1 else min(3, len(target_methods))
         if not target_methods:
             row_limit = 2
+    if binary_factor_query:
+        row_limit = max(row_limit, 4)
     expanded: List[dict] = list(results)
     seen_keys = {
         (
@@ -7668,6 +7678,11 @@ def _sanitize_structured_table_bundle(bundle: dict) -> dict:
         "previous_table_ids",
         "next_table_ids",
         "source",
+        "selected_source",
+        "selection_reason",
+        "table_selector_score",
+        "table_selector_version",
+        "table_selector_candidates",
         "evidence_units",
     ):
         value = bundle.get(key)
@@ -7989,6 +8004,21 @@ def _structured_table_row_shard_pages(rows: List[dict], fallback_page: int) -> L
     return sorted(set(pages))
 
 
+def _structured_table_selector_metadata(sanitized: dict) -> dict:
+    """Metadata added by offline table-source selection, if present."""
+    return {
+        key: sanitized.get(key)
+        for key in (
+            "selected_source",
+            "selection_reason",
+            "table_selector_score",
+            "table_selector_version",
+            "table_selector_candidates",
+        )
+        if sanitized.get(key) not in (None, "", [], {})
+    }
+
+
 def _append_structured_table_bundle_chunks(
     doc_id: str,
     chunks: List[str],
@@ -8051,6 +8081,7 @@ def _append_structured_table_bundle_chunks(
             "table_source_ids": sanitized.get("source_ids", []),
             "evidence_units": sanitized.get("evidence_units", []),
             "source": sanitized.get("source", "odl"),
+            **_structured_table_selector_metadata(sanitized),
         })
         chunks.append(chunk_text)
         chunk_headings.append(sanitized.get("table_caption") or sanitized.get("table_id") or "Structured Table Bundle")
@@ -8113,6 +8144,7 @@ def _append_structured_table_bundle_chunks(
                 "evidence_units": [row],
                 "cell_evidence_units": row.get("cell_evidence_units", []),
                 "source": sanitized.get("source", "odl"),
+                **_structured_table_selector_metadata(sanitized),
             })
             chunks.append(exact_row_chunk)
             chunk_headings.append(f"{heading_base} row {row_number}")
@@ -8171,6 +8203,7 @@ def _append_structured_table_bundle_chunks(
                 "table_source_ids": sanitized.get("source_ids", []),
                 "evidence_units": shard_rows,
                 "source": sanitized.get("source", "odl"),
+                **_structured_table_selector_metadata(sanitized),
             })
             chunks.append(shard_text)
             chunk_headings.append(f"{heading_base} rows {row_start}-{row_end}")

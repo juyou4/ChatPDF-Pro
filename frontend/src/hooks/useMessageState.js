@@ -657,6 +657,7 @@ export function useMessageState({
     customParams, reasoningEffort, answerDetailLevel,
     enableMemory,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    numericTableVisualVerification,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
   } = globalSettings;
 
@@ -772,9 +773,12 @@ export function useMessageState({
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
-      custom_params: customParams?.length > 0
-        ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
-        : null,
+      custom_params: {
+        ...(customParams?.length > 0
+          ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
+          : {}),
+        numeric_table_visual_verification: numericTableVisualVerification || 'auto',
+      },
       enable_memory: enableMemory,
       enable_web_search: enableWebSearch,
       web_search_provider: webSearchProvider,

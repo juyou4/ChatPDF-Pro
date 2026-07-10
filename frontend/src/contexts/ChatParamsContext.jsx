@@ -15,6 +15,13 @@ const normalizeMathEngine = (value) => {
     return CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine;
 };
 
+const normalizeVisualVerificationMode = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return ['auto', 'off', 'always'].includes(normalized)
+        ? normalized
+        : CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification;
+};
+
 // 对话参数默认设置
 export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     maxTokens: 8192,
@@ -57,6 +64,7 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     overrideAnswerCritic: null,     // 答案自审（检测幻觉）
     overrideLLMQueryRewrite: null,  // LLM 查询改写（多轮指代消解）
     overrideBM25Synonyms: null,     // BM25 查询时同义词扩展
+    numericTableVisualVerification: 'auto', // 'auto' | 'off' | 'always'
     // 辅助模型（双模型策略；空值跟随后端默认）
     cheapModel: '',
     cheapModelProvider: '',
@@ -104,6 +112,7 @@ export const ChatParamsProvider = ({ children }) => {
     const [overrideAnswerCritic, setOverrideAnswerCritic] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideAnswerCritic);
     const [overrideLLMQueryRewrite, setOverrideLLMQueryRewrite] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
     const [overrideBM25Synonyms, setOverrideBM25Synonyms] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
+    const [numericTableVisualVerification, setNumericTableVisualVerificationState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
     // 辅助模型
     const [cheapModel, setCheapModel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
     const [cheapModelProvider, setCheapModelProvider] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
@@ -146,6 +155,7 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.overrideAnswerCritic !== undefined) setOverrideAnswerCritic(settings.overrideAnswerCritic);
                 if (settings.overrideLLMQueryRewrite !== undefined) setOverrideLLMQueryRewrite(settings.overrideLLMQueryRewrite);
                 if (settings.overrideBM25Synonyms !== undefined) setOverrideBM25Synonyms(settings.overrideBM25Synonyms);
+                if (settings.numericTableVisualVerification !== undefined) setNumericTableVisualVerificationState(normalizeVisualVerificationMode(settings.numericTableVisualVerification));
                 if (settings.cheapModel !== undefined) setCheapModel(settings.cheapModel);
                 if (settings.cheapModelProvider !== undefined) setCheapModelProvider(settings.cheapModelProvider);
                 if (settings.cheapModelEndpoint !== undefined) setCheapModelEndpoint(settings.cheapModelEndpoint);
@@ -237,6 +247,7 @@ export const ChatParamsProvider = ({ children }) => {
             overrideAnswerCritic,
             overrideLLMQueryRewrite,
             overrideBM25Synonyms,
+            numericTableVisualVerification,
             cheapModel,
             cheapModelProvider,
             cheapModelEndpoint,
@@ -250,7 +261,7 @@ export const ChatParamsProvider = ({ children }) => {
         mathEngine, mathEnableSingleDollar,
         messageStyle, messageFontSize,
         overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
-        cheapModel, cheapModelProvider, cheapModelEndpoint,
+        numericTableVisualVerification, cheapModel, cheapModelProvider, cheapModelEndpoint,
         debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
@@ -295,6 +306,7 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideAnswerCritic(CHAT_PARAMS_DEFAULT_SETTINGS.overrideAnswerCritic);
         setOverrideLLMQueryRewrite(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
         setOverrideBM25Synonyms(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
+        setNumericTableVisualVerificationState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
         setCheapModel(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
         setCheapModelProvider(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
         setCheapModelEndpoint(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelEndpoint);
@@ -332,6 +344,7 @@ export const ChatParamsProvider = ({ children }) => {
         cheapModel,
         cheapModelProvider,
         cheapModelEndpoint,
+        numericTableVisualVerification,
 
         // 设置方法
         setMaxTokens,
@@ -361,6 +374,7 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideAnswerCritic,
         setOverrideLLMQueryRewrite,
         setOverrideBM25Synonyms,
+        setNumericTableVisualVerification: (value) => setNumericTableVisualVerificationState(normalizeVisualVerificationMode(value)),
         setCheapModel,
         setCheapModelProvider,
         setCheapModelEndpoint,

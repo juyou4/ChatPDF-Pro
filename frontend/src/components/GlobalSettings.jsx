@@ -18,6 +18,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
         overrideAnswerCritic, setOverrideAnswerCritic,
         overrideLLMQueryRewrite, setOverrideLLMQueryRewrite,
         overrideBM25Synonyms, setOverrideBM25Synonyms,
+        numericTableVisualVerification, setNumericTableVisualVerification,
         cheapModel, setCheapModel,
         cheapModelProvider, setCheapModelProvider,
     } = useChatParams();
@@ -444,6 +445,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             value={overrideAnswerCritic}
                                             onChange={setOverrideAnswerCritic}
                                         />
+                                        <VisualVerificationMode
+                                            value={numericTableVisualVerification}
+                                            onChange={setNumericTableVisualVerification}
+                                        />
 
                                         {/* Cheap Model 配置 */}
                                         <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 space-y-2">
@@ -581,6 +586,40 @@ const TriStateToggle = ({ title, desc, value, onChange }) => {
                         </button>
                     );
                 })}
+            </div>
+        </div>
+    );
+};
+
+const VisualVerificationMode = ({ value, onChange }) => {
+    const normalized = ['auto', 'off', 'always'].includes(value) ? value : 'auto';
+    const options = [
+        { v: 'auto', label: '自动' },
+        { v: 'off', label: '关闭' },
+        { v: 'always', label: '总是' },
+    ];
+    return (
+        <div className="flex items-start justify-between gap-4 py-2">
+            <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-bold text-gray-800">表格视觉校验</div>
+                <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                    数值表格证据有风险时裁剪原 PDF 表格并让视觉模型抽取单元格；会增加一次视觉调用
+                </div>
+            </div>
+            <div className="flex items-center gap-1 bg-gray-100/80 p-0.5 rounded-[12px] flex-shrink-0">
+                {options.map((opt) => (
+                    <button
+                        key={opt.v}
+                        onClick={() => onChange(opt.v)}
+                        className={`px-2.5 py-1 rounded-[10px] text-[11px] font-bold transition-all ${
+                            normalized === opt.v
+                                ? 'bg-white text-violet-600 shadow-sm'
+                                : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                    >
+                        {opt.label}
+                    </button>
+                ))}
             </div>
         </div>
     );

@@ -258,6 +258,7 @@ _DEFAULT_CONFIG = {
         "enable_ocr": False,
         "enable_formula": True,
         "enable_table": True,
+        "model_version": "vlm",
     },
     "doc2x": {
         "worker_url": "",
@@ -911,7 +912,7 @@ class MinerUAdapter(WorkerOCRAdapter):
     def __init__(self, worker_url: str, auth_key: str = "",
                  token: str = "", token_mode: str = "frontend",
                  enable_ocr: bool = False, enable_formula: bool = True,
-                 enable_table: bool = True):
+                 enable_table: bool = True, model_version: str = "vlm"):
         """
         初始化 MinerU OCR 适配器
 
@@ -923,11 +924,13 @@ class MinerUAdapter(WorkerOCRAdapter):
             enable_ocr: 是否启用 OCR 识别
             enable_formula: 是否启用公式识别
             enable_table: 是否启用表格识别
+            model_version: MinerU 解析模型版本，默认使用 VLM 后端
         """
         super().__init__(worker_url, auth_key, token, token_mode)
         self._enable_ocr = enable_ocr
         self._enable_formula = enable_formula
         self._enable_table = enable_table
+        self._model_version = (model_version or "vlm").strip() or "vlm"
 
     @property
     def name(self) -> str:
@@ -1071,6 +1074,7 @@ class MinerUAdapter(WorkerOCRAdapter):
                 "is_ocr": str(self._enable_ocr).lower(),
                 "enable_formula": str(self._enable_formula).lower(),
                 "enable_table": str(self._enable_table).lower(),
+                "model_version": self._model_version,
             },
         )
         self._check_worker_response(response, "上传 PDF")
@@ -1339,6 +1343,7 @@ class MinerUDirectAdapter(MinerUAdapter):
         enable_ocr: bool = False,
         enable_formula: bool = True,
         enable_table: bool = True,
+        model_version: str = "vlm",
     ):
         self._base_url = ""
         if base_url:
@@ -1357,6 +1362,7 @@ class MinerUDirectAdapter(MinerUAdapter):
             enable_ocr=enable_ocr,
             enable_formula=enable_formula,
             enable_table=enable_table,
+            model_version=model_version,
         )
 
     @property
@@ -1420,6 +1426,7 @@ class MinerUDirectAdapter(MinerUAdapter):
                 "enable_formula": self._enable_formula,
                 "enable_table": self._enable_table,
                 "language": "ch",
+                "model_version": self._model_version,
                 "files": [{
                     "name": "document.pdf",
                     "data_id": data_id,
@@ -2304,6 +2311,7 @@ if _mineru_config.get("access_mode") == "direct":
         enable_ocr=_mineru_config.get("enable_ocr", False),
         enable_formula=_mineru_config.get("enable_formula", True),
         enable_table=_mineru_config.get("enable_table", True),
+        model_version=_mineru_config.get("model_version", "vlm"),
     ))
 else:
     _ocr_registry.register(MinerUAdapter(
@@ -2314,6 +2322,7 @@ else:
         enable_ocr=_mineru_config.get("enable_ocr", False),
         enable_formula=_mineru_config.get("enable_formula", True),
         enable_table=_mineru_config.get("enable_table", True),
+        model_version=_mineru_config.get("model_version", "vlm"),
     ))
 
 # 注册在线 OCR 适配器：加载 Doc2X OCR 配置并注册

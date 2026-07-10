@@ -44,6 +44,7 @@ from services.rag_config import (
     should_enable_llm_query_rewrite,
     apply_request_overrides,
 )
+from services.table_visual_verifier import maybe_verify_numeric_table_visual
 from services.citation_service import (
     build_structured_citation_prompt,
     parse_citation_list,
@@ -469,6 +470,25 @@ def _get_cheap_model_params(request) -> tuple:
 
 def _get_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _resolve_chat_document_pdf_path(doc: dict) -> Path | None:
+    pdf_url = (doc or {}).get("pdf_url") or ""
+    if not pdf_url:
+        return None
+    pdf_name = pdf_url.split("/")[-1]
+    if not pdf_name:
+        return None
+    data_dir = Path(runtime.data_dir) if getattr(runtime, "data_dir", None) else _get_project_root() / "data"
+    candidates = [
+        data_dir / "uploads" / pdf_name,
+        _get_project_root() / "backend" / "uploads" / pdf_name,
+        _get_project_root() / "uploads" / pdf_name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _normalize_doc_alignment_text(text: str, limit: int = 240) -> str:
@@ -2037,6 +2057,7 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
     surrounding context are sidecars to help the model interpret the row.
     """
     exact_rows: list[dict] = []
+    visual_rows: list[dict] = []
     comparison_rows: list[dict] = []
     support_rows: list[dict] = []
     seen: set[str] = set()
@@ -2056,14 +2077,16 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
             continue
         seen.add(key)
         role = str(segment.get("segment_role") or "").strip()
-        if _is_exact_table_evidence_segment(segment):
+        if _is_numeric_table_visual_verification_segment(segment):
+            visual_rows.append(segment)
+        elif _is_exact_table_evidence_segment(segment):
             exact_rows.append(segment)
         elif role == "numeric_comparison_row":
             comparison_rows.append(segment)
         else:
             support_rows.append(segment)
 
-    ordered = exact_rows + comparison_rows + support_rows
+    ordered = visual_rows + exact_rows + comparison_rows + support_rows
     lines: list[str] = []
     for idx, segment in enumerate(ordered[: max(1, int(max_segments or 1))], 1):
         try:
@@ -2102,6 +2125,15 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
         parts = [f"[{ref}] 数值表格证据"]
         if page_text:
             parts[0] += f"（{page_text}）"
+        if _is_numeric_table_visual_verification_segment(segment):
+            parts[0] = f"[{ref}] 数值表格视觉校验"
+            if page_text:
+                parts[0] += f"（{page_text}）"
+            visual_text = _compact_context_text(segment.get("text") or "", limit=1200)
+            if visual_text:
+                parts.append(visual_text)
+            lines.append("\n".join(parts))
+            continue
         if caption:
             parts.append(f"表题: {caption}")
         if header:
@@ -2146,6 +2178,85 @@ def _sync_numeric_table_prompt_context(
     if graph_marker in str(context or ""):
         graph_suffix = str(context)[str(context).index(graph_marker):]
     return f"根据用户问题检索到的相关文档片段：\n\n{formatted}\n\n{graph_suffix}"
+
+
+def _is_numeric_table_visual_verification_segment(segment: dict) -> bool:
+    if not isinstance(segment, dict):
+        return False
+    if str(segment.get("segment_role") or "").strip() == "numeric_table_visual_verification":
+        return True
+    return "[numeric table visual verification]" in str(segment.get("text") or "").lower()
+
+
+async def _maybe_add_numeric_table_visual_verification(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    retrieval_meta: dict,
+    query: str,
+    evidence_need: list[str],
+) -> None:
+    needs = {str(item).strip() for item in (evidence_need or []) if str(item).strip()}
+    if "numeric_table" not in needs or not isinstance(retrieval_meta, dict):
+        return
+    diagnostics = retrieval_meta.setdefault("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        retrieval_meta["diagnostics"] = diagnostics
+
+    base_segments = _build_response_context_segments({
+        **retrieval_meta,
+        "search_query": query or retrieval_meta.get("search_query", ""),
+    })
+    if any(_is_numeric_table_visual_verification_segment(segment) for segment in base_segments):
+        diagnostics["numeric_table_visual_verification"] = {
+            "enabled": True,
+            "triggered": False,
+            "skipped_reason": "already_present",
+        }
+        return
+
+    try:
+        visual_segment, visual_diag = await maybe_verify_numeric_table_visual(
+            query=query or request.question,
+            doc_id=request.doc_id,
+            doc_data=(doc or {}).get("data") or {},
+            pdf_path=_resolve_chat_document_pdf_path(doc),
+            segments=base_segments,
+            api_key=request.api_key or "",
+            model=request.model,
+            provider=request.api_provider,
+            endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+            custom_params=request.custom_params,
+        )
+    except Exception as exc:
+        visual_segment = {}
+        visual_diag = {
+            "enabled": True,
+            "triggered": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        logger.debug("[TableVisual] verification failed: %s", exc)
+
+    diagnostics["numeric_table_visual_verification"] = visual_diag
+    if not visual_segment:
+        return
+
+    retrieval_meta["_context_segments"] = _merge_response_context_segments(
+        [visual_segment],
+        retrieval_meta.get("_context_segments") or [],
+    )
+    existing_citations = [
+        citation for citation in (retrieval_meta.get("citations") or [])
+        if isinstance(citation, dict)
+    ]
+    visual_citation = _segment_to_recovery_citation(visual_segment, 1)
+    renumbered_existing = []
+    for idx, citation in enumerate(existing_citations, start=2):
+        updated = dict(citation)
+        updated["ref"] = idx
+        renumbered_existing.append(updated)
+    retrieval_meta["citations"] = [visual_citation, *renumbered_existing]
 
 
 def _custom_bool(params: Optional[dict], *keys: str) -> bool:
@@ -2704,6 +2815,19 @@ def _extract_numeric_table_target_methods(query: str = "", hints: Optional[dict]
         phrase = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
         if phrase:
             values.append(phrase)
+    explicit_short_values: set[str] = set()
+    for pattern in (
+        r"\bID\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"\b#?\s*Row\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"(?:配置|实验)\s*ID\s*[:：]?\s*([A-Za-z0-9]+)",
+    ):
+        for match in re.finditer(pattern, sample, re.IGNORECASE):
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" ,.;:[]{}")
+            if value and len(value) <= 6:
+                values.append(value)
+                normalized = _normalize_numeric_table_method_token(value)
+                if normalized:
+                    explicit_short_values.add(normalized)
     for match in token_pattern.finditer(sample):
         token = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
         if not token:
@@ -2724,7 +2848,7 @@ def _extract_numeric_table_target_methods(query: str = "", hints: Optional[dict]
         for value in values
         for normalized in (_normalize_numeric_table_method_token(value),)
         if normalized
-        and len(normalized) >= 3
+        and (len(normalized) >= 3 or normalized in explicit_short_values)
         and _normalize_numeric_table_column_key(value) not in known_column_tokens
         and (
             _normalize_numeric_table_column_key(value) not in target_columns
@@ -4923,6 +5047,27 @@ def _numeric_table_segment_support_text(segment: dict) -> str:
     ).strip()
 
 
+def _extract_response_numeric_table_dataset_mentions(text: str) -> set[str]:
+    mentions: set[str] = set()
+    sample = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not sample:
+        return mentions
+    token_pattern = re.compile(
+        r"\b(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:19|20)?\d{0,2}\b"
+    )
+    for match in token_pattern.finditer(sample):
+        token = match.group(0).strip(" ,.;:[]{}")
+        if not token:
+            continue
+        if (
+            re.search(r"(?:^|[-_])(?:LT|Dataset|Data)$", token, re.IGNORECASE)
+            or re.search(r"(?:19|20)\d{2}$", token)
+            or re.search(r"(?:^|[-_])(?:INat|Nat|Bench|Corpus|Set)(?:[-_]|$)", token, re.IGNORECASE)
+        ):
+            mentions.add(re.sub(r"\s+", "-", token).lower())
+    return mentions
+
+
 def _numeric_table_unit_row_text(unit: dict) -> str:
     if not isinstance(unit, dict):
         return ""
@@ -4975,6 +5120,9 @@ def _numeric_table_row_identity_text(row_text: str = "") -> str:
         "pre-train data",
         "pre-training data",
         "pretraining data",
+        "#row",
+        "row",
+        "id",
         "attack",
         "victim model",
         "dataset",
@@ -5093,7 +5241,7 @@ def _split_structured_table_row_shard_rows(text: str = "") -> list[str]:
     if not rows_part:
         return []
     row_start = re.compile(
-        r"(?=(?:^|\s)(?:#ID|Method|Model|Backbone|Pre-Train(?:ing)?(?: Data)?|Attack|Victim Model|Dataset|方法|模型|攻击|数据集)\s*[:：])",
+        r"(?=(?:^|\s)(?:#ID|ID|#Row|Row|Method|Model|Backbone|Pre-Train(?:ing)?(?: Data)?|Attack|Victim Model|Dataset|方法|模型|攻击|数据集)\s*[:：])",
         re.IGNORECASE,
     )
     starts = [match.start() for match in row_start.finditer(rows_part)]
@@ -5399,10 +5547,21 @@ def _select_numeric_table_evidence_packs(
     explicit_table_labels = _extract_paper_table_labels_from_query(query)
     target_columns = _extract_numeric_table_target_columns(query, hints)
     target_methods = _extract_numeric_table_target_methods(query, hints)
+    target_datasets = _extract_response_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])) + " " + query)
+    binary_factor_query = bool(
+        target_datasets
+        and re.search(
+            r"(?:\bIL\b|\bTL\b|image\s+list|text\s+list|combination|both|simultaneously|benefit|effect|同时|组合|都|影响|作用)",
+            query,
+            re.IGNORECASE,
+        )
+    )
     effective_max_rows_per_table = max(
         int(max_rows_per_table or 1),
         min(4, len([method for method in target_methods if method])),
     )
+    if binary_factor_query:
+        effective_max_rows_per_table = max(effective_max_rows_per_table, 4)
 
     grouped: dict[str, list[tuple[int, dict]]] = {}
     for idx, segment in enumerate(normalized):
@@ -5499,6 +5658,24 @@ def _select_numeric_table_evidence_packs(
             if _numeric_table_segment_row_text(segment, query=query, hints=hints)
         ]
         row_candidates.sort(key=_row_rank, reverse=True)
+        if binary_factor_query and target_datasets:
+            dataset_rows: list[tuple[int, dict]] = []
+            seen_dataset_rows: set[str] = set()
+            for idx, segment in row_candidates:
+                row_text = _numeric_table_segment_row_text(segment, query=query, hints=hints)
+                row_datasets = _extract_response_numeric_table_dataset_mentions(row_text)
+                if not (row_datasets & target_datasets):
+                    continue
+                row_key = _normalize_numeric_table_method_token(row_text) or row_text.casefold()
+                if row_key in seen_dataset_rows:
+                    continue
+                seen_dataset_rows.add(row_key)
+                dataset_rows.append((idx, segment))
+            if len(dataset_rows) >= 3:
+                row_candidates = dataset_rows + [
+                    row for row in row_candidates
+                    if id(row[1]) not in {id(segment) for _idx, segment in dataset_rows}
+                ]
         has_method_matched_row = bool(
             target_methods
             and any(
@@ -5857,6 +6034,11 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
             citation_count=len(citation_segments),
         )
     if "numeric_table" in evidence_need and (citation_segments or retrieval_segments or existing_segments):
+        visual_segments = [
+            segment
+            for segment in _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
+            if _is_numeric_table_visual_verification_segment(segment)
+        ]
         comparator_segments = _build_numeric_table_comparator_context_segments(retrieval_meta)
         exact_table_segments = _collect_exact_table_evidence_segments(
             retrieval_segments,
@@ -5890,14 +6072,17 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
                 execution_segment = {}
             if execution_segment:
                 packed_numeric = _merge_response_context_segments([execution_segment], packed_numeric)
-            return packed_numeric
+            return _merge_response_context_segments(visual_segments, packed_numeric)
         if exact_table_segments:
             # RAGAS/context display must keep exact table rows even when a broader
             # semantic-group digest scores well. This mirrors PaperQA/LightRAG:
             # answer context may be compressed, but evidence references stay concrete.
             protected = _merge_response_context_segments(exact_table_segments, filtered_numeric)
-            return protected[:12]
-        return filtered_numeric or comparator_segments or citation_segments
+            return _merge_response_context_segments(visual_segments, protected)[:12]
+        return _merge_response_context_segments(
+            visual_segments,
+            filtered_numeric or comparator_segments or citation_segments,
+        )
     merged = _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
     return _filter_response_context_segments(
         merged,
@@ -9836,6 +10021,13 @@ async def chat_with_pdf(request: ChatRequest):
             retrieval_meta=retrieval_meta,
             query=search_query,
         )
+        await _maybe_add_numeric_table_visual_verification(
+            request=request,
+            doc=doc,
+            retrieval_meta=retrieval_meta,
+            query=search_query,
+            evidence_need=evidence_need,
+        )
         context = _sync_numeric_table_prompt_context(
             context,
             retrieval_meta,
@@ -10595,6 +10787,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     doc=doc,
                     retrieval_meta=retrieval_meta,
                     query=search_query,
+                )
+                await _maybe_add_numeric_table_visual_verification(
+                    request=request,
+                    doc=doc,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                    evidence_need=evidence_need,
                 )
                 context = _sync_numeric_table_prompt_context(
                     context,

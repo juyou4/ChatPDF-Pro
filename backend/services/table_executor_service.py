@@ -69,9 +69,13 @@ def _row_id(segment: dict, cells: list[dict]) -> str:
                 first = _clean(text.split("|", 1)[0])
                 if first:
                     return first
-            match = re.search(r"(?:method|model|backbone|方法|模型)\s*[:：]\s*([^;|]+)", text, re.I)
+            match = re.search(r"(?:id|#row|row|method|model|backbone|方法|模型)\s*[:：]\s*([^;|]+)", text, re.I)
             if match:
-                return _clean(match.group(1))
+                label = _clean(match.group(0).split(match.group(1), 1)[0]).strip(":： ")
+                row_value = _clean(match.group(1))
+                if label.casefold() == "id" and row_value:
+                    return f"ID: {row_value}"
+                return row_value
             return _clean(re.split(r";|\s{2,}", text, maxsplit=1)[0])
     if cells:
         return _cell_value(cells[0])
@@ -404,6 +408,63 @@ def _wants_rank_of_named_row(query: str, rows: list[dict]) -> bool:
     return any(row["row_key"] and row["row_key"] in query_key for row in rows)
 
 
+def _explicit_named_row_keys(query: str) -> set[str]:
+    keys: set[str] = set()
+    sample = str(query or "")
+    for pattern in (
+        r"\bID\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"\b#?\s*Row\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"(?:配置|实验)\s*ID\s*[:：]?\s*([A-Za-z0-9]+)",
+    ):
+        for match in re.finditer(pattern, sample, re.IGNORECASE):
+            value = _norm(match.group(1))
+            if not value or len(value) > 6:
+                continue
+            if "id" in pattern.casefold():
+                keys.add(f"id{value}")
+            if "row" in pattern.casefold():
+                keys.add(f"row{value}")
+            if len(value) >= 2:
+                keys.add(value)
+    return keys
+
+
+def _named_rows_from_query(query: str, rows: list[dict]) -> list[dict]:
+    query_key = _norm(query)
+    explicit_keys = _explicit_named_row_keys(query)
+    matched: list[tuple[int, int, dict]] = []
+    for idx, row in enumerate(rows):
+        row_key = row.get("row_key") or ""
+        if not row_key:
+            continue
+        if row_key in explicit_keys:
+            matched.append((query_key.find(row_key), idx, row))
+            continue
+        if len(row_key) >= 3 and row_key in query_key:
+            matched.append((query_key.find(row_key), idx, row))
+    if not matched:
+        return []
+    matched.sort(key=lambda item: (item[0] if item[0] >= 0 else 10_000, item[1]))
+    return [row for _pos, _idx, row in matched]
+
+
+def _row_cells_line(row: dict, query: str = "") -> str:
+    query_key = _norm(query)
+    cells = list((row.get("cells") or {}).values())
+    if not cells:
+        return ""
+    preferred: list[tuple[str, str, Optional[float]]] = []
+    rest: list[tuple[str, str, Optional[float]]] = []
+    for cell in cells:
+        header = _norm(cell[0])
+        if header and header in query_key:
+            preferred.append(cell)
+        else:
+            rest.append(cell)
+    ordered = [*preferred, *rest]
+    return "; ".join(f"{header} = {value}" for header, value, _number_value in ordered[:16])
+
+
 def _sorted_numeric_candidates(query: str, rows: list[dict], column_key: str) -> tuple[list[tuple[float, dict, tuple[str, str, Optional[float]]]], bool]:
     candidates: list[tuple[float, dict, tuple[str, str, Optional[float]]]] = []
     header = ""
@@ -446,9 +507,6 @@ def build_numeric_table_execution_segment(query: str, segments: list[dict]) -> d
     rows = _rows_from_segments(segments)
     if len(rows) < 1:
         return {}
-    column_key = _target_column_key(query, rows)
-    if not column_key:
-        return {}
     query_l = str(query or "").casefold()
     wants_delta = bool(re.search(r"高多少|差多少|提升|百分点|相比|比|difference|higher|lower|gain|improvement", query_l, re.I))
     wants_min = bool(re.search(r"最低|最小|minimum|lowest|smallest", query_l, re.I))
@@ -465,7 +523,23 @@ def build_numeric_table_execution_segment(query: str, segments: list[dict]) -> d
     elif table_id:
         lines.append(f"Table ID: {table_id}")
 
-    if wants_delta and len(rows) >= 2:
+    named_rows = _named_rows_from_query(query, rows)
+    if named_rows and not wants_delta and not wants_rank and not rank_position:
+        lines.append("Operation: direct lookup for named row")
+        for row in named_rows[:4]:
+            cells_line = _row_cells_line(row, query)
+            if cells_line:
+                lines.append(f"Selected Row: {row['row_id']} | {cells_line}")
+        if len(lines) <= 3:
+            return {}
+    else:
+        column_key = _target_column_key(query, rows)
+        if not column_key:
+            return {}
+
+    if len(lines) > 3:
+        pass
+    elif wants_delta and len(rows) >= 2:
         ordered = _ordered_query_rows(query, rows)
         base = ordered[0]
         base_cell = base["cells"].get(column_key)
