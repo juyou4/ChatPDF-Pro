@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
 
+from services.document_geometry import normalize_page_size, visual_geometry
+
 MINERU_RAG_INDEX_SOURCE = "mineru"
 MINERU_RAG_NORMALIZER_VERSION = "mineru-rag-v1"
 
@@ -94,6 +96,7 @@ def normalize_mineru_for_rag(
     *,
     source_hash: str | None = None,
     normalizer_version: str | None = None,
+    page_sizes: dict[int, list[float] | tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Convert MinerU payload into RAG-native pages/full_text/table bundles."""
     payload = mineru_payload if isinstance(mineru_payload, dict) else {}
@@ -155,7 +158,12 @@ def normalize_mineru_for_rag(
         elif raw_type in {"equation", "interline_equation", "inline_equation", "formula"}:
             text = _format_equation(_extract_text(item, ("latex", "text", "content")))
         elif raw_type == "table":
-            bundle, table_text, table_warnings = _build_table_bundle(item, page_num, item_index)
+            bundle, table_text, table_warnings = _build_table_bundle(
+                item,
+                page_num,
+                item_index,
+                page_size=_resolve_page_size(item, page_num, page_sizes),
+            )
             warnings.extend(table_warnings)
             if bundle:
                 structured_table_bundles.append(bundle)
@@ -263,12 +271,23 @@ def _extract_content_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _build_table_bundle(item: dict[str, Any], page_num: int, item_index: int) -> tuple[dict[str, Any] | None, str, list[str]]:
+def _build_table_bundle(
+    item: dict[str, Any],
+    page_num: int,
+    item_index: int,
+    *,
+    page_size: list[float],
+) -> tuple[dict[str, Any] | None, str, list[str]]:
     warnings: list[str] = []
     html_table = str(item.get("table_body") or item.get("html") or item.get("table_html") or "").strip()
     caption = _clean_text(_extract_text(item, ("table_caption", "caption")))
     footnote = _clean_text(_extract_text(item, ("table_footnote",)))
     bbox = _normalize_bbox(item.get("bbox") or item.get("table_body_bbox"))
+    geometry = visual_geometry(
+        bbox,
+        coordinate_space="normalized_0_1000",
+        page_size=page_size,
+    )
     table_id = _extract_table_reference(caption) or f"MinerU Table p{page_num}-{item_index + 1}"
     bundle_id = f"mineru:p{page_num}:table:{item_index + 1}"
 
@@ -290,6 +309,7 @@ def _build_table_bundle(item: dict[str, Any], page_num: int, item_index: int) ->
     body_markdown = _matrix_to_markdown(matrix)
     page_markdown = _matrix_to_markdown(matrix, caption=caption)
     header = " | ".join(matrix[0]).strip() if matrix else ""
+    cell_bboxes, row_bboxes = _extract_trustworthy_table_geometry(item, matrix, bbox)
     evidence_units = _build_table_evidence_units(
         bundle_id=bundle_id,
         table_id=table_id,
@@ -298,6 +318,9 @@ def _build_table_bundle(item: dict[str, Any], page_num: int, item_index: int) ->
         matrix=matrix,
         page_num=page_num,
         bbox=bbox,
+        page_size=page_size,
+        cell_bboxes=cell_bboxes,
+        row_bboxes=row_bboxes,
     )
     bundle = {
         "bundle_id": bundle_id,
@@ -315,8 +338,10 @@ def _build_table_bundle(item: dict[str, Any], page_num: int, item_index: int) ->
         "page_index": page_num - 1,
         "bounding_box": bbox,
         "bounding_boxes": [bbox] if bbox else [],
+        **geometry,
         "source_ids": [],
         "source": "mineru",
+        "row_cell_geometry_available": bool(cell_bboxes or row_bboxes),
         "evidence_units": evidence_units,
     }
     bundle_lines = ["[Structured Table Bundle]"]
@@ -477,15 +502,31 @@ def _build_table_evidence_units(
     matrix: list[list[str]],
     page_num: int,
     bbox: list[float],
+    page_size: list[float],
+    cell_bboxes: dict[tuple[int, int], list[float]] | None = None,
+    row_bboxes: dict[int, list[float]] | None = None,
 ) -> list[dict[str, Any]]:
     evidence_units: list[dict[str, Any]] = []
+    geometry = visual_geometry(
+        bbox,
+        coordinate_space="normalized_0_1000",
+        page_size=page_size,
+    )
     header_cells = matrix[0] if matrix else []
     header_paths = _mineru_column_header_paths(matrix)
+    cell_bboxes = cell_bboxes or {}
+    row_bboxes = row_bboxes or {}
     for row_idx, row in enumerate(matrix, start=1):
         is_header = row_idx == 1
         cell_units: list[dict[str, Any]] = []
         for col_idx, cell_text in enumerate(row, start=1):
             header_path = header_paths[col_idx - 1] if col_idx - 1 < len(header_paths) else f"Column {col_idx}"
+            cell_bbox = cell_bboxes.get((row_idx, col_idx))
+            cell_geometry = visual_geometry(
+                cell_bbox or bbox,
+                coordinate_space="normalized_0_1000",
+                page_size=page_size,
+            )
             cell_units.append({
                 "evidence_unit_id": f"{bundle_id}::table_cell::p{page_num}::r{row_idx}::c{col_idx}",
                 "evidence_unit_type": "table_cell",
@@ -501,8 +542,11 @@ def _build_table_evidence_units(
                 "col_id": header_path,
                 "column_header": header_path,
                 "header_path": header_path,
-                "bbox": bbox,
-                "bounding_box": bbox,
+                "bbox": cell_bbox or bbox,
+                "bounding_box": cell_bbox or bbox,
+                **cell_geometry,
+                "geometry_source": "mineru_cell" if cell_bbox else "table_fallback",
+                "visual_crop_eligible": bool(cell_bbox),
                 "cell_text": cell_text,
                 "content": cell_text,
                 "is_header_row": is_header,
@@ -510,6 +554,14 @@ def _build_table_evidence_units(
             })
         raw_row_text = " | ".join(cell for cell in row if cell).strip()
         row_text = raw_row_text if is_header else _build_header_bound_row_text(header_cells, row)
+        row_bbox = row_bboxes.get(row_idx)
+        if not row_bbox and row and all(cell_bboxes.get((row_idx, col_idx)) for col_idx in range(1, len(row) + 1)):
+            row_bbox = _merge_normalized_bboxes([cell_bboxes[(row_idx, col_idx)] for col_idx in range(1, len(row) + 1)])
+        row_geometry = visual_geometry(
+            row_bbox or bbox,
+            coordinate_space="normalized_0_1000",
+            page_size=page_size,
+        )
         evidence_units.append({
             "evidence_unit_id": f"{bundle_id}::table_row::p{page_num}::r{row_idx}",
             "evidence_unit_type": "table_row",
@@ -520,8 +572,11 @@ def _build_table_evidence_units(
             "page": page_num,
             "row_idx": row_idx,
             "row_number": row_idx,
-            "bbox": bbox,
-            "bounding_box": bbox,
+            "bbox": row_bbox or bbox,
+            "bounding_box": row_bbox or bbox,
+            **row_geometry,
+            "geometry_source": "mineru_row" if row_bbox else "table_fallback",
+            "visual_crop_eligible": bool(row_bbox),
             "row_id": next((cell for cell in row if cell), ""),
             "row_text": row_text,
             "raw_row_text": raw_row_text,
@@ -534,6 +589,74 @@ def _build_table_evidence_units(
             "source": "mineru",
         })
     return evidence_units
+
+
+def _extract_trustworthy_table_geometry(
+    item: dict[str, Any],
+    matrix: list[list[str]],
+    table_bbox: list[float],
+) -> tuple[dict[tuple[int, int], list[float]], dict[int, list[float]]]:
+    """Read only explicit MinerU table geometry; never infer it from HTML.
+
+    MinerU variants expose this either as ``table_cells``/``cells`` or
+    ``table_rows``/``rows``.  Coordinates must be normalized 0--1000 and lie
+    inside the declared table bbox.  Otherwise row/cell retrieval stays tied
+    to the whole-table overview and is marked non-croppable.
+    """
+    cell_bboxes: dict[tuple[int, int], list[float]] = {}
+    row_bboxes: dict[int, list[float]] = {}
+    rows = len(matrix)
+    cols = max((len(row) for row in matrix), default=0)
+    if not table_bbox or not rows or not cols:
+        return cell_bboxes, row_bboxes
+
+    def valid_bbox(value: Any) -> list[float]:
+        bbox = _normalize_bbox(value)
+        if not bbox or any(value < 0 or value > 1000 for value in bbox):
+            return []
+        if bbox[0] < table_bbox[0] or bbox[1] < table_bbox[1] or bbox[2] > table_bbox[2] or bbox[3] > table_bbox[3]:
+            return []
+        return bbox
+
+    def normalized_index(value: Any, limit: int, *, zero_based: bool) -> int:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if zero_based:
+            index += 1
+        return index if 1 <= index <= limit else 0
+
+    raw_cells = item.get("table_cells") or item.get("cells") or item.get("cell_bboxes") or []
+    if isinstance(raw_cells, list):
+        zero_based = any(isinstance(cell, dict) and (cell.get("row_idx") == 0 or cell.get("col_idx") == 0) for cell in raw_cells)
+        for cell in raw_cells:
+            if not isinstance(cell, dict):
+                continue
+            row = normalized_index(cell.get("row_idx", cell.get("row_index", cell.get("row"))), rows, zero_based=zero_based)
+            col = normalized_index(cell.get("col_idx", cell.get("col_index", cell.get("column", cell.get("col")))), cols, zero_based=zero_based)
+            bbox = valid_bbox(cell.get("bbox") or cell.get("cell_bbox"))
+            if row and col and bbox:
+                cell_bboxes[(row, col)] = bbox
+
+    raw_rows = item.get("table_rows") or item.get("rows") or item.get("row_bboxes") or []
+    if isinstance(raw_rows, list):
+        zero_based = any(isinstance(row, dict) and row.get("row_idx") == 0 for row in raw_rows)
+        for row_data in raw_rows:
+            if not isinstance(row_data, dict):
+                continue
+            row = normalized_index(row_data.get("row_idx", row_data.get("row_index", row_data.get("row"))), rows, zero_based=zero_based)
+            bbox = valid_bbox(row_data.get("bbox") or row_data.get("row_bbox"))
+            if row and bbox:
+                row_bboxes[row] = bbox
+    return cell_bboxes, row_bboxes
+
+
+def _merge_normalized_bboxes(bboxes: list[list[float]]) -> list[float]:
+    return [
+        min(bbox[0] for bbox in bboxes), min(bbox[1] for bbox in bboxes),
+        max(bbox[2] for bbox in bboxes), max(bbox[3] for bbox in bboxes),
+    ]
 
 
 def _quality_report(
@@ -649,11 +772,28 @@ def _page_num(item: dict[str, Any]) -> int:
         try:
             return max(1, int(item["page_idx"]) + 1)
         except (TypeError, ValueError):
-            return 1
+            pass
     try:
         return max(1, int(item.get("page") or item.get("page_id") or 1))
     except (TypeError, ValueError):
         return 1
+
+
+def _resolve_page_size(
+    item: dict[str, Any],
+    page_num: int,
+    page_sizes: dict[int, list[float] | tuple[float, float]] | None,
+) -> list[float]:
+    """Prefer the original PDF page size; keep item metadata as a fallback."""
+    if isinstance(page_sizes, dict):
+        known = normalize_page_size(page_sizes.get(page_num))
+        if known:
+            return known
+    for key in ("page_size", "pageSize", "page_dimensions"):
+        known = normalize_page_size(item.get(key))
+        if known:
+            return known
+    return []
 
 
 def _normalize_bbox(value: Any) -> list[float]:

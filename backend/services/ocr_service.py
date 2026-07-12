@@ -6,6 +6,7 @@ import io
 import ipaddress
 import os
 import re
+import shutil
 import time
 import zipfile
 from abc import ABC, abstractmethod
@@ -210,6 +211,7 @@ class BaseOCRAdapter(ABC):
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +222,37 @@ logger = logging.getLogger(__name__)
 
 # 配置文件路径：相对于 Chatpdf 项目根目录
 _ONLINE_OCR_CONFIG_PATH = Path(__file__).resolve().parents[2] / "data" / "online_ocr_config.json"
+_OCR_PROVIDER_USAGE_PATH = _ONLINE_OCR_CONFIG_PATH.parent / "ocr_provider_usage.json"
+
+
+def record_ocr_provider_use(provider: str) -> None:
+    """Persist a privacy-preserving provider usage counter for sunset gates."""
+    name = "".join(char for char in str(provider or "") if char.isalnum() or char in {"-", "_"})
+    if not name:
+        return
+    try:
+        data: dict = {}
+        if _OCR_PROVIDER_USAGE_PATH.exists():
+            data = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8"))
+        entry = dict(data.get(name) or {})
+        entry["count"] = int(entry.get("count") or 0) + 1
+        entry["last_used_at"] = datetime.now(timezone.utc).isoformat()
+        data[name] = entry
+        _OCR_PROVIDER_USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = _OCR_PROVIDER_USAGE_PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(_OCR_PROVIDER_USAGE_PATH)
+    except Exception as exc:
+        logger.warning("记录 OCR provider 使用情况失败: %s", exc)
+
+
+def get_ocr_provider_usage(provider: str) -> dict:
+    try:
+        data = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8")) if _OCR_PROVIDER_USAGE_PATH.exists() else {}
+        entry = data.get(provider) if isinstance(data, dict) else None
+        return dict(entry) if isinstance(entry, dict) else {"count": 0, "last_used_at": ""}
+    except Exception:
+        return {"count": 0, "last_used_at": ""}
 
 # 各在线 OCR 提供商的环境变量名映射
 # 注意：token_mode、enable_ocr、enable_formula、enable_table 等字段
@@ -511,8 +544,18 @@ class TesseractAdapter(BaseOCRAdapter):
         return "tesseract"
 
     def is_available(self) -> bool:
-        """检测 Tesseract 和 pdf2image 是否可用"""
-        return TESSERACT_AVAILABLE and PDF2IMAGE_AVAILABLE
+        """Verify the Python packages, executable, and requested language data."""
+        if not (TESSERACT_AVAILABLE and PDF2IMAGE_AVAILABLE):
+            return False
+        command = str(getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract") or "tesseract")
+        if not Path(command).is_file() and shutil.which(command) is None:
+            return False
+        try:
+            languages = set(pytesseract.get_languages(config=""))
+        except Exception:
+            return False
+        requested = {language.strip() for language in self._lang.split("+") if language.strip()}
+        return requested.issubset(languages)
 
     def ocr_image(self, image) -> str:
         """
@@ -1053,6 +1096,47 @@ class MinerUAdapter(WorkerOCRAdapter):
             payload["full_zip_url"] = full_zip_url
             return payload
 
+    def resume_batch(
+        self,
+        batch_id: str,
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_event: Any = None,
+        data_id: str = "",
+    ) -> Dict[str, Any]:
+        """Resume a Worker-backed remote job without uploading the PDF again."""
+        import httpx
+
+        if not batch_id:
+            raise RuntimeError("恢复 MinerU 任务缺少 batch_id")
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            if progress_callback:
+                progress_callback({"stage": "resuming", "message": "恢复 MinerU 远端任务", "batch_id": batch_id})
+            full_zip_url = self._poll_result(client, batch_id, progress_callback=progress_callback, cancel_event=cancel_event)
+            payload = self._download_and_extract_payload(client, full_zip_url)
+            payload.update({"batch_id": batch_id, "full_zip_url": full_zip_url, "access_mode": "worker"})
+            return payload
+
+    def cancel_batch(self, batch_id: str, *, data_id: str = "") -> dict:
+        """Ask the Worker proxy to cancel a remote job.
+
+        The proxy endpoint is deliberately explicit so an old proxy cannot be
+        mistaken for a successful cancellation.  Callers retain the returned
+        state and still stop local polling when the endpoint is unsupported.
+        """
+        import httpx
+
+        if not batch_id:
+            return {"attempted": False, "state": "not_requested", "reason": "missing_batch_id"}
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                response = client.post(f"{self._worker_url}/mineru/cancel/{batch_id}", headers=self._build_headers())
+            if response.is_success:
+                return {"attempted": True, "state": "sent", "status_code": response.status_code}
+            return {"attempted": True, "state": "rejected", "status_code": response.status_code, "detail": response.text[:300]}
+        except Exception as exc:
+            return {"attempted": True, "state": "error", "detail": str(exc)}
+
     def _upload_pdf(self, client, pdf_bytes: bytes) -> str:
         """
         上传 PDF 到 MinerU Worker 代理
@@ -1417,6 +1501,63 @@ class MinerUDirectAdapter(MinerUAdapter):
             payload["full_zip_url"] = full_zip_url
             payload["access_mode"] = "direct"
             return payload
+
+    def resume_batch(
+        self,
+        batch_id: str,
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_event: Any = None,
+        data_id: str = "",
+    ) -> Dict[str, Any]:
+        """Resume polling a submitted official MinerU batch after restart."""
+        import httpx
+
+        if not self.is_available():
+            raise RuntimeError("MinerU 直连模式未配置 Token 或 Base URL")
+        if not batch_id:
+            raise RuntimeError("恢复 MinerU 任务缺少 batch_id")
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            if progress_callback:
+                progress_callback({"stage": "resuming", "message": "恢复 MinerU 远端任务", "batch_id": batch_id, "data_id": data_id})
+            full_zip_url = self._poll_direct_result(
+                client,
+                batch_id,
+                data_id=data_id,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+            payload = self._download_direct_zip(client, full_zip_url)
+            payload.update({
+                "batch_id": batch_id,
+                "data_id": data_id,
+                "full_zip_url": full_zip_url,
+                "access_mode": "direct",
+            })
+            return payload
+
+    def cancel_batch(self, batch_id: str, *, data_id: str = "") -> dict:
+        """Best-effort cancellation against the official batch endpoint."""
+        import httpx
+
+        if not batch_id:
+            return {"attempted": False, "state": "not_requested", "reason": "missing_batch_id"}
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                response = client.delete(
+                    f"{self._base_url}/extract-results/batch/{batch_id}",
+                    headers=self._auth_headers(),
+                )
+                if response.status_code in (404, 405):
+                    response = client.post(
+                        f"{self._base_url}/extract-results/batch/{batch_id}/cancel",
+                        headers=self._auth_headers(),
+                    )
+            if response.is_success:
+                return {"attempted": True, "state": "sent", "status_code": response.status_code}
+            return {"attempted": True, "state": "rejected", "status_code": response.status_code, "detail": response.text[:300]}
+        except Exception as exc:
+            return {"attempted": True, "state": "error", "detail": str(exc)}
 
     def _create_upload_url(self, client, *, data_id: str) -> tuple[str, str]:
         response = client.post(
@@ -2041,24 +2182,22 @@ class OCRRegistry:
         获取适配器
 
         参数:
-            name: 适配器名称，"auto" 时按优先级返回第一个可用适配器
+            name: 适配器名称，"auto" 时只选择本地逐页 OCR 适配器
         返回:
             适配器实例，无可用适配器时返回 None
         """
         if name == "auto":
-            # 优先级：mistral > mineru > doc2x > paddleocr > tesseract（在线 OCR 优先）
-            for key in ["mistral", "mineru", "doc2x", "paddleocr", "tesseract"]:
+            # 自动页级 OCR 不得静默上传整篇 PDF。云端服务必须由用户显式选择。
+            for key in ["paddleocr", "tesseract"]:
                 if key in self._adapters:
                     logger.debug(f"自动选择 OCR 适配器: {key}")
                     return self._adapters[key]
             # 无任何可用适配器，记录可用性检测结果
             logger.warning(
                 "无可用的 OCR 适配器。已检测的后端: "
-                f"mistral={'已注册' if 'mistral' in self._adapters else '不可用'}, "
-                f"mineru={'已注册' if 'mineru' in self._adapters else '不可用'}, "
-                f"doc2x={'已注册' if 'doc2x' in self._adapters else '不可用'}, "
                 f"paddleocr={'已注册' if 'paddleocr' in self._adapters else '不可用'}, "
-                f"tesseract={'已注册' if 'tesseract' in self._adapters else '不可用'}"
+                f"tesseract={'已注册' if 'tesseract' in self._adapters else '不可用'}；"
+                "在线 OCR 需要显式选择"
             )
             return None
         return self._adapters.get(name)

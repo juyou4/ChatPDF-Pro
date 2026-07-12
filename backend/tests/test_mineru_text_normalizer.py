@@ -103,6 +103,13 @@ def test_table_html_generates_markdown_bundle_and_evidence_units():
     assert data_cells[2]["header_path"] == "Score F1"
     assert data_cells[2]["bbox"] == [100.0, 200.0, 900.0, 420.0]
 
+    geometry_normalized = normalize_mineru_for_rag(payload, page_sizes={3: [600, 800]})
+    geometry_bundle = geometry_normalized["structured_table_bundles"][0]
+    assert geometry_bundle["raw_bbox"] == [100.0, 200.0, 900.0, 420.0]
+    assert geometry_bundle["bbox_coordinate_space"] == "normalized_0_1000"
+    assert geometry_bundle["visual_bbox"] == [60.0, 160.0, 540.0, 336.0]
+    assert geometry_bundle["evidence_units"][2]["visual_bbox"] == [60.0, 160.0, 540.0, 336.0]
+
     full_text = normalized["full_text"]
     assert "[TABLE] Table 1: Results" in full_text
     assert "Higher is better." in full_text
@@ -111,6 +118,40 @@ def test_table_html_generates_markdown_bundle_and_evidence_units():
 
     ok, failures = validate_mineru_rag_data(normalized, original_full_text="x" * 50)
     assert ok, failures
+
+
+def test_mineru_uses_explicit_cell_geometry_and_refuses_table_bbox_as_row_crop():
+    payload = {
+        "content_list_json": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [100, 100, 900, 500],
+                "table_body": "<table><tr><td>Method</td><td>Score</td></tr><tr><td>A</td><td>90</td></tr></table>",
+                "table_cells": [
+                    {"row_idx": 0, "col_idx": 0, "bbox": [100, 100, 500, 200]},
+                    {"row_idx": 0, "col_idx": 1, "bbox": [500, 100, 900, 200]},
+                    {"row_idx": 1, "col_idx": 0, "bbox": [100, 200, 500, 300]},
+                    {"row_idx": 1, "col_idx": 1, "bbox": [500, 200, 900, 300]},
+                ],
+            }
+        ]
+    }
+    normalized = normalize_mineru_for_rag(payload, page_sizes={1: [600, 800]})
+    rows = normalized["structured_table_bundles"][0]["evidence_units"]
+
+    assert rows[1]["bbox"] == [100.0, 200.0, 900.0, 300.0]
+    assert rows[1]["visual_bbox"] == [60.0, 160.0, 540.0, 240.0]
+    assert rows[1]["visual_crop_eligible"] is True
+    assert rows[1]["cell_evidence_units"][1]["visual_crop_eligible"] is True
+
+    fallback = normalize_mineru_for_rag({
+        "content_list_json": [{
+            "type": "table", "page_idx": 0, "bbox": [100, 100, 900, 500],
+            "table_body": "<table><tr><td>Method</td><td>Score</td></tr><tr><td>A</td><td>90</td></tr></table>",
+        }]
+    })
+    assert fallback["structured_table_bundles"][0]["evidence_units"][1]["visual_crop_eligible"] is False
 
 
 def test_table_quality_gate_allows_escaped_pipe_inside_cells():

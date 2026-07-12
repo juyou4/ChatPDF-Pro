@@ -26,6 +26,9 @@ import {
   ensureAssistantInlineCitationFallback,
   optimizeAssistantInlineCitations,
   filterCitationsByContentRefs,
+  getNumericTableVisualVerification,
+  isVisualVerificationPending,
+  isVisualVerificationTerminal,
 } from '../useMessageState';
 
 const encoder = new TextEncoder();
@@ -144,12 +147,12 @@ describe('useMessageState streaming regressions', () => {
     global.fetch.mockResolvedValue(buildStreamResponse(events));
 
     let embeddingApiKey = 'embed-key-old';
-    const createWithKey = () => useMessageState({
+    const useMessageStateWithKey = () => useMessageState({
       ...createOptions(),
       embeddingApiKey,
     });
 
-    const { result, rerender } = renderHook(() => createWithKey());
+    const { result, rerender } = renderHook(() => useMessageStateWithKey());
 
     embeddingApiKey = 'embed-key-new';
     rerender();
@@ -675,5 +678,121 @@ describe('useMessageState non-stream memory hits', () => {
     expect(assistant.memoryMeta).toEqual(
       expect.objectContaining({ enabled: true, selected_count: 1 })
     );
+  });
+});
+
+describe('numeric table visual verification message state', () => {
+  it('应从 retrieval_meta 诊断中归一化任务状态', () => {
+    const verification = getNumericTableVisualVerification({
+      diagnostics: {
+        numeric_table_visual_verification: {
+          task_id: 'visual-task-1',
+          state: 'running',
+          table_id: 'Table 3',
+        },
+      },
+    });
+
+    expect(verification).toEqual(expect.objectContaining({
+      task_id: 'visual-task-1',
+      state: 'running',
+      table_id: 'Table 3',
+    }));
+    expect(isVisualVerificationPending(verification)).toBe(true);
+    expect(isVisualVerificationTerminal(verification)).toBe(false);
+  });
+
+  it('流式最终事件应将视觉核验诊断保存到助手消息', async () => {
+    const events = [
+      `data: ${JSON.stringify({
+        done: true,
+        final_content: '最终回答',
+        retrieval_meta: {
+          citations: [],
+          diagnostics: {
+            numeric_table_visual_verification: {
+              task_id: 'visual-task-stream',
+              state: 'confirmed',
+              table_id: 'Table 5',
+            },
+          },
+        },
+      })}\n\n`,
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('表格里的数值是多少？');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    const assistant = [...result.current.messages].reverse().find((message) => message.type === 'assistant');
+    expect(assistant.visualVerification).toEqual(expect.objectContaining({
+      task_id: 'visual-task-stream',
+      state: 'confirmed',
+      table_id: 'Table 5',
+    }));
+  });
+
+  it('非流式排队任务应轮询到终态并更新对应消息', async () => {
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          answer: '回答正文',
+          retrieval_meta: {
+            citations: [],
+            diagnostics: {
+              numeric_table_visual_verification: {
+                task_id: 'visual-task-poll',
+                state: 'queued',
+              },
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          task: {
+            task_id: 'visual-task-poll',
+            state: 'conflict',
+            table_id: 'Table 8',
+          },
+        }),
+      });
+
+    const { result } = renderHook(() => useMessageState({
+      ...createOptions(),
+      streamSpeed: 'off',
+      globalSettings: {
+        ...createOptions().globalSettings,
+        streamOutput: false,
+      },
+    }));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('请核对表 8 的结果');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    await waitFor(() => {
+      const assistant = [...result.current.messages].reverse().find((message) => message.type === 'assistant');
+      expect(assistant.visualVerification).toEqual(expect.objectContaining({
+        task_id: 'visual-task-poll',
+        state: 'conflict',
+        table_id: 'Table 8',
+      }));
+    });
+    const statusCall = global.fetch.mock.calls.find(([url]) =>
+      String(url).includes('/documents/doc-test/table-visual-verifications/visual-task-poll')
+    );
+    expect(statusCall).toBeTruthy();
   });
 });

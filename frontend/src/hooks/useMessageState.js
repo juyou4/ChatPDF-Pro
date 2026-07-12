@@ -14,6 +14,74 @@ const API_BASE_URL = (() => {
   return '';
 })();
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
+const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
+const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
+
+const TABLE_VISUAL_PENDING_STATES = new Set(['queued', 'running', 'pending']);
+const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed']);
+
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeVisualVerificationState = (value) => {
+  const state = String(value || '').trim().toLowerCase();
+  if (TABLE_VISUAL_PENDING_STATES.has(state) || TABLE_VISUAL_TERMINAL_STATES.has(state)) {
+    return state;
+  }
+  return '';
+};
+
+export const isVisualVerificationPending = (verification) =>
+  TABLE_VISUAL_PENDING_STATES.has(normalizeVisualVerificationState(verification?.state));
+
+export const isVisualVerificationTerminal = (verification) =>
+  TABLE_VISUAL_TERMINAL_STATES.has(normalizeVisualVerificationState(verification?.state));
+
+/**
+ * 兼容聊天诊断和状态接口的轻量包装，统一为消息可直接消费的视觉核验状态。
+ * 不主动推断未知结果，避免把非终态任务误标记为已确认。
+ */
+export const normalizeNumericTableVisualVerification = (payload) => {
+  if (!isPlainObject(payload)) return null;
+
+  const candidates = [
+    payload.verification,
+    payload.task,
+    payload.data,
+    payload.result,
+    payload,
+  ].filter(isPlainObject);
+  const record = candidates.find((candidate) => {
+    const state = normalizeVisualVerificationState(
+      candidate.state || candidate.verdict || candidate.status || (candidate.pending ? 'pending' : '')
+    );
+    return Boolean(candidate.task_id || state);
+  }) || payload;
+  const diagnostics = isPlainObject(record.diagnostics) ? record.diagnostics : {};
+  const state = [
+    record.state,
+    record.verdict,
+    record.status,
+    diagnostics.state,
+    diagnostics.verdict,
+    diagnostics.status,
+    record.pending ? 'pending' : '',
+  ].map(normalizeVisualVerificationState).find(Boolean) || '';
+
+  if (!state && !record.task_id && !payload.task_id) return null;
+
+  return {
+    ...payload,
+    ...record,
+    ...diagnostics,
+    task_id: record.task_id || payload.task_id || '',
+    state,
+  };
+};
+
+export const getNumericTableVisualVerification = (retrievalMeta) =>
+  normalizeNumericTableVisualVerification(
+    retrievalMeta?.diagnostics?.numeric_table_visual_verification
+  );
 
 const STREAM_RENDER_PROFILES = {
   // flushChars 故意保持较小，确保“仅在 done 才拿到大块内容”时，
@@ -646,9 +714,11 @@ export function useMessageState({
   const streamAgentTraceRef = useRef(null);
   const streamUsageRef = useRef(null);
   const streamCallInfoRef = useRef(null);
+  const streamVisualVerificationRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const visualVerificationPollersRef = useRef(new Map());
 
   // ========== 从全局设置中解构对话参数 ==========
   const {
@@ -694,6 +764,15 @@ export function useMessageState({
 
   // ========== 副作用 ==========
 
+  // 视觉核验属于回答后的异步旁路任务；切换文档或卸载时必须取消轮询，
+  // 以免旧文档结果写入新会话。
+  useEffect(() => () => {
+    for (const poller of visualVerificationPollersRef.current.values()) {
+      poller.cancel();
+    }
+    visualVerificationPollersRef.current.clear();
+  }, [docId]);
+
   // 消息变化时自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -713,6 +792,88 @@ export function useMessageState({
     }
     setHasInput(!!(val && val.trim()));
   }, []);
+
+  const startVisualVerificationPolling = useCallback((messageId, initialVerification) => {
+    const verification = normalizeNumericTableVisualVerification(initialVerification);
+    const taskId = String(verification?.task_id || '').trim();
+    if (!docId || !taskId || !isVisualVerificationPending(verification)) return;
+
+    const pollerKey = `${docId}:${messageId}:${taskId}`;
+    if (visualVerificationPollersRef.current.has(pollerKey)) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    let timerId = null;
+    let attempts = 0;
+    let latestVerification = verification;
+    const updateMessageVerification = (nextVerification) => {
+      if (cancelled) return;
+      setMessages((previous) => previous.map((message) => (
+        message.id === messageId
+          ? { ...message, visualVerification: nextVerification }
+          : message
+      )));
+    };
+    const stop = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+      controller.abort();
+      visualVerificationPollersRef.current.delete(pollerKey);
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/documents/${encodeURIComponent(docId)}/table-visual-verifications/${encodeURIComponent(taskId)}`,
+          { signal: controller.signal }
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const result = normalizeNumericTableVisualVerification(payload);
+        if (result) {
+          const nextVerification = {
+            ...latestVerification,
+            ...result,
+            task_id: result.task_id || taskId,
+          };
+          latestVerification = nextVerification;
+          updateMessageVerification(nextVerification);
+          if (isVisualVerificationTerminal(nextVerification)) {
+            stop();
+            return;
+          }
+        }
+      } catch (error) {
+        if (cancelled || error?.name === 'AbortError') return;
+        if (attempts >= TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS) {
+          updateMessageVerification({
+            ...latestVerification,
+            state: 'failed',
+            polling_error: 'status_unavailable',
+          });
+          stop();
+          return;
+        }
+      }
+
+      if (attempts >= TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS) {
+        updateMessageVerification({
+          ...latestVerification,
+          state: 'failed',
+          polling_error: 'status_timeout',
+        });
+        stop();
+        return;
+      }
+      timerId = setTimeout(poll, TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS);
+    };
+
+    visualVerificationPollersRef.current.set(pollerKey, { cancel: stop });
+    void poll();
+  }, [docId]);
 
   /**
    * 发送消息
@@ -814,6 +975,7 @@ export function useMessageState({
     streamAgentTraceRef.current = null;
     streamUsageRef.current = null;
     streamCallInfoRef.current = null;
+    streamVisualVerificationRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -954,6 +1116,8 @@ export function useMessageState({
           if (data === '[DONE]') { sseDone = true; return; }
           try {
             const p = JSON.parse(data);
+            const visualVerification = getNumericTableVisualVerification(p.retrieval_meta);
+            if (visualVerification) streamVisualVerificationRef.current = visualVerification;
             if (p.error && p.type !== 'retrieval_progress') {
               const em = `❌ ${p.error}`;
               currentText = em;
@@ -1128,6 +1292,7 @@ export function useMessageState({
           streamedContent,
           streamCitationsRef.current
         );
+        const streamVisualVerification = streamVisualVerificationRef.current;
         if (streamCallInfoRef.current) {
           setLastCallInfo({
             ...streamCallInfoRef.current,
@@ -1136,9 +1301,10 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, visualVerification: streamVisualVerification }
             : m
         ));
+        startVisualVerificationPolling(tempMsgId, streamVisualVerification);
         activeStreamMsgIdRef.current = null;
         setStreamingMessageId(null);
       } else {
@@ -1164,6 +1330,7 @@ export function useMessageState({
           data.answer,
           data.retrieval_meta?.citations
         );
+        const nonStreamVisualVerification = getNumericTableVisualVerification(data.retrieval_meta);
         let nonStreamAgentTrace = null;
         if (data.retrieval_meta && (data.retrieval_meta.agent_mode || data.retrieval_meta.agent_gate)) {
           nonStreamAgentTrace = createInitialAgentTrace();
@@ -1177,9 +1344,10 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, visualVerification: nonStreamVisualVerification }
             : m
         ));
+        startVisualVerificationPolling(tempMsgId, nonStreamVisualVerification);
         setStreamingMessageId(null);
       }
     } catch (error) {
@@ -1210,6 +1378,7 @@ export function useMessageState({
     streamRenderProfile, shouldUseStreaming,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
+    startVisualVerificationPolling,
   ]);
 
   /**

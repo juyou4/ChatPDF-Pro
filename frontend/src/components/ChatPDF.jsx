@@ -129,6 +129,83 @@ const MemoryHitsBadge = ({ hits, meta }) => {
   );
 };
 
+const TABLE_VISUAL_VERIFICATION_STATUS_META = {
+  pending: {
+    label: '正在核验',
+    Icon: Loader2,
+    className: 'border-sky-200 bg-sky-50 text-sky-700',
+    iconClassName: 'animate-spin',
+  },
+  confirmed: {
+    label: '核验确认',
+    Icon: Check,
+    className: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    iconClassName: '',
+  },
+  conflict: {
+    label: '发现冲突',
+    Icon: Scan,
+    className: 'border-amber-200 bg-amber-50 text-amber-700',
+    iconClassName: '',
+  },
+  indeterminate: {
+    label: '无法确定',
+    Icon: ScanText,
+    className: 'border-slate-200 bg-slate-50 text-slate-700',
+    iconClassName: '',
+  },
+  failed: {
+    label: '核验失败',
+    Icon: X,
+    className: 'border-rose-200 bg-rose-50 text-rose-700',
+    iconClassName: '',
+  },
+};
+
+export const resolveTableVisualVerificationStatus = (verification) => {
+  const rawState = String(verification?.state || '').trim().toLowerCase();
+  const state = ['queued', 'running', 'pending'].includes(rawState) ? 'pending' : rawState;
+  return TABLE_VISUAL_VERIFICATION_STATUS_META[state]
+    ? { state, ...TABLE_VISUAL_VERIFICATION_STATUS_META[state] }
+    : null;
+};
+
+const getTableVisualVerificationDetail = (verification, state) => {
+  const explicitDetail = [
+    verification?.summary,
+    verification?.message,
+    verification?.note,
+    verification?.table_caption,
+    verification?.table_id,
+  ].find((value) => typeof value === 'string' && value.trim());
+  if (explicitDetail) return explicitDetail.trim();
+  if (state === 'pending') return '正在比对表格截图与结构化单元格';
+  if (state === 'confirmed') return '视觉结果与结构化表格证据一致';
+  if (state === 'conflict') return '视觉结果与结构化表格证据存在差异';
+  if (state === 'indeterminate') return '图像证据不足以作出可靠判断';
+  return '本次视觉核验未完成';
+};
+
+const TableVisualVerificationStatus = ({ verification }) => {
+  const status = resolveTableVisualVerificationStatus(verification);
+  if (!status) return null;
+
+  const { Icon } = status;
+  const detail = getTableVisualVerificationDetail(verification, status.state);
+  return (
+    <div
+      className={`mt-3 flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-xs ${status.className}`}
+      role="status"
+      aria-live={status.state === 'pending' ? 'polite' : 'off'}
+    >
+      <Icon className={`h-3.5 w-3.5 shrink-0 ${status.iconClassName}`} />
+      <span className="shrink-0 font-medium">表格视觉核验</span>
+      <span className="shrink-0">{status.label}</span>
+      <span className="min-w-0 truncate opacity-80" title={detail}>{detail}</span>
+    </div>
+  );
+};
+
 const SendIcon = () => (
   <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
@@ -248,7 +325,7 @@ const isTranslatableReadingBlock = (block) => {
 const isValidBlockTranslationText = (value) => {
   const text = String(value || '').trim();
   if (!text) return false;
-  if (/^\s*[\{\[]?['"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['"]?\s*[:=]/s.test(text)) {
+  if (/^\s*[{[]?['"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['"]?\s*[:=]/s.test(text)) {
     return false;
   }
   if (text.includes('_used_provider') && text.includes('_usage_meta')) return false;
@@ -2273,6 +2350,9 @@ const ChatPDF = () => {
             <MemoryHitsBadge hits={msg.memoryHits} meta={msg.memoryMeta} />
           )}
         </div>
+        {msg.type === 'assistant' && !msg.isStreaming && msg.visualVerification && (
+          <TableVisualVerificationStatus verification={msg.visualVerification} />
+        )}
         {/* 证据面板 */}
         {msg.type === 'assistant' && !msg.isStreaming && msg.citations && msg.citations.length > 0 && (
           <EvidencePanel

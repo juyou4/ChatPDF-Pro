@@ -32,6 +32,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from services.document_geometry import visual_geometry
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,8 +298,10 @@ def _build_table_evidence_units(
     table_caption: str,
     table_header: str,
     grouped_items: list[tuple[int, dict, str]],
+    page_sizes: dict[int, list[float]] | None = None,
 ) -> list[dict]:
     evidence_units: list[dict] = []
+    page_sizes = page_sizes or {}
 
     for _, element, _caption in grouped_items:
         if not isinstance(element, dict):
@@ -310,6 +314,7 @@ def _build_table_evidence_units(
         source_id = _normalize_optional_int(element.get("id"))
         source_label = f"source:{source_id}" if source_id is not None else f"page:{page_num}"
         table_bbox = _normalize_bbox(element.get("bounding box") or element.get("bbox"))
+        page_size = page_sizes.get(page_num, [])
 
         for row_index, row_obj in enumerate(element.get("rows", []), start=1):
             if not isinstance(row_obj, dict):
@@ -331,6 +336,11 @@ def _build_table_evidence_units(
                 cell_texts.append(cell_text)
 
                 cell_bbox = _normalize_bbox(cell.get("bounding box") or cell.get("bbox"))
+                cell_geometry = visual_geometry(
+                    cell_bbox,
+                    coordinate_space="pdf_bottom_left_points",
+                    page_size=page_size,
+                )
                 if cell_bbox:
                     cell_bboxes.append(cell_bbox)
 
@@ -359,6 +369,7 @@ def _build_table_evidence_units(
                     "col_span": cell_col_span,
                     "bbox": cell_bbox,
                     "bounding_box": cell_bbox,
+                    **cell_geometry,
                     "cell_text": cell_text,
                     "content": cell_text,
                     "is_header_row": row_index <= header_depth,
@@ -367,6 +378,11 @@ def _build_table_evidence_units(
 
             row_text = " | ".join(text for text in cell_texts if text).strip()
             row_bbox = row_bbox or _merge_bboxes(cell_bboxes) or table_bbox
+            row_geometry = visual_geometry(
+                row_bbox,
+                coordinate_space="pdf_bottom_left_points",
+                page_size=page_size,
+            )
             row_id = next((text for text in cell_texts if text), "")
             row_unit = {
                 "evidence_unit_id": _build_evidence_unit_id(bundle_key, "table_row", source_label, row_idx),
@@ -381,6 +397,7 @@ def _build_table_evidence_units(
                 "row_number": row_idx,
                 "bbox": row_bbox,
                 "bounding_box": row_bbox,
+                **row_geometry,
                 "row_id": row_id,
                 "row_text": row_text,
                 "row_numbers": " ".join(text for text in cell_texts[1:] if text),
@@ -495,8 +512,9 @@ def _resolve_table_chain_key(
     return f"page:{page_num}:table:{index_in_doc}", root_caption
 
 
-def _build_structured_table_bundles(elements: list) -> list[dict]:
+def _build_structured_table_bundles(elements: list, page_sizes: dict[int, list[float]] | None = None) -> list[dict]:
     """从 ODL 顶层元素中提取并合并结构化表格 bundle。"""
+    page_sizes = page_sizes or {}
     captions_by_linked_id, orphan_captions_by_page = _build_caption_lookup(elements)
     table_elements = [
         element for element in elements
@@ -594,6 +612,12 @@ def _build_structured_table_bundles(elements: list) -> list[dict]:
             bundle_caption,
             headers[0] if headers else "",
             grouped_items,
+            page_sizes,
+        )
+        bundle_geometry = visual_geometry(
+            bboxes[0] if bboxes else [],
+            coordinate_space="pdf_bottom_left_points",
+            page_size=page_sizes.get(pages[0], []) if pages else [],
         )
         bundle = {
             "bundle_id": group_key,
@@ -610,6 +634,7 @@ def _build_structured_table_bundles(elements: list) -> list[dict]:
             "pages": pages,
             "bounding_box": bboxes[0] if bboxes else [],
             "bounding_boxes": bboxes,
+            **bundle_geometry,
             "source_ids": sorted(set(source_ids)),
             "previous_table_ids": sorted(set(previous_ids)),
             "next_table_ids": sorted(set(next_ids)),
@@ -780,6 +805,24 @@ def _build_pages_from_elements(elements: list, total_pages: int) -> tuple[list, 
 # 主入口
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pdf_page_sizes(pdf_path: str) -> dict[int, list[float]]:
+    """Read PDF point dimensions once for ODL's bottom-left coordinates."""
+    try:
+        import fitz
+
+        document = fitz.open(pdf_path)
+        try:
+            return {
+                page_index + 1: [float(page.rect.width), float(page.rect.height)]
+                for page_index, page in enumerate(document)
+            }
+        finally:
+            document.close()
+    except Exception as exc:
+        logger.warning("[ODL] 无法读取 PDF 页面尺寸，视觉裁剪将跳过 ODL bbox: %s", exc)
+        return {}
+
+
 def parse_pdf_odl(pdf_path: str) -> Optional[dict]:
     """
     用 OpenDataLoader PDF 解析指定 PDF 文件，返回去脏后的结构化数据。
@@ -846,7 +889,7 @@ def parse_pdf_odl(pdf_path: str) -> Optional[dict]:
             if isinstance(e, dict) and e.get("type") in _SOFT_KEEP_TYPES
         )
 
-        structured_table_bundles = _build_structured_table_bundles(elements)
+        structured_table_bundles = _build_structured_table_bundles(elements, _pdf_page_sizes(pdf_path))
         # 重建页面
         pages, full_text = _build_pages_from_elements(elements, total_pages)
         pages, full_text = _attach_structured_bundles_to_pages(pages, structured_table_bundles)

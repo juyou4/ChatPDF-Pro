@@ -31,6 +31,8 @@ from runtime_mode import runtime
 from services.formula_text import build_formula_alias_text, formula_term_matches, looks_formula_like
 from services.rag_config import should_apply_numeric_table_specialization
 from services.rerank_service import rerank_service
+from services.semantic_group_store import semantic_group_paths
+from services.table_visual_metadata import build_table_visual_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -7664,17 +7666,24 @@ def _sanitize_structured_table_bundle(bundle: dict) -> dict:
         "table_caption",
         "table_header",
         "table_body_markdown",
+        "table_markdown",
+        "bundle_text",
         "html_table",
         "table_footnote",
         "page_start",
         "page_end",
+        "page",
         "pages",
         "page_index",
         "page_uid",
         "page_uids",
         "bounding_box",
+        "bbox",
+        "table_bbox",
         "bounding_boxes",
         "source_ids",
+        "source_id",
+        "table_bundle_id",
         "previous_table_ids",
         "next_table_ids",
         "source",
@@ -7684,6 +7693,8 @@ def _sanitize_structured_table_bundle(bundle: dict) -> dict:
         "table_selector_version",
         "table_selector_candidates",
         "evidence_units",
+        "table_instance_id",
+        "table_source_hash",
     ):
         value = bundle.get(key)
         if value in (None, "", [], {}):
@@ -7692,6 +7703,7 @@ def _sanitize_structured_table_bundle(bundle: dict) -> dict:
             cleaned[key] = _sanitize_nested_value(value)
             continue
         cleaned[key] = value
+    cleaned.update(build_table_visual_metadata(cleaned))
     return cleaned
 
 
@@ -7867,6 +7879,8 @@ def _extract_structured_table_row_shard_units(bundle: dict) -> List[dict]:
         row.setdefault("table_caption", bundle.get("table_caption", ""))
         row.setdefault("table_id", bundle.get("table_id", ""))
         row.setdefault("table_bundle_id", bundle.get("bundle_id", "") or bundle.get("table_bundle_id", ""))
+        row.setdefault("table_instance_id", bundle.get("table_instance_id", ""))
+        row.setdefault("table_source_hash", bundle.get("table_source_hash", ""))
         row_text = _structured_table_row_text(row)
         if not row_text:
             continue
@@ -8079,6 +8093,8 @@ def _append_structured_table_bundle_chunks(
             "table_bbox": sanitized.get("bounding_box", []),
             "table_bboxes": sanitized.get("bounding_boxes", []),
             "table_source_ids": sanitized.get("source_ids", []),
+            "table_instance_id": sanitized.get("table_instance_id", ""),
+            "table_source_hash": sanitized.get("table_source_hash", ""),
             "evidence_units": sanitized.get("evidence_units", []),
             "source": sanitized.get("source", "odl"),
             **_structured_table_selector_metadata(sanitized),
@@ -8141,6 +8157,8 @@ def _append_structured_table_bundle_chunks(
                 "table_bbox": row_bboxes[0] if row_bboxes else sanitized.get("bounding_box", []),
                 "table_bboxes": row_bboxes or sanitized.get("bounding_boxes", []),
                 "table_source_ids": sanitized.get("source_ids", []),
+                "table_instance_id": sanitized.get("table_instance_id", ""),
+                "table_source_hash": sanitized.get("table_source_hash", ""),
                 "evidence_units": [row],
                 "cell_evidence_units": row.get("cell_evidence_units", []),
                 "source": sanitized.get("source", "odl"),
@@ -8201,6 +8219,8 @@ def _append_structured_table_bundle_chunks(
                 "table_bbox": sanitized.get("bounding_box", []),
                 "table_bboxes": sanitized.get("bounding_boxes", []),
                 "table_source_ids": sanitized.get("source_ids", []),
+                "table_instance_id": sanitized.get("table_instance_id", ""),
+                "table_source_hash": sanitized.get("table_source_hash", ""),
                 "evidence_units": shard_rows,
                 "source": sanitized.get("source", "odl"),
                 **_structured_table_selector_metadata(sanitized),
@@ -9128,6 +9148,8 @@ def _build_semantic_group_index_async(
     model: str = "gpt-4o-mini",
     provider: str = "openai",
     endpoint: str = "",
+    output_dir: str | None = None,
+    raise_on_error: bool = False,
 ):
     """异步启动意群生成任务（需求 6.1, 6.4）
 
@@ -9144,13 +9166,13 @@ def _build_semantic_group_index_async(
     """
     if doc_id in _group_generation_in_progress:
         logger.info(f"[{doc_id}] 意群生成任务已在进行中，跳过")
-        return
+        return {"status": "disabled", "group_count": 0, "paths": []}
 
     _group_generation_in_progress.add(doc_id)
 
     def _task():
         try:
-            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key, model=model, provider=provider, endpoint=endpoint)
+            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key, model=model, provider=provider, endpoint=endpoint, output_dir=output_dir)
         except Exception as e:
             # 任务失败时记录日志（需求 6.4），不影响主流程
             logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
@@ -9171,6 +9193,7 @@ def _build_semantic_group_index(
     model: str = "gpt-4o-mini",
     provider: str = "openai",
     endpoint: str = "",
+    output_dir: str | None = None,
 ):
     """在分块索引构建完成后，生成语义意群并构建意群级别向量索引
 
@@ -9223,12 +9246,12 @@ def _build_semantic_group_index(
 
         if not groups:
             logger.warning(f"[{doc_id}] 语义意群生成结果为空，跳过意群索引构建")
-            return
+            return {"status": "empty", "group_count": 0, "paths": []}
 
         logger.info(f"[{doc_id}] 生成了 {len(groups)} 个语义意群")
 
         # 确定意群数据存储目录
-        groups_store_dir = _get_semantic_groups_dir()
+        groups_store_dir = output_dir or _get_semantic_groups_dir()
         os.makedirs(groups_store_dir, exist_ok=True)
 
         # 保存意群数据为 JSON
@@ -9239,6 +9262,7 @@ def _build_semantic_group_index(
         digest_texts = [g.digest for g in groups]
         group_ids = [g.group_id for g in groups]
 
+        paths = [os.path.join(groups_store_dir, f"{doc_id}.json")]
         if digest_texts:
             group_embeddings = embed_fn(digest_texts)
             dimension = group_embeddings.shape[1]
@@ -9257,15 +9281,20 @@ def _build_semantic_group_index(
                     "group_ids": group_ids,
                 }, f)
 
+            paths.extend([group_index_path, group_meta_path])
             logger.info(
                 f"[{doc_id}] 意群向量索引已保存: "
                 f"index={group_index_path}, meta={group_meta_path}, "
                 f"共 {len(groups)} 个意群"
             )
+        return {"status": "ready", "group_count": len(groups), "paths": paths}
 
     except Exception as e:
-        # 意群生成失败不影响主流程，记录警告并继续
+        # 意群生成失败不影响普通异步主流程；staged 路径可显式要求失败上抛。
         logger.warning(f"[{doc_id}] 语义意群生成失败，继续使用分块级别索引: {e}")
+        if raise_on_error:
+            raise
+        return {"status": "failed", "group_count": 0, "paths": [], "error": str(e)}
 
 
 def _derive_chunk_pages(chunks: List[str], pages: List[dict]) -> List[int]:
@@ -9329,7 +9358,7 @@ def _load_group_index(doc_id: str) -> Optional[dict]:
         包含 index、digest_texts、group_ids 的字典，加载失败时返回 None
     """
     # 确定意群数据存储目录
-    groups_store_dir = _get_semantic_groups_dir()
+    groups_store_dir = _get_semantic_groups_dir(doc_id)
 
     group_index_path = os.path.join(groups_store_dir, f"{doc_id}_groups.index")
     group_meta_path = os.path.join(groups_store_dir, f"{doc_id}_groups.pkl")
@@ -9379,7 +9408,7 @@ def _load_group_data(doc_id: str) -> Optional[dict]:
     Returns:
         group_id -> chunk_indices 的映射字典，加载失败时返回 None
     """
-    groups_json_path = os.path.join(_get_semantic_groups_dir(), f"{doc_id}.json")
+    groups_json_path = os.path.join(_get_semantic_groups_dir(doc_id), f"{doc_id}.json")
 
     if not os.path.exists(groups_json_path):
         return None
@@ -11783,9 +11812,12 @@ def _merge_with_group_search(
         return chunk_results
 
 
-def _get_semantic_groups_dir() -> str:
-    """获取语义意群数据存储目录路径（使用模块级缓存常量）"""
-    return _SEMANTIC_GROUPS_DIR
+def _get_semantic_groups_dir(doc_id: str = "") -> str:
+    """Return the active generation directory, with a legacy-layout fallback."""
+    if not doc_id:
+        return _SEMANTIC_GROUPS_DIR
+    paths = semantic_group_paths(_SEMANTIC_GROUPS_DIR, doc_id)
+    return str(next(iter(paths.values())).parent)
 
 
 def get_relevant_context(
@@ -11942,7 +11974,7 @@ def get_relevant_context(
     #   - 同 group 第二次出现仍保留原 chunk_text（避免重复）
     if not prefer_raw_chunk_context:
         try:
-            _hier_groups_dir = _get_semantic_groups_dir()
+            _hier_groups_dir = _get_semantic_groups_dir(doc_id)
             from services.semantic_group_service import SemanticGroupService as _SGS_h
             _hier_groups = _SGS_h().load_groups(doc_id, _hier_groups_dir)
             if _hier_groups:
@@ -12106,6 +12138,8 @@ def get_relevant_context(
             "chunk_heading": entry["item"].get("chunk_heading", ""),
             "section_path": entry["item"].get("section_path", entry["item"].get("chunk_heading", "")),
             "table_id": entry["item"].get("table_id", ""),
+            "table_instance_id": entry["item"].get("table_instance_id", ""),
+            "table_source_hash": entry["item"].get("table_source_hash", ""),
             "table_caption": entry["item"].get("numeric_table_exact_context_caption") or entry["item"].get("table_caption", ""),
             "table_header": entry["item"].get("numeric_table_exact_context_header") or entry["item"].get("table_header", ""),
             "numeric_table_exact_context_row_text": entry["item"].get("numeric_table_exact_context_row_text", ""),
@@ -12133,6 +12167,8 @@ def get_relevant_context(
             "block_type": entry["item"].get("block_type", entry["item"].get("chunk_type", "")),
             "table_id": entry["item"].get("table_id", ""),
             "table_bundle_id": entry["item"].get("table_bundle_id", ""),
+            "table_instance_id": entry["item"].get("table_instance_id", ""),
+            "table_source_hash": entry["item"].get("table_source_hash", ""),
             "evidence_unit_id": entry["item"].get("evidence_unit_id", ""),
             "table_caption": entry["item"].get("numeric_table_exact_context_caption") or entry["item"].get("table_caption", ""),
             "table_header": entry["item"].get("numeric_table_exact_context_header") or entry["item"].get("table_header", ""),
@@ -12236,6 +12272,8 @@ def _build_fallback_citation_from_result(
         "chunk_type": item.get("chunk_type", ""),
         "block_type": item.get("block_type", item.get("chunk_type", "")),
         "table_id": item.get("table_id", ""),
+        "table_instance_id": item.get("table_instance_id", ""),
+        "table_source_hash": item.get("table_source_hash", ""),
         "table_caption": item.get("numeric_table_exact_context_caption") or item.get("table_caption", ""),
         "table_header": item.get("numeric_table_exact_context_header") or item.get("table_header", ""),
         "numeric_table_exact_context_row_text": item.get("numeric_table_exact_context_row_text", ""),
@@ -12374,7 +12412,7 @@ def _build_context_with_groups(
     from services.retrieval_logger import RetrievalLogger, RetrievalTrace
 
     # 步骤 1：加载语义意群数据
-    groups_store_dir = _get_semantic_groups_dir()
+    groups_store_dir = _get_semantic_groups_dir(doc_id)
     group_service = SemanticGroupService()
     groups = group_service.load_groups(doc_id, groups_store_dir)
 

@@ -1,8 +1,9 @@
-"""Selective visual verification for numeric-table QA.
+"""Post-retrieval visual verification for risky numeric table answers.
 
-The normal RAG path should stay text-first.  This module only adds a visual
-cell-extraction pass when the text table evidence looks risky, mirroring the
-PaperQA idea of deferring to the table image when markdown is malformed.
+This module deliberately sits *after* the normal text retrieval path.  It
+never changes MinerU output, table bundles, or vector indexes.  A visual result
+is useful to the answer only when it can be reconciled with the already
+retrieved table/cell evidence; otherwise it is retained as a diagnostic.
 """
 from __future__ import annotations
 
@@ -13,19 +14,88 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
 from services.chat_service import call_ai_api
+from utils.middleware import RetryMiddleware
+
+try:
+    from services.table_visual_metadata import build_table_visual_metadata
+except ImportError:  # Kept for old documents while rolling out the metadata helper.
+    build_table_visual_metadata = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+_VALID_MODES = {"off", "auto", "always"}
+_TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed"}
+_TASK_STATES = {"queued", "running", *_TERMINAL_STATES}
+_CACHE_SCHEMA_VERSION = 4
+_TASK_STORE_VERSION = 1
+_VISUAL_PROMPT_VERSION = 2
+_VISUAL_CROP_VERSION = 2
+_DEFAULT_CONCURRENCY = 2
+_DEFAULT_FAILURE_COOLDOWN_S = 300.0
+_DEFAULT_STALE_TASK_S = 600.0
+_DEFAULT_INDETERMINATE_TTL_S = 86400.0
 _VISUAL_CACHE: dict[str, dict] = {}
 _VISUAL_PENDING: set[str] = set()
-_VALID_MODES = {"off", "auto", "always"}
-_CACHE_SCHEMA_VERSION = 2
+_TASK_WRITE_LOCK = threading.Lock()
+_SEMAPHORES: dict[int, tuple[int, asyncio.Semaphore]] = {}
+
 _TABLE_REF_RE = re.compile(r"\btable\s*\.?\s*(\d+[a-z]?)\b|表\s*\.?\s*(\d+[a-z]?)", re.IGNORECASE)
 _COLUMN_PLACEHOLDER_RE = re.compile(r"\bcolumn\s*\d+\b|列\s*\d+", re.IGNORECASE)
+_WORD_RE = re.compile(r"[a-z][a-z0-9._/%-]{1,}|[\u4e00-\u9fff]{2,}|\d+(?:\.\d+)?%?", re.IGNORECASE)
+
+
+class VisualTableResponse(BaseModel):
+    """The narrow response contract requested from the vision model."""
+
+    table_id: str = ""
+    matched_row: str = ""
+    cells: dict[str, str] = Field(default_factory=dict)
+    confidence: float | None = None
+    notes: str = ""
+    supports_text_result: bool | None = None
+    corrected_answer_hint: str = ""
+
+    @field_validator("table_id", "matched_row", "notes", "corrected_answer_hint", mode="before")
+    @classmethod
+    def _coerce_text(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @field_validator("cells", mode="before")
+    @classmethod
+    def _coerce_cells(cls, value: Any) -> dict[str, str]:
+        if isinstance(value, list):
+            value = {
+                item.get("column") or item.get("key") or "": item.get("value") or item.get("content") or ""
+                for item in value
+                if isinstance(item, dict)
+            }
+        if not isinstance(value, dict):
+            raise ValueError("cells must be an object")
+        result: dict[str, str] = {}
+        for key, item in value.items():
+            clean_key = re.sub(r"\s+", " ", str(key or "")).strip()
+            clean_value = re.sub(r"\s+", " ", str(item or "")).strip()
+            if clean_key and clean_value:
+                result[clean_key] = clean_value
+        return result
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confidence must be numeric") from exc
 
 
 def resolve_visual_mode(custom_params: Optional[dict]) -> str:
@@ -86,17 +156,17 @@ def should_verify_numeric_table_visual(
     reasons: list[str] = []
     if mode == "off":
         return False, ["mode_off"]
-    if not segments:
-        return False, ["no_segments"]
-    if mode == "auto" and not looks_vision_capable_model(provider, model):
-        return False, ["model_not_vision_capable"]
     if mode == "always":
         return True, ["mode_always"]
+    if not segments:
+        return False, ["no_segments"]
+    if not looks_vision_capable_model(provider, model):
+        return False, ["model_not_vision_capable"]
 
     table_refs = _extract_table_refs(query)
     if table_refs:
         joined = _segments_text(segments)
-        if not any(ref in joined for ref in table_refs):
+        if not any(_table_ref_in_text(ref, joined) for ref in table_refs):
             reasons.append("explicit_table_ref_missing_in_text_evidence")
 
     row_keys = _extract_query_row_keys(query)
@@ -135,7 +205,6 @@ def should_verify_numeric_table_visual(
     )
     if not has_execution:
         reasons.append("no_deterministic_numeric_execution")
-
     return bool(reasons), reasons
 
 
@@ -153,13 +222,21 @@ async def maybe_verify_numeric_table_visual(
     custom_params: Optional[dict] = None,
     background: bool = False,
 ) -> tuple[dict, dict]:
+    """Run or enqueue a post-retrieval visual check.
+
+    A non-confirmed result intentionally returns no context segment.  The
+    caller can still expose its diagnostic/task status without allowing the
+    VLM to alter the answer or citations.
+    """
     mode = resolve_visual_mode(custom_params)
-    diagnostics = {
+    diagnostics: dict[str, Any] = {
         "enabled": mode != "off",
         "mode": mode,
         "triggered": False,
         "reasons": [],
         "skipped_reason": "",
+        "state": "not_started",
+        "verdict": "indeterminate",
     }
     should_verify, reasons = should_verify_numeric_table_visual(
         query=query,
@@ -170,44 +247,81 @@ async def maybe_verify_numeric_table_visual(
     )
     diagnostics["reasons"] = reasons
     if not should_verify:
-        diagnostics["skipped_reason"] = reasons[0] if reasons else "not_risky"
+        diagnostics.update({"skipped_reason": reasons[0] if reasons else "not_risky", "state": "skipped"})
         return {}, diagnostics
     if not api_key:
-        diagnostics["skipped_reason"] = "missing_api_key"
+        diagnostics.update({"skipped_reason": "missing_api_key", "state": "skipped"})
         return {}, diagnostics
     if not pdf_path or not Path(pdf_path).exists():
-        diagnostics["skipped_reason"] = "missing_pdf"
+        diagnostics.update({"skipped_reason": "missing_pdf", "state": "skipped"})
         return {}, diagnostics
 
     target = _select_target_table(query, segments, doc_data)
     if not target:
-        diagnostics["skipped_reason"] = "no_table_target"
+        diagnostics.update({"skipped_reason": "no_table_target", "state": "indeterminate"})
+        return {}, diagnostics
+    if target.get("selection_ambiguous"):
+        diagnostics.update({
+            "triggered": True,
+            "state": "indeterminate",
+            "verdict": "indeterminate",
+            "skipped_reason": "ambiguous_table_target",
+            "candidate_count": target.get("candidate_count", 0),
+            "selection_score": target.get("selection_score", 0),
+        })
         return {}, diagnostics
     page = target.get("page")
     if not isinstance(page, int) or page <= 0:
-        diagnostics["skipped_reason"] = "missing_page"
+        diagnostics.update({"skipped_reason": "missing_page", "state": "indeterminate"})
         return {}, diagnostics
 
-    cache_key = _cache_key(doc_id, query, target, provider, model)
-    cached = _get_cached_visual_result(cache_key)
-    if cached:
-        cached_diag = cached.get("diagnostics", {}) if isinstance(cached.get("diagnostics"), dict) else {}
-        diagnostics.update({
-            "triggered": True,
-            "cache_hit": True,
-            "confidence": cached_diag.get("confidence"),
-            "used_provider": cached_diag.get("used_provider"),
-            "used_model": cached_diag.get("used_model"),
-        })
-        return dict(cached.get("segment") or {}), diagnostics
+    target = dict(target)
+    target["requested_rows"] = sorted(_extract_query_row_keys(query))
+    target["requested_columns"] = _extract_requested_columns(query, target)
+    target["selected_row"] = _select_target_row(target, query)
+    if isinstance(target.get("selected_row"), dict):
+        row_page = _first_page(target["selected_row"])
+        if row_page > 0:
+            target["page"] = row_page
+            page = row_page
+    _ensure_target_metadata(target)
+    diagnostics.update({
+        "table_id": target.get("table_id") or target.get("table_ref") or "",
+        "table_caption": target.get("caption") or "",
+        "table_instance_id": target.get("table_instance_id") or "",
+    })
 
+    cache_key = _cache_key(doc_id, query, target, provider, model)
+    task_id = _task_id(cache_key)
+    existing = _load_task_record(cache_key)
+    if _task_matches_request(existing, doc_id=doc_id, target=target, provider=provider, model=model):
+        state = str(existing.get("state") or "")
+        if state in {"queued", "running"}:
+            if _task_is_stale(existing):
+                _VISUAL_PENDING.discard(cache_key)
+                diagnostics["stale_task_recovered"] = True
+            else:
+                diagnostics.update(_task_diagnostics(existing, cache_hit=True))
+                return {}, diagnostics
+        if state == "failed" and _failure_cooldown_active(existing):
+            diagnostics.update(_task_diagnostics(existing, cache_hit=True))
+            diagnostics["skipped_reason"] = "failure_cooldown"
+            return {}, diagnostics
+        if state == "indeterminate" and _indeterminate_cache_active(existing):
+            diagnostics.update(_task_diagnostics(existing, cache_hit=True))
+            diagnostics["skipped_reason"] = "indeterminate_cache"
+            return {}, diagnostics
+        if state in _TERMINAL_STATES:
+            diagnostics.update(_task_diagnostics(existing, cache_hit=True))
+            if state == "confirmed":
+                return dict(existing.get("segment") or {}), diagnostics
+            return {}, diagnostics
+
+    request_info = _request_info(doc_id, query, target, provider, model)
     if background and mode == "auto":
-        diagnostics.update({
-            "triggered": True,
-            "background": True,
-            "pending": True,
-            "skipped_reason": "background_pending",
-        })
+        record = _create_or_update_task(cache_key, request_info, state="queued", diagnostics=diagnostics)
+        diagnostics.update(_task_diagnostics(record))
+        diagnostics.update({"triggered": True, "background": True, "pending": True, "skipped_reason": "background_pending"})
         _schedule_visual_background_task(
             cache_key=cache_key,
             query=query,
@@ -220,6 +334,7 @@ async def maybe_verify_numeric_table_visual(
             endpoint=endpoint,
             custom_params=dict(custom_params or {}),
             diagnostics=dict(diagnostics),
+            request_info=request_info,
         )
         return {}, diagnostics
 
@@ -235,7 +350,478 @@ async def maybe_verify_numeric_table_visual(
         endpoint=endpoint,
         custom_params=custom_params,
         diagnostics=diagnostics,
+        request_info=request_info,
     )
+
+
+def rank_table_candidates(query: str, segments: list[dict], doc_data: dict) -> list[dict]:
+    """Rank evidence-backed tables without falling back to the first candidate."""
+    bundle_records = [
+        record for record in (doc_data or {}).get("structured_table_bundles") or []
+        if isinstance(record, dict)
+    ]
+    bundles_by_key: dict[str, dict] = {}
+    candidates: list[dict] = []
+    for record in bundle_records:
+        target = _target_from_record(record, origin="bundle")
+        if not target.get("page"):
+            continue
+        candidates.append(target)
+        for key in _candidate_join_keys(target):
+            bundles_by_key.setdefault(key, target)
+
+    for record in segments or []:
+        if not isinstance(record, dict):
+            continue
+        segment_target = _target_from_record(record, origin="segment")
+        if not segment_target.get("page"):
+            continue
+        matched = next((bundles_by_key[key] for key in _candidate_join_keys(segment_target) if key in bundles_by_key), None)
+        if matched:
+            _merge_candidate_evidence(matched, segment_target)
+        else:
+            candidates.append(segment_target)
+
+    deduped: dict[str, dict] = {}
+    for candidate in candidates:
+        _ensure_target_metadata(candidate)
+        key = str(candidate.get("table_instance_id") or "") or _candidate_fingerprint(candidate)
+        previous = deduped.get(key)
+        if previous is None:
+            deduped[key] = candidate
+        else:
+            _merge_candidate_evidence(previous, candidate)
+
+    refs = _extract_table_refs(query)
+    requested_rows = _extract_query_row_keys(query)
+    for candidate in deduped.values():
+        score, reasons = _score_table_candidate(query, candidate, refs, requested_rows)
+        candidate["selection_score"] = score
+        candidate["selection_reasons"] = reasons
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            -float(item.get("selection_score") or 0),
+            -float(item.get("source_quality") or 0),
+            int(item.get("page") or 10**9),
+            str(item.get("table_instance_id") or ""),
+        ),
+    )
+
+
+def _select_target_table(query: str, segments: list[dict], doc_data: dict) -> dict:
+    ranked = rank_table_candidates(query, segments, doc_data)
+    if not ranked:
+        return {}
+    selected = dict(ranked[0])
+    selected["candidate_count"] = len(ranked)
+    if len(ranked) > 1:
+        margin = float(selected.get("selection_score") or 0) - float(ranked[1].get("selection_score") or 0)
+        # An explicit table reference is a strong enough discriminator.  In its
+        # absence a near tie is intentionally indeterminate instead of a guess.
+        selected["selection_ambiguous"] = not _extract_table_refs(query) and margin < 8
+        selected["selection_margin"] = round(margin, 2)
+    else:
+        selected["selection_ambiguous"] = False
+    return selected
+
+
+def _target_from_record(record: dict, *, origin: str = "") -> dict:
+    page = _first_page(record)
+    bbox = _record_bbox(record)
+    caption = str(record.get("numeric_table_exact_context_caption") or record.get("table_caption") or "").strip()
+    table_id = str(record.get("table_id") or record.get("table_bundle_id") or record.get("bundle_id") or "").strip()
+    table_ref = next(iter(sorted(_extract_table_refs(f"{table_id} {caption}"))), "")
+    evidence_units = record.get("evidence_units") if isinstance(record.get("evidence_units"), list) else []
+    direct_cells = record.get("cell_evidence_units") if isinstance(record.get("cell_evidence_units"), list) else []
+    if direct_cells:
+        evidence_units = [
+            *evidence_units,
+            {
+                "evidence_unit_type": "table_row",
+                "content": record.get("numeric_table_exact_context_row_text") or record.get("row_text") or record.get("text") or "",
+                "row_id": record.get("row_id") or "",
+                "bbox": _record_bbox(record),
+                "page": page,
+                "cell_evidence_units": direct_cells,
+            },
+        ]
+    return {
+        "page": page,
+        "page_end": _last_page(record, page),
+        "pages": _record_pages(record, page),
+        "bbox": bbox,
+        "bboxes": _record_bboxes(record),
+        "caption": caption,
+        "table_id": table_id,
+        "table_ref": table_ref,
+        "table_header": str(record.get("numeric_table_exact_context_header") or record.get("table_header") or "").strip(),
+        "text": str(record.get("text") or record.get("bundle_text") or record.get("table_body_markdown") or ""),
+        "context_id": record.get("context_id") or record.get("bundle_id") or record.get("table_bundle_id") or "",
+        "evidence_id": record.get("evidence_id") or record.get("evidence_unit_id") or "",
+        "table_bundle_id": record.get("table_bundle_id") or record.get("bundle_id") or "",
+        "table_instance_id": record.get("table_instance_id") or "",
+        "table_source_hash": record.get("table_source_hash") or "",
+        "source": record.get("source") or record.get("selected_source") or "",
+        "source_quality": _source_quality(record),
+        "evidence_units": evidence_units,
+        "cell_evidence_units": direct_cells,
+        "origin": origin,
+    }
+
+
+def _merge_candidate_evidence(target: dict, supplement: dict) -> None:
+    for key in ("caption", "table_header", "text", "table_id", "table_ref", "table_bundle_id", "context_id", "evidence_id"):
+        if not target.get(key) and supplement.get(key):
+            target[key] = supplement[key]
+    if not target.get("bbox") and supplement.get("bbox"):
+        target["bbox"] = supplement["bbox"]
+    target["source_quality"] = max(float(target.get("source_quality") or 0), float(supplement.get("source_quality") or 0))
+    seen_units = {_unit_fingerprint(unit) for unit in target.get("evidence_units") or [] if isinstance(unit, dict)}
+    for unit in supplement.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        fingerprint = _unit_fingerprint(unit)
+        if fingerprint not in seen_units:
+            target.setdefault("evidence_units", []).append(unit)
+            seen_units.add(fingerprint)
+    if supplement.get("cell_evidence_units"):
+        target.setdefault("cell_evidence_units", []).extend(
+            cell for cell in supplement["cell_evidence_units"] if isinstance(cell, dict)
+        )
+
+
+def _candidate_join_keys(candidate: dict) -> list[str]:
+    values = (
+        candidate.get("table_instance_id"),
+        candidate.get("table_bundle_id"),
+        candidate.get("context_id"),
+        candidate.get("table_id"),
+    )
+    return [f"{index}:{_norm(str(value))}" for index, value in enumerate(values) if _norm(str(value))]
+
+
+def _candidate_fingerprint(candidate: dict) -> str:
+    raw = json.dumps(
+        {
+            "page": candidate.get("page"),
+            "bbox": candidate.get("bbox"),
+            "table": candidate.get("table_id"),
+            "caption": candidate.get("caption"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _score_table_candidate(query: str, candidate: dict, refs: set[str], requested_rows: set[str]) -> tuple[float, list[str]]:
+    joined = " ".join(
+        str(candidate.get(key) or "")
+        for key in ("table_ref", "table_id", "caption", "table_header", "text")
+    )
+    joined_norm = _norm(joined)
+    score = 0.0
+    reasons: list[str] = []
+    matched_refs = [ref for ref in refs if _table_ref_in_text(ref, joined)]
+    if matched_refs:
+        score += 100.0
+        reasons.append("explicit_table_ref")
+    elif refs:
+        score -= 20.0
+    query_terms = {term for term in _query_terms(query) if term not in {"table", "表格", "多少", "what", "which"}}
+    caption_terms = set(_query_terms(f"{candidate.get('caption') or ''} {candidate.get('table_id') or ''}"))
+    overlap = len(query_terms & caption_terms)
+    if overlap:
+        score += min(20.0, overlap * 3.0)
+        reasons.append("caption_match")
+    matched_rows = [key for key in requested_rows if _candidate_matches_row_key(candidate, key)]
+    if matched_rows:
+        score += min(35.0, len(matched_rows) * 20.0)
+        reasons.append("row_key_match")
+    columns = _extract_requested_columns(query, candidate)
+    if columns:
+        score += min(20.0, len(columns) * 5.0)
+        reasons.append("column_match")
+    if candidate.get("origin") == "segment":
+        score += 18.0
+        reasons.append("retrieval_context")
+    if candidate.get("evidence_units"):
+        score += 6.0
+    score += min(8.0, float(candidate.get("source_quality") or 0))
+    return round(score, 2), reasons
+
+
+def _source_quality(record: dict) -> float:
+    try:
+        explicit = float(record.get("table_selector_score"))
+        if explicit > 0:
+            return min(10.0, explicit)
+    except (TypeError, ValueError):
+        pass
+    source = str(record.get("selected_source") or record.get("source") or "").lower()
+    if "mineru" in source:
+        return 8.0
+    if source in {"odl", "pdf_native"}:
+        return 7.0 if source == "odl" else 5.0
+    return 3.0
+
+
+def _ensure_target_metadata(target: dict) -> None:
+    if target.get("table_instance_id") and target.get("table_source_hash"):
+        return
+    source_record = {
+        "table_instance_id": target.get("table_instance_id"),
+        "table_source_hash": target.get("table_source_hash"),
+        "bundle_id": target.get("table_bundle_id"),
+        "table_id": target.get("table_id"),
+        "table_caption": target.get("caption"),
+        "table_header": target.get("table_header"),
+        "table_body_markdown": target.get("text"),
+        "page_start": target.get("page"),
+        "page_end": target.get("page_end"),
+        "pages": target.get("pages"),
+        "bounding_box": target.get("bbox"),
+        "bounding_boxes": target.get("bboxes"),
+        "evidence_units": target.get("evidence_units"),
+        "source": target.get("source"),
+    }
+    metadata: dict[str, str] = {}
+    if callable(build_table_visual_metadata):
+        try:
+            metadata = build_table_visual_metadata(source_record) or {}
+        except Exception as exc:
+            logger.debug("[TableVisual] metadata derivation failed: %s", exc)
+    if not metadata:
+        identity = json.dumps(source_record, ensure_ascii=False, sort_keys=True, default=str)
+        metadata = {
+            "table_instance_id": f"table-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}",
+            "table_source_hash": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+        }
+    if not target.get("table_instance_id"):
+        target["table_instance_id"] = metadata.get("table_instance_id") or ""
+    if not target.get("table_source_hash"):
+        target["table_source_hash"] = metadata.get("table_source_hash") or ""
+
+
+def _request_info(doc_id: str, query: str, target: dict, provider: str, model: str) -> dict:
+    return {
+        "doc_id": doc_id,
+        "table_instance_id": target.get("table_instance_id") or "",
+        "table_source_hash": target.get("table_source_hash") or "",
+        "requested_rows": target.get("requested_rows") or [],
+        "requested_columns": target.get("requested_columns") or [],
+        "query_hash": _short_hash(_normal_query(query)),
+        "provider": provider,
+        "model": model,
+        "prompt_version": _VISUAL_PROMPT_VERSION,
+        "crop_version": _VISUAL_CROP_VERSION,
+    }
+
+
+def _cache_key(doc_id: str, query: str, target: dict, provider: str, model: str) -> str:
+    _ensure_target_metadata(target)
+    raw = json.dumps(
+        {
+            "schema_version": _CACHE_SCHEMA_VERSION,
+            **_request_info(doc_id, query, target, provider, model),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _task_id(cache_key: str) -> str:
+    return f"tv_{cache_key}"
+
+
+def _cache_key_from_task_id(task_id: str) -> str:
+    value = str(task_id or "").strip().lower()
+    if not value.startswith("tv_"):
+        return ""
+    candidate = value[3:]
+    return candidate if re.fullmatch(r"[a-f0-9]{64}", candidate) else ""
+
+
+def _visual_cache_dir() -> Path:
+    root = os.getenv("CHATPDF_TABLE_VISUAL_CACHE_DIR", "")
+    if root:
+        return Path(root)
+    try:
+        from runtime_mode import runtime
+        if runtime.is_desktop:
+            return Path(runtime.data_dir) / "table_visual_cache"
+    except Exception:
+        pass
+    return Path(__file__).resolve().parents[2] / "data" / "table_visual_cache"
+
+
+def _visual_cache_path(cache_key: str) -> Path:
+    safe_key = re.sub(r"[^a-f0-9]", "", str(cache_key).lower())[:64] or "cache"
+    return _visual_cache_dir() / f"{safe_key}.json"
+
+
+def _load_task_record(cache_key: str) -> dict:
+    cached = _VISUAL_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        return dict(cached)
+    cache_path = _visual_cache_path(cache_key)
+    if not cache_path.exists():
+        return {}
+    try:
+        record = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(record, dict) or record.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        return {}
+    if record.get("store_version") not in (None, _TASK_STORE_VERSION):
+        return {}
+    _VISUAL_CACHE[cache_key] = dict(record)
+    return dict(record)
+
+
+def _persist_task_record(cache_key: str, record: dict) -> dict:
+    safe_record = dict(record)
+    safe_record["schema_version"] = _CACHE_SCHEMA_VERSION
+    safe_record["store_version"] = _TASK_STORE_VERSION
+    safe_record["task_id"] = _task_id(cache_key)
+    safe_record["updated_at"] = time.time()
+    with _TASK_WRITE_LOCK:
+        _VISUAL_CACHE[cache_key] = dict(safe_record)
+        cache_path = _visual_cache_path(cache_key)
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(safe_record, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(cache_path)
+        except Exception as exc:
+            logger.debug("[TableVisual] task write failed: %s", exc)
+    return dict(safe_record)
+
+
+def _create_or_update_task(cache_key: str, request_info: dict, *, state: str, diagnostics: Optional[dict] = None) -> dict:
+    previous = _load_task_record(cache_key)
+    now = time.time()
+    record = {
+        "created_at": previous.get("created_at", now),
+        "state": state if state in _TASK_STATES else "failed",
+        "attempts": int(previous.get("attempts") or 0),
+        **request_info,
+        "diagnostics": dict(diagnostics or previous.get("diagnostics") or {}),
+        "segment": dict(previous.get("segment") or {}) if state == "confirmed" else {},
+    }
+    if state == "running":
+        record["attempts"] += 1
+        record["started_at"] = now
+    if state in _TERMINAL_STATES:
+        record["completed_at"] = now
+    return _persist_task_record(cache_key, record)
+
+
+def _complete_task(
+    cache_key: str,
+    request_info: dict,
+    *,
+    state: str,
+    diagnostics: dict,
+    segment: Optional[dict] = None,
+) -> dict:
+    previous = _load_task_record(cache_key)
+    record = {
+        "created_at": previous.get("created_at", time.time()),
+        "state": state if state in _TERMINAL_STATES else "failed",
+        "attempts": int(previous.get("attempts") or 0),
+        **request_info,
+        "diagnostics": _safe_diagnostics(diagnostics),
+        "segment": dict(segment or {}) if state == "confirmed" else {},
+        "completed_at": time.time(),
+    }
+    if state == "failed":
+        record["retry_after"] = time.time() + _resolve_failure_cooldown_seconds(None)
+    return _persist_task_record(cache_key, record)
+
+
+def _task_matches_request(record: dict, *, doc_id: str, target: dict, provider: str, model: str) -> bool:
+    if not record:
+        return False
+    return (
+        record.get("doc_id") == doc_id
+        and record.get("table_instance_id") == target.get("table_instance_id")
+        and record.get("table_source_hash") == target.get("table_source_hash")
+        and record.get("provider") == provider
+        and record.get("model") == model
+        and record.get("prompt_version") == _VISUAL_PROMPT_VERSION
+        and record.get("crop_version") == _VISUAL_CROP_VERSION
+    )
+
+
+def _failure_cooldown_active(record: dict) -> bool:
+    try:
+        return float(record.get("retry_after") or 0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _task_is_stale(record: dict) -> bool:
+    """Allow a new process to reclaim a persisted task left in progress."""
+    if str(record.get("state") or "") not in {"queued", "running"}:
+        return False
+    try:
+        updated_at = float(record.get("updated_at") or record.get("started_at") or record.get("created_at") or 0)
+    except (TypeError, ValueError):
+        return True
+    return updated_at <= 0 or (time.time() - updated_at) >= _resolve_stale_task_seconds()
+
+
+def _indeterminate_cache_active(record: dict) -> bool:
+    if str(record.get("state") or "") != "indeterminate":
+        return False
+    try:
+        completed_at = float(record.get("completed_at") or record.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return completed_at > 0 and (time.time() - completed_at) < _resolve_indeterminate_ttl_seconds()
+
+
+def _task_diagnostics(record: dict, *, cache_hit: bool = False) -> dict:
+    saved = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
+    state = str(record.get("state") or "indeterminate")
+    result = {
+        **_safe_diagnostics(saved),
+        "task_id": record.get("task_id") or "",
+        "state": state,
+        "verdict": state if state in {"confirmed", "conflict", "indeterminate"} else saved.get("verdict", "indeterminate"),
+        "table_instance_id": record.get("table_instance_id") or "",
+        "cache_hit": bool(cache_hit),
+    }
+    if state in {"queued", "running"}:
+        result["pending"] = True
+    return result
+
+
+def get_table_visual_verification_status(doc_id: str, task_id: str) -> dict:
+    """Return a public, document-scoped status record for frontend polling."""
+    cache_key = _cache_key_from_task_id(task_id)
+    if not cache_key:
+        return {}
+    record = _load_task_record(cache_key)
+    if not record or record.get("doc_id") != doc_id:
+        return {}
+    diagnostics = _task_diagnostics(record, cache_hit=True)
+    return {
+        "task_id": record.get("task_id") or task_id,
+        "doc_id": doc_id,
+        "table_instance_id": record.get("table_instance_id") or "",
+        "state": record.get("state") or "indeterminate",
+        "verdict": diagnostics.get("verdict", "indeterminate"),
+        "attempts": int(record.get("attempts") or 0),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "completed_at": record.get("completed_at"),
+        "retry_after": record.get("retry_after"),
+        "diagnostics": diagnostics,
+    }
 
 
 def _schedule_visual_background_task(
@@ -251,6 +837,7 @@ def _schedule_visual_background_task(
     endpoint: str,
     custom_params: dict,
     diagnostics: dict,
+    request_info: dict,
 ) -> None:
     if cache_key in _VISUAL_PENDING:
         return
@@ -260,28 +847,34 @@ def _schedule_visual_background_task(
     except RuntimeError:
         _VISUAL_PENDING.discard(cache_key)
         return
-    loop.create_task(_run_visual_verification_background(
-        cache_key=cache_key,
-        query=query,
-        target=target,
-        pdf_path=pdf_path,
-        segments=segments,
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        endpoint=endpoint,
-        custom_params={**dict(custom_params or {}), "_numeric_table_visual_background_task": True},
-        diagnostics=diagnostics,
-    ))
+    loop.create_task(
+        _run_visual_verification_background(
+            cache_key=cache_key,
+            query=query,
+            target=target,
+            pdf_path=pdf_path,
+            segments=segments,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            custom_params={**dict(custom_params or {}), "_numeric_table_visual_background_task": True},
+            diagnostics=diagnostics,
+            request_info=request_info,
+        )
+    )
 
 
 async def _run_visual_verification_background(**kwargs) -> None:
     cache_key = str(kwargs.get("cache_key") or "")
     try:
         _, diagnostics = await _run_visual_verification(**kwargs)
-        if diagnostics.get("error") or diagnostics.get("rejected_reason"):
-            logger.debug("[TableVisual] background verification skipped: %s", diagnostics)
+        if diagnostics.get("state") in {"failed", "conflict", "indeterminate"}:
+            logger.debug("[TableVisual] background task finished: %s", diagnostics.get("state"))
     except Exception as exc:
+        request_info = kwargs.get("request_info") if isinstance(kwargs.get("request_info"), dict) else {}
+        diagnostics = {"enabled": True, "triggered": True, "state": "failed", "verdict": "indeterminate", "error": f"{type(exc).__name__}: {exc}"}
+        _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
         logger.debug("[TableVisual] background verification failed: %s", exc)
     finally:
         _VISUAL_PENDING.discard(cache_key)
@@ -300,143 +893,120 @@ async def _run_visual_verification(
     endpoint: str,
     custom_params: Optional[dict],
     diagnostics: dict,
+    request_info: dict,
 ) -> tuple[dict, dict]:
-    page = target.get("page")
-    try:
-        image_b64, crop_meta = render_table_crop_base64(pdf_path, page, target.get("bbox"))
-    except Exception as exc:
-        diagnostics["skipped_reason"] = f"render_failed:{type(exc).__name__}"
-        logger.debug("[TableVisual] render failed: %s", exc)
-        return {}, diagnostics
+    diagnostics.update({"triggered": True, "state": "running", "task_id": _task_id(cache_key), "table_instance_id": target.get("table_instance_id") or ""})
+    _create_or_update_task(cache_key, request_info, state="running", diagnostics=diagnostics)
 
+    if _unsafe_cross_page_target(target):
+        diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "rejected_reason": "cross_page_table_ambiguous"})
+        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
+    try:
+        crops = render_table_crops_base64(pdf_path, target)
+    except Exception as exc:
+        diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "skipped_reason": f"render_failed:{type(exc).__name__}"})
+        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        logger.debug("[TableVisual] render failed: %s", exc)
+        return {}, _task_diagnostics(record)
+    if not crops:
+        diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "skipped_reason": "no_rendered_crop"})
+        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
+
+    crop_meta = [{key: value for key, value in crop.items() if key != "image_b64"} for crop in crops]
+    diagnostics.update({"page": target.get("page"), "crops": crop_meta, "crop_count": len(crops)})
     prompt_text = _build_visual_prompt(query, target, segments)
+    user_content: list[dict] = [{"type": "text", "text": prompt_text}]
+    for crop in crops:
+        user_content.append({"type": "text", "text": f"Image role: {crop['role']} (page {crop['page']})."})
+        user_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{crop['image_b64']}"}})
     messages = [
         {
             "role": "system",
             "content": (
-                "You verify numeric answers from academic paper tables. "
-                "Extract only cells visible in the table image. Return JSON only."
+                "You verify numeric answers from academic paper tables. Read only visible cells. "
+                "Return exactly one JSON object matching the requested schema; do not infer missing values."
             ),
         },
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt_text},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-            ],
-        },
+        {"role": "user", "content": user_content},
     ]
-    diagnostics.update({"triggered": True, "page": page, "crop": crop_meta})
+
     timeout_s = _resolve_visual_timeout_seconds(custom_params)
+    retries = _resolve_visual_retry_retries(custom_params)
+    retry_delay = _resolve_visual_retry_delay(custom_params)
+    semaphore = _get_visual_semaphore(_resolve_visual_concurrency(custom_params))
     try:
-        response = await asyncio.wait_for(
-            call_ai_api(
-                messages,
-                api_key,
-                model,
-                provider,
-                endpoint=endpoint,
-                max_tokens=700,
-                temperature=0,
-                purpose="numeric_table_visual_verification",
-            ),
-            timeout=timeout_s,
-        )
+        async with semaphore:
+            response = await asyncio.wait_for(
+                call_ai_api(
+                    messages,
+                    api_key,
+                    model,
+                    provider,
+                    endpoint=endpoint,
+                    middlewares=[RetryMiddleware(retries=retries, delay=retry_delay)],
+                    max_tokens=700,
+                    temperature=0,
+                    purpose="numeric_table_visual_verification",
+                ),
+                timeout=timeout_s,
+            )
     except asyncio.TimeoutError:
-        diagnostics["error"] = f"visual_timeout:{timeout_s:.0f}s"
-        diagnostics["rejected_reason"] = "timeout"
-        return {}, diagnostics
+        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"visual_timeout:{timeout_s:.0f}s", "rejected_reason": "timeout"})
+        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
     except Exception as exc:
-        diagnostics["error"] = f"{type(exc).__name__}: {exc}"
-        return {}, diagnostics
+        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"{type(exc).__name__}: {exc}"})
+        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
     if isinstance(response, dict) and response.get("error"):
-        diagnostics["error"] = str(response.get("error"))
-        return {}, diagnostics
+        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": str(response.get("error"))})
+        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
 
     content = _extract_response_content(response)
-    parsed = _parse_json_object(content)
-    if not parsed:
-        diagnostics["error"] = "invalid_json"
-        diagnostics["raw_preview"] = content[:300]
-        return {}, diagnostics
+    parsed = _parse_visual_response(content)
+    diagnostics["used_provider"] = response.get("_used_provider") if isinstance(response, dict) else ""
+    diagnostics["used_model"] = response.get("_used_model") if isinstance(response, dict) else ""
+    if parsed is None:
+        diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "error": "invalid_schema", "raw_preview": content[:300]})
+        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
+
+    verdict, verdict_details = _evaluate_visual_result(parsed, target, query)
+    diagnostics.update({
+        "state": verdict,
+        "verdict": verdict,
+        "confidence": parsed.confidence,
+        "verification": verdict_details,
+    })
+    if verdict != "confirmed":
+        diagnostics["rejected_reason"] = verdict_details.get("reason") or verdict
+        record = _complete_task(cache_key, request_info, state=verdict, diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
 
     segment = _build_visual_segment(
         parsed,
         query=query,
         target=target,
         crop_meta=crop_meta,
-        response=response,
+        response=response if isinstance(response, dict) else {},
+        verified_cells=verdict_details.get("verified_cells") or [],
     )
-    diagnostics["confidence"] = segment.get("visual_confidence")
-    diagnostics["used_provider"] = response.get("_used_provider")
-    diagnostics["used_model"] = response.get("_used_model")
-    min_confidence = _resolve_visual_min_confidence(custom_params)
-    try:
-        confidence_value = float(segment.get("visual_confidence"))
-    except Exception:
-        confidence_value = 0.0
-    if confidence_value < min_confidence:
-        diagnostics["rejected_reason"] = "low_confidence"
-        diagnostics["min_confidence"] = min_confidence
-        return {}, diagnostics
-    _store_cached_visual_result(cache_key, segment, diagnostics)
-    return segment, diagnostics
+    record = _complete_task(cache_key, request_info, state="confirmed", diagnostics=diagnostics, segment=segment)
+    return segment, _task_diagnostics(record)
 
 
-def _get_cached_visual_result(cache_key: str) -> dict:
-    cached = _VISUAL_CACHE.get(cache_key)
-    if isinstance(cached, dict):
-        return cached
-    cache_path = _visual_cache_path(cache_key)
-    if not cache_path.exists():
-        return {}
-    try:
-        record = json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(record, dict) or record.get("schema_version") != _CACHE_SCHEMA_VERSION:
-        return {}
-    segment = record.get("segment") if isinstance(record.get("segment"), dict) else {}
-    diagnostics = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
-    if not segment:
-        return {}
-    cached = {"segment": segment, "diagnostics": diagnostics}
-    _VISUAL_CACHE[cache_key] = cached
-    return cached
-
-
-def _store_cached_visual_result(cache_key: str, segment: dict, diagnostics: dict) -> None:
-    if not isinstance(segment, dict) or not segment:
-        return
-    safe_diagnostics = {
-        key: value
-        for key, value in (diagnostics or {}).items()
-        if key not in {"raw_preview"}
-    }
-    record = {
-        "schema_version": _CACHE_SCHEMA_VERSION,
-        "segment": segment,
-        "diagnostics": safe_diagnostics,
-    }
-    _VISUAL_CACHE[cache_key] = {"segment": segment, "diagnostics": safe_diagnostics}
-    cache_path = _visual_cache_path(cache_key)
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(cache_path)
-    except Exception as exc:
-        logger.debug("[TableVisual] cache write failed: %s", exc)
-
-
-def _visual_cache_path(cache_key: str) -> Path:
-    root = os.getenv("CHATPDF_TABLE_VISUAL_CACHE_DIR", "")
-    if root:
-        cache_dir = Path(root)
-    else:
-        cache_dir = Path(__file__).resolve().parents[2] / "data" / "table_visual_cache"
-    safe_key = re.sub(r"[^a-f0-9]", "", str(cache_key).lower())[:64] or "cache"
-    return cache_dir / f"{safe_key}.json"
+def _get_visual_semaphore(limit: int) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    existing = _SEMAPHORES.get(key)
+    if existing and existing[0] == limit:
+        return existing[1]
+    semaphore = asyncio.Semaphore(limit)
+    _SEMAPHORES[key] = (limit, semaphore)
+    return semaphore
 
 
 def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
@@ -448,126 +1018,369 @@ def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
         value = os.getenv("CHATPDF_TABLE_VISUAL_TIMEOUT_S", default_timeout)
     try:
         return max(8.0, min(90.0, float(value)))
-    except Exception:
+    except (TypeError, ValueError):
         return 35.0
 
 
-def _resolve_visual_min_confidence(custom_params: Optional[dict]) -> float:
-    value = None
-    if isinstance(custom_params, dict):
-        value = custom_params.get("numeric_table_visual_min_confidence") or custom_params.get("table_visual_min_confidence")
+def _resolve_visual_concurrency(custom_params: Optional[dict]) -> int:
+    value = custom_params.get("numeric_table_visual_concurrency") if isinstance(custom_params, dict) else None
     if value in (None, ""):
-        value = os.getenv("CHATPDF_TABLE_VISUAL_MIN_CONFIDENCE", "0.55")
+        value = os.getenv("CHATPDF_TABLE_VISUAL_CONCURRENCY", str(_DEFAULT_CONCURRENCY))
     try:
-        return max(0.0, min(1.0, float(value)))
-    except Exception:
-        return 0.55
+        return max(1, min(4, int(value)))
+    except (TypeError, ValueError):
+        return _DEFAULT_CONCURRENCY
+
+
+def _resolve_visual_retry_retries(custom_params: Optional[dict]) -> int:
+    value = custom_params.get("numeric_table_visual_retries") if isinstance(custom_params, dict) else None
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_RETRIES", "1")
+    try:
+        return max(0, min(3, int(value)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _resolve_visual_retry_delay(custom_params: Optional[dict]) -> float:
+    value = custom_params.get("numeric_table_visual_retry_delay") if isinstance(custom_params, dict) else None
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_RETRY_DELAY", "0.4")
+    try:
+        return max(0.0, min(5.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.4
+
+
+def _resolve_failure_cooldown_seconds(custom_params: Optional[dict]) -> float:
+    value = custom_params.get("numeric_table_visual_failure_cooldown_s") if isinstance(custom_params, dict) else None
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_FAILURE_COOLDOWN_S", str(_DEFAULT_FAILURE_COOLDOWN_S))
+    try:
+        return max(30.0, min(3600.0, float(value)))
+    except (TypeError, ValueError):
+        return _DEFAULT_FAILURE_COOLDOWN_S
+
+
+def _resolve_stale_task_seconds() -> float:
+    try:
+        value = float(os.getenv("CHATPDF_TABLE_VISUAL_STALE_TASK_S", str(_DEFAULT_STALE_TASK_S)))
+        return max(30.0, min(86400.0, value))
+    except (TypeError, ValueError):
+        return _DEFAULT_STALE_TASK_S
+
+
+def _resolve_indeterminate_ttl_seconds() -> float:
+    try:
+        value = float(os.getenv("CHATPDF_TABLE_VISUAL_INDETERMINATE_TTL_S", str(_DEFAULT_INDETERMINATE_TTL_S)))
+        return max(60.0, min(604800.0, value))
+    except (TypeError, ValueError):
+        return _DEFAULT_INDETERMINATE_TTL_S
 
 
 def render_table_crop_base64(pdf_path: Path, page_number: int, bbox: Optional[list[float]], *, dpi: int = 180) -> tuple[str, dict]:
+    """Compatibility wrapper returning an overview crop for existing callers."""
+    target = {"page": page_number, "bbox": bbox or []}
+    crops = render_table_crops_base64(pdf_path, target, dpi=dpi, include_detail=False)
+    if not crops:
+        raise ValueError("No crop rendered")
+    crop = crops[0]
+    return crop["image_b64"], {key: value for key, value in crop.items() if key != "image_b64"}
+
+
+def render_table_crops_base64(
+    pdf_path: Path,
+    target: dict,
+    *,
+    dpi: int = 180,
+    include_detail: bool = True,
+) -> list[dict]:
+    """Create overview, header, and target-row crops when their geometry exists."""
     import fitz
 
+    page_number = int(target.get("page") or 0)
+    if page_number <= 0:
+        raise ValueError("Missing page")
     doc = fitz.open(str(pdf_path))
     try:
-        page = doc[max(0, int(page_number) - 1)]
+        page = doc[max(0, page_number - 1)]
         page_rect = page.rect
-        if bbox and len(bbox) >= 4:
-            rect = fitz.Rect(*[float(v) for v in bbox[:4]])
-            x_pad_left = max(72.0, rect.width * 0.35)
-            x_pad_right = max(36.0, rect.width * 0.16)
-            y_pad = max(36.0, rect.height * 0.18)
-            clip = fitz.Rect(
-                max(page_rect.x0, rect.x0 - x_pad_left),
-                max(page_rect.y0, rect.y0 - y_pad),
-                min(page_rect.x1, rect.x1 + x_pad_right),
-                min(page_rect.y1, rect.y1 + y_pad),
-            )
-        else:
-            clip = page_rect
-        pix = page.get_pixmap(dpi=dpi, clip=clip, alpha=False, annots=False)
-        return base64.b64encode(pix.tobytes("png")).decode("ascii"), {
-            "page": int(page_number),
-            "bbox": [round(float(v), 2) for v in [clip.x0, clip.y0, clip.x1, clip.y1]],
-            "dpi": dpi,
-            "width": pix.width,
-            "height": pix.height,
-        }
+        table_bbox = _bbox_to_page_rect(target.get("bbox"), page_rect)
+        clips: list[tuple[str, Any]] = []
+        overview = _padded_rect(table_bbox or page_rect, page_rect, left_ratio=0.14, right_ratio=0.10, vertical_ratio=0.10)
+        clips.append(("overview", overview))
+        if include_detail and table_bbox:
+            header_height = max(30.0, table_bbox.height * 0.30)
+            header = fitz.Rect(table_bbox.x0, table_bbox.y0, table_bbox.x1, min(table_bbox.y1, table_bbox.y0 + header_height))
+            clips.append(("header", _padded_rect(header, page_rect, left_ratio=0.05, right_ratio=0.05, vertical_ratio=0.18)))
+            selected_row = target.get("selected_row") if isinstance(target.get("selected_row"), dict) else {}
+            row_bbox = _bbox_to_page_rect(_record_bbox(selected_row), page_rect) if selected_row else None
+            if row_bbox:
+                clips.append(("target_row", _padded_rect(row_bbox, page_rect, left_ratio=0.12, right_ratio=0.12, vertical_ratio=0.30)))
+
+        output: list[dict] = []
+        seen: set[tuple[int, int, int, int]] = set()
+        for role, clip in clips:
+            key = tuple(round(float(value), 1) for value in (clip.x0, clip.y0, clip.x1, clip.y1))
+            if key in seen:
+                continue
+            seen.add(key)
+            pix = page.get_pixmap(dpi=dpi, clip=clip, alpha=False, annots=False)
+            output.append({
+                "role": role,
+                "page": page_number,
+                "bbox": [round(float(value), 2) for value in (clip.x0, clip.y0, clip.x1, clip.y1)],
+                "dpi": dpi,
+                "width": pix.width,
+                "height": pix.height,
+                "rotation": int(page.rotation or 0),
+                "image_b64": base64.b64encode(pix.tobytes("png")).decode("ascii"),
+            })
+        return output
     finally:
         doc.close()
 
 
+def _bbox_to_page_rect(bbox: Any, page_rect: Any):
+    import fitz
+
+    normalized = _normalize_bbox(bbox)
+    if not normalized:
+        return None
+    x0, y0, x1, y1 = normalized
+    if max(abs(x0), abs(y0), abs(x1), abs(y1)) <= 1.5:
+        x0, x1 = x0 * page_rect.width, x1 * page_rect.width
+        y0, y1 = y0 * page_rect.height, y1 * page_rect.height
+    rect = fitz.Rect(x0, y0, x1, y1)
+    rect = rect & page_rect
+    return rect if rect.width > 1 and rect.height > 1 else None
+
+
+def _padded_rect(rect: Any, page_rect: Any, *, left_ratio: float, right_ratio: float, vertical_ratio: float):
+    import fitz
+
+    return fitz.Rect(
+        max(page_rect.x0, rect.x0 - max(18.0, rect.width * left_ratio)),
+        max(page_rect.y0, rect.y0 - max(12.0, rect.height * vertical_ratio)),
+        min(page_rect.x1, rect.x1 + max(18.0, rect.width * right_ratio)),
+        min(page_rect.y1, rect.y1 + max(12.0, rect.height * vertical_ratio)),
+    )
+
+
 def _build_visual_prompt(query: str, target: dict, segments: list[dict]) -> str:
     text_evidence = _segments_text(segments)[:5000]
-    return f"""用户问题:
+    requested_columns = ", ".join(target.get("requested_columns") or []) or "all columns needed for the answer"
+    requested_rows = ", ".join(target.get("requested_rows") or []) or "row implied by the question"
+    return f"""Question:
 {query}
 
-目标表格:
+Target table identity:
+- table_instance_id: {target.get('table_instance_id') or ''}
 - table_ref: {target.get('table_ref') or ''}
 - table_id: {target.get('table_id') or ''}
 - caption: {target.get('caption') or ''}
+- requested rows: {requested_rows}
+- requested columns: {requested_columns}
 
-文本检索证据（可能有错位、漏行或表头错误，仅作参考）:
+Retrieved text evidence may be malformed. It is only for locating the visible cells:
 {text_evidence}
 
-请直接查看图片中的表格，抽取回答该问题所需的行和单元格。
-只返回 JSON，不要 Markdown，不要解释。格式:
+Read the supplied table crops. Return JSON only, with this exact shape:
 {{
-  "table_id": "Table 4",
-  "matched_row": "ID D / method name / row label",
-  "cells": {{"column name": "visible value"}},
+  "table_id": "visible table label or empty",
+  "matched_row": "visible row label or empty",
+  "cells": {{"visible column label": "visible value"}},
   "confidence": 0.0,
-  "notes": "short note when row/column is uncertain",
+  "notes": "short uncertainty note",
   "supports_text_result": true,
-  "corrected_answer_hint": "short factual hint"
-}}"""
+  "corrected_answer_hint": "leave empty unless directly visible"
+}}
+Do not invent a cell, header, row label, or value that is not visible."""
+
+
+def _parse_visual_response(text: str) -> VisualTableResponse | None:
+    parsed = _parse_json_object(text)
+    if not parsed:
+        return None
+    try:
+        response = VisualTableResponse.model_validate(parsed)
+    except ValidationError:
+        return None
+    return response if response.cells else None
+
+
+def _evaluate_visual_result(parsed: VisualTableResponse, target: dict, query: str) -> tuple[str, dict]:
+    expected = _expected_table_cells(target, query)
+    details: dict[str, Any] = {
+        "matched_columns": [],
+        "matched_values": [],
+        "verified_cells": [],
+        "expected_columns": sorted(expected["values"].keys()),
+    }
+    if parsed.supports_text_result is False:
+        details["reason"] = "text_result_not_supported"
+        return "indeterminate", details
+    expected_refs = _extract_table_refs(f"{target.get('table_id') or ''} {target.get('caption') or ''}")
+    parsed_refs = _extract_table_refs(parsed.table_id)
+    if parsed_refs and expected_refs and not (parsed_refs & expected_refs):
+        details["reason"] = "table_identity_mismatch"
+        return "conflict", details
+
+    requested_rows = set(target.get("requested_rows") or _extract_query_row_keys(query))
+    row_candidates = expected["row_labels"]
+    if requested_rows and parsed.matched_row:
+        reported_row = {"row_id": parsed.matched_row}
+        expected_match = any(_row_matches_key(reported_row, key) for key in requested_rows)
+        candidate_match = any(_labels_match(parsed.matched_row, candidate) for candidate in row_candidates)
+        if not expected_match and not candidate_match:
+            details["reason"] = "row_identity_mismatch"
+            return "conflict", details
+    elif requested_rows and not parsed.matched_row:
+        details["reason"] = "missing_matched_row"
+        return "indeterminate", details
+
+    conflict_values: list[dict] = []
+    for visual_column, visual_value in parsed.cells.items():
+        matched_column = _match_expected_column(visual_column, expected["values"].keys())
+        if not matched_column:
+            continue
+        details["matched_columns"].append(matched_column)
+        expected_values = expected["values"].get(matched_column) or set()
+        if expected_values and any(_cell_values_match(visual_value, value) for value in expected_values):
+            details["matched_values"].append({"column": matched_column, "value": visual_value})
+            details["verified_cells"].append({
+                "column": visual_column,
+                "expected_column": matched_column,
+                "value": visual_value,
+            })
+        elif expected_values:
+            conflict_values.append({"column": matched_column, "visual": visual_value, "text": sorted(expected_values)[:3]})
+    if conflict_values:
+        details["conflicting_values"] = conflict_values
+        details["reason"] = "cell_value_mismatch"
+        return "conflict", details
+
+    requested_columns = target.get("requested_columns") or []
+    required_columns = {
+        _match_expected_column(column, expected["values"].keys())
+        for column in requested_columns
+    }
+    if requested_columns and ("" in required_columns or not required_columns):
+        details["reason"] = "requested_columns_missing_text_evidence"
+        return "indeterminate", details
+    # A question such as "ID Ours 的 Accuracy" names the ID column only to
+    # locate the row. Once that row has been strictly matched above, it is not
+    # an additional numeric answer cell the VLM must repeat.
+    if requested_rows:
+        selected = target.get("selected_row") if isinstance(target.get("selected_row"), dict) else {}
+        selected_cells = selected.get("cell_evidence_units") if isinstance(selected.get("cell_evidence_units"), list) else []
+        for index, cell in enumerate(selected_cells):
+            if not isinstance(cell, dict):
+                continue
+            cell_value = str(cell.get("content") or cell.get("text") or cell.get("cell_text") or "").strip()
+            if not any(_row_matches_key({"row_id": cell_value}, key) for key in requested_rows):
+                continue
+            column = str(cell.get("column_name") or cell.get("header") or cell.get("column") or "").strip()
+            if not column:
+                headers = _split_table_cells(target.get("table_header") or "")
+                column = headers[index] if index < len(headers) else ""
+            matched_identity_column = _match_expected_column(column, expected["values"].keys())
+            if matched_identity_column:
+                required_columns.discard(matched_identity_column)
+    verified_columns = {cell["expected_column"] for cell in details["verified_cells"]}
+    missing_columns = sorted(required_columns - verified_columns)
+    if missing_columns:
+        details["missing_columns"] = missing_columns
+        details["reason"] = "requested_columns_not_fully_verified"
+        return "indeterminate", details
+    if not details["matched_values"]:
+        details["reason"] = "no_cell_evidence_alignment"
+        return "indeterminate", details
+    return "confirmed", details
+
+
+def _expected_table_cells(target: dict, query: str) -> dict:
+    headers = _split_table_cells(target.get("table_header") or "")
+    values: dict[str, set[str]] = {}
+    row_labels: list[str] = []
+    rows = [unit for unit in target.get("evidence_units") or [] if isinstance(unit, dict)]
+    selected = target.get("selected_row") if isinstance(target.get("selected_row"), dict) else None
+    if selected:
+        rows = [selected]
+    elif target.get("cell_evidence_units"):
+        rows.append({"cell_evidence_units": target.get("cell_evidence_units"), "content": target.get("text") or ""})
+    for row in rows:
+        if bool(row.get("is_header_row")):
+            continue
+        cells = row.get("cell_evidence_units") if isinstance(row.get("cell_evidence_units"), list) else []
+        if not cells:
+            cells = [{"content": value} for value in _split_table_cells(row.get("content") or row.get("row_text") or "")]
+        row_label = str(row.get("row_id") or row.get("row_text") or row.get("content") or "").strip()
+        if cells and isinstance(cells[0], dict):
+            row_label = str(cells[0].get("content") or cells[0].get("text") or row_label).strip()
+        if row_label:
+            row_labels.append(row_label)
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, dict):
+                continue
+            column = str(cell.get("column_name") or cell.get("header") or cell.get("column") or "").strip()
+            if not column and index < len(headers):
+                column = headers[index]
+            if not column:
+                column = f"column {index + 1}"
+            value = str(cell.get("content") or cell.get("text") or cell.get("cell_text") or "").strip()
+            if value:
+                values.setdefault(_norm(column), set()).add(value)
+    return {"values": values, "row_labels": row_labels}
 
 
 def _build_visual_segment(
-    parsed: dict,
+    parsed: VisualTableResponse,
     *,
     query: str,
     target: dict,
-    crop_meta: dict,
+    crop_meta: list[dict],
     response: dict,
+    verified_cells: list[dict],
 ) -> dict:
-    cells = parsed.get("cells") if isinstance(parsed.get("cells"), dict) else {}
+    cells = {
+        str(cell.get("column") or ""): str(cell.get("value") or "")
+        for cell in verified_cells
+        if isinstance(cell, dict) and str(cell.get("column") or "").strip() and str(cell.get("value") or "").strip()
+    }
     cell_lines = [f"{key} = {value}" for key, value in cells.items() if str(key).strip()]
-    matched_row = str(parsed.get("matched_row") or "").strip()
-    table_id = str(parsed.get("table_id") or target.get("table_id") or target.get("table_ref") or "").strip()
-    confidence = _coerce_float(parsed.get("confidence"), 0.0)
-    notes = str(parsed.get("notes") or "").strip()
-    hint = str(parsed.get("corrected_answer_hint") or "").strip()
-    lines = ["[Numeric Table Visual Verification]"]
+    table_id = parsed.table_id or str(target.get("table_id") or target.get("table_ref") or "").strip()
+    lines = ["[Numeric Table Visual Verification: confirmed]"]
     if table_id:
         lines.append(f"Table ID: {table_id}")
     if target.get("caption"):
         lines.append(f"Table Caption: {target.get('caption')}")
-    if matched_row:
-        lines.append(f"Matched Row: {matched_row}")
+    if parsed.matched_row:
+        lines.append(f"Matched Row: {parsed.matched_row}")
     if cell_lines:
-        lines.append("Visual Cells:")
+        lines.append("Verified Cells:")
         lines.extend(f"- {line}" for line in cell_lines)
-    if hint:
-        lines.append(f"Corrected Answer Hint: {hint}")
-    if notes:
-        lines.append(f"Notes: {notes}")
-    lines.append(f"Confidence: {confidence:.2f}")
-    page = int(crop_meta.get("page") or target.get("page") or 0)
+    if parsed.notes:
+        lines.append(f"Notes: {parsed.notes}")
+    page = int(target.get("page") or 0)
     return {
         "text": "\n".join(lines),
         "segment_role": "numeric_table_visual_verification",
-        "context_id": f"{target.get('context_id') or target.get('table_id') or target.get('table_ref') or 'table'}:visual_verification",
-        "evidence_id": f"{target.get('evidence_id') or target.get('table_id') or target.get('table_ref') or 'table'}:visual_verification",
+        "context_id": f"{target.get('table_instance_id') or target.get('context_id') or 'table'}:visual_verification",
+        "evidence_id": f"{target.get('table_instance_id') or target.get('evidence_id') or 'table'}:visual_verification",
         "table_id": table_id,
+        "table_bundle_id": target.get("table_bundle_id") or "",
+        "table_instance_id": target.get("table_instance_id") or "",
+        "table_source_hash": target.get("table_source_hash") or "",
         "table_caption": target.get("caption") or "",
         "page_range": [page, page] if page else [],
-        "bbox": crop_meta.get("bbox") or target.get("bbox") or [],
+        "bbox": target.get("bbox") or [],
+        "visual_crops": crop_meta,
         "visual_cells": cells,
-        "visual_matched_row": matched_row,
-        "visual_confidence": confidence,
-        "visual_supports_text_result": bool(parsed.get("supports_text_result")),
-        "visual_notes": notes,
-        "visual_answer_hint": hint,
+        "visual_matched_row": parsed.matched_row,
+        "visual_confidence": parsed.confidence,
+        "visual_verdict": "confirmed",
+        "visual_notes": parsed.notes,
         "visual_query": query,
         "used_provider": response.get("_used_provider"),
         "used_model": response.get("_used_model"),
@@ -575,112 +1388,92 @@ def _build_visual_segment(
     }
 
 
-def _select_target_table(query: str, segments: list[dict], doc_data: dict) -> dict:
-    refs = _extract_table_refs(query)
-    candidates: list[dict] = []
-    for bundle in (doc_data or {}).get("structured_table_bundles") or []:
-        if isinstance(bundle, dict):
-            candidates.append(_target_from_record(bundle))
-    for segment in segments or []:
-        if not isinstance(segment, dict):
-            continue
-        candidates.append(_target_from_record(segment))
-    candidates = [candidate for candidate in candidates if candidate.get("page")]
-    if refs:
-        for candidate in candidates:
-            joined = " ".join(str(candidate.get(key) or "") for key in ("table_ref", "table_id", "caption", "text")).lower()
-            if any(ref in joined for ref in refs):
-                return candidate
-    return candidates[0] if candidates else {}
+def _select_target_row(target: dict, query: str) -> dict:
+    requested = _extract_query_row_keys(query)
+    candidates = [unit for unit in target.get("evidence_units") or [] if isinstance(unit, dict) and not unit.get("is_header_row")]
+    if not candidates:
+        return {}
+    scored: list[tuple[int, dict]] = []
+    for row in candidates:
+        score = sum(20 for key in requested if _row_matches_key(row, key))
+        if row.get("cell_evidence_units"):
+            score += 2
+        scored.append((score, row))
+    best_score, best = max(scored, key=lambda item: item[0])
+    return dict(best) if best_score > 0 else {}
 
 
-def _target_from_record(record: dict) -> dict:
-    page = _first_page(record)
-    bbox = _record_bbox(record)
-    caption = str(record.get("numeric_table_exact_context_caption") or record.get("table_caption") or "").strip()
-    table_id = str(record.get("table_id") or record.get("table_bundle_id") or "").strip()
-    table_ref = next(iter(_extract_table_refs(f"{table_id} {caption}")), "")
-    return {
-        "page": page,
-        "bbox": bbox,
-        "caption": caption,
-        "table_id": table_id,
-        "table_ref": table_ref,
-        "text": str(record.get("text") or record.get("bundle_text") or ""),
-        "context_id": record.get("context_id") or record.get("bundle_id") or "",
-        "evidence_id": record.get("evidence_id") or "",
-    }
+def _unsafe_cross_page_target(target: dict) -> bool:
+    pages = [page for page in target.get("pages") or [] if isinstance(page, int) and page > 0]
+    if not pages:
+        page = target.get("page")
+        page_end = target.get("page_end")
+        pages = [page, page_end] if isinstance(page, int) and isinstance(page_end, int) else []
+    # The current structured bundle format does not prove that a later page's
+    # header and table bbox are a continuation of the first page.  Treating a
+    # selected row as sufficient would silently create a cross-page merge, so
+    # leave these cases to the original structured evidence instead.
+    return len(set(pages)) > 1
 
 
-def _record_bbox(record: dict) -> list[float]:
-    for key in ("bbox", "table_bbox", "bounding_box"):
-        bbox = _normalize_bbox(record.get(key))
-        if bbox:
-            return bbox
-    bboxes: list[list[float]] = []
-    for key in ("bounding_boxes", "table_bboxes"):
-        value = record.get(key)
-        if isinstance(value, list):
-            for item in value:
-                bbox = _normalize_bbox(item)
-                if bbox:
-                    bboxes.append(bbox)
-    for unit_key in ("cell_evidence_units", "evidence_units"):
-        units = record.get(unit_key)
-        if isinstance(units, list):
-            for unit in units:
-                if not isinstance(unit, dict):
-                    continue
-                for key in ("bbox", "cell_bbox", "row_bbox", "bounding_box"):
-                    bbox = _normalize_bbox(unit.get(key))
-                    if bbox:
-                        bboxes.append(bbox)
-    return _merge_bboxes(bboxes)
-
-
-def _first_page(record: dict) -> int:
-    for key in ("page", "page_start"):
-        try:
-            page = int(record.get(key) or 0)
-        except (TypeError, ValueError):
-            page = 0
-        if page > 0:
-            return page
-    for key in ("page_range", "pages"):
-        value = record.get(key)
-        if isinstance(value, list):
-            for item in value:
-                try:
-                    page = int(item)
-                except (TypeError, ValueError):
-                    continue
-                if page > 0:
-                    return page
-    return 0
-
-
-def _normalize_bbox(value: Any) -> list[float]:
-    if not isinstance(value, (list, tuple)) or len(value) < 4:
+def _extract_requested_columns(query: str, target: Optional[dict] = None) -> list[str]:
+    headers = _split_table_cells((target or {}).get("table_header") or "")
+    if not headers:
         return []
-    try:
-        x0, y0, x1, y1 = [float(v) for v in value[:4]]
-    except (TypeError, ValueError):
-        return []
-    if x1 <= x0 or y1 <= y0:
-        return []
-    return [x0, y0, x1, y1]
+    query_norm = _norm(query)
+    normalized_headers = [(header, _norm(header)) for header in headers if _norm(header)]
+    requested: list[str] = []
+    aliases = {"accuracy": "acc", "precision": "prec", "recall": "rec", "performance": "perf"}
+    query_with_aliases = query_norm + "".join(aliases.get(term, "") for term in _query_terms(query))
+    for header, normalized in normalized_headers:
+        if len(normalized) >= 2 and normalized in query_with_aliases:
+            requested.append(header)
+    return list(dict.fromkeys(requested))
 
 
-def _merge_bboxes(bboxes: list[list[float]]) -> list[float]:
-    valid = [bbox for bbox in bboxes if bbox and len(bbox) >= 4]
-    if not valid:
+def _split_table_cells(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
         return []
-    return [
-        min(b[0] for b in valid),
-        min(b[1] for b in valid),
-        max(b[2] for b in valid),
-        max(b[3] for b in valid),
-    ]
+    if "|" in text:
+        cells = [re.sub(r"\s+", " ", part.replace("\\|", "|")).strip() for part in text.strip("|").split("|")]
+        return [cell for cell in cells if cell and not re.fullmatch(r":?-{2,}:?", cell)]
+    return [part.strip() for part in re.split(r"\t|;", text) if part.strip()]
+
+
+def _match_expected_column(value: str, expected_columns: Any) -> str:
+    value_norm = _norm(value)
+    if not value_norm:
+        return ""
+    for column in expected_columns:
+        if _labels_match(value, column):
+            return str(column)
+    return ""
+
+
+def _labels_match(left: str, right: str) -> bool:
+    left_norm, right_norm = _norm(left), _norm(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    if min(len(left_norm), len(right_norm)) < 3:
+        return False
+    return left_norm in right_norm or right_norm in left_norm
+
+
+def _cell_values_match(left: str, right: str) -> bool:
+    left_norm = _norm_numeric_value(left)
+    right_norm = _norm_numeric_value(right)
+    if left_norm == right_norm:
+        return True
+    left_numbers = re.findall(r"[-+]?\d+(?:\.\d+)?", str(left or "").replace(",", ""))
+    right_numbers = re.findall(r"[-+]?\d+(?:\.\d+)?", str(right or "").replace(",", ""))
+    return bool(left_numbers and right_numbers and left_numbers == right_numbers)
+
+
+def _norm_numeric_value(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").replace(",", "").replace("％", "%")).casefold()
 
 
 def _extract_response_content(response: dict) -> str:
@@ -711,22 +1504,167 @@ def _parse_json_object(text: str) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _cache_key(doc_id: str, query: str, target: dict, provider: str, model: str) -> str:
-    raw = json.dumps(
-        {
-            "schema_version": _CACHE_SCHEMA_VERSION,
-            "doc_id": doc_id,
-            "query": re.sub(r"\s+", " ", query or "").strip().lower(),
-            "page": target.get("page"),
-            "bbox": target.get("bbox"),
-            "table": target.get("table_id") or target.get("table_ref"),
-            "provider": provider,
-            "model": model,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def _record_bbox(record: Any) -> list[float]:
+    if not isinstance(record, dict):
+        return []
+    # MinerU row/cell units without explicit geometry must never turn a whole
+    # table bbox into a misleading "target row" crop.
+    if (
+        str(record.get("evidence_unit_type") or "").lower() in {"table_row", "table_cell"}
+        and record.get("visual_crop_eligible") is False
+    ):
+        return []
+    for key in ("visual_bbox",):
+        bbox = _normalize_bbox(record.get(key))
+        if bbox:
+            return bbox
+    bboxes: list[list[float]] = []
+    for key in ("visual_bounding_boxes",):
+        value = record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                bbox = _normalize_bbox(item)
+                if bbox:
+                    bboxes.append(bbox)
+    if bboxes:
+        return _merge_bboxes(bboxes)
+    # Never reinterpret parser-declared normalized or bottom-left coordinates as
+    # PyMuPDF top-left points. Legacy structured artifacts fall back to a page
+    # overview until they are rebuilt with visual geometry.
+    coordinate_space = str(record.get("bbox_coordinate_space") or "").strip()
+    source = str(record.get("source") or "").strip().lower()
+    if coordinate_space and coordinate_space != "pdf_top_left_points":
+        return []
+    if not coordinate_space and source in {"mineru", "odl"}:
+        return []
+    for key in ("bbox", "table_bbox", "bounding_box", "cell_bbox", "row_bbox"):
+        bbox = _normalize_bbox(record.get(key))
+        if bbox:
+            return bbox
+    for unit_key in ("cell_evidence_units", "evidence_units"):
+        units = record.get(unit_key)
+        if isinstance(units, list):
+            for unit in units:
+                if not isinstance(unit, dict):
+                    continue
+                bbox = _record_bbox(unit)
+                if bbox:
+                    bboxes.append(bbox)
+    return _merge_bboxes(bboxes)
+
+
+def _record_bboxes(record: dict) -> list[list[float]]:
+    bboxes: list[list[float]] = []
+    for key in ("visual_bounding_boxes",):
+        for item in record.get(key) or []:
+            bbox = _normalize_bbox(item)
+            if bbox:
+                bboxes.append(bbox)
+    if not bboxes:
+        coordinate_space = str(record.get("bbox_coordinate_space") or "").strip()
+        source = str(record.get("source") or "").strip().lower()
+        if not coordinate_space and source not in {"mineru", "odl"} or coordinate_space == "pdf_top_left_points":
+            for key in ("bounding_boxes", "table_bboxes"):
+                for item in record.get(key) or []:
+                    bbox = _normalize_bbox(item)
+                    if bbox:
+                        bboxes.append(bbox)
+    bbox = _record_bbox(record)
+    if bbox and bbox not in bboxes:
+        bboxes.insert(0, bbox)
+    return bboxes
+
+
+def _record_pages(record: dict, fallback: int) -> list[int]:
+    values: list[int] = []
+    for key in ("pages", "page_range", "table_pages"):
+        value = record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                try:
+                    page = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if page > 0 and page not in values:
+                    values.append(page)
+    if not values and fallback > 0:
+        values.append(fallback)
+    page_end = _last_page(record, fallback)
+    if page_end > 0 and page_end not in values:
+        values.append(page_end)
+    return values
+
+
+def _first_page(record: dict) -> int:
+    for key in ("page", "page_start"):
+        try:
+            page = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            return page
+    for key in ("page_range", "pages", "table_pages"):
+        value = record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                try:
+                    page = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if page > 0:
+                    return page
+    return 0
+
+
+def _last_page(record: dict, fallback: int = 0) -> int:
+    for key in ("page_end",):
+        try:
+            page = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            return page
+    pages = _record_pages_no_end(record)
+    return max(pages) if pages else fallback
+
+
+def _record_pages_no_end(record: dict) -> list[int]:
+    values: list[int] = []
+    for key in ("page_range", "pages", "table_pages"):
+        value = record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                try:
+                    page = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if page > 0:
+                    values.append(page)
+    return values
+
+
+def _normalize_bbox(value: Any) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return []
+    try:
+        x0, y0, x1, y1 = [float(v) for v in value[:4]]
+    except (TypeError, ValueError):
+        return []
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return [x0, y0, x1, y1]
+
+
+def _merge_bboxes(bboxes: list[list[float]]) -> list[float]:
+    valid = [bbox for bbox in bboxes if bbox and len(bbox) >= 4]
+    if not valid:
+        return []
+    return [
+        min(b[0] for b in valid),
+        min(b[1] for b in valid),
+        max(b[2] for b in valid),
+        max(b[3] for b in valid),
+    ]
 
 
 def _extract_table_refs(text: str) -> set[str]:
@@ -740,6 +1678,11 @@ def _extract_table_refs(text: str) -> set[str]:
     return refs
 
 
+def _table_ref_in_text(reference: str, text: str) -> bool:
+    ref = _norm(reference)
+    return bool(ref and ref in _norm(text))
+
+
 def _extract_query_row_keys(query: str) -> set[str]:
     keys: set[str] = set()
     sample = str(query or "")
@@ -751,7 +1694,7 @@ def _extract_query_row_keys(query: str) -> set[str]:
     for pattern in patterns:
         for match in re.finditer(pattern, sample, re.IGNORECASE):
             value = _norm(match.group(1))
-            if value and len(value) <= 8:
+            if value and len(value) <= 16:
                 keys.add(value)
                 if "id" in pattern.lower():
                     keys.add(f"id{value}")
@@ -809,22 +1752,76 @@ def _segments_text(segments: list[dict]) -> str:
     return "\n".join(parts).lower()
 
 
+def _query_terms(text: str) -> set[str]:
+    return {_norm(match.group(0)) for match in _WORD_RE.finditer(str(text or "")) if _norm(match.group(0))}
+
+
+def _row_text(row: dict) -> str:
+    values = [str(row.get(key) or "").strip() for key in ("row_id", "row_text", "content")]
+    cells = row.get("cell_evidence_units") if isinstance(row.get("cell_evidence_units"), list) else []
+    values.extend(str(cell.get("content") or cell.get("text") or "").strip() for cell in cells if isinstance(cell, dict))
+    return " ".join(value for value in values if value)
+
+
+def _candidate_matches_row_key(candidate: dict, key: str) -> bool:
+    for row in candidate.get("evidence_units") or []:
+        if isinstance(row, dict) and _row_matches_key(row, key):
+            return True
+    return False
+
+
+def _row_matches_key(row: dict, key: str) -> bool:
+    """Match a query row key against structured row/cell boundaries, not prose."""
+    key_norm = _norm(key)
+    if not key_norm:
+        return False
+    cells = row.get("cell_evidence_units") if isinstance(row.get("cell_evidence_units"), list) else []
+    labels = [str(row.get(field) or "").strip() for field in ("row_id", "row_text")]
+    labels.extend(
+        str(cell.get("content") or cell.get("text") or cell.get("cell_text") or "").strip()
+        for cell in cells
+        if isinstance(cell, dict)
+    )
+    # ID B / Row B is represented as both a compact key (idb) and B.  Only
+    # accept B when it is an exact structured cell/row label; it must not match
+    # the letter inside an unrelated caption such as "Appendix".
+    compact_suffix = key_norm
+    if key_norm.startswith("id"):
+        compact_suffix = key_norm[2:]
+    elif key_norm.startswith("row"):
+        compact_suffix = key_norm[3:]
+    for label in labels:
+        label_norm = _norm(label)
+        if label_norm == key_norm or (compact_suffix and label_norm == compact_suffix):
+            return True
+    return False
+
+
+def _unit_fingerprint(unit: dict) -> str:
+    raw = json.dumps(
+        {
+            "id": unit.get("evidence_unit_id"),
+            "row": unit.get("row_id") or unit.get("row_text") or unit.get("content"),
+            "bbox": _record_bbox(unit),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _safe_diagnostics(diagnostics: dict) -> dict:
+    return {key: value for key, value in (diagnostics or {}).items() if key not in {"raw_preview"}}
+
+
+def _normal_query(query: str) -> str:
+    return re.sub(r"\s+", " ", str(query or "")).strip().casefold()
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:24]
+
+
 def _norm(value: str = "") -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fffωα]+", "", str(value or "").casefold())
-
-
-def _coerce_float(value: Any, default: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0.0, min(1.0, number))
-
-
-__all__ = [
-    "maybe_verify_numeric_table_visual",
-    "render_table_crop_base64",
-    "resolve_visual_mode",
-    "should_verify_numeric_table_visual",
-    "looks_vision_capable_model",
-]

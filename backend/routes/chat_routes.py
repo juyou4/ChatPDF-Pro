@@ -2183,9 +2183,13 @@ def _sync_numeric_table_prompt_context(
 def _is_numeric_table_visual_verification_segment(segment: dict) -> bool:
     if not isinstance(segment, dict):
         return False
-    if str(segment.get("segment_role") or "").strip() == "numeric_table_visual_verification":
-        return True
-    return "[numeric table visual verification]" in str(segment.get("text") or "").lower()
+    is_visual_segment = (
+        str(segment.get("segment_role") or "").strip() == "numeric_table_visual_verification"
+        or "[numeric table visual verification" in str(segment.get("text") or "").lower()
+    )
+    # Visual extraction is a diagnostic by default.  Only a result that the
+    # verifier reconciled with structured cell evidence may affect the answer.
+    return is_visual_segment and str(segment.get("visual_verdict") or "").strip().lower() == "confirmed"
 
 
 async def _maybe_add_numeric_table_visual_verification(
@@ -2241,7 +2245,13 @@ async def _maybe_add_numeric_table_visual_verification(
         logger.debug("[TableVisual] verification failed: %s", exc)
 
     diagnostics["numeric_table_visual_verification"] = visual_diag
-    if not visual_segment:
+    visual_verdict = str(
+        (visual_segment or {}).get("visual_verdict")
+        or (visual_diag or {}).get("visual_verdict")
+        or (visual_diag or {}).get("verdict")
+        or ""
+    ).strip().lower()
+    if not visual_segment or visual_verdict != "confirmed":
         return
 
     retrieval_meta["_context_segments"] = _merge_response_context_segments(
@@ -4459,6 +4469,7 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
         "block_type": segment.get("block_type", ""),
         "table_id": segment.get("table_id", ""),
         "table_bundle_id": segment.get("table_bundle_id", ""),
+        "table_instance_id": segment.get("table_instance_id", ""),
         "evidence_unit_id": segment.get("evidence_unit_id", ""),
         "table_caption": segment.get("numeric_table_exact_context_caption") or segment.get("table_caption", ""),
         "table_header": segment.get("numeric_table_exact_context_header") or segment.get("table_header", ""),
@@ -4476,6 +4487,7 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
         "table_row_slice_kind": segment.get("table_row_slice_kind", ""),
         "retrieval_type": segment.get("retrieval_type", ""),
         "segment_role": segment.get("segment_role", ""),
+        "visual_verdict": segment.get("visual_verdict", ""),
         "bbox": _normalize_public_bbox(segment.get("bbox")),
         "citation_span": segment.get("citation_span") or {},
         "surrounding_context": _compact_context_text(segment.get("surrounding_context") or "", limit=1200),
@@ -4898,6 +4910,8 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
         "block_type": seg.get("block_type", ""),
         "table_id": seg.get("table_id", ""),
         "table_bundle_id": seg.get("table_bundle_id", ""),
+        "table_instance_id": seg.get("table_instance_id", ""),
+        "table_source_hash": seg.get("table_source_hash", ""),
         "evidence_unit_id": seg.get("evidence_unit_id", ""),
         "table_caption": seg.get("table_caption", ""),
         "table_header": seg.get("table_header", ""),
@@ -4914,6 +4928,10 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
         "table_row_evidence": seg.get("table_row_evidence", False),
         "table_row_slice_kind": seg.get("table_row_slice_kind", ""),
         "segment_role": segment_role,
+        "visual_verdict": seg.get("visual_verdict", ""),
+        "visual_cells": seg.get("visual_cells", {}),
+        "visual_matched_row": seg.get("visual_matched_row", ""),
+        "visual_crops": seg.get("visual_crops", []),
         "bbox": _normalize_public_bbox(seg.get("bbox")),
         "citation_span": seg.get("citation_span") or {},
         "surrounding_context": _compact_context_text(seg.get("surrounding_context") or "", limit=1200),
@@ -6263,6 +6281,7 @@ _PUBLIC_CITATION_KEYS = {
     "block_type",
     "retrieval_type",
     "segment_role",
+    "visual_verdict",
     "alignment_status",
     "start_phrase",
     "end_phrase",
@@ -6273,6 +6292,7 @@ _PUBLIC_CITATION_KEYS = {
     "combined_score",
     "table_id",
     "table_bundle_id",
+    "table_instance_id",
     "evidence_unit_id",
     "table_caption",
     "table_header",
@@ -6317,9 +6337,11 @@ _PUBLIC_CONTEXT_SEGMENT_KEYS = {
     "block_type",
     "retrieval_type",
     "segment_role",
+    "visual_verdict",
     "alignment_status",
     "table_id",
     "table_bundle_id",
+    "table_instance_id",
     "evidence_unit_id",
     "table_caption",
     "table_header",

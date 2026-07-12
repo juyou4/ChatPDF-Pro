@@ -47,8 +47,10 @@ def save_mineru_result(data_dir: Path | str, doc_id: str, payload: dict[str, Any
         "created_at": datetime.now(timezone.utc).isoformat(),
         "payload": payload,
     }
-    with open(path, "w", encoding="utf-8") as f:
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
+    temp_path.replace(path)
 
 
 def load_mineru_result(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:

@@ -101,12 +101,14 @@ const BACKEND_OPTIONS = [
   {
     value: 'mineru',
     label: 'MinerU OCR',
-    description: '在线 OCR 服务，通过 Worker 代理，支持公式和表格识别',
+    description: '仅用于深度结构解析，不再作为逐页 OCR',
+    deprecatedForPageOcr: true,
   },
   {
     value: 'doc2x',
     label: 'Doc2X OCR',
-    description: '在线 OCR 服务，通过 Worker 代理，支持 Dollar 公式模式',
+    description: '实验性服务，暂不支持逐页 OCR',
+    deprecatedForPageOcr: true,
   },
 ]
 
@@ -1157,14 +1159,22 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 <div className="space-y-2">
                   {BACKEND_OPTIONS.map((option) => {
                     const isActive = backend === option.value
+                    const localProviderUnavailable =
+                      ['tesseract', 'paddleocr'].includes(option.value) &&
+                      ocrStatus?.backends?.[option.value] === false
+                    const disabled = Boolean(option.deprecatedForPageOcr || localProviderUnavailable)
                     return (
                       <button
                         key={option.value}
-                        onClick={() => handleBackendChange(option.value)}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => !disabled && handleBackendChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
                             ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                            : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
+                            : disabled
+                              ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed opacity-70'
+                              : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
                         }`}
                       >
                         <div className="flex-1 min-w-0">

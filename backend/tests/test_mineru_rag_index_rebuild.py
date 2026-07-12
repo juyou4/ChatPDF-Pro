@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import routes.document_routes as document_routes
 from services.block_index_service import BLOCK_INDEX_VERSION
+from services.semantic_group_store import semantic_group_paths
 
 
 @pytest.fixture
@@ -221,7 +222,7 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
 
     monkeypatch.setattr(document_routes, "get_embedding_function", fake_get_embedding_function)
 
-    def fake_build_semantic_group_index_async(
+    def fake_build_semantic_group_index(
         doc_id,
         chunks,
         pages,
@@ -230,6 +231,8 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
         model="gpt-4o-mini",
         provider="openai",
         endpoint="",
+        output_dir=None,
+        raise_on_error=False,
     ):
         captured["semantic_group_rebuild"] = {
             "doc_id": doc_id,
@@ -242,11 +245,12 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
             "endpoint": endpoint,
             "current_index_source": document_routes._read_vector_index_meta(doc_id).get("index_source"),
         }
+        return {"status": "disabled", "group_count": 0, "paths": []}
 
     monkeypatch.setattr(
         document_routes,
-        "_build_semantic_group_index_async",
-        fake_build_semantic_group_index_async,
+            "_build_semantic_group_index",
+            fake_build_semantic_group_index,
     )
 
     result = document_routes._rebuild_mineru_rag_index(
@@ -267,7 +271,8 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
     assert result["backup"]["semantic_groups"]["backed_up"] is True
     assert result["backup"]["semantic_group_cleanup"]["removed"]
     assert captured["build_semantic_groups"] is False
-    assert result["semantic_group_rebuild"]["queued"] is True
+    assert result["semantic_group_rebuild"]["queued"] is False
+    assert result["semantic_group_rebuild"]["status"] == "disabled"
     assert result["semantic_group_rebuild"]["chunk_count"] == 2
     assert captured["embedding_request"] == {
         "model": "local-minilm",
@@ -285,7 +290,7 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
     assert captured["semantic_group_rebuild"]["model"] == "deepseek-chat"
     assert captured["semantic_group_rebuild"]["provider"] == "deepseek"
     assert captured["semantic_group_rebuild"]["endpoint"] == "https://api.deepseek.com/v1"
-    assert captured["semantic_group_rebuild"]["current_index_source"] == "mineru"
+    assert captured["semantic_group_rebuild"]["current_index_source"] == "pdf_native"
     assert "8 S. Liu et al." not in captured["full_text"]
     assert captured["pages"][0]["page"] == 1
     assert captured["structured_table_bundles"][0]["source"] == "mineru"
@@ -317,8 +322,9 @@ def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(m
         restored = pickle.load(f)
     assert restored["chunks"] == ["old native chunk"]
     assert document_routes.documents_store[doc_id]["data"]["full_text"] == "1 Introduction\nGrounding DINO text.\nTable 1 Results A 90"
-    assert (groups_dir / f"{doc_id}.json").exists()
-    with open(groups_dir / f"{doc_id}_groups.pkl", "rb") as f:
+    restored_paths = semantic_group_paths(groups_dir, doc_id)
+    assert restored_paths["json"].exists()
+    with open(restored_paths["pkl"], "rb") as f:
         restored_group_meta = pickle.load(f)
     assert restored_group_meta["group_ids"] == ["group-0"]
 
@@ -370,7 +376,7 @@ def test_rebuild_quality_failure_keeps_old_index(monkeypatch, isolated_document_
     _write_vector_pair(vectors_dir, doc_id, source="pdf_native", chunks=["old chunk"])
     _write_mineru_payload(data_dir, doc_id)
 
-    def bad_normalize(_payload):
+    def bad_normalize(_payload, **_kwargs):
         return {
             "full_text": "too short",
             "pages": [{"page": 1, "content": "too short"}],
@@ -519,3 +525,20 @@ def test_temp_index_html_failure_keeps_old_index(monkeypatch, isolated_document_
         current = pickle.load(f)
     assert current["index_source"] == "pdf_native"
     assert current["chunks"] == ["old chunk"]
+
+
+def test_rebuild_rejects_another_inflight_document_operation(isolated_document_routes):
+    doc_id = "doc-operation-lock"
+    operation_lock = document_routes._get_document_operation_lock(doc_id)
+    assert operation_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError, match="正在执行"):
+            document_routes._rebuild_mineru_rag_index(
+                doc_id,
+                embedding_model="local-minilm",
+                embedding_api_key=None,
+                embedding_api_host=None,
+                summary_api_key=None,
+            )
+    finally:
+        operation_lock.release()

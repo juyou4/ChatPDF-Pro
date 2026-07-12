@@ -1,12 +1,15 @@
 import io
+import asyncio
 import os
 import glob
 import hashlib
+import json
 import logging
 import pickle
 import re
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -32,10 +35,26 @@ from services.mineru_text_normalizer import (
     utc_now_iso,
     validate_mineru_rag_data,
 )
+from services.document_parse_artifact import (
+    artifact_reference,
+    build_document_parse_artifact,
+    persist_document_parse_artifact,
+)
+from services.document_job_store import (
+    load_document_job,
+    persist_document_job,
+    recover_interrupted_document_job,
+)
 from services.embedding_service import (
     _build_semantic_group_index_async,
+    _build_semantic_group_index,
     _index_cache,
     get_embedding_function,
+)
+from services.semantic_group_store import (
+    deactivate_generation,
+    publish_generation,
+    semantic_group_paths,
 )
 from services.block_translation_service import (
     MAX_BLOCKS_PER_REQUEST,
@@ -45,6 +64,8 @@ from services.block_translation_service import (
 )
 from services.reading_outline_service import get_or_create_reading_outline, get_reading_outline_path
 from services.section_outline_service import get_or_create_section_outline, get_section_outline_path
+from services.table_visual_metadata import build_table_visual_metadata
+from services.table_visual_verifier import get_table_visual_verification_status
 from runtime_mode import runtime
 from services.ocr_service import (
     is_ocr_available,
@@ -57,6 +78,8 @@ from services.ocr_service import (
     _load_online_ocr_config,
     _mask_api_key,
     apply_ocr_result_to_pages,
+    get_ocr_provider_usage,
+    record_ocr_provider_use,
     select_ocr_target_pages,
     validate_external_ocr_service_url,
     MistralAdapter,
@@ -105,6 +128,19 @@ _DOCUMENT_INDEX_STATUS: dict[str, dict] = {}
 _DEEP_PARSE_LOCK = threading.Lock()
 _DEEP_PARSE_TASKS: dict[str, dict] = {}
 _DEEP_PARSE_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_DEEP_PARSE_JOB_TYPE = "mineru_deep_parse"
+try:
+    _DEEP_PARSE_CONCURRENCY = max(1, min(8, int(os.getenv("CHATPDF_MINERU_DEEP_PARSE_CONCURRENCY", "2"))))
+except ValueError:
+    _DEEP_PARSE_CONCURRENCY = 2
+_DEEP_PARSE_SEMAPHORE = threading.BoundedSemaphore(_DEEP_PARSE_CONCURRENCY)
+_DOCUMENT_OPERATION_LOCKS_LOCK = threading.Lock()
+_DOCUMENT_OPERATION_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_document_operation_lock(doc_id: str) -> threading.Lock:
+    with _DOCUMENT_OPERATION_LOCKS_LOCK:
+        return _DOCUMENT_OPERATION_LOCKS.setdefault(doc_id, threading.Lock())
 
 
 def _normalize_page_keys(data: dict):
@@ -152,6 +188,8 @@ def _clean_structured_table_bundle(bundle: dict) -> dict:
             cleaned_bundle[key] = _clean_control_text(str(cleaned_bundle.get(key) or ""))
     if "evidence_units" in cleaned_bundle:
         cleaned_bundle["evidence_units"] = _clean_nested_text(cleaned_bundle.get("evidence_units"))
+    # 视觉核验身份只附加到清洗后的副本，不能修改 MinerU/ODL 原始 bundle。
+    cleaned_bundle.update(build_table_visual_metadata(cleaned_bundle))
     return cleaned_bundle
 
 
@@ -200,6 +238,8 @@ def _backfill_bundle_evidence_units_from_pages(
                 hydrated_bundle["evidence_units"] = evidence_units_by_key[("bundle_id", bundle_id)]
             elif table_id and ("table_id", table_id) in evidence_units_by_key:
                 hydrated_bundle["evidence_units"] = evidence_units_by_key[("table_id", table_id)]
+        # evidence 回填会改变表格源内容，重新派生缓存失效所需的身份元数据。
+        hydrated_bundle.update(build_table_visual_metadata(hydrated_bundle))
         hydrated_bundles.append(hydrated_bundle)
     return hydrated_bundles
 
@@ -218,6 +258,43 @@ def _clean_page_texts(pages: list[dict]) -> list[dict]:
             cleaned_page["table_bundles"] = _clean_structured_table_bundles(cleaned_page.get("table_bundles", []))
         cleaned_pages.append(cleaned_page)
     return cleaned_pages
+
+
+def _merge_odl_pages_with_existing_ocr(
+    existing_pages: list[dict],
+    odl_pages: list[dict],
+) -> tuple[list[dict], bool]:
+    """Use ODL for native pages without discarding successful page OCR."""
+    existing_by_page = {
+        int(page.get("page") or index + 1): page
+        for index, page in enumerate(existing_pages or [])
+        if isinstance(page, dict)
+    }
+    merged_pages: list[dict] = []
+    preserved_ocr = False
+    seen_pages: set[int] = set()
+    for index, odl_page in enumerate(odl_pages or []):
+        if not isinstance(odl_page, dict):
+            continue
+        page_num = int(odl_page.get("page") or index + 1)
+        seen_pages.add(page_num)
+        existing = existing_by_page.get(page_num)
+        if existing and existing.get("source") == "ocr":
+            merged = dict(odl_page)
+            merged["text"] = existing.get("text", existing.get("content", ""))
+            merged["content"] = existing.get("content", existing.get("text", ""))
+            merged["source"] = "ocr"
+            if existing.get("ocr_backend"):
+                merged["ocr_backend"] = existing["ocr_backend"]
+            merged_pages.append(merged)
+            preserved_ocr = True
+        else:
+            merged_pages.append(dict(odl_page))
+    for page_num, existing in sorted(existing_by_page.items()):
+        if page_num not in seen_pages:
+            merged_pages.append(dict(existing))
+    merged_pages.sort(key=lambda page: int(page.get("page") or 0))
+    return merged_pages, preserved_ocr
 
 
 def save_document(doc_id: str, data: dict):
@@ -286,12 +363,7 @@ def _vector_index_paths(doc_id: str, base_dir: Path | None = None) -> tuple[Path
 
 
 def _semantic_group_paths(doc_id: str) -> dict[str, Path]:
-    root = DATA_DIR / "semantic_groups"
-    return {
-        "json": root / f"{doc_id}.json",
-        "index": root / f"{doc_id}_groups.index",
-        "pkl": root / f"{doc_id}_groups.pkl",
-    }
+    return semantic_group_paths(DATA_DIR / "semantic_groups", doc_id)
 
 
 def _semantic_group_backup_path(doc_id: str, source: str, kind: str) -> Path:
@@ -345,10 +417,7 @@ def _get_rag_index_status(doc_id: str) -> dict:
         "normalizer_version": meta.get("normalizer_version", ""),
         "chunk_count": meta.get("chunk_count", 0),
         "table_chunk_count": meta.get("table_chunk_count", 0),
-        "can_rollback": (
-            (VECTOR_STORE_DIR / f"{doc_id}.pdf_native.bak.index").exists()
-            and (VECTOR_STORE_DIR / f"{doc_id}.pdf_native.bak.pkl").exists()
-        ),
+        "can_rollback": bool(_load_complete_rag_backup_manifest(doc_id, "pdf_native")),
     }
 
 
@@ -593,18 +662,33 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
         current.update({
             "doc_id": doc_id,
             "provider": "mineru",
+            "job_type": _DEEP_PARSE_JOB_TYPE,
             "status": status,
             "stage": stage,
             "error": error,
+            "created_at": current.get("created_at") or datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             **extra,
         })
         _DEEP_PARSE_TASKS[doc_id] = current
+    persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, current)
 
 
 def _get_deep_parse_status(doc_id: str) -> dict:
     with _DEEP_PARSE_LOCK:
         current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
+    if not current:
+        persisted = load_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id)
+        if persisted:
+            current = recover_interrupted_document_job(
+                DATA_DIR,
+                _DEEP_PARSE_JOB_TYPE,
+                doc_id,
+                persisted,
+                updated_at=datetime.now().isoformat(),
+            )
+            with _DEEP_PARSE_LOCK:
+                _DEEP_PARSE_TASKS[doc_id] = dict(current)
 
     mineru_config = _load_online_ocr_config("mineru")
     access_mode = str(mineru_config.get("access_mode") or "worker").strip().lower()
@@ -700,8 +784,49 @@ def _assess_deep_parse_recommendation(
     }
 
 
-def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
+def _make_mineru_adapter(config: dict, access_mode: str):
+    if access_mode == "direct":
+        return MinerUDirectAdapter(
+            token=config.get("token", ""),
+            base_url=config.get("base_url", "https://mineru.net/api/v4"),
+            enable_ocr=config.get("enable_ocr", False),
+            enable_formula=config.get("enable_formula", True),
+            enable_table=config.get("enable_table", True),
+            model_version=config.get("model_version", "vlm"),
+        )
+    return MinerUAdapter(
+        worker_url=config.get("worker_url", ""),
+        auth_key=config.get("auth_key", ""),
+        token=config.get("token", ""),
+        token_mode=config.get("token_mode", "frontend"),
+        enable_ocr=config.get("enable_ocr", False),
+        enable_formula=config.get("enable_formula", True),
+        enable_table=config.get("enable_table", True),
+        model_version=config.get("model_version", "vlm"),
+    )
+
+
+def _run_mineru_deep_parse(
+    doc_id: str,
+    cancel_event: threading.Event,
+    remote_job: Optional[dict] = None,
+) -> None:
+    acquired_slot = False
+    acquired_document_lock = False
+    document_lock = _get_document_operation_lock(doc_id)
     try:
+        _set_deep_parse_status(doc_id, "queued", stage="waiting_for_slot", message="等待 MinerU 解析槽位")
+        _DEEP_PARSE_SEMAPHORE.acquire()
+        acquired_slot = True
+        if cancel_event.is_set():
+            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            return
+        _set_deep_parse_status(doc_id, "queued", stage="waiting_for_document_lock", message="等待文档解析锁")
+        document_lock.acquire()
+        acquired_document_lock = True
+        if cancel_event.is_set():
+            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            return
         doc = documents_store.get(doc_id)
         if not doc:
             raise RuntimeError("文档记录不存在")
@@ -711,27 +836,8 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
             raise RuntimeError("当前文档没有可用于 MinerU 深度解析的 PDF 原文件")
 
         config = _load_online_ocr_config("mineru")
-        access_mode = str(config.get("access_mode") or "worker").strip().lower()
-        if access_mode == "direct":
-            adapter = MinerUDirectAdapter(
-                token=config.get("token", ""),
-                base_url=config.get("base_url", "https://mineru.net/api/v4"),
-                enable_ocr=config.get("enable_ocr", False),
-                enable_formula=config.get("enable_formula", True),
-                enable_table=config.get("enable_table", True),
-                model_version=config.get("model_version", "vlm"),
-            )
-        else:
-            adapter = MinerUAdapter(
-                worker_url=config.get("worker_url", ""),
-                auth_key=config.get("auth_key", ""),
-                token=config.get("token", ""),
-                token_mode=config.get("token_mode", "frontend"),
-                enable_ocr=config.get("enable_ocr", False),
-                enable_formula=config.get("enable_formula", True),
-                enable_table=config.get("enable_table", True),
-                model_version=config.get("model_version", "vlm"),
-            )
+        access_mode = str((remote_job or {}).get("access_mode") or config.get("access_mode") or "worker").strip().lower()
+        adapter = _make_mineru_adapter(config, access_mode)
         if not adapter.is_available():
             raise RuntimeError("MinerU 未配置或不可用，请先在 OCR 设置中配置 Worker/直连模式和 Token")
 
@@ -755,9 +861,20 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
                 **extra,
             )
 
-        _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
-        pdf_bytes = pdf_path.read_bytes()
-        payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
+        if remote_job and remote_job.get("batch_id"):
+            _set_deep_parse_status(
+                doc_id, "running", stage="resuming", message="恢复 MinerU 远端任务",
+                access_mode=access_mode, batch_id=remote_job["batch_id"], data_id=remote_job.get("data_id", ""),
+                recovered_after_restart=True,
+            )
+            payload = adapter.resume_batch(
+                str(remote_job["batch_id"]), data_id=str(remote_job.get("data_id") or ""),
+                progress_callback=_on_mineru_progress, cancel_event=cancel_event,
+            )
+        else:
+            _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
+            pdf_bytes = pdf_path.read_bytes()
+            payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
         payload.setdefault("model_version", config.get("model_version", "vlm"))
         if cancel_event.is_set():
             _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
@@ -807,6 +924,10 @@ def _run_mineru_deep_parse(doc_id: str, cancel_event: threading.Event) -> None:
         logger.exception("[DeepParse] MinerU deep parse failed for %s: %s", doc_id, exc)
         _set_deep_parse_status(doc_id, "failed", stage="failed", error=str(exc))
     finally:
+        if acquired_document_lock:
+            document_lock.release()
+        if acquired_slot:
+            _DEEP_PARSE_SEMAPHORE.release()
         with _DEEP_PARSE_LOCK:
             _DEEP_PARSE_CANCEL_EVENTS.pop(doc_id, None)
 
@@ -821,7 +942,13 @@ def _queue_mineru_deep_parse(doc_id: str, *, force: bool = False) -> dict:
     cancel_event = threading.Event()
     with _DEEP_PARSE_LOCK:
         _DEEP_PARSE_CANCEL_EVENTS[doc_id] = cancel_event
-    _set_deep_parse_status(doc_id, "queued", stage="queued", error="")
+    _set_deep_parse_status(
+        doc_id,
+        "queued",
+        stage="queued",
+        error="",
+        job_id=f"mineru-{uuid.uuid4().hex}",
+    )
     thread = threading.Thread(
         target=_run_mineru_deep_parse,
         args=(doc_id, cancel_event),
@@ -832,6 +959,41 @@ def _queue_mineru_deep_parse(doc_id: str, *, force: bool = False) -> dict:
     return _get_deep_parse_status(doc_id)
 
 
+def resume_pending_mineru_deep_parse_jobs() -> list[dict]:
+    """Resume persisted remote MinerU batches after a process restart."""
+    jobs_dir = DATA_DIR / "document_jobs" / _DEEP_PARSE_JOB_TYPE
+    if not jobs_dir.exists():
+        return []
+    resumed: list[dict] = []
+    for job_path in jobs_dir.glob("*.json"):
+        try:
+            record = json.loads(job_path.read_text(encoding="utf-8"))
+            doc_id = str(record.get("doc_id") or "")
+            if (
+                not doc_id or doc_id not in documents_store
+                or record.get("status") not in {"queued", "running"}
+                or not record.get("batch_id")
+            ):
+                continue
+            cancel_event = threading.Event()
+            with _DEEP_PARSE_LOCK:
+                if doc_id in _DEEP_PARSE_CANCEL_EVENTS:
+                    continue
+                _DEEP_PARSE_CANCEL_EVENTS[doc_id] = cancel_event
+                _DEEP_PARSE_TASKS[doc_id] = dict(record)
+            thread = threading.Thread(
+                target=_run_mineru_deep_parse,
+                args=(doc_id, cancel_event, record),
+                name=f"chatpdf-mineru-resume-{doc_id[:8]}",
+                daemon=True,
+            )
+            thread.start()
+            resumed.append({"doc_id": doc_id, "batch_id": record["batch_id"]})
+        except Exception as exc:
+            logger.error("[DeepParse] failed to resume persisted MinerU job %s: %s", job_path, exc)
+    return resumed
+
+
 def _cancel_mineru_deep_parse(doc_id: str) -> dict:
     current = _get_deep_parse_status(doc_id)
     if current.get("status") not in {"queued", "running"}:
@@ -840,7 +1002,22 @@ def _cancel_mineru_deep_parse(doc_id: str) -> dict:
         event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
         if event:
             event.set()
-    _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
+    remote_cancel = {"attempted": False, "state": "not_requested"}
+    batch_id = str(current.get("batch_id") or "")
+    if batch_id:
+        config = _load_online_ocr_config("mineru")
+        access_mode = str(current.get("access_mode") or config.get("access_mode") or "worker").strip().lower()
+        try:
+            remote_cancel = _make_mineru_adapter(config, access_mode).cancel_batch(
+                batch_id,
+                data_id=str(current.get("data_id") or ""),
+            )
+        except Exception as exc:
+            remote_cancel = {"attempted": True, "state": "error", "detail": str(exc)}
+    _set_deep_parse_status(
+        doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="",
+        remote_cancel=remote_cancel,
+    )
     return _get_deep_parse_status(doc_id)
 
 
@@ -897,29 +1074,67 @@ def _backup_current_semantic_groups(doc_id: str, source: str) -> dict:
 
 
 def _remove_current_semantic_groups(doc_id: str) -> dict:
-    removed: list[str] = []
-    for path in _semantic_group_paths(doc_id).values():
-        if not path.exists():
-            continue
-        try:
-            path.unlink()
-            removed.append(str(path))
-        except Exception as exc:
-            logger.warning("[RagIndex] failed to remove stale semantic group artifact for %s: %s", doc_id, exc)
+    try:
+        result = deactivate_generation(DATA_DIR / "semantic_groups", doc_id)
+    except Exception as exc:
+        logger.warning("[RagIndex] failed to deactivate semantic groups for %s: %s", doc_id, exc)
+        result = {"deactivated": False, "removed": [], "error": str(exc)}
     _index_cache.invalidate(doc_id)
-    return {"removed": removed}
+    return result
+
+
+def _publish_temp_semantic_groups(
+    doc_id: str,
+    temp_dir: Path,
+    validation: dict,
+    *,
+    source_hash: str = "",
+    transaction_id: str = "",
+) -> dict:
+    if validation.get("status") == "disabled":
+        return _remove_current_semantic_groups(doc_id)
+    result = publish_generation(
+        DATA_DIR / "semantic_groups",
+        doc_id,
+        temp_dir,
+        source_hash=source_hash,
+        transaction_id=transaction_id,
+    )
+    _index_cache.invalidate(doc_id)
+    return result
+
+
+def _validate_temp_semantic_groups(doc_id: str, temp_dir: Path, result: dict) -> dict:
+    status = str((result or {}).get("status") or "failed")
+    if status == "disabled":
+        return {"valid": True, "status": status, "paths": []}
+    expected = [temp_dir / f"{doc_id}.json", temp_dir / f"{doc_id}_groups.index", temp_dir / f"{doc_id}_groups.pkl"]
+    missing = [str(path) for path in expected if not path.exists() or path.stat().st_size <= 0]
+    if status != "ready" or missing:
+        raise RuntimeError(f"临时 semantic groups 不完整: status={status}, missing={missing}")
+    return {"valid": True, "status": status, "paths": [str(path) for path in expected]}
 
 
 def _restore_semantic_group_backup(doc_id: str, source: str) -> dict:
-    paths = _semantic_group_paths(doc_id)
+    root = DATA_DIR / "semantic_groups"
+    staged_dir = root / "_restore" / f"{_safe_index_source_name(doc_id)}.{uuid.uuid4().hex}"
     restored: dict[str, str] = {}
-    for kind, target_path in paths.items():
+    for kind, target_path in _semantic_group_paths(doc_id).items():
         backup_path = _semantic_group_backup_path(doc_id, source, kind)
         if not backup_path.exists():
             continue
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup_path, target_path)
-        restored[kind] = str(target_path)
+        staged_dir.mkdir(parents=True, exist_ok=True)
+        target = staged_dir / target_path.name
+        shutil.copy2(backup_path, target)
+        restored[kind] = str(target)
+    if len(restored) == 3:
+        published = publish_generation(root, doc_id, staged_dir, transaction_id=f"restore-{source}")
+        restored = dict(published["paths"])
+    elif restored:
+        shutil.rmtree(staged_dir, ignore_errors=True)
+        raise RuntimeError("语义组备份不完整，拒绝发布部分恢复结果")
+    else:
+        _remove_current_semantic_groups(doc_id)
     _index_cache.invalidate(doc_id)
     return {"restored": bool(restored), "paths": restored}
 
@@ -941,6 +1156,74 @@ def _backup_current_document_data(doc_id: str, source: str) -> dict:
     except Exception as exc:
         logger.warning("[RagIndex] failed to backup document data for %s: %s", doc_id, exc)
         return {"backed_up": False, "error": str(exc)}
+
+
+def _rag_backup_manifest_path(doc_id: str, source: str) -> Path:
+    return DATA_DIR / "rag_transactions" / f"{doc_id}.{_safe_index_source_name(source)}.manifest.json"
+
+
+def _rag_transaction_journal_path(doc_id: str) -> Path:
+    return DATA_DIR / "rag_transactions" / "pending" / f"{_safe_index_source_name(doc_id)}.json"
+
+
+def _write_rag_transaction_journal(doc_id: str, state: str, *, source: str, manifest_path: str, error: str = "") -> dict:
+    """Persist the source-switch phase before moving to the next artifact."""
+    path = _rag_transaction_journal_path(doc_id)
+    payload = {
+        "schema_version": 1,
+        "doc_id": doc_id,
+        "source": _safe_index_source_name(source),
+        "state": state,
+        "manifest_path": manifest_path,
+        "updated_at": utc_now_iso(),
+    }
+    if error:
+        payload["error"] = error
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(temp_path), str(path))
+    return {**payload, "path": str(path)}
+
+
+def _backup_current_rag_state(doc_id: str, source: str) -> dict:
+    """Snapshot all active artifacts before a source switch."""
+    vector = _backup_current_vector_index(doc_id, source)
+    document = _backup_current_document_data(doc_id, source)
+    semantic = _backup_current_semantic_groups(doc_id, source)
+    complete = bool(vector.get("backed_up") and document.get("backed_up"))
+    manifest = {
+        "schema_version": 1,
+        "doc_id": doc_id,
+        "source": _safe_index_source_name(source),
+        "created_at": utc_now_iso(),
+        "complete": complete,
+        "vector": vector,
+        "document": document,
+        "semantic_groups": semantic,
+    }
+    path = _rag_backup_manifest_path(doc_id, source)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+    manifest["path"] = str(path)
+    return manifest
+
+
+def _load_complete_rag_backup_manifest(doc_id: str, source: str) -> dict:
+    path = _rag_backup_manifest_path(doc_id, source)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(manifest, dict) or not manifest.get("complete"):
+        return {}
+    vector = manifest.get("vector") or {}
+    document = manifest.get("document") or {}
+    if not (Path(str(vector.get("index_path") or "")).exists() and Path(str(vector.get("pkl_path") or "")).exists() and Path(str(document.get("path") or "")).exists()):
+        return {}
+    return manifest
 
 
 def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
@@ -970,6 +1253,7 @@ def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
         "rag_source_hash": normalized.get("source_hash", ""),
         "rag_normalizer_version": normalized.get("normalizer_version", ""),
         "rag_quality_report": normalized.get("quality_report") or {},
+        "parse_artifact": normalized.get("parse_artifact") or data.get("parse_artifact") or {},
         "extraction_method": data.get("extraction_method", "pdf_native"),
     })
     doc["data"] = data
@@ -1099,7 +1383,58 @@ def _restore_vector_index_backup(doc_id: str, source: str = "pdf_native") -> dic
     return status
 
 
+def _document_pdf_page_sizes(doc_id: str) -> dict[int, list[float]]:
+    """Return the original PDF page dimensions for parser bbox conversion."""
+    pdf_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    if not pdf_path.exists():
+        return {}
+    try:
+        import fitz
+
+        document = fitz.open(str(pdf_path))
+        try:
+            return {
+                page_index + 1: [float(page.rect.width), float(page.rect.height)]
+                for page_index, page in enumerate(document)
+            }
+        finally:
+            document.close()
+    except Exception as exc:
+        logger.warning("[RagIndex] failed to read PDF page sizes for %s: %s", doc_id, exc)
+        return {}
+
+
 def _rebuild_mineru_rag_index(
+    doc_id: str,
+    *,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+    summary_model: str = "gpt-4o-mini",
+    summary_provider: str = "openai",
+    summary_api_host: str = "",
+) -> dict:
+    """Rebuild under the same document lock used by MinerU deep parsing."""
+    document_lock = _get_document_operation_lock(doc_id)
+    if not document_lock.acquire(blocking=False):
+        raise RuntimeError("该文档正在执行 MinerU 深度解析或索引重建，请稍后再试")
+    try:
+        return _rebuild_mineru_rag_index_unlocked(
+            doc_id,
+            embedding_model=embedding_model,
+            embedding_api_key=embedding_api_key,
+            embedding_api_host=embedding_api_host,
+            summary_api_key=summary_api_key,
+            summary_model=summary_model,
+            summary_provider=summary_provider,
+            summary_api_host=summary_api_host,
+        )
+    finally:
+        document_lock.release()
+
+
+def _rebuild_mineru_rag_index_unlocked(
     doc_id: str,
     *,
     embedding_model: str,
@@ -1121,7 +1456,7 @@ def _rebuild_mineru_rag_index(
     previous_meta = _read_vector_index_meta(doc_id)
     previous_source = previous_meta.get("index_source") or "pdf_native"
 
-    normalized = normalize_mineru_for_rag(payload)
+    normalized = normalize_mineru_for_rag(payload, page_sizes=_document_pdf_page_sizes(doc_id))
     ok, failures = validate_mineru_rag_data(
         normalized,
         original_full_text=original_data.get("full_text", ""),
@@ -1131,16 +1466,45 @@ def _rebuild_mineru_rag_index(
         quality_report["failure_reasons"] = sorted(set((quality_report.get("failure_reasons") or []) + failures))
         raise RuntimeError(f"MinerU 问答索引重建失败，已保留原索引: {', '.join(failures)}")
 
+    artifact = build_document_parse_artifact(
+        doc_id=doc_id,
+        provider="mineru",
+        provider_version=str(normalized.get("normalizer_version") or ""),
+        pages=normalized.get("pages") or [],
+        tables=normalized.get("structured_table_bundles") or [],
+        warnings=(normalized.get("quality_report") or {}).get("warnings") or [],
+        capabilities={
+            "per_page_text": True,
+            "document_structure": True,
+            "structured_tables": True,
+            "table_geometry": True,
+            "figures": True,
+        },
+        source_hash=str(normalized.get("source_hash") or ""),
+        raw_ref=f"mineru_results/{doc_id}.json",
+    )
+    artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
+    normalized["parse_artifact"] = {
+        "schema_version": artifact["schema_version"],
+        "provider": artifact["provider"],
+        "source_hash": artifact["source_hash"],
+        "ref": artifact_reference(DATA_DIR, artifact_path),
+    }
+
     full_text = normalized.get("full_text", "")
-    pages = normalized.get("pages") or []
-    structured_table_bundles = normalized.get("structured_table_bundles") or []
+    pages = artifact["pages"]
+    structured_table_bundles = artifact["tables"]
     if not full_text or not pages:
         raise RuntimeError("MinerU 规范化结果为空，已保留原索引")
 
     temp_dir = VECTOR_STORE_DIR / "_tmp" / f"{doc_id}.mineru"
+    temp_semantic_dir = DATA_DIR / "semantic_groups" / "_tmp" / f"{doc_id}.mineru"
     if temp_dir.exists():
         shutil.rmtree(temp_dir, ignore_errors=True)
+    if temp_semantic_dir.exists():
+        shutil.rmtree(temp_semantic_dir, ignore_errors=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_semantic_dir.mkdir(parents=True, exist_ok=True)
 
     _set_document_index_status(doc_id, "running", stage="rebuilding_rag_index")
     backup = {}
@@ -1165,6 +1529,7 @@ def _rebuild_mineru_rag_index(
                 "rebuilt_at": utc_now_iso(),
                 "previous_index_source": previous_source,
                 "normalizer_version": normalized.get("normalizer_version", ""),
+                "parse_artifact_ref": normalized["parse_artifact"]["ref"],
             },
             build_semantic_groups=False,
         )
@@ -1185,28 +1550,67 @@ def _rebuild_mineru_rag_index(
             summary_provider=summary_provider,
             summary_api_host=summary_api_host,
         )
-        backup = _backup_current_vector_index(doc_id, previous_source)
-        doc_backup = _backup_current_document_data(doc_id, previous_source)
-        semantic_backup = _backup_current_semantic_groups(doc_id, previous_source)
+        semantic_result = _build_semantic_group_index(
+            doc_id, semantic_rebuild["chunks"], pages, semantic_rebuild["embed_fn"], semantic_rebuild["api_key"],
+            model=semantic_rebuild["model"], provider=semantic_rebuild["provider"], endpoint=semantic_rebuild["endpoint"],
+            output_dir=str(temp_semantic_dir), raise_on_error=True,
+        )
+        semantic_validation = _validate_temp_semantic_groups(doc_id, temp_semantic_dir, semantic_result)
+        backup_manifest = _backup_current_rag_state(doc_id, previous_source)
+        if not backup_manifest.get("complete"):
+            raise RuntimeError("无法创建完整的当前 RAG 快照，已取消切换")
+        transaction_journal = _write_rag_transaction_journal(
+            doc_id,
+            "prepared",
+            source=previous_source,
+            manifest_path=str(backup_manifest.get("path") or ""),
+        )
+        backup = dict(backup_manifest.get("vector") or {})
+        doc_backup = dict(backup_manifest.get("document") or {})
+        semantic_backup = dict(backup_manifest.get("semantic_groups") or {})
         _replace_vector_index_from_temp(doc_id, temp_dir)
         replaced_current_index = True
-        semantic_cleanup = _remove_current_semantic_groups(doc_id)
+        _write_rag_transaction_journal(
+            doc_id,
+            "vector_swapped",
+            source=previous_source,
+            manifest_path=str(backup_manifest.get("path") or ""),
+        )
         _apply_mineru_rag_document_data(doc_id, normalized)
-        _build_semantic_group_index_async(
-            doc_id=doc_id,
-            chunks=semantic_rebuild["chunks"],
-            pages=pages,
-            embed_fn=semantic_rebuild["embed_fn"],
-            api_key=semantic_rebuild["api_key"],
-            model=semantic_rebuild["model"],
-            provider=semantic_rebuild["provider"],
-            endpoint=semantic_rebuild["endpoint"],
+        _write_rag_transaction_journal(
+            doc_id,
+            "document_swapped",
+            source=previous_source,
+            manifest_path=str(backup_manifest.get("path") or ""),
+        )
+        semantic_cleanup = _publish_temp_semantic_groups(
+            doc_id,
+            temp_semantic_dir,
+            semantic_validation,
+            source_hash=str(normalized.get("source_hash") or ""),
+            transaction_id=str(backup_manifest.get("path") or ""),
+        )
+        semantic_cleanup["staged_validation"] = semantic_validation
+        transaction_journal = _write_rag_transaction_journal(
+            doc_id,
+            "committed",
+            source=previous_source,
+            manifest_path=str(backup_manifest.get("path") or ""),
         )
         _set_document_index_status(doc_id, "ready", stage="ready")
     except Exception as exc:
-        if replaced_current_index and backup.get("backed_up"):
+        if replaced_current_index and _load_complete_rag_backup_manifest(doc_id, previous_source):
             try:
                 _restore_vector_index_backup(doc_id, previous_source)
+                _restore_document_backup(doc_id, previous_source)
+                _restore_semantic_group_backup(doc_id, previous_source)
+                transaction_journal = _write_rag_transaction_journal(
+                    doc_id,
+                    "rolled_back",
+                    source=previous_source,
+                    manifest_path=str((locals().get("backup_manifest") or {}).get("path") or ""),
+                    error=str(exc),
+                )
             except Exception as restore_exc:
                 logger.error(
                     "[RagIndex] failed to restore previous index after MinerU rebuild error for %s: %s",
@@ -1217,6 +1621,7 @@ def _rebuild_mineru_rag_index(
         raise exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(temp_semantic_dir, ignore_errors=True)
 
     return {
         "status": "ready",
@@ -1229,15 +1634,19 @@ def _rebuild_mineru_rag_index(
             "estimated_embedding_tokens": _estimate_text_tokens(full_text),
             "estimated_chunk_count": _estimate_chunk_count(full_text),
             "structured_table_count": len(structured_table_bundles),
+            "parse_artifact": normalized["parse_artifact"],
         },
         "backup": {
             **backup,
+            "manifest": backup_manifest if 'backup_manifest' in locals() else {},
+            "transaction": transaction_journal if 'transaction_journal' in locals() else {},
             "document": doc_backup,
             "semantic_groups": semantic_backup,
             "semantic_group_cleanup": semantic_cleanup,
         },
         "semantic_group_rebuild": {
-            "queued": True,
+            "queued": False,
+            "status": semantic_validation.get("status"),
             "chunk_count": len(semantic_rebuild["chunks"]),
             "embedding_model": semantic_rebuild["embedding_model"],
         },
@@ -2497,6 +2906,16 @@ def extract_text_from_pdf(
     
     # 通过注册表获取 OCR 适配器。优先使用本次上传请求的设置，缺省时回退到后端全局配置。
     selected_ocr_backend = (ocr_backend or settings.ocr_backend or "auto").strip().lower()
+    legacy_structured_ocr_warning = ""
+    if selected_ocr_backend in {"mineru", "doc2x"}:
+        # These adapters currently return whole-document Markdown and cannot
+        # safely populate only the failed pages. Keep their configuration for
+        # deep parsing, but never use them in the page-level replacement path.
+        legacy_structured_ocr_warning = (
+            f"{selected_ocr_backend} 已从逐页 OCR 降级为本地自动 OCR；"
+            "请使用深度解析入口获取结构化结果"
+        )
+        selected_ocr_backend = "auto"
     adapter = _ocr_registry.get_adapter(selected_ocr_backend)
     if adapter is None:
         logger.warning(
@@ -2505,7 +2924,7 @@ def extract_text_from_pdf(
             selected_ocr_backend,
         )
         result["ocr_error"] = f"OCR 后端不可用: {selected_ocr_backend}"
-        result["ocr_warning"] = f"OCR 后端不可用: {selected_ocr_backend}"
+        result["ocr_warning"] = "；".join(part for part in (legacy_structured_ocr_warning, f"OCR 后端不可用: {selected_ocr_backend}") if part)
         return result
     
     if pdf_bytes is None:
@@ -2517,6 +2936,7 @@ def extract_text_from_pdf(
     # 使用适配器系统执行逐页 OCR
     logger.info("[PDF] 开始逐页 OCR，共 %s 页，后端: %s", len(ocr_target_pages), adapter.name)
     try:
+        record_ocr_provider_use(adapter.name)
         # 调用适配器的 ocr_pages()，仅传入需要 OCR 的页码列表
         ocr_result = adapter.ocr_pages(
             pdf_bytes=pdf_bytes,
@@ -2532,6 +2952,9 @@ def extract_text_from_pdf(
             heuristic_rebuild,
             is_cjk=is_cjk,
         )
+        if legacy_structured_ocr_warning:
+            current_warning = str(result.get("ocr_warning") or "").strip()
+            result["ocr_warning"] = "；".join(part for part in (legacy_structured_ocr_warning, current_warning) if part)
         
         # 处理部分页面 OCR 失败的警告信息
         if ocr_result.failed_pages:
@@ -2724,6 +3147,39 @@ async def upload_pdf(
 
         doc_id = generate_doc_id(extracted_data["full_text"])
 
+        # Page OCR has a different contract from MinerU/ODL document parsing.
+        # Keep Mistral's page-level result in the common artifact namespace
+        # before an optional ODL merge replaces the active page representation.
+        page_ocr_artifact_ref = {}
+        if extracted_data.get("ocr_used") and extracted_data.get("ocr_backend") == "mistral":
+            mistral_pages = [
+                dict(page) for page in (extracted_data.get("pages") or [])
+                if isinstance(page, dict) and page.get("ocr_backend") == "mistral"
+            ]
+            if mistral_pages:
+                artifact = build_document_parse_artifact(
+                    doc_id=doc_id,
+                    provider="mistral",
+                    provider_version="mistral-ocr-latest",
+                    pages=mistral_pages,
+                    tables=[],
+                    warnings=[str(extracted_data.get("ocr_warning") or "")],
+                    capabilities={
+                        "per_page_text": True,
+                        "document_structure": False,
+                        "structured_tables": False,
+                        "table_geometry": False,
+                        "figures": False,
+                    },
+                )
+                artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
+                page_ocr_artifact_ref = {
+                    "schema_version": artifact["schema_version"],
+                    "provider": artifact["provider"],
+                    "source_hash": artifact["source_hash"],
+                    "ref": artifact_reference(DATA_DIR, artifact_path),
+                }
+
         pdf_filename = f"{doc_id}.pdf"
         pdf_path = UPLOAD_DIR / pdf_filename
         with open(pdf_path, "wb") as f:
@@ -2731,7 +3187,7 @@ async def upload_pdf(
 
         pdf_url = f"/uploads/{pdf_filename}"
 
-        # ── ODL 去脏覆盖层 ──────────────────────────────────────────────────
+        # ── ODL 去脏合并层 ──────────────────────────────────────────────────
         # PDF 已落盘，尝试用 OpenDataLoader 解析，得到过滤了 header/footer/
         # caption/image 脏块的干净文本；失败则静默降级使用 pdfplumber 结果。
         try:
@@ -2750,18 +3206,28 @@ async def upload_pdf(
                         cleaned_odl_full_text = "\n\n".join(
                             page.get("text", "") for page in cleaned_odl_pages if page.get("text", "").strip()
                         )
-                    extracted_data["full_text"] = cleaned_odl_full_text
-                    extracted_data["pages"] = cleaned_odl_pages
+                    merged_pages, preserved_ocr = _merge_odl_pages_with_existing_ocr(
+                        extracted_data.get("pages") or [],
+                        cleaned_odl_pages,
+                    )
+                    merged_full_text = "\n\n".join(
+                        str(page.get("content") or page.get("text") or "").strip()
+                        for page in merged_pages
+                        if str(page.get("content") or page.get("text") or "").strip()
+                    )
+                    extracted_data["full_text"] = merged_full_text or cleaned_odl_full_text or extracted_data.get("full_text", "")
+                    extracted_data["pages"] = merged_pages or extracted_data.get("pages", [])
                     extracted_data["total_pages"] = odl_result["total_pages"]
-                    extracted_data["extraction_method"] = "odl"
+                    extracted_data["extraction_method"] = "odl_hybrid" if preserved_ocr else "odl"
+                    extracted_data["odl_preserved_ocr_pages"] = preserved_ocr
                     extracted_data["odl_element_count"] = odl_result.get("odl_element_count", 0)
                     extracted_data["odl_kept_count"] = odl_result.get("odl_kept_count", 0)
                     extracted_data["odl_soft_kept_caption_count"] = odl_result.get("odl_soft_kept_caption_count", 0)
                     extracted_data["structured_table_bundles"] = cleaned_odl_bundles
                     extracted_data["structured_table_count"] = odl_result.get("structured_table_count", 0)
-                    extracted_data["extraction_quality"] = odl_result.get("extraction_quality", "odl_clean")
+                    extracted_data["extraction_quality"] = "odl_hybrid" if preserved_ocr else odl_result.get("extraction_quality", "odl_clean")
         except Exception as _odl_err:
-            logger.warning(f"[Upload] ODL 覆盖失败，使用 pdfplumber 结果: {_odl_err}")
+            logger.warning(f"[Upload] ODL 合并失败，使用已有提取结果: {_odl_err}")
         # ────────────────────────────────────────────────────────────────────
 
         documents_store[doc_id] = {
@@ -2770,6 +3236,34 @@ async def upload_pdf(
             "data": extracted_data,
             "pdf_url": pdf_url
         }
+        if page_ocr_artifact_ref:
+            documents_store[doc_id]["data"]["parse_artifacts"] = [page_ocr_artifact_ref]
+        if str(extracted_data.get("extraction_method") or "").startswith("odl"):
+            artifact = build_document_parse_artifact(
+                doc_id=doc_id,
+                provider="odl",
+                provider_version="odl-v1",
+                pages=extracted_data.get("pages") or [],
+                tables=extracted_data.get("structured_table_bundles") or [],
+                warnings=[str(extracted_data.get("ocr_warning") or "")],
+                capabilities={
+                    "per_page_text": True,
+                    "document_structure": True,
+                    "structured_tables": True,
+                    "table_geometry": True,
+                    "figures": False,
+                },
+            )
+            artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
+            documents_store[doc_id]["data"]["parse_artifact"] = {
+                "schema_version": artifact["schema_version"],
+                "provider": artifact["provider"],
+                "source_hash": artifact["source_hash"],
+                "ref": artifact_reference(DATA_DIR, artifact_path),
+            }
+            documents_store[doc_id]["data"].setdefault("parse_artifacts", []).append(
+                documents_store[doc_id]["data"]["parse_artifact"]
+            )
         _normalize_page_keys(documents_store[doc_id])
 
         save_document(doc_id, documents_store[doc_id])
@@ -2928,6 +3422,47 @@ async def get_document_index_status(doc_id: str):
     return _get_document_index_status(doc_id)
 
 
+@router.get("/documents/{doc_id}/table-visual-verifications/{task_id}")
+async def get_document_table_visual_verification_status(doc_id: str, task_id: str):
+    """Return the persisted post-retrieval visual verification task state."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    status = get_table_visual_verification_status(doc_id, task_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="表格视觉核验任务未找到")
+    return status
+
+
+def recover_pending_rag_transactions() -> list[dict]:
+    """Rollback interrupted source switches after the document store has loaded."""
+    pending_dir = DATA_DIR / "rag_transactions" / "pending"
+    if not pending_dir.exists():
+        return []
+    recovered: list[dict] = []
+    terminal_states = {"committed", "rolled_back"}
+    for journal_path in pending_dir.glob("*.json"):
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            doc_id = str(journal.get("doc_id") or "")
+            source = str(journal.get("source") or "pdf_native")
+            if not doc_id or journal.get("state") in terminal_states:
+                continue
+            if not _load_complete_rag_backup_manifest(doc_id, source):
+                logger.error("[RagIndex] pending transaction lacks a complete backup: %s", journal_path)
+                continue
+            _restore_vector_index_backup(doc_id, source)
+            _write_rag_transaction_journal(
+                doc_id,
+                "rolled_back",
+                source=source,
+                manifest_path=str(journal.get("manifest_path") or ""),
+            )
+            recovered.append({"doc_id": doc_id, "state": "rolled_back"})
+        except Exception as exc:
+            logger.error("[RagIndex] failed to recover pending transaction %s: %s", journal_path, exc)
+    return recovered
+
+
 @router.get("/documents/{doc_id}/deep-parse/status")
 async def get_document_deep_parse_status(doc_id: str):
     """Return current MinerU deep-parse task status for this document."""
@@ -3048,7 +3583,7 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
         raise HTTPException(status_code=404, detail="没有缓存的 MinerU 解析结果，请先执行深度解析")
 
     doc = documents_store[doc_id]
-    normalized = normalize_mineru_for_rag(payload)
+    normalized = normalize_mineru_for_rag(payload, page_sizes=_document_pdf_page_sizes(doc_id))
     ok, failures = validate_mineru_rag_data(
         normalized,
         original_full_text=(doc.get("data") or {}).get("full_text", ""),
@@ -3090,7 +3625,8 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
     summary_api_host = (body.get("summary_api_host") or body.get("api_host") or "").strip()
 
     try:
-        return _rebuild_mineru_rag_index(
+        return await asyncio.to_thread(
+            _rebuild_mineru_rag_index,
             doc_id,
             embedding_model=embedding_model,
             embedding_api_key=embedding_api_key,
@@ -3112,10 +3648,21 @@ async def rollback_document_rag_index(doc_id: str):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
     try:
+        manifest = _load_complete_rag_backup_manifest(doc_id, "pdf_native")
+        if not manifest:
+            raise HTTPException(status_code=409, detail="没有完整的本地 RAG 回滚快照")
+        vector = _restore_vector_index_backup(doc_id, "pdf_native")
+        document = _restore_document_backup(doc_id, "pdf_native")
+        semantic_groups = _restore_semantic_group_backup(doc_id, "pdf_native")
+        if not (vector.get("restored") and document.get("restored")):
+            raise RuntimeError("RAG 回滚快照恢复不完整")
         return {
             "status": "ready",
             "message": "已回退到本地问答索引",
-            "rag_index": _restore_vector_index_backup(doc_id, "pdf_native"),
+            "rag_index": vector,
+            "document": document,
+            "semantic_groups": semantic_groups,
+            "manifest": manifest,
         }
     except Exception as exc:
         logger.exception("[RagIndex] rollback failed for %s: %s", doc_id, exc)
@@ -3627,15 +4174,9 @@ async def get_ocr_status():
     poppler_path = _find_poppler()
     poppler_available = poppler_path is not None
 
-    # 确定推荐后端（在线优先：mistral > mineru > doc2x > paddleocr > tesseract）
+    # 自动逐页 OCR 仅推荐本地引擎；云端需要在上传时显式选择。
     recommended = None
-    if backends.get("mistral"):
-        recommended = "mistral"
-    elif backends.get("mineru"):
-        recommended = "mineru"
-    elif backends.get("doc2x"):
-        recommended = "doc2x"
-    elif backends.get("paddleocr"):
+    if backends.get("paddleocr"):
         recommended = "paddleocr"
     elif backends.get("tesseract"):
         recommended = "tesseract"
@@ -3659,6 +4200,8 @@ async def get_ocr_status():
                 "configured": configured,
                 "available": available,
                 "access_mode": access_mode,
+                "deprecated": provider == "doc2x",
+                "usage": get_ocr_provider_usage(provider),
             }
         else:
             # Mistral 等直接 API 调用模式
@@ -3698,6 +4241,12 @@ async def get_ocr_status():
     return {
         "available": status["any"],
         "backends": backends,
+        "page_ocr_backends": ["paddleocr", "tesseract", "mistral"],
+        "deprecated_page_ocr_backends": ["mineru", "doc2x"],
+        "provider_sunset": {
+            "doc2x": {"deprecated": True, "replacement": "local_auto", "usage": get_ocr_provider_usage("doc2x")},
+            "paddleocr": {"deprecated": True, "replacement": "paddleocr_vl", "usage": get_ocr_provider_usage("paddleocr")},
+        },
         "poppler_available": poppler_available,
         "recommended": recommended,
         "config": config,
@@ -4311,6 +4860,8 @@ VECTOR_STORE_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR.mkdir(exist_ok=True)
 migrate_legacy_storage()
 load_documents()
+recover_pending_rag_transactions()
+resume_pending_mineru_deep_parse_jobs()
 
 
 # ============ 速览（Overview）API ============
