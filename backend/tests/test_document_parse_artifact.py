@@ -1,6 +1,7 @@
 from services.document_parse_artifact import (
     artifact_reference,
     build_document_parse_artifact,
+    derive_table_geometry_capabilities,
     persist_document_parse_artifact,
 )
 
@@ -23,3 +24,37 @@ def test_parse_artifact_is_versioned_and_atomically_persisted(tmp_path):
     assert artifact_reference(tmp_path, path).startswith("parse_artifacts/doc-1/mineru/")
     assert artifact["schema_version"] == 1
     assert artifact["capabilities"]["structured_tables"] is True
+
+
+def test_table_geometry_capabilities_keep_overview_and_exact_crops_separate():
+    capabilities = derive_table_geometry_capabilities([
+        {
+            "visual_bbox": [10, 20, 100, 200],
+            "evidence_units": [{
+                "visual_crop_eligible": False,
+                "visual_bbox": [10, 20, 100, 200],
+                "cell_evidence_units": [{
+                    "visual_crop_eligible": False,
+                    "visual_bbox": [10, 20, 40, 50],
+                }],
+            }],
+        },
+        {
+            "visual_bbox": [20, 30, 200, 300],
+            "evidence_units": [{
+                "visual_crop_eligible": True,
+                "visual_bbox": [20, 80, 200, 120],
+                "cell_evidence_units": [{
+                    "visual_crop_eligible": True,
+                    "visual_bbox": [20, 80, 80, 120],
+                }],
+            }],
+        },
+    ])
+
+    assert capabilities == {
+        "table_geometry": True,
+        "table_overview_geometry": True,
+        "table_row_geometry": True,
+        "table_cell_geometry": True,
+    }

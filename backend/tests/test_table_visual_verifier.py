@@ -109,9 +109,9 @@ def test_visual_model_params_can_use_dedicated_env_model(monkeypatch):
     assert endpoint == "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 
 
-def test_visual_background_defaults_to_enabled_and_can_be_overridden(monkeypatch):
+def test_visual_background_defaults_to_synchronous_and_can_be_overridden(monkeypatch):
     monkeypatch.delenv("CHATPDF_TABLE_VISUAL_BACKGROUND", raising=False)
-    assert _should_background_numeric_table_visual_verification(_RequestStub()) is True
+    assert _should_background_numeric_table_visual_verification(_RequestStub()) is False
 
     monkeypatch.setenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "false")
     assert _should_background_numeric_table_visual_verification(_RequestStub()) is False

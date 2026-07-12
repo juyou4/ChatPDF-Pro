@@ -19,7 +19,7 @@ import {
   ScanText,
   Wifi,
   WifiOff,
-  X,
+  ChevronLeft,
   XCircle,
 } from 'lucide-react'
 
@@ -58,7 +58,7 @@ const OCR_MODES = [
  */
 const PANEL_TABS = [
   { id: 'local', label: '扫描 OCR', icon: ScanText },
-  { id: 'cloud', label: '云端服务', icon: Globe },
+  { id: 'cloud', label: '云端解析', icon: Globe },
   { id: 'figure', label: '图表识别', icon: Crop },
 ]
 
@@ -69,7 +69,7 @@ const BACKEND_LABELS = {
   tesseract: 'Tesseract',
   paddleocr: 'PaddleOCR',
   mistral: 'Mistral OCR',
-  mineru: 'MinerU OCR',
+  mineru: 'MinerU 深度解析',
   doc2x: 'Doc2X OCR',
 }
 
@@ -100,7 +100,7 @@ const BACKEND_OPTIONS = [
   },
   {
     value: 'mineru',
-    label: 'MinerU OCR',
+    label: 'MinerU 深度解析',
     description: '仅用于深度结构解析，不再作为逐页 OCR',
     deprecatedForPageOcr: true,
   },
@@ -201,7 +201,7 @@ const getApiErrorMessage = async (res, fallback) => {
  * @param {function} props.onClose - 关闭面板的回调
  */
 export default function OCRSettingsPanel({ isOpen, onClose }) {
-  // 面板分区导航：local=扫描 OCR，cloud=云端服务，figure=图表识别
+  // 面板分区导航：local=扫描 OCR，cloud=云端解析，figure=图表识别
   const [activePanelTab, setActivePanelTab] = useState('local')
   // OCR 模式状态
   const [mode, setMode] = useState('auto')
@@ -900,19 +900,27 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all opacity-100"
+          className="fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all opacity-100"
         >
           <motion.div
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-            className="w-full max-w-[640px] max-h-[92vh] bg-[#fbfbfc] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.1)] rounded-[32px] overflow-hidden flex flex-col"
+            className="settings-solid settings-shell w-full max-w-[640px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col"
           >
             {/* 顶部标题栏 */}
-            <div className="flex items-center justify-between px-6 py-5 sticky top-0 bg-[#fbfbfc]/90 backdrop-blur-md z-10 border-b border-gray-100/50">
+            <div className="flex items-center px-6 py-5 sticky top-0 bg-[#f6f7f9] z-10 border-b border-gray-200">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-[#8871e4]/10 rounded-2xl flex items-center justify-center text-[#8871e4]">
+                <button
+                  onClick={onClose}
+                  className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+                  title="返回设置中心"
+                  aria-label="返回设置中心"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+                <div className="w-10 h-10 bg-[#ece9fb] rounded-[14px] flex items-center justify-center text-[#8871e4]">
                   <ScanText className="w-5 h-5" />
                 </div>
                 <div>
@@ -924,12 +932,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                   </div>
                 </div>
               </div>
-              <button
-                onClick={onClose}
-                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
             </div>
 
             {/* 主内容区（单栏） */}
@@ -945,7 +947,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 </div>
               )}
 
-              {/* 分区导航：扫描 OCR / 云端服务 / 图表识别 —— 三条互相独立的链路，
+              {/* 分区导航：扫描 OCR / 云端解析 / 图表识别 —— 三条互相独立的链路，
                   分开后每次只需要看和改其中一块，避免全部堆成一条长列表 */}
               <div className="relative flex items-center p-1 rounded-2xl bg-gray-100/70">
                 <motion.div
@@ -992,7 +994,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
               {/* OCR 可用状态卡片 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <Info className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1095,7 +1097,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 模式选择 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1148,7 +1150,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 引擎选择 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1211,16 +1213,15 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
-              {/* 说明：这里的连接配置同时服务于两条链路——
-                  ① 扫描页 OCR 兜底选中该引擎时，② MinerU 深度解析（阅读结构/大纲/速览图表）。
-                  两者共用同一份 Token/Worker 配置，不需要重复填写。 */}
+              {/* MinerU only performs document-level deep parsing. Page OCR uses
+                  local engines or the explicitly selected Mistral provider. */}
               <div className="flex items-start gap-2 px-4 py-3 rounded-2xl bg-[#8871e4]/5 border border-[#8871e4]/15 text-xs text-[#5d45c8]">
                 <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                <span>下方的连接配置会同时用于「扫描页 OCR 兜底」和「MinerU 深度解析」两个功能，只需配置一次。</span>
+                <span>下方配置仅用于 MinerU 深度解析，包括阅读结构、大纲与速览图表；扫描页 OCR 请使用本地引擎或 Mistral OCR。</span>
               </div>
 
               {/* 在线 OCR 服务配置卡片（可折叠，与 MinerU/Doc2X 卡片风格一致） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <button
                   onClick={() => setMistralExpanded(!mistralExpanded)}
                   className="w-full flex items-center gap-2"
@@ -1410,7 +1411,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* MinerU OCR 配置卡片（可折叠） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setMineruExpanded(!mineruExpanded)}
@@ -1418,7 +1419,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 >
                   <Globe className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
-                    MinerU OCR 服务
+                    MinerU 深度解析服务
                   </span>
                   {/* 已配置状态指示 */}
                   {(onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) && (
@@ -1691,11 +1692,11 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         OCR 处理选项
                       </label>
                       <div className="space-y-2">
-                        {/* 扫描件 OCR */}
-                        <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
-                          <span>
-                            <span className="block text-xs text-gray-700">扫描件 OCR</span>
-                            <span className="block text-[10px] text-gray-400 mt-0.5">同时影响 OCR 兜底和深度解析；普通论文建议关闭，扫描 PDF 再开启</span>
+                    {/* 深度解析中的扫描件识别 */}
+                    <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
+                      <span>
+                        <span className="block text-xs text-gray-700">扫描件 OCR</span>
+                        <span className="block text-[10px] text-gray-400 mt-0.5">仅影响 MinerU 深度解析；普通论文建议关闭，扫描 PDF 再开启</span>
                           </span>
                           <div
                             onClick={() => setMineruEnableOcr(!mineruEnableOcr)}
@@ -1853,7 +1854,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* Doc2X OCR 配置卡片（可折叠） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setDoc2xExpanded(!doc2xExpanded)}
@@ -2145,7 +2146,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               {/* 速览图表增强与识别方式 —— 从 MinerU 卡片里独立出来：
                   这块只关心"图表怎么识别/怎么裁切"，和是否配置了 MinerU 账号无关，
                   raw 模式零依赖，yolo 模式用本地模型，不需要联网。 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <Crop className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -2375,7 +2376,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               >
               {/* Poppler 不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.poppler_available && (
-                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                <div className="settings-card bg-white p-5 border border-gray-200/90">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
                     <div>
@@ -2412,7 +2413,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
 
               {/* OCR 后端不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.available && (
-                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                <div className="settings-card bg-white p-5 border border-gray-200/90">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                     <div>

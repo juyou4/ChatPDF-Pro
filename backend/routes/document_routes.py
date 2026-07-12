@@ -38,6 +38,7 @@ from services.mineru_text_normalizer import (
 from services.document_parse_artifact import (
     artifact_reference,
     build_document_parse_artifact,
+    derive_table_geometry_capabilities,
     persist_document_parse_artifact,
 )
 from services.document_job_store import (
@@ -55,6 +56,7 @@ from services.semantic_group_store import (
     deactivate_generation,
     publish_generation,
     semantic_group_paths,
+    validate_semantic_group_artifacts,
 )
 from services.block_translation_service import (
     MAX_BLOCKS_PER_REQUEST,
@@ -73,6 +75,7 @@ from services.ocr_service import (
     ocr_pdf,
     get_ocr_service,
     _ocr_registry,
+    _document_parser_registry,
     _find_poppler,
     _save_online_ocr_config,
     _load_online_ocr_config,
@@ -813,6 +816,8 @@ def _run_mineru_deep_parse(
 ) -> None:
     acquired_slot = False
     acquired_document_lock = False
+    parser_attempted = False
+    parser_outcome_recorded = False
     document_lock = _get_document_operation_lock(doc_id)
     try:
         _set_deep_parse_status(doc_id, "queued", stage="waiting_for_slot", message="等待 MinerU 解析槽位")
@@ -867,6 +872,7 @@ def _run_mineru_deep_parse(
                 access_mode=access_mode, batch_id=remote_job["batch_id"], data_id=remote_job.get("data_id", ""),
                 recovered_after_restart=True,
             )
+            parser_attempted = True
             payload = adapter.resume_batch(
                 str(remote_job["batch_id"]), data_id=str(remote_job.get("data_id") or ""),
                 progress_callback=_on_mineru_progress, cancel_event=cancel_event,
@@ -874,7 +880,10 @@ def _run_mineru_deep_parse(
         else:
             _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
             pdf_bytes = pdf_path.read_bytes()
+            parser_attempted = True
             payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
+        record_ocr_provider_use("mineru", outcome="success", operation="document_parse")
+        parser_outcome_recorded = True
         payload.setdefault("model_version", config.get("model_version", "vlm"))
         if cancel_event.is_set():
             _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
@@ -917,6 +926,9 @@ def _run_mineru_deep_parse(
         )
         logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
     except Exception as exc:
+        if parser_attempted and not parser_outcome_recorded and not cancel_event.is_set():
+            record_ocr_provider_use("mineru", outcome="failure", operation="document_parse")
+            parser_outcome_recorded = True
         if cancel_event.is_set() or "已取消" in str(exc):
             logger.info("[DeepParse] MinerU deep parse cancelled for %s", doc_id)
             _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
@@ -1112,7 +1124,21 @@ def _validate_temp_semantic_groups(doc_id: str, temp_dir: Path, result: dict) ->
     missing = [str(path) for path in expected if not path.exists() or path.stat().st_size <= 0]
     if status != "ready" or missing:
         raise RuntimeError(f"临时 semantic groups 不完整: status={status}, missing={missing}")
-    return {"valid": True, "status": status, "paths": [str(path) for path in expected]}
+    artifact_validation = validate_semantic_group_artifacts(
+        {"json": expected[0], "index": expected[1], "pkl": expected[2]},
+        doc_id,
+    )
+    if not artifact_validation["valid"]:
+        raise RuntimeError(
+            "临时 semantic groups 无法加载: "
+            + ", ".join(artifact_validation["errors"])
+        )
+    return {
+        "valid": True,
+        "status": status,
+        "paths": [str(path) for path in expected],
+        "group_count": artifact_validation["group_count"],
+    }
 
 
 def _restore_semantic_group_backup(doc_id: str, source: str) -> dict:
@@ -1477,8 +1503,8 @@ def _rebuild_mineru_rag_index_unlocked(
             "per_page_text": True,
             "document_structure": True,
             "structured_tables": True,
-            "table_geometry": True,
             "figures": True,
+            **derive_table_geometry_capabilities(normalized.get("structured_table_bundles") or []),
         },
         source_hash=str(normalized.get("source_hash") or ""),
         raw_ref=f"mineru_results/{doc_id}.json",
@@ -1675,6 +1701,11 @@ def migrate_legacy_storage():
 
 def generate_doc_id(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()
+
+
+def _ocr_result_has_success(ocr_result) -> bool:
+    pages = getattr(ocr_result, "pages", None)
+    return any(getattr(page, "success", False) for page in pages or [])
 
 
 def extract_text_from_pdf(
@@ -2935,14 +2966,20 @@ def extract_text_from_pdf(
     
     # 使用适配器系统执行逐页 OCR
     logger.info("[PDF] 开始逐页 OCR，共 %s 页，后端: %s", len(ocr_target_pages), adapter.name)
+    primary_outcome_recorded = False
     try:
-        record_ocr_provider_use(adapter.name)
         # 调用适配器的 ocr_pages()，仅传入需要 OCR 的页码列表
         ocr_result = adapter.ocr_pages(
             pdf_bytes=pdf_bytes,
             page_numbers=ocr_target_pages,
             dpi=ocr_dpi
         )
+        if not _ocr_result_has_success(ocr_result):
+            record_ocr_provider_use(adapter.name, outcome="failure", operation="page_ocr")
+            primary_outcome_recorded = True
+            raise RuntimeError("OCR 后端未返回任何成功页面")
+        record_ocr_provider_use(adapter.name, outcome="success", operation="page_ocr")
+        primary_outcome_recorded = True
         
         apply_ocr_result_to_pages(
             result,
@@ -2961,10 +2998,6 @@ def extract_text_from_pdf(
             failed_info = ", ".join(str(p) for p in ocr_result.failed_pages)
             logger.warning("[PDF] OCR 警告: 部分页面 OCR 失败（页码: %s）", failed_info)
         
-        # 所有目标页面均失败时，附带全部失败警告
-        if len(ocr_result.failed_pages) == len(ocr_target_pages):
-            logger.warning("[PDF] OCR 全部失败，保留原始文本")
-        
         logger.info(
             "[PDF] OCR 完成。已使用: %s，目标页面: %s，后端: %s",
             result["ocr_used"],
@@ -2977,11 +3010,15 @@ def extract_text_from_pdf(
             logger.info("[PDF] MinerU 版面分析: 存储 %s 个 figure 区域", len(ocr_result.layout_figures))
         
     except Exception as e:
+        if not primary_outcome_recorded:
+            record_ocr_provider_use(adapter.name, outcome="failure", operation="page_ocr")
+            primary_outcome_recorded = True
         # 在线 OCR 失败时，尝试回退到本地 OCR 引擎
         if adapter.name in _ocr_registry._ONLINE_ADAPTERS:
             logger.warning("[PDF] 在线 OCR (%s) 失败，尝试回退到本地引擎: %s", adapter.name, e)
             local_adapter = _ocr_registry.get_local_adapter(exclude=[adapter.name])
             if local_adapter is not None:
+                fallback_outcome_recorded = False
                 try:
                     logger.info("[PDF] 回退到本地 OCR 引擎: %s", local_adapter.name)
                     ocr_result = local_adapter.ocr_pages(
@@ -2989,6 +3026,22 @@ def extract_text_from_pdf(
                         page_numbers=ocr_target_pages,
                         dpi=ocr_dpi
                     )
+                    if not _ocr_result_has_success(ocr_result):
+                        record_ocr_provider_use(
+                            local_adapter.name,
+                            outcome="failure",
+                            operation="page_ocr",
+                            fallback=True,
+                        )
+                        fallback_outcome_recorded = True
+                        raise RuntimeError("本地 OCR 回退未返回任何成功页面")
+                    record_ocr_provider_use(
+                        local_adapter.name,
+                        outcome="success",
+                        operation="page_ocr",
+                        fallback=True,
+                    )
+                    fallback_outcome_recorded = True
 
                     apply_ocr_result_to_pages(
                         result,
@@ -3019,6 +3072,13 @@ def extract_text_from_pdf(
                             local_adapter.name,
                         )
                 except Exception as fallback_err:
+                    if not fallback_outcome_recorded:
+                        record_ocr_provider_use(
+                            local_adapter.name,
+                            outcome="failure",
+                            operation="page_ocr",
+                            fallback=True,
+                        )
                     logger.error("[PDF] 本地 OCR 回退也失败: %s", fallback_err)
                     result["ocr_error"] = str(e)
                     result["ocr_warning"] = (
@@ -3250,8 +3310,8 @@ async def upload_pdf(
                     "per_page_text": True,
                     "document_structure": True,
                     "structured_tables": True,
-                    "table_geometry": True,
                     "figures": False,
+                    **derive_table_geometry_capabilities(extracted_data.get("structured_table_bundles") or []),
                 },
             )
             artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
@@ -3450,14 +3510,32 @@ def recover_pending_rag_transactions() -> list[dict]:
             if not _load_complete_rag_backup_manifest(doc_id, source):
                 logger.error("[RagIndex] pending transaction lacks a complete backup: %s", journal_path)
                 continue
-            _restore_vector_index_backup(doc_id, source)
+            manifest = _load_complete_rag_backup_manifest(doc_id, source)
+            vector = _restore_vector_index_backup(doc_id, source)
+            document = _restore_document_backup(doc_id, source)
+            semantic_groups = _restore_semantic_group_backup(doc_id, source)
+            semantic_required = bool((manifest.get("semantic_groups") or {}).get("backed_up"))
+            semantic_ready = bool(semantic_groups.get("restored")) or not semantic_required
+            if not (vector.get("restored") and document.get("restored") and semantic_ready):
+                raise RuntimeError(
+                    "RAG transaction recovery incomplete: "
+                    f"vector={vector.get('restored')}, "
+                    f"document={document.get('restored')}, "
+                    f"semantic={semantic_groups.get('restored')}"
+                )
             _write_rag_transaction_journal(
                 doc_id,
                 "rolled_back",
                 source=source,
                 manifest_path=str(journal.get("manifest_path") or ""),
             )
-            recovered.append({"doc_id": doc_id, "state": "rolled_back"})
+            recovered.append({
+                "doc_id": doc_id,
+                "state": "rolled_back",
+                "vector": vector,
+                "document": document,
+                "semantic_groups": semantic_groups,
+            })
         except Exception as exc:
             logger.error("[RagIndex] failed to recover pending transaction %s: %s", journal_path, exc)
     return recovered
@@ -4162,12 +4240,13 @@ async def get_ocr_status():
 
     # 使用 OCRRegistry 获取后端可用性
     available_backends = _ocr_registry.list_available()
+    available_document_parsers = _document_parser_registry.list_available()
     backends = {
         "tesseract": available_backends.get("tesseract", False),
         "paddleocr": available_backends.get("paddleocr", False),
         "mistral": available_backends.get("mistral", False),  # 在线 OCR
-        "mineru": available_backends.get("mineru", False),  # MinerU Worker OCR
-        "doc2x": available_backends.get("doc2x", False),  # Doc2X Worker OCR
+        "mineru": available_document_parsers.get("mineru", False),  # 文档级深度解析
+        "doc2x": available_document_parsers.get("doc2x", False),  # legacy 文档解析
     }
 
     # 检测 Poppler 可用性
@@ -4194,7 +4273,7 @@ async def get_ocr_status():
             configured = bool(token) if provider == "mineru" and access_mode == "direct" else (
                 bool(worker_url) and (token_mode == "worker" or bool(token))
             )
-            adapter = _ocr_registry.get_adapter(provider)
+            adapter = _document_parser_registry.get_adapter(provider)
             available = adapter.is_available() if adapter else False
             online_services[provider] = {
                 "configured": configured,
@@ -4484,8 +4563,8 @@ async def save_online_ocr_config(request: Request):
         elif provider == "mineru":
             # 重新加载完整配置
             full_config = _load_online_ocr_config("mineru")
-            # 从注册表中移除旧的 mineru 适配器（如果存在）
-            _ocr_registry._adapters.pop("mineru", None)
+            # MinerU belongs to the document-parser registry, never to page OCR.
+            _document_parser_registry.unregister("mineru")
             # 创建新的 MinerUAdapter 实例并注册
             if full_config.get("access_mode") == "direct":
                 new_adapter = MinerUDirectAdapter(
@@ -4507,13 +4586,13 @@ async def save_online_ocr_config(request: Request):
                     enable_table=full_config.get("enable_table", True),
                     model_version=full_config.get("model_version", "vlm"),
                 )
-            _ocr_registry.register(new_adapter)
-            logger.info(f"MinerUAdapter 已重新注册，可用: {new_adapter.is_available()}")
+            _document_parser_registry.register(new_adapter)
+            logger.info(f"MinerU 文档解析适配器已重新注册，可用: {new_adapter.is_available()}")
         elif provider == "doc2x":
             # 重新加载完整配置
             full_config = _load_online_ocr_config("doc2x")
-            # 从注册表中移除旧的 doc2x 适配器（如果存在）
-            _ocr_registry._adapters.pop("doc2x", None)
+            # Doc2X is retained only as a legacy document parser configuration.
+            _document_parser_registry.unregister("doc2x")
             # 创建新的 Doc2XAdapter 实例并注册
             new_adapter = Doc2XAdapter(
                 worker_url=full_config.get("worker_url", ""),
@@ -4521,8 +4600,8 @@ async def save_online_ocr_config(request: Request):
                 token=full_config.get("token", ""),
                 token_mode=full_config.get("token_mode", "frontend"),
             )
-            _ocr_registry.register(new_adapter)
-            logger.info(f"Doc2XAdapter 已重新注册，可用: {new_adapter.is_available()}")
+            _document_parser_registry.register(new_adapter)
+            logger.info(f"Doc2X 文档解析适配器已重新注册，可用: {new_adapter.is_available()}")
     except Exception as e:
         # 适配器注册失败不影响配置保存结果，仅记录警告
         logger.warning(f"重新注册在线 OCR 适配器失败: {e}")

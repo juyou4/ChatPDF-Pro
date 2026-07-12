@@ -7,9 +7,11 @@ import ipaddress
 import os
 import re
 import shutil
+import threading
 import time
 import zipfile
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, Dict
 from pathlib import Path
@@ -208,6 +210,11 @@ class BaseOCRAdapter(ABC):
         """
         ...
 
+
+# MinerU and Doc2X return document-level parse results.  They must never be
+# selected through the page replacement OCR contract above.
+_DOCUMENT_PARSE_PROVIDER_NAMES = frozenset({"mineru", "doc2x"})
+
 import json
 import logging
 import uuid
@@ -223,36 +230,156 @@ logger = logging.getLogger(__name__)
 # 配置文件路径：相对于 Chatpdf 项目根目录
 _ONLINE_OCR_CONFIG_PATH = Path(__file__).resolve().parents[2] / "data" / "online_ocr_config.json"
 _OCR_PROVIDER_USAGE_PATH = _ONLINE_OCR_CONFIG_PATH.parent / "ocr_provider_usage.json"
+_OCR_PROVIDER_USAGE_THREAD_LOCK = threading.RLock()
 
 
-def record_ocr_provider_use(provider: str) -> None:
-    """Persist a privacy-preserving provider usage counter for sunset gates."""
+@contextmanager
+def _ocr_provider_usage_lock():
+    """Serialize JSON read-modify-write across desktop processes and servers."""
+    lock_path = Path(f"{_OCR_PROVIDER_USAGE_PATH}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _OCR_PROVIDER_USAGE_THREAD_LOCK:
+        with open(lock_path, "a+b") as lock_file:
+            locked = False
+            try:
+                lock_file.seek(0)
+                lock_file.write(b"\0")
+                lock_file.flush()
+                if os.name == "nt":
+                    import msvcrt
+
+                    deadline = time.monotonic() + 10.0
+                    while True:
+                        try:
+                            lock_file.seek(0)
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                            locked = True
+                            break
+                        except OSError:
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("OCR provider usage lock timed out")
+                            time.sleep(0.02)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                    locked = True
+                yield
+            finally:
+                if locked:
+                    try:
+                        if os.name == "nt":
+                            import msvcrt
+
+                            lock_file.seek(0)
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+
+
+def _usage_entry(entry: Any) -> dict:
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    legacy_count = _usage_int(entry.get("count"))
+    # Historic data records only an undifferentiated count.  Conservatively
+    # treat it as prior success so an upgrade cannot falsely justify deletion.
+    entry.setdefault("attempt_count", legacy_count)
+    entry.setdefault("success_count", legacy_count)
+    entry.setdefault("failure_count", 0)
+    entry.setdefault("fallback_success_count", 0)
+    entry.setdefault("first_seen_at", entry.get("last_used_at") or "")
+    entry.setdefault("last_used_at", "")
+    entry.setdefault("last_operation", "")
+    entry.setdefault("operations", {})
+    entry["operations"] = entry["operations"] if isinstance(entry["operations"], dict) else {}
+    return entry
+
+
+def _usage_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_usage_outcome(entry: dict, *, outcome: str, fallback: bool) -> None:
+    entry["attempt_count"] = _usage_int(entry.get("attempt_count")) + 1
+    if outcome == "success":
+        entry["success_count"] = _usage_int(entry.get("success_count")) + 1
+        if fallback:
+            entry["fallback_success_count"] = _usage_int(entry.get("fallback_success_count")) + 1
+    else:
+        entry["failure_count"] = _usage_int(entry.get("failure_count")) + 1
+
+
+def record_ocr_provider_use(
+    provider: str,
+    *,
+    outcome: str = "success",
+    operation: str = "page_ocr",
+    fallback: bool = False,
+) -> None:
+    """Persist actual provider outcomes for rollout and sunset decisions.
+
+    ``count`` remains a compatibility alias for successful requests.  New
+    fields separate attempts, failures, fallback successes, and operation type.
+    """
     name = "".join(char for char in str(provider or "") if char.isalnum() or char in {"-", "_"})
-    if not name:
+    normalized_outcome = str(outcome or "").strip().lower()
+    normalized_operation = "".join(char for char in str(operation or "") if char.isalnum() or char in {"-", "_"})
+    if not name or normalized_outcome not in {"success", "failure"} or not normalized_operation:
         return
     try:
-        data: dict = {}
-        if _OCR_PROVIDER_USAGE_PATH.exists():
-            data = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8"))
-        entry = dict(data.get(name) or {})
-        entry["count"] = int(entry.get("count") or 0) + 1
-        entry["last_used_at"] = datetime.now(timezone.utc).isoformat()
-        data[name] = entry
-        _OCR_PROVIDER_USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = _OCR_PROVIDER_USAGE_PATH.with_suffix(".tmp")
-        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(_OCR_PROVIDER_USAGE_PATH)
+        with _ocr_provider_usage_lock():
+            data: dict = {}
+            if _OCR_PROVIDER_USAGE_PATH.exists():
+                loaded = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8"))
+                data = loaded if isinstance(loaded, dict) else {}
+            now = datetime.now(timezone.utc).isoformat()
+            entry = _usage_entry(data.get(name))
+            _record_usage_outcome(entry, outcome=normalized_outcome, fallback=bool(fallback))
+            operation_entry = _usage_entry(entry["operations"].get(normalized_operation))
+            _record_usage_outcome(operation_entry, outcome=normalized_outcome, fallback=bool(fallback))
+            operation_entry["last_used_at"] = now
+            operation_entry["first_seen_at"] = operation_entry.get("first_seen_at") or now
+            entry["operations"][normalized_operation] = operation_entry
+            entry["count"] = _usage_int(entry.get("success_count"))
+            entry["last_used_at"] = now
+            entry["first_seen_at"] = entry.get("first_seen_at") or now
+            entry["last_operation"] = normalized_operation
+            data[name] = entry
+            temp_path = _OCR_PROVIDER_USAGE_PATH.with_name(
+                f".{_OCR_PROVIDER_USAGE_PATH.name}.{uuid.uuid4().hex}.tmp"
+            )
+            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp_path, _OCR_PROVIDER_USAGE_PATH)
     except Exception as exc:
         logger.warning("记录 OCR provider 使用情况失败: %s", exc)
 
 
 def get_ocr_provider_usage(provider: str) -> dict:
     try:
-        data = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8")) if _OCR_PROVIDER_USAGE_PATH.exists() else {}
-        entry = data.get(provider) if isinstance(data, dict) else None
-        return dict(entry) if isinstance(entry, dict) else {"count": 0, "last_used_at": ""}
+        with _ocr_provider_usage_lock():
+            data = json.loads(_OCR_PROVIDER_USAGE_PATH.read_text(encoding="utf-8")) if _OCR_PROVIDER_USAGE_PATH.exists() else {}
+            entry = data.get(provider) if isinstance(data, dict) else None
+            normalized = _usage_entry(entry)
+            normalized["count"] = _usage_int(normalized.get("success_count"))
+            return normalized
     except Exception:
-        return {"count": 0, "last_used_at": ""}
+        return {
+            "count": 0,
+            "attempt_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "fallback_success_count": 0,
+            "first_seen_at": "",
+            "last_used_at": "",
+            "last_operation": "",
+            "operations": {},
+        }
 
 # 各在线 OCR 提供商的环境变量名映射
 # 注意：token_mode、enable_ocr、enable_formula、enable_table 等字段
@@ -998,18 +1125,16 @@ class MinerUAdapter(WorkerOCRAdapter):
         page_numbers: List[int],
         dpi: int = 200
     ) -> OCRResult:
-        """
-        通过 MinerU Worker 代理处理 PDF，提取文本
+        """Reject page-level use; MinerU only exposes document parsing."""
+        raise RuntimeError("MinerU 不支持逐页 OCR；请使用 MinerU 深度解析获取文档级结构化结果")
 
-        流程：上传 PDF → 轮询结果 → 下载 ZIP → 解压 → 提取 Markdown → 转文本
-
-        参数:
-            pdf_bytes: PDF 原始字节
-            page_numbers: 需要 OCR 的页码列表（从 0 开始）
-            dpi: 图像转换分辨率（MinerU 忽略此参数）
-        返回:
-            OCRResult 包含各页结果和错误信息
-        """
+    def _legacy_document_ocr_pages(
+        self,
+        pdf_bytes: bytes,
+        page_numbers: List[int],
+        dpi: int = 200,
+    ) -> OCRResult:
+        """Historical whole-document conversion kept out of the page OCR contract."""
         import httpx
 
         try:
@@ -1750,18 +1875,16 @@ class Doc2XAdapter(WorkerOCRAdapter):
         page_numbers: List[int],
         dpi: int = 200
     ) -> OCRResult:
-        """
-        通过 Doc2X Worker 代理处理 PDF，提取文本
+        """Reject page-level use; Doc2X is retained only as a legacy migration provider."""
+        raise RuntimeError("Doc2X 不支持逐页 OCR；请迁移到本地 OCR 或文档级解析服务")
 
-        流程：上传 PDF → 轮询状态 → 获取 Markdown → 转文本
-
-        参数:
-            pdf_bytes: PDF 原始字节
-            page_numbers: 需要 OCR 的页码列表（从 0 开始）
-            dpi: 图像转换分辨率（Doc2X 忽略此参数）
-        返回:
-            OCRResult 包含各页结果和错误信息
-        """
+    def _legacy_document_ocr_pages(
+        self,
+        pdf_bytes: bytes,
+        page_numbers: List[int],
+        dpi: int = 200,
+    ) -> OCRResult:
+        """Historical whole-document conversion kept out of the page OCR contract."""
         import httpx
 
         try:
@@ -2171,6 +2294,9 @@ class OCRRegistry:
         参数:
             adapter: 要注册的 OCR 适配器实例
         """
+        if adapter.name in _DOCUMENT_PARSE_PROVIDER_NAMES:
+            logger.warning("拒绝将文档级解析器注册为逐页 OCR: %s", adapter.name)
+            return
         if adapter.is_available():
             self._adapters[adapter.name] = adapter
             logger.info(f"OCR 适配器已注册: {adapter.name}")
@@ -2186,6 +2312,10 @@ class OCRRegistry:
         返回:
             适配器实例，无可用适配器时返回 None
         """
+        name = str(name or "auto").strip().lower()
+        if name in _DOCUMENT_PARSE_PROVIDER_NAMES:
+            logger.warning("%s 是文档级解析器，不能作为逐页 OCR 获取", name)
+            return None
         if name == "auto":
             # 自动页级 OCR 不得静默上传整篇 PDF。云端服务必须由用户显式选择。
             for key in ["paddleocr", "tesseract"]:
@@ -2203,7 +2333,7 @@ class OCRRegistry:
         return self._adapters.get(name)
 
     # 在线 OCR 适配器名称集合，用于回退时排除
-    _ONLINE_ADAPTERS = {"mistral", "mineru", "doc2x"}
+    _ONLINE_ADAPTERS = {"mistral"}
 
     def get_local_adapter(self, exclude: Optional[List[str]] = None) -> Optional[BaseOCRAdapter]:
         """
@@ -2240,6 +2370,29 @@ class OCRRegistry:
         return {name: True for name in self._adapters}
 
 
+class DocumentParserRegistry:
+    """Registry for document-level parsers, separate from PageOCR providers."""
+
+    def __init__(self):
+        self._adapters: Dict[str, Any] = {}
+
+    def register(self, adapter: Any) -> None:
+        if adapter.is_available():
+            self._adapters[adapter.name] = adapter
+            logger.info("文档解析适配器已注册: %s", adapter.name)
+        else:
+            logger.debug("文档解析适配器 %s 不可用，跳过注册", adapter.name)
+
+    def unregister(self, name: str) -> None:
+        self._adapters.pop(str(name or "").strip().lower(), None)
+
+    def get_adapter(self, name: str) -> Any | None:
+        return self._adapters.get(str(name or "").strip().lower())
+
+    def list_available(self) -> Dict[str, bool]:
+        return {name: True for name in self._adapters}
+
+
 def is_ocr_available() -> dict:
     """
     检查可用的 OCR 后端
@@ -2248,13 +2401,14 @@ def is_ocr_available() -> dict:
     同时保持向后兼容的返回格式。
     """
     available = _ocr_registry.list_available()
+    document_parsers = _document_parser_registry.list_available()
     return {
         "tesseract": available.get("tesseract", False),
         "paddleocr": available.get("paddleocr", False),
         "mistral": available.get("mistral", False),
-        "mineru": available.get("mineru", False),
-        "doc2x": available.get("doc2x", False),
-        "any": len(available) > 0
+        "mineru": document_parsers.get("mineru", False),
+        "doc2x": document_parsers.get("doc2x", False),
+        "any": bool(available or document_parsers)
     }
 
 
@@ -2431,6 +2585,7 @@ class OCRService:
 
 # 创建全局注册表并注册可用的适配器
 _ocr_registry = OCRRegistry()
+_document_parser_registry = DocumentParserRegistry()
 _ocr_registry.register(TesseractAdapter())
 _ocr_registry.register(PaddleOCRAdapter())
 
@@ -2444,7 +2599,7 @@ _ocr_registry.register(MistralAdapter(
 # 注册在线 OCR 适配器：加载 MinerU OCR 配置并注册
 _mineru_config = _load_online_ocr_config("mineru")
 if _mineru_config.get("access_mode") == "direct":
-    _ocr_registry.register(MinerUDirectAdapter(
+    _document_parser_registry.register(MinerUDirectAdapter(
         token=_mineru_config.get("token", ""),
         base_url=_mineru_config.get("base_url", "https://mineru.net/api/v4"),
         enable_ocr=_mineru_config.get("enable_ocr", False),
@@ -2453,7 +2608,7 @@ if _mineru_config.get("access_mode") == "direct":
         model_version=_mineru_config.get("model_version", "vlm"),
     ))
 else:
-    _ocr_registry.register(MinerUAdapter(
+    _document_parser_registry.register(MinerUAdapter(
         worker_url=_mineru_config.get("worker_url", ""),
         auth_key=_mineru_config.get("auth_key", ""),
         token=_mineru_config.get("token", ""),
@@ -2466,7 +2621,7 @@ else:
 
 # 注册在线 OCR 适配器：加载 Doc2X OCR 配置并注册
 _doc2x_config = _load_online_ocr_config("doc2x")
-_ocr_registry.register(Doc2XAdapter(
+_document_parser_registry.register(Doc2XAdapter(
     worker_url=_doc2x_config.get("worker_url", ""),
     auth_key=_doc2x_config.get("auth_key", ""),
     token=_doc2x_config.get("token", ""),
@@ -2494,12 +2649,16 @@ def get_ocr_service(backend: str = "auto") -> OCRService:
     """
     global _ocr_service
 
+    requested_backend = str(backend or "auto").strip().lower()
+    if requested_backend in _DOCUMENT_PARSE_PROVIDER_NAMES:
+        raise ValueError(f"{requested_backend} 是文档级解析器，不能用于逐页 OCR")
+
     # 通过注册表确定实际可用的后端
-    adapter = _ocr_registry.get_adapter(backend)
+    adapter = _ocr_registry.get_adapter(requested_backend)
     if adapter is not None:
         resolved_backend = adapter.name
     else:
-        resolved_backend = backend
+        resolved_backend = requested_backend
 
     if _ocr_service is None or _ocr_service.backend != resolved_backend:
         _ocr_service = OCRService(backend=resolved_backend)

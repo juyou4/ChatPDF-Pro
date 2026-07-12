@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2, Code, MessageSquare, Type, Sigma } from 'lucide-react';
+import { ChevronLeft, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2, Code, MessageSquare, Type, Sigma } from 'lucide-react';
 import { useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from '../contexts/ChatParamsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -54,19 +54,22 @@ const ChatSettings = ({ isOpen, onClose }) => {
         <AnimatePresence>
             <motion.div
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all"
+                className="fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all"
                 onClick={onClose}
             >
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0, y: 15 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 10 }}
                     transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                    className="w-full max-w-[640px] max-h-[92vh] bg-[#fbfbfc] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.1)] rounded-[32px] overflow-hidden flex flex-col"
+                    className="settings-solid settings-shell w-full max-w-[640px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* 头部 */}
-                    <div className="flex items-center justify-between px-6 py-5 sticky top-0 bg-[#fbfbfc]/90 backdrop-blur-md z-10">
+                    <div className="flex items-center px-6 py-5 sticky top-0 bg-[#f6f7f9] border-b border-gray-200 z-10">
                         <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-purple-100/80 rounded-2xl flex items-center justify-center text-purple-600">
+                            <button onClick={onClose} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors" title="返回设置中心" aria-label="返回设置中心">
+                                <ChevronLeft className="w-5 h-5" />
+                            </button>
+                            <div className="w-10 h-10 bg-purple-100 rounded-[14px] flex items-center justify-center text-purple-600">
                                 <SlidersHorizontal className="w-5 h-5" />
                             </div>
                             <div>
@@ -74,14 +77,11 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                 <div className="text-[12px] text-gray-500 font-medium">调整模型生成参数，优化对话体验</div>
                             </div>
                         </div>
-                        <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors">
-                            <X className="w-5 h-5" />
-                        </button>
                     </div>
 
                     <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2 space-y-5 custom-scrollbar">
                         {/* ===== 生成参数 ===== (根据图1去除标题) */}
-                        <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-6">
+                        <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-6">
                             {/* 上下文数 (无开关) */}
                             <SettingSliderWithInput
                                 label="上下文数" tooltip="发送给模型的历史消息轮数。值越大模型记忆越多，但消耗更多 Token"
@@ -131,7 +131,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                             className={`flex-1 py-1.5 text-sm font-medium rounded-xl transition-all ${
                                                 answerDetailLevel === item.value
                                                     ? 'bg-[#8871e4] text-white shadow-sm'
-                                                    : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+                                                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                                             }`}
                                         >
                                             {item.label}
@@ -151,7 +151,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                         </div>
 
                         {/* ===== 自定义参数 ===== */}
-                        <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                        <div className="settings-card bg-white p-5 border border-gray-200/90">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
                                     <Code className="w-4 h-4 text-gray-400" />
@@ -182,7 +182,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                         </div>
 
                         {/* ===== 行为设置 ===== */}
-                        <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                        <div className="settings-card bg-white p-5 border border-gray-200/90">
                             <div className="flex items-center gap-2 mb-4">
                                 <SlidersHorizontal className="w-4 h-4 text-gray-400" />
                                 <h3 className="text-[14px] font-medium text-gray-800">行为设置</h3>
@@ -235,7 +235,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                         {/* ===== 界面与代码块 ===== */}
                         <div className="grid grid-cols-2 gap-4">
                             {/* 代码块设置 */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
+                            <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-4">
                                 <div className="flex items-center gap-2 mb-2">
                                     <Code className="w-4 h-4 text-gray-400" />
                                     <h3 className="text-[14px] font-medium text-gray-800">代码块</h3>
@@ -255,7 +255,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             </div>
 
                             {/* 其他 (数学与样式) */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
+                            <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-4">
                                 <div className="flex items-center gap-2 mb-2">
                                     <Type className="w-4 h-4 text-gray-400" />
                                     <h3 className="text-[14px] font-medium text-gray-800">外观</h3>

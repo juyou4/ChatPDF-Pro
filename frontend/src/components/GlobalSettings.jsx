@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Sparkles, BookOpen } from 'lucide-react';
+import { ChevronLeft, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
@@ -12,31 +12,12 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const {
         fontFamily, customFont, globalScale, setFontFamily, setCustomFont, setGlobalScale, resetFontSettings
     } = useFontSettings();
-    const {
-        enableMemory, setEnableMemory, resetChatParams,
-        overrideNumericTable, setOverrideNumericTable,
-        overrideAnswerCritic, setOverrideAnswerCritic,
-        overrideLLMQueryRewrite, setOverrideLLMQueryRewrite,
-        overrideBM25Synonyms, setOverrideBM25Synonyms,
-        numericTableVisualVerification, setNumericTableVisualVerification,
-        cheapModel, setCheapModel,
-        cheapModelProvider, setCheapModelProvider,
-    } = useChatParams();
-    const [showRetrievalTuning, setShowRetrievalTuning] = useState(false);
+    // 检索增强调优已上移到设置中心一级「检索」tab；此处仅保留重置能力
+    const { enableMemory, setEnableMemory, resetChatParams } = useChatParams();
+    const [activeSection, setActiveSection] = useState('display');
     const { exportSettings, importSettings } = useGlobalSettings();
-    const {
-        aiAutoProcess,
-        setAiAutoProcess,
-        autoOutlineSummary,
-        setAutoOutlineSummary,
-        autoPretranslate,
-        setAutoPretranslate,
-        pretranslateConcurrency,
-        setPretranslateConcurrency,
-        overviewDefaultDepth,
-        setOverviewDefaultDepth,
-        resetReadingSettings,
-    } = useReadingSettings();
+    // 阅读相关设置已上移到设置中心一级「阅读」tab；此处仅保留重置能力
+    const { resetReadingSettings } = useReadingSettings();
 
     const resetSettings = () => { resetFontSettings(); resetChatParams(); resetWebSearch(); resetReadingSettings(); };
 
@@ -104,30 +85,70 @@ const GlobalSettings = ({ isOpen, onClose }) => {
             {isOpen && (
                 <motion.div
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                    className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all"
+                    className="fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all"
                     onClick={onClose}
                 >
                     <motion.div
                         initial={{ scale: 0.95, opacity: 0, y: 15 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 10 }}
                         transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                        className="w-full max-w-[700px] max-h-[92vh] bg-[#fbfbfc] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.1)] rounded-[32px] overflow-hidden flex flex-col relative"
+                        className="settings-solid settings-shell w-full max-w-[700px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col relative"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* 头部 */}
-                        <div className="flex items-center justify-between px-7 py-5 sticky top-0 bg-[#fbfbfc]/90 backdrop-blur-md z-10">
+                        <div className="flex items-center px-7 py-5 sticky top-0 bg-[#f6f7f9] border-b border-gray-200 z-10">
                             <div className="flex items-center gap-3">
+                                <button onClick={onClose} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors" title="返回设置中心" aria-label="返回设置中心">
+                                    <ChevronLeft className="w-5 h-5" />
+                                </button>
                                 <div className="w-9 h-9 flex items-center justify-center text-[#8871e4]">
                                     <Type className="w-5 h-5 fill-current opacity-20" />
                                     <Type className="w-5 h-5 absolute" />
                                 </div>
                                 <h2 className="text-[17px] font-bold text-gray-900 tracking-tight">全局设置</h2>
                             </div>
-                            <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors">
-                                <X className="w-5 h-5" />
-                            </button>
                         </div>
 
-                        <div className="flex-1 overflow-y-auto px-7 pb-[100px] pt-1 space-y-6 custom-scrollbar">
+                        {/* 「阅读」分区已上移到设置中心一级 tab，避免同一设置出现在两处 */}
+                        <div className="relative grid grid-cols-3 mx-7 mb-4 p-1 rounded-[14px] bg-gray-100 border border-gray-200 flex-shrink-0" role="tablist" aria-label="全局设置分类">
+                            <span
+                                aria-hidden="true"
+                                className="absolute left-1 top-1 bottom-1 rounded-[14px] bg-white shadow-sm transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
+                                style={{
+                                    width: 'calc((100% - 0.5rem) / 3)',
+                                    transform: `translateX(${['display', 'services', 'advanced'].indexOf(activeSection) * 100}%)`,
+                                }}
+                            />
+                            {[
+                                { id: 'display', label: '显示' },
+                                { id: 'services', label: '服务' },
+                                { id: 'advanced', label: '高级' },
+                            ].map((section) => (
+                                <button
+                                    key={section.id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={activeSection === section.id}
+                                    onClick={() => setActiveSection(section.id)}
+                                    className={`relative z-10 min-w-0 rounded-[14px] px-2 py-2 text-[12px] font-semibold transition-colors ${
+                                        activeSection === section.id
+                                            ? 'text-[#8871e4]'
+                                            : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200/70'
+                                    }`}
+                                >
+                                    {section.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        <motion.div
+                            key={activeSection}
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.18, ease: 'easeOut' }}
+                            className="flex-1 overflow-y-auto px-7 pb-[100px] pt-1 space-y-6 custom-scrollbar"
+                        >
+                            {activeSection === 'display' && (
+                            <>
                             {/* Font Settings - Cards Grid */}
                             <div className="space-y-4">
                                 <div>
@@ -183,14 +204,14 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                                 fontFamily === 'custom' ? 'bg-[#8871e4] text-white' : 'bg-[#8871e4] text-white hover:bg-[#725ec3]'
                                             }`}
                                         >
-                                            Apply
+                                            应用
                                         </button>
                                     </div>
                                 </div>
                             </div>
 
                             {/* Scale/Zoom Settings */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                            <div className="settings-card bg-white p-5 border border-gray-200/90">
                                 <div className="flex items-center justify-between mb-4">
                                     <div className="flex items-center gap-2">
                                         <ZoomIn className="w-4 h-4 text-gray-400" />
@@ -224,89 +245,13 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     </div>
                                 </div>
                             </div>
+                            </>
+                            )}
 
-                            {/* Intelligent Reading Settings */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-violet-50 text-[#8871e4] flex items-center justify-center">
-                                            <BookOpen className="w-4 h-4" />
-                                        </div>
-                                        <div>
-                                            <h3 className="text-[14px] font-bold text-gray-900">智能阅读</h3>
-                                            <p className="text-[12px] text-gray-500">控制文档打开后是否自动生成 AI 阅读辅助</p>
-                                        </div>
-                                    </div>
-                                    <ToggleSwitch checked={aiAutoProcess} onChange={setAiAutoProcess} color="#8871e4" />
-                                </div>
-
-                                <div className={`pt-3 border-t border-gray-100/50 space-y-3 ${aiAutoProcess ? '' : 'opacity-60'}`}>
-                                    <SmartReadingRow
-                                        title="自动生成大纲与总结"
-                                        desc="打开文档后自动生成左侧 AI 总结和章节大纲；关闭后只读取已有缓存"
-                                        checked={autoOutlineSummary}
-                                        onChange={setAutoOutlineSummary}
-                                        disabled={!aiAutoProcess}
-                                    />
-                                    <SmartReadingRow
-                                        title="自动预翻译全文"
-                                        desc="提前缓存正文、标题和图注翻译，悬浮时直接显示；会产生较多模型调用"
-                                        checked={autoPretranslate}
-                                        onChange={setAutoPretranslate}
-                                        disabled={!aiAutoProcess}
-                                    />
-
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
-                                            <div className="flex items-center justify-between gap-3">
-                                                <div>
-                                                    <div className="text-[12px] font-bold text-gray-700">预翻译并发</div>
-                                                    <div className="text-[11px] text-gray-500 mt-0.5">限速模型建议 3-6，付费高速模型可用 8-16</div>
-                                                </div>
-                                                <span className="text-[12px] font-bold text-[#8871e4] tabular-nums">{pretranslateConcurrency}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="1"
-                                                max="16"
-                                                step="1"
-                                                value={pretranslateConcurrency}
-                                                onChange={(e) => setPretranslateConcurrency(Number(e.target.value))}
-                                                disabled={!aiAutoProcess}
-                                                className="mt-3 w-full accent-[#8871e4] disabled:opacity-50"
-                                            />
-                                        </div>
-
-                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
-                                            <div className="text-[12px] font-bold text-gray-700">速览默认详细度</div>
-                                            <div className="mt-2 grid grid-cols-3 gap-1 bg-white/80 p-1 rounded-[12px] border border-gray-100">
-                                                {[
-                                                    { id: 'brief', label: '简略' },
-                                                    { id: 'standard', label: '标准' },
-                                                    { id: 'detailed', label: '详细' },
-                                                ].map((item) => (
-                                                    <button
-                                                        key={item.id}
-                                                        onClick={() => setOverviewDefaultDepth(item.id)}
-                                                        disabled={!aiAutoProcess}
-                                                        className={`py-1.5 rounded-[10px] text-[11px] font-bold transition-all disabled:opacity-50 ${
-                                                            overviewDefaultDepth === item.id
-                                                                ? 'bg-[#8871e4] text-white shadow-sm'
-                                                                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                                                        }`}
-                                                    >
-                                                        {item.label}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                            <p className="mt-2 text-[11px] text-gray-500">速览仍然按需触发，不会因这个选项自动消耗 token</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
+                            {activeSection === 'services' && (
+                            <>
                             {/* Memory Settings */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                            <div className="settings-card bg-white p-5 border border-gray-200/90">
                                 <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-3">
                                         <div className="w-8 h-8 rounded-full bg-blue-50 text-blue-500 flex items-center justify-center">
@@ -327,7 +272,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             </div>
 
                             {/* Web Search Settings */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
+                            <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-4">
                                 <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-3">
                                         <div className="w-8 h-8 rounded-full bg-emerald-50 text-emerald-500 flex items-center justify-center">
@@ -403,84 +348,12 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     </div>
                                 )}
                             </div>
+                            </>
+                            )}
 
-                            {/* Retrieval Tuning — 检索增强调优 */}
-                            <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80 space-y-4">
-                                <button onClick={() => setShowRetrievalTuning(!showRetrievalTuning)} className="w-full flex items-center justify-between text-left">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-violet-50 text-violet-500 flex items-center justify-center">
-                                            <Sparkles className="w-4 h-4" />
-                                        </div>
-                                        <div>
-                                            <h3 className="text-[14px] font-bold text-gray-900">检索增强调优</h3>
-                                            <p className="text-[12px] text-gray-500">对当前会话覆盖后端检索开关，不持久化到后端 config</p>
-                                        </div>
-                                    </div>
-                                    <div className={`transform transition-transform text-gray-400 ${showRetrievalTuning ? 'rotate-180' : ''}`}>▼</div>
-                                </button>
-
-                                {showRetrievalTuning && (
-                                    <div className="pt-3 border-t border-gray-100/50 space-y-3">
-                                        <TriStateToggle
-                                            title="numeric_table 专项增强"
-                                            desc="表格数值比较类查询（如「第二好的方法」「Table 7 DiffuLT」）的专项检索增强"
-                                            value={overrideNumericTable}
-                                            onChange={setOverrideNumericTable}
-                                        />
-                                        <TriStateToggle
-                                            title="BM25 同义词扩展"
-                                            desc="查询时自动扩展同义词，提升召回率"
-                                            value={overrideBM25Synonyms}
-                                            onChange={setOverrideBM25Synonyms}
-                                        />
-                                        <TriStateToggle
-                                            title="LLM 查询改写"
-                                            desc="多轮对话中用 LLM 消解指代（代词/省略），长查询自动跳过"
-                                            value={overrideLLMQueryRewrite}
-                                            onChange={setOverrideLLMQueryRewrite}
-                                        />
-                                        <TriStateToggle
-                                            title="答案自审"
-                                            desc="回答结束后用 cheap model 检测幻觉；会增加 1-3s 延迟"
-                                            value={overrideAnswerCritic}
-                                            onChange={setOverrideAnswerCritic}
-                                        />
-                                        <VisualVerificationMode
-                                            value={numericTableVisualVerification}
-                                            onChange={setNumericTableVisualVerification}
-                                        />
-
-                                        {/* Cheap Model 配置 */}
-                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 space-y-2">
-                                            <div className="flex items-center justify-between px-1">
-                                                <span className="text-[12px] font-bold text-gray-700">辅助模型（双模型策略）</span>
-                                                <span className="text-[10px] text-gray-500">为空则跟随后端默认</span>
-                                            </div>
-                                            <p className="text-[11px] text-gray-500 px-1">
-                                                用于非核心 LLM 任务（查询改写 / 追问建议 / 自动命名 / 答案自审）
-                                            </p>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <input
-                                                    type="text"
-                                                    value={cheapModelProvider || ''}
-                                                    onChange={(e) => setCheapModelProvider(e.target.value)}
-                                                    placeholder="provider (如 openai)"
-                                                    className="text-[12px] font-mono bg-white border border-gray-200 rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm"
-                                                />
-                                                <input
-                                                    type="text"
-                                                    value={cheapModel || ''}
-                                                    onChange={(e) => setCheapModel(e.target.value)}
-                                                    placeholder="model (如 gpt-4o-mini)"
-                                                    className="text-[12px] font-mono bg-white border border-gray-200 rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm"
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Data Mgmt */}
+                            {/* Data Mgmt — 检索增强调优已上移到设置中心一级「检索」tab */}
+                            {activeSection === 'advanced' && (
+                            <>
                             <div className="grid grid-cols-4 gap-3 pt-2">
                                 {[
                                     { icon: RotateCcw, label: '恢复默认', onClick: () => { if(confirm('确定?')) { resetSettings(); setCustomFontInput(''); } }, color: 'text-red-500 hover:bg-red-50 hover:border-red-200' },
@@ -500,24 +373,26 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     )
                                 ))}
                             </div>
-                        </div>
+                            </>
+                            )}
+                        </motion.div>
 
                         {/* Floating Bottom Action */}
-                        <div className="absolute inset-x-0 bottom-0 p-5 bg-gradient-to-t from-[#fbfbfc] via-[#fbfbfc]/90 to-transparent flex justify-center pointer-events-none">
+                        <div className="absolute inset-x-0 bottom-0 p-4 bg-[#f6f7f9] border-t border-gray-200 flex justify-center pointer-events-none">
                             <button
                                 onClick={onClose}
-                                className="pointer-events-auto bg-[#8871e4] hover:bg-[#725ec3] text-white font-bold text-[14px] py-3.5 px-8 flex items-center justify-center gap-2 rounded-[24px] shadow-[0_8px_20px_-6px_rgba(136,113,228,0.5)] transition-all transform hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm"
+                                className="pointer-events-auto bg-[#8871e4] hover:bg-[#725ec3] text-white font-bold text-[14px] py-3 px-8 flex items-center justify-center gap-2 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(136,113,228,0.55)] transition-colors"
                             >
                                 <CheckCircle2 className="w-5 h-5" />
-                                保存并关闭
+                                完成并返回
                             </button>
                         </div>
                     </motion.div>
 
                     {/* 文本导入附赠弹窗保持基本干净即可 */}
                     {showImportDialog && (
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowImportDialog(false)}>
-                            <div className="bg-white rounded-[24px] p-6 max-w-sm w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-slate-950/45 z-[60] flex items-center justify-center p-4" onClick={() => setShowImportDialog(false)}>
+                            <div className="bg-white border border-gray-200 rounded-[18px] p-6 max-w-sm w-full shadow-[0_24px_60px_-18px_rgba(15,23,42,0.35)]" onClick={(e) => e.stopPropagation()}>
                                 <h3 className="text-[15px] font-bold mb-3">粘贴 JSON 配置</h3>
                                 <textarea value={importText} onChange={(e) => setImportText(e.target.value)} className="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-[16px] text-xs font-mono outline-none focus:ring-2 focus:ring-[#8871e4]/20 resize-none mb-4" />
                                 <div className="flex gap-2">
@@ -540,90 +415,6 @@ const ToggleSwitch = ({ checked, onChange, color = '#8871e4' }) => (
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>
 );
-
-const SmartReadingRow = ({ title, desc, checked, onChange, disabled = false }) => (
-    <div className="flex items-start justify-between gap-4 py-1.5">
-        <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-bold text-gray-800">{title}</div>
-            {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
-        </div>
-        <div className={disabled ? 'opacity-50 pointer-events-none' : ''}>
-            <ToggleSwitch checked={checked} onChange={onChange} color="#8871e4" />
-        </div>
-    </div>
-);
-
-/**
- * 三态开关：null=自动（跟随后端 config）/ true=强制开 / false=强制关
- * 用于检索增强调优面板，让用户无需 restart 后端即可会话级切换 feature flag。
- */
-const TriStateToggle = ({ title, desc, value, onChange }) => {
-    const options = [
-        { v: null, label: '自动' },
-        { v: true, label: '开' },
-        { v: false, label: '关' },
-    ];
-    return (
-        <div className="flex items-start justify-between gap-4 py-2">
-            <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-bold text-gray-800">{title}</div>
-                {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
-            </div>
-            <div className="flex items-center gap-1 bg-gray-100/80 p-0.5 rounded-[12px] flex-shrink-0">
-                {options.map((opt) => {
-                    const active = value === opt.v;
-                    return (
-                        <button
-                            key={String(opt.v)}
-                            onClick={() => onChange(opt.v)}
-                            className={`px-2.5 py-1 rounded-[10px] text-[11px] font-bold transition-all ${
-                                active
-                                    ? 'bg-white text-violet-600 shadow-sm'
-                                    : 'text-gray-500 hover:text-gray-700'
-                            }`}
-                        >
-                            {opt.label}
-                        </button>
-                    );
-                })}
-            </div>
-        </div>
-    );
-};
-
-const VisualVerificationMode = ({ value, onChange }) => {
-    const normalized = ['auto', 'off', 'always'].includes(value) ? value : 'auto';
-    const options = [
-        { v: 'auto', label: '自动' },
-        { v: 'off', label: '关闭' },
-        { v: 'always', label: '总是' },
-    ];
-    return (
-        <div className="flex items-start justify-between gap-4 py-2">
-            <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-bold text-gray-800">表格视觉校验</div>
-                <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
-                    数值表格证据有风险时裁剪原 PDF 表格并让视觉模型抽取单元格；会增加一次视觉调用
-                </div>
-            </div>
-            <div className="flex items-center gap-1 bg-gray-100/80 p-0.5 rounded-[12px] flex-shrink-0">
-                {options.map((opt) => (
-                    <button
-                        key={opt.v}
-                        onClick={() => onChange(opt.v)}
-                        className={`px-2.5 py-1 rounded-[10px] text-[11px] font-bold transition-all ${
-                            normalized === opt.v
-                                ? 'bg-white text-violet-600 shadow-sm'
-                                : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                    >
-                        {opt.label}
-                    </button>
-                ))}
-            </div>
-        </div>
-    );
-};
 
 const KeyIcon = (props) => (
     <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg>

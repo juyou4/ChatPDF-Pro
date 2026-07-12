@@ -36,7 +36,7 @@ _TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed"}
 _TASK_STATES = {"queued", "running", *_TERMINAL_STATES}
 _CACHE_SCHEMA_VERSION = 4
 _TASK_STORE_VERSION = 1
-_VISUAL_PROMPT_VERSION = 2
+_VISUAL_PROMPT_VERSION = 3
 _VISUAL_CROP_VERSION = 2
 _DEFAULT_CONCURRENCY = 2
 _DEFAULT_FAILURE_COOLDOWN_S = 300.0
@@ -974,7 +974,12 @@ async def _run_visual_verification(
         record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
         return {}, _task_diagnostics(record)
 
-    verdict, verdict_details = _evaluate_visual_result(parsed, target, query)
+    verdict, verdict_details = _evaluate_visual_result(
+        parsed,
+        target,
+        query,
+        minimum_confidence=_resolve_visual_min_confidence(custom_params),
+    )
     diagnostics.update({
         "state": verdict,
         "verdict": verdict,
@@ -1050,6 +1055,21 @@ def _resolve_visual_retry_delay(custom_params: Optional[dict]) -> float:
         return max(0.0, min(5.0, float(value)))
     except (TypeError, ValueError):
         return 0.4
+
+
+def _resolve_visual_min_confidence(custom_params: Optional[dict]) -> float:
+    value = None
+    if isinstance(custom_params, dict):
+        for key in ("numeric_table_visual_min_confidence", "table_visual_min_confidence"):
+            if key in custom_params and custom_params.get(key) not in (None, ""):
+                value = custom_params.get(key)
+                break
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_TABLE_VISUAL_MIN_CONFIDENCE", "0.75")
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.75
 
 
 def _resolve_failure_cooldown_seconds(custom_params: Optional[dict]) -> float:
@@ -1168,7 +1188,6 @@ def _padded_rect(rect: Any, page_rect: Any, *, left_ratio: float, right_ratio: f
 
 
 def _build_visual_prompt(query: str, target: dict, segments: list[dict]) -> str:
-    text_evidence = _segments_text(segments)[:5000]
     requested_columns = ", ".join(target.get("requested_columns") or []) or "all columns needed for the answer"
     requested_rows = ", ".join(target.get("requested_rows") or []) or "row implied by the question"
     return f"""Question:
@@ -1182,9 +1201,6 @@ Target table identity:
 - requested rows: {requested_rows}
 - requested columns: {requested_columns}
 
-Retrieved text evidence may be malformed. It is only for locating the visible cells:
-{text_evidence}
-
 Read the supplied table crops. Return JSON only, with this exact shape:
 {{
   "table_id": "visible table label or empty",
@@ -1195,6 +1211,7 @@ Read the supplied table crops. Return JSON only, with this exact shape:
   "supports_text_result": true,
   "corrected_answer_hint": "leave empty unless directly visible"
 }}
+Do not use values from any text context. Read the supplied image crops directly.
 Do not invent a cell, header, row label, or value that is not visible."""
 
 
@@ -1209,7 +1226,13 @@ def _parse_visual_response(text: str) -> VisualTableResponse | None:
     return response if response.cells else None
 
 
-def _evaluate_visual_result(parsed: VisualTableResponse, target: dict, query: str) -> tuple[str, dict]:
+def _evaluate_visual_result(
+    parsed: VisualTableResponse,
+    target: dict,
+    query: str,
+    *,
+    minimum_confidence: float = 0.75,
+) -> tuple[str, dict]:
     expected = _expected_table_cells(target, query)
     details: dict[str, Any] = {
         "matched_columns": [],
@@ -1219,6 +1242,10 @@ def _evaluate_visual_result(parsed: VisualTableResponse, target: dict, query: st
     }
     if parsed.supports_text_result is False:
         details["reason"] = "text_result_not_supported"
+        return "indeterminate", details
+    if parsed.confidence is None or parsed.confidence < minimum_confidence:
+        details["reason"] = "confidence_below_threshold"
+        details["minimum_confidence"] = minimum_confidence
         return "indeterminate", details
     expected_refs = _extract_table_refs(f"{target.get('table_id') or ''} {target.get('caption') or ''}")
     parsed_refs = _extract_table_refs(parsed.table_id)

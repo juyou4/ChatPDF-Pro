@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import re
 import shutil
 import uuid
@@ -52,6 +53,52 @@ def semantic_group_paths(root: Path | str, doc_id: str) -> dict[str, Path]:
 
 def active_manifest_path(root: Path | str, doc_id: str) -> Path:
     return Path(root) / "active" / f"{_doc_key(doc_id)}.json"
+
+
+def validate_semantic_group_artifacts(paths: dict[str, Path], doc_id: str) -> dict[str, Any]:
+    """Verify that a semantic generation is loadable before it becomes active."""
+    errors: list[str] = []
+    try:
+        payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+        groups = payload.get("groups") if isinstance(payload, dict) else None
+        if not isinstance(groups, list) or not groups:
+            errors.append("groups_json_empty")
+        if isinstance(payload, dict) and payload.get("doc_id") not in (None, "", doc_id):
+            errors.append("groups_json_doc_id_mismatch")
+    except Exception as exc:
+        groups = []
+        errors.append(f"groups_json_unreadable:{exc}")
+
+    try:
+        with open(paths["pkl"], "rb") as handle:
+            metadata = pickle.load(handle)
+        digest_texts = metadata.get("digest_texts") if isinstance(metadata, dict) else None
+        group_ids = metadata.get("group_ids") if isinstance(metadata, dict) else None
+        if not isinstance(digest_texts, list) or not isinstance(group_ids, list):
+            errors.append("groups_pkl_invalid_shape")
+        elif not digest_texts or len(digest_texts) != len(group_ids):
+            errors.append("groups_pkl_count_mismatch")
+        elif groups and len(groups) != len(group_ids):
+            errors.append("groups_json_pkl_count_mismatch")
+    except Exception as exc:
+        group_ids = []
+        errors.append(f"groups_pkl_unreadable:{exc}")
+
+    try:
+        import faiss
+
+        index = faiss.read_index(str(paths["index"]))
+        if int(index.ntotal) != len(group_ids):
+            errors.append("groups_faiss_count_mismatch")
+    except Exception as exc:
+        errors.append(f"groups_faiss_unreadable:{exc}")
+
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "group_count": len(group_ids),
+        "paths": {key: str(value) for key, value in paths.items()},
+    }
 
 
 def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:

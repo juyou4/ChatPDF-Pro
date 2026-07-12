@@ -1,8 +1,4 @@
-"""数值表格视觉校验在聊天路由中的证据边界回归测试。
-
-视觉校验是结构化表格检索后的兜底诊断。只有已确认的结果可以进入
-回答上下文和引用；冲突或无法判定的结果必须只保留在诊断中。
-"""
+"""数值表格视觉校验在聊天路由中的证据边界回归测试。"""
 
 import os
 import sys
@@ -123,7 +119,7 @@ async def test_confirmed_visual_verification_is_added_to_answer_context_and_cita
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verdict", ["conflict", "indeterminate"])
-async def test_unconfirmed_visual_verification_stays_out_of_answer_context_and_citations(monkeypatch, verdict):
+async def test_unconfirmed_visual_verification_stays_out_of_evidence_and_citations(monkeypatch, verdict):
     retrieval_meta = _base_retrieval_meta()
 
     async def fake_verify(**_kwargs):
@@ -167,3 +163,15 @@ async def test_unconfirmed_visual_verification_stays_out_of_answer_context_and_c
     diagnostics = retrieval_meta["diagnostics"]["numeric_table_visual_verification"]
     assert diagnostics["visual_verdict"] == verdict
     assert diagnostics["reason"] == "visual_and_structured_evidence_disagree"
+
+    prompt_context = chat_routes._sync_numeric_table_prompt_context(
+        "原始上下文",
+        retrieval_meta,
+        query="Table 1 中 Ours 的 Accuracy 是多少？",
+        evidence_need=["numeric_table"],
+    )
+    if verdict == "conflict":
+        assert "数值答案安全约束" in prompt_context
+        assert "不要给出任何确定数值" in prompt_context
+    else:
+        assert "数值答案安全约束" not in prompt_context

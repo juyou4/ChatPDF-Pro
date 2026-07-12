@@ -11,6 +11,17 @@ from services.embedding_service import (
 )
 
 
+def _middle_table_block(table_html, bbox, *, lines_deleted=False):
+    body = {
+        "type": "table_body",
+        "bbox": bbox,
+        "lines": [{"spans": [{"type": "table", "bbox": bbox, "html": table_html}]}] if table_html else [],
+    }
+    if lines_deleted:
+        body["lines_deleted"] = True
+    return {"type": "table", "blocks": [body]}
+
+
 def test_normalize_mineru_content_list_without_middle_json_filters_artifacts():
     payload = {
         "content_list_json": [
@@ -152,6 +163,115 @@ def test_mineru_uses_explicit_cell_geometry_and_refuses_table_bbox_as_row_crop()
         }]
     })
     assert fallback["structured_table_bundles"][0]["evidence_units"][1]["visual_crop_eligible"] is False
+
+
+def test_mineru_middle_json_enriches_only_table_overview_geometry():
+    table_html = "<table><tr><td>Method</td><td>Score</td></tr><tr><td>A</td><td>90</td></tr></table>"
+    payload = {
+        "content_list_json": [{
+            "type": "table",
+            "page_idx": 0,
+            "table_body": table_html,
+        }],
+        "middle_json": {
+            "pdf_info": [{
+                "page_idx": 0,
+                "page_size": [2000, 1000],
+                "para_blocks": [_middle_table_block(table_html, [200, 100, 1800, 800])],
+            }],
+        },
+    }
+
+    normalized = normalize_mineru_for_rag(payload, page_sizes={1: [600, 800]})
+    bundle = normalized["structured_table_bundles"][0]
+
+    assert bundle["bounding_box"] == [100.0, 100.0, 900.0, 800.0]
+    assert bundle["visual_bbox"] == [60.0, 80.0, 540.0, 640.0]
+    assert bundle["table_geometry_source"] == "middle_json_table"
+    assert bundle["row_cell_geometry_available"] is False
+    assert all(row["visual_crop_eligible"] is False for row in bundle["evidence_units"])
+    assert all(
+        cell["visual_crop_eligible"] is False
+        for row in bundle["evidence_units"]
+        for cell in row["cell_evidence_units"]
+    )
+
+
+def test_mineru_middle_json_matches_same_page_tables_by_html_not_position():
+    table_a = "<table><tr><td>Method</td></tr><tr><td>A</td></tr></table>"
+    table_b = "<table><tr><td>Method</td></tr><tr><td>B</td></tr></table>"
+    payload = {
+        "content_list_json": [
+            {"type": "table", "page_idx": 0, "table_body": table_b},
+            {"type": "table", "page_idx": 0, "table_body": table_a},
+        ],
+        "middle_json": {
+            "pdf_info": [{
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    _middle_table_block(table_a, [50, 100, 450, 400]),
+                    _middle_table_block(table_b, [550, 100, 950, 400]),
+                ],
+            }],
+        },
+    }
+
+    bundles = normalize_mineru_for_rag(payload)["structured_table_bundles"]
+
+    assert bundles[0]["bounding_box"] == [550.0, 100.0, 950.0, 400.0]
+    assert bundles[1]["bounding_box"] == [50.0, 100.0, 450.0, 400.0]
+
+
+def test_mineru_middle_json_does_not_assign_bbox_to_an_unmatched_table():
+    content_table = "<table><tr><td>Method</td></tr><tr><td>A</td></tr></table>"
+    other_table = "<table><tr><td>Method</td></tr><tr><td>B</td></tr></table>"
+    payload = {
+        "content_list_json": [{"type": "table", "page_idx": 0, "table_body": content_table}],
+        "middle_json": {
+            "pdf_info": [{
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [_middle_table_block(other_table, [100, 100, 900, 500])],
+            }],
+        },
+    }
+
+    normalized = normalize_mineru_for_rag(payload)
+    bundle = normalized["structured_table_bundles"][0]
+
+    assert bundle["bounding_box"] == []
+    assert bundle["visual_bbox"] == []
+    assert any("middle_json_table_geometry_unmatched" in warning for warning in normalized["quality_report"]["warnings"])
+    assert all(row["visual_crop_eligible"] is False for row in bundle["evidence_units"])
+
+
+def test_mineru_middle_json_cross_page_merge_marks_bundle_as_multi_page():
+    merged_table = "<table><tr><td>Method</td><td>Score</td></tr><tr><td>A</td><td>90</td></tr><tr><td>B</td><td>91</td></tr></table>"
+    payload = {
+        "content_list_json": [{"type": "table", "page_idx": 0, "table_body": merged_table}],
+        "middle_json": {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [_middle_table_block(merged_table, [100, 100, 900, 900])],
+                },
+                {
+                    "page_idx": 1,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [_middle_table_block("", [100, 100, 900, 600], lines_deleted=True)],
+                },
+            ],
+        },
+    }
+
+    bundle = normalize_mineru_for_rag(payload)["structured_table_bundles"][0]
+
+    assert bundle["pages"] == [1, 2]
+    assert bundle["page_start"] == 1
+    assert bundle["page_end"] == 2
+    assert all(row["visual_crop_eligible"] is False for row in bundle["evidence_units"])
 
 
 def test_table_quality_gate_allows_escaped_pipe_inside_cells():

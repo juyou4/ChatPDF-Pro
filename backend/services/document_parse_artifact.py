@@ -11,6 +11,39 @@ from typing import Any
 DOCUMENT_PARSE_ARTIFACT_VERSION = 1
 
 
+def derive_table_geometry_capabilities(tables: list[dict] | None) -> dict[str, bool]:
+    """Describe geometry that is actually safe for visual table verification.
+
+    A table overview bbox is useful for inspection, but it does not prove where
+    a requested row or cell lives.  Keep those capabilities separate so parser
+    adapters cannot overstate crop precision.
+    """
+    has_overview = False
+    has_row = False
+    has_cell = False
+    for table in tables or []:
+        if not isinstance(table, dict):
+            continue
+        if _valid_bbox(table.get("visual_bbox")):
+            has_overview = True
+        for row in table.get("evidence_units") or []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("visual_crop_eligible") is True and _valid_bbox(row.get("visual_bbox")):
+                has_row = True
+            for cell in row.get("cell_evidence_units") or []:
+                if isinstance(cell, dict) and cell.get("visual_crop_eligible") is True and _valid_bbox(cell.get("visual_bbox")):
+                    has_cell = True
+    return {
+        # Retains the existing capability name for exact table evidence, rather
+        # than treating a table outline as a row/cell geometry guarantee.
+        "table_geometry": has_row or has_cell,
+        "table_overview_geometry": has_overview,
+        "table_row_geometry": has_row,
+        "table_cell_geometry": has_cell,
+    }
+
+
 def build_document_parse_artifact(
     *,
     doc_id: str,
@@ -85,3 +118,13 @@ def _artifact_source_hash(*, provider: str, provider_version: str, pages: list[d
 def _safe_path_part(value: Any, fallback: str) -> str:
     text = "".join(char for char in str(value or "") if char.isalnum() or char in {"-", "_", "."})
     return text[:128] or fallback
+
+
+def _valid_bbox(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return False
+    try:
+        x0, y0, x1, y1 = [float(item) for item in value[:4]]
+    except (TypeError, ValueError):
+        return False
+    return x1 > x0 and y1 > y0

@@ -321,7 +321,7 @@ def _build_table_evidence_units(
                 continue
 
             row_idx = _normalize_optional_int(row_obj.get("row number")) or _normalize_optional_int(row_obj.get("row idx")) or row_index
-            row_bbox = _normalize_bbox(row_obj.get("bounding box") or row_obj.get("bbox"))
+            explicit_row_bbox = _normalize_bbox(row_obj.get("bounding box") or row_obj.get("bbox"))
             cell_bboxes: list[list] = []
             cell_units: list[dict] = []
             cell_texts: list[str] = []
@@ -341,7 +341,8 @@ def _build_table_evidence_units(
                     coordinate_space="pdf_bottom_left_points",
                     page_size=page_size,
                 )
-                if cell_bbox:
+                cell_crop_eligible = bool(cell_geometry.get("visual_bbox"))
+                if cell_crop_eligible:
                     cell_bboxes.append(cell_bbox)
 
                 cell_row_idx = _normalize_optional_int(cell.get("row number")) or row_idx
@@ -370,6 +371,8 @@ def _build_table_evidence_units(
                     "bbox": cell_bbox,
                     "bounding_box": cell_bbox,
                     **cell_geometry,
+                    "geometry_source": "odl_cell" if cell_crop_eligible else "table_fallback",
+                    "visual_crop_eligible": cell_crop_eligible,
                     "cell_text": cell_text,
                     "content": cell_text,
                     "is_header_row": row_index <= header_depth,
@@ -377,11 +380,24 @@ def _build_table_evidence_units(
                 })
 
             row_text = " | ".join(text for text in cell_texts if text).strip()
-            row_bbox = row_bbox or _merge_bboxes(cell_bboxes) or table_bbox
+            explicit_row_geometry = visual_geometry(
+                explicit_row_bbox,
+                coordinate_space="pdf_bottom_left_points",
+                page_size=page_size,
+            )
+            cells_cover_row = bool(cell_units) and len(cell_bboxes) == len(cell_units)
+            inferred_row_bbox = _merge_bboxes(cell_bboxes) if cells_cover_row else []
+            row_bbox = (
+                explicit_row_bbox if explicit_row_geometry.get("visual_bbox")
+                else inferred_row_bbox or table_bbox
+            )
             row_geometry = visual_geometry(
                 row_bbox,
                 coordinate_space="pdf_bottom_left_points",
                 page_size=page_size,
+            )
+            row_crop_eligible = bool(explicit_row_geometry.get("visual_bbox")) or (
+                cells_cover_row and bool(row_geometry.get("visual_bbox"))
             )
             row_id = next((text for text in cell_texts if text), "")
             row_unit = {
@@ -398,6 +414,10 @@ def _build_table_evidence_units(
                 "bbox": row_bbox,
                 "bounding_box": row_bbox,
                 **row_geometry,
+                "geometry_source": "odl_row" if explicit_row_geometry.get("visual_bbox") else (
+                    "odl_cells_merged" if row_crop_eligible else "table_fallback"
+                ),
+                "visual_crop_eligible": row_crop_eligible,
                 "row_id": row_id,
                 "row_text": row_text,
                 "row_numbers": " ".join(text for text in cell_texts[1:] if text),
@@ -619,6 +639,16 @@ def _build_structured_table_bundles(elements: list, page_sizes: dict[int, list[f
             coordinate_space="pdf_bottom_left_points",
             page_size=page_sizes.get(pages[0], []) if pages else [],
         )
+        row_cell_geometry_available = any(
+            row.get("visual_crop_eligible") is True
+            or any(
+                cell.get("visual_crop_eligible") is True
+                for cell in row.get("cell_evidence_units") or []
+                if isinstance(cell, dict)
+            )
+            for row in evidence_units
+            if isinstance(row, dict)
+        )
         bundle = {
             "bundle_id": group_key,
             "evidence_unit_id": f"{group_key}::table_bundle",
@@ -635,6 +665,7 @@ def _build_structured_table_bundles(elements: list, page_sizes: dict[int, list[f
             "bounding_box": bboxes[0] if bboxes else [],
             "bounding_boxes": bboxes,
             **bundle_geometry,
+            "row_cell_geometry_available": row_cell_geometry_available,
             "source_ids": sorted(set(source_ids)),
             "previous_table_ids": sorted(set(previous_ids)),
             "next_table_ids": sorted(set(next_ids)),

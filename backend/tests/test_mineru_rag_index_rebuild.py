@@ -542,3 +542,42 @@ def test_rebuild_rejects_another_inflight_document_operation(isolated_document_r
             )
     finally:
         operation_lock.release()
+
+
+def test_startup_recovery_restores_all_rag_artifacts_before_marking_rolled_back(
+    monkeypatch,
+    isolated_document_routes,
+):
+    data_dir, _vectors_dir = isolated_document_routes
+    doc_id = "doc-recovery"
+    pending = data_dir / "rag_transactions" / "pending"
+    pending.mkdir(parents=True)
+    journal_path = pending / f"{doc_id}.json"
+    journal_path.write_text(
+        json.dumps({"doc_id": doc_id, "source": "pdf_native", "state": "document_swapped"}),
+        encoding="utf-8",
+    )
+    manifest = {"semantic_groups": {"backed_up": True}}
+    calls = []
+    monkeypatch.setattr(document_routes, "_load_complete_rag_backup_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(
+        document_routes,
+        "_restore_vector_index_backup",
+        lambda *_args: calls.append("vector") or {"restored": True},
+    )
+    monkeypatch.setattr(
+        document_routes,
+        "_restore_document_backup",
+        lambda *_args: calls.append("document") or {"restored": True},
+    )
+    monkeypatch.setattr(
+        document_routes,
+        "_restore_semantic_group_backup",
+        lambda *_args: calls.append("semantic") or {"restored": True},
+    )
+
+    recovered = document_routes.recover_pending_rag_transactions()
+
+    assert calls == ["vector", "document", "semantic"]
+    assert recovered[0]["state"] == "rolled_back"
+    assert json.loads(journal_path.read_text(encoding="utf-8"))["state"] == "rolled_back"

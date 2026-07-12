@@ -4,10 +4,13 @@ import math
 import os
 import pickle
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter, OrderedDict
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
@@ -31,7 +34,11 @@ from runtime_mode import runtime
 from services.formula_text import build_formula_alias_text, formula_term_matches, looks_formula_like
 from services.rag_config import should_apply_numeric_table_specialization
 from services.rerank_service import rerank_service
-from services.semantic_group_store import semantic_group_paths
+from services.semantic_group_store import (
+    publish_generation,
+    semantic_group_paths,
+    validate_semantic_group_artifacts,
+)
 from services.table_visual_metadata import build_table_visual_metadata
 
 logger = logging.getLogger(__name__)
@@ -9172,7 +9179,18 @@ def _build_semantic_group_index_async(
 
     def _task():
         try:
-            _build_semantic_group_index(doc_id, chunks, pages, embed_fn, api_key, model=model, provider=provider, endpoint=endpoint, output_dir=output_dir)
+            _build_semantic_group_index(
+                doc_id,
+                chunks,
+                pages,
+                embed_fn,
+                api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+                output_dir=output_dir,
+                raise_on_error=raise_on_error,
+            )
         except Exception as e:
             # 任务失败时记录日志（需求 6.4），不影响主流程
             logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
@@ -9194,6 +9212,7 @@ def _build_semantic_group_index(
     provider: str = "openai",
     endpoint: str = "",
     output_dir: str | None = None,
+    raise_on_error: bool = False,
 ):
     """在分块索引构建完成后，生成语义意群并构建意群级别向量索引
 
@@ -9219,8 +9238,9 @@ def _build_semantic_group_index(
     # 检查是否启用语义意群功能
     if not config.enable_semantic_groups:
         logger.info(f"[{doc_id}] 语义意群功能已禁用，跳过意群生成")
-        return
+        return {"status": "disabled", "group_count": 0, "paths": []}
 
+    staged_dir = ""
     try:
         logger.info(f"[{doc_id}] 开始生成语义意群...")
 
@@ -9250,8 +9270,17 @@ def _build_semantic_group_index(
 
         logger.info(f"[{doc_id}] 生成了 {len(groups)} 个语义意群")
 
-        # 确定意群数据存储目录
-        groups_store_dir = output_dir or _get_semantic_groups_dir()
+        # Transactional callers supply their own staging directory. Ordinary
+        # background writes also stage first, then atomically switch active.
+        publish_active_generation = output_dir is None
+        semantic_root = _get_semantic_groups_dir()
+        if publish_active_generation:
+            staging_root = os.path.join(semantic_root, "_tmp")
+            os.makedirs(staging_root, exist_ok=True)
+            staged_dir = tempfile.mkdtemp(prefix=f"{doc_id}.", dir=staging_root)
+            groups_store_dir = staged_dir
+        else:
+            groups_store_dir = output_dir
         os.makedirs(groups_store_dir, exist_ok=True)
 
         # 保存意群数据为 JSON
@@ -9287,6 +9316,18 @@ def _build_semantic_group_index(
                 f"index={group_index_path}, meta={group_meta_path}, "
                 f"共 {len(groups)} 个意群"
             )
+        if publish_active_generation:
+            artifact_paths = {
+                "json": Path(groups_store_dir) / f"{doc_id}.json",
+                "index": Path(groups_store_dir) / f"{doc_id}_groups.index",
+                "pkl": Path(groups_store_dir) / f"{doc_id}_groups.pkl",
+            }
+            validation = validate_semantic_group_artifacts(artifact_paths, doc_id)
+            if not validation["valid"]:
+                raise RuntimeError("semantic groups validation failed: " + ", ".join(validation["errors"]))
+            published = publish_generation(semantic_root, doc_id, groups_store_dir)
+            paths = list(published["paths"].values())
+            staged_dir = ""
         return {"status": "ready", "group_count": len(groups), "paths": paths}
 
     except Exception as e:
@@ -9295,6 +9336,9 @@ def _build_semantic_group_index(
         if raise_on_error:
             raise
         return {"status": "failed", "group_count": 0, "paths": [], "error": str(e)}
+    finally:
+        if staged_dir:
+            shutil.rmtree(staged_dir, ignore_errors=True)
 
 
 def _derive_chunk_pages(chunks: List[str], pages: List[dict]) -> List[int]:

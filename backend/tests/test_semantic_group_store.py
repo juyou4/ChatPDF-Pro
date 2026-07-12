@@ -1,10 +1,16 @@
+import json
+import pickle
 from pathlib import Path
+
+import faiss
+import numpy as np
 
 from services.semantic_group_store import (
     active_manifest_path,
     deactivate_generation,
     publish_generation,
     semantic_group_paths,
+    validate_semantic_group_artifacts,
 )
 
 
@@ -67,3 +73,30 @@ def test_deactivate_removes_pointer_but_keeps_generation_history(tmp_path: Path)
     assert result["deactivated"] is True
     assert active_path.exists()
     assert not active_manifest_path(root, doc_id).exists()
+
+
+def test_validation_requires_readable_and_consistent_semantic_artifacts(tmp_path: Path):
+    doc_id = "doc-validated"
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    paths = {
+        "json": stage / f"{doc_id}.json",
+        "index": stage / f"{doc_id}_groups.index",
+        "pkl": stage / f"{doc_id}_groups.pkl",
+    }
+    paths["json"].write_text(
+        json.dumps({"doc_id": doc_id, "groups": [{"group_id": "g-1"}]}),
+        encoding="utf-8",
+    )
+    with open(paths["pkl"], "wb") as handle:
+        pickle.dump({"digest_texts": ["digest"], "group_ids": ["g-1"]}, handle)
+    index = faiss.IndexFlatL2(2)
+    index.add(np.array([[0.1, 0.2]], dtype="float32"))
+    faiss.write_index(index, str(paths["index"]))
+
+    assert validate_semantic_group_artifacts(paths, doc_id)["valid"] is True
+
+    paths["index"].write_bytes(b"not-a-faiss-index")
+    result = validate_semantic_group_artifacts(paths, doc_id)
+    assert result["valid"] is False
+    assert any(error.startswith("groups_faiss_unreadable") for error in result["errors"])

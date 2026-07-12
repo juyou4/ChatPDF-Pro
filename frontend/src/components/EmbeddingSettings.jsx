@@ -13,7 +13,7 @@ import {
   Settings,
   Shield,
   Trash2,
-  X,
+  ChevronLeft,
   Box, Edit3, Link2, Play, ChevronRight, CheckSquare, Sparkles, Cloud, Moon, Fish, Cpu, MessageSquare, Zap, Settings2
 } from 'lucide-react'
 
@@ -30,7 +30,7 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
       value={value}
       onChange={onChange}
       disabled={disabled}
-      className={`w-full bg-white/50 backdrop-blur-md border border-white/60 rounded-[16px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/40 focus:bg-white/80 transition-all shadow-[0_4px_12px_rgba(0,0,0,0.02)] ${Icon ? 'pl-10 pr-4 py-3' : 'px-4 py-3'} ${disabled ? 'opacity-60 cursor-not-allowed' : ''} ${props.className || ''}`}
+      className={`w-full bg-white border border-gray-200 rounded-[14px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 focus:border-[#7c4dff]/50 transition-colors ${Icon ? 'pl-10 pr-4 py-3' : 'px-4 py-3'} ${disabled ? 'opacity-60 cursor-not-allowed bg-gray-100' : ''} ${props.className || ''}`}
       {...props}
     />
   </div>
@@ -39,7 +39,7 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
 const Tag = ({ text, active, onClick }) => (
   <span 
     onClick={onClick}
-    className={`${active ? 'bg-[#7c4dff]/10 text-[#7c4dff] border-[#7c4dff]/30' : 'bg-white/50 text-gray-600 border-white/60 hover:bg-white/80'} backdrop-blur-sm border text-[12px] font-semibold px-3.5 py-1.5 rounded-[12px] cursor-pointer transition-all shadow-sm hover:shadow-md hover:-translate-y-0.5`}
+    className={`${active ? 'bg-[#f1effb] text-[#6f58cf] border-[#cfc6f4]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
   >
     {text}
   </span>
@@ -50,8 +50,8 @@ const ProviderItem = ({ provider, isActive, onClick }) => (
     onClick={onClick}
     className={`flex items-center p-3 rounded-[20px] transition-all duration-300 cursor-pointer ${
     isActive 
-      ? 'bg-white shadow-[0_8px_20px_rgba(124,77,255,0.15)] border border-[#7c4dff]/40 translate-x-1' 
-      : 'bg-white/70 hover:bg-white shadow-[0_4px_12px_rgba(0,0,0,0.04)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] border border-white/60 hover:-translate-y-0.5'
+      ? 'bg-white shadow-[0_8px_20px_-12px_rgba(124,77,255,0.45)] border border-[#b7a9ee]'
+      : 'bg-white hover:bg-gray-50 shadow-sm border border-gray-200 hover:border-gray-300'
   }`}>
     <div className={`w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-gray-50 border border-gray-100 overflow-hidden`}>
       <ProviderAvatar providerId={provider.id} size={24} />
@@ -162,7 +162,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     image: { label: 'Image 图像' }
   }
   const GLASS_CARD_CLASS = 'soft-card'
-  const RADIUS_CLASS = 'rounded-[32px]'
+  const RADIUS_CLASS = 'rounded-[18px]'
 
   const activeProvider = useMemo(
     () => providers.find(p => p.id === activeProviderId) || providers[0] || null,
@@ -444,38 +444,34 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-[#e8ebf2]/90 backdrop-blur-sm p-6 font-sans overflow-hidden"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/25 p-3 sm:p-6 font-sans overflow-hidden"
           >
-            {/* Background Decorative Blobs for Glassmorphism */}
-            <div className="absolute top-[-5%] left-[10%] w-[600px] h-[600px] bg-purple-200/50 rounded-full mix-blend-multiply filter blur-[100px] opacity-70 animate-blob pointer-events-none"></div>
-            <div className="absolute bottom-[-10%] right-[10%] w-[500px] h-[500px] bg-blue-100/50 rounded-full mix-blend-multiply filter blur-[100px] opacity-70 animate-blob animation-delay-2000 pointer-events-none"></div>
-
             <motion.div
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
               transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-              className="w-full max-w-[1150px] h-[85vh] min-h-[600px] bg-white/40 backdrop-blur-2xl rounded-[36px] p-5 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] border border-white/70 relative z-10 flex flex-col"
+              className="settings-solid settings-shell w-full max-w-[1150px] h-[92vh] min-h-0 bg-[#f6f7f9] p-4 sm:p-5 border border-white/80 relative z-10 flex flex-col"
             >
-              {/* Header with Close Button */}
-              <div className="flex justify-between items-center mb-4 px-2">
+              {/* Header */}
+              <div className="flex items-center mb-4 px-2">
                 <div className="flex items-center gap-2">
-                  <div className="p-2 rounded-xl bg-white/60 text-[#7c4dff] shadow-sm">
+                  <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white hover:bg-gray-100 rounded-[12px] border border-gray-200 transition-colors text-gray-600" title="返回设置中心" aria-label="返回设置中心">
+                    <ChevronLeft size={18} />
+                  </button>
+                  <div className="p-2 rounded-[12px] bg-[#ece9fb] text-[#7c4dff]">
                     <Settings2 className="w-5 h-5" />
                   </div>
                   <div>
                     <h2 className="text-[18px] font-bold text-gray-900">模型服务管理</h2>
                   </div>
                 </div>
-                <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white/50 hover:bg-white rounded-full border border-white/60 transition-colors shadow-sm text-gray-600">
-                  <X size={18} />
-                </button>
               </div>
 
               {/* Main Content Area */}
-              <div className="flex gap-5 flex-1 min-h-0 overflow-hidden pb-2">
+              <div className="flex flex-col lg:flex-row gap-4 flex-1 min-h-0 overflow-y-auto lg:overflow-hidden pb-2">
                 {/* Left Column: Sidebar */}
-                <div className="w-[240px] flex flex-col gap-4 shrink-0">
+                <div className="w-full lg:w-[220px] flex flex-col gap-4 shrink-0 min-h-[220px] lg:min-h-0">
                   {/* Search Bar */}
                   <div className="relative">
                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
@@ -484,7 +480,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       value={providerSearch}
                       onChange={(e) => setProviderSearch(e.target.value)}
                       placeholder="搜索模型平台..." 
-                      className="w-full bg-white/60 backdrop-blur-md border border-white/50 rounded-[18px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/30 shadow-sm"
+                      className="w-full bg-white border border-gray-200 rounded-[14px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 focus:border-[#7c4dff]/50"
                     />
                   </div>
 
@@ -499,10 +495,10 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       />
                     ))}
 
-                    <div className="mt-4 pt-2 border-t border-white/40">
+                    <div className="mt-4 pt-3 border-t border-gray-200">
                       <div 
                         onClick={() => setCustomProviderFormOpen(!customProviderFormOpen)}
-                        className={`flex items-center p-3 rounded-[20px] transition-all duration-300 cursor-pointer bg-white/50 hover:bg-white/80 shadow-sm border border-white/60`}
+                        className="flex items-center p-3 rounded-[16px] transition-colors cursor-pointer bg-white hover:bg-gray-50 shadow-sm border border-gray-200"
                       >
                         <div className="w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-[#7c4dff] text-white">
                           <Settings2 size={20} />
@@ -522,7 +518,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                             exit={{ height: 0, opacity: 0 }}
                             className="overflow-hidden mt-2"
                           >
-                            <div className="p-4 rounded-[24px] bg-white/60 border border-white/60 space-y-3 shadow-sm">
+                            <div className="p-4 rounded-[16px] bg-white border border-gray-200 space-y-3 shadow-sm">
                               <GlassInput 
                                 placeholder="Provider ID (如 my-openai)" 
                                 value={customProviderForm.id}
@@ -567,9 +563,9 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                 </div>
 
                 {/* Middle Column: Configuration */}
-                <div className="flex flex-col gap-4 min-w-[340px] flex-1 overflow-y-auto custom-scrollbar pr-2 pb-2">
+                <div className="flex flex-col gap-4 min-w-0 w-full flex-1 overflow-visible lg:overflow-y-auto custom-scrollbar lg:pr-2 pb-2">
                   {/* Header Card */}
-                  <div className="bg-white/70 backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex justify-between items-center shrink-0">
+                  <div className="settings-card bg-white p-5 border border-gray-200/90 flex justify-between items-center shrink-0">
                     <div className="flex items-center space-x-4">
                       <div className="w-12 h-12 bg-white rounded-[16px] flex items-center justify-center shadow-sm border border-gray-100 overflow-hidden">
                         <ProviderAvatar providerId={activeProvider?.id} size={32} />
@@ -580,7 +576,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       </div>
                     </div>
                     <div className="flex items-center space-x-4">
-                      <label className="flex items-center space-x-2 bg-white/50 px-3 py-1.5 rounded-full border border-white/60 cursor-pointer hover:bg-white transition-colors">
+                      <label className="flex items-center space-x-2 bg-gray-50 px-3 py-1.5 rounded-[12px] border border-gray-200 cursor-pointer hover:bg-gray-100 transition-colors">
                         <input
                           type="checkbox"
                           checked={!!activeProvider?.enabled}
@@ -595,7 +591,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   </div>
 
                   {/* API Settings Card */}
-                  <div className="bg-white/60 backdrop-blur-xl rounded-[28px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 space-y-4 shrink-0">
+                  <div className="settings-card bg-white p-6 border border-gray-200/90 space-y-4 shrink-0">
                     <div className="space-y-1.5">
                       <label className="text-[13px] font-bold text-gray-700 ml-1">API Key</label>
                       <GlassInput 
@@ -619,16 +615,15 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       <button 
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="flex-1 bg-[#7c4dff] hover:bg-[#6836f5] disabled:opacity-70 disabled:hover:bg-[#7c4dff] transition-all duration-300 text-white text-[14px] font-bold py-3.5 rounded-[20px] shadow-[0_8px_24px_rgba(124,77,255,0.35)] hover:shadow-[0_12px_32px_rgba(124,77,255,0.45)] hover:-translate-y-0.5 flex items-center justify-center gap-2 group relative overflow-hidden"
+                        className="flex-1 bg-[#7c4dff] hover:bg-[#6836f5] disabled:opacity-70 disabled:hover:bg-[#7c4dff] transition-colors text-white text-[14px] font-bold py-3 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(124,77,255,0.55)] flex items-center justify-center gap-2"
                       >
                         {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-white" />}
-                        <span className="relative z-10">测试连接</span>
-                        <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
+                        <span>测试连接</span>
                       </button>
                       <button 
                         onClick={handleSyncModels}
                         disabled={!activeProvider || isFetching}
-                        className="flex-1 bg-white hover:bg-white/90 disabled:opacity-70 transition-all duration-300 text-gray-700 text-[14px] font-bold py-3.5 rounded-[20px] shadow-sm hover:shadow-md border border-white flex items-center justify-center gap-2 hover:-translate-y-0.5"
+                        className="flex-1 bg-white hover:bg-gray-50 disabled:opacity-70 transition-colors text-gray-700 text-[14px] font-bold py-3 rounded-[14px] border border-gray-200 flex items-center justify-center gap-2"
                       >
                         <RefreshCw size={16} className={isFetching ? "animate-spin" : ""} />
                         {isFetching ? '同步中...' : '同步模型'}
@@ -651,7 +646,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   </div>
 
                   {/* Add Model Card */}
-                  <div className="bg-white/60 backdrop-blur-xl rounded-[28px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex flex-col flex-1 shrink-0">
+                  <div className="settings-card bg-white p-6 border border-gray-200/90 flex flex-col flex-1 shrink-0">
                     <h3 className="text-[15px] font-bold text-gray-900 mb-4 shrink-0">手动新增模型</h3>
                     <div className="space-y-4 pr-2">
                       <div className="flex gap-4 shrink-0">
@@ -664,7 +659,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                         </div>
                         <div className="flex-1 relative">
                           <select 
-                            className="w-full bg-white/50 backdrop-blur-md border border-white/60 rounded-[16px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/40 appearance-none shadow-sm cursor-pointer"
+                            className="w-full bg-white border border-gray-200 rounded-[14px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 appearance-none cursor-pointer"
                             value={addModelForm.type}
                             onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
                           >
@@ -708,11 +703,10 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                     <div className="pt-4 shrink-0">
                       <button 
                         onClick={handleAddModel}
-                        className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-all duration-300 text-white text-[14px] font-bold py-3.5 rounded-[20px] shadow-[0_8px_24px_rgba(124,77,255,0.35)] hover:-translate-y-0.5 flex items-center justify-center gap-2 group relative overflow-hidden"
+                        className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-colors text-white text-[14px] font-bold py-3 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(124,77,255,0.55)] flex items-center justify-center gap-2"
                       >
                         <Plus size={18} />
-                        <span className="relative z-10">保存模型</span>
-                        <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
+                        <span>保存模型</span>
                       </button>
                       {addSuccess && (
                         <div className="mt-2 text-center text-[12px] text-green-600 font-medium animate-pulse">
@@ -724,7 +718,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                 </div>
 
                 {/* Right Column: Model List */}
-                <div className="w-[360px] bg-white/50 backdrop-blur-xl rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-white/60 flex flex-col shrink-0">
+                <div className="settings-card w-full lg:w-[340px] min-h-[360px] bg-white p-5 border border-gray-200/90 flex flex-col shrink-0">
                   <h3 className="text-[16px] font-bold text-gray-900 mt-2">模型列表</h3>
                   <p className="text-[12px] text-gray-500 font-medium mt-1 mb-4">按类型分组: 对话 / 嵌入 / 重排</p>
                   
@@ -742,12 +736,12 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       })();
                       
                       return (
-                        <div key={type} className="bg-white/70 backdrop-blur-md rounded-[20px] border border-gray-200/60 shadow-[0_4px_16px_rgba(0,0,0,0.06)] overflow-hidden">
+                        <div key={type} className="bg-white rounded-[16px] border border-gray-200 shadow-sm overflow-hidden">
                           <button
                             type="button"
                             aria-expanded={!isCollapsed}
                             onClick={() => toggleCollapse(type)}
-                            className="w-full px-4 py-3 flex items-center justify-between hover:bg-white/50 transition-colors focus:outline-none"
+                            className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors focus:outline-none"
                           >
                             <div className="flex items-center gap-2 shrink-0">
                               {type === 'chat' && <MessageSquare size={16} className="text-[#7c4dff]" />}
@@ -775,7 +769,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                               >
                                 <div className="p-2 pt-0 space-y-1">
                                   {list.map(model => (
-                                      <div key={model.id} className={`bg-white/60 hover:bg-white rounded-[16px] p-2.5 flex items-center justify-between border ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'border-green-300' : 'border-transparent'} cursor-pointer transition-all hover:shadow-sm group`}>
+                                      <div key={model.id} className={`bg-gray-50 hover:bg-gray-100 rounded-[14px] p-2.5 flex items-center justify-between border ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'border-green-300' : 'border-gray-100'} cursor-pointer transition-colors group`}>
                                         <div className="flex items-center space-x-2.5 overflow-hidden min-w-0 flex-1">
                                           <div className="w-8 h-8 rounded-[10px] bg-white flex items-center justify-center shrink-0 border border-gray-100 shadow-sm">
                                             <ProviderAvatar providerId={getIconProviderId(model)} size={20} />
@@ -823,7 +817,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                     })}
                     
                     {(!modelsByType || Object.keys(modelsByType).length === 0) && (
-                      <div className="text-center text-sm text-gray-500 py-8 bg-white/40 rounded-[20px] border border-dashed border-gray-300">
+                      <div className="text-center text-sm text-gray-500 py-8 bg-gray-50 rounded-[16px] border border-dashed border-gray-300">
                         暂无模型
                       </div>
                     )}
@@ -873,8 +867,8 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
   } catch (err) {
     console.error('EmbeddingSettings render error', err)
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#e8ebf2]/90 backdrop-blur-sm p-4 font-sans">
-        <div className="bg-white/80 backdrop-blur-xl border border-white/60 rounded-[28px] shadow-2xl p-6 max-w-lg w-full">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/25 p-4 font-sans">
+        <div className="settings-solid settings-shell bg-white border border-white/80 p-6 max-w-lg w-full">
           <div className="text-lg font-bold text-gray-900 mb-2">模型服务管理加载失败</div>
           <div className="text-sm text-gray-600 mb-4 bg-red-50 p-3 rounded-xl border border-red-100">{err?.message || '未知错误'}</div>
           <button

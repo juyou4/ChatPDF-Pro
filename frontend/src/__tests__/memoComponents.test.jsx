@@ -68,6 +68,7 @@ vi.mock('lucide-react', () => ({
   ChevronRight: () => <span>→</span>,
   ZoomIn: () => <span>+</span>,
   ZoomOut: () => <span>-</span>,
+  FileText: () => <span>file</span>,
 }));
 
 // Mock framer-motion

@@ -2177,7 +2177,26 @@ def _sync_numeric_table_prompt_context(
     graph_marker = "\n\n## 知识图谱关联信息"
     if graph_marker in str(context or ""):
         graph_suffix = str(context)[str(context).index(graph_marker):]
-    return f"根据用户问题检索到的相关文档片段：\n\n{formatted}\n\n{graph_suffix}"
+    safety_guard = _numeric_table_visual_conflict_guard(retrieval_meta)
+    return f"根据用户问题检索到的相关文档片段：\n\n{formatted}{safety_guard}\n\n{graph_suffix}"
+
+
+def _numeric_table_visual_conflict_guard(retrieval_meta: dict) -> str:
+    diagnostics = retrieval_meta.get("diagnostics") if isinstance(retrieval_meta, dict) else {}
+    visual = diagnostics.get("numeric_table_visual_verification") if isinstance(diagnostics, dict) else {}
+    verdict = str(
+        (visual or {}).get("visual_verdict")
+        or (visual or {}).get("verdict")
+        or (visual or {}).get("state")
+        or ""
+    ).strip().lower()
+    if verdict != "conflict":
+        return ""
+    return (
+        "\n\n[数值答案安全约束]\n"
+        "表格视觉核验与结构化文字证据发生冲突。不要给出任何确定数值、"
+        "不要猜测校正值；应明确说明当前证据冲突，并建议查看原始表格或重新解析文档。"
+    )
 
 
 def _is_numeric_table_visual_verification_segment(segment: dict) -> bool:
@@ -2314,7 +2333,9 @@ def _should_background_numeric_table_visual_verification(request: ChatRequest) -
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
             return bool(value)
-    value = os.getenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "true")
+    # A late conflict cannot safely retract an already-streamed numeric answer.
+    # Operators can still opt into background mode where latency matters more.
+    value = os.getenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "false")
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 

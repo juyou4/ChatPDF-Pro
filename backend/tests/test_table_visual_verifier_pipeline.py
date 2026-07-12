@@ -83,22 +83,57 @@ def test_schema_and_structured_cell_cross_check_return_all_verdicts():
         "table_id": "Table 1",
         "matched_row": "Ours",
         "cells": {"Accuracy": "91.2"},
-        "confidence": 0.01,
+        "confidence": 0.9,
     }))
     conflict = verifier._parse_visual_response(json.dumps({
         "table_id": "Table 1",
         "matched_row": "Ours",
         "cells": {"Accuracy": "89.0"},
+        "confidence": 0.9,
     }))
     indeterminate = verifier._parse_visual_response(json.dumps({
         "table_id": "Table 1",
         "matched_row": "Ours",
         "cells": {"F1": "89.0"},
+        "confidence": 0.9,
     }))
 
     assert confirmed is not None and verifier._evaluate_visual_result(confirmed, target, "ID Ours Accuracy")[0] == "confirmed"
     assert conflict is not None and verifier._evaluate_visual_result(conflict, target, "ID Ours Accuracy")[0] == "conflict"
     assert indeterminate is not None and verifier._evaluate_visual_result(indeterminate, target, "ID Ours Accuracy")[0] == "indeterminate"
+
+
+def test_low_confidence_visual_result_is_indeterminate_even_when_cells_match():
+    target = verifier._target_from_record(_bundle(), origin="bundle")
+    target.update({"requested_rows": ["ours"], "requested_columns": ["Accuracy"]})
+    target["selected_row"] = target["evidence_units"][0]
+    verifier._ensure_target_metadata(target)
+    parsed = verifier._parse_visual_response(json.dumps({
+        "table_id": "Table 1",
+        "matched_row": "Ours",
+        "cells": {"Accuracy": "91.2"},
+        "confidence": 0.74,
+    }))
+
+    assert parsed is not None
+    verdict, details = verifier._evaluate_visual_result(parsed, target, "ID Ours Accuracy")
+    assert verdict == "indeterminate"
+    assert details["reason"] == "confidence_below_threshold"
+    assert details["minimum_confidence"] == 0.75
+
+
+def test_visual_prompt_does_not_include_retrieved_text_values():
+    target = verifier._target_from_record(_bundle(), origin="bundle")
+    target.update({"requested_rows": ["ours"], "requested_columns": ["Accuracy"]})
+
+    prompt = verifier._build_visual_prompt(
+        "Table 1 中 ID Ours 的 Accuracy 是多少？",
+        target,
+        [{"text": "Retrieved answer candidate: Ours | Accuracy | 91.2"}],
+    )
+
+    assert "91.2" not in prompt
+    assert "Retrieved answer candidate" not in prompt
 
 
 def test_confirmed_visual_segment_only_contains_evidence_aligned_cells():
@@ -110,6 +145,7 @@ def test_confirmed_visual_segment_only_contains_evidence_aligned_cells():
         "table_id": "Table 1",
         "matched_row": "Ours",
         "cells": {"Accuracy": "91.2", "Unrelated": "should-not-enter-context"},
+        "confidence": 0.9,
     }))
 
     assert parsed is not None
@@ -138,10 +174,15 @@ def test_requested_columns_must_all_be_verified_and_text_capability_must_agree()
     target["selected_row"] = target["evidence_units"][0]
     verifier._ensure_target_metadata(target)
 
-    partial = verifier._parse_visual_response(json.dumps({"matched_row": "Ours", "cells": {"Accuracy": "91.2"}}))
+    partial = verifier._parse_visual_response(json.dumps({
+        "matched_row": "Ours",
+        "cells": {"Accuracy": "91.2"},
+        "confidence": 0.9,
+    }))
     unsupported = verifier._parse_visual_response(json.dumps({
         "matched_row": "Ours",
         "cells": {"Accuracy": "91.2", "F1": "88.1"},
+        "confidence": 0.9,
         "supports_text_result": False,
     }))
 
@@ -237,7 +278,7 @@ async def test_sync_verification_uses_overview_header_and_target_row_crops(monke
                 "table_id": "Table 1",
                 "matched_row": "Ours",
                 "cells": {"Accuracy": "91.2"},
-                "confidence": 0.02,
+                "confidence": 0.9,
             })}}],
             "_used_provider": "openai",
             "_used_model": "gpt-4o",
@@ -284,6 +325,7 @@ async def test_background_task_persists_queued_then_terminal_status(monkeypatch,
                 "table_id": "Table 1",
                 "matched_row": "Ours",
                 "cells": {"Accuracy": "91.2"},
+                "confidence": 0.9,
             })}}],
         }
 
