@@ -126,7 +126,7 @@ export default function EmbeddingModelSelector() {
                                                 return (
                                                     <motion.button
                                                         key={model.id}
-                                                        whileHover={{ backgroundColor: 'rgba(136, 113, 228, 0.05)' }}
+                                                        whileHover={{ backgroundColor: 'rgba(237, 140, 104, 0.05)' }}
                                                         onClick={() => {
                                                             setDefaultModel('embeddingModel', `${provider.id}:${model.id}`)
                                                             setIsOpen(false)
@@ -166,9 +166,9 @@ export default function EmbeddingModelSelector() {
                                                                 <motion.div
                                                                     initial={{ scale: 0 }}
                                                                     animate={{ scale: 1 }}
-                                                                    className="w-6 h-6 bg-purple-500 rounded-full flex items-center justify-center flex-shrink-0"
+                                                                    className="accent-control w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
                                                                 >
-                                                                    <Check className="w-4 h-4 text-white" />
+                                                                    <Check className="w-4 h-4 text-[#B85F47]" />
                                                                 </motion.div>
                                                             )}
                                                         </div>

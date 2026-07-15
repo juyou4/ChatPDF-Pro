@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ChevronLeft, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2, Code, MessageSquare, Type, Sigma } from 'lucide-react';
 import { useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from '../contexts/ChatParamsContext';
 import { motion, AnimatePresence } from 'framer-motion';
+import SettingsSegmentedControl from './SettingsSegmentedControl';
 
 /**
  * 对话设置面板
@@ -64,12 +65,12 @@ const ChatSettings = ({ isOpen, onClose }) => {
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* 头部 */}
-                    <div className="flex items-center px-6 py-5 sticky top-0 bg-[#f6f7f9] border-b border-gray-200 z-10">
+                    <div className="settings-chrome flex items-center px-6 py-5 sticky top-0 border-b border-gray-200 z-10">
                         <div className="flex items-center gap-3">
                             <button onClick={onClose} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors" title="返回设置中心" aria-label="返回设置中心">
                                 <ChevronLeft className="w-5 h-5" />
                             </button>
-                            <div className="w-10 h-10 bg-purple-100 rounded-[14px] flex items-center justify-center text-purple-600">
+                            <div className="w-10 h-10 bg-[#FFF4EF] rounded-[14px] border border-[#FFDCCF] flex items-center justify-center text-[#B85F47]">
                                 <SlidersHorizontal className="w-5 h-5" />
                             </div>
                             <div>
@@ -119,25 +120,16 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                     <span className="text-[14px] font-medium text-gray-800">回答详细度</span>
                                     <Tooltip text="控制回答展开程度。建议与最大 Token 数配合使用" />
                                 </div>
-                                <div className="flex p-1 bg-gray-50/80 rounded-[14px] border border-gray-100/50">
-                                    {[
+                                <SettingsSegmentedControl
+                                    ariaLabel="回答详细度"
+                                    value={answerDetailLevel}
+                                    onChange={setAnswerDetailLevel}
+                                    options={[
                                         { value: 'concise', label: '简洁' },
                                         { value: 'standard', label: '标准' },
                                         { value: 'detailed', label: '详细' },
-                                    ].map((item) => (
-                                        <button
-                                            key={item.value}
-                                            onClick={() => setAnswerDetailLevel(item.value)}
-                                            className={`flex-1 py-1.5 text-sm font-medium rounded-xl transition-all ${
-                                                answerDetailLevel === item.value
-                                                    ? 'bg-[#8871e4] text-white shadow-sm'
-                                                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                                            }`}
-                                        >
-                                            {item.label}
-                                        </button>
-                                    ))}
-                                </div>
+                                    ]}
+                                />
                             </div>
 
                             {/* 流式输出 */}
@@ -160,7 +152,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                 </div>
                                 <button
                                     onClick={addCustomParam}
-                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-[#8871e4] bg-[#8871e4]/10 hover:bg-[#8871e4]/20 rounded-xl transition-colors"
+                                    className="accent-surface flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-xl transition-colors"
                                 >
                                     <Plus className="w-3.5 h-3.5" /> 添加参数
                                 </button>
@@ -201,18 +193,18 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                     <div className="flex items-center gap-2">
                                         <span className="text-[14px] font-medium text-gray-800">发送快捷键</span>
                                     </div>
-                                    <div className="flex gap-1 bg-gray-50/80 p-1 rounded-xl border border-gray-100/50">
-                                        {['Enter', 'Ctrl+Enter'].map((key) => (
-                                            <button
-                                                key={key} onClick={() => setSendShortcut(key)}
-                                                className={`px-3 py-1 text-[13px] font-medium rounded-[10px] transition-all ${
-                                                    sendShortcut === key ? 'bg-[#8871e4] text-white shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white'
-                                                }`}
-                                            >
-                                                {key}
-                                            </button>
-                                        ))}
-                                    </div>
+                                    <SettingsSegmentedControl
+                                        ariaLabel="发送快捷键"
+                                        value={sendShortcut}
+                                        onChange={setSendShortcut}
+                                        options={[
+                                            { value: 'Enter', label: 'Enter' },
+                                            { value: 'Ctrl+Enter', label: 'Ctrl+Enter' },
+                                        ]}
+                                        className="w-[180px] rounded-xl"
+                                        buttonClassName="px-2 py-1 text-[13px] font-medium text-center rounded-[9px]"
+                                        indicatorClassName="rounded-[9px]"
+                                    />
                                 </div>
 
                                 <div className="flex items-center justify-between">
@@ -279,7 +271,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
 
                     </div>
                     {/* 底部重置按钮 - 悬浮在底部 */}
-                    <div className="p-4 bg-gradient-to-t from-[#fbfbfc] to-[#fbfbfc]/80 border-t border-gray-100/50 flex justify-center">
+                    <div className="settings-chrome p-4 border-t border-gray-200 flex justify-center">
                         <button
                             onClick={() => { if (confirm('确定要重置所有对话参数为默认值吗？')) resetChatSettings(); }}
                             className="w-full flex items-center justify-center gap-2 py-2.5 text-[13px] font-medium text-gray-500 hover:text-red-500 hover:bg-red-50/50 rounded-2xl transition-all"
@@ -311,7 +303,7 @@ const Tooltip = ({ text }) => (
 const ToggleSwitch = ({ checked, onChange }) => (
     <button
         onClick={() => onChange(!checked)}
-        className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none ${checked ? 'bg-[#8871e4]' : 'bg-gray-200'}`}
+        className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none ${checked ? 'accent-control' : 'bg-gray-200'}`}
     >
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>
@@ -341,7 +333,7 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
         <input
             type="text" value={localValue} onChange={(e) => setLocalValue(e.target.value)} onBlur={handleBlur} disabled={disabled}
             className={`w-full text-center text-[13px] font-medium border rounded-[12px] px-2 py-1 outline-none transition-colors
-                ${disabled ? 'bg-gray-50 text-gray-400 border-transparent cursor-not-allowed' : 'bg-white text-gray-700 border-gray-200 focus:border-[#8871e4]/50 focus:ring-2 focus:ring-[#8871e4]/10 hover:border-gray-300'}`}
+                ${disabled ? 'bg-gray-50 text-gray-400 border-transparent cursor-not-allowed' : 'bg-white text-gray-700 border-gray-200 focus:border-[#ed8c68]/50 focus:ring-2 focus:ring-[#ed8c68]/10 hover:border-gray-300'}`}
         />
     );
 };
@@ -351,7 +343,7 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
  */
 const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, precision }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    const gc = '#8871e4';
+    const gc = '#ed8c68';
 
     return (
         <div className="flex flex-col gap-2.5">
@@ -389,7 +381,7 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
  */
 const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, step, precision }) => {
     const pct = ((value - min) / (max - min)) * 100;
-    const gc = '#8871e4';
+    const gc = '#ed8c68';
 
     return (
         <div className="flex flex-col gap-2.5">
@@ -419,12 +411,12 @@ const CustomParamRow = ({ param, onChange, onRemove }) => {
         <div className="flex items-center gap-2 p-1.5 bg-gray-50/80 rounded-[14px] border border-gray-100/50">
             <input
                 type="text" value={param.name} onChange={(e) => onChange('name', e.target.value)} placeholder="Key"
-                className="flex-[2] text-[13px] border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#8871e4]/20 bg-transparent transition-all"
+                className="flex-[2] text-[13px] border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#ed8c68]/20 bg-transparent transition-all"
             />
             <div className="w-[1px] h-4 bg-gray-200"></div>
             <select
                 value={param.type} onChange={(e) => onChange('type', e.target.value)}
-                className="flex-[1] text-[12px] text-gray-500 font-medium border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#8871e4]/20 bg-transparent transition-all cursor-pointer appearance-none"
+                className="flex-[1] text-[12px] text-gray-500 font-medium border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#ed8c68]/20 bg-transparent transition-all cursor-pointer appearance-none"
             >
                 <option value="string">str</option>
                 <option value="number">num</option>
@@ -439,7 +431,7 @@ const CustomParamRow = ({ param, onChange, onRemove }) => {
                 <input
                     type={param.type === 'number' ? 'number' : 'text'}
                     value={param.value} onChange={(e) => onChange('value', param.type === 'number' ? Number(e.target.value) : e.target.value)} placeholder="Value"
-                    className="flex-[2] text-[13px] border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#8871e4]/20 bg-transparent transition-all"
+                    className="flex-[2] text-[13px] border-none rounded-[10px] px-2 py-1.5 outline-none focus:bg-white focus:ring-2 focus:ring-[#ed8c68]/20 bg-transparent transition-all"
                 />
             )}
             <button onClick={onRemove} className="p-1.5 mx-1 text-gray-300 hover:text-red-500 hover:bg-white rounded-lg transition-all">

@@ -15,9 +15,13 @@
     --color-bg-subtle: #F9FAFB;
 
     /* --- Brand Colors --- */
-    --color-primary: #8871e4;
-    --color-primary-soft: #cfc6f4;
-    --color-primary-light: #f3f0fc;
+    --color-primary: #FFA07A;
+    --color-primary-hover: #F08F6D;
+    --color-primary-strong: #B85F47;
+    --color-primary-ink: #4A2820;
+    --color-primary-soft: #FFDCCF;
+    --color-primary-light: #FFF4EF;
+    --color-primary-light-hover: #FFE8DF;
 
     /* --- Text Colors --- */
     --color-text-main: #1F2937;
@@ -52,9 +56,28 @@
         0 36px 90px -28px rgba(15, 23, 42, 0.42);
     --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
 
-    --radius-panel: 28px;
-    --radius-panel-lg: 32px;
-    --radius-card: 20px;
+    /* --- Settings surface hierarchy --- */
+    --settings-canvas: #f6f7f9;
+    --settings-canvas-deep: #eceff2;
+    --settings-card-surface: #ffffff;
+    --settings-card-border: rgba(100, 116, 139, 0.16);
+    --shadow-settings-card:
+        0 1px 1px rgba(30, 41, 59, 0.05),
+        0 4px 10px -4px rgba(30, 41, 59, 0.12),
+        0 18px 38px -20px rgba(30, 41, 59, 0.32),
+        inset 0 1px 0 rgba(255, 255, 255, 0.96);
+    --shadow-settings-card-hover:
+        0 2px 3px rgba(30, 41, 59, 0.06),
+        0 9px 20px -8px rgba(30, 41, 59, 0.17),
+        0 24px 48px -20px rgba(30, 41, 59, 0.36),
+        inset 0 1px 0 rgba(255, 255, 255, 0.98);
+    --shadow-settings-shell:
+        0 4px 12px rgba(15, 23, 42, 0.10),
+        0 38px 90px -28px rgba(15, 23, 42, 0.46);
+
+    --radius-panel: 32px;
+    --radius-panel-lg: 36px;
+    --radius-card: 24px;
 
     /* Blur reveal defaults */
     --blur-distance: 4px;
@@ -79,22 +102,20 @@
     background-size: cover;
 }
 
+/* 暖灰画布：外壳浮在上面，仅顶部留一点暖橙呼吸感 */
 .chatpdf-shell--welcome {
+    background-color: #e9e7e4;
     background-image:
-        linear-gradient(180deg, rgba(255, 255, 255, 0) 36%, rgba(251, 252, 255, 0.28) 62%, #fbfcff 100%),
-        radial-gradient(ellipse 74% 62% at 2% 0%, rgba(255, 188, 181, 0.78) 0%, rgba(255, 213, 207, 0.46) 38%, transparent 74%),
-        radial-gradient(ellipse 62% 56% at 38% 6%, rgba(246, 184, 218, 0.62) 0%, rgba(250, 215, 228, 0.36) 43%, transparent 76%),
-        radial-gradient(ellipse 76% 66% at 100% 3%, rgba(190, 205, 255, 0.78) 0%, rgba(219, 226, 255, 0.45) 44%, transparent 78%),
-        radial-gradient(ellipse 64% 54% at 52% 44%, rgba(255, 216, 184, 0.58) 0%, rgba(255, 233, 214, 0.32) 46%, transparent 78%),
-        radial-gradient(ellipse 58% 46% at 0% 62%, rgba(217, 232, 255, 0.48) 0%, transparent 76%);
+        radial-gradient(ellipse 70% 55% at 50% 0%, rgba(255, 255, 255, 0.75) 0%, transparent 72%),
+        radial-gradient(ellipse 50% 40% at 88% 0%, rgba(251, 126, 81, 0.08) 0%, transparent 70%),
+        linear-gradient(180deg, #f0eeec 0%, #e4e2df 100%);
 }
 
 .chatpdf-shell--document {
+    background-color: #eae8e6;
     background-image:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(251, 252, 255, 0.72) 72%, #fbfcff 100%),
-        radial-gradient(ellipse 66% 58% at 4% 0%, rgba(255, 205, 201, 0.34) 0%, transparent 74%),
-        radial-gradient(ellipse 70% 62% at 100% 4%, rgba(205, 216, 255, 0.38) 0%, transparent 78%),
-        radial-gradient(ellipse 58% 50% at 50% 42%, rgba(255, 226, 204, 0.28) 0%, transparent 78%);
+        radial-gradient(ellipse 70% 50% at 50% 0%, rgba(255, 255, 255, 0.6) 0%, transparent 70%),
+        linear-gradient(180deg, #efedeb 0%, #e6e4e1 100%);
 }
 
 .chatpdf-shell--dark {
@@ -102,12 +123,89 @@
     background-image: none;
 }
 
+/* PDF 与对话区的统一工作台：浅米白底板从页面暖灰背景中自然浮起。 */
+.workspace-surface {
+    background-color: #faf8f5;
+    border: 1px solid rgba(255, 253, 250, 0.96);
+    box-shadow:
+        0 0 0 1px rgba(125, 103, 91, 0.12),
+        0 2px 5px rgba(78, 64, 56, 0.08),
+        0 20px 48px -24px rgba(78, 64, 56, 0.28),
+        0 38px 86px -44px rgba(78, 64, 56, 0.30),
+        inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+.workspace-surface-dark {
+    background-color: #16181d;
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.035),
+        0 2px 6px rgba(0, 0, 0, 0.30),
+        0 28px 70px -34px rgba(0, 0, 0, 0.74),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+/* 阅读工作区内部是平面分区，层级由底色和细边界表达，不再重复悬浮。 */
+.workspace-pane {
+    background-color: #fffdfb;
+    border: 1px solid rgba(125, 103, 91, 0.11);
+    border-radius: 20px;
+    box-shadow: none;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.workspace-pane-pdf {
+    background-color: #f3f1ee;
+}
+
+.workspace-pane-chat {
+    background-color: #fffdfb;
+}
+
+.workspace-pane-dark {
+    background-color: #20232a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* 首页上传卡片使用稳定的语义阴影，避免 Tailwind 忽略 CSS 变量型 arbitrary shadow。 */
+.upload-document-card {
+    box-shadow: var(--shadow-card);
+}
+
+.chatpdf-shell--dark .upload-document-card {
+    box-shadow: 0 12px 28px -20px rgba(0, 0, 0, 0.65);
+}
+
 /* 页面缩放由 JS 控制 document.body.style.zoom，此处不设置 */
+
+/* 细滚动条：类名早已在多处引用，但样式一直缺失（表现为原生宽滚动条） */
+.custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(125, 125, 135, 0.35) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(125, 125, 135, 0.35);
+    border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(125, 125, 135, 0.55);
+}
 
 /* --- Component Classes --- */
 .soft-card {
     background-color: #ffffff;
-    border: 1px solid rgba(226, 232, 240, 0.92);
+    border: 1px solid transparent;
     box-shadow: var(--shadow-card);
     border-radius: var(--radius-card);
     transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
@@ -115,14 +213,13 @@
 
 .soft-card:hover {
     box-shadow: var(--shadow-card-hover);
-    border-color: #d8dee8;
     transform: translateY(-2px);
 }
 
 /* Solid floating panel: no translucent lighting borders or blur. */
 .soft-panel {
     background: #ffffff;
-    border: 1px solid rgba(226, 232, 240, 0.9);
+    border: 1px solid transparent;
     box-shadow: var(--shadow-float);
     border-radius: var(--radius-panel);
     transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -158,10 +255,12 @@
     background-color: #ffffff;
 }
 
+.settings-solid [class~="bg-gray-50/50"],
+.settings-solid [class~="bg-gray-50/70"],
 .settings-solid [class~="bg-gray-50/80"],
 .settings-solid [class~="bg-gray-100/60"],
 .settings-solid [class~="bg-gray-100/70"] {
-    background-color: #f3f4f6;
+    background-color: #f8fafc;
 }
 
 .settings-solid [class~="border-white/40"],
@@ -169,7 +268,7 @@
 .settings-solid [class~="border-white/60"],
 .settings-solid [class~="border-white/70"],
 .settings-solid [class~="border-gray-100/80"] {
-    border-color: #e5e7eb;
+    border-color: #e2e8f0;
 }
 
 .settings-solid [class~="rounded-[24px]"],
@@ -178,34 +277,206 @@
 }
 
 .settings-shell {
+    background-color: var(--settings-canvas);
+    border-color: rgba(255, 255, 255, 0.92);
     border-radius: var(--radius-panel);
-    box-shadow: var(--shadow-modal);
+    box-shadow: var(--shadow-settings-shell);
+    isolation: isolate;
+}
+
+/* 大尺寸设置弹窗只提升自身图层，避免内部每张交互卡片各占一个合成层。 */
+.settings-modal-surface {
+    backface-visibility: hidden;
+    will-change: transform, opacity;
+}
+
+.settings-chrome {
+    background-color: var(--settings-canvas);
+    border-color: rgba(100, 116, 139, 0.14);
 }
 
 .settings-shell-dark {
+    background-color: #1d2026;
+    border-color: #353941;
     box-shadow:
         0 3px 12px rgba(0, 0, 0, 0.26),
         0 36px 90px -26px rgba(0, 0, 0, 0.72);
 }
 
+.settings-shell-dark .settings-chrome {
+    background-color: #1d2026;
+    border-color: #353941;
+}
+
 .settings-card {
+    position: relative;
+    background-color: var(--settings-card-surface);
+    border: 1px solid var(--settings-card-border);
     border-radius: var(--radius-card);
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--shadow-settings-card);
 }
 
 .settings-card-interactive {
-    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    transition:
+        transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        border-color 220ms ease,
+        background-color 220ms ease;
 }
 
-.settings-card-interactive:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-card-hover);
+@media (hover: hover) {
+    .settings-card-interactive:hover {
+        transform: translateY(-2px);
+        border-color: rgba(100, 116, 139, 0.26);
+        box-shadow: var(--shadow-settings-card-hover);
+    }
+}
+
+.settings-card-interactive:active {
+    transform: translateY(0);
+}
+
+.settings-card-selected {
+    background-color: #fffaf8;
+    border-color: var(--color-primary-soft);
+    box-shadow:
+        0 1px 2px rgba(184, 95, 71, 0.08),
+        0 12px 30px -17px rgba(184, 95, 71, 0.34),
+        inset 0 1px 0 rgba(255, 255, 255, 0.98);
+}
+
+/* 内部控制层只做轻微凹面，不与顶层卡片争夺层级。 */
+.settings-inset {
+    background-color: #f8fafc;
+    border: 1px solid rgba(100, 116, 139, 0.14);
+    box-shadow:
+        inset 0 1px 2px rgba(30, 41, 59, 0.04),
+        0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.settings-segment {
+    background-color: var(--settings-canvas-deep);
+    border: 1px solid rgba(100, 116, 139, 0.16);
+    box-shadow:
+        inset 0 1px 3px rgba(30, 41, 59, 0.07),
+        0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.settings-segment-indicator {
+    background-color: #ffffff;
+    border: 1px solid rgba(100, 116, 139, 0.15);
+    box-shadow:
+        0 1px 2px rgba(30, 41, 59, 0.07),
+        0 5px 12px -7px rgba(30, 41, 59, 0.24),
+        inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+.settings-segment-selection {
+    background-color: var(--color-primary-light);
+    border: 1px solid var(--color-primary-soft);
+    box-shadow:
+        0 1px 2px rgba(184, 95, 71, 0.08),
+        0 6px 14px -9px rgba(184, 95, 71, 0.34),
+        inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    will-change: transform;
+}
+
+.settings-segment-option {
+    color: #64748b;
+    transition: color 200ms ease, background-color 200ms ease, transform 120ms ease;
+}
+
+.settings-segment-option[data-active="true"] {
+    color: var(--color-primary-strong);
+}
+
+@media (hover: hover) {
+    .settings-segment-option[data-active="false"]:not(:disabled):hover {
+        color: #334155;
+        background-color: #f8fafc;
+    }
+}
+
+.settings-segment-option:focus-visible {
+    outline: 2px solid rgba(255, 160, 122, 0.42);
+    outline-offset: -2px;
+}
+
+.settings-segment-option:not(:disabled):active {
+    transform: scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-segment-option {
+        transition-duration: 0.01ms;
+    }
+
+    .settings-segment-option:not(:disabled):active {
+        transform: none;
+    }
+}
+
+.settings-row {
+    transition: background-color 220ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (hover: hover) {
+    .settings-row:hover {
+        background-color: #f8fafc;
+    }
 }
 
 .settings-card-dark {
+    background-color: #25282f;
+    border-color: #3a3f48;
     box-shadow:
         0 2px 6px rgba(0, 0, 0, 0.18),
         0 14px 30px -16px rgba(0, 0, 0, 0.55);
+}
+
+.settings-shell-dark .settings-inset {
+    background-color: #202329;
+    border-color: #363b44;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.24);
+}
+
+.settings-shell-dark .settings-segment {
+    background-color: #272a31;
+    border-color: #383c45;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.32);
+}
+
+.settings-shell-dark .settings-segment-indicator {
+    background-color: #3a3f49;
+    border-color: #4a505b;
+    box-shadow: 0 4px 12px -7px rgba(0, 0, 0, 0.72);
+}
+
+.settings-shell-dark .settings-segment-selection {
+    background-color: rgba(255, 160, 122, 0.16);
+    border-color: rgba(255, 160, 122, 0.26);
+    box-shadow: 0 5px 14px -9px rgba(0, 0, 0, 0.72);
+}
+
+.settings-shell-dark .settings-segment-option {
+    color: #9ca3af;
+}
+
+.settings-shell-dark .settings-segment-option[data-active="true"] {
+    color: #ffdccf;
+}
+
+@media (hover: hover) {
+    .settings-shell-dark .settings-segment-option[data-active="false"]:not(:disabled):hover {
+        color: #e5e7eb;
+        background-color: #30343d;
+    }
+}
+
+@media (hover: hover) {
+    .settings-shell-dark .settings-row:hover {
+        background-color: #2b2f37;
+    }
 }
 
 .settings-card-interactive.settings-card-dark:hover {
@@ -220,16 +491,84 @@
 }
 
 .message-bubble-user {
-    background: linear-gradient(135deg, var(--color-primary) 0%, #6c5ab6 100%);
-    color: white;
-    box-shadow: 
-        0 8px 16px -4px rgba(139, 92, 246, 0.3),
-        0 4px 6px -2px rgba(139, 92, 246, 0.1),
-        inset 0 1px 0 rgba(255, 255, 255, 0.3),
-        inset 0 -2px 0 rgba(0, 0, 0, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--color-primary-light);
+    color: var(--color-primary-strong);
+    box-shadow:
+        0 7px 16px -12px rgba(184, 95, 71, 0.32),
+        inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(255, 160, 122, 0.18);
     border-radius: 20px 20px 2px 20px;
-    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+    text-shadow: none;
+}
+
+.chatpdf-shell--dark .message-bubble-user {
+    background: rgba(255, 160, 122, 0.16);
+    color: #FFDCCF;
+    border-color: rgba(255, 160, 122, 0.24);
+    box-shadow: 0 7px 18px -12px rgba(0, 0, 0, 0.6);
+}
+
+/* 统一浅鲑鱼交互面：主按钮、选中项和开关不再使用大块实色橙。 */
+.accent-surface {
+    background-color: var(--color-primary-light);
+    color: var(--color-primary-strong);
+    border: 1px solid var(--color-primary-soft);
+    box-shadow: 0 7px 16px -13px rgba(184, 95, 71, 0.32);
+}
+
+.accent-surface:hover:not(:disabled) {
+    background-color: var(--color-primary-light-hover);
+    border-color: #FFCBB9;
+}
+
+/* 实心发光主 CTA：悬浮立体胶囊（选择文件等主要行动点），
+   区别于 accent-surface 的浅底次级样式 */
+.accent-cta {
+    background-color: #F0653A;
+    color: #fff;
+    border: none;
+    box-shadow:
+        0 2px 5px rgba(240, 101, 58, 0.28),
+        0 10px 26px -6px rgba(240, 101, 58, 0.55);
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.accent-cta:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background-color: #F5713F;
+    box-shadow:
+        0 3px 7px rgba(240, 101, 58, 0.3),
+        0 14px 32px -6px rgba(240, 101, 58, 0.6);
+}
+
+.accent-cta:active:not(:disabled) {
+    background-color: #E25A2F;
+    box-shadow:
+        0 2px 5px rgba(240, 101, 58, 0.3),
+        0 6px 16px -6px rgba(240, 101, 58, 0.45);
+}
+
+.chatpdf-shell--dark .accent-cta {
+    box-shadow:
+        0 2px 6px rgba(0, 0, 0, 0.3),
+        0 12px 28px -6px rgba(240, 101, 58, 0.45);
+}
+
+.accent-control {
+    background-color: var(--color-primary-soft);
+    color: var(--color-primary-strong);
+    border: 1px solid rgba(255, 160, 122, 0.28);
+}
+
+.chatpdf-shell--dark .accent-surface,
+.chatpdf-shell--dark .accent-control {
+    background-color: rgba(255, 160, 122, 0.16);
+    color: #FFDCCF;
+    border-color: rgba(255, 160, 122, 0.24);
+}
+
+.chatpdf-shell--dark .accent-surface:hover:not(:disabled) {
+    background-color: rgba(255, 160, 122, 0.22);
 }
 
 .message-bubble-ai {
@@ -252,14 +591,14 @@
 }
 
 .soft-button-primary {
-    background-color: var(--color-primary);
-    color: white;
+    background-color: var(--color-primary-light);
+    color: var(--color-primary-strong);
     box-shadow: var(--shadow-sm);
-    border: 1px solid transparent;
+    border: 1px solid var(--color-primary-soft);
 }
 
 .soft-button-primary:hover {
-    background-color: #6c5ab6;
+    background-color: var(--color-primary-light-hover);
     box-shadow: var(--shadow-md);
 }
 
@@ -406,7 +745,7 @@
     content: '▋';
     animation: blink 1s infinite;
     margin-left: 2px;
-    color: var(--color-primary);
+    color: var(--color-primary-strong);
     font-size: 0.8em;
 }
 
@@ -655,7 +994,7 @@
     content: '▋';
     animation: blink 1s infinite;
     margin-left: 2px;
-    color: var(--color-primary);
+    color: var(--color-primary-strong);
     font-size: 0.8em;
 }
 
@@ -771,7 +1110,7 @@
     display: inline-block;
     width: 2px;
     height: 1.1em;
-    background: #6c5ab6;
+    background: #bd6f53;
     margin-left: 1px;
     animation: streaming-cursor-blink 0.7s steps(2) infinite;
     vertical-align: text-bottom;
@@ -852,7 +1191,7 @@
     background: rgba(255, 255, 255, 0.45);
     background-image:
         url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.06'/%3E%3C/svg%3E"),
-        radial-gradient(circle at 25% 15%, rgba(230, 210, 255, 0.5) 0%, transparent 50%),
+        radial-gradient(circle at 25% 15%, rgba(254, 222, 211, 0.5) 0%, transparent 50%),
         radial-gradient(circle at 75% 85%, rgba(210, 250, 230, 0.45) 0%, transparent 50%),
         linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0%, rgba(245, 247, 250, 0.3) 100%);
 
@@ -901,9 +1240,9 @@
 /* Tanya Button Styles (Matte Frosted) */
 .tanya-btn {
     position: relative;
-    padding: 24px 32px;
-    border-radius: 30px;
-    font-size: 16px;
+    padding: 13px 18px;
+    border-radius: 18px;
+    font-size: 13px;
     font-weight: 500;
     color: #58586a;
     letter-spacing: 0.5px;
@@ -917,13 +1256,10 @@
 
     background:
         url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.08'/%3E%3C/svg%3E"),
-        radial-gradient(circle at 60% 0%, rgba(255, 157, 217, 0.45) 0%, transparent 55%),
-        radial-gradient(circle at 90% 90%, rgba(185, 207, 255, 0.55) 0%, transparent 55%),
-        radial-gradient(circle at 20% 90%, rgba(194, 226, 175, 0.5) 0%, transparent 55%),
-        radial-gradient(circle at 20% 20%, rgba(255, 243, 202, 0.55) 0%, transparent 55%),
-        linear-gradient(180deg, rgba(245, 247, 250, 0.95) 0%, rgba(222, 223, 229, 0.95) 100%);
+        radial-gradient(circle at 70% 0%, rgba(251, 126, 81, 0.20) 0%, transparent 55%),
+        linear-gradient(180deg, rgba(250, 250, 251, 0.98) 0%, rgba(233, 234, 237, 0.98) 100%);
 
-    background-blend-mode: overlay, normal, normal, normal, normal, normal;
+    background-blend-mode: overlay, normal, normal;
     backdrop-filter: blur(30px);
     -webkit-backdrop-filter: blur(30px);
 
@@ -1215,12 +1551,6 @@
     background: rgba(255, 255, 255, 0.38);
 }
 
-/* Upload loading animation - spinning rings */
-@keyframes chatpdf-spin {
-    from { transform: translate(-50%, -50%) rotate(0deg); }
-    to   { transform: translate(-50%, -50%) rotate(360deg); }
-}
-
 /* --- Dark Mode Prose High Contrast --- */
 .dark .prose-invert {
     --tw-prose-body: #e5e7eb;      /* gray-200 - brighter body text */
@@ -1266,13 +1596,13 @@
     bottom: 0;
     width: 38%;
     border-radius: 9999px;
-    background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.75), transparent);
+    background: linear-gradient(90deg, transparent, rgba(252, 130, 86, 0.75), transparent);
     animation: agentShimmerSweep 1.4s ease-in-out infinite;
 }
 
 @keyframes agentBreath {
-    0%, 100% { background-color: rgba(139, 92, 246, 0.04); }
-    50% { background-color: rgba(139, 92, 246, 0.12); }
+    0%, 100% { background-color: rgba(252, 130, 86, 0.04); }
+    50% { background-color: rgba(252, 130, 86, 0.12); }
 }
 
 .agent-op-running {
@@ -1284,6 +1614,6 @@
 }
 
 @keyframes agentBreathDark {
-    0%, 100% { background-color: rgba(139, 92, 246, 0.08); }
-    50% { background-color: rgba(139, 92, 246, 0.18); }
+    0%, 100% { background-color: rgba(252, 130, 86, 0.08); }
+    50% { background-color: rgba(252, 130, 86, 0.18); }
 }

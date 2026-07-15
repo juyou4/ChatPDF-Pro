@@ -20,7 +20,7 @@ import {
 const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", disabled = false, ...props }) => (
   <div className="relative group w-full">
     {Icon && (
-      <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-[#7c4dff] transition-colors">
+      <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-[#B85F47] transition-colors">
         <Icon size={18} />
       </div>
     )}
@@ -30,7 +30,7 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
       value={value}
       onChange={onChange}
       disabled={disabled}
-      className={`w-full bg-white border border-gray-200 rounded-[14px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 focus:border-[#7c4dff]/50 transition-colors ${Icon ? 'pl-10 pr-4 py-3' : 'px-4 py-3'} ${disabled ? 'opacity-60 cursor-not-allowed bg-gray-100' : ''} ${props.className || ''}`}
+      className={`w-full bg-white border border-gray-200 rounded-[14px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 focus:border-[#FFA07A]/50 transition-colors ${Icon ? 'pl-10 pr-4 py-3' : 'px-4 py-3'} ${disabled ? 'opacity-60 cursor-not-allowed bg-gray-100' : ''} ${props.className || ''}`}
       {...props}
     />
   </div>
@@ -39,7 +39,7 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
 const Tag = ({ text, active, onClick }) => (
   <span 
     onClick={onClick}
-    className={`${active ? 'bg-[#f1effb] text-[#6f58cf] border-[#cfc6f4]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
+    className={`${active ? 'bg-[#FFF4EF] text-[#B85F47] border-[#FFDCCF]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
   >
     {text}
   </span>
@@ -48,16 +48,16 @@ const Tag = ({ text, active, onClick }) => (
 const ProviderItem = ({ provider, isActive, onClick }) => (
   <div 
     onClick={onClick}
-    className={`flex items-center p-3 rounded-[20px] transition-all duration-300 cursor-pointer ${
+    className={`settings-card settings-card-interactive flex items-center p-3 rounded-[20px] cursor-pointer ${
     isActive 
-      ? 'bg-white shadow-[0_8px_20px_-12px_rgba(124,77,255,0.45)] border border-[#b7a9ee]'
-      : 'bg-white hover:bg-gray-50 shadow-sm border border-gray-200 hover:border-gray-300'
+      ? 'settings-card-selected'
+      : 'bg-white'
   }`}>
     <div className={`w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-gray-50 border border-gray-100 overflow-hidden`}>
       <ProviderAvatar providerId={provider.id} size={24} />
     </div>
     <div className="ml-3 flex-1 min-w-0">
-      <h3 className={`text-[14px] font-bold truncate ${isActive ? 'text-[#7c4dff]' : 'text-gray-800'}`}>{provider.name}</h3>
+      <h3 className={`text-[14px] font-bold truncate ${isActive ? 'text-[#B85F47]' : 'text-gray-800'}`}>{provider.name}</h3>
       <p className="text-[12px] text-gray-500 font-medium truncate">{provider.id}</p>
     </div>
     <div className={`w-2 h-2 rounded-full shrink-0 ml-2 ${provider.enabled ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-gray-300 shadow-sm'}`}></div>
@@ -100,7 +100,7 @@ const TAG_LABELS = {
  * “模型服务管理”面板
  * 对齐 cherry-studio 的三栏结构：左侧 Provider 列表，中间连接配置，右侧模型清单。
  */
-export default function EmbeddingSettings({ isOpen, onClose }) {
+export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
   const {
     providers,
     addProvider,
@@ -176,9 +176,13 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     }
   }, [providers, activeProvider])
 
-  const filteredProviders = providers.filter(p =>
-    `${p.name} ${p.id}`.toLowerCase().includes(providerSearch.toLowerCase())
-  )
+  const filteredProviders = useMemo(() => {
+    const normalizedSearch = providerSearch.trim().toLowerCase()
+    if (!normalizedSearch) return providers
+    return providers.filter(p =>
+      `${p.name} ${p.id}`.toLowerCase().includes(normalizedSearch)
+    )
+  }, [providerSearch, providers])
 
   // 直接订阅 userCollection + systemModels 基础状态（对齐 Cherry Studio 单一数据源模式）
   // 避免通过 getModelsByProvider 函数派生，确保状态更新时立即反映在 UI 上
@@ -438,20 +442,20 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
 
   try {
     return (
-      <AnimatePresence initial={false}>
+      <AnimatePresence initial={false} onExitComplete={onExitComplete}>
         {isOpen && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/25 p-3 sm:p-6 font-sans overflow-hidden"
           >
             <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 10 }}
-              transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-              className="settings-solid settings-shell w-full max-w-[1150px] h-[92vh] min-h-0 bg-[#f6f7f9] p-4 sm:p-5 border border-white/80 relative z-10 flex flex-col"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0, transition: { duration: 0.16, ease: [0.22, 1, 0.36, 1] } }}
+              exit={{ opacity: 0, y: 6, transition: { duration: 0.09, ease: [0.4, 0, 1, 1] } }}
+              className="settings-modal-surface settings-solid settings-shell w-full max-w-[1150px] h-[92vh] min-h-0 bg-[#f6f7f9] p-4 sm:p-5 border border-white/80 relative z-10 flex flex-col"
             >
               {/* Header */}
               <div className="flex items-center mb-4 px-2">
@@ -459,7 +463,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white hover:bg-gray-100 rounded-[12px] border border-gray-200 transition-colors text-gray-600" title="返回设置中心" aria-label="返回设置中心">
                     <ChevronLeft size={18} />
                   </button>
-                  <div className="p-2 rounded-[12px] bg-[#ece9fb] text-[#7c4dff]">
+                  <div className="p-2 rounded-[12px] bg-[#FFF4EF] text-[#B85F47]">
                     <Settings2 className="w-5 h-5" />
                   </div>
                   <div>
@@ -480,7 +484,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       value={providerSearch}
                       onChange={(e) => setProviderSearch(e.target.value)}
                       placeholder="搜索模型平台..." 
-                      className="w-full bg-white border border-gray-200 rounded-[14px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 focus:border-[#7c4dff]/50"
+                      className="w-full bg-white border border-gray-200 rounded-[14px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 focus:border-[#FFA07A]/50"
                     />
                   </div>
 
@@ -498,9 +502,9 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                     <div className="mt-4 pt-3 border-t border-gray-200">
                       <div 
                         onClick={() => setCustomProviderFormOpen(!customProviderFormOpen)}
-                        className="flex items-center p-3 rounded-[16px] transition-colors cursor-pointer bg-white hover:bg-gray-50 shadow-sm border border-gray-200"
+                        className="settings-card settings-card-interactive flex items-center p-3 rounded-[16px] cursor-pointer bg-white"
                       >
-                        <div className="w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-[#7c4dff] text-white">
+                        <div className="accent-control w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner">
                           <Settings2 size={20} />
                         </div>
                         <div className="ml-3 flex-1">
@@ -518,7 +522,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                             exit={{ height: 0, opacity: 0 }}
                             className="overflow-hidden mt-2"
                           >
-                            <div className="p-4 rounded-[16px] bg-white border border-gray-200 space-y-3 shadow-sm">
+                            <div className="settings-inset p-4 rounded-[16px] space-y-3">
                               <GlassInput 
                                 placeholder="Provider ID (如 my-openai)" 
                                 value={customProviderForm.id}
@@ -536,21 +540,21 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                               />
                               <div className="flex items-center gap-3 text-[12px] text-gray-600 px-1">
                                 <label className="flex items-center gap-1 cursor-pointer">
-                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.chat} onChange={e => setCustomProviderForm({ ...customProviderForm, chat: e.target.checked })} />
+                                  <input type="checkbox" className="accent-[#FFA07A]" checked={customProviderForm.chat} onChange={e => setCustomProviderForm({ ...customProviderForm, chat: e.target.checked })} />
                                   Chat
                                 </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
-                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.embedding} onChange={e => setCustomProviderForm({ ...customProviderForm, embedding: e.target.checked })} />
+                                  <input type="checkbox" className="accent-[#FFA07A]" checked={customProviderForm.embedding} onChange={e => setCustomProviderForm({ ...customProviderForm, embedding: e.target.checked })} />
                                   Embedding
                                 </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
-                                  <input type="checkbox" className="accent-[#7c4dff]" checked={customProviderForm.rerank} onChange={e => setCustomProviderForm({ ...customProviderForm, rerank: e.target.checked })} />
+                                  <input type="checkbox" className="accent-[#FFA07A]" checked={customProviderForm.rerank} onChange={e => setCustomProviderForm({ ...customProviderForm, rerank: e.target.checked })} />
                                   Rerank
                                 </label>
                               </div>
                               <button
                                 onClick={handleAddCustomProvider}
-                                className="w-full bg-[#7c4dff] hover:bg-[#6836f5] text-white text-[13px] font-bold py-2.5 rounded-[14px] shadow-md transition-all flex items-center justify-center gap-2"
+                                className="accent-surface w-full text-[13px] font-bold py-2.5 rounded-[14px] transition-all flex items-center justify-center gap-2"
                               >
                                 <Plus size={16} /> 添加
                               </button>
@@ -581,9 +585,9 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                           type="checkbox"
                           checked={!!activeProvider?.enabled}
                           onChange={e => handleProviderUpdate('enabled', e.target.checked)}
-                          className="w-4 h-4 accent-[#7c4dff] rounded"
+                          className="w-4 h-4 accent-[#FFA07A] rounded"
                         />
-                        <span className={`text-[13px] font-bold ${activeProvider?.enabled ? 'text-[#7c4dff]' : 'text-gray-500'}`}>
+                        <span className={`text-[13px] font-bold ${activeProvider?.enabled ? 'text-[#B85F47]' : 'text-gray-500'}`}>
                           {activeProvider?.enabled ? '已启用' : '已停用'}
                         </span>
                       </label>
@@ -615,9 +619,9 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       <button 
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="flex-1 bg-[#7c4dff] hover:bg-[#6836f5] disabled:opacity-70 disabled:hover:bg-[#7c4dff] transition-colors text-white text-[14px] font-bold py-3 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(124,77,255,0.55)] flex items-center justify-center gap-2"
+                        className="accent-surface flex-1 disabled:opacity-70 transition-colors text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
                       >
-                        {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-white" />}
+                        {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-current" />}
                         <span>测试连接</span>
                       </button>
                       <button 
@@ -659,7 +663,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                         </div>
                         <div className="flex-1 relative">
                           <select 
-                            className="w-full bg-white border border-gray-200 rounded-[14px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#7c4dff]/25 appearance-none cursor-pointer"
+                            className="w-full bg-white border border-gray-200 rounded-[14px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 appearance-none cursor-pointer"
                             value={addModelForm.type}
                             onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
                           >
@@ -703,7 +707,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                     <div className="pt-4 shrink-0">
                       <button 
                         onClick={handleAddModel}
-                        className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-colors text-white text-[14px] font-bold py-3 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(124,77,255,0.55)] flex items-center justify-center gap-2"
+                        className="accent-surface w-full transition-colors text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
                       >
                         <Plus size={18} />
                         <span>保存模型</span>
@@ -736,7 +740,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                       })();
                       
                       return (
-                        <div key={type} className="bg-white rounded-[16px] border border-gray-200 shadow-sm overflow-hidden">
+                        <div key={type} className="settings-inset rounded-[16px] overflow-hidden">
                           <button
                             type="button"
                             aria-expanded={!isCollapsed}
@@ -744,12 +748,12 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                             className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors focus:outline-none"
                           >
                             <div className="flex items-center gap-2 shrink-0">
-                              {type === 'chat' && <MessageSquare size={16} className="text-[#7c4dff]" />}
-                              {type === 'embedding' && <Cpu size={16} className="text-[#7c4dff]" />}
-                              {type === 'rerank' && <Zap size={16} className="text-[#7c4dff]" />}
-                              {type === 'image' && <Sparkles size={16} className="text-[#7c4dff]" />}
+                              {type === 'chat' && <MessageSquare size={16} className="text-[#B85F47]" />}
+                              {type === 'embedding' && <Cpu size={16} className="text-[#B85F47]" />}
+                              {type === 'rerank' && <Zap size={16} className="text-[#B85F47]" />}
+                              {type === 'image' && <Sparkles size={16} className="text-[#B85F47]" />}
                               <span className="text-[14px] font-bold text-gray-800 whitespace-nowrap">{meta.label}</span>
-                              <span className="text-[11px] font-medium text-[#7c4dff] bg-[#7c4dff]/10 px-1.5 py-0.5 rounded-full">{list.length}</span>
+                              <span className="text-[11px] font-medium text-[#B85F47] bg-[#FFA07A]/10 px-1.5 py-0.5 rounded-full">{list.length}</span>
                             </div>
                             <div className="flex items-center gap-2 min-w-0 ml-2">
                               <CheckCircle2 size={12} className="text-gray-400 shrink-0" />
@@ -789,14 +793,14 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                                               )}
                                             </div>
                                             <div className="flex items-start gap-1.5 mt-0.5">
-                                               {isDefaultModel(model.type, model.id) && <span className="text-[10px] bg-[#7c4dff]/10 text-[#7c4dff] px-1.5 py-0.5 rounded-sm font-bold shrink-0 mt-px">默认</span>}
+                                               {isDefaultModel(model.type, model.id) && <span className="text-[10px] bg-[#FFA07A]/10 text-[#B85F47] px-1.5 py-0.5 rounded-sm font-bold shrink-0 mt-px">默认</span>}
                                                <p className="text-[11px] text-gray-400 font-medium break-all line-clamp-2 leading-snug" title={model.id}>{model.id}</p>
                                             </div>
                                           </div>
                                         </div>
                                         <div className="flex gap-1 shrink-0 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                             {!isDefaultModel(model.type, model.id) && (
-                                              <button onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }} className="p-1.5 text-gray-400 hover:text-[#7c4dff] rounded-md hover:bg-[#7c4dff]/10" title="设为默认">
+                                              <button onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }} className="p-1.5 text-gray-400 hover:text-[#B85F47] rounded-md hover:bg-[#FFA07A]/10" title="设为默认">
                                                 <CheckCircle2 size={16} />
                                               </button>
                                             )}
@@ -840,11 +844,11 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
                   background: transparent;
                 }
                 .custom-scrollbar::-webkit-scrollbar-thumb {
-                  background: rgba(124, 77, 255, 0.15);
+                  background: rgba(184, 95, 71, 0.12);
                   border-radius: 10px;
                 }
                 .custom-scrollbar:hover::-webkit-scrollbar-thumb {
-                  background: rgba(124, 77, 255, 0.3);
+                  background: rgba(184, 95, 71, 0.24);
                 }
                 .animate-blob {
                   animation: blob 7s infinite;
@@ -873,7 +877,7 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
           <div className="text-sm text-gray-600 mb-4 bg-red-50 p-3 rounded-xl border border-red-100">{err?.message || '未知错误'}</div>
           <button
             onClick={onClose}
-            className="w-full bg-[#7c4dff] text-white text-[14px] font-bold py-3 rounded-[16px] shadow-md hover:bg-[#6836f5] transition-colors"
+            className="accent-surface w-full text-[14px] font-bold py-3 rounded-[16px] transition-colors"
           >
             关闭
           </button>
@@ -882,5 +886,3 @@ export default function EmbeddingSettings({ isOpen, onClose }) {
     )
   }
 }
-
-

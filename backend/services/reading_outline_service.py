@@ -4,12 +4,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from services.chat_service import call_ai_api
+from services.document_parse_state import read_parse_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +66,35 @@ def load_reading_outline(data_dir: Path | str, doc_id: str) -> dict[str, Any] | 
 
 
 def save_reading_outline(data_dir: Path | str, doc_id: str, outline: dict[str, Any]) -> None:
+    if not _has_parse_identity(outline):
+        logger.warning("[ReadingOutline] Skip cache without parse identity for %s", doc_id)
+        return
     path = get_reading_outline_path(data_dir, doc_id)
     outline["version"] = READING_OUTLINE_VERSION
     outline["doc_id"] = doc_id
+    temp_path: Path | None = None
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(outline, f, ensure_ascii=False, indent=2)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            json.dump(outline, temp_file, ensure_ascii=False, indent=2)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        temp_path.replace(path)
     except Exception as exc:
         logger.warning("[ReadingOutline] Failed to save %s: %s", path, exc)
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 async def get_or_create_reading_outline(
@@ -83,6 +108,7 @@ async def get_or_create_reading_outline(
     provider: str = "openai",
     endpoint: str = "",
     force: bool = False,
+    cache_writer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Return cached AI outline, generate one when credentials are available.
 
@@ -90,12 +116,21 @@ async def get_or_create_reading_outline(
     the same evidence-bound schema, so the UI remains usable.
     """
     source_hash = _source_hash(block_index)
+    parse_generation, document_source_hash = _parse_identity(doc_id, doc)
     provider_lower = (provider or "").lower()
     can_call_model = bool(api_key) or provider_lower in {"local", "ollama"}
 
     cached = None if force else load_reading_outline(data_dir, doc_id)
-    if cached and cached.get("source_hash") == source_hash:
-        if cached.get("source") == "ai" or not can_call_model:
+    if (
+        cached
+        and _matches_parse_identity(cached, parse_generation, document_source_hash)
+        and cached.get("source_hash") == source_hash
+    ):
+        if (
+            cached.get("source") == "ai"
+            or not can_call_model
+            or _matches_failed_generation(cached, provider=provider, model=model)
+        ):
             if cached.get("source") == "ai":
                 logger.info(
                     "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=cache_hit",
@@ -104,20 +139,21 @@ async def get_or_create_reading_outline(
                     cached.get("model") or "",
                 )
             return cached
-    if cached and cached.get("source") == "ai":
+    if cached:
         logger.info(
-            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=cache_hit_hash_drift",
+            "[ReadingOutline] Ignore stale cache doc=%s parse_match=%s source_match=%s",
             doc_id,
-            cached.get("provider") or "",
-            cached.get("model") or "",
+            _matches_parse_identity(cached, parse_generation, document_source_hash),
+            cached.get("source_hash") == source_hash,
         )
-        return cached
 
     fallback = build_fallback_reading_outline(
         doc_id=doc_id,
         doc=doc,
         block_index=block_index,
         source_hash=source_hash,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
     )
     if not can_call_model:
         return fallback
@@ -147,17 +183,11 @@ async def get_or_create_reading_outline(
             source="ai",
             model=model,
             provider=provider,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )
         if not outline.get("items"):
             raise ValueError("empty outline items")
-        save_reading_outline(data_dir, doc_id, outline)
-        logger.info(
-            "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=success",
-            doc_id,
-            provider,
-            model,
-        )
-        return outline
     except Exception as exc:
         logger.warning(
             "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=failed error=%s",
@@ -169,7 +199,37 @@ async def get_or_create_reading_outline(
         fallback.setdefault("meta", {})["generation_error"] = str(exc)
         fallback.setdefault("meta", {})["provider"] = provider
         fallback.setdefault("meta", {})["model"] = model
+        writer = cache_writer or (lambda value: save_reading_outline(data_dir, doc_id, value))
+        writer(fallback)
         return fallback
+
+    # A route can inject a generation fence here.  Keep it outside the model
+    # failure handler so a stale result cannot be reported as a valid fallback.
+    writer = cache_writer or (lambda value: save_reading_outline(data_dir, doc_id, value))
+    writer(outline)
+    logger.info(
+        "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=success",
+        doc_id,
+        provider,
+        model,
+    )
+    return outline
+
+
+def _matches_failed_generation(
+    cached: dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+) -> bool:
+    """相同模型的自动生成失败缓存可复用，手动 force 会在调用前绕过。"""
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    if not str(meta.get("generation_error") or "").strip():
+        return False
+    return (
+        str(meta.get("provider") or "").strip().lower() == str(provider or "").strip().lower()
+        and str(meta.get("model") or "").strip() == str(model or "").strip()
+    )
 
 
 def build_fallback_reading_outline(
@@ -178,6 +238,8 @@ def build_fallback_reading_outline(
     doc: dict[str, Any],
     block_index: dict[str, Any],
     source_hash: str | None = None,
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> dict[str, Any]:
     block_map = _flatten_blocks(block_index)
     ordered = list(block_map.values())
@@ -248,6 +310,8 @@ def build_fallback_reading_outline(
         source="fallback",
         model="",
         provider="",
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
     )
 
 
@@ -320,6 +384,8 @@ def _normalize_outline(
     source: str,
     model: str,
     provider: str,
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> dict[str, Any]:
     block_map = _flatten_blocks(block_index)
     used_ids: set[str] = set()
@@ -387,6 +453,8 @@ def _normalize_outline(
         "doc_id": doc_id,
         "source": source,
         "source_hash": source_hash,
+        "parse_generation": parse_generation,
+        "document_source_hash": document_source_hash,
         "title": title,
         "items": items,
         "flat_items": _flatten_outline_items(items),
@@ -642,13 +710,64 @@ def _is_noise_text(text: str) -> bool:
 
 
 def _source_hash(block_index: dict[str, Any]) -> str:
-    parts = [f"pages:{len(block_index.get('pages', []) or [])}"]
-    for block in _flatten_blocks(block_index).values():
-        text = " ".join(str(block.get("text") or "").split())
-        if text:
-            parts.append(text)
-    payload = "\n".join(parts)
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    """Fingerprint the evidence structure, not only the visible text."""
+    pages = []
+    for page_order, page in enumerate(block_index.get("pages", []) or []):
+        if not isinstance(page, dict):
+            continue
+        blocks = []
+        for block_order, block in enumerate(page.get("blocks", []) or []):
+            if not isinstance(block, dict):
+                continue
+            blocks.append({
+                "order": block_order,
+                "block_id": str(block.get("block_id") or ""),
+                "type": str(block.get("type") or ""),
+                "text": " ".join(str(block.get("text") or "").split()),
+                "level": block.get("level"),
+                "section_id": block.get("section_id"),
+            })
+        pages.append({
+            "order": page_order,
+            "page": page.get("page"),
+            "blocks": blocks,
+        })
+    payload = {
+        "block_index_version": block_index.get("version"),
+        "block_index_source": block_index.get("source"),
+        "pages": pages,
+        "outline": block_index.get("outline") or [],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _parse_identity(doc_id: str, doc: dict[str, Any]) -> tuple[str, str]:
+    """Return the active primary parse identity for a cached outline."""
+    manifest = read_parse_manifest(doc, doc_id=doc_id)
+    return (
+        str(manifest.get("generation") or "").strip(),
+        str(manifest.get("source_hash") or "").strip(),
+    )
+
+
+def _has_parse_identity(outline: dict[str, Any]) -> bool:
+    return bool(
+        str(outline.get("parse_generation") or "").strip()
+        and str(outline.get("document_source_hash") or "").strip()
+    )
+
+
+def _matches_parse_identity(
+    outline: dict[str, Any],
+    parse_generation: str,
+    document_source_hash: str,
+) -> bool:
+    return (
+        _has_parse_identity(outline)
+        and str(outline.get("parse_generation") or "").strip() == parse_generation
+        and str(outline.get("document_source_hash") or "").strip() == document_source_hash
+    )
 
 
 def _extract_content(response: Any) -> str:

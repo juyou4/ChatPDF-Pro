@@ -1,6 +1,13 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
 const OVERVIEW_DEPTHS = new Set(['brief', 'standard', 'detailed']);
+export const NARROW_DESKTOP_MEDIA_QUERY = '(max-width: 1239px)';
+
+const getIsNarrowDesktop = () => (
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia(NARROW_DESKTOP_MEDIA_QUERY).matches
+);
 
 /**
  * UI 展示状态管理 Hook
@@ -11,9 +18,26 @@ const OVERVIEW_DEPTHS = new Set(['brief', 'standard', 'detailed']);
  */
 export function useUIState() {
   // ========== 侧边栏与布局 ==========
-  const [showSidebar, setShowSidebar] = useState(true);
+  const [isNarrowDesktop, setIsNarrowDesktop] = useState(getIsNarrowDesktop);
+  const [showSidebar, setShowSidebar] = useState(() => !getIsNarrowDesktop());
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(280);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(50);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+
+    const mediaQuery = window.matchMedia(NARROW_DESKTOP_MEDIA_QUERY);
+    const handleChange = (event) => {
+      setIsNarrowDesktop(event.matches);
+      if (event.matches) setShowSidebar(false);
+    };
+
+    setIsNarrowDesktop(mediaQuery.matches);
+    if (mediaQuery.matches) setShowSidebar(false);
+    mediaQuery.addEventListener?.('change', handleChange);
+    return () => mediaQuery.removeEventListener?.('change', handleChange);
+  }, []);
 
   // ========== 暗色模式 ==========
   const [darkMode, setDarkMode] = useState(false);
@@ -85,10 +109,13 @@ export function useUIState() {
 
   return {
     // 侧边栏与布局
+    isNarrowDesktop,
     showSidebar,
     setShowSidebar,
     isHeaderExpanded,
     setIsHeaderExpanded,
+    sidebarWidth,
+    setSidebarWidth,
     pdfPanelWidth,
     setPdfPanelWidth,
 

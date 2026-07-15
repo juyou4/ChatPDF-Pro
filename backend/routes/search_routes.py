@@ -1,5 +1,8 @@
 from datetime import datetime
+import json
 import logging
+import pickle
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -11,6 +14,8 @@ from services.advanced_search import AdvancedSearchService
 from services.grep_service import grep_search
 from services.semantic_group_service import SemanticGroupService
 from services.embedding_service import _get_semantic_groups_dir
+from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.semantic_group_store import active_manifest_path
 from utils.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -26,6 +31,68 @@ router = APIRouter()
 
 # 高级搜索服务实例
 _advanced_search_service = AdvancedSearchService()
+
+
+def _require_document_parse_ready(doc_id: str, doc: dict) -> dict:
+    """Do not expose provisional parser output through search endpoints."""
+    manifest = read_parse_manifest(doc or {}, doc_id=doc_id)
+    if is_parse_prepared(manifest):
+        return manifest
+
+    route = str(manifest.get("requested_route") or manifest.get("route") or "auto")
+    stage = str(manifest.get("stage") or "")
+    if route == "mineru" and stage == "awaiting_rag_index":
+        detail = "MinerU 已完成版面解析，正在等待问答索引发布"
+    elif route == "mineru":
+        detail = "当前文档正在按 MinerU 全程解析，完成前不能搜索文档内容"
+    else:
+        detail = "当前文档解析尚未完成，请稍后重试"
+    raise HTTPException(status_code=409, detail=detail)
+
+
+def _is_legacy_parse_manifest(manifest: dict) -> bool:
+    return bool((manifest.get("metadata") or {}).get("legacy_inferred"))
+
+
+def _vector_index_matches_parse_manifest(
+    doc_id: str,
+    vector_store_dir: str,
+    manifest: dict,
+) -> bool:
+    """Reject an old vector generation after a same-document reparse."""
+    if _is_legacy_parse_manifest(manifest):
+        return True
+    index_path = Path(vector_store_dir or "") / f"{doc_id}.pkl"
+    # Fresh local uploads can fall back to their current pages before a vector
+    # artifact exists. Only an existing artifact can belong to an old parse.
+    if not index_path.exists():
+        return True
+    try:
+        with open(index_path, "rb") as handle:
+            data = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
+    return (
+        str(index_meta.get("parse_generation") or "") == str(manifest.get("generation") or "")
+        and str(index_meta.get("document_source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
+def _semantic_groups_match_parse_manifest(doc_id: str, groups_dir: str, manifest: dict) -> bool:
+    """Only expose semantic groups published for the current parse generation."""
+    if _is_legacy_parse_manifest(manifest):
+        return True
+    try:
+        active_manifest = json.loads(active_manifest_path(groups_dir, doc_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return (
+        str(active_manifest.get("transaction_id") or "") == str(manifest.get("generation") or "")
+        and str(active_manifest.get("source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
 
 
 class GrepSearchRequest(BaseModel):
@@ -101,6 +168,13 @@ async def search_in_pdf(request: SearchRequest):
             raise HTTPException(status_code=404, detail="文档未找到")
 
         doc = store[request.doc_id]
+        parse_manifest = _require_document_parse_ready(request.doc_id, doc)
+        if not _vector_index_matches_parse_manifest(
+            request.doc_id,
+            str(getattr(router, "vector_store_dir", "") or ""),
+            parse_manifest,
+        ):
+            raise HTTPException(status_code=409, detail="当前文档的问答索引尚未发布，请稍后重试")
         pages = doc.get("data", {}).get("pages", [])
 
         # 智能分析查询类型，动态调整top_k
@@ -163,6 +237,7 @@ async def grep_search_endpoint(request: GrepSearchRequest):
             raise HTTPException(status_code=404, detail="文档未找到")
 
         doc = router.documents_store[request.doc_id]
+        _require_document_parse_ready(request.doc_id, doc)
         full_text = doc.get("data", {}).get("full_text", "")
 
         if not full_text:
@@ -201,6 +276,7 @@ async def regex_search(request: RegexSearchRequest):
             raise HTTPException(status_code=404, detail="文档未找到")
 
         doc = router.documents_store[request.doc_id]
+        _require_document_parse_ready(request.doc_id, doc)
         full_text = doc.get("data", {}).get("full_text", "")
 
         if not full_text:
@@ -242,6 +318,7 @@ async def boolean_search(request: BooleanSearchRequest):
             raise HTTPException(status_code=404, detail="文档未找到")
 
         doc = router.documents_store[request.doc_id]
+        _require_document_parse_ready(request.doc_id, doc)
         full_text = doc.get("data", {}).get("full_text", "")
 
         if not full_text:
@@ -277,8 +354,22 @@ async def document_map(request: DocumentMapRequest):
     用于快速了解文档整体结构。
     """
     try:
-        # 加载意群数据
-        groups_dir = _get_semantic_groups_dir()
+        if not hasattr(router, "documents_store"):
+            raise HTTPException(status_code=500, detail="文档存储未初始化")
+        if request.doc_id not in router.documents_store:
+            raise HTTPException(status_code=404, detail="文档未找到")
+        parse_manifest = _require_document_parse_ready(request.doc_id, router.documents_store[request.doc_id])
+
+        # ``active`` manifest lives at the semantic-group root, while the
+        # published JSON itself may live in its active generation directory.
+        groups_root = _get_semantic_groups_dir()
+        if not _semantic_groups_match_parse_manifest(request.doc_id, groups_root, parse_manifest):
+            return {
+                "map": [],
+                "total": 0,
+                "message": "该文档尚未生成当前解析代际的语义意群",
+            }
+        groups_dir = _get_semantic_groups_dir(request.doc_id)
         group_svc = SemanticGroupService()
         groups = group_svc.load_groups(request.doc_id, groups_dir)
 
@@ -304,5 +395,7 @@ async def document_map(request: DocumentMapRequest):
             "total": len(map_entries),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取文档地图失败: {str(e)}")

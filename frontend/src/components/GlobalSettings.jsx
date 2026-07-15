@@ -7,6 +7,7 @@ import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
 import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext';
 import { useReadingSettings } from '../contexts/ReadingSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
+import SettingsSegmentedControl from './SettingsSegmentedControl';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
     const {
@@ -95,12 +96,12 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* 头部 */}
-                        <div className="flex items-center px-7 py-5 sticky top-0 bg-[#f6f7f9] border-b border-gray-200 z-10">
+                        <div className="settings-chrome flex items-center px-7 py-5 sticky top-0 border-b border-gray-200 z-10">
                             <div className="flex items-center gap-3">
                                 <button onClick={onClose} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors" title="返回设置中心" aria-label="返回设置中心">
                                     <ChevronLeft className="w-5 h-5" />
                                 </button>
-                                <div className="w-9 h-9 flex items-center justify-center text-[#8871e4]">
+                                <div className="w-9 h-9 flex items-center justify-center text-[#ed8c68]">
                                     <Type className="w-5 h-5 fill-current opacity-20" />
                                     <Type className="w-5 h-5 absolute" />
                                 </div>
@@ -109,10 +110,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </div>
 
                         {/* 「阅读」分区已上移到设置中心一级 tab，避免同一设置出现在两处 */}
-                        <div className="relative grid grid-cols-3 mx-7 mb-4 p-1 rounded-[14px] bg-gray-100 border border-gray-200 flex-shrink-0" role="tablist" aria-label="全局设置分类">
+                        <div className="settings-segment relative grid grid-cols-3 mx-7 mb-4 p-1 rounded-[20px] flex-shrink-0" role="tablist" aria-label="全局设置分类">
                             <span
                                 aria-hidden="true"
-                                className="absolute left-1 top-1 bottom-1 rounded-[14px] bg-white shadow-sm transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
+                                className="settings-segment-indicator absolute left-1 top-1 bottom-1 rounded-[16px] transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
                                 style={{
                                     width: 'calc((100% - 0.5rem) / 3)',
                                     transform: `translateX(${['display', 'services', 'advanced'].indexOf(activeSection) * 100}%)`,
@@ -129,9 +130,9 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     role="tab"
                                     aria-selected={activeSection === section.id}
                                     onClick={() => setActiveSection(section.id)}
-                                    className={`relative z-10 min-w-0 rounded-[14px] px-2 py-2 text-[12px] font-semibold transition-colors ${
+                                    className={`relative z-10 min-w-0 rounded-[16px] px-2 py-2 text-[12px] font-semibold transition-colors ${
                                         activeSection === section.id
-                                            ? 'text-[#8871e4]'
+                                            ? 'text-[#ed8c68]'
                                             : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200/70'
                                     }`}
                                 >
@@ -160,18 +161,18 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     {PRESET_FONTS.map((font) => (
                                         <button
                                             key={font.id} onClick={() => setFontFamily(font.id)}
-                                            className={`relative p-4 rounded-[20px] text-left transition-all border ${
+                                            className={`settings-card settings-card-interactive relative p-4 rounded-[20px] text-left ${
                                                 fontFamily === font.id
-                                                    ? 'border-[#8871e4] bg-[#8871e4]/5 shadow-[0_2px_10px_-2px_rgba(136,113,228,0.15)]'
-                                                    : 'border-transparent bg-white shadow-sm hover:border-gray-200'
+                                                    ? 'accent-surface'
+                                                    : 'bg-white'
                                             }`}
                                         >
                                             {/* 选择圆点指示器 */}
                                             <div className="mb-3 flex items-center justify-between">
-                                                <div className={`w-4 h-4 rounded-full flex items-center justify-center transition-colors flex-shrink-0 ${fontFamily === font.id ? 'bg-[#8871e4]' : 'bg-gray-200'}`}>
-                                                    {fontFamily === font.id && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
+                                                <div className={`w-4 h-4 rounded-full flex items-center justify-center transition-colors flex-shrink-0 ${fontFamily === font.id ? 'accent-control' : 'bg-gray-200'}`}>
+                                                    {fontFamily === font.id && <Check className="w-2.5 h-2.5 text-[#B85F47]" strokeWidth={3} />}
                                                 </div>
-                                                {fontFamily === font.id && <span className="text-[10px] uppercase font-bold text-[#8871e4] bg-[#8871e4]/10 px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">Default</span>}
+                                                {fontFamily === font.id && <span className="accent-surface text-[10px] uppercase font-bold px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">Default</span>}
                                             </div>
                                             <div className="font-bold text-[15px] mb-1 text-gray-900 truncate">{font.name}</div>
                                             <div className="text-[11px] text-gray-500 leading-tight pr-2" style={{ fontFamily: font.value }}>
@@ -186,7 +187,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 </div>
 
                                 {/* 自定义 Google 字体 Input */}
-                                <div className="bg-gray-100/60 rounded-[20px] p-2 pl-4 mt-2 flex items-center justify-between gap-3 border border-gray-200/50">
+                                <div className="settings-card bg-white rounded-[20px] p-2 pl-4 mt-2 flex items-center justify-between gap-3">
                                     <div className="flex-1 min-w-0">
                                         <div className="text-[13px] font-bold text-gray-800 truncate">自定义 Google 字体</div>
                                         <div className="text-[11px] text-gray-500 truncate">输入任何 Google Font 名称以自动加载。</div>
@@ -200,9 +201,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         />
                                         <button
                                             onClick={applyCustomFont}
-                                            className={`px-3 py-1 rounded-[12px] text-[12px] font-bold transition-all flex-shrink-0 ${
-                                                fontFamily === 'custom' ? 'bg-[#8871e4] text-white' : 'bg-[#8871e4] text-white hover:bg-[#725ec3]'
-                                            }`}
+                                            className="accent-surface px-3 py-1 rounded-[12px] text-[12px] font-bold transition-all flex-shrink-0"
                                         >
                                             应用
                                         </button>
@@ -226,23 +225,17 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         <input
                                             type="range" min="0.5" max="2.0" step="0.05" value={globalScale} onChange={(e) => setGlobalScale(parseFloat(e.target.value))}
                                             className="w-full h-[6px] rounded-full appearance-none bg-gray-100 cursor-pointer"
-                                            style={{ background: `linear-gradient(to right, #8871e4 0%, #8871e4 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 100%)` }}
+                                            style={{ background: `linear-gradient(to right, #ed8c68 0%, #ed8c68 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 100%)` }}
                                         />
                                     </div>
-                                    <div className="flex gap-2">
-                                        {scalePresets.map((preset) => (
-                                            <button
-                                                key={preset.value} onClick={() => setGlobalScale(preset.value)}
-                                                className={`flex-1 py-1.5 text-[12px] font-medium rounded-xl transition-all ${
-                                                    Math.abs(globalScale - preset.value) < 0.01
-                                                        ? 'bg-[#8871e4]/10 text-[#8871e4] border border-[#8871e4]/30'
-                                                        : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-transparent'
-                                                }`}
-                                            >
-                                                {preset.label}
-                                            </button>
-                                        ))}
-                                    </div>
+                                    <SettingsSegmentedControl
+                                        ariaLabel="界面缩放预设"
+                                        value={scalePresets.find((preset) => Math.abs(globalScale - preset.value) < 0.01)?.value ?? null}
+                                        onChange={setGlobalScale}
+                                        options={scalePresets}
+                                        buttonClassName="py-1.5 text-[12px] font-medium text-center rounded-[9px]"
+                                        indicatorClassName="rounded-[9px]"
+                                    />
                                 </div>
                             </div>
                             </>
@@ -362,12 +355,12 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     { icon: Type, label: '导入文本', onClick: () => setShowImportDialog(true), color: 'text-gray-600 hover:bg-gray-100' },
                                 ].map((btn, i) => (
                                     btn.action === 'file' ? (
-                                        <label key={i} className={`flex flex-col items-center justify-center gap-1.5 p-3 rounded-[16px] bg-white border border-gray-100 shadow-sm transition-colors cursor-pointer ${btn.color}`}>
+                                        <label key={i} className={`settings-card settings-card-interactive flex flex-col items-center justify-center gap-1.5 p-3 rounded-[16px] bg-white cursor-pointer ${btn.color}`}>
                                             <btn.icon className="w-4 h-4 opacity-80" /> <span className="text-[11px] font-bold">{btn.label}</span>
                                             <input type="file" accept=".json" onChange={handleFileImport} className="hidden" />
                                         </label>
                                     ) : (
-                                        <button key={i} onClick={btn.onClick} className={`flex flex-col items-center justify-center gap-1.5 p-3 rounded-[16px] bg-white border border-gray-100 shadow-sm transition-colors ${btn.color}`}>
+                                        <button key={i} onClick={btn.onClick} className={`settings-card settings-card-interactive flex flex-col items-center justify-center gap-1.5 p-3 rounded-[16px] bg-white ${btn.color}`}>
                                             <btn.icon className="w-4 h-4 opacity-80" /> <span className="text-[11px] font-bold">{btn.label}</span>
                                         </button>
                                     )
@@ -378,10 +371,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </motion.div>
 
                         {/* Floating Bottom Action */}
-                        <div className="absolute inset-x-0 bottom-0 p-4 bg-[#f6f7f9] border-t border-gray-200 flex justify-center pointer-events-none">
+                        <div className="settings-chrome absolute inset-x-0 bottom-0 p-4 border-t border-gray-200 flex justify-center pointer-events-none">
                             <button
                                 onClick={onClose}
-                                className="pointer-events-auto bg-[#8871e4] hover:bg-[#725ec3] text-white font-bold text-[14px] py-3 px-8 flex items-center justify-center gap-2 rounded-[14px] shadow-[0_8px_18px_-10px_rgba(136,113,228,0.55)] transition-colors"
+                                className="accent-surface pointer-events-auto font-bold text-[14px] py-3 px-8 flex items-center justify-center gap-2 rounded-[14px] transition-colors"
                             >
                                 <CheckCircle2 className="w-5 h-5" />
                                 完成并返回
@@ -394,10 +387,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-slate-950/45 z-[60] flex items-center justify-center p-4" onClick={() => setShowImportDialog(false)}>
                             <div className="bg-white border border-gray-200 rounded-[18px] p-6 max-w-sm w-full shadow-[0_24px_60px_-18px_rgba(15,23,42,0.35)]" onClick={(e) => e.stopPropagation()}>
                                 <h3 className="text-[15px] font-bold mb-3">粘贴 JSON 配置</h3>
-                                <textarea value={importText} onChange={(e) => setImportText(e.target.value)} className="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-[16px] text-xs font-mono outline-none focus:ring-2 focus:ring-[#8871e4]/20 resize-none mb-4" />
+                                <textarea value={importText} onChange={(e) => setImportText(e.target.value)} className="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-[16px] text-xs font-mono outline-none focus:ring-2 focus:ring-[#ed8c68]/20 resize-none mb-4" />
                                 <div className="flex gap-2">
                                     <button onClick={() => setShowImportDialog(false)} className="flex-1 py-2 bg-gray-100 text-gray-700 rounded-xl text-sm font-bold">取消</button>
-                                    <button onClick={handleImport} className="flex-1 py-2 bg-[#8871e4] text-white rounded-xl text-sm font-bold">导入</button>
+                                    <button onClick={handleImport} className="accent-surface flex-1 py-2 rounded-xl text-sm font-bold">导入</button>
                                 </div>
                             </div>
                         </motion.div>
@@ -410,7 +403,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
 };
 
 /* 子组件 */
-const ToggleSwitch = ({ checked, onChange, color = '#8871e4' }) => (
+const ToggleSwitch = ({ checked, onChange, color = '#ed8c68' }) => (
     <button onClick={() => onChange(!checked)} className="relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0" style={{ backgroundColor: checked ? color : '#e5e7eb' }}>
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>

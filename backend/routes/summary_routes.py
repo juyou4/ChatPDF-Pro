@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from models.provider_registry import PROVIDER_CONFIG
 from services.chat_service import call_ai_api
+from services.document_parse_state import is_parse_prepared, read_parse_manifest
 from utils.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -17,6 +18,23 @@ from utils.middleware import (
 from config import settings
 
 router = APIRouter()
+
+
+def _require_document_parse_ready(doc_id: str, doc: dict) -> dict:
+    """Do not summarize temporary text from an unfinished primary parser."""
+    manifest = read_parse_manifest(doc or {}, doc_id=doc_id)
+    if is_parse_prepared(manifest):
+        return manifest
+
+    route = str(manifest.get("requested_route") or manifest.get("route") or "auto")
+    stage = str(manifest.get("stage") or "")
+    if route == "mineru" and stage == "awaiting_rag_index":
+        detail = "MinerU 已完成版面解析，正在等待问答索引发布"
+    elif route == "mineru":
+        detail = "当前文档正在按 MinerU 全程解析，完成前不能生成总结"
+    else:
+        detail = "当前文档解析尚未完成，请稍后重试"
+    raise HTTPException(status_code=409, detail=detail)
 
 
 class SummaryRequest(BaseModel):
@@ -48,6 +66,7 @@ async def generate_summary(request: SummaryRequest):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = router.documents_store[request.doc_id]
+    _require_document_parse_ready(request.doc_id, doc)
     full_text = doc["data"]["full_text"]
 
     system_prompt = """你是专业的文档摘要专家。请为文档生成简洁的摘要。

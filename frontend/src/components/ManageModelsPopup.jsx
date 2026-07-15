@@ -210,7 +210,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                 className={`
                                     px-4 py-2 rounded-xl font-semibold text-sm transition-all
                                     ${activeTab === 'available'
-                                        ? 'bg-purple-500 text-white shadow-md'
+                                        ? 'accent-surface shadow-md'
                                         : 'text-gray-600 hover:bg-gray-100'
                                     }
                                 `}
@@ -222,14 +222,14 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                 className={`
                                     px-4 py-2 rounded-xl font-semibold text-sm transition-all
                                     ${activeTab === 'my-models'
-                                        ? 'bg-purple-500 text-white shadow-md'
+                                        ? 'accent-surface shadow-md'
                                         : 'text-gray-600 hover:bg-gray-100'
                                     }
                                 `}
                             >
                                 我的模型
                                 {myModels.length > 0 && (
-                                    <span className="ml-2 px-2 py-0.5 bg-white/20 rounded-full text-xs">
+                                    <span className="accent-control ml-2 px-2 py-0.5 rounded-full text-xs">
                                         {myModels.length}
                                     </span>
                                 )}
@@ -271,7 +271,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
                                             whileTap={{ scale: 0.98 }}
                                             onClick={handleFetchModels}
                                             disabled={isFetching}
-                                            className="px-4 py-2 bg-purple-500 text-white rounded-xl font-semibold text-sm shadow-md hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                            className="accent-surface px-4 py-2 rounded-xl font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                                         >
                                             <Download className="w-4 h-4" />
                                             {isFetching ? '获取中...' : '获取模型'}
@@ -780,7 +780,7 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                         w-full px-4 py-3 rounded-xl font-semibold shadow-md flex items-center justify-center gap-2
                         ${testingModel
                             ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
-                            : 'bg-purple-500 text-white hover:bg-purple-600'}
+                            : 'accent-surface'}
                     `}
                 >
                     {testingModel ? (

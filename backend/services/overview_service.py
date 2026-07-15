@@ -29,6 +29,7 @@ from services.figure_builder import build_logical_figures, select_top_figures
 from services.figure_render import render_figure
 from services.figure_validation import validate_and_fallback
 from schemas.figure_schema import LogicalFigureSchema, OverviewFigureItem
+from services.document_parse_state import derive_source_hash, read_parse_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,10 @@ class OverviewData(BaseModel):
     created_at: float
     figure_meta: Optional[dict] = None
     ai_meta: Optional[dict] = None
+    # 文档可以在不改变 ``doc_id`` 的情况下重新解析。缓存内容也保留主
+    # 解析 generation，作为文件名之外的第二层校验。
+    parse_generation: str = ""
+    document_source_hash: str = ""
 
 
 class OverviewTask(BaseModel):
@@ -100,6 +105,8 @@ class OverviewTask(BaseModel):
     updated_at: float
     use_mineru_figures: bool = False
     figure_render_mode: str = "raw"
+    parse_generation: str = ""
+    document_source_hash: str = ""
 
 
 # ============ 配置 ============
@@ -112,7 +119,7 @@ try:
 except Exception:
     pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v12"
+OVERVIEW_CACHE_VERSION = "v13"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -704,7 +711,9 @@ def _build_figure_clip_bbox(
 
     # 多子图往往只覆盖 figure 里的位图局部，需要扩大到更接近整张图的尺度。
     if multi_image:
-        min_width = page_width * 0.50
+        # Panels frequently omit the connector area and shared labels between
+        # them. Keep enough horizontal context to preserve the composite figure.
+        min_width = page_width * 0.58
         min_height = page_height * 0.20
         cur_width = clip_x1 - clip_x0
         cur_height = clip_y1 - clip_y0
@@ -1273,12 +1282,17 @@ def _render_figures_with_pipeline(
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     
     for figure in figures:
+        # MinerU 与视觉兜底已经提供图主体 bbox，不再用另一套检测二次裁剪。
+        # 兼容旧客户端传入 yolo 模式，但不让它改写主解析给出的坐标。
+        effective_render_mode = (
+            "raw" if str(figure.source or "") in {"mineru", "yolo"} else render_mode
+        )
         # 渲染
         render_result = validate_and_fallback(
             figure,
             pdf_doc,
             render_figure,
-            render_kwargs={"render_mode": render_mode},
+            render_kwargs={"render_mode": effective_render_mode},
         )
         
         results.append({
@@ -1373,7 +1387,7 @@ async def _generate_figure_analysis_via_pipeline(
     if not figure or not render_result or not render_result.success:
         return None
     
-    # display_image = YOLO 收紧后的纯图像裁切（给用户看）
+    # display_image = 当前图表来源给出的展示区域（给用户看）
     # model_image  = 完整区域（给 LLM 分析，包含上下文）
     display_b64 = render_result.display_image_base64
     model_b64 = render_result.model_image_base64 or display_b64
@@ -1532,29 +1546,156 @@ async def _generate_single_figure_analysis(
         return None
 
 
-def _get_cache_key(doc_id: str, depth: str, figure_render_mode: str = "raw") -> str:
-    """生成缓存 key"""
+def _fallback_parse_cache_identity(doc_id: str) -> tuple[str, str]:
+    """为没有内存文档的调用方返回稳定的解析身份。
+
+    正常 API 请求始终从 ``parse_manifest`` 获取身份。确定性的回退值保留
+    运维脚本和独立测试的行为，同时避免未知文档共用一个缓存槽。
+    """
+    source_hash = derive_source_hash({"overview_cache_doc_id": str(doc_id or "")})
+    return f"legacy-{source_hash[:24]}", source_hash
+
+
+async def _get_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
+    """读取拥有当前速览缓存的主解析 generation。"""
+    try:
+        from routes.document_routes import documents_store
+
+        document = documents_store.get(doc_id)
+        if isinstance(document, dict):
+            manifest = read_parse_manifest(document, doc_id=doc_id)
+            generation = str(manifest.get("generation") or "").strip()
+            source_hash = str(manifest.get("source_hash") or "").strip()
+            if generation and source_hash:
+                return generation, source_hash
+    except Exception as exc:
+        # 速览生成流程稍后还会读取文档。独立调用方没有路由存储时，不应让
+        # 可选缓存查询变成导入期错误。
+        logger.warning("读取速览解析身份失败 doc=%s error=%s", doc_id, exc)
+
+    return _fallback_parse_cache_identity(doc_id)
+
+
+async def _resolve_parse_cache_identity(
+    doc_id: str,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> tuple[str, str]:
+    """优先使用已捕获的身份，否则读取当前活动身份。"""
+    generation = str(parse_generation or "").strip()
+    source_hash = str(document_source_hash or "").strip()
+    if generation and source_hash:
+        return generation, source_hash
+    return await _get_document_parse_cache_identity(doc_id)
+
+
+def _parse_cache_identity_token(
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> str:
+    """基于完整解析身份生成路径安全的缓存后缀。"""
+    payload = json.dumps(
+        {
+            "generation": str(parse_generation or "").strip(),
+            "source_hash": str(document_source_hash or "").strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def _get_cache_key(
+    doc_id: str,
+    depth: str,
+    figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> str:
+    """生成绑定当前主解析 generation 的缓存键。"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
-    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}"
+    identity_token = _parse_cache_identity_token(parse_generation, document_source_hash)
+    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{identity_token}"
 
 
-def _get_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") -> Path:
+def _get_cache_path(
+    doc_id: str,
+    depth: str,
+    figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> Path:
     """获取缓存文件路径"""
-    key = _get_cache_key(doc_id, depth, figure_render_mode)
+    key = _get_cache_key(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     return CACHE_DIR / f"{key}.json"
 
 
-def _get_legacy_cache_path(doc_id: str, depth: str, figure_render_mode: str = "raw") -> Path:
+def _get_legacy_cache_path(
+    doc_id: str,
+    depth: str,
+    figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> Path:
     """旧版 backend/data/overviews 缓存路径，用于一次性兼容迁移。"""
-    key = _get_cache_key(doc_id, depth, figure_render_mode)
+    key = _get_cache_key(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     return LEGACY_CACHE_DIR / f"{key}.json"
 
 
-async def clear_overview_cache(doc_id: str, depth: str, figure_render_mode: str = "raw") -> None:
-    """删除指定速览缓存，用于强制重新生成。"""
-    cache_key = _get_cache_key(doc_id, depth, figure_render_mode)
+def _overview_matches_parse_identity(
+    overview: OverviewData,
+    parse_generation: str,
+    document_source_hash: str,
+) -> bool:
+    """即使文件名意外复用，也拒绝没有匹配 manifest 的旧缓存。"""
+    return (
+        str(overview.parse_generation or "").strip() == str(parse_generation or "").strip()
+        and str(overview.document_source_hash or "").strip()
+        == str(document_source_hash or "").strip()
+    )
+
+
+async def clear_overview_cache(
+    doc_id: str,
+    depth: str,
+    figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> None:
+    """删除当前解析 generation 的指定速览缓存，用于强制重新生成。"""
+    parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
+    )
+    cache_key = _get_cache_key(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     overview_cache.pop(cache_key, None)
-    cache_path = _get_cache_path(doc_id, depth, figure_render_mode)
+    cache_path = _get_cache_path(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     try:
         if cache_path.exists():
             cache_path.unlink()
@@ -1566,43 +1707,117 @@ async def get_cached_overview(
     doc_id: str,
     depth: str,
     figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> Optional[OverviewData]:
-    """获取缓存的速览"""
-    cache_key = _get_cache_key(doc_id, depth, figure_render_mode)
-    
+    """获取与当前 primary parser generation 匹配的速览缓存。"""
+    parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
+    )
+    cache_key = _get_cache_key(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
+
     # 内存缓存
-    if cache_key in overview_cache:
-        return overview_cache[cache_key]
-    
-    # 文件缓存
-    cache_path = _get_cache_path(doc_id, depth, figure_render_mode)
-    legacy_cache_path = _get_legacy_cache_path(doc_id, depth, figure_render_mode)
+    cached = overview_cache.get(cache_key)
+    if cached:
+        if _overview_matches_parse_identity(cached, parse_generation, document_source_hash):
+            return cached
+        overview_cache.pop(cache_key, None)
+
+    # 文件缓存。v13 之前的文件没有解析 identity，必须视为不匹配，
+    # 不能在 MinerU 发布后迁移进当前 generation。
+    cache_path = _get_cache_path(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
+    legacy_cache_path = _get_legacy_cache_path(
+        doc_id,
+        depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     source_path = cache_path if cache_path.exists() else legacy_cache_path
     if source_path.exists():
         try:
             with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             overview = OverviewData(**data)
+            if not _overview_matches_parse_identity(
+                overview,
+                parse_generation,
+                document_source_hash,
+            ):
+                logger.info(
+                    "忽略过期速览缓存 doc=%s depth=%s generation=%s",
+                    doc_id,
+                    depth,
+                    parse_generation,
+                )
+                return None
             overview_cache[cache_key] = overview
             if source_path == legacy_cache_path:
-                await save_overview_cache(overview)
+                await save_overview_cache(
+                    overview,
+                    parse_generation=parse_generation,
+                    document_source_hash=document_source_hash,
+                )
             return overview
         except Exception as e:
             logger.warning(f"读取速览缓存失败: {e}")
-    
+
     return None
 
 
-async def save_overview_cache(overview: OverviewData):
-    """保存速览到缓存"""
+async def save_overview_cache(
+    overview: OverviewData,
+    *,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> None:
+    """保存已绑定 primary parser generation 的速览缓存。"""
+    parse_generation = str(parse_generation or overview.parse_generation or "").strip()
+    document_source_hash = str(
+        document_source_hash or overview.document_source_hash or ""
+    ).strip()
+    if not parse_generation or not document_source_hash:
+        # 缺少该元数据的缓存可能是上一路线遗留的本地结果，不能提升为当前
+        # MinerU 路线的结果。
+        logger.warning("跳过未绑定解析身份的速览缓存 doc=%s", overview.doc_id)
+        return
+
+    overview.parse_generation = parse_generation
+    overview.document_source_hash = document_source_hash
     figure_render_mode = (overview.figure_meta or {}).get("render_mode", "raw")
-    cache_key = _get_cache_key(overview.doc_id, overview.depth, figure_render_mode)
-    
+    cache_key = _get_cache_key(
+        overview.doc_id,
+        overview.depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
+
     # 内存缓存
     overview_cache[cache_key] = overview
-    
+
     # 文件缓存
-    cache_path = _get_cache_path(overview.doc_id, overview.depth, figure_render_mode)
+    cache_path = _get_cache_path(
+        overview.doc_id,
+        overview.depth,
+        figure_render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(overview.model_dump(), f, ensure_ascii=False, indent=2)
@@ -1620,10 +1835,17 @@ async def generate_overview_content(
     endpoint: str = "",
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> OverviewData:
     """生成速览内容（调用 LLM）"""
     from services.chat_service import call_ai_api
     figure_render_mode = _normalize_figure_render_mode(figure_render_mode)
+    parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
+    )
     logger.info(
         "[AI-Audit] purpose=overview doc=%s provider=%s model=%s depth=%s render_mode=%s",
         doc_id,
@@ -1702,6 +1924,8 @@ async def generate_overview_content(
                 "depth": depth,
                 "render_mode": figure_render_mode,
             },
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )
         logger.info(
             "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=success depth=%s",
@@ -1740,7 +1964,6 @@ async def generate_overview_content(
                     doc,
                     depth,
                     force_rebuild=force_rebuild,
-                    prefer_yolo=figure_render_mode == "yolo",
                 )
                 if logical_figures and pdf_url:
                     try:
@@ -1859,7 +2082,11 @@ async def generate_overview_content(
             logger.warning(f"关键图表解读跳过: {e}")
         
         # 保存缓存
-        await save_overview_cache(overview)
+        await save_overview_cache(
+            overview,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+        )
         
         return overview
         
@@ -1883,8 +2110,15 @@ async def build_fallback_overview_content(
     provider: str = "",
     figure_render_mode: str = "raw",
     error: str = "",
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> OverviewData:
     """模型不可用时的确定性基础速览，避免前端空白报错。"""
+    parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
+    )
     doc_info = await get_document_info(doc_id)
     title = doc_info.get("filename", "未知文档") if doc_info else "未知文档"
     text = " ".join(str(document_text or "").split())
@@ -1931,8 +2165,14 @@ async def build_fallback_overview_content(
             "fallback": True,
             "generation_error": error,
         },
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
     )
-    await save_overview_cache(overview)
+    await save_overview_cache(
+        overview,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
+    )
     return overview
 
 
@@ -1948,6 +2188,7 @@ async def create_overview_task(
 ) -> OverviewTask:
     """创建异步任务"""
     task_id = str(uuid.uuid4())
+    parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
     
     task = OverviewTask(
         task_id=task_id,
@@ -1962,6 +2203,8 @@ async def create_overview_task(
         updated_at=time.time(),
         use_mineru_figures=use_mineru_figures,
         figure_render_mode=_normalize_figure_render_mode(figure_render_mode),
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
     )
     
     overview_tasks[task_id] = task
@@ -1987,7 +2230,20 @@ async def _process_overview_task(task_id: str):
         # 检查缓存
         _use_mineru = getattr(task, 'use_mineru_figures', False)
         _render_mode = _normalize_figure_render_mode(getattr(task, 'figure_render_mode', 'raw'))
-        cached = await get_cached_overview(task.doc_id, task.depth, _render_mode)
+        parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+            task.doc_id,
+            getattr(task, "parse_generation", ""),
+            getattr(task, "document_source_hash", ""),
+        )
+        task.parse_generation = parse_generation
+        task.document_source_hash = document_source_hash
+        cached = await get_cached_overview(
+            task.doc_id,
+            task.depth,
+            _render_mode,
+            parse_generation,
+            document_source_hash,
+        )
         if cached:
             if _use_mineru and (cached.figure_meta or {}).get("source") != "mineru":
                 logger.info(f"[Overview] task: 缓存非 MinerU，跳过")
@@ -2006,6 +2262,8 @@ async def _process_overview_task(task_id: str):
             endpoint=task.endpoint,
             use_mineru_figures=getattr(task, 'use_mineru_figures', False),
             figure_render_mode=_render_mode,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )
         
         task.result = result
@@ -2036,12 +2294,31 @@ async def _generate_or_wait_overview(
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
     force: bool = False,
+    parse_generation: str = "",
+    document_source_hash: str = "",
 ) -> OverviewData:
     """相同 doc/depth 的 overview 只生成一次，其余请求直接复用。"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
-    cache_key = _get_cache_key(doc_id, depth, render_mode)
+    parse_generation, document_source_hash = await _resolve_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
+    )
+    cache_key = _get_cache_key(
+        doc_id,
+        depth,
+        render_mode,
+        parse_generation,
+        document_source_hash,
+    )
 
-    cached = await get_cached_overview(doc_id, depth, render_mode)
+    cached = await get_cached_overview(
+        doc_id,
+        depth,
+        render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     if cached and not force:
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
             logger.info(f"[Overview] _generate_or_wait: 缓存非 MinerU，跳过")
@@ -2067,6 +2344,8 @@ async def _generate_or_wait_overview(
             endpoint=endpoint,
             use_mineru_figures=use_mineru_figures,
             figure_render_mode=render_mode,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )
 
     task = asyncio.create_task(_runner())
@@ -2091,7 +2370,14 @@ async def get_or_create_overview(
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
-    cached = await get_cached_overview(doc_id, depth, render_mode)
+    parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
+    cached = await get_cached_overview(
+        doc_id,
+        depth,
+        render_mode,
+        parse_generation,
+        document_source_hash,
+    )
     if cached and not force:
         logger.info(
             "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=cache_hit depth=%s",
@@ -2114,6 +2400,8 @@ async def get_or_create_overview(
                 use_mineru_figures=use_mineru_figures,
                 figure_render_mode=render_mode,
                 force=force,
+                parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
             ),
             timeout=180,
         )
@@ -2137,6 +2425,8 @@ async def get_or_create_overview(
             provider=provider,
             figure_render_mode=render_mode,
             error="速览生成超时",
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )
     except Exception as e:
         if cached:
@@ -2158,4 +2448,6 @@ async def get_or_create_overview(
             provider=provider,
             figure_render_mode=render_mode,
             error=str(e),
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
         )

@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
   Bot,
+  ScanSearch,
   Search,
   Hash,
   Wrench,
@@ -60,7 +61,7 @@ const AGENT_GATE_REASON_LABELS = {
  * 检索代理执行轨迹面板。
  * embedded=true 时作为思考面板内的子区域显示，避免完成后跳到回答下方。
  */
-const BouncingDots = ({ className = 'bg-violet-400' }) => (
+const BouncingDots = ({ className = 'bg-[#D97A5D]' }) => (
   <span className="ml-1 inline-flex items-center gap-0.5" aria-hidden="true">
     {[0, 1, 2].map((i) => (
       <span
@@ -73,10 +74,11 @@ const BouncingDots = ({ className = 'bg-violet-400' }) => (
 );
 
 export default function AgentTracePanel({ trace, embedded = false }) {
-  const [collapsed, setCollapsed] = useState(false);
-  const [expandedRounds, setExpandedRounds] = useState(() => new Set([1]));
+  const [collapsed, setCollapsed] = useState(() => Boolean(trace?.endedAt));
+  const [expandedRounds, setExpandedRounds] = useState(() => new Set(trace?.endedAt ? [] : [1]));
 
   const isRunning = Boolean(trace && trace.enabled && trace.startedAt && !trace.endedAt);
+  const wasRunningRef = useRef(isRunning);
 
   // 运行中每 500ms 触发一次重绘，让头部计时器实时走动
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -89,7 +91,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
   // 新一轮开始时自动展开，让执行过程始终可见
   const roundsLength = Array.isArray(trace?.rounds) ? trace.rounds.length : 0;
   useEffect(() => {
-    if (!roundsLength) return;
+    if (!isRunning || !roundsLength) return;
     const latest = trace.rounds[roundsLength - 1]?.round;
     if (latest == null) return;
     setExpandedRounds((prev) => {
@@ -98,7 +100,15 @@ export default function AgentTracePanel({ trace, embedded = false }) {
       next.add(latest);
       return next;
     });
-  }, [roundsLength]);
+  }, [isRunning, roundsLength]);
+
+  // 运行结束后保留轨迹摘要，但收起各轮细节，避免完成消息长期占满对话区。
+  useEffect(() => {
+    if (wasRunningRef.current && !isRunning) {
+      setExpandedRounds(new Set());
+    }
+    wasRunningRef.current = isRunning;
+  }, [isRunning]);
 
   const stats = useMemo(() => {
     if (!trace) return null;
@@ -165,7 +175,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     if (items.length === 0) return null;
 
     return (
-      <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-gray-200/70 bg-gray-50/70 px-2.5 py-2 text-[11px] text-gray-600 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-300">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-[8px] bg-[#faf7f4] px-2.5 py-2 text-[11px] text-gray-600 dark:bg-white/[0.04] dark:text-gray-300">
         {items.map((item, index) => (
           <span key={index} className={item.startsWith('错误') ? 'text-rose-600 dark:text-rose-400' : ''}>
             {item}
@@ -176,9 +186,9 @@ export default function AgentTracePanel({ trace, embedded = false }) {
   };
 
   const renderTaskStatus = () => (
-    <div className="rounded-md border border-gray-200/70 bg-white/70 p-2.5 text-xs dark:border-gray-700 dark:bg-gray-900/30">
+    <div className="rounded-[8px] bg-[#faf7f4] p-2.5 text-xs dark:bg-white/[0.04]">
       <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
-        <Bot className="h-3.5 w-3.5 text-violet-500" />
+        <Bot className="h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
         <span>任务状态</span>
       </div>
       <div className="flex flex-col gap-1.5">
@@ -189,7 +199,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           </div>
         ))}
         {taskStatus.current && (
-          <div className="agent-op-enter flex items-start gap-1.5 text-violet-700 dark:text-violet-400">
+          <div className="agent-op-enter flex items-start gap-1.5 text-[#B85F47] dark:text-[#FFA07A]">
             {isRunning ? (
               <Loader2 className="mt-0.5 h-3 w-3 flex-shrink-0 animate-spin" />
             ) : (
@@ -218,15 +228,15 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     return (
       <div
         key={index}
-        className={`agent-op-enter flex items-start gap-2 rounded-md border px-2.5 py-2 text-[11px] transition-colors duration-300 ${
+        className={`agent-op-enter flex items-start gap-2 border-t px-2.5 py-2 text-[11px] transition-colors duration-300 first:border-t-0 ${
           isExecuting
-            ? 'agent-op-running border-violet-200/80 dark:border-violet-800/50'
-            : 'border-gray-200/70 bg-white/75 dark:border-gray-700 dark:bg-gray-900/30'
+            ? 'agent-op-running border-[#FFDCCF] dark:border-[#FFA07A]/30'
+            : 'border-[#eee9e5] bg-transparent dark:border-white/[0.08]'
         }`}
       >
         <span
           className={`mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md ${
-            isExecuting ? 'animate-pulse bg-violet-50 dark:bg-violet-950/40' : 'bg-gray-50 dark:bg-gray-800'
+            isExecuting ? 'animate-pulse bg-[#FFF4EF] dark:bg-[#FFA07A]/10' : 'bg-[#f5f2ef] dark:bg-white/[0.05]'
           }`}
         >
           <Icon className={`h-3.5 w-3.5 ${meta.iconClass}`} />
@@ -239,7 +249,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             )}
             {elapsed && <span className="text-gray-400 dark:text-gray-500">· {elapsed}</span>}
             {isExecuting && (
-              <span className="inline-flex items-center gap-1 text-violet-500 dark:text-violet-400">
+              <span className="inline-flex items-center gap-1 text-[#B85F47] dark:text-[#FFA07A]">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 执行中
               </span>
@@ -267,16 +277,16 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     return (
       <div
         key={round}
-        className={`agent-op-enter overflow-hidden rounded-md border transition-colors duration-300 ${
+        className={`agent-op-enter overflow-hidden rounded-[10px] border transition-colors duration-300 ${
           isCurrentRound
-            ? 'border-violet-200 bg-violet-50/30 dark:border-violet-800/60 dark:bg-violet-950/10'
-            : 'border-gray-200/80 bg-gray-50/40 dark:border-gray-700 dark:bg-gray-900/20'
+            ? 'border-[#f0c7b8] bg-[#fff9f6] dark:border-[#FFA07A]/30 dark:bg-[#FFA07A]/[0.05]'
+            : 'border-transparent bg-[#faf7f4] dark:border-white/[0.06] dark:bg-white/[0.025]'
         }`}
       >
         <button
           type="button"
           onClick={() => toggleRound(round)}
-          className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-gray-100/70 dark:hover:bg-gray-800/60"
+          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs transition-colors hover:bg-[#f8f3f0] dark:hover:bg-white/[0.04]"
         >
           {isExpanded ? (
             <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
@@ -284,8 +294,8 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
           )}
           <span
-            className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-violet-100 text-[10px] font-bold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300 ${
-              isCurrentRound ? 'animate-pulse ring-2 ring-violet-300/60 dark:ring-violet-700/60' : ''
+            className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#FFF0E9] text-[10px] font-bold text-[#B85F47] dark:bg-[#FFA07A]/15 dark:text-[#FFA07A] ${
+              isCurrentRound ? 'animate-pulse ring-2 ring-[#FFDCCF]/80 dark:ring-[#FFA07A]/30' : ''
             }`}
           >
             {round}
@@ -304,14 +314,14 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             </span>
           )}
           {roundData.planningMessage && !operations.length && (
-            <span className="inline-flex items-center text-[10px] text-violet-500 dark:text-violet-400">
+            <span className="inline-flex items-center text-[10px] text-[#B85F47] dark:text-[#FFA07A]">
               规划中
               {isCurrentRound && <BouncingDots />}
             </span>
           )}
         </button>
         {isExpanded && (
-          <div className="space-y-1.5 px-2.5 pb-2.5 pt-0.5">
+          <div className="px-3 pb-2.5 pt-0.5">
             {roundData.planningMessage && (
               <div className="px-0.5 text-[11px] italic text-gray-500 dark:text-gray-400">
                 {roundData.planningMessage}
@@ -329,7 +339,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
   };
 
   const rootClass = embedded
-    ? 'mt-3 border-t border-purple-100/70 pt-3 dark:border-purple-900/40'
+    ? 'mt-2 rounded-[14px] border border-[#eadfd8] bg-white px-3.5 py-3 shadow-[0_12px_30px_-20px_rgba(78,64,56,0.38),0_2px_7px_-4px_rgba(78,64,56,0.14),inset_0_1px_0_rgba(255,255,255,0.96)] dark:border-white/[0.09] dark:bg-[#25282f] dark:shadow-[0_14px_32px_-20px_rgba(0,0,0,0.68),inset_0_1px_0_rgba(255,255,255,0.04)]'
     : 'mt-2 ml-2 max-w-2xl';
 
   return (
@@ -337,7 +347,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
       <button
         type="button"
         onClick={() => setCollapsed((prev) => !prev)}
-        className="mb-2 flex w-full items-center gap-1.5 text-left text-xs text-gray-600 transition-colors hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100"
+        className={`flex w-full items-center gap-1.5 text-left text-xs text-gray-600 transition-colors hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100 ${collapsed ? '' : 'mb-2'}`}
       >
         {collapsed ? (
           <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" />
@@ -346,13 +356,13 @@ export default function AgentTracePanel({ trace, embedded = false }) {
         )}
         <span className="relative flex h-3.5 w-3.5 flex-shrink-0" aria-hidden="true">
           {isRunning && (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-50" />
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#D97A5D] opacity-50" />
           )}
-          <Bot className="relative h-3.5 w-3.5 text-violet-500" />
+          <ScanSearch className="relative h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
         </span>
         <span className="font-medium">检索轨迹</span>
         {isRunning && (
-          <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-600 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300">
+          <span className="inline-flex items-center gap-1 rounded-full border border-[#FFDCCF] bg-[#FFF4EF] px-1.5 py-0.5 text-[10px] font-medium text-[#B85F47] dark:border-[#FFA07A]/30 dark:bg-[#FFA07A]/10 dark:text-[#FFA07A]">
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             检索中{liveDuration ? ` ${liveDuration}` : ''}
           </span>
@@ -372,7 +382,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
       </button>
 
       {isRunning && !collapsed && (
-        <div className="agent-progress-track mb-2 h-[3px] w-full rounded-full bg-violet-100/80 dark:bg-violet-950/40" aria-hidden="true">
+        <div className="agent-progress-track mb-2 h-[3px] w-full rounded-full bg-[#FFE8DE] dark:bg-[#FFA07A]/10" aria-hidden="true">
           <span className="agent-progress-sweep" />
         </div>
       )}
@@ -384,9 +394,9 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           {hasTaskStatus && renderTaskStatus()}
 
           {subQuestions.length > 0 && (
-            <div className="rounded-md border border-gray-200/70 bg-white/70 p-2.5 text-xs dark:border-gray-700 dark:bg-gray-900/30">
+            <div className="rounded-[8px] bg-[#faf7f4] p-2.5 text-xs dark:bg-white/[0.04]">
               <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
-                <Search className="h-3.5 w-3.5 text-violet-500" />
+                <Search className="h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
                 <span>子问题分解</span>
                 <span className="text-gray-400">({subQuestions.length})</span>
               </div>
@@ -406,25 +416,27 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           )}
 
           {rounds.length > 0 && (
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-2">
               {rounds.map((roundData, index) => renderRound(roundData, index))}
             </div>
           )}
 
           {trace.finalMessage && (
-            <div className="agent-op-enter rounded-r-md border-l-2 border-violet-200 bg-violet-50/50 px-2.5 py-1.5 text-[11px] italic text-gray-500 dark:border-violet-900/60 dark:bg-violet-950/20 dark:text-gray-400">
+            <div className="agent-op-enter rounded-[8px] bg-[#fff4ef] px-2.5 py-1.5 text-[11px] italic text-gray-500 dark:bg-[#FFA07A]/[0.07] dark:text-gray-400">
               {trace.finalMessage}
             </div>
           )}
 
           {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
-            <div className="rounded-md border border-gray-200/70 bg-gray-50/70 p-2.5 text-[11px] text-gray-500 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-400">
-              <div className="mb-1.5 font-medium text-gray-600 dark:text-gray-300">已纳入意群</div>
-              <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
+            <details className="rounded-[8px] bg-[#faf7f4] px-2.5 py-2 text-[11px] text-gray-500 dark:bg-white/[0.04] dark:text-gray-400">
+              <summary className="cursor-pointer select-none font-medium text-gray-600 dark:text-gray-300">
+                已纳入意群 <span className="font-normal text-gray-400">({trace.agentDetail.length})</span>
+              </summary>
+              <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
                 {trace.agentDetail.map((detail, index) => (
                   <span
                     key={index}
-                    className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-gray-600 dark:border-gray-700 dark:bg-gray-900/60 dark:text-gray-300"
+                    className="inline-flex items-center gap-1 rounded-[6px] bg-[#f4f1ee] px-1.5 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
                   >
                     <Layers className="h-3 w-3 text-emerald-500" />
                     {detail.group_id}
@@ -435,7 +447,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
                   </span>
                 ))}
               </div>
-            </div>
+            </details>
           )}
         </div>
       )}

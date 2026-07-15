@@ -116,10 +116,44 @@ def ensure_block_index(
     data_dir: Path | str,
     pdf_path: Path | str | None = None,
     force_rebuild: bool = False,
+    preserve_active_source: bool = True,
 ) -> dict[str, Any]:
-    if not force_rebuild:
-        cached = load_block_index(data_dir, doc_id)
-        if cached:
+    parse_identity = _document_parse_identity(doc)
+    if parse_identity.get("invalid_manifest"):
+        raise RuntimeError("文档解析身份不完整，拒绝复用无法确认来源的阅读块缓存")
+    cached = load_block_index(data_dir, doc_id)
+    if (
+        parse_identity.get("parser_route") == "mineru"
+        and parse_identity.get("full_route")
+        and not cached
+    ):
+        # A full MinerU document cannot safely fall back to locally inferred
+        # blocks after its MinerU cache has been removed or corrupted.
+        raise RuntimeError("MinerU 全程解析的阅读块尚未发布")
+    if cached:
+        cached_matches_parse = _block_index_matches_parse_identity(cached, parse_identity)
+        # A re-upload of the same PDF keeps its document id, but deliberately
+        # creates a new parse generation.  Local readers must rebuild instead
+        # of retaining a prior MinerU block tree for the new local route.
+        if parse_identity.get("parser_route") == "local" and not cached_matches_parse:
+            force_rebuild = True
+            preserve_active_source = False
+        # MinerU-first documents have no correct local fallback.  They stay
+        # gated until their worker publishes a matching MinerU block index.
+        if (
+            parse_identity.get("parser_route") == "mineru"
+            and parse_identity.get("full_route")
+            and not cached_matches_parse
+        ):
+            raise RuntimeError("MinerU 全程解析的阅读块尚未发布")
+        # AI-outline regeneration currently uses ``force_rebuild`` to bypass its
+        # own cache. Do not let that incidental request replace a completed
+        # MinerU layout with a second, local PDF interpretation. A caller that
+        # intentionally switches the document back to local parsing must opt in.
+        if not force_rebuild or (
+            preserve_active_source
+            and str(cached.get("source") or "").strip().lower() == "mineru_vlm"
+        ):
             return cached
 
     index = build_block_index(doc_id=doc_id, doc=doc, pdf_path=pdf_path)
@@ -137,6 +171,9 @@ def build_block_index(
     pages: list[dict[str, Any]] = []
     toc_items: list[dict[str, Any]] = []
     source = "fallback"
+    canonical_source_pages = data.get("pages", []) if isinstance(data, dict) else []
+    canonical_pages = _build_pages_from_text(canonical_source_pages)
+    canonical_source = _canonical_block_index_source(data, canonical_source_pages)
 
     pdf_file = Path(pdf_path) if pdf_path else None
     if pdf_file and pdf_file.exists():
@@ -146,14 +183,18 @@ def build_block_index(
         except Exception as exc:
             logger.warning("[BlockIndex] PDF build failed for %s: %s", doc_id, exc)
 
-    if not pages:
-        pages = _build_pages_from_text(data.get("pages", []))
-        source = "text_fallback"
+    # ``data.pages`` is the document's canonical text representation after
+    # local extraction, OCR and optional ODL cleanup. Scanned PDFs still have
+    # physical pages, so checking only ``if not pages`` loses usable OCR text.
+    if not pages or _should_prefer_canonical_pages(pages, canonical_pages):
+        pages = canonical_pages
+        source = canonical_source
 
     _mark_repeated_page_artifacts(pages)
     _inject_visual_blocks(pages, data)
     outline = _build_outline(toc_items, pages)
     _assign_sections(pages, outline)
+    parse_identity = _document_parse_identity(doc)
 
     return {
         "version": BLOCK_INDEX_VERSION,
@@ -163,7 +204,52 @@ def build_block_index(
         "page_count": len(pages),
         "pages": pages,
         "outline": outline,
+        **parse_identity,
     }
+
+
+def _document_parse_identity(doc: dict[str, Any]) -> dict[str, Any]:
+    data = doc.get("data", {}) if isinstance(doc, dict) else {}
+    manifest = data.get("parse_manifest") if isinstance(data, dict) else None
+    if not isinstance(manifest, dict) and isinstance(data, dict):
+        manifest = data.get("document_parse_state")
+    if not isinstance(manifest, dict):
+        # 真正没有 manifest 的历史文档继续沿用旧缓存；现代文档一旦写入
+        # manifest，就必须具备完整身份，不能再走 fail-open。
+        return {}
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    if metadata.get("legacy_inferred"):
+        return {}
+    route = str(manifest.get("resolved_route") or "").strip().lower()
+    generation = str(manifest.get("generation") or "").strip()
+    source_hash = str(manifest.get("source_hash") or "").strip()
+    if not route or not generation or not source_hash:
+        return {"invalid_manifest": True}
+    return {
+        "parser_route": route,
+        "parse_generation": generation,
+        "document_source_hash": source_hash,
+        "full_route": bool(metadata.get("full_route")),
+    }
+
+
+def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[str, Any]) -> bool:
+    if not identity:
+        # Existing documents predate parse generations. Keep their cached block
+        # index usable until they are explicitly reparsed.
+        return True
+    if (
+        str(index.get("parse_generation") or "") != str(identity.get("parse_generation") or "")
+        or str(index.get("document_source_hash") or "") != str(identity.get("document_source_hash") or "")
+    ):
+        return False
+    route = str(identity.get("parser_route") or "")
+    source = str(index.get("source") or "").strip().lower()
+    if route == "mineru":
+        return source == "mineru_vlm"
+    if route == "local":
+        return source != "mineru_vlm"
+    return True
 
 
 def _build_pages_from_pdf(pdf_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -282,8 +368,11 @@ def _extract_page_text_blocks(
 def _build_pages_from_text(source_pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pages: list[dict[str, Any]] = []
     for page_idx, page_data in enumerate(source_pages or []):
+        if not isinstance(page_data, dict):
+            continue
         page_num = int(page_data.get("page") or page_idx + 1)
         text = str(page_data.get("content") or page_data.get("text") or "")
+        page_source = _canonical_page_source(page_data)
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
         blocks = []
         y = 72.0
@@ -297,6 +386,7 @@ def _build_pages_from_text(source_pages: list[dict[str, Any]]) -> list[dict[str,
                 "bbox": [54.0, y, 558.0, min(760.0, y + max(22.0, step * 0.75))],
                 "text": _limit_text(paragraph, 2400),
                 "section_id": None,
+                "source": page_source,
             }
             if heading_level:
                 block["level"] = heading_level
@@ -307,8 +397,102 @@ def _build_pages_from_text(source_pages: list[dict[str, Any]]) -> list[dict[str,
             "width_pts": 612.0,
             "height_pts": 792.0,
             "blocks": blocks,
+            "source": page_source,
         })
     return pages
+
+
+def _canonical_page_source(page_data: dict[str, Any]) -> str:
+    """Return the per-page text source without inventing a MinerU identity."""
+    raw_source = str(page_data.get("source") or "").strip().lower()
+    aliases = {
+        "pdf": "pdf_native",
+        "pdfplumber": "pdf_native",
+        "pymupdf": "pdf_native",
+        "local": "pdf_native",
+        "local_pdf": "pdf_native",
+    }
+    return aliases.get(raw_source, raw_source or "text_fallback")
+
+
+def _canonical_block_index_source(data: dict[str, Any], source_pages: list[dict[str, Any]]) -> str:
+    """Describe the active canonical text path at document level.
+
+    ODL can retain individual OCR pages, so prefer its explicit hybrid marker
+    over reducing a mixed page set to an opaque generic fallback.
+    """
+    extraction_method = str(data.get("extraction_method") or "").strip().lower()
+    if extraction_method in {"odl", "odl_hybrid"}:
+        return extraction_method
+
+    page_sources = {
+        _canonical_page_source(page)
+        for page in source_pages or []
+        if isinstance(page, dict) and str(page.get("content") or page.get("text") or "").strip()
+    }
+    if not page_sources:
+        return "text_fallback"
+    if len(page_sources) == 1:
+        return next(iter(page_sources))
+    if "odl" in page_sources and "ocr" in page_sources:
+        return "odl_hybrid"
+    if "ocr" in page_sources:
+        return "ocr"
+    if "odl" in page_sources:
+        return "odl"
+    return "text_fallback"
+
+
+def _page_text_metrics(pages: list[dict[str, Any]]) -> dict[str, int]:
+    """Measure text coverage before figure/table blocks are injected."""
+    characters = 0
+    pages_with_text = 0
+    for page in pages or []:
+        page_characters = 0
+        for block in page.get("blocks", []) or []:
+            if str(block.get("type") or "").lower() in {"artifact", "figure", "image", "table"}:
+                continue
+            text = " ".join(str(block.get("text") or "").split())
+            page_characters += len(text)
+        characters += page_characters
+        if page_characters >= 8:
+            pages_with_text += 1
+    return {"characters": characters, "pages_with_text": pages_with_text}
+
+
+def _should_prefer_canonical_pages(
+    native_pages: list[dict[str, Any]],
+    canonical_pages: list[dict[str, Any]],
+) -> bool:
+    """Use OCR/ODL canonical text only when native PDF text is unusable.
+
+    This deliberately does not make ODL a blanket replacement for native PDF
+    layout. It switches only for empty or clearly under-covered native text,
+    preserving native geometry on ordinary born-digital PDFs.
+    """
+    canonical = _page_text_metrics(canonical_pages)
+    if canonical["characters"] < 8 or canonical["pages_with_text"] == 0:
+        return False
+
+    native = _page_text_metrics(native_pages)
+    if native["characters"] < 8 or native["pages_with_text"] == 0:
+        return True
+
+    # A short native text layer often contains only a page number or a stray
+    # glyph on scanned pages. Require a material canonical corpus before
+    # treating a non-empty PDF layer as weak.
+    if (
+        canonical["characters"] >= 16
+        and native["characters"] < 32
+        and native["characters"] < canonical["characters"]
+    ):
+        return True
+    if canonical["characters"] >= 80 and native["characters"] * 4 < canonical["characters"]:
+        return True
+    return (
+        canonical["characters"] >= 80
+        and native["pages_with_text"] * 2 < canonical["pages_with_text"]
+    )
 
 
 def _mark_repeated_page_artifacts(pages: list[dict[str, Any]]) -> None:

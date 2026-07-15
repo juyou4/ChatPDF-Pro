@@ -17,7 +17,11 @@ from typing import Optional
 import faiss
 import numpy as np
 
-from services.bm25_service import BM25Index
+from services.bm25_service import (
+    BM25Index,
+    BM25_TOKENIZER_VERSION,
+    get_bm25_tokenizer_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,11 @@ class MemoryIndex:
         self._embedding_cache: dict[str, np.ndarray] = {}  # content_hash -> embedding
         # 持久化 BM25 索引
         self._bm25: Optional[BM25Index] = None
+        self._bm25_variants: dict[str, BM25Index] = {}
+        # FAISS、entry_ids/texts 与 BM25 必须作为同一代状态提交和读取。
+        self._state_lock = threading.RLock()
+        self._state_generation: int = 0
+        self._synced_generation: int = 0
         # dirty-sync 状态
         self.dirty: bool = False
         self.last_sync_at: str = ""
@@ -63,13 +72,25 @@ class MemoryIndex:
         self.rebuild_reason: str = ""
         self._sync_debounce_seconds: float = 5.0
         self._sync_timer: Optional[threading.Timer] = None
-        self._save_lock = threading.Lock()
+        self._save_lock = threading.RLock()
         self._pending_reason: str = ""
 
     @staticmethod
     def _hash_content(text: str) -> str:
         """计算内容 hash（MD5，仅用于变更检测）"""
         return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+    def _mark_state_changed_locked(self) -> int:
+        """推进内存状态代际；调用方必须持有 _state_lock。"""
+        self._state_generation += 1
+        self.dirty = self._state_generation != self._synced_generation
+        return self._state_generation
+
+    def _mark_snapshot_synced(self, snapshot_generation: int) -> None:
+        """只确认快照实际写出的代际，保留其后提交的 dirty 状态。"""
+        with self._state_lock:
+            self._synced_generation = snapshot_generation
+            self.dirty = self._state_generation != self._synced_generation
 
     def _get_embed_fn(self, api_key: str = None):
         """获取 embedding 函数"""
@@ -172,9 +193,10 @@ class MemoryIndex:
         """
         # 变更检测：hash 相同则跳过
         new_hash = self._hash_content(text)
-        if entry_id in self._content_hashes and self._content_hashes[entry_id] == new_hash:
-            logger.debug(f"记忆条目内容未变化，跳过 embedding: {entry_id}")
-            return
+        with self._state_lock:
+            if entry_id in self._content_hashes and self._content_hashes[entry_id] == new_hash:
+                logger.debug(f"记忆条目内容未变化，跳过 embedding: {entry_id}")
+                return
 
         try:
             # 使用缓存机制进行 embedding
@@ -184,17 +206,22 @@ class MemoryIndex:
             # 归一化向量，使 IP = 余弦相似度
             embeddings = _normalize_vectors(embeddings)
 
-            # 首次添加时创建索引
-            if self.index is None:
-                self.index = faiss.IndexFlatIP(dimension)
+            with self._state_lock:
+                # embedding 计算期间可能有另一个写入先完成，提交前再次检查。
+                if self._content_hashes.get(entry_id) == new_hash:
+                    return
+                # 首次添加时创建索引
+                if self.index is None:
+                    self.index = faiss.IndexFlatIP(dimension)
 
-            self.index.add(embeddings)
-            self.entry_ids.append(entry_id)
-            self.texts.append(text)
-            self._content_hashes[entry_id] = new_hash
+                self.index.add(embeddings)
+                self.entry_ids.append(entry_id)
+                self.texts.append(text)
+                self._content_hashes[entry_id] = new_hash
 
-            # 增量更新 BM25 索引
-            self._rebuild_bm25()
+                # 增量更新 BM25 索引
+                self._rebuild_bm25()
+                self._mark_state_changed_locked()
 
             # 异步 dirty-sync 持久化
             self.schedule_sync(reason="add")
@@ -212,35 +239,37 @@ class MemoryIndex:
         Args:
             entry_id: 要移除的记忆条目 ID
         """
-        if entry_id not in self.entry_ids:
-            logger.warning(f"记忆条目不在向量索引中: {entry_id}")
-            return
+        with self._state_lock:
+            if entry_id not in self.entry_ids:
+                logger.warning(f"记忆条目不在向量索引中: {entry_id}")
+                return
 
-        idx = self.entry_ids.index(entry_id)
-        self.entry_ids.pop(idx)
-        self.texts.pop(idx)
-        self._content_hashes.pop(entry_id, None)
+            idx = self.entry_ids.index(entry_id)
+            self.entry_ids.pop(idx)
+            self.texts.pop(idx)
+            self._content_hashes.pop(entry_id, None)
 
-        if self.index is not None and self.index.ntotal > 0:
-            # 从 FAISS 索引中提取所有向量
-            all_vectors = faiss.rev_swig_ptr(
-                self.index.get_xb(), self.index.ntotal * self.index.d
-            ).reshape(self.index.ntotal, self.index.d).copy()
+            if self.index is not None and self.index.ntotal > 0:
+                # 从 FAISS 索引中提取所有向量
+                all_vectors = faiss.rev_swig_ptr(
+                    self.index.get_xb(), self.index.ntotal * self.index.d
+                ).reshape(self.index.ntotal, self.index.d).copy()
 
-            # 删除对应行并重建索引
-            remaining_vectors = np.delete(all_vectors, idx, axis=0)
-            dimension = self.index.d
-            self.index = faiss.IndexFlatIP(dimension)
-            if len(remaining_vectors) > 0:
-                remaining_vectors = _normalize_vectors(remaining_vectors)
-                self.index.add(remaining_vectors)
+                # 删除对应行并重建索引
+                remaining_vectors = np.delete(all_vectors, idx, axis=0)
+                dimension = self.index.d
+                self.index = faiss.IndexFlatIP(dimension)
+                if len(remaining_vectors) > 0:
+                    remaining_vectors = _normalize_vectors(remaining_vectors)
+                    self.index.add(remaining_vectors)
 
-        # 如果没有条目了，清空索引
-        if len(self.entry_ids) == 0:
-            self.index = None
+            # 如果没有条目了，清空索引
+            if len(self.entry_ids) == 0:
+                self.index = None
 
-        # 重建 BM25 索引
-        self._rebuild_bm25()
+            # 重建 BM25 索引
+            self._rebuild_bm25()
+            self._mark_state_changed_locked()
 
         self.schedule_sync(reason="remove")
         logger.info(f"记忆条目已从向量索引移除: {entry_id}")
@@ -256,8 +285,9 @@ class MemoryIndex:
         Returns:
             [{"entry_id": str, "similarity": float, "text": str}, ...]
         """
-        if self.index is None or self.index.ntotal == 0:
-            return []
+        with self._state_lock:
+            if self.index is None or self.index.ntotal == 0:
+                return []
 
         try:
             # 查询向量缓存：避免重复 embedding 计算
@@ -271,16 +301,19 @@ class MemoryIndex:
                 # 归一化查询向量
                 query_embedding = _normalize_vectors(query_embedding)
                 _query_vector_cache.put(self.embedding_model_id, cache_key, query_embedding)
-            # 实际搜索数量不超过索引中的条目数
-            actual_k = min(top_k, self.index.ntotal)
-            distances, indices = self.index.search(query_embedding, actual_k)
-
-            # 检测索引类型：兼容旧 L2 索引
-            is_ip = (self.index.metric_type == faiss.METRIC_INNER_PRODUCT)
+            with self._state_lock:
+                if self.index is None or self.index.ntotal == 0:
+                    return []
+                # FAISS search 与 add/remove/write_index 互斥，结果和元数据取同一快照。
+                actual_k = min(top_k, self.index.ntotal)
+                distances, indices = self.index.search(query_embedding, actual_k)
+                is_ip = (self.index.metric_type == faiss.METRIC_INNER_PRODUCT)
+                entry_ids_snapshot = list(self.entry_ids)
+                texts_snapshot = list(self.texts)
 
             results = []
             for dist, idx in zip(distances[0], indices[0]):
-                if idx < 0 or idx >= len(self.entry_ids):
+                if idx < 0 or idx >= len(entry_ids_snapshot):
                     continue
                 if is_ip:
                     # IP 归一化后分数即余弦相似度 [0, 1]
@@ -289,9 +322,9 @@ class MemoryIndex:
                     # 旧 L2 索引兼容
                     similarity = 1.0 / (1.0 + float(dist))
                 results.append({
-                    "entry_id": self.entry_ids[idx],
+                    "entry_id": entry_ids_snapshot[idx],
                     "similarity": similarity,
-                    "text": self.texts[idx],
+                    "text": texts_snapshot[idx],
                 })
 
             return results
@@ -307,11 +340,6 @@ class MemoryIndex:
             api_key: API 密钥（远程模型需要）
         """
         if not entries:
-            self.index = None
-            self.entry_ids = []
-            self.texts = []
-            self._content_hashes = {}
-            self._bm25 = None
             self._embedding_cache.clear()
             self._apply_reindex_state(
                 {
@@ -330,11 +358,24 @@ class MemoryIndex:
 
     def _rebuild_bm25(self) -> None:
         """从 self.texts 重建 BM25 索引"""
-        if not self.texts:
-            self._bm25 = None
-            return
-        self._bm25 = BM25Index()
-        self._bm25.build(self.texts)
+        with self._state_lock:
+            texts_snapshot = list(self.texts)
+            if not texts_snapshot:
+                self._set_primary_bm25(None)
+                return
+            bm25 = BM25Index()
+            bm25.build(texts_snapshot)
+            self._set_primary_bm25(bm25)
+
+    def _set_primary_bm25(self, bm25: Optional[BM25Index]) -> None:
+        """更新持久化主索引，并使所有请求级只读变体失效。"""
+        with self._state_lock:
+            self._bm25 = bm25
+            self._bm25_variants = {}
+            if bm25 is not None:
+                signature = str(getattr(bm25, "tokenizer_signature", "") or "")
+                if signature:
+                    self._bm25_variants[signature] = bm25
 
     def _mark_rebuild_required(self, reason: str, *, stored_model: str = "") -> None:
         """记录需要重建索引的原因。"""
@@ -383,21 +424,37 @@ class MemoryIndex:
             "bm25": bm25,
         }
 
-    def _apply_reindex_state(self, state: dict, *, reason: str = "rebuild") -> None:
+    def _apply_reindex_state(
+        self,
+        state: dict,
+        *,
+        reason: str = "rebuild",
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """提交新的索引状态。"""
-        self.index = state["index"]
-        self.entry_ids = state["entry_ids"]
-        self.texts = state["texts"]
-        self._content_hashes = state["content_hashes"]
-        self._bm25 = state["bm25"]
+        with self._state_lock:
+            if (
+                expected_generation is not None
+                and self._state_generation != expected_generation
+            ):
+                return False
+            self.index = state["index"]
+            self.entry_ids = state["entry_ids"]
+            self.texts = state["texts"]
+            self._content_hashes = state["content_hashes"]
+            self._set_primary_bm25(state["bm25"])
+            self._mark_state_changed_locked()
         now_iso = datetime.now(timezone.utc).isoformat()
         self.last_reindex_at = now_iso
         self.last_reindex_reason = reason
         self._clear_rebuild_required()
         self.schedule_sync(reason="rebuild")
+        return True
 
-    def safe_reindex(self, entries: list, api_key: str = None, reason: str = "rebuild") -> None:
+    def safe_reindex(self, entries: list, api_key: str = None, reason: str = "rebuild") -> bool:
         """安全重建索引，失败时保留旧索引。"""
+        with self._state_lock:
+            start_generation = self._state_generation
         try:
             state = self._build_reindex_state(entries, api_key=api_key)
         except Exception as e:
@@ -405,8 +462,21 @@ class MemoryIndex:
             self._mark_rebuild_required(f"{reason}_failed", stored_model=self.stored_embedding_model or self.embedding_model_id)
             raise
 
-        self._apply_reindex_state(state, reason=reason)
+        applied = self._apply_reindex_state(
+            state,
+            reason=reason,
+            expected_generation=start_generation,
+        )
+        if not applied:
+            logger.info(
+                "记忆索引重建结果已过期，保留较新的内存状态: reason=%s start=%s current=%s",
+                reason,
+                start_generation,
+                self._state_generation,
+            )
+            return False
         logger.info(f"记忆向量索引已安全重建，共 {len(entries)} 条")
+        return True
 
     def bm25_search(self, query: str, top_k: int = 3) -> list[dict]:
         """使用持久化的 BM25 索引检索记忆
@@ -418,22 +488,38 @@ class MemoryIndex:
         Returns:
             [{"chunk": str, "entry_id": str, "score": float}, ...]
         """
-        if self._bm25 is None or not self.texts:
-            return []
+        signature = get_bm25_tokenizer_signature()
+        with self._state_lock:
+            texts_snapshot = list(self.texts)
+            entry_ids_snapshot = list(self.entry_ids)
+            if not texts_snapshot:
+                return []
+            bm25 = self._bm25_variants.get(signature)
+            if bm25 is None or bm25.chunks != texts_snapshot:
+                bm25 = BM25Index(use_jieba=signature.endswith(":jieba"))
+                bm25.build(texts_snapshot)
+                self._bm25_variants[signature] = bm25
 
-        raw_results = self._bm25.search(query, top_k=top_k)
+        # 变体构建后不可变；使用同一时刻的 entry id 快照保证结果映射一致。
+        raw_results = bm25.search(query, top_k=top_k)
         results = []
         for item in raw_results:
             idx = item["index"]
-            if 0 <= idx < len(self.entry_ids):
+            if 0 <= idx < len(entry_ids_snapshot):
                 results.append({
                     "chunk": item["chunk"],
-                    "entry_id": self.entry_ids[idx],
+                    "entry_id": entry_ids_snapshot[idx],
                     "score": item["score"],
                 })
         return results
 
-    def _write_snapshot(self) -> None:
+    def _write_snapshot(self) -> int:
+        """在状态锁内持久化同一代 FAISS 与元数据。"""
+        with self._state_lock:
+            self._write_snapshot_locked()
+            return self._state_generation
+
+    def _write_snapshot_locked(self) -> None:
         """持久化 FAISS 索引和元数据到磁盘"""
         os.makedirs(self.index_dir, exist_ok=True)
 
@@ -452,13 +538,26 @@ class MemoryIndex:
 
         # 保存元数据（含 BM25 索引 + 内容 hash）
         # 注意：embedding_cache 不持久化（内存缓存），每次启动重建
+        bm25_tokenizer_version = getattr(
+            self._bm25,
+            "tokenizer_version",
+            BM25_TOKENIZER_VERSION,
+        )
+        bm25_tokenizer_signature = getattr(
+            self._bm25,
+            "tokenizer_signature",
+            get_bm25_tokenizer_signature(),
+        )
         meta = {
             "entry_ids": self.entry_ids,
             "texts": self.texts,
             "embedding_model": self.embedding_model_id,
             "bm25": self._bm25,
+            "bm25_tokenizer_version": bm25_tokenizer_version,
+            "bm25_tokenizer_signature": bm25_tokenizer_signature,
             "content_hashes": self._content_hashes,
             "last_reindex_reason": self.last_reindex_reason,
+            "state_generation": self._state_generation,
         }
         temp_meta_path = meta_path + temp_suffix
         with open(temp_meta_path, "wb") as f:
@@ -471,8 +570,8 @@ class MemoryIndex:
         """立即持久化当前索引快照。"""
         with self._save_lock:
             self._cancel_pending_sync()
-            self._write_snapshot()
-            self.dirty = False
+            snapshot_generation = self._write_snapshot()
+            self._mark_snapshot_synced(snapshot_generation)
             self.last_sync_at = datetime.now(timezone.utc).isoformat()
 
     def _cancel_pending_sync(self) -> None:
@@ -482,26 +581,35 @@ class MemoryIndex:
 
     def schedule_sync(self, reason: str = "") -> None:
         """标记 dirty，并在 debounce 窗口后统一落盘。"""
-        self.dirty = True
-        self._pending_reason = reason or self._pending_reason
-        delay = self._sync_debounce_seconds
-        self._cancel_pending_sync()
-        if delay <= 0:
-            self.flush_sync(reason=reason)
-            return
-        self._sync_timer = threading.Timer(delay, self.flush_sync, kwargs={"reason": reason})
-        self._sync_timer.daemon = True
-        self._sync_timer.start()
+        with self._save_lock:
+            with self._state_lock:
+                self.dirty = self._state_generation != self._synced_generation
+                needs_sync = self.dirty
+            self._pending_reason = reason or self._pending_reason
+            self._cancel_pending_sync()
+            if not needs_sync:
+                self._pending_reason = ""
+                return
+            delay = self._sync_debounce_seconds
+            if delay <= 0:
+                self.flush_sync(reason=reason)
+                return
+            self._sync_timer = threading.Timer(delay, self.flush_sync, kwargs={"reason": reason})
+            self._sync_timer.daemon = True
+            self._sync_timer.start()
 
     def flush_sync(self, reason: str = "") -> None:
         """刷新 dirty 索引到磁盘。"""
         with self._save_lock:
             self._cancel_pending_sync()
-            if not self.dirty and reason != "manual":
+            with self._state_lock:
+                needs_sync = self._state_generation != self._synced_generation
+                self.dirty = needs_sync
+            if not needs_sync and reason != "manual":
                 return
-            self._write_snapshot()
+            snapshot_generation = self._write_snapshot()
             now_iso = datetime.now(timezone.utc).isoformat()
-            self.dirty = False
+            self._mark_snapshot_synced(snapshot_generation)
             self.last_sync_at = now_iso
             if (reason or self._pending_reason) == "rebuild":
                 self.last_reindex_at = now_iso
@@ -509,17 +617,21 @@ class MemoryIndex:
 
     def get_status(self) -> dict:
         """返回索引 dirty-sync 状态快照。"""
-        return {
-            "dirty": self.dirty,
-            "last_sync_at": self.last_sync_at,
-            "last_reindex_at": self.last_reindex_at,
-            "last_reindex_reason": self.last_reindex_reason,
-            "index_version": self.index_version,
-            "pending_sync": self._sync_timer is not None,
-            "stored_embedding_model": self.stored_embedding_model or self.embedding_model_id,
-            "rebuild_required": self.rebuild_required,
-            "rebuild_reason": self.rebuild_reason,
-        }
+        with self._save_lock:
+            with self._state_lock:
+                return {
+                    "dirty": self._state_generation != self._synced_generation,
+                    "last_sync_at": self.last_sync_at,
+                    "last_reindex_at": self.last_reindex_at,
+                    "last_reindex_reason": self.last_reindex_reason,
+                    "index_version": self.index_version,
+                    "state_generation": self._state_generation,
+                    "synced_generation": self._synced_generation,
+                    "pending_sync": self._sync_timer is not None,
+                    "stored_embedding_model": self.stored_embedding_model or self.embedding_model_id,
+                    "rebuild_required": self.rebuild_required,
+                    "rebuild_reason": self.rebuild_reason,
+                }
 
     def load(self) -> bool:
         """从磁盘加载索引
@@ -539,6 +651,15 @@ class MemoryIndex:
             with open(meta_path, "rb") as f:
                 meta = pickle.load(f)
 
+            try:
+                stored_state_generation = max(0, int(meta.get("state_generation", 0) or 0))
+            except (TypeError, ValueError):
+                stored_state_generation = 0
+            with self._state_lock:
+                self._state_generation = stored_state_generation
+                self._synced_generation = stored_state_generation
+                self.dirty = False
+
             self.entry_ids = meta.get("entry_ids", [])
             self.texts = meta.get("texts", [])
             stored_model = meta.get("embedding_model", "")
@@ -547,13 +668,31 @@ class MemoryIndex:
 
             # 恢复持久化的 BM25 索引
             stored_bm25 = meta.get("bm25")
-            if isinstance(stored_bm25, BM25Index) and stored_bm25.doc_count > 0:
-                self._bm25 = stored_bm25
+            try:
+                stored_bm25_tokenizer_version = int(meta.get("bm25_tokenizer_version", 0) or 0)
+            except (TypeError, ValueError):
+                stored_bm25_tokenizer_version = 0
+            stored_bm25_tokenizer_signature = str(
+                meta.get("bm25_tokenizer_signature") or ""
+            )
+            current_bm25_tokenizer_signature = get_bm25_tokenizer_signature()
+            bm25_snapshot_required = False
+            if (
+                isinstance(stored_bm25, BM25Index)
+                and stored_bm25.doc_count > 0
+                and stored_bm25_tokenizer_version == BM25_TOKENIZER_VERSION
+                and stored_bm25_tokenizer_signature == current_bm25_tokenizer_signature
+                and getattr(stored_bm25, "tokenizer_version", 0) == BM25_TOKENIZER_VERSION
+                and getattr(stored_bm25, "tokenizer_signature", "") == current_bm25_tokenizer_signature
+            ):
+                self._set_primary_bm25(stored_bm25)
             elif self.texts:
-                # 旧版元数据没有 BM25，从 texts 重建
+                # 旧版 BM25 或旧 tokenizer 不能复用；从已持久化文本轻量重建，
+                # 无需重新计算 embedding。
                 self._rebuild_bm25()
+                bm25_snapshot_required = True
             else:
-                self._bm25 = None
+                self._set_primary_bm25(None)
 
             # 恢复内容 hash 映射
             stored_hashes = meta.get("content_hashes", {})
@@ -576,6 +715,7 @@ class MemoryIndex:
                 self.entry_ids = []
                 self.texts = []
                 self.index = None
+                self._set_primary_bm25(None)
                 return False
 
             # 加载 FAISS 索引
@@ -592,6 +732,7 @@ class MemoryIndex:
                     self.entry_ids = []
                     self.texts = []
                     self.index = None
+                    self._set_primary_bm25(None)
                     return False
             else:
                 # 元数据存在但索引文件不存在
@@ -600,6 +741,7 @@ class MemoryIndex:
                     self._mark_rebuild_required("missing_index_file", stored_model=stored_model)
                     self.entry_ids = []
                     self.texts = []
+                    self._set_primary_bm25(None)
                     return False
 
             # 自动迁移旧 L2 索引到 IP 索引
@@ -617,9 +759,19 @@ class MemoryIndex:
                 else:
                     self.index = faiss.IndexFlatIP(d)
                 self.save()
+                bm25_snapshot_required = False
                 logger.info(f"L2 → IP 迁移完成，共 {n} 条向量")
 
-            self.dirty = False
+            if bm25_snapshot_required:
+                self.save()
+                logger.info(
+                    "记忆 BM25 tokenizer 已迁移到版本 %s",
+                    BM25_TOKENIZER_VERSION,
+                )
+
+            with self._state_lock:
+                self._synced_generation = self._state_generation
+                self.dirty = False
             self._clear_rebuild_required()
 
             logger.info(f"记忆向量索引已加载，共 {len(self.entry_ids)} 条")
@@ -627,7 +779,9 @@ class MemoryIndex:
         except Exception as e:
             logger.error(f"加载记忆向量索引失败: {e}")
             self._mark_rebuild_required("load_failed", stored_model=self.stored_embedding_model or self.embedding_model_id)
-            self.index = None
-            self.entry_ids = []
-            self.texts = []
+            with self._state_lock:
+                self.index = None
+                self.entry_ids = []
+                self.texts = []
+                self._set_primary_bm25(None)
             return False

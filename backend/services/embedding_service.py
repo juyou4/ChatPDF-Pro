@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import os
@@ -32,9 +33,13 @@ from models.model_id_resolver import resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
 from runtime_mode import runtime
 from services.formula_text import build_formula_alias_text, formula_term_matches, looks_formula_like
-from services.rag_config import should_apply_numeric_table_specialization
+from services.rag_config import (
+    get_context_chunk_expansion,
+    should_apply_numeric_table_specialization,
+)
 from services.rerank_service import rerank_service
 from services.semantic_group_store import (
+    active_manifest_path,
     publish_generation,
     semantic_group_paths,
     validate_semantic_group_artifacts,
@@ -9139,6 +9144,13 @@ def build_vector_index(
                 model=summary_model,
                 provider=summary_provider,
                 endpoint=summary_api_host,
+                source_hash=str(
+                    effective_index_meta.get("document_source_hash")
+                    or effective_index_meta.get("source_hash")
+                    or ""
+                ),
+                transaction_id=str(effective_index_meta.get("parse_generation") or ""),
+                vector_store_dir=vector_store_dir,
             )
 
     except Exception as e:
@@ -9157,6 +9169,9 @@ def _build_semantic_group_index_async(
     endpoint: str = "",
     output_dir: str | None = None,
     raise_on_error: bool = False,
+    source_hash: str = "",
+    transaction_id: str = "",
+    vector_store_dir: str = "",
 ):
     """异步启动意群生成任务（需求 6.1, 6.4）
 
@@ -9171,11 +9186,12 @@ def _build_semantic_group_index_async(
         embed_fn: 嵌入函数
         api_key: LLM API 密钥（用于意群摘要生成）
     """
-    if doc_id in _group_generation_in_progress:
+    task_key = f"{doc_id}:{transaction_id or 'legacy'}"
+    if task_key in _group_generation_in_progress:
         logger.info(f"[{doc_id}] 意群生成任务已在进行中，跳过")
         return {"status": "disabled", "group_count": 0, "paths": []}
 
-    _group_generation_in_progress.add(doc_id)
+    _group_generation_in_progress.add(task_key)
 
     def _task():
         try:
@@ -9190,12 +9206,15 @@ def _build_semantic_group_index_async(
                 endpoint=endpoint,
                 output_dir=output_dir,
                 raise_on_error=raise_on_error,
+                source_hash=source_hash,
+                transaction_id=transaction_id,
+                vector_store_dir=vector_store_dir,
             )
         except Exception as e:
             # 任务失败时记录日志（需求 6.4），不影响主流程
             logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
         finally:
-            _group_generation_in_progress.discard(doc_id)
+            _group_generation_in_progress.discard(task_key)
 
     thread = threading.Thread(target=_task, daemon=True)
     thread.start()
@@ -9213,6 +9232,9 @@ def _build_semantic_group_index(
     endpoint: str = "",
     output_dir: str | None = None,
     raise_on_error: bool = False,
+    source_hash: str = "",
+    transaction_id: str = "",
+    vector_store_dir: str = "",
 ):
     """在分块索引构建完成后，生成语义意群并构建意群级别向量索引
 
@@ -9325,7 +9347,22 @@ def _build_semantic_group_index(
             validation = validate_semantic_group_artifacts(artifact_paths, doc_id)
             if not validation["valid"]:
                 raise RuntimeError("semantic groups validation failed: " + ", ".join(validation["errors"]))
-            published = publish_generation(semantic_root, doc_id, groups_store_dir)
+            if transaction_id and not _semantic_generation_matches_vector_index(
+                doc_id,
+                vector_store_dir,
+                parse_generation=transaction_id,
+                document_source_hash=source_hash,
+            ):
+                logger.info("[%s] 丢弃已过期的语义意群后台结果: generation=%s", doc_id, transaction_id)
+                return {"status": "stale", "group_count": 0, "paths": []}
+            published = publish_generation(
+                semantic_root,
+                doc_id,
+                groups_store_dir,
+                source_hash=source_hash,
+                transaction_id=transaction_id,
+            )
+            _index_cache.invalidate(doc_id)
             paths = list(published["paths"].values())
             staged_dir = ""
         return {"status": "ready", "group_count": len(groups), "paths": paths}
@@ -11246,7 +11283,8 @@ def search_document_chunks(
         pages,
     )
 
-    group_chunk_map = _load_group_data(doc_id) or {}
+    semantic_groups_current = _semantic_groups_match_vector_index(doc_id, vector_store_dir)
+    group_chunk_map = _load_group_data(doc_id) or {} if semantic_groups_current else {}
 
     embed_fn = get_embedding_function(embedding_model_id, api_key)
 
@@ -11651,6 +11689,7 @@ def search_document_chunks(
             pages=pages,
             query=query,
             top_k=pre_rerank_top_k,
+            vector_store_dir=vector_store_dir,
         )
         results = _apply_query_intent_boost(results, analysis_query)
         results = _apply_numeric_table_boost(results, analysis_query)
@@ -11665,7 +11704,7 @@ def search_document_chunks(
 
     # 邻居 chunk 上下文扩展
     try:
-        _expand_n = _settings.num_expand_context_chunk
+        _expand_n = get_context_chunk_expansion()
         if _expand_n > 0:
             results = _chunk_expander.expand_context_chunks(results, chunks, expand_n=_expand_n)
     except Exception as _expand_err:
@@ -11779,6 +11818,7 @@ def _merge_with_group_search(
     pages: List[dict],
     query: str,
     top_k: int = 10,
+    vector_store_dir: str = "",
 ) -> List[dict]:
     """尝试加载意群级别索引并与分块结果进行 RRF 融合
 
@@ -11797,6 +11837,10 @@ def _merge_with_group_search(
         融合后的结果列表，或原始分块结果（降级时）
     """
     config = _rag_config_singleton
+
+    if not _semantic_groups_match_vector_index(doc_id, vector_store_dir):
+        logger.info(f"[{doc_id}] 意群索引不属于当前向量代际，降级到分块检索")
+        return chunk_results
 
     # 检查是否启用语义意群功能
     if not config.enable_semantic_groups:
@@ -11862,6 +11906,58 @@ def _get_semantic_groups_dir(doc_id: str = "") -> str:
         return _SEMANTIC_GROUPS_DIR
     paths = semantic_group_paths(_SEMANTIC_GROUPS_DIR, doc_id)
     return str(next(iter(paths.values())).parent)
+
+
+def _semantic_generation_matches_vector_index(
+    doc_id: str,
+    vector_store_dir: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+) -> bool:
+    if not parse_generation or not document_source_hash or not vector_store_dir:
+        return False
+    chunks_path = Path(vector_store_dir) / f"{doc_id}.pkl"
+    try:
+        with open(chunks_path, "rb") as handle:
+            data = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
+    return (
+        str(index_meta.get("parse_generation") or "") == str(parse_generation)
+        and str(index_meta.get("document_source_hash") or "") == str(document_source_hash)
+    )
+
+
+def _semantic_groups_match_vector_index(doc_id: str, vector_store_dir: str) -> bool:
+    """仅让与当前向量索引同代际的 semantic generation 参与检索。"""
+    chunks_path = Path(vector_store_dir or "") / f"{doc_id}.pkl"
+    try:
+        with open(chunks_path, "rb") as handle:
+            data = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return False
+    if not isinstance(data, dict):
+        # 旧 list 结构没有代际信息，继续保持兼容。
+        return True
+    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
+    parse_generation = str(index_meta.get("parse_generation") or "")
+    document_source_hash = str(index_meta.get("document_source_hash") or "")
+    if not parse_generation or not document_source_hash:
+        return True
+    try:
+        active = json.loads(
+            active_manifest_path(_SEMANTIC_GROUPS_DIR, doc_id).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return (
+        str(active.get("transaction_id") or "") == parse_generation
+        and str(active.get("source_hash") or "") == document_source_hash
+    )
 
 
 def get_relevant_context(
@@ -11944,6 +12040,7 @@ def get_relevant_context(
 
     config = _rag_config_singleton
     prefer_raw_chunk_context = "numeric_table" in evidence_need
+    semantic_groups_current = _semantic_groups_match_vector_index(doc_id, vector_store_dir)
 
     # 动态 Token 预算：根据模型上下文窗口动态调整，同时扣除输出预留
     if config.token_budget_ratio > 0 and model_context_window > 0:
@@ -11960,7 +12057,7 @@ def get_relevant_context(
             config.max_token_budget = dynamic_budget
 
     # 尝试使用语义意群增强检索
-    if config.enable_semantic_groups and not prefer_raw_chunk_context:
+    if config.enable_semantic_groups and semantic_groups_current and not prefer_raw_chunk_context:
         try:
             context_str, retrieval_meta = _build_context_with_groups(
                 doc_id=doc_id,
@@ -11978,6 +12075,8 @@ def get_relevant_context(
         except Exception as e:
             # 意群增强失败，回退到简单拼接
             logger.warning(f"[{doc_id}] 意群增强检索失败，回退到简单拼接: {e}")
+    elif config.enable_semantic_groups and not semantic_groups_current:
+        logger.info(f"[{doc_id}] 当前向量代际没有匹配的语义意群，使用分块上下文")
     elif prefer_raw_chunk_context:
         logger.info(f"[{doc_id}] numeric_table 查询跳过语义意群摘要，直接使用原始 chunk 上下文")
 
@@ -12016,7 +12115,7 @@ def get_relevant_context(
     #   - 单 group ≤ 6000 字符（防止单意群占满预算）
     #   - 总 hierarchical 升级体量 ≤ 18000 字符（提前截断）
     #   - 同 group 第二次出现仍保留原 chunk_text（避免重复）
-    if not prefer_raw_chunk_context:
+    if not prefer_raw_chunk_context and semantic_groups_current:
         try:
             _hier_groups_dir = _get_semantic_groups_dir(doc_id)
             from services.semantic_group_service import SemanticGroupService as _SGS_h

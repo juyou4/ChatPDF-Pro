@@ -41,6 +41,24 @@ from services.document_parse_artifact import (
     derive_table_geometry_capabilities,
     persist_document_parse_artifact,
 )
+from services.document_parse_state import (
+    PARSE_ROUTE_AUTO,
+    PARSE_ROUTE_LOCAL,
+    PARSE_ROUTE_MINERU,
+    PARSE_STATUS_CANCELLED,
+    PARSE_STATUS_FAILED,
+    PARSE_STATUS_PENDING,
+    PARSE_STATUS_QUEUED,
+    PARSE_STATUS_READY,
+    PARSE_STATUS_RUNNING,
+    build_parse_manifest,
+    derive_source_hash,
+    is_parse_prepared,
+    matches_parse_generation,
+    normalize_parse_route,
+    read_parse_manifest,
+    transition_parse_manifest,
+)
 from services.document_job_store import (
     load_document_job,
     persist_document_job,
@@ -58,14 +76,24 @@ from services.semantic_group_store import (
     semantic_group_paths,
     validate_semantic_group_artifacts,
 )
+from services.ai_cache_state import load_ai_cache_generation, rotate_ai_cache_generation
 from services.block_translation_service import (
     MAX_BLOCKS_PER_REQUEST,
     get_cached_translations,
     get_translation_cache_path,
+    save_translation_cache,
     translate_blocks,
 )
-from services.reading_outline_service import get_or_create_reading_outline, get_reading_outline_path
-from services.section_outline_service import get_or_create_section_outline, get_section_outline_path
+from services.reading_outline_service import (
+    get_or_create_reading_outline,
+    get_reading_outline_path,
+    save_reading_outline,
+)
+from services.section_outline_service import (
+    get_or_create_section_outline,
+    get_section_outline_path,
+    save_section_outline,
+)
 from services.table_visual_metadata import build_table_visual_metadata
 from services.table_visual_verifier import get_table_visual_verification_status
 from runtime_mode import runtime
@@ -139,11 +167,25 @@ except ValueError:
 _DEEP_PARSE_SEMAPHORE = threading.BoundedSemaphore(_DEEP_PARSE_CONCURRENCY)
 _DOCUMENT_OPERATION_LOCKS_LOCK = threading.Lock()
 _DOCUMENT_OPERATION_LOCKS: dict[str, threading.Lock] = {}
+_DOCUMENT_PUBLICATION_LOCKS_LOCK = threading.Lock()
+_DOCUMENT_PUBLICATION_LOCKS: dict[str, threading.RLock] = {}
 
 
 def _get_document_operation_lock(doc_id: str) -> threading.Lock:
     with _DOCUMENT_OPERATION_LOCKS_LOCK:
         return _DOCUMENT_OPERATION_LOCKS.setdefault(doc_id, threading.Lock())
+
+
+def _get_document_publication_lock(doc_id: str) -> threading.RLock:
+    """Serialize short, externally visible parse-generation publications.
+
+    MinerU parsing and embedding construction can take minutes, so uploads
+    must not wait for the whole operation lock.  This separate re-entrant lock
+    only covers the final artifact/document swap and the upload's manifest
+    replacement, making the generation check and publication atomic together.
+    """
+    with _DOCUMENT_PUBLICATION_LOCKS_LOCK:
+        return _DOCUMENT_PUBLICATION_LOCKS.setdefault(doc_id, threading.RLock())
 
 
 def _normalize_page_keys(data: dict):
@@ -340,6 +382,195 @@ def _resolve_document_pdf_path(doc: dict) -> Path | None:
     return pdf_path if pdf_path.exists() else None
 
 
+def _read_document_parse_manifest(doc_id: str, doc: dict | None = None) -> dict:
+    """Return the primary parser contract, including a safe legacy fallback."""
+    target = doc if isinstance(doc, dict) else documents_store.get(doc_id)
+    return read_parse_manifest(target or {}, doc_id=doc_id)
+
+
+class _SupersededParseGeneration(RuntimeError):
+    """Raised when a background publisher no longer owns a document run."""
+
+
+class _SupersededAICacheGeneration(RuntimeError):
+    """Raised when a cache publisher predates an explicit cache clear."""
+
+
+def _parse_generation_matches_current_document(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str = "",
+) -> bool:
+    """Return whether a worker still owns the current document generation."""
+    if not parse_generation:
+        return False
+    manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    return matches_parse_generation(
+        manifest,
+        generation=parse_generation,
+        source_hash=document_source_hash or None,
+    )
+
+
+def _require_current_parse_generation(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str = "",
+) -> dict:
+    """Return the active manifest or refuse an obsolete publication."""
+    manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    if not parse_generation or not matches_parse_generation(
+        manifest,
+        generation=parse_generation,
+        source_hash=document_source_hash or None,
+    ):
+        raise _SupersededParseGeneration("文档解析路线已更新，已拒绝发布旧代际结果")
+    return manifest
+
+
+def _build_parse_bound_cache_writer(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    persist,
+    ai_cache_generation: str | None = None,
+):
+    """创建“身份复核 + 缓存落盘”不可分割的短事务。"""
+    expected_ai_cache_generation = (
+        load_ai_cache_generation(DATA_DIR, doc_id)
+        if ai_cache_generation is None
+        else str(ai_cache_generation)
+    )
+
+    def write(payload):
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
+            )
+            current_ai_cache_generation = load_ai_cache_generation(DATA_DIR, doc_id)
+            if current_ai_cache_generation != expected_ai_cache_generation:
+                raise _SupersededAICacheGeneration(
+                    "AI 缓存已清理，已拒绝发布清理前的旧结果"
+                )
+            return persist(payload)
+
+    return write
+
+
+def _write_document_parse_manifest(
+    doc_id: str,
+    manifest: dict,
+    *,
+    doc: dict | None = None,
+    persist: bool = True,
+) -> dict:
+    """Persist one canonical parser state without replacing unrelated document data."""
+    target = doc if isinstance(doc, dict) else documents_store.get(doc_id)
+    if not isinstance(target, dict):
+        raise RuntimeError("文档记录不存在，无法更新解析状态")
+    data = target.setdefault("data", {})
+    data["parse_manifest"] = dict(manifest)
+    if persist:
+        save_document(doc_id, target)
+    return data["parse_manifest"]
+
+
+def _transition_document_parse_manifest(
+    doc_id: str,
+    status: str,
+    *,
+    stage: str | None = None,
+    error: str | None = None,
+    doc: dict | None = None,
+    metadata: dict | None = None,
+    persist: bool = True,
+) -> dict:
+    target = doc if isinstance(doc, dict) else documents_store.get(doc_id)
+    current = _read_document_parse_manifest(doc_id, target)
+    updated = transition_parse_manifest(current, status, stage=stage, error=error)
+    if metadata:
+        merged_metadata = dict(updated.get("metadata") or {})
+        merged_metadata.update(metadata)
+        updated["metadata"] = merged_metadata
+    return _write_document_parse_manifest(doc_id, updated, doc=target, persist=persist)
+
+
+def _transition_current_full_mineru_manifest(
+    doc_id: str,
+    status: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    stage: str,
+    error: str | None = None,
+    expected_statuses: set[str] | None = None,
+) -> dict | None:
+    """Transition only the active full-route MinerU generation under its publication lock."""
+    if not parse_generation or not document_source_hash:
+        return None
+    with _get_document_publication_lock(doc_id):
+        doc = documents_store.get(doc_id)
+        manifest = _read_document_parse_manifest(doc_id, doc)
+        if not matches_parse_generation(
+            manifest,
+            generation=parse_generation,
+            source_hash=document_source_hash,
+        ):
+            return None
+        if not _is_full_mineru_parse_manifest(manifest):
+            return None
+        if expected_statuses is not None and manifest.get("status") not in expected_statuses:
+            return None
+        return _transition_document_parse_manifest(
+            doc_id,
+            status,
+            stage=stage,
+            error=error,
+            doc=doc,
+        )
+
+
+def _document_parse_gate_message(manifest: dict) -> str:
+    route = str(
+        manifest.get("resolved_route")
+        or manifest.get("requested_route")
+        or manifest.get("route")
+        or "auto"
+    )
+    stage = str(manifest.get("stage") or "")
+    if route == PARSE_ROUTE_MINERU and (manifest.get("metadata") or {}).get("full_route"):
+        if stage == "awaiting_rag_index":
+            return "MinerU 已完成版面解析，正在等待问答索引发布；请继续完成 MinerU 索引重建"
+        return "当前文档正在按 MinerU 全程解析，完成前不能使用阅读、速览、翻译或问答"
+    return "当前文档解析尚未完成，请稍后重试"
+
+
+def _require_document_parse_ready(doc_id: str, doc: dict | None = None) -> dict:
+    manifest = _read_document_parse_manifest(doc_id, doc)
+    if not is_parse_prepared(manifest):
+        raise HTTPException(status_code=409, detail=_document_parse_gate_message(manifest))
+    return manifest
+
+
+def _parse_manifest_index_matches(doc_id: str, manifest: dict) -> bool:
+    """Whether the active vector pair belongs to the document's active parse run."""
+    if not _vector_index_ready(doc_id):
+        return False
+    metadata = _read_vector_index_meta(doc_id)
+    if bool((manifest.get("metadata") or {}).get("legacy_inferred")):
+        return True
+    index_meta = metadata.get("index_meta") or {}
+    return (
+        str(index_meta.get("parse_generation") or "") == str(manifest.get("generation") or "")
+        and str(index_meta.get("document_source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
 def _warm_block_index(doc_id: str) -> None:
     """Best-effort block index build; upload/search must not fail because of it."""
     try:
@@ -392,12 +623,16 @@ def _read_vector_index_meta(doc_id: str, base_dir: Path | None = None) -> dict:
         return {}
     if not isinstance(data, dict):
         return {"index_source": "pdf_native"}
+    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
     return {
         "index_source": data.get("index_source") or "pdf_native",
         "source_hash": data.get("source_hash") or "",
         "rebuilt_at": data.get("rebuilt_at") or "",
         "previous_index_source": data.get("previous_index_source") or "",
         "normalizer_version": data.get("normalizer_version") or "",
+        "parse_generation": index_meta.get("parse_generation") or "",
+        "document_source_hash": index_meta.get("document_source_hash") or "",
+        "index_meta": index_meta,
         "chunk_count": len(data.get("chunks") or []),
         "table_chunk_count": sum(
             1
@@ -411,26 +646,66 @@ def _get_rag_index_status(doc_id: str) -> dict:
     ready = _vector_index_ready(doc_id)
     meta = _read_vector_index_meta(doc_id) if ready else {}
     source = meta.get("index_source") or ("pdf_native" if ready else "")
+    parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    matches_active_parse = _parse_manifest_index_matches(doc_id, parse_manifest) if ready else False
+    with _INDEX_STATUS_LOCK:
+        lifecycle = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+    lifecycle_matches_active_parse = bool(lifecycle) and matches_parse_generation(
+        parse_manifest,
+        generation=str(lifecycle.get("parse_generation") or ""),
+        source_hash=str(lifecycle.get("document_source_hash") or ""),
+    )
+    if not lifecycle_matches_active_parse:
+        lifecycle = {}
+    if not lifecycle:
+        if ready and matches_active_parse:
+            lifecycle = {"status": "ready", "stage": "ready", "error": ""}
+        elif ready:
+            lifecycle = {
+                "status": "stale",
+                "stage": "parse_generation_mismatch",
+                "error": "现有问答索引不属于当前解析代际",
+            }
+        else:
+            lifecycle = {"status": "missing", "stage": "not_started", "error": ""}
     return {
-        "ready": ready,
+        "status": str(lifecycle.get("status") or "missing"),
+        "stage": str(lifecycle.get("stage") or "not_started"),
+        "error": str(lifecycle.get("error") or ""),
+        "ready": ready and matches_active_parse,
+        "artifact_ready": ready,
         "index_source": source,
         "source_hash": meta.get("source_hash", ""),
         "rebuilt_at": meta.get("rebuilt_at", ""),
         "previous_index_source": meta.get("previous_index_source", ""),
         "normalizer_version": meta.get("normalizer_version", ""),
+        "parse_generation": meta.get("parse_generation", ""),
+        "document_source_hash": meta.get("document_source_hash", ""),
+        "matches_active_parse": matches_active_parse,
         "chunk_count": meta.get("chunk_count", 0),
         "table_chunk_count": meta.get("table_chunk_count", 0),
         "can_rollback": bool(_load_complete_rag_backup_manifest(doc_id, "pdf_native")),
     }
 
 
-def _set_document_index_status(doc_id: str, status: str, *, stage: str = "", error: str = "") -> None:
+def _set_document_index_status(
+    doc_id: str,
+    status: str,
+    *,
+    stage: str = "",
+    error: str = "",
+    parse_generation: str | None = None,
+    document_source_hash: str | None = None,
+) -> None:
+    manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
     with _INDEX_STATUS_LOCK:
         _DOCUMENT_INDEX_STATUS[doc_id] = {
             "doc_id": doc_id,
             "status": status,
             "stage": stage,
             "error": error,
+            "parse_generation": str(parse_generation or manifest.get("generation") or ""),
+            "document_source_hash": str(document_source_hash or manifest.get("source_hash") or ""),
             "updated_at": datetime.now().isoformat(),
         }
 
@@ -438,13 +713,30 @@ def _set_document_index_status(doc_id: str, status: str, *, stage: str = "", err
 def _get_document_index_status(doc_id: str) -> dict:
     with _INDEX_STATUS_LOCK:
         current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
-    if _vector_index_ready(doc_id):
+    parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    current_matches_parse = bool(current) and matches_parse_generation(
+        parse_manifest,
+        generation=str(current.get("parse_generation") or ""),
+        source_hash=str(current.get("document_source_hash") or ""),
+    )
+    if current and not current_matches_parse:
+        current = {}
+    vector_matches_parse = _parse_manifest_index_matches(doc_id, parse_manifest)
+    if _vector_index_ready(doc_id) and vector_matches_parse:
         current.update({
             "doc_id": doc_id,
             "status": "ready",
             "stage": "ready",
             "error": "",
         })
+    elif _vector_index_ready(doc_id) and not vector_matches_parse:
+        if current.get("status") not in {"queued", "running"}:
+            current = {
+                "doc_id": doc_id,
+                "status": "stale",
+                "stage": "parse_generation_mismatch",
+                "error": "现有问答索引不属于当前解析代际",
+            }
     elif not current:
         current = {
             "doc_id": doc_id,
@@ -452,7 +744,9 @@ def _get_document_index_status(doc_id: str) -> dict:
             "stage": "not_started",
             "error": "",
         }
-    current["vector_ready"] = _vector_index_ready(doc_id)
+    current["vector_ready"] = _vector_index_ready(doc_id) and vector_matches_parse
+    current["vector_artifact_ready"] = _vector_index_ready(doc_id)
+    current["parse_manifest"] = parse_manifest
     current["rag_index"] = _get_rag_index_status(doc_id)
     return current
 
@@ -464,20 +758,54 @@ def _build_document_indexes(
     embedding_api_host: Optional[str],
     summary_api_key: Optional[str],
 ) -> None:
+    document_lock = _get_document_operation_lock(doc_id)
+    document_lock.acquire()
+    parse_manifest: dict = {}
     try:
         doc = documents_store.get(doc_id)
         if not doc:
             raise RuntimeError("文档记录不存在，无法构建索引")
 
-        _set_document_index_status(doc_id, "running", stage="block_index")
+        parse_manifest = _read_document_parse_manifest(doc_id, doc)
+        parse_generation = str(parse_manifest.get("generation") or "")
+        parse_source_hash = str(parse_manifest.get("source_hash") or "")
+        if not is_parse_prepared(parse_manifest):
+            _set_document_index_status(
+                doc_id,
+                "queued",
+                stage="waiting_for_primary_parser",
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
+            return
+
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="block_index",
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+        )
         _warm_block_index(doc_id)
 
-        if _vector_index_ready(doc_id):
-            _set_document_index_status(doc_id, "ready", stage="ready")
+        if _parse_manifest_index_matches(doc_id, parse_manifest):
+            _set_document_index_status(
+                doc_id,
+                "ready",
+                stage="ready",
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
             return
 
         data = doc.get("data") or {}
-        _set_document_index_status(doc_id, "running", stage="vector_index")
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="vector_index",
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+        )
         create_index(
             doc_id,
             data.get("full_text", ""),
@@ -488,12 +816,92 @@ def _build_document_indexes(
             pages=data.get("pages"),
             structured_table_bundles=data.get("structured_table_bundles"),
             summary_api_key=summary_api_key,
+            index_source=(
+                MINERU_RAG_INDEX_SOURCE
+                if parse_manifest.get("resolved_route") == PARSE_ROUTE_MINERU
+                else "pdf_native"
+            ),
+            index_meta={
+                "source_hash": data.get("rag_source_hash") or parse_manifest.get("source_hash", ""),
+                "document_source_hash": parse_manifest.get("source_hash", ""),
+                "parse_generation": parse_manifest.get("generation", ""),
+                "parser_route": parse_manifest.get("resolved_route", ""),
+            },
+            build_semantic_groups=False,
         )
-        _set_document_index_status(doc_id, "ready", stage="ready")
+        # Do not let the embedding service publish a detached background
+        # semantic generation after this document switches to MinerU. Build and
+        # publish it while the same document lock is held instead.
+        semantic_stage = DATA_DIR / "semantic_groups" / "_tmp" / f"{doc_id}.local.{uuid.uuid4().hex}"
+        try:
+            semantic_stage.mkdir(parents=True, exist_ok=True)
+            semantic_rebuild = _prepare_semantic_group_rebuild(
+                doc_id,
+                VECTOR_STORE_DIR,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+                embedding_api_host=embedding_api_host,
+                summary_api_key=summary_api_key,
+            )
+            semantic_result = _build_semantic_group_index(
+                doc_id,
+                semantic_rebuild["chunks"],
+                data.get("pages") or [],
+                semantic_rebuild["embed_fn"],
+                semantic_rebuild["api_key"],
+                model=semantic_rebuild["model"],
+                provider=semantic_rebuild["provider"],
+                endpoint=semantic_rebuild["endpoint"],
+                output_dir=str(semantic_stage),
+                raise_on_error=True,
+            )
+            semantic_validation = _validate_temp_semantic_groups(doc_id, semantic_stage, semantic_result)
+            with _get_document_publication_lock(doc_id):
+                _require_current_parse_generation(
+                    doc_id,
+                    parse_generation=parse_generation,
+                    document_source_hash=parse_source_hash,
+                )
+                _publish_temp_semantic_groups(
+                    doc_id,
+                    semantic_stage,
+                    semantic_validation,
+                    source_hash=parse_source_hash,
+                    transaction_id=parse_generation,
+                )
+        except Exception as semantic_exc:
+            # Semantic groups enhance retrieval but must never leave an older
+            # generation active when the current parser route has changed.
+            logger.warning("[Upload] semantic groups unavailable for %s: %s", doc_id, semantic_exc)
+        finally:
+            shutil.rmtree(semantic_stage, ignore_errors=True)
+        current_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        if not matches_parse_generation(
+            current_manifest,
+            generation=str(parse_manifest.get("generation") or ""),
+            source_hash=str(parse_manifest.get("source_hash") or ""),
+        ):
+            raise RuntimeError("索引构建期间文档解析路线已切换，已拒绝发布旧代际状态")
+        _set_document_index_status(
+            doc_id,
+            "ready",
+            stage="ready",
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+        )
         logger.info("[Upload] background index ready for %s", doc_id)
     except Exception as exc:
         logger.exception("[Upload] background index failed for %s: %s", doc_id, exc)
-        _set_document_index_status(doc_id, "failed", stage="failed", error=str(exc))
+        _set_document_index_status(
+            doc_id,
+            "failed",
+            stage="failed",
+            error=str(exc),
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+        )
+    finally:
+        document_lock.release()
 
 
 def _queue_document_indexes(
@@ -503,6 +911,10 @@ def _queue_document_indexes(
     embedding_api_host: Optional[str],
     summary_api_key: Optional[str],
 ) -> dict:
+    parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    if not is_parse_prepared(parse_manifest):
+        _set_document_index_status(doc_id, "queued", stage="waiting_for_primary_parser")
+        return _get_document_index_status(doc_id)
     current = _get_document_index_status(doc_id)
     if current.get("status") in {"queued", "running", "ready"}:
         return current
@@ -656,6 +1068,21 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
             doc_data.pop("logical_figures", None)
             removed.append("logical_figures")
 
+    # GraphRAG persists under doc_id, while a re-upload of the same PDF keeps
+    # that id but starts a different parse generation. Remove both its in-memory
+    # registry and on-disk graph before a new route can be published.
+    try:
+        from services.graphrag import INSTANCES as graphrag_instances, BUILD_PROGRESS as graphrag_progress
+
+        graphrag_instances.pop(doc_id, None)
+        graphrag_progress.pop(doc_id, None)
+        graph_dir = Path(settings.graphrag_working_dir) / doc_id
+        if graph_dir.exists():
+            shutil.rmtree(graph_dir, ignore_errors=True)
+            removed.append("graphrag")
+    except Exception as exc:
+        logger.warning("[ParseRoute] 删除 GraphRAG 缓存失败 doc=%s err=%s", doc_id, exc)
+
     return removed
 
 
@@ -677,6 +1104,31 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
     persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, current)
 
 
+def _retire_superseded_mineru_job(doc_id: str) -> None:
+    """Stop a same-PDF MinerU job before replacing its parse manifest.
+
+    The cancellation event prevents any remaining remote polling from doing
+    more local work. The generation fence at publication time is still the
+    authoritative protection, because a remote response can race with this
+    best-effort cancellation.
+    """
+    with _DEEP_PARSE_LOCK:
+        current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
+        cancel_event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
+        if cancel_event:
+            cancel_event.set()
+
+    if current.get("status") in {"queued", "running"}:
+        _set_deep_parse_status(
+            doc_id,
+            "cancelled",
+            stage="superseded",
+            error="",
+            message="同一 PDF 已重新上传，旧 MinerU 解析任务已失效",
+            superseded=True,
+        )
+
+
 def _get_deep_parse_status(doc_id: str) -> dict:
     with _DEEP_PARSE_LOCK:
         current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
@@ -693,20 +1145,54 @@ def _get_deep_parse_status(doc_id: str) -> dict:
             with _DEEP_PARSE_LOCK:
                 _DEEP_PARSE_TASKS[doc_id] = dict(current)
 
+    parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    legacy_parse = _is_legacy_parse_manifest(parse_manifest)
+    if current and not legacy_parse:
+        # Persisted job records are keyed by doc_id, while same-PDF uploads
+        # intentionally keep that id. Do not surface an old MinerU job as the
+        # state of the newly selected primary route.
+        if not matches_parse_generation(
+            parse_manifest,
+            generation=str(current.get("parse_generation") or ""),
+            source_hash=str(current.get("document_source_hash") or "") or None,
+        ):
+            current = {}
+
     mineru_config = _load_online_ocr_config("mineru")
     access_mode = str(mineru_config.get("access_mode") or "worker").strip().lower()
-    mineru_result_exists = get_mineru_result_path(DATA_DIR, doc_id).exists()
+    if legacy_parse:
+        mineru_result_exists = get_mineru_result_path(DATA_DIR, doc_id).exists()
+    else:
+        mineru_result_exists = bool(
+            load_mineru_result(
+                DATA_DIR,
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                require_identity=True,
+            )
+        )
     block_index = load_block_index(DATA_DIR, doc_id)
+    block_matches_parse = legacy_parse or (
+        isinstance(block_index, dict)
+        and str(block_index.get("parse_generation") or "") == str(parse_manifest.get("generation") or "")
+        and str(block_index.get("document_source_hash") or "") == str(parse_manifest.get("source_hash") or "")
+    )
+    if not block_matches_parse:
+        block_index = None
     active_source = block_index.get("source") if isinstance(block_index, dict) else ""
     active_mineru = active_source == MINERU_BLOCK_INDEX_SOURCE
+    parse_ready = is_parse_prepared(parse_manifest)
+    is_full_mineru_route = _is_full_mineru_parse_manifest(parse_manifest)
 
     if not current:
-        status = "ready" if active_mineru else "idle"
+        waiting_for_full_route = active_mineru and is_full_mineru_route and not parse_ready
+        status = "running" if waiting_for_full_route else ("ready" if active_mineru else "idle")
         current = {
             "doc_id": doc_id,
             "provider": "mineru",
             "status": status,
-            "stage": "ready" if active_mineru else "not_started",
+            "stage": str(parse_manifest.get("stage") or "building_rag_index") if waiting_for_full_route else ("ready" if active_mineru else "not_started"),
             "error": "",
         }
 
@@ -719,7 +1205,13 @@ def _get_deep_parse_status(doc_id: str) -> dict:
     })
     rag_index = _get_rag_index_status(doc_id)
     current["rag_index"] = rag_index
-    if active_mineru and current.get("status") not in {"queued", "running", "failed"}:
+    current["parse_manifest"] = parse_manifest
+    current["parse_ready"] = parse_ready
+    if (
+        active_mineru
+        and current.get("status") not in {"queued", "running", "failed"}
+        and not (is_full_mineru_route and not parse_ready)
+    ):
         current["status"] = "ready"
         current["stage"] = "ready"
 
@@ -738,6 +1230,20 @@ def _assess_deep_parse_recommendation(
     质量门只读已有信号（上传阶段算好的 extraction_quality、本地大纲候选数），
     不重新跑一遍质量评估，成本几乎为零。已经在用 MinerU 结果时不再建议。
     """
+    doc = documents_store.get(doc_id)
+    parse_manifest = _read_document_parse_manifest(doc_id, doc)
+    if (
+        not _is_legacy_parse_manifest(parse_manifest)
+        and parse_manifest.get("resolved_route") == PARSE_ROUTE_LOCAL
+    ):
+        return {
+            "recommend_deep_parse": False,
+            "recommend_reason": "",
+            "recommend_rag_index_rebuild": False,
+            "recommend_rag_index_reason": "",
+            "parse_route_locked": True,
+        }
+
     if active_mineru:
         rag_index = rag_index if isinstance(rag_index, dict) else _get_rag_index_status(doc_id)
         rag_source = str(rag_index.get("index_source") or ("pdf_native" if rag_index.get("ready") else "")).strip()
@@ -752,7 +1258,6 @@ def _assess_deep_parse_recommendation(
             ),
         }
 
-    doc = documents_store.get(doc_id)
     doc_data = doc.get("data") if isinstance(doc, dict) else None
     extraction_quality = str((doc_data or {}).get("extraction_quality") or "unknown")
     total_pages = int((doc_data or {}).get("total_pages") or 0)
@@ -813,24 +1318,75 @@ def _run_mineru_deep_parse(
     doc_id: str,
     cancel_event: threading.Event,
     remote_job: Optional[dict] = None,
+    parse_generation: str = "",
+    full_route_options: Optional[dict] = None,
 ) -> None:
     acquired_slot = False
     acquired_document_lock = False
     parser_attempted = False
     parser_outcome_recorded = False
+    full_mineru_route = False
+    parse_source_hash = ""
     document_lock = _get_document_operation_lock(doc_id)
+
+    def _worker_matches_current_generation() -> bool:
+        """Keep an older same-PDF job from touching a newer parse generation."""
+        if not parse_generation:
+            return True
+        current_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        return matches_parse_generation(
+            current_manifest,
+            generation=parse_generation,
+            source_hash=parse_source_hash or None,
+        )
+
+    def _set_worker_status(status: str, *, stage: str = "", error: str = "", **extra) -> bool:
+        """Publish progress only while this worker still owns the document generation."""
+        if not _worker_matches_current_generation():
+            return False
+        if parse_generation:
+            extra.setdefault("parse_generation", parse_generation)
+            extra.setdefault("document_source_hash", parse_source_hash)
+        _set_deep_parse_status(doc_id, status, stage=stage, error=error, **extra)
+        return True
+
     try:
-        _set_deep_parse_status(doc_id, "queued", stage="waiting_for_slot", message="等待 MinerU 解析槽位")
+        initial_doc = documents_store.get(doc_id)
+        initial_manifest = _read_document_parse_manifest(doc_id, initial_doc)
+        parse_source_hash = str(initial_manifest.get("source_hash") or "")
+        if parse_generation and not matches_parse_generation(
+            initial_manifest,
+            generation=parse_generation,
+            source_hash=parse_source_hash,
+        ):
+            logger.info("[DeepParse] skip stale MinerU worker for %s generation=%s", doc_id, parse_generation)
+            return
+        full_mineru_route = bool(
+            full_route_options is not None
+            or _is_full_mineru_parse_manifest(initial_manifest)
+        )
+        if full_mineru_route and initial_manifest.get("status") in {PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED}:
+            _transition_document_parse_manifest(
+                doc_id,
+                PARSE_STATUS_RUNNING,
+                stage="mineru_parsing",
+                doc=initial_doc,
+                metadata={"full_route": True},
+            )
+        _set_worker_status("queued", stage="waiting_for_slot", message="等待 MinerU 解析槽位")
         _DEEP_PARSE_SEMAPHORE.acquire()
         acquired_slot = True
         if cancel_event.is_set():
-            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
             return
-        _set_deep_parse_status(doc_id, "queued", stage="waiting_for_document_lock", message="等待文档解析锁")
+        _set_worker_status("queued", stage="waiting_for_document_lock", message="等待文档解析锁")
         document_lock.acquire()
         acquired_document_lock = True
+        if not _worker_matches_current_generation():
+            logger.info("[DeepParse] skip stale MinerU worker after lock for %s generation=%s", doc_id, parse_generation)
+            return
         if cancel_event.is_set():
-            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
             return
         doc = documents_store.get(doc_id)
         if not doc:
@@ -857,8 +1413,7 @@ def _run_mineru_deep_parse(
                 if key not in {"stage", "message"}
             }
             extra.setdefault("model_version", config.get("model_version", "vlm"))
-            _set_deep_parse_status(
-                doc_id,
+            _set_worker_status(
                 "running",
                 stage=stage,
                 message=message,
@@ -867,8 +1422,8 @@ def _run_mineru_deep_parse(
             )
 
         if remote_job and remote_job.get("batch_id"):
-            _set_deep_parse_status(
-                doc_id, "running", stage="resuming", message="恢复 MinerU 远端任务",
+            _set_worker_status(
+                "running", stage="resuming", message="恢复 MinerU 远端任务",
                 access_mode=access_mode, batch_id=remote_job["batch_id"], data_id=remote_job.get("data_id", ""),
                 recovered_after_restart=True,
             )
@@ -878,21 +1433,31 @@ def _run_mineru_deep_parse(
                 progress_callback=_on_mineru_progress, cancel_event=cancel_event,
             )
         else:
-            _set_deep_parse_status(doc_id, "running", stage="uploading", message="准备上传 PDF 到 MinerU")
+            _set_worker_status("running", stage="uploading", message="准备上传 PDF 到 MinerU")
             pdf_bytes = pdf_path.read_bytes()
             parser_attempted = True
             payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
         record_ocr_provider_use("mineru", outcome="success", operation="document_parse")
         parser_outcome_recorded = True
         payload.setdefault("model_version", config.get("model_version", "vlm"))
-        if cancel_event.is_set():
-            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
-            return
-        save_mineru_result(DATA_DIR, doc_id, payload)
+        with _get_document_publication_lock(doc_id):
+            if not _worker_matches_current_generation():
+                logger.info("[DeepParse] discard stale MinerU payload for %s generation=%s", doc_id, parse_generation)
+                return
+            if cancel_event.is_set():
+                _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+                return
+            save_mineru_result(
+                DATA_DIR,
+                doc_id,
+                payload,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
 
-        _set_deep_parse_status(doc_id, "running", stage="building_index", message="重建阅读块和大纲")
+        _set_worker_status("running", stage="building_index", message="重建阅读块和大纲")
         if cancel_event.is_set():
-            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+            _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
             return
         block_index = build_block_index_from_mineru_payload(
             doc_id=doc_id,
@@ -900,8 +1465,69 @@ def _run_mineru_deep_parse(
             payload=payload,
             pdf_path=pdf_path,
         )
-        save_block_index(DATA_DIR, doc_id, block_index)
-        removed = _clear_block_dependent_ai_cache(doc_id, doc)
+        removed: list[str] = []
+        waiting_for_rag_rebuild = False
+        with _get_document_publication_lock(doc_id):
+            if not _worker_matches_current_generation():
+                logger.info("[DeepParse] discard stale MinerU block index for %s generation=%s", doc_id, parse_generation)
+                return
+            if cancel_event.is_set():
+                _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
+                return
+            save_block_index(DATA_DIR, doc_id, block_index)
+            current_doc = documents_store.get(doc_id)
+            removed = _clear_block_dependent_ai_cache(doc_id, current_doc)
+
+            if full_mineru_route:
+                _transition_document_parse_manifest(
+                    doc_id,
+                    PARSE_STATUS_RUNNING,
+                    stage="building_rag_index",
+                    doc=current_doc,
+                    metadata={
+                        "full_route": True,
+                        "block_source": MINERU_BLOCK_INDEX_SOURCE,
+                        "figure_source": "mineru_deep_parse",
+                    },
+                )
+                waiting_for_rag_rebuild = full_route_options is None
+
+        if full_mineru_route:
+            if waiting_for_rag_rebuild:
+                # A restarted worker can safely resume the remote MinerU job,
+                # but secrets for the embedding service are intentionally not
+                # persisted. Leave this generation unpublished until the UI
+                # supplies a fresh RAG rebuild request.
+                with _get_document_publication_lock(doc_id):
+                    if not _worker_matches_current_generation():
+                        return
+                    _transition_document_parse_manifest(
+                        doc_id,
+                        PARSE_STATUS_PENDING,
+                        stage="awaiting_rag_index",
+                        doc=documents_store.get(doc_id),
+                    )
+                _set_worker_status(
+                    "ready",
+                    stage="awaiting_rag_index",
+                    message="MinerU 版面解析完成，等待使用当前 Embedding 配置发布问答索引",
+                    active_source=MINERU_BLOCK_INDEX_SOURCE,
+                    active_mineru=True,
+                    access_mode=access_mode,
+                )
+                return
+            _rebuild_mineru_rag_index_unlocked(
+                doc_id,
+                embedding_model=str(full_route_options.get("embedding_model") or "local-minilm"),
+                embedding_api_key=full_route_options.get("embedding_api_key"),
+                embedding_api_host=full_route_options.get("embedding_api_host"),
+                summary_api_key=full_route_options.get("summary_api_key"),
+                summary_model=str(full_route_options.get("summary_model") or "gpt-4o-mini"),
+                summary_provider=str(full_route_options.get("summary_provider") or "openai"),
+                summary_api_host=str(full_route_options.get("summary_api_host") or ""),
+                expected_parse_generation=parse_generation,
+                expected_document_source_hash=parse_source_hash,
+            )
 
         block_count = sum(len(page.get("blocks") or []) for page in block_index.get("pages", []))
         outline_count = len(block_index.get("outline") or [])
@@ -911,8 +1537,7 @@ def _run_mineru_deep_parse(
             for block in (page.get("blocks") or [])
             if block.get("type") in ("figure", "table")
         )
-        _set_deep_parse_status(
-            doc_id,
+        _set_worker_status(
             "ready",
             stage="ready",
             block_count=block_count,
@@ -925,31 +1550,116 @@ def _run_mineru_deep_parse(
             model_version=config.get("model_version", "vlm"),
         )
         logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
+    except _SupersededParseGeneration:
+        logger.info("[DeepParse] MinerU worker superseded for %s generation=%s", doc_id, parse_generation)
+        return
     except Exception as exc:
         if parser_attempted and not parser_outcome_recorded and not cancel_event.is_set():
             record_ocr_provider_use("mineru", outcome="failure", operation="document_parse")
             parser_outcome_recorded = True
         if cancel_event.is_set() or "已取消" in str(exc):
             logger.info("[DeepParse] MinerU deep parse cancelled for %s", doc_id)
-            _set_deep_parse_status(doc_id, "cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
+            if full_mineru_route:
+                try:
+                    _transition_current_full_mineru_manifest(
+                        doc_id,
+                        PARSE_STATUS_CANCELLED,
+                        parse_generation=parse_generation,
+                        document_source_hash=parse_source_hash,
+                        stage="cancelled",
+                        error="",
+                        expected_statuses={
+                            PARSE_STATUS_PENDING,
+                            PARSE_STATUS_QUEUED,
+                            PARSE_STATUS_RUNNING,
+                            PARSE_STATUS_FAILED,
+                            PARSE_STATUS_CANCELLED,
+                        },
+                    )
+                except Exception:
+                    logger.debug("[DeepParse] failed to mark parse manifest cancelled for %s", doc_id)
+            _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
             return
         logger.exception("[DeepParse] MinerU deep parse failed for %s: %s", doc_id, exc)
-        _set_deep_parse_status(doc_id, "failed", stage="failed", error=str(exc))
+        if full_mineru_route and _worker_matches_current_generation():
+            try:
+                _transition_document_parse_manifest(
+                    doc_id,
+                    PARSE_STATUS_FAILED,
+                    stage="failed",
+                    error=str(exc),
+                )
+            except Exception:
+                logger.debug("[DeepParse] failed to mark parse manifest failed for %s", doc_id)
+        _set_worker_status("failed", stage="failed", error=str(exc))
     finally:
         if acquired_document_lock:
             document_lock.release()
         if acquired_slot:
             _DEEP_PARSE_SEMAPHORE.release()
         with _DEEP_PARSE_LOCK:
-            _DEEP_PARSE_CANCEL_EVENTS.pop(doc_id, None)
+            # A same-PDF re-upload gets a new parse generation and cancel
+            # event. An old worker must never remove that new worker's handle.
+            if _DEEP_PARSE_CANCEL_EVENTS.get(doc_id) is cancel_event:
+                _DEEP_PARSE_CANCEL_EVENTS.pop(doc_id, None)
 
 
-def _queue_mineru_deep_parse(doc_id: str, *, force: bool = False) -> dict:
+def _queue_mineru_deep_parse(
+    doc_id: str,
+    *,
+    force: bool = False,
+    full_route_options: Optional[dict] = None,
+) -> dict:
+    doc = documents_store.get(doc_id)
+    parse_manifest = _read_document_parse_manifest(doc_id, doc)
+    parse_generation = str(parse_manifest.get("generation") or "")
+    parse_source_hash = str(parse_manifest.get("source_hash") or "")
     current = _get_deep_parse_status(doc_id)
-    if current.get("status") in {"queued", "running"}:
+    # ``_get_deep_parse_status`` intentionally hides an old task from a new
+    # document generation. Queueing still has to retire that task's concrete
+    # cancellation handle, even though it is no longer user-visible.
+    with _DEEP_PARSE_LOCK:
+        previous_task = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
+        previous_cancel_event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
+        previous_generation = str(previous_task.get("parse_generation") or "")
+        if previous_cancel_event and previous_generation and previous_generation != parse_generation:
+            previous_cancel_event.set()
+    current_matches_generation = bool(
+        parse_generation
+        and str(current.get("parse_generation") or "") == parse_generation
+        and str(current.get("document_source_hash") or "") in {"", parse_source_hash}
+    )
+    if current.get("status") in {"queued", "running"} and current_matches_generation:
         return current
-    if current.get("active_mineru") and not force:
+    if current.get("active_mineru") and not force and current_matches_generation:
         return current
+
+    full_mineru_route = bool(
+        full_route_options is not None or _is_full_mineru_parse_manifest(parse_manifest)
+    )
+    if full_mineru_route and parse_manifest.get("status") == PARSE_STATUS_FAILED:
+        requeued_manifest = _transition_current_full_mineru_manifest(
+            doc_id,
+            PARSE_STATUS_QUEUED,
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+            stage="mineru_queued",
+            error="",
+            expected_statuses={PARSE_STATUS_FAILED},
+        )
+        if requeued_manifest is None:
+            # Another upload or retry won the publication lock. Do not start a
+            # worker for the stale failed snapshot read above.
+            return _get_deep_parse_status(doc_id)
+
+    # Document ids are content hashes. Re-uploading the same PDF intentionally
+    # creates a new parse generation, so its worker must not be suppressed by
+    # an older job still waiting on MinerU or the document lock.
+    if current.get("status") in {"queued", "running"} and not current_matches_generation:
+        with _DEEP_PARSE_LOCK:
+            previous_cancel_event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
+            if previous_cancel_event:
+                previous_cancel_event.set()
 
     cancel_event = threading.Event()
     with _DEEP_PARSE_LOCK:
@@ -960,10 +1670,13 @@ def _queue_mineru_deep_parse(doc_id: str, *, force: bool = False) -> dict:
         stage="queued",
         error="",
         job_id=f"mineru-{uuid.uuid4().hex}",
+        parse_generation=parse_generation,
+        document_source_hash=parse_source_hash,
+        full_route=full_mineru_route,
     )
     thread = threading.Thread(
         target=_run_mineru_deep_parse,
-        args=(doc_id, cancel_event),
+        args=(doc_id, cancel_event, None, parse_generation, full_route_options),
         name=f"chatpdf-mineru-{doc_id[:8]}",
         daemon=True,
     )
@@ -995,7 +1708,7 @@ def resume_pending_mineru_deep_parse_jobs() -> list[dict]:
                 _DEEP_PARSE_TASKS[doc_id] = dict(record)
             thread = threading.Thread(
                 target=_run_mineru_deep_parse,
-                args=(doc_id, cancel_event, record),
+                args=(doc_id, cancel_event, record, str(record.get("parse_generation") or ""), None),
                 name=f"chatpdf-mineru-resume-{doc_id[:8]}",
                 daemon=True,
             )
@@ -1010,10 +1723,26 @@ def _cancel_mineru_deep_parse(doc_id: str) -> dict:
     current = _get_deep_parse_status(doc_id)
     if current.get("status") not in {"queued", "running"}:
         return current
+    parse_generation = str(current.get("parse_generation") or "")
+    document_source_hash = str(current.get("document_source_hash") or "")
     with _DEEP_PARSE_LOCK:
         event = _DEEP_PARSE_CANCEL_EVENTS.get(doc_id)
         if event:
             event.set()
+    _transition_current_full_mineru_manifest(
+        doc_id,
+        PARSE_STATUS_CANCELLED,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
+        stage="cancelled",
+        error="",
+        expected_statuses={
+            PARSE_STATUS_PENDING,
+            PARSE_STATUS_QUEUED,
+            PARSE_STATUS_RUNNING,
+            PARSE_STATUS_FAILED,
+        },
+    )
     remote_cancel = {"attempted": False, "state": "not_requested"}
     batch_id = str(current.get("batch_id") or "")
     if batch_id:
@@ -1141,7 +1870,13 @@ def _validate_temp_semantic_groups(doc_id: str, temp_dir: Path, result: dict) ->
     }
 
 
-def _restore_semantic_group_backup(doc_id: str, source: str) -> dict:
+def _restore_semantic_group_backup(
+    doc_id: str,
+    source: str,
+    *,
+    source_hash: str = "",
+    transaction_id: str = "",
+) -> dict:
     root = DATA_DIR / "semantic_groups"
     staged_dir = root / "_restore" / f"{_safe_index_source_name(doc_id)}.{uuid.uuid4().hex}"
     restored: dict[str, str] = {}
@@ -1154,7 +1889,13 @@ def _restore_semantic_group_backup(doc_id: str, source: str) -> dict:
         shutil.copy2(backup_path, target)
         restored[kind] = str(target)
     if len(restored) == 3:
-        published = publish_generation(root, doc_id, staged_dir, transaction_id=f"restore-{source}")
+        published = publish_generation(
+            root,
+            doc_id,
+            staged_dir,
+            source_hash=source_hash,
+            transaction_id=transaction_id,
+        )
         restored = dict(published["paths"])
     elif restored:
         shutil.rmtree(staged_dir, ignore_errors=True)
@@ -1252,7 +1993,94 @@ def _load_complete_rag_backup_manifest(doc_id: str, source: str) -> dict:
     return manifest
 
 
-def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
+def _is_full_mineru_parse_manifest(manifest: dict) -> bool:
+    return bool(
+        manifest.get("resolved_route") == PARSE_ROUTE_MINERU
+        and (manifest.get("metadata") or {}).get("full_route")
+    )
+
+
+def _is_legacy_parse_manifest(manifest: dict) -> bool:
+    return bool((manifest.get("metadata") or {}).get("legacy_inferred"))
+
+
+def _require_mineru_route_compatibility(doc_id: str, doc: dict) -> dict:
+    """Limit the old block-only MinerU path to documents created before routes."""
+    manifest = _read_document_parse_manifest(doc_id, doc)
+    if _is_full_mineru_parse_manifest(manifest) or _is_legacy_parse_manifest(manifest):
+        return manifest
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "当前文档已按本地解析路线发布。为避免阅读、大纲、翻译和问答来源不一致，"
+            "请重新上传并在上传前选择 MinerU 全程解析。"
+        ),
+    )
+
+
+def _load_mineru_result_for_manifest(doc_id: str, manifest: dict) -> dict | None:
+    """Load only the raw MinerU payload belonging to this document run."""
+    legacy_parse = _is_legacy_parse_manifest(manifest)
+    return load_mineru_result(
+        DATA_DIR,
+        doc_id,
+        parse_generation=(None if legacy_parse else str(manifest.get("generation") or "")),
+        document_source_hash=(None if legacy_parse else str(manifest.get("source_hash") or "")),
+        require_identity=not legacy_parse,
+    )
+
+
+def _mark_full_mineru_parse_ready(
+    doc_id: str,
+    *,
+    expected_parse_generation: str = "",
+    expected_document_source_hash: str = "",
+) -> dict:
+    """Open a MinerU-first document only after all primary artifacts publish."""
+    if expected_parse_generation:
+        _require_current_parse_generation(
+            doc_id,
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
+    doc = documents_store.get(doc_id)
+    if not isinstance(doc, dict):
+        raise RuntimeError("文档记录不存在，无法发布 MinerU 解析结果")
+    manifest = _read_document_parse_manifest(doc_id, doc)
+    if not _is_full_mineru_parse_manifest(manifest):
+        return manifest
+    if manifest.get("status") in {PARSE_STATUS_FAILED, PARSE_STATUS_CANCELLED}:
+        raise RuntimeError("已终止的 MinerU 解析不能直接发布")
+    if manifest.get("status") in {PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED}:
+        manifest = _transition_document_parse_manifest(
+            doc_id,
+            PARSE_STATUS_RUNNING,
+            stage="building_rag_index",
+            doc=doc,
+        )
+    if manifest.get("status") != PARSE_STATUS_READY:
+        manifest = _transition_document_parse_manifest(
+            doc_id,
+            PARSE_STATUS_READY,
+            stage="ready",
+            doc=doc,
+        )
+    return manifest
+
+
+def _apply_mineru_rag_document_data(
+    doc_id: str,
+    normalized: dict,
+    *,
+    expected_parse_generation: str = "",
+    expected_document_source_hash: str = "",
+) -> None:
+    if expected_parse_generation:
+        _require_current_parse_generation(
+            doc_id,
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
     doc = documents_store.get(doc_id)
     if not isinstance(doc, dict):
         raise RuntimeError("文档记录不存在，无法切换问答数据源")
@@ -1269,6 +2097,7 @@ def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
         pages.append(page_copy)
 
     structured_table_bundles = normalized.get("structured_table_bundles") or []
+    parse_manifest = _read_document_parse_manifest(doc_id, doc)
     data.update({
         "full_text": normalized.get("full_text", ""),
         "pages": pages,
@@ -1282,6 +2111,21 @@ def _apply_mineru_rag_document_data(doc_id: str, normalized: dict) -> None:
         "parse_artifact": normalized.get("parse_artifact") or data.get("parse_artifact") or {},
         "extraction_method": data.get("extraction_method", "pdf_native"),
     })
+    if _is_full_mineru_parse_manifest(parse_manifest):
+        # Keep the route gated while the staged semantic index is published.
+        # A full MinerU route must not expose its new text before every primary
+        # consumer can resolve the same generation.
+        metadata = dict(parse_manifest.get("metadata") or {})
+        metadata.update({
+            "text_source": "mineru",
+            "block_source": MINERU_BLOCK_INDEX_SOURCE,
+            "rag_source": MINERU_RAG_INDEX_SOURCE,
+            "figure_source": "mineru_deep_parse",
+            "parser_source_hash": normalized.get("source_hash", ""),
+            "normalizer_version": normalized.get("normalizer_version", ""),
+        })
+        parse_manifest["metadata"] = metadata
+        data["parse_manifest"] = parse_manifest
     doc["data"] = data
     _normalize_page_keys(doc)
     save_document(doc_id, doc)
@@ -1391,6 +2235,7 @@ def _prepare_semantic_group_rebuild(
 
 
 def _restore_vector_index_backup(doc_id: str, source: str = "pdf_native") -> dict:
+    """恢复完整 RAG 快照，并通过顶层 ``restored`` 返回统一结果。"""
     safe_source = _safe_index_source_name(source)
     backup_index = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.index"
     backup_pkl = VECTOR_STORE_DIR / f"{doc_id}.{safe_source}.bak.pkl"
@@ -1400,10 +2245,24 @@ def _restore_vector_index_backup(doc_id: str, source: str = "pdf_native") -> dic
     shutil.copy2(backup_index, index_path)
     shutil.copy2(backup_pkl, pkl_path)
     doc_restore = _restore_document_backup(doc_id, safe_source)
-    semantic_restore = _restore_semantic_group_backup(doc_id, safe_source)
+    restored_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    legacy_manifest = _is_legacy_parse_manifest(restored_manifest)
+    semantic_restore = _restore_semantic_group_backup(
+        doc_id,
+        safe_source,
+        source_hash=("" if legacy_manifest else str(restored_manifest.get("source_hash") or "")),
+        transaction_id=("" if legacy_manifest else str(restored_manifest.get("generation") or "")),
+    )
+    backup_manifest = _load_complete_rag_backup_manifest(doc_id, safe_source)
+    semantic_required = bool((backup_manifest.get("semantic_groups") or {}).get("backed_up"))
+    restored = bool(
+        doc_restore.get("restored")
+        and (semantic_restore.get("restored") or not semantic_required)
+    )
     _index_cache.invalidate(doc_id)
     _set_document_index_status(doc_id, "ready", stage="ready")
     status = _get_rag_index_status(doc_id)
+    status["restored"] = restored
     status["document_restore"] = doc_restore
     status["semantic_group_restore"] = semantic_restore
     return status
@@ -1440,6 +2299,8 @@ def _rebuild_mineru_rag_index(
     summary_model: str = "gpt-4o-mini",
     summary_provider: str = "openai",
     summary_api_host: str = "",
+    expected_parse_generation: str = "",
+    expected_document_source_hash: str = "",
 ) -> dict:
     """Rebuild under the same document lock used by MinerU deep parsing."""
     document_lock = _get_document_operation_lock(doc_id)
@@ -1455,6 +2316,8 @@ def _rebuild_mineru_rag_index(
             summary_model=summary_model,
             summary_provider=summary_provider,
             summary_api_host=summary_api_host,
+            expected_parse_generation=expected_parse_generation,
+            expected_document_source_hash=expected_document_source_hash,
         )
     finally:
         document_lock.release()
@@ -1470,17 +2333,33 @@ def _rebuild_mineru_rag_index_unlocked(
     summary_model: str = "gpt-4o-mini",
     summary_provider: str = "openai",
     summary_api_host: str = "",
+    expected_parse_generation: str = "",
+    expected_document_source_hash: str = "",
 ) -> dict:
     if doc_id not in documents_store:
         raise RuntimeError("文档记录不存在")
-    payload = load_mineru_result(DATA_DIR, doc_id)
-    if not payload:
-        raise RuntimeError("没有缓存的 MinerU 解析结果，请先执行深度解析")
-
     doc = documents_store[doc_id]
+    parse_manifest = _read_document_parse_manifest(doc_id, doc)
+    legacy_parse = _is_legacy_parse_manifest(parse_manifest)
+    expected_parse_generation = str(
+        expected_parse_generation or parse_manifest.get("generation") or ""
+    )
+    expected_document_source_hash = str(
+        expected_document_source_hash or parse_manifest.get("source_hash") or ""
+    )
+    _require_current_parse_generation(
+        doc_id,
+        parse_generation=expected_parse_generation,
+        document_source_hash=expected_document_source_hash,
+    )
+    payload = _load_mineru_result_for_manifest(doc_id, parse_manifest)
+    if not payload:
+        raise RuntimeError("当前解析代际没有可用的 MinerU 原始结果，请重新执行 MinerU 解析")
+
     original_data = doc.get("data") or {}
     previous_meta = _read_vector_index_meta(doc_id)
     previous_source = previous_meta.get("index_source") or "pdf_native"
+    had_previous_rag = _vector_index_ready(doc_id)
 
     normalized = normalize_mineru_for_rag(payload, page_sizes=_document_pdf_page_sizes(doc_id))
     ok, failures = validate_mineru_rag_data(
@@ -1552,6 +2431,9 @@ def _rebuild_mineru_rag_index_unlocked(
             index_source=MINERU_RAG_INDEX_SOURCE,
             index_meta={
                 "source_hash": normalized.get("source_hash", ""),
+                "document_source_hash": parse_manifest.get("source_hash", ""),
+                "parse_generation": parse_manifest.get("generation", ""),
+                "parser_route": parse_manifest.get("resolved_route", ""),
                 "rebuilt_at": utc_now_iso(),
                 "previous_index_source": previous_source,
                 "normalizer_version": normalized.get("normalizer_version", ""),
@@ -1582,68 +2464,122 @@ def _rebuild_mineru_rag_index_unlocked(
             output_dir=str(temp_semantic_dir), raise_on_error=True,
         )
         semantic_validation = _validate_temp_semantic_groups(doc_id, temp_semantic_dir, semantic_result)
-        backup_manifest = _backup_current_rag_state(doc_id, previous_source)
-        if not backup_manifest.get("complete"):
-            raise RuntimeError("无法创建完整的当前 RAG 快照，已取消切换")
-        transaction_journal = _write_rag_transaction_journal(
-            doc_id,
-            "prepared",
-            source=previous_source,
-            manifest_path=str(backup_manifest.get("path") or ""),
-        )
-        backup = dict(backup_manifest.get("vector") or {})
-        doc_backup = dict(backup_manifest.get("document") or {})
-        semantic_backup = dict(backup_manifest.get("semantic_groups") or {})
-        _replace_vector_index_from_temp(doc_id, temp_dir)
-        replaced_current_index = True
-        _write_rag_transaction_journal(
-            doc_id,
-            "vector_swapped",
-            source=previous_source,
-            manifest_path=str(backup_manifest.get("path") or ""),
-        )
-        _apply_mineru_rag_document_data(doc_id, normalized)
-        _write_rag_transaction_journal(
-            doc_id,
-            "document_swapped",
-            source=previous_source,
-            manifest_path=str(backup_manifest.get("path") or ""),
-        )
-        semantic_cleanup = _publish_temp_semantic_groups(
-            doc_id,
-            temp_semantic_dir,
-            semantic_validation,
-            source_hash=str(normalized.get("source_hash") or ""),
-            transaction_id=str(backup_manifest.get("path") or ""),
-        )
-        semantic_cleanup["staged_validation"] = semantic_validation
-        transaction_journal = _write_rag_transaction_journal(
-            doc_id,
-            "committed",
-            source=previous_source,
-            manifest_path=str(backup_manifest.get("path") or ""),
-        )
-        _set_document_index_status(doc_id, "ready", stage="ready")
-    except Exception as exc:
-        if replaced_current_index and _load_complete_rag_backup_manifest(doc_id, previous_source):
-            try:
-                _restore_vector_index_backup(doc_id, previous_source)
-                _restore_document_backup(doc_id, previous_source)
-                _restore_semantic_group_backup(doc_id, previous_source)
+        # The expensive temp build above intentionally runs without holding
+        # the upload path. The irreversible swap below is short and guarded
+        # by both the publication lock and the active parse identity.
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=expected_parse_generation,
+                document_source_hash=expected_document_source_hash,
+            )
+            if had_previous_rag:
+                backup_manifest = _backup_current_rag_state(doc_id, previous_source)
+                if not backup_manifest.get("complete"):
+                    raise RuntimeError("无法创建完整的当前 RAG 快照，已取消切换")
                 transaction_journal = _write_rag_transaction_journal(
                     doc_id,
-                    "rolled_back",
+                    "prepared",
                     source=previous_source,
-                    manifest_path=str((locals().get("backup_manifest") or {}).get("path") or ""),
-                    error=str(exc),
+                    manifest_path=str(backup_manifest.get("path") or ""),
                 )
-            except Exception as restore_exc:
-                logger.error(
-                    "[RagIndex] failed to restore previous index after MinerU rebuild error for %s: %s",
+            else:
+                # A MinerU-first upload has no local vector pair to back up. It is
+                # still a transaction, but there is no previous generation to
+                # restore on failure.
+                backup_manifest = {
+                    "complete": False,
+                    "fresh_document": True,
+                    "source": previous_source,
+                    "vector": {},
+                    "document": {},
+                    "semantic_groups": {},
+                }
+                transaction_journal = {}
+            backup = dict(backup_manifest.get("vector") or {})
+            doc_backup = dict(backup_manifest.get("document") or {})
+            semantic_backup = dict(backup_manifest.get("semantic_groups") or {})
+            _replace_vector_index_from_temp(doc_id, temp_dir)
+            replaced_current_index = True
+            if had_previous_rag:
+                _write_rag_transaction_journal(
                     doc_id,
-                    restore_exc,
+                    "vector_swapped",
+                    source=previous_source,
+                    manifest_path=str(backup_manifest.get("path") or ""),
                 )
-        _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error="MinerU 问答索引重建失败，已保留原索引")
+            _apply_mineru_rag_document_data(
+                doc_id,
+                normalized,
+                expected_parse_generation=("" if legacy_parse else expected_parse_generation),
+                expected_document_source_hash=("" if legacy_parse else expected_document_source_hash),
+            )
+            if had_previous_rag:
+                _write_rag_transaction_journal(
+                    doc_id,
+                    "document_swapped",
+                    source=previous_source,
+                    manifest_path=str(backup_manifest.get("path") or ""),
+                )
+            semantic_cleanup = _publish_temp_semantic_groups(
+                doc_id,
+                temp_semantic_dir,
+                semantic_validation,
+                source_hash=("" if legacy_parse else expected_document_source_hash),
+                transaction_id=("" if legacy_parse else expected_parse_generation),
+            )
+            semantic_cleanup["staged_validation"] = semantic_validation
+            _mark_full_mineru_parse_ready(
+                doc_id,
+                expected_parse_generation=("" if legacy_parse else expected_parse_generation),
+                expected_document_source_hash=("" if legacy_parse else expected_document_source_hash),
+            )
+            if had_previous_rag:
+                transaction_journal = _write_rag_transaction_journal(
+                    doc_id,
+                    "committed",
+                    source=previous_source,
+                    manifest_path=str(backup_manifest.get("path") or ""),
+                )
+            _set_document_index_status(doc_id, "ready", stage="ready")
+    except _SupersededParseGeneration:
+        # A newer upload owns the document now. Never mark that new route as a
+        # failed MinerU rebuild and never restore an older route over it.
+        logger.info("[RagIndex] discard superseded MinerU publication for %s", doc_id)
+        raise
+    except Exception as exc:
+        with _get_document_publication_lock(doc_id):
+            still_owns_document = (
+                _is_legacy_parse_manifest(
+                    _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+                )
+                if legacy_parse
+                else _parse_generation_matches_current_document(
+                    doc_id,
+                    parse_generation=expected_parse_generation,
+                    document_source_hash=expected_document_source_hash,
+                )
+            )
+            if still_owns_document:
+                if had_previous_rag and replaced_current_index and _load_complete_rag_backup_manifest(doc_id, previous_source):
+                    try:
+                        _restore_vector_index_backup(doc_id, previous_source)
+                        transaction_journal = _write_rag_transaction_journal(
+                            doc_id,
+                            "rolled_back",
+                            source=previous_source,
+                            manifest_path=str((locals().get("backup_manifest") or {}).get("path") or ""),
+                            error=str(exc),
+                        )
+                    except Exception as restore_exc:
+                        logger.error(
+                            "[RagIndex] failed to restore previous index after MinerU rebuild error for %s: %s",
+                            doc_id,
+                            restore_exc,
+                        )
+                _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error="MinerU 问答索引重建失败，已保留原索引")
+            else:
+                logger.info("[RagIndex] skip rollback for superseded parse generation doc=%s", doc_id)
         raise exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1699,8 +2635,147 @@ def migrate_legacy_storage():
                 shutil.copy2(src_file, dest_file)
 
 
-def generate_doc_id(content: str) -> str:
-    return hashlib.md5(content.encode()).hexdigest()
+def generate_doc_id(content: str | bytes | bytearray | memoryview) -> str:
+    """Generate a stable document identity.
+
+    PDFs use their original bytes so OCR/ODL/MinerU output can never make two
+    unrelated scans share a document id. Text-only imports retain the legacy
+    text hash for backwards-compatible storage paths.
+    """
+    if isinstance(content, memoryview):
+        content = content.tobytes()
+    if isinstance(content, (bytes, bytearray)):
+        return hashlib.sha256(bytes(content)).hexdigest()
+    return hashlib.md5(str(content).encode("utf-8")).hexdigest()
+
+
+def _build_pending_mineru_document_data(pdf_bytes: bytes) -> dict:
+    """Keep only display-safe PDF metadata until the selected MinerU route publishes."""
+    total_pages = 0
+    try:
+        total_pages = len(PyPDF2.PdfReader(io.BytesIO(pdf_bytes)).pages)
+    except Exception as exc:
+        logger.warning("[Upload] failed to read PDF page count before MinerU parse: %s", exc)
+    return {
+        "full_text": "",
+        "pages": [],
+        "total_pages": total_pages,
+        "images": [],
+        "figures": [],
+        "image_count": 0,
+        "ocr_used": False,
+        "ocr_backend": None,
+        "extraction_quality": "pending_mineru",
+        "extraction_method": "mineru_pending",
+        "structured_table_bundles": [],
+        "structured_table_count": 0,
+    }
+
+
+def _build_upload_parse_manifest(
+    doc_id: str,
+    *,
+    parse_route: str,
+    resolved_route: str | None = None,
+    pdf_bytes: bytes,
+    status: str,
+    stage: str,
+    metadata: dict | None = None,
+) -> dict:
+    selected_route = resolved_route or (parse_route if parse_route != PARSE_ROUTE_AUTO else PARSE_ROUTE_LOCAL)
+    return build_parse_manifest(
+        doc_id=doc_id,
+        route=parse_route,
+        resolved_route=selected_route,
+        source_hash=derive_source_hash(pdf_bytes),
+        status=status,
+        stage=stage,
+        metadata=metadata or {},
+    )
+
+
+def _start_mineru_full_route_upload(
+    *,
+    doc_id: str,
+    filename: str,
+    pdf_bytes: bytes,
+    requested_route: str,
+    embedding_model: str,
+    embedding_api_key: Optional[str],
+    embedding_api_host: Optional[str],
+    summary_api_key: Optional[str],
+    auto_selected: bool = False,
+) -> dict:
+    """Persist a pending MinerU-first document and queue its atomic publication."""
+    if not _mineru_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="已选择 MinerU 全程解析，但 MinerU 尚未配置或不可用",
+        )
+
+    pending_data = _build_pending_mineru_document_data(pdf_bytes)
+    pending_data["parse_manifest"] = _build_upload_parse_manifest(
+        doc_id,
+        parse_route=requested_route,
+        resolved_route=PARSE_ROUTE_MINERU,
+        pdf_bytes=pdf_bytes,
+        status=PARSE_STATUS_QUEUED,
+        stage="queued_mineru",
+        metadata={
+            "full_route": True,
+            "auto_selected": bool(auto_selected),
+            "text_source": "pending",
+            "block_source": "pending",
+            "rag_source": "pending",
+            "figure_source": "pending",
+        },
+    )
+    pdf_filename = f"{doc_id}.pdf"
+    pdf_path = UPLOAD_DIR / pdf_filename
+    with open(pdf_path, "wb") as handle:
+        handle.write(pdf_bytes)
+
+    # Replacing a same-byte PDF creates a new parse generation. Keep that
+    # replacement atomic with old MinerU publication so a late worker cannot
+    # write its blocks/RAG/document data into this pending route.
+    with _get_document_publication_lock(doc_id):
+        _retire_superseded_mineru_job(doc_id)
+        _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
+        _remove_current_semantic_groups(doc_id)
+        documents_store[doc_id] = {
+            "filename": filename,
+            "upload_time": datetime.now().isoformat(),
+            "data": pending_data,
+            "pdf_url": f"/uploads/{pdf_filename}",
+        }
+        _normalize_page_keys(documents_store[doc_id])
+        save_document(doc_id, documents_store[doc_id])
+        _set_document_index_status(doc_id, "queued", stage="waiting_for_mineru")
+    deep_status = _queue_mineru_deep_parse(
+        doc_id,
+        full_route_options={
+            "embedding_model": embedding_model,
+            "embedding_api_key": embedding_api_key,
+            "embedding_api_host": embedding_api_host,
+            "summary_api_key": summary_api_key,
+        },
+    )
+    return {
+        "message": "PDF 已上传，正在执行 MinerU 全程解析",
+        "doc_id": doc_id,
+        "filename": filename,
+        "total_pages": pending_data["total_pages"],
+        "total_chars": 0,
+        "image_count": 0,
+        "pdf_url": f"/uploads/{pdf_filename}",
+        "ocr_used": False,
+        "ocr_backend": None,
+        "extraction_quality": "pending_mineru",
+        "extraction_method": "mineru_pending",
+        "parse_manifest": pending_data["parse_manifest"],
+        "deep_parse": deep_status,
+        "indexing_status": "waiting_for_mineru",
+    }
 
 
 def _ocr_result_has_success(ocr_result) -> bool:
@@ -3107,6 +4182,7 @@ async def upload_pdf(
     api_key: Optional[str] = Form(None),
     enable_ocr: Optional[str] = Form(None),
     ocr_backend: Optional[str] = Form(None),
+    parse_route: Optional[str] = Form(None),
 ):
     """
     上传并处理 PDF 文件
@@ -3120,6 +4196,7 @@ async def upload_pdf(
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
                     缺失时使用后端配置中的 ocr_default_mode 默认值。
         ocr_backend: OCR 后端。缺失时使用后端配置中的 ocr_backend 默认值。
+        parse_route: 主解析路线 - auto（本地优先）、local 或 mineru。
     """
     filename_lower = file.filename.lower()
     is_pdf = filename_lower.endswith('.pdf')
@@ -3131,9 +4208,19 @@ async def upload_pdf(
 
     try:
         content = await file.read()
+        try:
+            requested_parse_route = normalize_parse_route(
+                parse_route,
+                default=PARSE_ROUTE_AUTO,
+                strict=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # 多格式文档处理（非 PDF）
         if is_multi_format and not is_pdf:
+            if requested_parse_route == PARSE_ROUTE_MINERU:
+                raise HTTPException(status_code=400, detail="MinerU 全程解析当前仅支持 PDF 文件")
             import tempfile
             suffix = Path(file.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -3148,7 +4235,24 @@ async def upload_pdf(
 
                 extracted_data = extract_from_file(tmp_path, file.filename)
                 doc_id = generate_doc_id(extracted_data["full_text"])
+                extracted_data["parse_manifest"] = build_parse_manifest(
+                    doc_id=doc_id,
+                    route=requested_parse_route,
+                    resolved_route=PARSE_ROUTE_LOCAL,
+                    source_hash=derive_source_hash(content),
+                    status=PARSE_STATUS_READY,
+                    stage="local_ready",
+                    metadata={
+                        "full_route": False,
+                        "text_source": str(extracted_data.get("source_type") or "file"),
+                        "block_source": "canonical_pages",
+                        "rag_source": "pdf_native",
+                        "figure_source": "none",
+                    },
+                )
 
+                _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
+                _remove_current_semantic_groups(doc_id)
                 documents_store[doc_id] = {
                     "filename": file.filename,
                     "upload_time": datetime.now().isoformat(),
@@ -3190,6 +4294,23 @@ async def upload_pdf(
                 detail="桌面版不支持本地 Embedding 模型，请在设置中选择远程 Embedding 服务（如 OpenAI、硅基流动等）并配置 API Key"
             )
 
+        # PDF identity is derived from the original bytes before any parser can
+        # alter text. This keeps re-parses in one document lineage while the
+        # parse manifest distinguishes generations.
+        doc_id = generate_doc_id(content)
+        summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
+        if requested_parse_route == PARSE_ROUTE_MINERU:
+            return _start_mineru_full_route_upload(
+                doc_id=doc_id,
+                filename=file.filename,
+                pdf_bytes=content,
+                requested_route=requested_parse_route,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+                embedding_api_host=embedding_api_host,
+                summary_api_key=summary_api_key,
+            )
+
         # 当 enable_ocr 参数缺失时，回退到配置中的默认值
         ocr_mode = enable_ocr if enable_ocr is not None else settings.ocr_default_mode
         ocr_backend_name = ocr_backend if ocr_backend is not None else settings.ocr_backend
@@ -3204,8 +4325,6 @@ async def upload_pdf(
             ocr_language=settings.ocr_language,
             ocr_quality_threshold=settings.ocr_quality_threshold,
         )
-
-        doc_id = generate_doc_id(extracted_data["full_text"])
 
         # Page OCR has a different contract from MinerU/ODL document parsing.
         # Keep Mistral's page-level result in the common artifact namespace
@@ -3249,7 +4368,8 @@ async def upload_pdf(
 
         # ── ODL 去脏合并层 ──────────────────────────────────────────────────
         # PDF 已落盘，尝试用 OpenDataLoader 解析，得到过滤了 header/footer/
-        # caption/image 脏块的干净文本；失败则静默降级使用 pdfplumber 结果。
+        # caption/image 脏块的干净文本；失败则保留 PyMuPDF 优先、pdfplumber
+        # 回退以及可选逐页 OCR 已得到的结果。
         try:
             from services.odl_parser_service import parse_pdf_odl, is_odl_available
             if is_odl_available():
@@ -3290,43 +4410,86 @@ async def upload_pdf(
             logger.warning(f"[Upload] ODL 合并失败，使用已有提取结果: {_odl_err}")
         # ────────────────────────────────────────────────────────────────────
 
-        documents_store[doc_id] = {
-            "filename": file.filename,
-            "upload_time": datetime.now().isoformat(),
-            "data": extracted_data,
-            "pdf_url": pdf_url
-        }
-        if page_ocr_artifact_ref:
-            documents_store[doc_id]["data"]["parse_artifacts"] = [page_ocr_artifact_ref]
-        if str(extracted_data.get("extraction_method") or "").startswith("odl"):
-            artifact = build_document_parse_artifact(
+        # Auto never publishes the provisional local extraction as a second
+        # route. When quality is poor and MinerU has been configured, switch
+        # directly to the same full MinerU publication path as an explicit
+        # MinerU upload.
+        if (
+            requested_parse_route == PARSE_ROUTE_AUTO
+            and str(extracted_data.get("extraction_quality") or "").lower() == "poor"
+            and _mineru_configured()
+        ):
+            return _start_mineru_full_route_upload(
                 doc_id=doc_id,
-                provider="odl",
-                provider_version="odl-v1",
-                pages=extracted_data.get("pages") or [],
-                tables=extracted_data.get("structured_table_bundles") or [],
-                warnings=[str(extracted_data.get("ocr_warning") or "")],
-                capabilities={
-                    "per_page_text": True,
-                    "document_structure": True,
-                    "structured_tables": True,
-                    "figures": False,
-                    **derive_table_geometry_capabilities(extracted_data.get("structured_table_bundles") or []),
-                },
+                filename=file.filename,
+                pdf_bytes=content,
+                requested_route=requested_parse_route,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+                embedding_api_host=embedding_api_host,
+                summary_api_key=summary_api_key,
+                auto_selected=True,
             )
-            artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
-            documents_store[doc_id]["data"]["parse_artifact"] = {
-                "schema_version": artifact["schema_version"],
-                "provider": artifact["provider"],
-                "source_hash": artifact["source_hash"],
-                "ref": artifact_reference(DATA_DIR, artifact_path),
-            }
-            documents_store[doc_id]["data"].setdefault("parse_artifacts", []).append(
-                documents_store[doc_id]["data"]["parse_artifact"]
-            )
-        _normalize_page_keys(documents_store[doc_id])
 
-        save_document(doc_id, documents_store[doc_id])
+        extracted_data["parse_manifest"] = _build_upload_parse_manifest(
+            doc_id,
+            parse_route=requested_parse_route,
+            resolved_route=PARSE_ROUTE_LOCAL,
+            pdf_bytes=content,
+            status=PARSE_STATUS_READY,
+            stage="local_ready",
+            metadata={
+                "full_route": False,
+                "auto_selected": requested_parse_route == PARSE_ROUTE_AUTO,
+                "text_source": str(extracted_data.get("extraction_method") or "pdf_native"),
+                "block_source": "canonical_pages",
+                "rag_source": "pdf_native",
+                "figure_source": "pdf_native",
+            },
+        )
+
+        # A local re-upload is also a route publication. Retire an old MinerU
+        # run under the same short lock used by its final artifact swap.
+        with _get_document_publication_lock(doc_id):
+            _retire_superseded_mineru_job(doc_id)
+            _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
+            _remove_current_semantic_groups(doc_id)
+            documents_store[doc_id] = {
+                "filename": file.filename,
+                "upload_time": datetime.now().isoformat(),
+                "data": extracted_data,
+                "pdf_url": pdf_url
+            }
+            if page_ocr_artifact_ref:
+                documents_store[doc_id]["data"]["parse_artifacts"] = [page_ocr_artifact_ref]
+            if str(extracted_data.get("extraction_method") or "").startswith("odl"):
+                artifact = build_document_parse_artifact(
+                    doc_id=doc_id,
+                    provider="odl",
+                    provider_version="odl-v1",
+                    pages=extracted_data.get("pages") or [],
+                    tables=extracted_data.get("structured_table_bundles") or [],
+                    warnings=[str(extracted_data.get("ocr_warning") or "")],
+                    capabilities={
+                        "per_page_text": True,
+                        "document_structure": True,
+                        "structured_tables": True,
+                        "figures": False,
+                        **derive_table_geometry_capabilities(extracted_data.get("structured_table_bundles") or []),
+                    },
+                )
+                artifact_path = persist_document_parse_artifact(DATA_DIR, artifact)
+                documents_store[doc_id]["data"]["parse_artifact"] = {
+                    "schema_version": artifact["schema_version"],
+                    "provider": artifact["provider"],
+                    "source_hash": artifact["source_hash"],
+                    "ref": artifact_reference(DATA_DIR, artifact_path),
+                }
+                documents_store[doc_id]["data"].setdefault("parse_artifacts", []).append(
+                    documents_store[doc_id]["data"]["parse_artifact"]
+                )
+            _normalize_page_keys(documents_store[doc_id])
+            save_document(doc_id, documents_store[doc_id])
 
         summary_api_key = ((api_key or "").strip() or (embedding_api_key or "").strip() or None)
         index_status = _queue_document_indexes(
@@ -3349,6 +4512,7 @@ async def upload_pdf(
             "ocr_backend": extracted_data.get("ocr_backend"),
             "extraction_quality": extracted_data.get("extraction_quality", "unknown"),
             "extraction_method": extracted_data.get("extraction_method", "unknown"),
+            "parse_manifest": extracted_data.get("parse_manifest", {}),
             "indexing_status": index_status.get("status", "queued"),
         }
         if extracted_data.get("extraction_method") == "odl":
@@ -3417,7 +4581,24 @@ async def import_url(
             "source_type": "url",
             "source_url": url,
         }
+        extracted_data["parse_manifest"] = build_parse_manifest(
+            doc_id=doc_id,
+            route=PARSE_ROUTE_LOCAL,
+            resolved_route=PARSE_ROUTE_LOCAL,
+            source_hash=derive_source_hash(content),
+            status=PARSE_STATUS_READY,
+            stage="local_ready",
+            metadata={
+                "full_route": False,
+                "text_source": "url",
+                "block_source": "canonical_pages",
+                "rag_source": "url",
+                "figure_source": "none",
+            },
+        )
 
+        _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
+        _remove_current_semantic_groups(doc_id)
         documents_store[doc_id] = {
             "filename": f"🌐 {title[:60]}",
             "upload_time": datetime.now().isoformat(),
@@ -3432,6 +4613,13 @@ async def import_url(
             embedding_model, embedding_api_key, embedding_api_host,
             pages=extracted_data["pages"],
             summary_api_key=api_key or embedding_api_key,
+            index_source="url",
+            index_meta={
+                "source_hash": extracted_data["parse_manifest"]["source_hash"],
+                "document_source_hash": extracted_data["parse_manifest"]["source_hash"],
+                "parse_generation": extracted_data["parse_manifest"]["generation"],
+                "parser_route": PARSE_ROUTE_LOCAL,
+            },
         )
 
         return {
@@ -3452,27 +4640,33 @@ async def import_url(
 
 
 @router.get("/document/{doc_id}")
-async def get_document(doc_id: str):
+async def get_document(doc_id: str, include_content: bool = True):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
-    return {
+    parse_manifest = _read_document_parse_manifest(doc_id, doc)
+    response = {
         "doc_id": doc_id,
         "filename": doc["filename"],
         "upload_time": doc["upload_time"],
         "total_pages": doc["data"]["total_pages"],
         "total_chars": len(doc["data"]["full_text"]),
         "image_count": doc["data"].get("image_count", 0),
-        "pages": doc["data"]["pages"],
-        "images": doc["data"].get("images", []),  # 新增：返回图片数据
         "pdf_url": doc.get("pdf_url"),
         "ocr_used": doc["data"].get("ocr_used", False),
         "ocr_backend": doc["data"].get("ocr_backend"),
         "extraction_quality": doc["data"].get("extraction_quality", "unknown"),
         "extraction_method": doc["data"].get("extraction_method", "unknown"),
+        "parse_manifest": parse_manifest,
+        "parse_ready": is_parse_prepared(parse_manifest),
         "indexing": _get_document_index_status(doc_id),
     }
+    if include_content:
+        _require_document_parse_ready(doc_id, doc)
+        response["pages"] = doc["data"]["pages"]
+        response["images"] = doc["data"].get("images", [])
+    return response
 
 
 @router.get("/document/{doc_id}/index-status")
@@ -3510,16 +4704,13 @@ def recover_pending_rag_transactions() -> list[dict]:
             if not _load_complete_rag_backup_manifest(doc_id, source):
                 logger.error("[RagIndex] pending transaction lacks a complete backup: %s", journal_path)
                 continue
-            manifest = _load_complete_rag_backup_manifest(doc_id, source)
-            vector = _restore_vector_index_backup(doc_id, source)
-            document = _restore_document_backup(doc_id, source)
-            semantic_groups = _restore_semantic_group_backup(doc_id, source)
-            semantic_required = bool((manifest.get("semantic_groups") or {}).get("backed_up"))
-            semantic_ready = bool(semantic_groups.get("restored")) or not semantic_required
-            if not (vector.get("restored") and document.get("restored") and semantic_ready):
+            snapshot = _restore_vector_index_backup(doc_id, source)
+            document = snapshot.get("document_restore") or {}
+            semantic_groups = snapshot.get("semantic_group_restore") or {}
+            if not snapshot.get("restored"):
                 raise RuntimeError(
                     "RAG transaction recovery incomplete: "
-                    f"vector={vector.get('restored')}, "
+                    f"snapshot={snapshot.get('restored')}, "
                     f"document={document.get('restored')}, "
                     f"semantic={semantic_groups.get('restored')}"
                 )
@@ -3532,7 +4723,7 @@ def recover_pending_rag_transactions() -> list[dict]:
             recovered.append({
                 "doc_id": doc_id,
                 "state": "rolled_back",
-                "vector": vector,
+                "vector": snapshot,
                 "document": document,
                 "semantic_groups": semantic_groups,
             })
@@ -3567,6 +4758,7 @@ async def start_document_deep_parse(request: Request, doc_id: str):
         raise HTTPException(status_code=400, detail="请先在 OCR 设置中配置 MinerU Worker/直连模式和 Token")
 
     doc = documents_store[doc_id]
+    parse_manifest = _require_mineru_route_compatibility(doc_id, doc)
     pdf_path = _resolve_document_pdf_path(doc)
     if not pdf_path or not pdf_path.exists():
         raise HTTPException(status_code=400, detail="当前文档没有可用于 MinerU 深度解析的 PDF 原文件")
@@ -3597,11 +4789,12 @@ async def rebuild_document_deep_parse_index(doc_id: str):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
-    payload = load_mineru_result(DATA_DIR, doc_id)
-    if not payload:
-        raise HTTPException(status_code=404, detail="没有缓存的 MinerU 解析结果，请先执行深度解析")
-
     doc = documents_store[doc_id]
+    parse_manifest = _require_mineru_route_compatibility(doc_id, doc)
+    payload = _load_mineru_result_for_manifest(doc_id, parse_manifest)
+    if not payload:
+        raise HTTPException(status_code=409, detail="当前解析代际没有可用的 MinerU 解析结果，请重新执行深度解析")
+
     pdf_path = _resolve_document_pdf_path(doc)
     try:
         block_index = build_block_index_from_mineru_payload(
@@ -3610,8 +4803,16 @@ async def rebuild_document_deep_parse_index(doc_id: str):
             payload=payload,
             pdf_path=pdf_path,
         )
-        save_block_index(DATA_DIR, doc_id, block_index)
-        removed = _clear_block_dependent_ai_cache(doc_id, doc)
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            )
+            save_block_index(DATA_DIR, doc_id, block_index)
+            removed = _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新执行 MinerU 阅读块重建")
     except Exception as exc:
         logger.exception("[DeepParse] rebuild-from-cache failed for %s: %s", doc_id, exc)
         raise HTTPException(status_code=500, detail=f"从缓存重建索引失败: {exc}")
@@ -3624,18 +4825,26 @@ async def rebuild_document_deep_parse_index(doc_id: str):
         for block in (page.get("blocks") or [])
         if block.get("type") in ("figure", "table")
     )
-    _set_deep_parse_status(
-        doc_id,
-        "ready",
-        stage="ready",
-        block_count=block_count,
-        outline_count=outline_count,
-        figure_count=figure_count,
-        cache_removed=removed,
-        active_source=MINERU_BLOCK_INDEX_SOURCE,
-        active_mineru=True,
-        message="已从缓存的 MinerU 结果重建索引",
-    )
+    with _get_document_publication_lock(doc_id):
+        _require_current_parse_generation(
+            doc_id,
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+        )
+        _set_deep_parse_status(
+            doc_id,
+            "ready",
+            stage="ready",
+            block_count=block_count,
+            outline_count=outline_count,
+            figure_count=figure_count,
+            cache_removed=removed,
+            active_source=MINERU_BLOCK_INDEX_SOURCE,
+            active_mineru=True,
+            message="已从缓存的 MinerU 结果重建索引",
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+        )
     return _get_deep_parse_status(doc_id)
 
 
@@ -3651,16 +4860,18 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
+    doc = documents_store[doc_id]
+    parse_manifest = _require_mineru_route_compatibility(doc_id, doc)
+
     try:
         body = await request.json()
     except Exception:
         body = {}
 
-    payload = load_mineru_result(DATA_DIR, doc_id)
+    payload = _load_mineru_result_for_manifest(doc_id, parse_manifest)
     if not payload:
-        raise HTTPException(status_code=404, detail="没有缓存的 MinerU 解析结果，请先执行深度解析")
+        raise HTTPException(status_code=409, detail="当前解析代际没有可用的 MinerU 解析结果，请重新执行深度解析")
 
-    doc = documents_store[doc_id]
     normalized = normalize_mineru_for_rag(payload, page_sizes=_document_pdf_page_sizes(doc_id))
     ok, failures = validate_mineru_rag_data(
         normalized,
@@ -3713,7 +4924,11 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
             summary_model=summary_model,
             summary_provider=summary_provider,
             summary_api_host=summary_api_host,
+            expected_parse_generation=str(parse_manifest.get("generation") or ""),
+            expected_document_source_hash=str(parse_manifest.get("source_hash") or ""),
         )
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新发起 MinerU 索引重建")
     except HTTPException:
         raise
     except Exception as exc:
@@ -3725,23 +4940,31 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
 async def rollback_document_rag_index(doc_id: str):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
+    parse_manifest = _read_document_parse_manifest(doc_id, documents_store[doc_id])
+    if _is_full_mineru_parse_manifest(parse_manifest):
+        raise HTTPException(
+            status_code=409,
+            detail="MinerU 全程解析不支持只回退问答索引；请重新选择本地路线并重新解析整份文档",
+        )
     try:
         manifest = _load_complete_rag_backup_manifest(doc_id, "pdf_native")
         if not manifest:
             raise HTTPException(status_code=409, detail="没有完整的本地 RAG 回滚快照")
-        vector = _restore_vector_index_backup(doc_id, "pdf_native")
-        document = _restore_document_backup(doc_id, "pdf_native")
-        semantic_groups = _restore_semantic_group_backup(doc_id, "pdf_native")
-        if not (vector.get("restored") and document.get("restored")):
+        snapshot = _restore_vector_index_backup(doc_id, "pdf_native")
+        document = snapshot.get("document_restore") or {}
+        semantic_groups = snapshot.get("semantic_group_restore") or {}
+        if not snapshot.get("restored"):
             raise RuntimeError("RAG 回滚快照恢复不完整")
         return {
             "status": "ready",
             "message": "已回退到本地问答索引",
-            "rag_index": vector,
+            "rag_index": snapshot,
             "document": document,
             "semantic_groups": semantic_groups,
             "manifest": manifest,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("[RagIndex] rollback failed for %s: %s", doc_id, exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -3754,6 +4977,7 @@ async def get_document_blocks(doc_id: str, force_rebuild: bool = False):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
+    _require_document_parse_ready(doc_id, doc)
     try:
         return ensure_block_index(
             doc_id=doc_id,
@@ -3774,6 +4998,7 @@ async def get_document_reading_outline(doc_id: str, force: bool = False):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
+    parse_manifest = _require_document_parse_ready(doc_id, doc)
     block_index = ensure_block_index(
         doc_id=doc_id,
         doc=doc,
@@ -3781,13 +5006,24 @@ async def get_document_reading_outline(doc_id: str, force: bool = False):
         pdf_path=_resolve_document_pdf_path(doc),
         force_rebuild=force,
     )
-    return await get_or_create_reading_outline(
-        data_dir=DATA_DIR,
-        doc_id=doc_id,
-        doc=doc,
-        block_index=block_index,
-        force=force,
-    )
+    try:
+        return await get_or_create_reading_outline(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            force=force,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda outline: save_reading_outline(DATA_DIR, doc_id, outline),
+            ),
+        )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成阅读总结")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成阅读总结")
 
 
 @router.post("/documents/{doc_id}/reading-outline")
@@ -3804,6 +5040,8 @@ async def create_document_reading_outline(
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     try:
         body = await request.json()
     except Exception:
@@ -3831,17 +5069,28 @@ async def create_document_reading_outline(
         force_rebuild=force,
     )
 
-    return await get_or_create_reading_outline(
-        data_dir=DATA_DIR,
-        doc_id=doc_id,
-        doc=doc,
-        block_index=block_index,
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        endpoint=_get_overview_provider_endpoint(provider, api_host),
-        force=force,
-    )
+    try:
+        return await get_or_create_reading_outline(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=_get_overview_provider_endpoint(provider, api_host),
+            force=force,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda outline: save_reading_outline(DATA_DIR, doc_id, outline),
+            ),
+        )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成阅读总结")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成阅读总结")
 
 
 @router.get("/documents/{doc_id}/section-outline")
@@ -3851,6 +5100,7 @@ async def get_document_section_outline(doc_id: str, force: bool = False):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
+    parse_manifest = _require_document_parse_ready(doc_id, doc)
     block_index = ensure_block_index(
         doc_id=doc_id,
         doc=doc,
@@ -3858,13 +5108,24 @@ async def get_document_section_outline(doc_id: str, force: bool = False):
         pdf_path=_resolve_document_pdf_path(doc),
         force_rebuild=force,
     )
-    return await get_or_create_section_outline(
-        data_dir=DATA_DIR,
-        doc_id=doc_id,
-        doc=doc,
-        block_index=block_index,
-        force=force,
-    )
+    try:
+        return await get_or_create_section_outline(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            force=force,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda outline: save_section_outline(DATA_DIR, doc_id, outline),
+            ),
+        )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成章节大纲")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成章节大纲")
 
 
 @router.post("/documents/{doc_id}/section-outline")
@@ -3881,6 +5142,8 @@ async def create_document_section_outline(
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     try:
         body = await request.json()
     except Exception:
@@ -3908,17 +5171,28 @@ async def create_document_section_outline(
         force_rebuild=force,
     )
 
-    return await get_or_create_section_outline(
-        data_dir=DATA_DIR,
-        doc_id=doc_id,
-        doc=doc,
-        block_index=block_index,
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        endpoint=_get_overview_provider_endpoint(provider, api_host),
-        force=force,
-    )
+    try:
+        return await get_or_create_section_outline(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=_get_overview_provider_endpoint(provider, api_host),
+            force=force,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda outline: save_section_outline(DATA_DIR, doc_id, outline),
+            ),
+        )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成章节大纲")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成章节大纲")
 
 
 @router.get("/document/{doc_id}/thumbnail/{page}")
@@ -3974,6 +5248,101 @@ async def get_page_thumbnail(doc_id: str, page: int):
         raise HTTPException(status_code=500, detail=f"缩略图生成失败: {str(e)}")
 
 
+_GRAPHRAG_PARSE_IDENTITY_FILE = "chatpdf_parse_identity.json"
+
+
+def _graphrag_parse_identity(manifest: dict) -> dict:
+    """Return the parser generation a GraphRAG artifact is allowed to serve."""
+    return {
+        "parse_generation": str(manifest.get("generation") or ""),
+        "document_source_hash": str(manifest.get("source_hash") or ""),
+    }
+
+
+def _graphrag_build_matches_active_parse(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+) -> bool:
+    return matches_parse_generation(
+        _read_document_parse_manifest(doc_id, documents_store.get(doc_id)),
+        generation=parse_generation,
+        source_hash=document_source_hash,
+    )
+
+
+def _bind_graphrag_progress_identity(progress, *, parse_generation: str, document_source_hash: str):
+    """将内存构建进度绑定到发起构建时的主解析代际。"""
+    progress.parse_generation = str(parse_generation or "")
+    progress.document_source_hash = str(document_source_hash or "")
+    return progress
+
+
+def _graphrag_progress_matches_parse(progress, manifest: dict) -> bool:
+    return bool(
+        progress
+        and str(getattr(progress, "parse_generation", "") or "")
+        == str(manifest.get("generation") or "")
+        and str(getattr(progress, "document_source_hash", "") or "")
+        == str(manifest.get("source_hash") or "")
+    )
+
+
+def _graphrag_identity_path(working_dir: str | Path) -> Path:
+    return Path(working_dir) / _GRAPHRAG_PARSE_IDENTITY_FILE
+
+
+def _graphrag_index_matches_parse(working_dir: str | Path, manifest: dict) -> bool:
+    expected = _graphrag_parse_identity(manifest)
+    if not expected["parse_generation"] or not expected["document_source_hash"]:
+        return False
+    try:
+        stored = json.loads(_graphrag_identity_path(working_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return (
+        str(stored.get("parse_generation") or "") == expected["parse_generation"]
+        and str(stored.get("document_source_hash") or "") == expected["document_source_hash"]
+    )
+
+
+def _write_graphrag_parse_identity(working_dir: str | Path, manifest: dict) -> None:
+    path = _graphrag_identity_path(working_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    identity = _graphrag_parse_identity(manifest)
+    if not identity["parse_generation"] or not identity["document_source_hash"]:
+        raise RuntimeError("GraphRAG 缺少文档解析代际，无法发布索引")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(json.dumps(identity, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(temp_path), str(path))
+
+
+def _new_graphrag_staging_dir(doc_id: str, parse_generation: str) -> str:
+    root = Path(settings.graphrag_working_dir) / "_staging" / doc_id
+    return str(root / f"{parse_generation}.{uuid.uuid4().hex}")
+
+
+def _publish_graphrag_staging_dir(staging_dir: str | Path, working_dir: str | Path) -> None:
+    """Swap a completed generation into the active GraphRAG location."""
+    staging_path = Path(staging_dir)
+    active_path = Path(working_dir)
+    backup_path = active_path.with_name(f".{active_path.name}.{uuid.uuid4().hex}.backup")
+    moved_active = False
+    try:
+        if active_path.exists():
+            os.replace(str(active_path), str(backup_path))
+            moved_active = True
+        os.replace(str(staging_path), str(active_path))
+    except Exception:
+        if moved_active and backup_path.exists() and not active_path.exists():
+            os.replace(str(backup_path), str(active_path))
+        raise
+    finally:
+        if backup_path.exists():
+            shutil.rmtree(backup_path, ignore_errors=True)
+
+
 @router.post("/document/{doc_id}/graphrag/build")
 async def build_graphrag_index(doc_id: str, request: Request):
     """为文档构建 GraphRAG 知识图谱索引
@@ -3996,6 +5365,9 @@ async def build_graphrag_index(doc_id: str, request: Request):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
+    parse_manifest = _require_document_parse_ready(doc_id, doc)
+    parse_generation = str(parse_manifest.get("generation") or "")
+    parse_source_hash = str(parse_manifest.get("source_hash") or "")
     full_text = doc.get("data", {}).get("full_text", "")
     if not full_text or len(full_text) < 50:
         raise HTTPException(status_code=400, detail="文档内容过短，无法构建知识图谱")
@@ -4006,6 +5378,8 @@ async def build_graphrag_index(doc_id: str, request: Request):
     if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="该文档正在构建中，请勿重复提交")
 
+    staging_dir = ""
+    build_progress = None
     try:
         body = await request.json()
         api_key = body.get("api_key", "")
@@ -4079,9 +5453,16 @@ async def build_graphrag_index(doc_id: str, request: Request):
             embedding_dim=resolved_embedding_dim,
         )
 
-        # 检查是否已有持久化索引且配置未变（跳过构建）
-        need_clean_existing_index = force_rebuild
-        if not force_rebuild and GraphRAG.has_persisted_index(working_dir):
+        # A GraphRAG cache is valid only for the document parse generation that
+        # created it. Same-PDF re-uploads intentionally retain ``doc_id``.
+        # Without this identity check a graph from a former local/MinerU route
+        # could be loaded merely because its model configuration still matches.
+        has_persisted_index = GraphRAG.has_persisted_index(working_dir)
+        if (
+            not force_rebuild
+            and has_persisted_index
+            and _graphrag_index_matches_parse(working_dir, parse_manifest)
+        ):
             disk_meta = GraphRAG.load_metadata(working_dir)
             from services.graphrag.graphrag import _compute_config_hash
             current_hash = _compute_config_hash(
@@ -4098,26 +5479,36 @@ async def build_graphrag_index(doc_id: str, request: Request):
                     cheap_model_max_async=settings.graphrag_max_async,
                 )
                 if rag is not None:
-                    _GRAPHRAG_INSTANCES[doc_id] = rag
-                    _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
+                    with _get_document_publication_lock(doc_id):
+                        _require_current_parse_generation(
+                            doc_id,
+                            parse_generation=parse_generation,
+                            document_source_hash=parse_source_hash,
+                        )
+                        if not _graphrag_index_matches_parse(working_dir, parse_manifest):
+                            raise _SupersededParseGeneration("GraphRAG 索引不属于当前解析代际")
+                        loaded_progress = _bind_graphrag_progress_identity(
+                            rag.get_build_progress(),
+                            parse_generation=parse_generation,
+                            document_source_hash=parse_source_hash,
+                        )
+                        _GRAPHRAG_INSTANCES[doc_id] = rag
+                        _GRAPHRAG_BUILD_PROGRESS[doc_id] = loaded_progress
                     return {
                         "message": "GraphRAG 索引已存在，从磁盘加载",
                         "doc_id": doc_id,
                         "stats": rag.stats(),
                         "loaded_from_disk": True,
                     }
-            else:
-                need_clean_existing_index = True
-
-        if need_clean_existing_index and os.path.exists(working_dir):
-            import shutil
-            _GRAPHRAG_INSTANCES.pop(doc_id, None)
-            _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
-            shutil.rmtree(working_dir, ignore_errors=True)
+        # 旧图谱在 staging 构建成功前继续可用；最终发布会在短锁内替换。
 
         # 构建新索引
+        # Build into a generation-specific staging directory. The parser route
+        # may change while LLM extraction is running; direct writes to the
+        # active doc_id directory would let that old task resurrect stale data.
+        staging_dir = _new_graphrag_staging_dir(doc_id, parse_generation)
         rag = GraphRAG(
-            working_dir=working_dir,
+            working_dir=staging_dir,
             config=config,
             chunk_token_size=settings.graphrag_chunk_token_size,
             entity_extract_max_gleaning=settings.graphrag_max_gleaning,
@@ -4126,14 +5517,76 @@ async def build_graphrag_index(doc_id: str, request: Request):
         )
 
         # 注册构建进度（供 progress 端点读取）
-        _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
+        build_progress = _bind_graphrag_progress_identity(
+            rag.get_build_progress(),
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+        )
+        _GRAPHRAG_BUILD_PROGRESS[doc_id] = build_progress
 
         await rag.ainsert(full_text)
 
-        stats = rag.stats()
-        # 缓存实例以便查询时复用（存到模块级 registry，跨 router 共享）
-        _GRAPHRAG_INSTANCES[doc_id] = rag
-        _GRAPHRAG_BUILD_PROGRESS[doc_id] = rag.get_build_progress()
+        if not _graphrag_build_matches_active_parse(
+            doc_id,
+            parse_generation=parse_generation,
+            document_source_hash=parse_source_hash,
+        ):
+            if _GRAPHRAG_BUILD_PROGRESS.get(doc_id) is rag.get_build_progress():
+                _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
+            raise HTTPException(status_code=409, detail="文档解析路线已更新，已丢弃旧 GraphRAG 构建")
+
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
+            _write_graphrag_parse_identity(staging_dir, parse_manifest)
+            # 身份文件写入与目录交换之间也保持 fail-closed。
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
+            _publish_graphrag_staging_dir(staging_dir, working_dir)
+            staging_dir = ""
+
+        # Storage objects keep absolute paths. Reload after the directory swap
+        # so the shared registry never points back to the moved staging path.
+        published_rag = await GraphRAG.load_from_disk(
+            working_dir=working_dir,
+            config=config,
+            chunk_token_size=settings.graphrag_chunk_token_size,
+            entity_extract_max_gleaning=settings.graphrag_max_gleaning,
+            best_model_max_async=settings.graphrag_max_async,
+            cheap_model_max_async=settings.graphrag_max_async,
+        )
+        if published_rag is None:
+            if not _graphrag_build_matches_active_parse(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            ):
+                raise HTTPException(status_code=409, detail="文档解析路线已更新，已丢弃旧 GraphRAG 构建")
+            raise RuntimeError("GraphRAG 发布后无法重新加载索引")
+
+        with _get_document_publication_lock(doc_id):
+            current_manifest = _require_current_parse_generation(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
+            if not _graphrag_index_matches_parse(working_dir, current_manifest):
+                raise _SupersededParseGeneration("GraphRAG 发布结果不属于当前解析代际")
+            stats = published_rag.stats()
+            published_progress = _bind_graphrag_progress_identity(
+                published_rag.get_build_progress(),
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+            )
+            # 缓存实例以便查询时复用（存到模块级 registry，跨 router 共享）
+            _GRAPHRAG_INSTANCES[doc_id] = published_rag
+            _GRAPHRAG_BUILD_PROGRESS[doc_id] = published_progress
 
         return {
             "message": "GraphRAG 索引构建完成",
@@ -4142,17 +5595,23 @@ async def build_graphrag_index(doc_id: str, request: Request):
             "loaded_from_disk": False,
         }
 
+    except _SupersededParseGeneration:
+        if _GRAPHRAG_BUILD_PROGRESS.get(doc_id) is build_progress:
+            _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，已丢弃旧 GraphRAG 构建")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[GraphRAG] 构建失败: {e}", exc_info=True)
         # 记录失败到进度表
-        if doc_id in _GRAPHRAG_BUILD_PROGRESS:
-            prog = _GRAPHRAG_BUILD_PROGRESS[doc_id]
+        if _GRAPHRAG_BUILD_PROGRESS.get(doc_id) is build_progress:
+            prog = build_progress
             prog.status = "failed"
             prog.last_error = str(e)
         raise HTTPException(status_code=500, detail=f"GraphRAG 构建失败: {str(e)}")
     finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         lock.release()
 
 
@@ -4162,18 +5621,26 @@ async def get_graphrag_stats(doc_id: str):
 
     优先从内存 INSTANCES 读取，若不存在则尝试从磁盘加载。
     """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     from services.graphrag import INSTANCES as _GRAPHRAG_INSTANCES, BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
 
     # 1. 内存中已有实例
     if doc_id in _GRAPHRAG_INSTANCES:
         rag = _GRAPHRAG_INSTANCES[doc_id]
-        return {"doc_id": doc_id, "stats": rag.stats()}
+        working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
+        if _graphrag_index_matches_parse(working_dir, parse_manifest):
+            return {"doc_id": doc_id, "stats": rag.stats()}
+        _GRAPHRAG_INSTANCES.pop(doc_id, None)
+        _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
 
     # 2. 尝试从磁盘加载元数据（不需要 api_key 也能读取统计）
     working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
     from services.graphrag import GraphRAG
     disk_meta = GraphRAG.load_metadata(working_dir)
-    if disk_meta is not None:
+    if disk_meta is not None and _graphrag_index_matches_parse(working_dir, parse_manifest):
         return {
             "doc_id": doc_id,
             "stats": {
@@ -4193,18 +5660,24 @@ async def get_graphrag_stats(doc_id: str):
 @router.get("/document/{doc_id}/graphrag/progress")
 async def get_graphrag_build_progress(doc_id: str):
     """获取文档的 GraphRAG 构建进度"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     from services.graphrag import BUILD_PROGRESS as _GRAPHRAG_BUILD_PROGRESS
 
     # 1. 内存中的实时进度
     if doc_id in _GRAPHRAG_BUILD_PROGRESS:
         prog = _GRAPHRAG_BUILD_PROGRESS[doc_id]
-        return {"doc_id": doc_id, "progress": prog.to_dict()}
+        if _graphrag_progress_matches_parse(prog, parse_manifest):
+            return {"doc_id": doc_id, "progress": prog.to_dict()}
+        _GRAPHRAG_BUILD_PROGRESS.pop(doc_id, None)
 
     # 2. 磁盘元数据
     working_dir = os.path.join(settings.graphrag_working_dir, doc_id)
     from services.graphrag import GraphRAG
     disk_meta = GraphRAG.load_metadata(working_dir)
-    if disk_meta is not None:
+    if disk_meta is not None and _graphrag_index_matches_parse(working_dir, parse_manifest):
         return {"doc_id": doc_id, "progress": disk_meta.to_dict()}
 
     raise HTTPException(status_code=404, detail="该文档未构建 GraphRAG 索引")
@@ -4987,25 +6460,34 @@ def _resolve_overview_runtime_params(
 
 @router.get("/documents/{doc_id}/blocks/translations")
 async def get_block_translations(
+    request: Request,
     doc_id: str,
     target_lang: str = "zh",
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ):
     """Return cached block translations for the immersive reading panel."""
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
     doc = documents_store[doc_id]
+    _require_document_parse_ready(doc_id, doc)
     block_index = ensure_block_index(
         doc_id=doc_id,
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
     )
+    resolved_provider = (provider or request.headers.get("X-ChatPDF-Provider") or "").strip() or None
+    resolved_model = (model or request.headers.get("X-ChatPDF-Model") or "").strip() or None
     return get_cached_translations(
         data_dir=DATA_DIR,
         doc_id=doc_id,
         block_index=block_index,
         target_lang=target_lang,
+        provider=resolved_provider,
+        model=resolved_model,
+        ai_cache_generation=load_ai_cache_generation(DATA_DIR, doc_id),
     )
 
 
@@ -5023,6 +6505,8 @@ async def translate_document_blocks(
     """Translate selected block ids and cache the result."""
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
+
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
 
     try:
         body = await request.json()
@@ -5066,6 +6550,7 @@ async def translate_document_blocks(
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
     )
+    ai_cache_generation = load_ai_cache_generation(DATA_DIR, doc_id)
 
     try:
         return await translate_blocks(
@@ -5079,7 +6564,19 @@ async def translate_document_blocks(
             provider=provider,
             endpoint=_get_overview_provider_endpoint(provider, api_host),
             force=force,
+            ai_cache_generation=ai_cache_generation,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda envelope: save_translation_cache(DATA_DIR, doc_id, envelope),
+                ai_cache_generation=ai_cache_generation,
+            ),
         )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新翻译当前阅读块")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新翻译当前阅读块")
     except Exception as exc:
         logger.exception("[BlockTranslation] translate failed for %s", doc_id)
         raise HTTPException(status_code=502, detail=f"段落翻译失败: {exc}")
@@ -5100,6 +6597,8 @@ async def pretranslate_document_blocks(
     """批量预翻译文档块，由后端统一控制并发。"""
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
+
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
 
     try:
         body = await request.json()
@@ -5145,6 +6644,7 @@ async def pretranslate_document_blocks(
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
     )
+    ai_cache_generation = load_ai_cache_generation(DATA_DIR, doc_id)
 
     try:
         return await translate_blocks(
@@ -5160,7 +6660,19 @@ async def pretranslate_document_blocks(
             force=force,
             max_blocks=None,
             concurrency=concurrency,
+            ai_cache_generation=ai_cache_generation,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda envelope: save_translation_cache(DATA_DIR, doc_id, envelope),
+                ai_cache_generation=ai_cache_generation,
+            ),
         )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新开始全文预翻译")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新开始全文预翻译")
     except Exception as exc:
         logger.exception("[BlockTranslation] pretranslate failed for %s", doc_id)
         raise HTTPException(status_code=502, detail=f"全文预翻译失败: {exc}")
@@ -5173,19 +6685,21 @@ async def clear_document_ai_cache(doc_id: str):
         raise HTTPException(status_code=404, detail="文档未找到")
 
     removed: list[str] = []
-    cache_paths = {
-        "reading_outline": get_reading_outline_path(DATA_DIR, doc_id),
-        "section_outline": get_section_outline_path(DATA_DIR, doc_id),
-        "block_translations": get_translation_cache_path(DATA_DIR, doc_id),
-    }
+    with _get_document_publication_lock(doc_id):
+        ai_cache_generation = rotate_ai_cache_generation(DATA_DIR, doc_id)
+        cache_paths = {
+            "reading_outline": get_reading_outline_path(DATA_DIR, doc_id),
+            "section_outline": get_section_outline_path(DATA_DIR, doc_id),
+            "block_translations": get_translation_cache_path(DATA_DIR, doc_id),
+        }
 
-    for name, path in cache_paths.items():
-        try:
-            if path.exists():
-                path.unlink()
-                removed.append(name)
-        except Exception as exc:
-            logger.warning("[AICache] 删除 %s 缓存失败 doc=%s path=%s err=%s", name, doc_id, path, exc)
+        for name, path in cache_paths.items():
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed.append(name)
+            except Exception as exc:
+                logger.warning("[AICache] 删除 %s 缓存失败 doc=%s path=%s err=%s", name, doc_id, path, exc)
 
     for depth in (OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED):
         for render_mode in ("raw", "yolo"):
@@ -5195,6 +6709,7 @@ async def clear_document_ai_cache(doc_id: str):
     return {
         "doc_id": doc_id,
         "removed": removed,
+        "ai_cache_generation": ai_cache_generation,
     }
 
 
@@ -5227,6 +6742,8 @@ async def create_overview(
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     # 验证深度参数
     valid_depths = [OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED]
     if depth not in valid_depths:
@@ -5255,6 +6772,21 @@ async def create_overview(
         figure_render_mode=figure_render_mode,
     )
 
+    try:
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            )
+            if (
+                str(task.parse_generation or "") != str(parse_manifest.get("generation") or "")
+                or str(task.document_source_hash or "") != str(parse_manifest.get("source_hash") or "")
+            ):
+                raise _SupersededParseGeneration("速览任务捕获了不同的解析代际")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新创建速览任务")
+
     return {
         "task_id": task.task_id,
         "doc_id": doc_id,
@@ -5277,6 +6809,10 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         result: 完成后返回速览数据
         error: 失败时返回错误信息
     """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     task = await get_task_status(task_id)
     
     if not task:
@@ -5284,6 +6820,14 @@ async def get_overview_task_status(doc_id: str, task_id: str):
     
     if task.doc_id != doc_id:
         raise HTTPException(status_code=400, detail="任务与文档不匹配")
+    if (
+        not _is_legacy_parse_manifest(parse_manifest)
+        and (
+        str(task.parse_generation or "") != str(parse_manifest.get("generation") or "")
+        or str(task.document_source_hash or "") != str(parse_manifest.get("source_hash") or "")
+        )
+    ):
+        raise HTTPException(status_code=409, detail="该速览任务属于旧的文档解析结果，已不再可用")
     
     response = {
         "task_id": task.task_id,
@@ -5335,6 +6879,8 @@ async def get_overview(
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
 
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
     # 验证深度参数
     valid_depths = [OverviewDepth.BRIEF, OverviewDepth.STANDARD, OverviewDepth.DETAILED]
     if depth not in valid_depths:
@@ -5374,7 +6920,20 @@ async def get_overview(
             figure_render_mode=figure_render_mode,
             force=force,
         )
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            )
+            if (
+                str(overview.parse_generation or "") != str(parse_manifest.get("generation") or "")
+                or str(overview.document_source_hash or "") != str(parse_manifest.get("source_hash") or "")
+            ):
+                raise _SupersededParseGeneration("速览结果不属于当前解析代际")
         return overview.model_dump()
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成速览")
     except TimeoutError:
         raise HTTPException(status_code=408, detail="速览生成超时，请稍后重试")
     except Exception as e:

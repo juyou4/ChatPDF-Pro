@@ -75,11 +75,11 @@ const KindBadge = ({ label, tone = 'purple' }) => {
 // 按照 Figure 2 重构大卡片 Dashboard
 const DashboardCard = ({ icon: Icon, tone, label, title, subtitle, labelTone }) => {
   const palette = {
-    blue: 'bg-[#eeeffe] text-[#4f46e5]',
+    blue: 'bg-[#fff2ed] text-[#f16b3a]',
     emerald: 'bg-emerald-50 text-emerald-500',
     amber: 'bg-amber-50 text-amber-500',
     slate: 'bg-gray-50 text-gray-400',
-    purple: 'bg-[#f4ebff] text-[#8b5cf6]',
+    purple: 'bg-[#fff1eb] text-[#fc8256]',
   };
   return (
     <div className="bg-white rounded-[28px] p-5 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.06)] border border-gray-100/50 flex flex-col min-h-[140px] transform transition-all hover:-translate-y-1">
@@ -308,12 +308,12 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                   <button
                     key={tab.id} onClick={() => setActiveTab(tab.id)}
                     className={`flex items-center justify-center gap-2 px-4 py-2 text-[12px] font-bold rounded-[24px] transition-all relative ${
-                      active ? 'bg-white text-[#4f46e5] shadow-[0_2px_12px_-4px_rgba(79,70,229,0.2)]' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+                      active ? 'bg-white text-[#f16b3a] shadow-[0_2px_12px_-4px_rgba(241, 107, 58,0.2)]' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
                     }`}
                   >
                     <span>{tab.label}</span>
                     <span className={`text-[9px] w-[18px] h-[18px] flex items-center justify-center font-bold rounded-full transition-colors ${
-                      active ? 'bg-[#eeeffe] text-[#4f46e5]' : 'bg-transparent text-gray-400'
+                      active ? 'bg-[#fff2ed] text-[#f16b3a]' : 'bg-transparent text-gray-400'
                     }`}>
                       {tabCounts[tab.id]}
                     </span>
@@ -327,7 +327,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                <button onClick={fetchAllData} disabled={loading} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-white hover:bg-gray-50 border border-gray-200/80 text-gray-700 font-bold text-[13px] shadow-sm transition-all">
                  <RotateCcw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={2.5}/> 刷新状态
                </button>
-               <button onClick={handleRebuildFromEvents} disabled={rebuilding} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-[#5a50e5] hover:bg-[#4338ca] text-white font-bold text-[13px] shadow-[0_8px_16px_-6px_rgba(79,70,229,0.4)] transition-all">
+               <button onClick={handleRebuildFromEvents} disabled={rebuilding} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-[#f07345] hover:bg-[#d55a2d] text-white font-bold text-[13px] shadow-[0_8px_16px_-6px_rgba(241, 107, 58,0.4)] transition-all">
                  {rebuilding ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <RefreshCw className="w-3.5 h-3.5" strokeWidth={2.5}/>} 事件恢复
                </button>
             </div>
@@ -399,7 +399,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
             {/* ========== Lists & Empty State ========== */}
             {loading && (
               <div className="flex flex-col items-center justify-center py-20 text-gray-400">
-                <Loader2 className="w-8 h-8 animate-spin mb-4 text-[#8871e4]" />
+                <Loader2 className="w-8 h-8 animate-spin mb-4 text-[#ed8c68]" />
                 <span className="text-[13px] font-bold tracking-wide">读取记忆核心...</span>
               </div>
             )}
@@ -408,7 +408,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
               <div className="space-y-4">
                 {graphLoading && (
                   <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-                    <Loader2 className="h-6 w-6 animate-spin mb-3 text-[#4f46e5]" />
+                    <Loader2 className="h-6 w-6 animate-spin mb-3 text-[#f16b3a]" />
                     <span className="text-[13px] font-bold">图谱矩阵生成中...</span>
                   </div>
                 )}
@@ -458,8 +458,8 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                  <div className="relative flex items-center justify-center mb-8">
                     <div className="absolute w-[180px] h-[180px] rounded-full border border-gray-100 bg-gray-50/30 shadow-[inset_0_0_20px_rgba(0,0,0,0.02)]" />
                     <div className="absolute w-[130px] h-[130px] rounded-full border border-gray-100/80 bg-gray-50/50 shadow-[inset_0_0_15px_rgba(0,0,0,0.01)]" />
-                    <div className="absolute w-[80px] h-[80px] rounded-full border border-gray-100 bg-[#f4ebff]" />
-                    <div className="relative z-10 text-[#8b5cf6]">
+                    <div className="absolute w-[80px] h-[80px] rounded-full border border-gray-100 bg-[#fff1eb]" />
+                    <div className="relative z-10 text-[#fc8256]">
                         <Brain className="w-10 h-10" strokeWidth={2} />
                     </div>
                  </div>
@@ -513,14 +513,14 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                                 <div className="space-y-3">
                                   <textarea
                                     value={editContent} onChange={(e) => setEditContent(e.target.value)}
-                                    className="min-h-[140px] w-full resize-none rounded-xl border border-gray-200 px-4 py-3 text-[13px] outline-none font-medium focus:ring-2 focus:ring-[#8871e4]/20 focus:border-[#8871e4]/50 transition-all bg-gray-50/50"
+                                    className="min-h-[140px] w-full resize-none rounded-xl border border-gray-200 px-4 py-3 text-[13px] outline-none font-medium focus:ring-2 focus:ring-[#ed8c68]/20 focus:border-[#ed8c68]/50 transition-all bg-gray-50/50"
                                     autoFocus
                                   />
                                   <div className="flex justify-end gap-2">
                                     <button onClick={() => setEditingId(null)} className="rounded-[16px] px-4 py-2 text-[12px] font-bold text-gray-600 transition-colors hover:bg-gray-100">取消</button>
                                     <button
                                       onClick={() => handleSave(entry.id)} disabled={isOperating}
-                                      className="inline-flex items-center gap-1.5 rounded-[16px] bg-[#4f46e5] px-5 py-2 text-[12px] font-bold text-white transition-all hover:bg-[#4338ca] disabled:opacity-50 shadow-sm"
+                                      className="inline-flex items-center gap-1.5 rounded-[16px] bg-[#f16b3a] px-5 py-2 text-[12px] font-bold text-white transition-all hover:bg-[#d55a2d] disabled:opacity-50 shadow-sm"
                                     >
                                       {isOperating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} 应用修改
                                     </button>
@@ -555,7 +555,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                               )}
 
                               {trace && (
-                                <motion.div initial={{opacity:0}} animate={{opacity:1}} className="mt-4 rounded-[20px] border border-blue-100 bg-[#eeeffe]/50 p-5">
+                                <motion.div initial={{opacity:0}} animate={{opacity:1}} className="mt-4 rounded-[20px] border border-blue-100 bg-[#fff2ed]/50 p-5">
                                   <div className="mb-3 text-[13px] font-bold text-blue-800 tracking-wide">🔗 节点联结追溯</div>
                                   <div className="space-y-3 text-[12px] text-gray-700 font-medium font-mono">
                                     <div className="p-3 bg-white/60 rounded-xl whitespace-pre-wrap overflow-x-auto border border-blue-50">

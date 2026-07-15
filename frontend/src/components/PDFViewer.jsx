@@ -112,6 +112,23 @@ const DockIcon = ({ className = '' }) => (
 
 const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const scheduleIdleTask = (callback, timeout = 1000) => {
+    if (typeof window === 'undefined') return null;
+    if (typeof window.requestIdleCallback === 'function') {
+        return { type: 'idle', id: window.requestIdleCallback(callback, { timeout }) };
+    }
+    return { type: 'timeout', id: window.setTimeout(callback, 0) };
+};
+
+const cancelIdleTask = (task) => {
+    if (!task || typeof window === 'undefined') return;
+    if (task.type === 'idle' && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(task.id);
+        return;
+    }
+    window.clearTimeout(task.id);
+};
+
 const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
@@ -137,6 +154,11 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const translationPanelDragRef = useRef({ dragging: false, start: { x: 0, y: 0 }, origin: null });
     const translationPanelResizeRef = useRef({ resizing: false, start: { x: 0, y: 0 }, origin: null });
     const translationDockResizeRef = useRef({ resizing: false, startX: 0, originWidth: TRANSLATION_DOCK_DEFAULT_WIDTH });
+    const pdfDocumentRef = useRef(null);
+    const hasAutoFitRef = useRef(false);
+    const backgroundDelayRef = useRef(null);
+    const backgroundIdleTaskRef = useRef(null);
+    const backgroundGenerationRef = useRef(0);
     const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
     const [desktopApiBaseUrl, setDesktopApiBaseUrl] = useState('');
     const [desktopBackendToken, setDesktopBackendToken] = useState('');
@@ -160,6 +182,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     useEffect(() => {
         setIsTranslationDocked(false);
+        pdfDocumentRef.current = null;
+        hasAutoFitRef.current = false;
+        setNumPages(null);
+        setError(null);
     }, [pdfUrl]);
 
     // 桌面模式下通过 preload IPC 获取后端地址与鉴权 token
@@ -201,6 +227,11 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         if (!origin) return pdfUrl;
         return `${origin}${pdfUrl.startsWith('/') ? '' : '/'}${pdfUrl}`;
     }, [pdfUrl, isDesktop, desktopApiBaseUrl]);
+    const pdfCacheKey = fullPdfUrl || pdfUrl || '';
+    const renderPixelRatio = useMemo(() => {
+        if (typeof window === 'undefined') return 1;
+        return Math.min(Math.max(window.devicePixelRatio || 1, 1), 1.5);
+    }, []);
 
     // react-pdf 支持通过 file 对象传递 httpHeaders，桌面端必须携带 token 访问 /uploads
     const pdfFile = useMemo(() => {
@@ -219,7 +250,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         return fullPdfUrl;
     }, [fullPdfUrl, isDesktop, desktopBackendToken]);
 
-    function onDocumentLoadSuccess({ numPages }) {
+    function onDocumentLoadSuccess(pdfDocument) {
+        const { numPages } = pdfDocument;
+        pdfDocumentRef.current = pdfDocument;
         setNumPages(numPages);
         setError(null);
         setPageNumber(prev => {
@@ -230,6 +263,20 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             return safePage;
         });
     }
+
+    // 首次加载按容器宽度自适应缩放（fit-width）；只做一次，不覆盖用户手动缩放
+    const handleFirstPageLoad = useCallback((page) => {
+        if (hasAutoFitRef.current) return;
+        const el = pdfScrollRef.current;
+        if (!el) return;
+        const naturalWidth = page.getViewport({ scale: 1 }).width;
+        const available = el.clientWidth - 48;
+        if (naturalWidth > 0 && available > 200) {
+            hasAutoFitRef.current = true;
+            const fit = Math.min(Math.max(available / naturalWidth, 0.9), 1.75);
+            setScale(Math.round(fit * 20) / 20);
+        }
+    }, []);
 
     function onDocumentLoadError(error) {
         console.error('❌ PDF load error:', error);
@@ -267,39 +314,71 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     // ── PDF 页面 canvas 缓存：渲染完成后捕获 canvas 数据 ──
     // 缓存的图片 dataURL，用于在页面加载/重渲染期间显示占位图
     const [cachedImage, setCachedImage] = useState(() =>
-        pdfPageCache.get(pageNumber, scale) || null
+        pdfPageCache.get(pageNumber, scale, pdfCacheKey) || null
     );
 
     // 页码或缩放变化时，立即尝试从缓存获取占位图
     useEffect(() => {
-        const cached = pdfPageCache.get(pageNumber, debouncedScale);
+        const cached = pdfPageCache.get(pageNumber, debouncedScale, pdfCacheKey);
         setCachedImage(cached || null);
-    }, [pageNumber, debouncedScale]);
+    }, [pdfCacheKey, pageNumber, debouncedScale]);
 
-    // 页面渲染成功后，捕获 canvas 数据存入缓存
-    const handlePageRenderSuccess = useCallback(() => {
-        try {
-            const pageEl = pageRef.current;
-            if (!pageEl) return;
-            const canvas = pageEl.querySelector('canvas');
-            if (!canvas) return;
-            const dataURL = canvas.toDataURL('image/png');
-            pdfPageCache.set(pageNumber, debouncedScale, dataURL);
-            // 更新当前缓存图片（下次切换回来时可用）
-            setCachedImage(dataURL);
-        } catch (e) {
-            // canvas 捕获失败时静默忽略，不影响正常渲染
+    const cancelBackgroundWork = useCallback(() => {
+        backgroundGenerationRef.current += 1;
+        if (backgroundDelayRef.current) {
+            window.clearTimeout(backgroundDelayRef.current);
+            backgroundDelayRef.current = null;
         }
-    }, [pageNumber, debouncedScale]);
+        cancelIdleTask(backgroundIdleTaskRef.current);
+        backgroundIdleTaskRef.current = null;
+    }, []);
 
-    // ── 相邻页面预渲染：计算需要预渲染的前后页码 ──
-    const pagesToPrerender = useMemo(() => {
-        if (!numPages) return [];
-        const pages = [];
-        if (pageNumber > 1) pages.push(pageNumber - 1);
-        if (pageNumber < numPages) pages.push(pageNumber + 1);
-        return pages;
-    }, [pageNumber, numPages]);
+    useEffect(() => {
+        cancelBackgroundWork();
+        return cancelBackgroundWork;
+    }, [pdfCacheKey, pageNumber, debouncedScale, cancelBackgroundWork]);
+
+    // 首屏绘制完成后再异步缓存，并只预取下一页的解析数据，避免与当前页抢资源。
+    const handlePageRenderSuccess = useCallback(() => {
+        cancelBackgroundWork();
+        const generation = backgroundGenerationRef.current;
+        const cachePage = pageNumber;
+        const cacheScale = debouncedScale;
+        const cacheDocumentKey = pdfCacheKey;
+        const pdfDocument = pdfDocumentRef.current;
+
+        backgroundDelayRef.current = window.setTimeout(() => {
+            backgroundDelayRef.current = null;
+            if (generation !== backgroundGenerationRef.current) return;
+
+            backgroundIdleTaskRef.current = scheduleIdleTask(() => {
+                backgroundIdleTaskRef.current = null;
+                if (generation !== backgroundGenerationRef.current) return;
+
+                const pageEl = pageRef.current;
+                const canvas = pageEl?.querySelector('canvas');
+                if (canvas?.toBlob && !pdfPageCache.has(cachePage, cacheScale, cacheDocumentKey)) {
+                    canvas.toBlob((blob) => {
+                        if (!blob || generation !== backgroundGenerationRef.current || typeof FileReader === 'undefined') return;
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            if (generation !== backgroundGenerationRef.current || typeof reader.result !== 'string') return;
+                            pdfPageCache.set(cachePage, cacheScale, reader.result, cacheDocumentKey);
+                        };
+                        reader.readAsDataURL(blob);
+                    }, 'image/webp', 0.86);
+                }
+
+                const nextPage = cachePage < numPages ? cachePage + 1 : null;
+                if (nextPage && typeof pdfDocument?.getPage === 'function') {
+                    pdfDocument
+                        .getPage(nextPage)
+                        .then((pageProxy) => pageProxy.getOperatorList())
+                        .catch(() => {});
+                }
+            }, 1200);
+        }, 180);
+    }, [cancelBackgroundWork, debouncedScale, numPages, pageNumber, pdfCacheKey]);
 
     const currentBlockPage = useMemo(
         () => getPageBlockData(blockIndex, pageNumber),
@@ -1159,10 +1238,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         : 0;
 
     return (
-        <div className={`relative h-full flex flex-col rounded-2xl overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
+        <div className={`relative h-full flex flex-col overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#f3f1ee]'}`}>
             {/* Toolbar Area */}
-            <div className={`pt-4 px-4 pb-2 z-10 transition-colors duration-200 flex-shrink-0 ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#F4F4F7]'}`}>
-                <div className={`flex items-center justify-between border shadow-sm rounded-2xl px-4 py-2 transition-colors duration-200 ${darkMode ? 'bg-[#2a2d31] border-white/10 text-gray-200' : 'bg-white border-gray-200 text-gray-600'}`}>
+            <div className={`z-10 flex-shrink-0 border-b px-3 py-2.5 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
+                <div className="flex items-center justify-between px-1 py-1">
                     {/* Left Controls */}
                     <div className="flex items-center gap-1">
                         {onToggleSidebar && (
@@ -1206,7 +1285,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 ref={pdfScrollRef}
                 className={`absolute left-0 top-0 bottom-0 overflow-auto p-4 md:p-8 flex items-start justify-center pdf-scroll transition-[right] duration-300 ${
                     isTranslationDocked ? 'md:pr-6' : ''
-                } ${darkMode ? 'bg-[#0f1115]' : 'bg-[#F8F8FA]'}`}
+                } ${darkMode ? 'bg-[#0f1115]' : 'bg-[#f6f4f1]'}`}
                 style={{ scrollbarWidth: 'none', right: translationDockReservedWidth }}
                 onMouseUp={handleTextSelection}
                 onMouseMove={handleBlockMouseMove}
@@ -1268,8 +1347,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 inputRef={pageRef}
                                 pageNumber={pageNumber}
                                 scale={debouncedScale}
+                                devicePixelRatio={renderPixelRatio}
                                 renderTextLayer={true}
                                 renderAnnotationLayer={true}
+                                onLoadSuccess={handleFirstPageLoad}
                                 onRenderSuccess={handlePageRenderSuccess}
                             />
                             </div>
@@ -1484,7 +1565,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         style={{
                                             boxShadow: highlightInfo?.source === 'citation'
                                                 ? '0 0 0 2px rgba(245, 158, 11, 0.15), 0 4px 12px -1px rgba(245, 158, 11, 0.2)'
-                                                : '0 0 0 2px rgba(136, 113, 228, 0.1), 0 4px 6px -1px rgba(136, 113, 228, 0.1)'
+                                                : '0 0 0 2px rgba(237, 140, 104, 0.1), 0 4px 6px -1px rgba(237, 140, 104, 0.1)'
                                         }}
                                     >
                                         {/* 只在第一个矩形上显示标签 */}
@@ -1498,27 +1579,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
-                            {/* 相邻页面预渲染：隐藏渲染前后页面，预热 canvas 缓存 */}
-                            {pagesToPrerender.map(p => (
-                                <div
-                                    key={`prerender-${p}`}
-                                    style={{
-                                        position: 'absolute',
-                                        visibility: 'hidden',
-                                        pointerEvents: 'none',
-                                        top: 0,
-                                        left: 0,
-                                    }}
-                                    aria-hidden="true"
-                                >
-                                    <Page
-                                        pageNumber={p}
-                                        scale={debouncedScale}
-                                        renderTextLayer={false}
-                                        renderAnnotationLayer={false}
-                                    />
-                                </div>
-                            ))}
                         </div>
                     </Document>
                 )}
@@ -1556,7 +1616,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         <div className={`flex items-center justify-between gap-3 border-b px-4 py-3 ${darkMode ? 'border-white/10' : 'border-gray-100'}`}>
                             <div className="flex min-w-0 items-center gap-3">
                                 <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
-                                    darkMode ? 'bg-white/10 text-gray-100' : 'bg-[#f1effb] text-[#8b7cc8]'
+                                    darkMode ? 'bg-white/10 text-gray-100' : 'bg-[#fcf2ee] text-[#ce8e76]'
                                 }`}>
                                     <DockIcon className="h-4 w-4" />
                                 </div>

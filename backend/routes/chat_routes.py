@@ -42,9 +42,11 @@ from services.rag_config import (
     should_apply_numeric_table_specialization,
     should_enable_answer_critic,
     should_enable_llm_query_rewrite,
-    apply_request_overrides,
+    request_override_scope,
 )
 from services.table_visual_verifier import maybe_verify_numeric_table_visual
+from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.semantic_group_store import active_manifest_path, semantic_group_paths
 from services.citation_service import (
     build_structured_citation_prompt,
     parse_citation_list,
@@ -89,6 +91,81 @@ _STRICT_CITATION_SUPPORT_THRESHOLDS = {
     "reference_meta": 0.1,
 }
 _CONSERVATIVE_REWRITE_EVIDENCE_NEEDS = {"reference_trap", "reference_meta"}
+_GRAPHRAG_PARSE_IDENTITY_FILE = "chatpdf_parse_identity.json"
+
+
+def _chat_vector_index_matches_parse(doc_id: str, manifest: dict) -> bool:
+    """Reject an old vector pair when a same-PDF reparse has a new generation."""
+    if bool((manifest.get("metadata") or {}).get("legacy_inferred")):
+        return True
+    vector_store_dir = str(getattr(router, "vector_store_dir", "") or "").strip()
+    if not vector_store_dir:
+        return True
+    chunks_path = Path(vector_store_dir) / f"{doc_id}.pkl"
+    if not chunks_path.exists():
+        # No artifact exists yet, so the normal retrieval fallback can still
+        # use the current document text without exposing an old generation.
+        return True
+    try:
+        with open(chunks_path, "rb") as handle:
+            data = pickle.load(handle)
+    except Exception:
+        return False
+    index_meta = data.get("index_meta") if isinstance(data, dict) else {}
+    if not isinstance(index_meta, dict):
+        return False
+    return (
+        str(index_meta.get("parse_generation") or "") == str(manifest.get("generation") or "")
+        and str(index_meta.get("document_source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
+def _chat_graphrag_index_matches_parse(working_dir: str | Path, manifest: dict) -> bool:
+    """Only attach a GraphRAG artifact from the active parse generation."""
+    if bool((manifest.get("metadata") or {}).get("legacy_inferred")):
+        return True
+    expected_generation = str(manifest.get("generation") or "")
+    expected_source_hash = str(manifest.get("source_hash") or "")
+    if not expected_generation or not expected_source_hash:
+        return False
+    try:
+        identity_path = Path(working_dir) / _GRAPHRAG_PARSE_IDENTITY_FILE
+        stored = json.loads(identity_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return (
+        str(stored.get("parse_generation") or "") == expected_generation
+        and str(stored.get("document_source_hash") or "") == expected_source_hash
+    )
+
+
+def _require_chat_document_parse_ready(doc_id: str, doc: dict) -> dict:
+    """Refuse provisional MinerU-first documents instead of answering from local scratch text."""
+    manifest = read_parse_manifest(doc or {}, doc_id=doc_id)
+    if is_parse_prepared(manifest):
+        if not _chat_vector_index_matches_parse(doc_id, manifest):
+            raise HTTPException(
+                status_code=409,
+                detail="当前文档的问答索引正在按新的解析结果更新，请稍后重试",
+            )
+        return manifest
+    route = str(
+        manifest.get("resolved_route")
+        or manifest.get("requested_route")
+        or manifest.get("route")
+        or "auto"
+    )
+    stage = str(manifest.get("stage") or "")
+    is_full_mineru_route = bool(
+        route == "mineru" and (manifest.get("metadata") or {}).get("full_route")
+    )
+    if is_full_mineru_route and stage == "awaiting_rag_index":
+        detail = "MinerU 已完成版面解析，正在等待问答索引发布"
+    elif is_full_mineru_route:
+        detail = "当前文档正在按 MinerU 全程解析，完成前不能发起问答"
+    else:
+        detail = "当前文档解析尚未完成，请稍后重试"
+    raise HTTPException(status_code=409, detail=detail)
 
 
 def _coerce_positive_int(value, default: int = 0) -> int:
@@ -623,15 +700,61 @@ def _load_doc_chunk_metadata_for_agent(doc_id: str, vector_store_dir: str, chunk
     return []
 
 
-def _load_doc_semantic_groups_for_agent(doc_id: str, full_text: str = "") -> list[dict]:
-    """从落盘的 semantic_groups 中加载意群数据。"""
-    candidate_dirs = [
+def _is_legacy_parse_manifest(manifest: dict | None) -> bool:
+    return manifest is None or bool((manifest.get("metadata") or {}).get("legacy_inferred"))
+
+
+def _agent_semantic_groups_match_parse_manifest(
+    doc_id: str,
+    groups_root: Path,
+    manifest: dict | None,
+) -> bool:
+    """Only consume the semantic generation published for this parse identity."""
+    if _is_legacy_parse_manifest(manifest):
+        return True
+    try:
+        active_manifest = json.loads(
+            active_manifest_path(groups_root, doc_id).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return (
+        str(active_manifest.get("transaction_id") or "") == str(manifest.get("generation") or "")
+        and str(active_manifest.get("source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
+def _load_doc_semantic_groups_for_agent(
+    doc_id: str,
+    full_text: str = "",
+    *,
+    parse_manifest: dict | None = None,
+) -> list[dict]:
+    """Load the active semantic-group generation, retaining legacy flat-file support."""
+    legacy_parse_manifest = _is_legacy_parse_manifest(parse_manifest)
+    candidate_roots = [
         Path(runtime.data_dir) / "semantic_groups",
         _get_project_root() / "data" / "semantic_groups",
         Path(__file__).resolve().parents[1] / "data" / "semantic_groups",
     ]
-    for groups_dir in candidate_dirs:
-        group_path = groups_dir / f"{doc_id}.json"
+    for groups_root in candidate_roots:
+        if not _agent_semantic_groups_match_parse_manifest(doc_id, groups_root, parse_manifest):
+            logger.warning(
+                "[AgentDoc] semantic_groups 解析身份不匹配，丢弃 stale groups: doc_id=%s root=%s",
+                doc_id,
+                groups_root,
+            )
+            continue
+        group_path = semantic_group_paths(groups_root, doc_id)["json"]
+        # A modern parse must not silently fall back to a root-level legacy
+        # file when its active generation is incomplete or unavailable.
+        if not legacy_parse_manifest and group_path.parent == groups_root:
+            logger.warning(
+                "[AgentDoc] 当前解析代际的 semantic_groups 不完整，拒绝 legacy fallback: doc_id=%s root=%s",
+                doc_id,
+                groups_root,
+            )
+            continue
         if not group_path.exists():
             continue
         try:
@@ -640,7 +763,9 @@ def _load_doc_semantic_groups_for_agent(doc_id: str, full_text: str = "") -> lis
             groups = data.get("groups") or []
             if isinstance(groups, list):
                 loaded_groups = [g for g in groups if isinstance(g, dict)]
-                if _semantic_groups_match_current_doc(loaded_groups, full_text):
+                # Old documents have no parse identity to bind against. Keep their
+                # historical flat-cache behavior; modern documents stay fail-closed.
+                if legacy_parse_manifest or _semantic_groups_match_current_doc(loaded_groups, full_text):
                     return loaded_groups
                 logger.warning(
                     "[AgentDoc] semantic_groups 与当前文档不匹配，丢弃 stale groups: doc_id=%s path=%s",
@@ -670,7 +795,12 @@ def _build_agent_doc_context(
     pages = data.get("pages", []) or []
     chunks = _load_doc_chunks_for_agent(doc_id, vector_store_dir, full_text)
     chunk_metadata = _load_doc_chunk_metadata_for_agent(doc_id, vector_store_dir, chunks, full_text)
-    semantic_groups = _load_doc_semantic_groups_for_agent(doc_id, full_text)
+    parse_manifest = read_parse_manifest(doc, doc_id=doc_id)
+    semantic_groups = _load_doc_semantic_groups_for_agent(
+        doc_id,
+        full_text,
+        parse_manifest=parse_manifest,
+    )
     return DocContext(
         doc_id=doc_id,
         full_text=full_text,
@@ -818,6 +948,12 @@ def _extract_paper_table_labels_from_record(record: dict, fallback_text: str = "
 def _record_matches_explicit_table_labels(record: dict, target_labels: set[str], fallback_text: str = "") -> bool:
     if not target_labels:
         return True
+    # A structured table identity is authoritative. A row can mention another
+    # table in a footnote or comparison sentence, which must not override its
+    # own table_id/caption when the user named an explicit Table N.
+    trusted_labels = _extract_trusted_paper_table_labels_from_record(record)
+    if trusted_labels:
+        return bool(trusted_labels & target_labels)
     record_labels = _extract_paper_table_labels_from_record(record, fallback_text=fallback_text)
     return bool(record_labels & target_labels)
 
@@ -1775,28 +1911,102 @@ def _auto_enable_rerank_if_beneficial(request, evidence_need: list, query_type: 
     return True
 
 
-def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = None) -> str:
+def _normalize_memory_parse_identity(parse_identity: dict | None) -> dict[str, str] | None:
+    """Normalize a parse manifest identity for memory reads and delayed writes."""
+    if not isinstance(parse_identity, dict):
+        return None
+    generation = str(
+        parse_identity.get("parse_generation")
+        or parse_identity.get("generation")
+        or ""
+    ).strip()
+    source_hash = str(
+        parse_identity.get("document_source_hash")
+        or parse_identity.get("source_hash")
+        or ""
+    ).strip()
+    if not generation or not source_hash:
+        return None
+    return {
+        "parse_generation": generation,
+        "document_source_hash": source_hash,
+    }
+
+
+def _memory_parse_identity_from_manifest(manifest: dict | None) -> dict[str, str] | None:
+    return _normalize_memory_parse_identity(manifest)
+
+
+def _memory_write_matches_current_parse(request, parse_identity: dict | None) -> bool:
+    """Fence delayed automatic memory writes against a later document reparse."""
+    if not getattr(request, "doc_id", None):
+        return True
+    expected = _normalize_memory_parse_identity(parse_identity)
+    if expected is None:
+        return False
+    try:
+        root_store = getattr(router, "documents_store", None)
+        if not isinstance(root_store, dict):
+            return False
+        store_key = getattr(request, "doc_store_key", "")
+        store = root_store.get(store_key, {}) if store_key else root_store
+        if not isinstance(store, dict):
+            return False
+        doc = store.get(request.doc_id)
+        if not isinstance(doc, dict):
+            return False
+        manifest = read_parse_manifest(doc, doc_id=request.doc_id)
+        current = _memory_parse_identity_from_manifest(manifest)
+        return bool(is_parse_prepared(manifest) and current == expected)
+    except Exception as exc:
+        logger.warning("[Memory] 无法复核异步写入的解析身份，跳过写入: %s", exc)
+        return False
+
+
+def _retrieve_memory_context(
+    question: str,
+    api_key: str = None,
+    doc_id: str = None,
+    parse_identity: dict | None = None,
+) -> str:
     if memory_service is None:
         return ""
     try:
         filter_by_doc = bool(doc_id)
-        return memory_service.retrieve_memories(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc
-        )
+        kwargs = {
+            "api_key": api_key,
+            "doc_id": doc_id,
+            "filter_by_doc": filter_by_doc,
+        }
+        if parse_identity is not None:
+            kwargs["parse_identity"] = parse_identity
+        return memory_service.retrieve_memories(question, **kwargs)
     except Exception as e:
         logger.error(f"记忆检索失败: {e}")
         return ""
 
 
-def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = None, chat_history: list[dict] | None = None) -> list[dict]:
+def _retrieve_raw_memories(
+    question: str,
+    api_key: str = None,
+    doc_id: str = None,
+    chat_history: list[dict] | None = None,
+    parse_identity: dict | None = None,
+) -> list[dict]:
     """检索原始记忆列表（供 ContextInjector 使用）"""
     if memory_service is None:
         return []
     try:
         filter_by_doc = bool(doc_id)
-        return memory_service.retrieve_memories_raw(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc, chat_history=chat_history
-        )
+        kwargs = {
+            "api_key": api_key,
+            "doc_id": doc_id,
+            "filter_by_doc": filter_by_doc,
+            "chat_history": chat_history,
+        }
+        if parse_identity is not None:
+            kwargs["parse_identity"] = parse_identity
+        return memory_service.retrieve_memories_raw(question, **kwargs)
     except Exception as e:
         logger.error(f"记忆原始检索失败: {e}")
         return []
@@ -1840,6 +2050,7 @@ async def _retrieve_memory_for_stream(
     api_key: str = None,
     doc_id: str = None,
     chat_history: list[dict] | None = None,
+    parse_identity: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """在线程中读取记忆，保护流式接口不被同步检索卡住。"""
     if memory_service is None:
@@ -1847,7 +2058,12 @@ async def _retrieve_memory_for_stream(
 
     memory_context = await _run_memory_read_for_stream(
         "上下文",
-        lambda: _retrieve_memory_context(question, api_key=api_key, doc_id=doc_id),
+        lambda: _retrieve_memory_context(
+            question,
+            api_key=api_key,
+            doc_id=doc_id,
+            parse_identity=parse_identity,
+        ),
         "",
     )
     raw_memories = await _run_memory_read_for_stream(
@@ -1857,6 +2073,7 @@ async def _retrieve_memory_for_stream(
             api_key=api_key,
             doc_id=doc_id,
             chat_history=chat_history,
+            parse_identity=parse_identity,
         ),
         [],
     )
@@ -1910,9 +2127,12 @@ def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: 
     )
 
 
-def _async_memory_write(svc, request):
+def _async_memory_write(svc, request, parse_identity: dict | None = None):
     try:
         if request.doc_id:
+            if not _memory_write_matches_current_parse(request, parse_identity):
+                logger.info("[Memory] 解析身份已切换，跳过过期请求的自动记忆写入: doc_id=%s", request.doc_id)
+                return
             history = list(request.chat_history or [])
             history.append({"role": "user", "content": request.question})
             svc.save_qa_summary(
@@ -1921,6 +2141,7 @@ def _async_memory_write(svc, request):
                 api_key=getattr(request, "api_key", None),
                 model=getattr(request, "model", None),
                 api_provider=getattr(request, "api_provider", None),
+                parse_identity=_normalize_memory_parse_identity(parse_identity),
             )
         svc.update_keywords(request.question)
     except Exception as e:
@@ -1930,7 +2151,7 @@ def _async_memory_write(svc, request):
 _flushed_sessions: set = set()
 
 
-def _maybe_flush_memory(request) -> None:
+def _maybe_flush_memory(request, parse_identity: dict | None = None) -> None:
     if memory_service is None:
         return
     if not settings.memory_flush_enabled:
@@ -1939,10 +2160,18 @@ def _maybe_flush_memory(request) -> None:
     if not history:
         return
     doc_id = getattr(request, "doc_id", "")
-    if not doc_id or doc_id in _flushed_sessions:
+    identity = _normalize_memory_parse_identity(parse_identity)
+    if not doc_id or identity is None:
         return
-    from services.token_budget import TokenBudget
-    budget = TokenBudget()
+    session_key = (
+        doc_id,
+        identity["parse_generation"],
+        identity["document_source_hash"],
+    )
+    if session_key in _flushed_sessions:
+        return
+    from services.token_budget import TokenBudgetManager
+    budget = TokenBudgetManager()
     total_tokens = 0
     for msg in history:
         if isinstance(msg, dict):
@@ -1952,11 +2181,17 @@ def _maybe_flush_memory(request) -> None:
     threshold = settings.memory_flush_threshold_tokens
     if total_tokens < threshold:
         return
-    _flushed_sessions.add(doc_id)
-    logger.info(f"[Memory] Compaction flush 触发: doc_id={doc_id}, tokens={total_tokens}, threshold={threshold}")
+    _flushed_sessions.add(session_key)
+    logger.info(
+        "[Memory] Compaction flush 触发: doc_id=%s, generation=%s, tokens=%s, threshold=%s",
+        doc_id,
+        identity["parse_generation"],
+        total_tokens,
+        threshold,
+    )
     threading.Thread(
         target=_async_memory_write,
-        args=(memory_service, request),
+        args=(memory_service, request, identity),
         daemon=True,
     ).start()
 
@@ -2480,8 +2715,8 @@ async def _apply_query_aware_evidence_selector(
         for idx, segment in enumerate(segments)
         if _is_protected_evidence_selector_segment(segment, evidence_set)
     }
-    if len(segments) < 3:
-        selector_diag["skipped_reason"] = "too_few_segments"
+    if not segments:
+        selector_diag["skipped_reason"] = "no_segments"
         selector_diag["candidate_count"] = len(segments)
         selector_diag["protected_count"] = len(protected_indices)
         return context
@@ -6092,14 +6327,17 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
         return []
 
     query = str(retrieval_meta.get("search_query") or retrieval_meta.get("query") or "").strip()
-    citation_segments = _build_context_segments_from_citations(
-        retrieval_meta.get("citations", []),
-        query=query,
-    )
     retrieval_segments = _merge_response_context_segments(
         retrieval_meta.get("_retrieval_context_segments") or [],
     )
     existing_segments = _merge_response_context_segments(retrieval_meta.get("_context_segments") or [])
+    citations = retrieval_meta.get("citations", [])
+    # Page/paragraph fallback citations are generated from the same raw context
+    # when structured citations are unavailable. Do not let them reintroduce an
+    # uncompressed duplicate after the evidence selector has pruned that context.
+    citation_segments = []
+    if not ((retrieval_segments or existing_segments) and _is_paragraph_fallback(citations)):
+        citation_segments = _build_context_segments_from_citations(citations, query=query)
 
     evidence_need = {
         str(item).strip()
@@ -6112,7 +6350,13 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
         for citation in retrieval_meta.get("citations", []) or []
     ):
         return citation_segments
-    if "numeric_table" in evidence_need and not _is_strong_numeric_table_context_query(query, evidence_need):
+    # Callers without a query have already classified the evidence explicitly;
+    # do not discard concrete table rows merely because no text heuristic can run.
+    if (
+        "numeric_table" in evidence_need
+        and query
+        and not _is_strong_numeric_table_context_query(query, evidence_need)
+    ):
         relaxed_need = {item for item in evidence_need if item != "numeric_table"}
         merged = _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
         return _filter_response_context_segments(
@@ -7970,12 +8214,12 @@ def _build_agent_retrieval_gate(
         }
 
     enabled = bool(matched_query_type or matched_needs)
-    if matched_query_type:
-        reason = "matched_query_type"
-        gate_source = "query_type"
-    elif matched_needs:
+    if matched_needs:
         reason = "matched_evidence_need"
         gate_source = "evidence_needs"
+    elif matched_query_type:
+        reason = "matched_query_type"
+        gate_source = "query_type"
     else:
         reason = "route_not_matched"
         gate_source = "denied"
@@ -9844,19 +10088,26 @@ async def _retry_generation_after_stream_error(
 
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
-    if not hasattr(router, "documents_store"):
-        raise HTTPException(status_code=500, detail="文档存储未初始化")
-    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
-    apply_request_overrides(
+    with request_override_scope(
         numeric_table=request.override_numeric_table,
         answer_critic=request.override_answer_critic,
         llm_query_rewrite=request.override_llm_query_rewrite,
         bm25_synonyms=request.override_bm25_synonyms,
-    )
+        jieba_bm25=request.enable_jieba_bm25,
+        context_chunk_expansion=request.num_expand_context_chunk,
+    ):
+        return await _chat_with_pdf_impl(request)
+
+
+async def _chat_with_pdf_impl(request: ChatRequest):
+    if not hasattr(router, "documents_store"):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
+    parse_manifest = _require_chat_document_parse_ready(request.doc_id, doc)
+    memory_parse_identity = _memory_parse_identity_from_manifest(parse_manifest)
     context = ""
     retrieval_meta = {}
     citations: list[dict] = []
@@ -9864,7 +10115,7 @@ async def chat_with_pdf(request: ChatRequest):
     web_search_context = ""
     use_memory = _should_use_memory(request)
     if use_memory:
-        _maybe_flush_memory(request)
+        _maybe_flush_memory(request, parse_identity=memory_parse_identity)
     memory_context = ""
     raw_memories = []
     memory_hits: list[dict] = []
@@ -9879,10 +10130,17 @@ async def chat_with_pdf(request: ChatRequest):
     }
     if use_memory:
         memory_context = _retrieve_memory_context(
-            request.question, api_key=request.api_key, doc_id=request.doc_id
+            request.question,
+            api_key=request.api_key,
+            doc_id=request.doc_id,
+            parse_identity=memory_parse_identity,
         )
     raw_memories = _retrieve_raw_memories(
-        request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
+        request.question,
+        api_key=request.api_key,
+        doc_id=request.doc_id,
+        chat_history=request.chat_history,
+        parse_identity=memory_parse_identity,
     )
 
     # 支持多图逻辑
@@ -10271,7 +10529,11 @@ async def chat_with_pdf(request: ChatRequest):
         response_context_segments = _build_response_context_segments(retrieval_meta)
 
         if use_memory:
-            threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
+            threading.Thread(
+                target=_async_memory_write,
+                args=(memory_service, request, memory_parse_identity),
+                daemon=True,
+            ).start()
         return {
             "answer": answer, "reasoning_content": reasoning_content,
             "doc_id": request.doc_id, "question": request.question,
@@ -10296,17 +10558,12 @@ async def chat_with_pdf(request: ChatRequest):
 async def chat_with_pdf_stream(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
-    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
-    apply_request_overrides(
-        numeric_table=request.override_numeric_table,
-        answer_critic=request.override_answer_critic,
-        llm_query_rewrite=request.override_llm_query_rewrite,
-        bm25_synonyms=request.override_bm25_synonyms,
-    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
+    parse_manifest = _require_chat_document_parse_ready(request.doc_id, doc)
+    memory_parse_identity = _memory_parse_identity_from_manifest(parse_manifest)
     trace_id = _new_chat_trace_id()
     trace_started_at = time.perf_counter()
     _log_chat_trace(
@@ -10354,6 +10611,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     api_key=request.api_key,
                     doc_id=request.doc_id,
                     chat_history=request.chat_history,
+                    parse_identity=memory_parse_identity,
                 )
 
             image_list = (request.image_base64_list or [])
@@ -10386,10 +10644,6 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     mime = _detect_mime_type(img_b64)
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
             else:
-                # 应用前端传入的检索增强设置到全局配置（即时生效）
-                settings.bm25_use_jieba = request.enable_jieba_bm25
-                settings.num_expand_context_chunk = request.num_expand_context_chunk
-
                 _cheap_model, _cheap_provider, _cheap_endpoint = _get_cheap_model_params(request)
                 initial_strategy = get_retrieval_strategy(request.question or "")
                 agent_gate = _build_agent_retrieval_gate(
@@ -10800,12 +11054,33 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     try:
                         from services.graphrag import INSTANCES as _GRAPHRAG_INSTANCES
                         graphrag_inst = _GRAPHRAG_INSTANCES.get(request.doc_id)
+                        _gr_working_dir = os.path.join(settings.graphrag_working_dir, request.doc_id)
+                        _gr_parse_manifest = read_parse_manifest(doc, doc_id=request.doc_id)
+
+                        # The in-memory registry survives a same-PDF re-upload
+                        # inside one backend process. Check its persisted parse
+                        # identity before allowing it to contribute context.
+                        if (
+                            graphrag_inst is not None
+                            and not _chat_graphrag_index_matches_parse(
+                                _gr_working_dir,
+                                _gr_parse_manifest,
+                            )
+                        ):
+                            _GRAPHRAG_INSTANCES.pop(request.doc_id, None)
+                            graphrag_inst = None
+                            logger.info("[Chat] Ignore stale GraphRAG generation: %s", request.doc_id)
 
                         # 尝试从磁盘加载（重启后 INSTANCES 为空）
                         if graphrag_inst is None:
                             from services.graphrag import GraphRAG, GraphRAGConfig
-                            _gr_working_dir = os.path.join(settings.graphrag_working_dir, request.doc_id)
-                            if GraphRAG.has_persisted_index(_gr_working_dir):
+                            if (
+                                GraphRAG.has_persisted_index(_gr_working_dir)
+                                and _chat_graphrag_index_matches_parse(
+                                    _gr_working_dir,
+                                    _gr_parse_manifest,
+                                )
+                            ):
                                 _gr_meta = GraphRAG.load_metadata(_gr_working_dir)
                                 if _gr_meta and _gr_meta.status == "done":
                                     # 构建最小 config（不需要 api_key，仅用于加载存储）
@@ -11315,7 +11590,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     yield f"data: {json.dumps(chunk_data)}\n\n"
 
-                    if use_memory: threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
+                    if use_memory:
+                        threading.Thread(
+                            target=_async_memory_write,
+                            args=(memory_service, request, memory_parse_identity),
+                            daemon=True,
+                        ).start()
 
                     # P1.5 优化：4 个后处理任务（followup/critic/conv_name/mindmap）改为并行执行
                     # 总耗时从 sum(各任务) → max(各任务)，按完成顺序 yield SSE 事件
@@ -11638,8 +11918,20 @@ async def chat_with_pdf_stream(request: ChatRequest):
             )
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
+    async def scoped_event_generator():
+        with request_override_scope(
+            numeric_table=request.override_numeric_table,
+            answer_critic=request.override_answer_critic,
+            llm_query_rewrite=request.override_llm_query_rewrite,
+            bm25_synonyms=request.override_bm25_synonyms,
+            jieba_bm25=request.enable_jieba_bm25,
+            context_chunk_expansion=request.num_expand_context_chunk,
+        ):
+            async for event in event_generator():
+                yield event
+
     return StreamingResponse(
-        event_generator(),
+        scoped_event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

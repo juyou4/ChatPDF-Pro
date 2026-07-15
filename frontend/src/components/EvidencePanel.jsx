@@ -28,7 +28,7 @@ export const partitionEvidenceCitations = (citations = []) => {
 
 /**
  * 证据面板：展示每个检索到的文档块
- * 被引用的证据排在前面（默认展开），未被引用的折叠
+ * 被引用的证据排在前面，条目默认折叠并按需展开
  *
  * Props:
  *   citations: Array - 引文列表 [{ref, group_id, page_range, highlight_text}, ...]
@@ -46,10 +46,8 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
 
   const toggleRef = useCallback((ref) => {
     setExpandedRefs(prev => {
-      const next = new Set(prev);
-      if (next.has(ref)) next.delete(ref);
-      else next.add(ref);
-      return next;
+      if (prev.has(ref)) return new Set();
+      return new Set([ref]);
     });
   }, []);
 
@@ -76,9 +74,9 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
 
   if (!citations || citations.length === 0) return null;
 
-  const renderCitation = (c, defaultOpen) => {
+  const renderCitation = (c) => {
     const ref = resolveEvidenceRef(c);
-    const isExpanded = defaultOpen ? !expandedRefs.has(ref) : expandedRefs.has(ref);
+    const isExpanded = expandedRefs.has(ref);
     const isActive = activeRef === ref;
     const alignmentStatus = c.alignment_status || (c.highlight_text ? 'span_matched' : 'unmatched');
     const statusLabel = alignmentStatus === 'span_matched'
@@ -105,10 +103,10 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
     return (
       <div
         key={ref}
-        className={`border rounded-lg transition-all duration-200 ${
+        className={`rounded-[12px] border transition-[transform,box-shadow,border-color,background-color] duration-200 ${
           isActive
-            ? 'border-blue-400 bg-blue-50/50 ring-1 ring-blue-200'
-            : 'border-gray-200 hover:border-gray-300'
+            ? 'border-[#e8dfd9] bg-[#fffaf7] shadow-[0_10px_24px_-18px_rgba(78,64,56,0.30),0_1px_3px_rgba(78,64,56,0.08)]'
+            : 'border-[#e8dfd9] bg-white shadow-[0_8px_22px_-18px_rgba(78,64,56,0.32),0_1px_3px_rgba(78,64,56,0.07)] hover:-translate-y-0.5 hover:border-[#decfc6] hover:shadow-[0_12px_26px_-18px_rgba(78,64,56,0.34),0_2px_6px_-4px_rgba(78,64,56,0.12)]'
         }`}
         onMouseEnter={() => onRefHover?.(ref)}
         onMouseLeave={() => onRefHover?.(null)}
@@ -120,13 +118,13 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
             // Lazy-load thumbnail when expanding
             if (!isExpanded && thumbPage) fetchThumbnail(thumbPage);
           }}
-          className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs"
+          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs"
         >
           {isExpanded
             ? <ChevronDown className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
             : <ChevronRight className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
           }
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold flex-shrink-0">
+          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-[#FFF0E9] text-[#B85F47] text-[10px] font-bold flex-shrink-0">
             {ref}
           </span>
           <span className="text-gray-500 truncate flex-1">
@@ -167,11 +165,11 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
               </div>
             )}
             {c.highlight_text ? (
-              <div className="text-xs text-gray-700 leading-relaxed bg-yellow-50/60 border border-yellow-100 rounded px-2.5 py-2">
-                <mark className="bg-yellow-200/70 rounded px-0.5">{c.highlight_text}</mark>
+              <div className="rounded-[8px] bg-[#fffdf6] px-2.5 py-2 text-xs leading-relaxed text-gray-700">
+                <mark className="rounded bg-[#fff0a6]/70 px-0.5">{c.highlight_text}</mark>
               </div>
             ) : (c.display_text || c.source_text) ? (
-              <div className="text-xs text-gray-700 leading-relaxed bg-gray-50 border border-gray-100 rounded px-2.5 py-2">
+              <div className="rounded-[8px] bg-gray-50/70 px-2.5 py-2 text-xs leading-relaxed text-gray-700">
                 {c.display_text || c.source_text}
               </div>
             ) : (
@@ -183,7 +181,7 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
                   e.stopPropagation();
                   onCitationClick?.(c);
                 }}
-                className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-blue-500 hover:text-blue-700 transition-colors"
+                className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-[#B85F47] transition-colors hover:text-[#934934]"
               >
                 <ExternalLink className="w-3 h-3" />
                 跳转到 {pageLabel}
@@ -196,7 +194,7 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
   };
 
   return (
-    <div className="mt-2 ml-2">
+    <div className="mt-3">
       <button
         onClick={() => setPanelCollapsed(prev => !prev)}
         className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors mb-1.5"
@@ -209,9 +207,9 @@ export default function EvidencePanel({ citations, docId, onCitationClick, activ
         <span className="text-gray-400">({citations.length})</span>
       </button>
       {!panelCollapsed && (
-        <div className="flex flex-col gap-1.5 max-w-lg">
-          {cited.map(c => renderCitation(c, true))}
-          {uncited.map(c => renderCitation(c, false))}
+        <div className="flex max-w-lg flex-col gap-2">
+          {cited.map(c => renderCitation(c))}
+          {uncited.map(c => renderCitation(c))}
         </div>
       )}
     </div>

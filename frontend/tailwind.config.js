@@ -1,3 +1,17 @@
+const brand = {
+    50: '#fff8f5',
+    100: '#fff0ea',
+    200: '#ffdccf',
+    300: '#ffc6b3',
+    400: '#ffb092',
+    500: '#ffa07a',
+    600: '#b85f47',
+    700: '#984a37',
+    800: '#763729',
+    900: '#52251c',
+    950: '#32150f',
+};
+
 /** @type {import('tailwindcss').Config} */
 export default {
     content: [
@@ -7,19 +21,12 @@ export default {
     theme: {
         extend: {
             colors: {
-                purple: {
-                    50: '#f3f0fc',
-                    100: '#e7e2f9',
-                    200: '#cfc6f4',
-                    300: '#b7a9ee',
-                    400: '#9f8de9',
-                    500: '#8871e4',
-                    600: '#6c5ab6',
-                    700: '#514388',
-                    800: '#362d5b',
-                    900: '#1b162d',
-                    950: '#0d0b16',
-                }
+                // 品牌暖橙色阶（原紫色系整体旋转到 hue≈16°）。
+                // violet/indigo 与 purple 指向同一套：历史代码里三个名字混用，
+                // 统一在这里收口，避免逐文件改类名。
+                purple: brand,
+                violet: brand,
+                indigo: brand,
             }
         },
     },

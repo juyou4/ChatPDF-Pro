@@ -119,23 +119,22 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
 
   return (
     <div className={`flex flex-col items-start gap-2 my-2 ${darkMode ? 'dark' : ''}`}>
-      {/* Expandable Pill (开关样式，与展开状态绑定) */}
-      <div 
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm cursor-pointer transition-colors select-none ${darkMode ? 'bg-gray-800 border-gray-700 hover:bg-gray-700' : 'bg-[#f4f5f9] border-gray-200/60 hover:bg-gray-100'}`}
+      {/* 紧凑折叠头：展开状态由箭头表达，避免同时出现开关和折叠两套语义。 */}
+      <button
+        type="button"
+        className={`inline-flex items-center gap-2 rounded-[10px] border px-2.5 py-1.5 cursor-pointer transition-colors select-none ${darkMode ? 'bg-white/[0.04] border-white/[0.08] hover:bg-white/[0.07]' : 'bg-[#f6f2ef] border-transparent hover:bg-[#f1ebe7]'}`}
         onClick={() => setExpanded(!expanded)}
       >
-        {/* Toggle Switch 视觉还原 */}
-        <div className={`w-8 h-4 rounded-full flex items-center relative shadow-inner transition-colors duration-300 ${expanded ? 'bg-[#7c3aed]' : (darkMode ? 'bg-gray-600' : 'bg-gray-300')}`}>
-           <div className={`w-3 h-3 bg-white rounded-full absolute shadow-sm transition-all duration-300 ${expanded ? 'right-0.5' : 'left-0.5'}`}></div>
-        </div>
-
-        <span className={`text-[11px] font-medium ${darkMode ? 'text-gray-300' : 'text-gray-800'}`}>Deep Thinking</span>
+        <span className={`flex h-6 w-6 items-center justify-center rounded-[7px] ${darkMode ? 'bg-[#FFA07A]/10 text-[#FFA07A]' : 'bg-[#FFF0E9] text-[#B85F47]'}`}>
+          <BrainCircuit size={13} />
+        </span>
+        <span className={`text-[11px] font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Deep Thinking</span>
         
         <div className="flex items-center">
           <ThinkingTimer isThinking={isStreaming} thinkingMs={thinkingMs || 0} />
           <ChevronDown size={14} className={`ml-1 transition-transform duration-300 ${darkMode ? 'text-gray-500' : 'text-gray-400'} ${expanded ? 'rotate-180' : ''}`} />
         </div>
-      </div>
+      </button>
 
       {/* Expanded Thought Process */}
       <div 
@@ -143,10 +142,10 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
           expanded ? 'max-h-[3000px] opacity-100 scale-100 mb-2' : 'max-h-0 opacity-0 scale-95 mb-0'
         }`}
       >
-        <div className={`backdrop-blur-sm border shadow-[0_4px_15px_rgba(124,58,237,0.06)] rounded-lg p-4 w-full text-[13px] relative ml-1 ${darkMode ? 'bg-gray-800/90 border-purple-900/50 text-gray-300' : 'bg-white/90 border-purple-100 text-gray-600'}`}>
+        <div className={`relative w-full rounded-[14px] border p-4 text-[13px] ${darkMode ? 'border-white/[0.09] bg-[#25282f] text-gray-300 shadow-[0_14px_32px_-20px_rgba(0,0,0,0.68),inset_0_1px_0_rgba(255,255,255,0.04)]' : 'border-[#eadfd8] bg-white text-gray-600 shadow-[0_12px_30px_-20px_rgba(78,64,56,0.38),0_2px_7px_-4px_rgba(78,64,56,0.14),inset_0_1px_0_rgba(255,255,255,0.96)]'}`}>
           
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-1.5 text-purple-600 font-medium">
+            <div className={`flex items-center gap-1.5 font-medium ${darkMode ? 'text-[#FFA07A]' : 'text-[#B85F47]'}`}>
               <BrainCircuit size={15} className={isStreaming ? "animate-pulse" : ""} />
               <span>思考过程</span>
             </div>
@@ -164,15 +163,15 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
           </div>
           
           {shouldShowTimeline && (
-            <div className={`pl-2 border-l-2 py-0.5 ${darkMode ? 'border-purple-900/50' : 'border-purple-100/70'} ml-1.5`}>
+            <div className={`ml-1.5 border-l py-0.5 pl-3 ${darkMode ? 'border-[#FFA07A]/20' : 'border-[#eaded8]'}`}>
               <div className="relative">
                 {/* 活动进度点：随检索/思考阶段行数下移，避免一直停在第一行。 */}
                 <span
-                  className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full transition-transform duration-300 ease-out ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}
+                  className={`absolute -left-[17px] top-1.5 w-2 h-2 rounded-full transition-transform duration-300 ease-out ${isStreaming ? 'bg-[#B85F47] shadow-[0_0_8px_rgba(184,95,71,0.28)]' : 'bg-[#FFDCCF] dark:bg-[#FFA07A]/30'}`}
                   style={{ transform: `translateY(${timelineDotOffset}px)` }}
                 />
                 {shouldShowStreamingHint && (
-                  <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-purple-300/90' : 'text-purple-500/90'}`}>
+                  <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-[#FFA07A]/90' : 'text-[#B85F47]/90'}`}>
                     正在检索并组织思考内容...
                   </div>
                 )}
@@ -189,11 +188,11 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
               </div>
             </div>
           )}
-
-          {hasAgentTrace && (
-            <AgentTracePanel trace={agentTrace} embedded />
-          )}
         </div>
+
+        {hasAgentTrace && (
+          <AgentTracePanel trace={agentTrace} embedded />
+        )}
       </div>
     </div>
   )

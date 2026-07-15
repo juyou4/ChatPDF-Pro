@@ -39,12 +39,28 @@ def get_mineru_result_path(data_dir: Path | str, doc_id: str) -> Path:
     return get_mineru_result_dir(data_dir) / f"{doc_id}.json"
 
 
-def save_mineru_result(data_dir: Path | str, doc_id: str, payload: dict[str, Any]) -> None:
+def save_mineru_result(
+    data_dir: Path | str,
+    doc_id: str,
+    payload: dict[str, Any],
+    *,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> None:
+    """Persist a raw MinerU result with the parse run that produced it.
+
+    ``doc_id`` is derived from the original PDF bytes, so the same PDF can be
+    uploaded again with a different primary parse route.  Raw MinerU output
+    must therefore be tied to the parse generation rather than being treated
+    as an unqualified document-level cache.
+    """
     path = get_mineru_result_path(data_dir, doc_id)
     serializable = {
         "version": MINERU_RAW_VERSION,
         "doc_id": doc_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "parse_generation": str(parse_generation or ""),
+        "document_source_hash": str(document_source_hash or ""),
         "payload": payload,
     }
     temp_path = path.with_suffix(".tmp")
@@ -53,7 +69,21 @@ def save_mineru_result(data_dir: Path | str, doc_id: str, payload: dict[str, Any
     temp_path.replace(path)
 
 
-def load_mineru_result(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:
+def load_mineru_result(
+    data_dir: Path | str,
+    doc_id: str,
+    *,
+    parse_generation: str | None = None,
+    document_source_hash: str | None = None,
+    require_identity: bool = False,
+) -> dict[str, Any] | None:
+    """Load raw MinerU output, optionally only for one parse generation.
+
+    Legacy records predate parse manifests and do not carry an identity.  They
+    remain readable unless a caller explicitly requests identity validation;
+    newly routed documents must use that validation before rebuilding blocks or
+    an index from the raw payload.
+    """
     path = get_mineru_result_path(data_dir, doc_id)
     if not path.exists():
         return None
@@ -61,6 +91,14 @@ def load_mineru_result(data_dir: Path | str, doc_id: str) -> dict[str, Any] | No
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if data.get("version") != MINERU_RAW_VERSION:
+            return None
+        stored_generation = str(data.get("parse_generation") or "")
+        stored_source_hash = str(data.get("document_source_hash") or "")
+        if require_identity and (not stored_generation or not stored_source_hash):
+            return None
+        if parse_generation is not None and stored_generation != str(parse_generation or ""):
+            return None
+        if document_source_hash is not None and stored_source_hash != str(document_source_hash or ""):
             return None
         payload = data.get("payload")
         return payload if isinstance(payload, dict) else None
@@ -117,6 +155,21 @@ def build_block_index_from_mineru_payload(
 
     outline = _build_outline([], pages)
     _assign_sections(pages, outline)
+    data = doc.get("data", {}) if isinstance(doc, dict) else {}
+    manifest = data.get("parse_manifest") if isinstance(data, dict) else {}
+    parse_identity = {}
+    if isinstance(manifest, dict):
+        generation = str(manifest.get("generation") or "").strip()
+        source_hash = str(manifest.get("source_hash") or "").strip()
+        route = str(manifest.get("resolved_route") or "").strip().lower()
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        if generation and source_hash and route:
+            parse_identity = {
+                "parser_route": route,
+                "parse_generation": generation,
+                "document_source_hash": source_hash,
+                "full_route": bool(metadata.get("full_route")),
+            }
 
     return {
         "version": BLOCK_INDEX_VERSION,
@@ -126,6 +179,7 @@ def build_block_index_from_mineru_payload(
         "page_count": len(pages),
         "pages": pages,
         "outline": outline,
+        **parse_identity,
         "mineru_meta": {
             "raw_hash": _payload_hash(payload),
             "has_middle_json": isinstance(middle_json, (dict, list)),

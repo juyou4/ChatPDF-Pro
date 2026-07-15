@@ -14,6 +14,7 @@ const API_BASE_URL = '';
  * @param {Object} options - 配置选项
  * @param {string|null} options.docId - 当前文档 ID
  * @param {Object|null} options.docInfo - 当前文档信息
+ * @param {string} options.documentIdentity - 主解析代际标识
  * @param {boolean} options.useRerank - 是否启用重排
  * @param {string} options.rerankerModel - 重排模型名称
  * @param {Function} options.getRerankCredentials - 获取重排凭证
@@ -23,6 +24,7 @@ const API_BASE_URL = '';
 export function usePDFState({
   docId = null,
   docInfo = null,
+  documentIdentity = '',
   useRerank = false,
   rerankerModel = 'BAAI/bge-reranker-base',
   getRerankCredentials,
@@ -53,20 +55,23 @@ export function usePDFState({
 
   // ========== Refs ==========
   const pdfContainerRef = useRef(null);
+  const searchEpochRef = useRef(0);
 
   // ========== 文档切换时重置搜索状态 ==========
   useEffect(() => {
+    searchEpochRef.current += 1;
     setSearchQuery('');
     setSearchResults([]);
     setCurrentResultIndex(0);
     setActiveHighlight(null);
+    setIsSearching(false);
     if (docId) {
       const stored = JSON.parse(localStorage.getItem(`search_history_${docId}`) || '[]');
       setSearchHistory(stored);
     } else {
       setSearchHistory([]);
     }
-  }, [docId]);
+  }, [docId, documentIdentity]);
 
   // ========== 高亮自动消失定时器 ==========
   useEffect(() => {
@@ -97,6 +102,14 @@ export function usePDFState({
 
     setIsSearching(true);
     setSearchQuery(q);
+    const searchContext = {
+      docId,
+      documentIdentity,
+      epoch: searchEpochRef.current,
+    };
+    const isCurrentSearch = () => (
+      searchEpochRef.current === searchContext.epoch
+    );
 
     // 获取重排凭证
     const { providerId: rp, modelId: rm, apiKey: rk } = getRerankCredentials?.() || {};
@@ -122,6 +135,7 @@ export function usePDFState({
       });
       if (res.ok) {
         const data = await res.json();
+        if (!isCurrentSearch()) return;
         const results = Array.isArray(data.results) ? data.results : [];
         setSearchResults(results);
         if (results.length) {
@@ -139,9 +153,9 @@ export function usePDFState({
       // 静默处理（超时或取消）
     } finally {
       clearTimeout(tid);
-      setIsSearching(false);
+      if (isCurrentSearch()) setIsSearching(false);
     }
-  }, [docId, searchQuery, embeddingApiKey, apiKey, useRerank, rerankerModel, getRerankCredentials, searchHistory]);
+  }, [docId, documentIdentity, searchQuery, embeddingApiKey, apiKey, useRerank, rerankerModel, getRerankCredentials, searchHistory]);
 
   /**
    * 内部方法：聚焦到指定搜索结果
