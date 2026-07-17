@@ -83,9 +83,9 @@ const ChatSettings = ({ isOpen, onClose }) => {
                     <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2 space-y-5 custom-scrollbar">
                         {/* ===== 生成参数 ===== (根据图1去除标题) */}
                         <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-6">
-                            {/* 上下文数 (无开关) */}
+                            {/* 历史轮数 (无开关) */}
                             <SettingSliderWithInput
-                                label="上下文数" tooltip="发送给模型的历史消息轮数。值越大模型记忆越多，但消耗更多 Token"
+                                label="历史轮数" tooltip="每次请求会附带的最近对话轮数。超过范围的历史不会直接发送；它不是模型总上下文窗口，也不是摘要压缩开关。"
                                 value={contextCount} onChange={(v) => setContextCount(Math.round(v))}
                                 min={0} max={50} step={1} precision={0}
                             />

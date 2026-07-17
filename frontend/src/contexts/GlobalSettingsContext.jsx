@@ -87,6 +87,9 @@ const GlobalSettingsBridge = ({ children }) => {
             messageStyle: chatParams.messageStyle,
             messageFontSize: chatParams.messageFontSize,
             numericTableVisualVerification: chatParams.numericTableVisualVerification,
+            visualModelKey: chatParams.visualModelKey,
+            visualStrategy: chatParams.visualStrategy,
+            localVisualModelKey: chatParams.localVisualModelKey,
             // 联网搜索
             enableWebSearch: webSearch.enableWebSearch,
             webSearchProvider: webSearch.webSearchProvider,
@@ -111,7 +114,8 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.confirmDeleteMessage, chatParams.confirmRegenerateMessage,
         chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
         chatParams.messageStyle, chatParams.messageFontSize,
-        chatParams.numericTableVisualVerification,
+        chatParams.numericTableVisualVerification, chatParams.visualModelKey,
+        chatParams.visualStrategy, chatParams.localVisualModelKey,
         webSearch.enableWebSearch, webSearch.webSearchProvider, webSearch.webSearchApiKey, webSearch.webSearchBlacklist,
         readingSettings.aiAutoProcess, readingSettings.autoOutlineSummary, readingSettings.autoPretranslate,
         readingSettings.pretranslateConcurrency, readingSettings.overviewDefaultDepth,
@@ -149,6 +153,9 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.messageStyle !== undefined) chatParams.setMessageStyle(settings.messageStyle);
             if (settings.messageFontSize !== undefined) chatParams.setMessageFontSize(settings.messageFontSize);
             if (settings.numericTableVisualVerification !== undefined) chatParams.setNumericTableVisualVerification(settings.numericTableVisualVerification);
+            if (settings.visualModelKey !== undefined) chatParams.setVisualModelKey(settings.visualModelKey);
+            if (settings.visualStrategy !== undefined) chatParams.setVisualStrategy(settings.visualStrategy);
+            if (settings.localVisualModelKey !== undefined) chatParams.setLocalVisualModelKey(settings.localVisualModelKey);
             // 联网搜索相关
             if (settings.enableWebSearch !== undefined) webSearch.setEnableWebSearch(settings.enableWebSearch);
             if (settings.webSearchProvider !== undefined) webSearch.setWebSearchProvider(settings.webSearchProvider);
@@ -175,7 +182,8 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.setConfirmDeleteMessage, chatParams.setConfirmRegenerateMessage,
         chatParams.setCodeCollapsible, chatParams.setCodeWrappable, chatParams.setCodeShowLineNumbers,
         chatParams.setMessageStyle, chatParams.setMessageFontSize,
-        chatParams.setNumericTableVisualVerification,
+        chatParams.setNumericTableVisualVerification, chatParams.setVisualModelKey,
+        chatParams.setVisualStrategy, chatParams.setLocalVisualModelKey,
         webSearch.setEnableWebSearch, webSearch.setWebSearchProvider, webSearch.setWebSearchApiKey, webSearch.setWebSearchBlacklist,
         readingSettings.setAiAutoProcess, readingSettings.setAutoOutlineSummary, readingSettings.setAutoPretranslate,
         readingSettings.setPretranslateConcurrency, readingSettings.setOverviewDefaultDepth,
@@ -224,6 +232,9 @@ const GlobalSettingsBridge = ({ children }) => {
         overrideLLMQueryRewrite: chatParams.overrideLLMQueryRewrite,
         overrideBM25Synonyms: chatParams.overrideBM25Synonyms,
         numericTableVisualVerification: chatParams.numericTableVisualVerification,
+        visualModelKey: chatParams.visualModelKey,
+        visualStrategy: chatParams.visualStrategy,
+        localVisualModelKey: chatParams.localVisualModelKey,
         cheapModel: chatParams.cheapModel,
         cheapModelProvider: chatParams.cheapModelProvider,
         cheapModelEndpoint: chatParams.cheapModelEndpoint,
@@ -261,6 +272,9 @@ const GlobalSettingsBridge = ({ children }) => {
         setOverrideLLMQueryRewrite: chatParams.setOverrideLLMQueryRewrite,
         setOverrideBM25Synonyms: chatParams.setOverrideBM25Synonyms,
         setNumericTableVisualVerification: chatParams.setNumericTableVisualVerification,
+        setVisualModelKey: chatParams.setVisualModelKey,
+        setVisualStrategy: chatParams.setVisualStrategy,
+        setLocalVisualModelKey: chatParams.setLocalVisualModelKey,
         setCheapModel: chatParams.setCheapModel,
         setCheapModelProvider: chatParams.setCheapModelProvider,
         setCheapModelEndpoint: chatParams.setCheapModelEndpoint,

@@ -17,6 +17,8 @@ from typing import Any, Callable, List, Optional, Tuple, Dict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from services.document_parse_adapter import DocumentParseAdapter, MinerUDocumentParseAdapter
+
 
 # ============================================================
 # 数据模型与抽象基类（适配器模式）
@@ -211,9 +213,10 @@ class BaseOCRAdapter(ABC):
         ...
 
 
-# MinerU and Doc2X return document-level parse results.  They must never be
-# selected through the page replacement OCR contract above.
-_DOCUMENT_PARSE_PROVIDER_NAMES = frozenset({"mineru", "doc2x"})
+# MinerU is a document parser and must never enter the page replacement OCR
+# contract. Doc2X is no longer registered; its class remains only to read old
+# local configuration during migration.
+_DOCUMENT_PARSE_PROVIDER_NAMES = frozenset({"mineru"})
 
 import json
 import logging
@@ -1218,6 +1221,20 @@ class MinerUAdapter(WorkerOCRAdapter):
 
     def analyze_pdf(self, pdf_bytes: bytes, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancel_event: Any = None) -> Dict[str, Any]:
         """运行 MinerU Worker 并返回 full.md / middle.json / content_list.json 等完整解析载荷。"""
+        submission = self.submit_document(pdf_bytes, progress_callback=progress_callback)
+        return self.poll_document(
+            submission,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
+
+    def submit_document(
+        self,
+        pdf_bytes: bytes,
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Upload one PDF and return a durable Worker batch identity."""
         import httpx
 
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
@@ -1226,19 +1243,23 @@ class MinerUAdapter(WorkerOCRAdapter):
             logger.info("MinerU OCR: 开始上传 PDF 文件...")
             batch_id = self._upload_pdf(client, pdf_bytes)
             logger.info(f"MinerU OCR: 上传成功，batch_id={batch_id}")
+        return {"batch_id": batch_id, "access_mode": "worker"}
 
-            if progress_callback:
-                progress_callback({"stage": "polling", "message": "等待 MinerU 处理", "batch_id": batch_id})
-            logger.info("MinerU OCR: 开始轮询处理结果...")
-            full_zip_url = self._poll_result(client, batch_id, progress_callback=progress_callback, cancel_event=cancel_event)
-            logger.info("MinerU OCR: 处理完成，开始下载结果...")
-
-            if progress_callback:
-                progress_callback({"stage": "downloading", "message": "下载 MinerU 解析结果", "batch_id": batch_id})
-            payload = self._download_and_extract_payload(client, full_zip_url)
-            payload["batch_id"] = batch_id
-            payload["full_zip_url"] = full_zip_url
-            return payload
+    def poll_document(
+        self,
+        submission: Dict[str, Any],
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_event: Any = None,
+    ) -> Dict[str, Any]:
+        """Poll and download one previously submitted Worker batch."""
+        batch_id = str((submission or {}).get("batch_id") or "")
+        return self.resume_batch(
+            batch_id,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            data_id=str((submission or {}).get("data_id") or ""),
+        )
 
     def resume_batch(
         self,
@@ -1605,6 +1626,20 @@ class MinerUDirectAdapter(MinerUAdapter):
 
     def analyze_pdf(self, pdf_bytes: bytes, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancel_event: Any = None) -> Dict[str, Any]:
         """通过 MinerU 官方 API 运行解析并返回完整结果载荷。"""
+        submission = self.submit_document(pdf_bytes, progress_callback=progress_callback)
+        return self.poll_document(
+            submission,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
+
+    def submit_document(
+        self,
+        pdf_bytes: bytes,
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Request an official upload URL, upload the PDF, and return its batch."""
         import httpx
 
         if not self.is_available():
@@ -1626,25 +1661,22 @@ class MinerUDirectAdapter(MinerUAdapter):
                     f"MinerU OSS 上传失败 (HTTP {upload_response.status_code}): "
                     f"{upload_response.text[:300]}"
                 )
+        return {"batch_id": batch_id, "data_id": data_id, "access_mode": "direct"}
 
-            if progress_callback:
-                progress_callback({"stage": "polling", "message": "等待 MinerU 处理", "batch_id": batch_id, "data_id": data_id})
-            logger.info("MinerU Direct: 上传成功，batch_id=%s data_id=%s，开始轮询结果...", batch_id, data_id)
-            full_zip_url = self._poll_direct_result(
-                client,
-                batch_id,
-                data_id=data_id,
-                progress_callback=progress_callback,
-                cancel_event=cancel_event,
-            )
-            if progress_callback:
-                progress_callback({"stage": "downloading", "message": "下载 MinerU 解析结果", "batch_id": batch_id, "data_id": data_id})
-            payload = self._download_direct_zip(client, full_zip_url)
-            payload["batch_id"] = batch_id
-            payload["data_id"] = data_id
-            payload["full_zip_url"] = full_zip_url
-            payload["access_mode"] = "direct"
-            return payload
+    def poll_document(
+        self,
+        submission: Dict[str, Any],
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_event: Any = None,
+    ) -> Dict[str, Any]:
+        """Poll and download a previously submitted official MinerU batch."""
+        return self.resume_batch(
+            str((submission or {}).get("batch_id") or ""),
+            data_id=str((submission or {}).get("data_id") or ""),
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
 
     def resume_batch(
         self,
@@ -1774,11 +1806,7 @@ class MinerUDirectAdapter(MinerUAdapter):
                     "remote_state": state,
                 })
             logger.debug("MinerU Direct: 轮询中 (%s/%s)，当前状态: %s", attempt + 1, max_attempts, state)
-            if cancel_event is not None:
-                if cancel_event.wait(poll_interval):
-                    raise RuntimeError("MinerU 深度解析已取消")
-            else:
-                time.sleep(poll_interval)
+            time.sleep(poll_interval)
         raise RuntimeError(f"MinerU 处理超时: 已轮询 {max_attempts} 次（共 {max_attempts * poll_interval} 秒）")
 
     @staticmethod
@@ -2393,9 +2421,11 @@ class DocumentParserRegistry:
     """Registry for document-level parsers, separate from PageOCR providers."""
 
     def __init__(self):
-        self._adapters: Dict[str, Any] = {}
+        self._adapters: Dict[str, DocumentParseAdapter] = {}
 
-    def register(self, adapter: Any) -> None:
+    def register(self, adapter: DocumentParseAdapter) -> None:
+        if not isinstance(adapter, DocumentParseAdapter):
+            raise TypeError("文档解析适配器必须实现 DocumentParseAdapter 合同")
         if adapter.is_available():
             self._adapters[adapter.name] = adapter
             logger.info("文档解析适配器已注册: %s", adapter.name)
@@ -2405,7 +2435,7 @@ class DocumentParserRegistry:
     def unregister(self, name: str) -> None:
         self._adapters.pop(str(name or "").strip().lower(), None)
 
-    def get_adapter(self, name: str) -> Any | None:
+    def get_adapter(self, name: str) -> DocumentParseAdapter | None:
         return self._adapters.get(str(name or "").strip().lower())
 
     def list_available(self) -> Dict[str, bool]:
@@ -2426,7 +2456,7 @@ def is_ocr_available() -> dict:
         "paddleocr": available.get("paddleocr", False),
         "mistral": available.get("mistral", False),
         "mineru": document_parsers.get("mineru", False),
-        "doc2x": document_parsers.get("doc2x", False),
+        "doc2x": False,
         "any": bool(available or document_parsers)
     }
 
@@ -2618,16 +2648,16 @@ _ocr_registry.register(MistralAdapter(
 # 注册在线 OCR 适配器：加载 MinerU OCR 配置并注册
 _mineru_config = _load_online_ocr_config("mineru")
 if _mineru_config.get("access_mode") == "direct":
-    _document_parser_registry.register(MinerUDirectAdapter(
+    _document_parser_registry.register(MinerUDocumentParseAdapter(MinerUDirectAdapter(
         token=_mineru_config.get("token", ""),
         base_url=_mineru_config.get("base_url", "https://mineru.net/api/v4"),
         enable_ocr=_mineru_config.get("enable_ocr", False),
         enable_formula=_mineru_config.get("enable_formula", True),
         enable_table=_mineru_config.get("enable_table", True),
         model_version=_mineru_config.get("model_version", "vlm"),
-    ))
+    )))
 else:
-    _document_parser_registry.register(MinerUAdapter(
+    _document_parser_registry.register(MinerUDocumentParseAdapter(MinerUAdapter(
         worker_url=_mineru_config.get("worker_url", ""),
         auth_key=_mineru_config.get("auth_key", ""),
         token=_mineru_config.get("token", ""),
@@ -2636,16 +2666,7 @@ else:
         enable_formula=_mineru_config.get("enable_formula", True),
         enable_table=_mineru_config.get("enable_table", True),
         model_version=_mineru_config.get("model_version", "vlm"),
-    ))
-
-# 注册在线 OCR 适配器：加载 Doc2X OCR 配置并注册
-_doc2x_config = _load_online_ocr_config("doc2x")
-_document_parser_registry.register(Doc2XAdapter(
-    worker_url=_doc2x_config.get("worker_url", ""),
-    auth_key=_doc2x_config.get("auth_key", ""),
-    token=_doc2x_config.get("token", ""),
-    token_mode=_doc2x_config.get("token_mode", "frontend"),
-))
+    )))
 
 
 # 保留旧的全局 OCRService 实例（向后兼容）

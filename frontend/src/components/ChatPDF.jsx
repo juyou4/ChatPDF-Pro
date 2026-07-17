@@ -32,6 +32,7 @@ import { usePDFState } from '../hooks/usePDFState';
 import { useScreenshotState } from '../hooks/useScreenshotState';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
+import ChatContextIndicator from './ChatContextIndicator';
 import ThinkingBlock from './ThinkingBlock';
 import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
@@ -56,6 +57,23 @@ import {
   selectPendingPretranslateBlocks,
   shouldForcePretranslateRequest,
 } from '../utils/pretranslateUtils';
+
+const isLoopbackApiHost = (value) => {
+  const input = String(value || '').trim();
+  if (!input || input.startsWith('/')) return true;
+  try {
+    const parsed = new URL(input.includes('://') ? input : `http://${input}`);
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    return host === 'localhost'
+      || host.endsWith('.localhost')
+      || host === '::1'
+      || host === '::'
+      || host === '0.0.0.0'
+      || host.startsWith('127.');
+  } catch {
+    return false;
+  }
+};
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -552,7 +570,7 @@ const getParseIdentity = (manifest) => {
 const getStatusParseIdentity = (status) => getParseIdentity(status?.parse_manifest);
 
 const buildOutlineCacheKey = (docId, parseIdentity, blockIndex) => (
-  `${docId || ''}:${parseIdentity || ''}:${blockIndex?.source_hash || blockIndex?.generated_at || ''}`
+  `${docId || ''}:${parseIdentity || ''}:${blockIndex?.visual_supplement_revision || blockIndex?.source_hash || blockIndex?.generated_at || ''}`
 );
 
 const matchesOutlineGenerationFailure = (data, providerId, modelId) => {
@@ -672,11 +690,18 @@ const isUsefulOutline = (items = [], source = '') => {
 const ChatPDF = () => {
   // ========== Context Hooks ==========
   const { getProviderById } = useProvider();
-  const { getModelById } = useModel();
+  const { getModelById, allModels } = useModel();
   const { getDefaultModel } = useDefaults();
   const { hasLocalRerank } = useCapabilities();
   const globalSettings = useGlobalSettings();
-  const { setReasoningEffort, reasoningEffort, streamOutput, setStreamOutput } = globalSettings;
+  const {
+    setReasoningEffort,
+    reasoningEffort,
+    streamOutput,
+    setStreamOutput,
+    contextCount,
+    enableMemory,
+  } = globalSettings;
   const {
     sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers,
     overrideNumericTable, setOverrideNumericTable,
@@ -684,6 +709,9 @@ const ChatPDF = () => {
     overrideLLMQueryRewrite, setOverrideLLMQueryRewrite,
     overrideBM25Synonyms, setOverrideBM25Synonyms,
     numericTableVisualVerification, setNumericTableVisualVerification,
+    visualModelKey, setVisualModelKey,
+    visualStrategy, setVisualStrategy,
+    localVisualModelKey, setLocalVisualModelKey,
     cheapModel, setCheapModel,
     cheapModelProvider, setCheapModelProvider,
   } = useChatParams();
@@ -777,10 +805,12 @@ const ChatPDF = () => {
   const [selectedParseRoute, setSelectedParseRoute] = useState(loadStoredParseRoute);
   const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
   const [pinnedReadingBlockId, setPinnedReadingBlockId] = useState(null);
+  const [readingJumpPulseToken, setReadingJumpPulseToken] = useState(0);
   const pretranslateRunRef = useRef(0);
   const pretranslateStartedDocRef = useRef(null);
   const pretranslateAbortRef = useRef(null);
   const blockTranslationEpochRef = useRef(0);
+  const visualSupplementRevisionRef = useRef('');
   const parseContextRef = useRef({ docId: '', parseIdentity: '', epoch: 0 });
   const prevShouldAutoPretranslateRef = useRef(shouldAutoPretranslate);
   const readingOutlineRequestRef = useRef(0);
@@ -928,10 +958,49 @@ const ChatPDF = () => {
     const { providerId, modelId } = getCurrentChatModel();
     const provider = getProviderById(providerId);
     if (chatKey) {
-      return { providerId, modelId, apiKey: provider?.apiKey || '' };
+      return { providerId, modelId, apiKey: provider?.apiKey || '', apiHost: provider?.apiHost || '' };
     }
-    return { providerId, modelId, apiKey: provider?.apiKey || apiKey };
+    return { providerId, modelId, apiKey: provider?.apiKey || apiKey, apiHost: provider?.apiHost || '' };
   }, [getDefaultModel, getCurrentChatModel, getProviderById, apiKey]);
+
+  const getVisualCredentials = useCallback(() => {
+    const chatCredentials = getChatCredentials?.() || {};
+    const chatProvider = chatCredentials.providerId || 'openai';
+    const chatModel = chatCredentials.modelId || 'gpt-4o';
+    const useDedicatedModel = Boolean(visualModelKey && visualModelKey !== 'follow_chat' && visualModelKey.includes(':'));
+    const separator = useDedicatedModel ? visualModelKey.indexOf(':') : -1;
+    const providerId = useDedicatedModel ? visualModelKey.slice(0, separator) : chatProvider;
+    const modelId = useDedicatedModel ? visualModelKey.slice(separator + 1) : chatModel;
+    const provider = getProviderById?.(providerId);
+    const modelObject = getModelById?.(modelId, providerId) || { id: modelId, providerId };
+    const useLocalModel = Boolean(localVisualModelKey && localVisualModelKey !== 'none' && localVisualModelKey.includes(':'));
+    const localSeparator = useLocalModel ? localVisualModelKey.indexOf(':') : -1;
+    const localProviderId = useLocalModel ? localVisualModelKey.slice(0, localSeparator) : '';
+    const localModelId = useLocalModel ? localVisualModelKey.slice(localSeparator + 1) : '';
+    const localProvider = useLocalModel ? getProviderById?.(localProviderId) : null;
+    const localModelObject = useLocalModel
+      ? getModelById?.(localModelId, localProviderId) || { id: localModelId, providerId: localProviderId }
+      : null;
+    const strongIsVisionCapable = supportsVision(modelObject);
+    const localIsVisionCapable = useLocalModel && supportsVision(localModelObject);
+    return {
+      providerId,
+      modelId,
+      apiKey: provider?.apiKey || (useDedicatedModel ? '' : chatCredentials.apiKey || ''),
+      apiHost: provider?.apiHost || '',
+      isVisionCapable: strongIsVisionCapable,
+      policyVisionCapable: strongIsVisionCapable || localIsVisionCapable,
+      source: useDedicatedModel ? 'dedicated' : 'follow_chat',
+      strategy: visualStrategy || 'balanced',
+      local: useLocalModel ? {
+        providerId: localProviderId,
+        modelId: localModelId,
+        apiKey: localProvider?.apiKey || '',
+        apiHost: localProvider?.apiHost || '',
+        isVisionCapable: localIsVisionCapable,
+      } : null,
+    };
+  }, [getChatCredentials, getModelById, getProviderById, localVisualModelKey, visualModelKey, visualStrategy]);
 
   const getChatRequestConfig = useCallback(() => {
     const chatCredentials = getChatCredentials?.();
@@ -999,7 +1068,55 @@ const ChatPDF = () => {
     return getModelById(mid, pid);
   }, [getDefaultModel, getModelById]);
 
-  const isVisionCapable = useMemo(() => supportsVision(currentChatModelObj), [currentChatModelObj]);
+  const isVisionCapable = useMemo(() => {
+    const current = currentChatModelObj || {
+      id: getCurrentChatModel().modelId,
+      providerId: getCurrentChatModel().providerId,
+    };
+    return supportsVision(current);
+  }, [currentChatModelObj, getCurrentChatModel]);
+
+  const visualModelOptions = useMemo(() => {
+    const chatCredentials = getChatCredentials?.() || {};
+    const followingLabel = isVisionCapable
+      ? `跟随对话模型（${chatCredentials.modelId || '当前模型'}）`
+      : `跟随对话模型（${chatCredentials.modelId || '当前模型'}，未检测到视觉能力）`;
+    const candidates = (allModels || [])
+      .filter((candidate) => candidate?.type === 'chat' && supportsVision(candidate))
+      .map((candidate) => ({
+        value: `${candidate.providerId}:${candidate.id}`,
+        label: `${getProviderById?.(candidate.providerId)?.name || candidate.providerId} · ${candidate.name || candidate.id}`,
+      }));
+    const seen = new Set();
+    return [
+      { value: 'follow_chat', label: followingLabel },
+      ...candidates.filter((candidate) => !seen.has(candidate.value) && seen.add(candidate.value)),
+    ];
+  }, [allModels, getChatCredentials, getProviderById, isVisionCapable]);
+
+  const localVisualModelOptions = useMemo(() => {
+    const candidates = (allModels || [])
+      .filter((candidate) => (
+        candidate?.type === 'chat'
+        && ['local', 'ollama'].includes(String(candidate.providerId || '').toLowerCase())
+        && isLoopbackApiHost(getProviderById?.(candidate.providerId)?.apiHost)
+        && supportsVision(candidate)
+      ))
+      .map((candidate) => ({
+        value: `${candidate.providerId}:${candidate.id}`,
+        label: `${getProviderById?.(candidate.providerId)?.name || candidate.providerId} · ${candidate.name || candidate.id}`,
+      }));
+    const seen = new Set();
+    return [
+      { value: 'none', label: '未配置本地视觉模型' },
+      ...candidates.filter((candidate) => !seen.has(candidate.value) && seen.add(candidate.value)),
+    ];
+  }, [allModels, getProviderById]);
+  const hasLocalVisualModel = localVisualModelKey !== 'none'
+    && localVisualModelOptions.some((option) => option.value === localVisualModelKey);
+  const visualPolicyReady = visualStrategy === 'privacy'
+    ? hasLocalVisualModel
+    : (isVisionCapable || visualModelKey !== 'follow_chat' || hasLocalVisualModel);
 
   // ========== 文档状态 Hook（需求 1.1） ==========
   // useDocumentState 内部管理 docId/docInfo，需要其他 Hook 的 setter 函数
@@ -1011,6 +1128,7 @@ const ChatPDF = () => {
   const documentState = useDocumentState({
     getEmbeddingConfig,
     getChatCredentials,
+    getVisualCredentials,
     getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
@@ -1422,6 +1540,47 @@ const ChatPDF = () => {
     // 速览缓存，避免用户已经打开过速览时仍显示深度解析前的旧图表结果。
     clearOverviewCache?.(docId);
   }, [clearOverviewCache, docId]);
+
+  const refreshReadingBlocksAfterVisualSupplement = useCallback(() => {
+    // A local VLM supplement adds parse-bound caption blocks.  Existing
+    // translation/outline state may be keyed to the prior block collection,
+    // but the current overview itself remains valid and must not be cleared.
+    blockTranslationEpochRef.current += 1;
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    pretranslateStartedDocRef.current = null;
+    setBlockTranslations({});
+    setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
+    setFailedTranslationBlockIds(new Set());
+    setTranslatingBlockIds(new Set());
+    setBlockTranslateError('');
+    setBlockTranslateLoading(false);
+    setPretranslateNotice('');
+    setPretranslateError('');
+    setPretranslateProgress({ running: false, done: 0, total: 0 });
+    setReadingOutline(null);
+    setSectionOutline(null);
+    setReadingOutlineFallbackNotice('');
+    setSectionOutlineFallbackNotice('');
+    setReadingOutlineReloadKey((value) => value + 1);
+    setSectionOutlineReloadKey((value) => value + 1);
+    setBlockIndexReloadKey((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    const revision = String(
+      overview?.visual_supplement_revision
+      || overview?.figure_meta?.visual_supplement_revision
+      || ''
+    ).trim();
+    if (!docId || !revision) return;
+    const token = `${docId}:${documentParseIdentity}:${revision}`;
+    if (visualSupplementRevisionRef.current === token) return;
+    visualSupplementRevisionRef.current = token;
+    refreshReadingBlocksAfterVisualSupplement();
+  }, [docId, documentParseIdentity, overview, refreshReadingBlocksAfterVisualSupplement]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2314,6 +2473,9 @@ const ChatPDF = () => {
       });
     }
     setPinnedReadingBlockId(firstBlock);
+    if (firstBlock) {
+      setReadingJumpPulseToken((value) => value + 1);
+    }
     setHoveredReadingBlockId(null);
   }, [setCurrentPage]);
 
@@ -2336,6 +2498,9 @@ const ChatPDF = () => {
       });
     }
     setPinnedReadingBlockId(firstBlock);
+    if (firstBlock) {
+      setReadingJumpPulseToken((value) => value + 1);
+    }
     setHoveredReadingBlockId(null);
   }, [blockMap, resolveSectionOutlineAnchor, setCurrentPage]);
 
@@ -2794,6 +2959,7 @@ const ChatPDF = () => {
     screenshots,
     selectedText,
     getChatCredentials,
+    getVisualCredentials,
     getCurrentChatModel,
     getProviderById,
     streamSpeed,
@@ -3423,6 +3589,7 @@ const ChatPDF = () => {
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={isStreamingCurrentMessage}
+              answerStarted={Boolean(msg.answerStarted)}
               darkMode={darkMode}
               thinkingMs={msg.thinkingMs || 0}
               streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
@@ -4206,6 +4373,7 @@ const ChatPDF = () => {
                     blockIndex={blockIndex}
                     activeBlockId={activeReadingBlockId}
                     focusedBlockIds={focusedReadingBlockIds}
+                    focusPulseToken={readingJumpPulseToken}
                     visitedBlockIds={[]}
                     inlineTranslationBlockIds={[]}
                     onBlockHover={handleReadingBlockHover}
@@ -4570,10 +4738,10 @@ const ChatPDF = () => {
             {/* 输入区域：仅在对话模式显示，避免遮挡速览/解析内容 */}
             {rightPanelMode === 'chat' && (
             <div className="p-6 pt-0 bg-transparent relative z-10">
-              <div className={`absolute bottom-5 left-3 right-3 z-20 rounded-[24px] border p-2.5 ${
+              <div className={`absolute bottom-5 left-3 right-3 z-20 rounded-[26px] p-3 transition-shadow focus-within:ring-2 ${
                 darkMode
-                  ? 'border-white/[0.09] bg-[#24272d] shadow-[0_18px_46px_-24px_rgba(0,0,0,0.72)]'
-                  : 'border-[#e7dfd9] bg-[#fffdfb] shadow-[0_18px_46px_-24px_rgba(78,64,56,0.34),0_4px_12px_-8px_rgba(78,64,56,0.16)]'
+                  ? 'bg-[#24272d] shadow-[0_18px_46px_-24px_rgba(0,0,0,0.72)] focus-within:ring-[#FFA07A]/15'
+                  : 'bg-white shadow-[0_16px_40px_-18px_rgba(60,55,50,0.28),0_4px_12px_-8px_rgba(60,55,50,0.12)] focus-within:ring-[#FFA07A]/25'
               }`}>
                 {/* 截图预览 - 嵌入输入框顶部，避免被遮挡 */}
                 <ScreenshotPreview
@@ -4581,92 +4749,91 @@ const ChatPDF = () => {
                   onAction={handleParseAwareScreenshotAction}
                   onClose={handleScreenshotClose}
                 />
-                {/* 上半部分：模型选择、状态、工具图标 */}
-                <div className="flex items-center justify-between mb-2.5 px-1">
-                  <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
-                  
-                  {/* 右侧工具图标 */}
-                  <div className={`flex items-center gap-2 shrink-0 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    <button onClick={openSettings} className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`} title="设置中心" aria-label="设置中心">
-                      <Settings size={15} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={openUploadHome}
-                      aria-label="上传 PDF"
-                      title="上传新 PDF"
-                      className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`}
-                    >
-                      <Paperclip size={15} />
-                    </button>
-                    <WebSearchButton />
-                    {isVisionCapable && (
-                      <button
-                        onClick={() => setIsSelectingArea(true)}
-                        disabled={!docId || isMinerUFullRoutePending}
-                        className={`transition-colors p-1 rounded-md ${docId && !isMinerUFullRoutePending ? isSelectingArea ? 'text-[#B85F47] dark:text-[#FFA07A]' : darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800' : 'text-gray-300 cursor-not-allowed'}`}
-                        title={!docId ? '请先上传文档' : isMinerUFullRoutePending ? minerUParsePendingNotice : isSelectingArea ? '框选模式已开启' : '区域截图'}
-                      >
-                        <Scan size={15} />
-                      </button>
-                    )}
-                  </div>
-                </div>
+                {/* 第一行：输入文本（参考版式：文本在上，工具在下） */}
+                <textarea
+                  ref={textareaRef}
+                  disabled={isMinerUFullRoutePending}
+                  onChange={(e) => {
+                    e.target.style.height = '24px';
+                    e.target.style.height = e.target.scrollHeight + 'px';
+                    const newHasInput = !!e.target.value.trim();
+                    if (newHasInput !== hasInput) setHasInput(newHasInput);
+                  }}
+                  onKeyDown={(e) => {
+                    if (isMinerUFullRoutePending) return;
+                    if (sendShortcut === 'Ctrl+Enter') {
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+                    } else {
+                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                    }
+                  }}
+                  placeholder={isMinerUFullRoutePending ? minerUParsePendingNotice : 'Summarize, rephrase, convert...'}
+                  className={`w-full bg-transparent outline-none px-2 pt-1 text-[14px] min-w-0 resize-none h-[24px] overflow-hidden leading-relaxed ${darkMode ? 'text-gray-100 placeholder:text-gray-500' : 'text-gray-800 placeholder:text-gray-400'} ${isMinerUFullRoutePending ? 'cursor-not-allowed opacity-60' : ''}`}
+                  rows={1}
+                  style={{ minHeight: '24px', maxHeight: '120px' }}
+                />
 
-                {/* 下半部分：输入区 */}
-                <div className={`flex items-center rounded-[16px] border p-1.5 transition-colors ${
-                  darkMode
-                    ? 'border-transparent bg-transparent focus-within:border-[#FFA07A]/30 focus-within:bg-white/[0.03]'
-                    : 'border-transparent bg-transparent focus-within:border-[#FFDCCF] focus-within:bg-[#fff9f6]'
-                }`}>
-                  <textarea
-                    ref={textareaRef}
-                    disabled={isMinerUFullRoutePending}
-                    onChange={(e) => {
-                      e.target.style.height = '24px';
-                      e.target.style.height = e.target.scrollHeight + 'px';
-                      const newHasInput = !!e.target.value.trim();
-                      if (newHasInput !== hasInput) setHasInput(newHasInput);
-                    }}
-                    onKeyDown={(e) => {
-                      if (isMinerUFullRoutePending) return;
-                      if (sendShortcut === 'Ctrl+Enter') {
-                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
-                      } else {
-                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-                      }
-                    }}
-                    placeholder={isMinerUFullRoutePending ? minerUParsePendingNotice : 'Summarize, rephrase, convert...'}
-                    className={`flex-1 bg-transparent outline-none px-4 text-[14px] min-w-0 resize-none h-[24px] overflow-hidden leading-relaxed py-0 ${darkMode ? 'text-gray-100 placeholder:text-gray-500' : 'text-gray-800 placeholder:text-gray-400'} ${isMinerUFullRoutePending ? 'cursor-not-allowed opacity-60' : ''}`}
-                    rows={1}
-                    style={{ minHeight: '24px', maxHeight: '120px' }}
-                  />
-                  
-                  {/* Send 文字和发送按钮，固定在右侧 */}
-                  <div className="flex items-center gap-3 pr-1 shrink-0">
-                    <span className="text-gray-400 text-[13px] font-medium select-none pointer-events-none">Send</span>
-                    <button
-                      onClick={isLoading ? handleStop : sendMessage}
-                      disabled={isMinerUFullRoutePending || (!isLoading && (!hasInput && screenshots.length === 0))}
-                      className={`w-9 h-9 rounded-full transition-colors flex items-center justify-center shadow-sm ${
-                        !isMinerUFullRoutePending && (isLoading || hasInput || screenshots.length > 0)
-                          ? 'accent-surface'
-                          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                      }`}
-                    >
-                      <AnimatePresence initial={false}>
-                        {isLoading ? (
-                          <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center">
-                            <PauseIcon />
-                          </motion.div>
-                        ) : (
-                          <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center ml-0.5">
-                            <SendIcon />
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </button>
+                {/* 第二行：模型与工具在左，发送在右 */}
+                <div className="flex items-center justify-between mt-2 px-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
+                    <ChatContextIndicator
+                      messages={messages}
+                      contextCount={contextCount}
+                      memoryEnabled={enableMemory}
+                      lastUsage={lastCallInfo?.usage}
+                      darkMode={darkMode}
+                    />
+                    <div aria-hidden="true" className={`mx-1 h-4 w-px shrink-0 ${darkMode ? 'bg-white/10' : 'bg-gray-200'}`} />
+                    <div className={`flex items-center gap-2 shrink-0 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <button onClick={openSettings} className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`} title="设置中心" aria-label="设置中心">
+                        <Settings size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={openUploadHome}
+                        aria-label="上传 PDF"
+                        title="上传新 PDF"
+                        className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`}
+                      >
+                        <Paperclip size={15} />
+                      </button>
+                      <WebSearchButton />
+                      {isVisionCapable && (
+                        <button
+                          onClick={() => setIsSelectingArea(true)}
+                          disabled={!docId || isMinerUFullRoutePending}
+                          className={`transition-colors p-1 rounded-md ${docId && !isMinerUFullRoutePending ? isSelectingArea ? 'text-[#B85F47] dark:text-[#FFA07A]' : darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800' : 'text-gray-300 cursor-not-allowed'}`}
+                          title={!docId ? '请先上传文档' : isMinerUFullRoutePending ? minerUParsePendingNotice : isSelectingArea ? '框选模式已开启' : '区域截图'}
+                        >
+                          <Scan size={15} />
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  <button
+                    onClick={isLoading ? handleStop : sendMessage}
+                    disabled={isMinerUFullRoutePending || (!isLoading && (!hasInput && screenshots.length === 0))}
+                    aria-label={isLoading ? '停止生成' : '发送'}
+                    className={`w-9 h-9 shrink-0 rounded-full transition-all flex items-center justify-center ${
+                      !isMinerUFullRoutePending && (isLoading || hasInput || screenshots.length > 0)
+                        ? 'bg-[#F0653A] text-white shadow-[0_6px_16px_-6px_rgba(240,101,58,0.55)] hover:bg-[#D9552B] active:scale-95'
+                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <AnimatePresence initial={false}>
+                      {isLoading ? (
+                        <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center">
+                          <PauseIcon />
+                        </motion.div>
+                      ) : (
+                        <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center ml-0.5">
+                          <SendIcon />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </button>
                 </div>
               </div>
             </div>
@@ -4868,6 +5035,54 @@ const ChatPDF = () => {
                         indicatorClassName="rounded-[9px]"
                       />
                       <p className={`mt-2 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>速览仍然按需触发，不会因这个选项自动消耗 token</p>
+                    </div>
+
+                    <div className="settings-inset p-3.5 rounded-[14px]">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>图表理解模型</div>
+                          <p className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                            用于速览图表解读与高风险表格核验；未配置视觉能力时只保留定位和裁剪结果
+                          </p>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visualPolicyReady ? 'bg-emerald-500/10 text-emerald-600' : 'bg-[#FBE9E2] text-[#B85F47]'}`}>
+                          {visualStrategy === 'privacy'
+                            ? (hasLocalVisualModel ? '仅本地' : '需本地模型')
+                            : (visualPolicyReady ? '可用' : '需选择')}
+                        </span>
+                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="视觉增强策略"
+                        value={visualStrategy}
+                        onChange={setVisualStrategy}
+                        options={[
+                          { value: 'privacy', label: '隐私优先' },
+                          { value: 'balanced', label: '平衡' },
+                          { value: 'quality', label: '质量优先' },
+                        ]}
+                        className="mt-2.5 rounded-[12px]"
+                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                        indicatorClassName="rounded-[9px]"
+                      />
+                      <div className="mt-3">
+                        <div className={`mb-1.5 text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>强视觉模型</div>
+                        <CustomSelect
+                          value={visualModelKey}
+                          onChange={setVisualModelKey}
+                          options={visualModelOptions}
+                        />
+                      </div>
+                      <div className="mt-2.5">
+                        <div className={`mb-1.5 flex items-center justify-between text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          <span>本地视觉模型</span>
+                          {visualStrategy === 'privacy' && <span className="text-[#B85F47]">仅本地</span>}
+                        </div>
+                        <CustomSelect
+                          value={localVisualModelKey}
+                          onChange={setLocalVisualModelKey}
+                          options={localVisualModelOptions}
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -5506,6 +5721,7 @@ const FeedbackModal = ({ onSubmit, onClose }) => {
 // 自定义下拉选择组件
 const CustomSelect = ({ value, onChange, options }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [opensUpward, setOpensUpward] = useState(false);
   const containerRef = useRef(null);
 
   useEffect(() => {
@@ -5520,13 +5736,46 @@ const CustomSelect = ({ value, onChange, options }) => {
 
   const selectedOption = options.find(opt => opt.value === value);
 
+  const toggleMenu = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+
+    const trigger = containerRef.current;
+    if (trigger) {
+      const triggerRect = trigger.getBoundingClientRect();
+      let boundary = null;
+      let ancestor = trigger.parentElement;
+      while (ancestor) {
+        const overflowY = window.getComputedStyle(ancestor).overflowY;
+        if (overflowY === 'auto' || overflowY === 'scroll') {
+          boundary = ancestor.getBoundingClientRect();
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+
+      const menuHeight = Math.min(240, options.length * 42 + 12);
+      const safeBoundary = boundary || {
+        top: 8,
+        bottom: window.innerHeight - 8,
+      };
+      const roomAbove = triggerRect.top - safeBoundary.top - 8;
+      const roomBelow = safeBoundary.bottom - triggerRect.bottom - 8;
+      setOpensUpward(roomBelow < Math.min(menuHeight, 160) && roomAbove > roomBelow);
+    }
+
+    setIsOpen(true);
+  };
+
   return (
     <div className="relative w-full" ref={containerRef}>
       <button
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={toggleMenu}
         className="w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm hover:border-[#FFA07A]/50 transition-all outline-none"
       >
-        <span className="text-gray-700 dark:text-gray-300 font-medium">
+        <span className="min-w-0 flex-1 truncate pr-3 text-left text-gray-700 dark:text-gray-300 font-medium" title={selectedOption?.label}>
           {selectedOption ? selectedOption.label : 'Select...'}
         </span>
         <ChevronDown size={14} className={`text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
@@ -5535,11 +5784,11 @@ const CustomSelect = ({ value, onChange, options }) => {
       <AnimatePresence>
         {isOpen && (
           <motion.div
-            initial={{ opacity: 0, y: -5, scale: 0.95 }}
+            initial={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -5, scale: 0.95 }}
+            exit={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
             transition={{ duration: 0.15 }}
-            className="absolute z-50 w-full mt-1.5 p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto"
+            className={`absolute z-50 w-full p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto ${opensUpward ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
           >
             {options.map((option) => (
               <button
@@ -5566,19 +5815,6 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -15,6 +15,7 @@ from services.grep_service import grep_search
 from services.semantic_group_service import SemanticGroupService
 from services.embedding_service import _get_semantic_groups_dir
 from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.visual_supplement_service import committed_visual_evidence_for_document
 from services.semantic_group_store import active_manifest_path
 from utils.middleware import (
     LoggingMiddleware,
@@ -203,6 +204,7 @@ async def search_in_pdf(request: SearchRequest):
             rerank_provider=request.rerank_provider,
             rerank_api_key=request.rerank_api_key,
             rerank_endpoint=request.rerank_endpoint,
+            visual_evidence=committed_visual_evidence_for_document(doc),
             middlewares=middlewares
         )
 

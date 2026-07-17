@@ -7,16 +7,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import io
+import tempfile
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any
 
+from services.visual_supplement_service import (
+    active_visual_supplements,
+    visual_supplement_revision,
+    visual_supplements_are_committed,
+)
+
 logger = logging.getLogger(__name__)
 
-BLOCK_INDEX_VERSION = 10
+BLOCK_INDEX_VERSION = 12
 _GENERIC_TOC_TITLES = {
     "全文",
     "全文书签",
@@ -100,13 +109,38 @@ def load_block_index(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None
         return None
 
 
-def save_block_index(data_dir: Path | str, doc_id: str, index: dict[str, Any]) -> None:
+def save_block_index(data_dir: Path | str, doc_id: str, index: dict[str, Any]) -> bool:
+    """Durably publish a block index and report a failed write to callers.
+
+    The index is consumed by reading, outlines, translations, and the visual
+    supplement publication fence.  A partial or silently failed write must not
+    be treated as a successful parser publication.
+    """
     path = get_block_index_path(data_dir, doc_id)
+    temp_path: str | None = None
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            temp_path = f.name
             json.dump(index, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        return True
     except Exception as exc:
         logger.warning("[BlockIndex] Failed to save %s: %s", path, exc)
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        return False
 
 
 def ensure_block_index(
@@ -117,11 +151,16 @@ def ensure_block_index(
     pdf_path: Path | str | None = None,
     force_rebuild: bool = False,
     preserve_active_source: bool = True,
+    include_uncommitted_visual_supplements: bool = False,
 ) -> dict[str, Any]:
-    parse_identity = _document_parse_identity(doc)
+    parse_identity = _document_parse_identity(
+        doc,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    )
     if parse_identity.get("invalid_manifest"):
         raise RuntimeError("文档解析身份不完整，拒绝复用无法确认来源的阅读块缓存")
     cached = load_block_index(data_dir, doc_id)
+    has_uncommitted_visual_staging = _has_uncommitted_visual_staging(doc, parse_identity)
     if (
         parse_identity.get("parser_route") == "mineru"
         and parse_identity.get("full_route")
@@ -132,6 +171,19 @@ def ensure_block_index(
         raise RuntimeError("MinerU 全程解析的阅读块尚未发布")
     if cached:
         cached_matches_parse = _block_index_matches_parse_identity(cached, parse_identity)
+        # A publisher may have written a staged visual block index immediately
+        # before it durably records the matching commit marker. Do not expose
+        # those blocks, but also do not overwrite the staged file with a base
+        # index: the publisher needs that exact revision to become visible as
+        # soon as its document commit succeeds.
+        if (
+            has_uncommitted_visual_staging
+            and str(cached.get("source") or "").strip().lower() != "mineru_vlm"
+            and str(cached.get("parse_generation") or "") == str(parse_identity.get("parse_generation") or "")
+            and str(cached.get("document_source_hash") or "")
+            == str(parse_identity.get("document_source_hash") or "")
+        ):
+            return _without_uncommitted_visual_blocks(cached)
         # A re-upload of the same PDF keeps its document id, but deliberately
         # creates a new parse generation.  Local readers must rebuild instead
         # of retaining a prior MinerU block tree for the new local route.
@@ -156,9 +208,44 @@ def ensure_block_index(
         ):
             return cached
 
-    index = build_block_index(doc_id=doc_id, doc=doc, pdf_path=pdf_path)
-    save_block_index(data_dir, doc_id, index)
+    index = build_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        pdf_path=pdf_path,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    )
+    if not save_block_index(data_dir, doc_id, index):
+        raise RuntimeError("阅读块索引写入失败")
     return index
+
+
+def _has_uncommitted_visual_staging(doc: dict[str, Any], parse_identity: dict[str, Any]) -> bool:
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, dict) or not parse_identity:
+        return False
+    return bool(
+        active_visual_supplements(
+            data,
+            parse_identity,
+            require_committed=False,
+        )
+        and not visual_supplements_are_committed(data, parse_identity=parse_identity)
+    )
+
+
+def _without_uncommitted_visual_blocks(index: dict[str, Any]) -> dict[str, Any]:
+    """Return a request-local base view while retaining a staged file on disk."""
+    safe = deepcopy(index)
+    safe["visual_supplement_revision"] = ""
+    for page in safe.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page["blocks"] = [
+            block
+            for block in page.get("blocks") or []
+            if not (isinstance(block, dict) and block.get("visual_enhancement"))
+        ]
+    return safe
 
 
 def build_block_index(
@@ -166,6 +253,7 @@ def build_block_index(
     doc_id: str,
     doc: dict[str, Any],
     pdf_path: Path | str | None = None,
+    include_uncommitted_visual_supplements: bool = False,
 ) -> dict[str, Any]:
     data = doc.get("data", {}) if isinstance(doc, dict) else {}
     pages: list[dict[str, Any]] = []
@@ -190,11 +278,19 @@ def build_block_index(
         pages = canonical_pages
         source = canonical_source
 
+    parse_identity = _document_parse_identity(
+        doc,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    )
     _mark_repeated_page_artifacts(pages)
-    _inject_visual_blocks(pages, data)
+    _inject_visual_blocks(
+        pages,
+        data,
+        parse_identity,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    )
     outline = _build_outline(toc_items, pages)
     _assign_sections(pages, outline)
-    parse_identity = _document_parse_identity(doc)
 
     return {
         "version": BLOCK_INDEX_VERSION,
@@ -204,11 +300,16 @@ def build_block_index(
         "page_count": len(pages),
         "pages": pages,
         "outline": outline,
+        "visual_supplement_revision": str(parse_identity.get("visual_supplement_revision") or ""),
         **parse_identity,
     }
 
 
-def _document_parse_identity(doc: dict[str, Any]) -> dict[str, Any]:
+def _document_parse_identity(
+    doc: dict[str, Any],
+    *,
+    include_uncommitted_visual_supplements: bool = False,
+) -> dict[str, Any]:
     data = doc.get("data", {}) if isinstance(doc, dict) else {}
     manifest = data.get("parse_manifest") if isinstance(data, dict) else None
     if not isinstance(manifest, dict) and isinstance(data, dict):
@@ -225,12 +326,18 @@ def _document_parse_identity(doc: dict[str, Any]) -> dict[str, Any]:
     source_hash = str(manifest.get("source_hash") or "").strip()
     if not route or not generation or not source_hash:
         return {"invalid_manifest": True}
-    return {
+    identity = {
         "parser_route": route,
         "parse_generation": generation,
         "document_source_hash": source_hash,
         "full_route": bool(metadata.get("full_route")),
     }
+    identity["visual_supplement_revision"] = visual_supplement_revision(
+        data,
+        identity,
+        require_committed=not include_uncommitted_visual_supplements,
+    )
+    return identity
 
 
 def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[str, Any]) -> bool:
@@ -241,6 +348,8 @@ def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[st
     if (
         str(index.get("parse_generation") or "") != str(identity.get("parse_generation") or "")
         or str(index.get("document_source_hash") or "") != str(identity.get("document_source_hash") or "")
+        or str(index.get("visual_supplement_revision") or "")
+        != str(identity.get("visual_supplement_revision") or "")
     ):
         return False
     route = str(identity.get("parser_route") or "")
@@ -348,6 +457,7 @@ def _extract_page_text_blocks(
                     "is_bold": is_bold,
                     "line_count": len([line for line in region_lines if line.get("spans")]),
                     "font_key": _dominant_font_key(region_lines),
+                    "line_anchors": _build_line_anchors(region_lines),
                 }
                 if forced_heading:
                     block["split_from_mixed_block"] = True
@@ -540,7 +650,17 @@ def _normalize_repeated_artifact_text(text: str) -> str:
     return " ".join(value.split())
 
 
-def _inject_visual_blocks(pages: list[dict[str, Any]], data: dict[str, Any]) -> None:
+def _inject_visual_blocks(
+    pages: list[dict[str, Any]],
+    data: dict[str, Any],
+    parse_identity: dict[str, Any],
+    *,
+    include_uncommitted_visual_supplements: bool = False,
+) -> None:
+    base_block_counts = {
+        id(page): len(page.get("blocks") or [])
+        for page in pages
+    }
     page_map = {int(page.get("page", 0)): page for page in pages}
     existing_ids: set[str] = {
         str(block.get("block_id"))
@@ -607,11 +727,53 @@ def _inject_visual_blocks(pages: list[dict[str, Any]], data: dict[str, Any]) -> 
             text="Image",
         )
 
+    # VLM output is intentionally additive and only active for the current
+    # local parse generation.  It never replaces OCR/PDF text or MinerU blocks.
+    for supplement in active_visual_supplements(
+        data,
+        parse_identity,
+        require_committed=not include_uncommitted_visual_supplements,
+    ):
+        page_num = int(supplement.get("page") or 0)
+        bbox = _normalize_bbox(supplement.get("bbox"))
+        if page_num not in page_map or not bbox:
+            continue
+        item_id = str(supplement.get("id") or "").strip()
+        if not item_id:
+            continue
+        _append_visual_block(
+            page_map[page_num],
+            existing_ids,
+            block_id=item_id,
+            block_type="caption",
+            bbox=bbox,
+            text=str(supplement.get("text") or supplement.get("analysis") or "").strip(),
+            extra={
+                "visual_enhancement": True,
+                "block_type": str(supplement.get("block_type") or "visual_enrichment"),
+                "visual_source": str(supplement.get("source") or "visual_vlm"),
+                "route": str(supplement.get("route") or "local"),
+                "purpose": str(supplement.get("purpose") or "figure_description"),
+                "confidence": supplement.get("confidence"),
+                "prompt_version": str(supplement.get("prompt_version") or ""),
+                "bbox_hash": str(supplement.get("bbox_hash") or ""),
+                "provider": str(supplement.get("provider") or ""),
+                "model": str(supplement.get("model") or ""),
+                "visual_supplement_revision": str(parse_identity.get("visual_supplement_revision") or ""),
+                "visual_model": dict(supplement.get("visual_model") or {}),
+                "figure_id": str(supplement.get("figure_id") or ""),
+            },
+        )
+
     for page in pages:
-        page["blocks"] = sorted(
-            page.get("blocks", []),
+        blocks = list(page.get("blocks") or [])
+        base_count = min(base_block_counts.get(id(page), 0), len(blocks))
+        base_blocks = blocks[:base_count]
+        visual_blocks = sorted(
+            blocks[base_count:],
             key=lambda b: (float((b.get("bbox") or [0, 0, 0, 0])[1]), float((b.get("bbox") or [0, 0, 0, 0])[0])),
         )
+        page["blocks"] = [*base_blocks, *visual_blocks]
 
 
 def _append_visual_block(
@@ -622,17 +784,21 @@ def _append_visual_block(
     block_type: str,
     bbox: list[float],
     text: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     if block_id in existing_ids:
         return
     existing_ids.add(block_id)
-    page.setdefault("blocks", []).append({
+    block = {
         "block_id": block_id,
         "type": block_type,
         "bbox": bbox,
         "text": _limit_text(text or block_type, 1000),
         "section_id": None,
-    })
+    }
+    if extra:
+        block.update(extra)
+    page.setdefault("blocks", []).append(block)
 
 
 def _demote_adjacent_table_titles(blocks: list[dict[str, Any]]) -> None:
@@ -1120,11 +1286,17 @@ def _block_should_demote_inside_text_region(block: dict[str, Any], region: dict[
 
 def _layout_title_level(text: str, bbox: list[float], page_height: float) -> int:
     explicit = _embedded_heading_level(text)
-    if explicit == 1:
-        return 1
+    stripped = " ".join(str(text or "").split())
+    if (
+        _RE_CANONICAL_HEADING.match(stripped)
+        or _RE_NUMBERED_HEADING.match(stripped)
+        or _RE_ROMAN_HEADING.match(stripped)
+        or _RE_ALPHA_HEADING.match(stripped)
+    ):
+        return explicit
     if bbox and bbox[1] < page_height * 0.20 and len(text.split()) >= 5:
         return 1
-    return explicit or 2
+    return 2
 
 
 def _looks_like_region_label_noise(text: str) -> bool:
@@ -1817,6 +1989,21 @@ def _merge_bboxes(bboxes: Any) -> list[float] | None:
         round(max(b[2] for b in valid), 2),
         round(max(b[3] for b in valid), 2),
     ]
+
+
+def _build_line_anchors(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    for line in lines or []:
+        spans = line.get("spans", []) if isinstance(line, dict) else []
+        text = _block_text([line]) if spans else ""
+        bbox = _merge_bboxes(
+            span.get("bbox")
+            for span in spans
+            if isinstance(span, dict)
+        )
+        if text and bbox:
+            anchors.append({"text": _limit_text(text, 800), "bbox": bbox})
+    return anchors
 
 
 def _limit_text(text: Any, max_len: int) -> str:

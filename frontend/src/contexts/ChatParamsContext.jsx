@@ -22,6 +22,13 @@ const normalizeVisualVerificationMode = (value) => {
         : CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification;
 };
 
+const normalizeVisualStrategy = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return ['privacy', 'balanced', 'quality'].includes(normalized)
+        ? normalized
+        : CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy;
+};
+
 // 对话参数默认设置
 export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     maxTokens: 8192,
@@ -65,6 +72,11 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     overrideLLMQueryRewrite: null,  // LLM 查询改写（多轮指代消解）
     overrideBM25Synonyms: null,     // BM25 查询时同义词扩展
     numericTableVisualVerification: 'auto', // 'auto' | 'off' | 'always'
+    // Dedicated VLM for figure reading/table verification; follow_chat keeps
+    // existing behaviour while allowing a vision-capable model to be chosen.
+    visualModelKey: 'follow_chat',
+    visualStrategy: 'balanced',
+    localVisualModelKey: 'none',
     // 辅助模型（双模型策略；空值跟随后端默认）
     cheapModel: '',
     cheapModelProvider: '',
@@ -113,6 +125,9 @@ export const ChatParamsProvider = ({ children }) => {
     const [overrideLLMQueryRewrite, setOverrideLLMQueryRewrite] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
     const [overrideBM25Synonyms, setOverrideBM25Synonyms] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
     const [numericTableVisualVerification, setNumericTableVisualVerificationState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
+    const [visualModelKey, setVisualModelKey] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
+    const [visualStrategy, setVisualStrategyState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy);
+    const [localVisualModelKey, setLocalVisualModelKey] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
     // 辅助模型
     const [cheapModel, setCheapModel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
     const [cheapModelProvider, setCheapModelProvider] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
@@ -156,6 +171,9 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.overrideLLMQueryRewrite !== undefined) setOverrideLLMQueryRewrite(settings.overrideLLMQueryRewrite);
                 if (settings.overrideBM25Synonyms !== undefined) setOverrideBM25Synonyms(settings.overrideBM25Synonyms);
                 if (settings.numericTableVisualVerification !== undefined) setNumericTableVisualVerificationState(normalizeVisualVerificationMode(settings.numericTableVisualVerification));
+                if (settings.visualModelKey !== undefined) setVisualModelKey(String(settings.visualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey));
+                if (settings.visualStrategy !== undefined) setVisualStrategyState(normalizeVisualStrategy(settings.visualStrategy));
+                if (settings.localVisualModelKey !== undefined) setLocalVisualModelKey(String(settings.localVisualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey));
                 if (settings.cheapModel !== undefined) setCheapModel(settings.cheapModel);
                 if (settings.cheapModelProvider !== undefined) setCheapModelProvider(settings.cheapModelProvider);
                 if (settings.cheapModelEndpoint !== undefined) setCheapModelEndpoint(settings.cheapModelEndpoint);
@@ -248,6 +266,9 @@ export const ChatParamsProvider = ({ children }) => {
             overrideLLMQueryRewrite,
             overrideBM25Synonyms,
             numericTableVisualVerification,
+            visualModelKey,
+            visualStrategy,
+            localVisualModelKey,
             cheapModel,
             cheapModelProvider,
             cheapModelEndpoint,
@@ -261,7 +282,8 @@ export const ChatParamsProvider = ({ children }) => {
         mathEngine, mathEnableSingleDollar,
         messageStyle, messageFontSize,
         overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
-        numericTableVisualVerification, cheapModel, cheapModelProvider, cheapModelEndpoint,
+        numericTableVisualVerification, visualModelKey, visualStrategy, localVisualModelKey,
+        cheapModel, cheapModelProvider, cheapModelEndpoint,
         debouncedSave]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
@@ -307,6 +329,9 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideLLMQueryRewrite(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
         setOverrideBM25Synonyms(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
         setNumericTableVisualVerificationState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
+        setVisualModelKey(CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
+        setVisualStrategyState(CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy);
+        setLocalVisualModelKey(CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
         setCheapModel(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
         setCheapModelProvider(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
         setCheapModelEndpoint(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelEndpoint);
@@ -345,6 +370,9 @@ export const ChatParamsProvider = ({ children }) => {
         cheapModelProvider,
         cheapModelEndpoint,
         numericTableVisualVerification,
+        visualModelKey,
+        visualStrategy,
+        localVisualModelKey,
 
         // 设置方法
         setMaxTokens,
@@ -375,6 +403,9 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideLLMQueryRewrite,
         setOverrideBM25Synonyms,
         setNumericTableVisualVerification: (value) => setNumericTableVisualVerificationState(normalizeVisualVerificationMode(value)),
+        setVisualModelKey,
+        setVisualStrategy: (value) => setVisualStrategyState(normalizeVisualStrategy(value)),
+        setLocalVisualModelKey,
         setCheapModel,
         setCheapModelProvider,
         setCheapModelEndpoint,

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
 import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
+import { buildChatHistory } from '../utils/chatContextUsageUtils';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -128,27 +129,7 @@ const formatThinkingStageEvent = (payload) => {
   return null;
 };
 
-/**
- * 构建聊天历史记录
- * 过滤无效消息，取最近 contextCount*2 条作为上下文
- *
- * @param {Array} messages - 消息列表
- * @param {number} contextCount - 上下文轮数
- * @returns {Array} 格式化后的聊天历史
- */
-export const buildChatHistory = (messages, contextCount) => {
-  if (!contextCount || contextCount <= 0) return [];
-  const validMessages = messages.filter(msg =>
-    (msg.type === 'user' || msg.type === 'assistant') && !msg.hasImage
-    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('⚠️ AI未返回内容'))
-    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('❌'))
-  );
-  const recentMessages = validMessages.slice(-(contextCount * 2));
-  return recentMessages.map(msg => ({
-    role: msg.type === 'user' ? 'user' : 'assistant',
-    content: msg.content
-  }));
-};
+export { buildChatHistory } from '../utils/chatContextUsageUtils';
 
 const tokenizeForCitation = (text = '') => {
   const lowered = String(text).toLowerCase();
@@ -652,6 +633,7 @@ export const finalizeThinkingDurationMs = ({
  * @param {Function} options.setScreenshots - 设置截图列表
  * @param {string} options.selectedText - 当前选中的文本
  * @param {Function} options.getChatCredentials - 获取聊天凭证
+ * @param {Function} options.getVisualCredentials - 获取独立视觉模型凭证
  * @param {Function} options.getCurrentChatModel - 获取当前聊天模型
  * @param {Function} options.getProviderById - 根据 ID 获取 provider
  * @param {string} options.streamSpeed - 流式输出速度设置
@@ -666,6 +648,7 @@ export function useMessageState({
   setScreenshots,
   selectedText = '',
   getChatCredentials,
+  getVisualCredentials,
   getCurrentChatModel,
   getProviderById,
   streamSpeed = 'normal',
@@ -884,6 +867,7 @@ export function useMessageState({
     if (!currentInput.trim() && screenshots.length === 0) return;
 
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
+    const visualCredentials = getVisualCredentials?.() || null;
     if (!docId) { alert('请先上传文档'); return; }
     if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
       alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
@@ -907,6 +891,33 @@ export function useMessageState({
 
     // 获取 provider 完整信息
     const chatProviderFull = getProviderById?.(chatProvider);
+    const useDedicatedVisualModel = visualCredentials?.source === 'dedicated';
+    const visualProviderFull = useDedicatedVisualModel
+      ? getProviderById?.(visualCredentials?.providerId || '')
+      : null;
+    const localVisualProviderFull = visualCredentials?.local?.providerId
+      ? getProviderById?.(visualCredentials.local.providerId)
+      : null;
+    const visualRequestParams = {
+      visual_strategy: visualCredentials?.strategy || 'balanced',
+      visual_enabled: visualCredentials ? visualCredentials.isVisionCapable === true : true,
+      ...(useDedicatedVisualModel
+        ? {
+          visual_provider: visualCredentials?.providerId || '',
+          visual_model: visualCredentials?.modelId || '',
+          visual_api_key: visualCredentials?.apiKey || '',
+          visual_api_host: visualProviderFull?.apiHost || visualCredentials?.apiHost || '',
+        }
+        : {}),
+      ...(visualCredentials?.local?.providerId && visualCredentials?.local?.modelId
+        ? {
+          local_visual_provider: visualCredentials.local.providerId,
+          local_visual_model: visualCredentials.local.modelId,
+          local_visual_api_key: visualCredentials.local.apiKey || '',
+          local_visual_api_host: localVisualProviderFull?.apiHost || visualCredentials.local.apiHost || '',
+        }
+        : {}),
+    };
 
     // 构建请求体
     const requestBody = {
@@ -939,6 +950,7 @@ export function useMessageState({
           ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
           : {}),
         numeric_table_visual_verification: numericTableVisualVerification || 'auto',
+        ...visualRequestParams,
       },
       enable_memory: enableMemory,
       enable_web_search: enableWebSearch,
@@ -1187,7 +1199,14 @@ export function useMessageState({
               if (cc) {
                 currentText += cc;
                 contentStream.addChunk(cc);
-                if (!contentStartTime) contentStartTime = Date.now();
+                if (!contentStartTime) {
+                  contentStartTime = Date.now();
+                  // 思考阶段结束信号：正文首 token 到达，让 ThinkingBlock 立即自动折叠，
+                  // 不必等整条回答流完
+                  setMessages(prev => prev.map(m =>
+                    m.id === tempMsgId ? { ...m, answerStarted: true } : m
+                  ));
+                }
               }
               if (ct) {
                 appendRealThinking(ct);
@@ -1370,7 +1389,7 @@ export function useMessageState({
   }, [
     docId, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
     enableAgentRetrieval,
-    getChatCredentials, getProviderById, contentStream, thinkingStream,
+    getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,

@@ -21,8 +21,10 @@ PROVIDER_ALIAS_MAP = {
     "silicon": ["openai"],     # 硅基流动同理
     "moonshot": ["openai"],
     "deepseek": ["openai"],
+    "gemini": ["openai"],
     "zhipu": ["openai"],
     "minimax": ["openai"],
+    "xiaomi": ["openai"],
     "local": ["local"],
     "openai": ["openai"],
 }
@@ -34,8 +36,10 @@ PROVIDER_BASE_URL_HINTS = {
     "silicon": "siliconflow.cn",
     "moonshot": "moonshot.cn",
     "deepseek": "deepseek.com",
+    "gemini": "generativelanguage.googleapis.com",
     "zhipu": "bigmodel.cn",
     "minimax": "minimax",
+    "xiaomi": "xiaomimimo.com",
     "openai": "openai.com",
 }
 
@@ -45,8 +49,10 @@ DEPRECATED_MODEL_ID_ALIASES = {
     "Qwen/Qwen-Embedding-8B": "Qwen/Qwen3-Embedding-8B",
     # OpenAI 经典 embedding 旧 ID（兼容迁移到 3-small）
     "text-embedding-ada-002": "text-embedding-3-small",
-    # MiniMax 旧 embedding ID
-    "embo-01": "minimax-embedding-v2",
+    # DashScope v3 已由 v4 替换，旧配置只做透明迁移，不再暴露为默认模型。
+    "text-embedding-v3": "text-embedding-v4",
+    # MiniMax 旧目录中的错误 ID -> 官方 embo-01
+    "minimax-embedding-v2": "embo-01",
 }
 
 

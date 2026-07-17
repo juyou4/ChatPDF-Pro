@@ -216,8 +216,8 @@ async def get_capabilities():
     from services.rerank_service import _HAS_CROSS_ENCODER
 
     # 收集可用的 embedding provider 列表
-    embedding_providers = ["openai", "silicon", "aliyun", "deepseek", "moonshot",
-                           "zhipu", "minimax", "ollama"]
+    embedding_providers = ["openai", "silicon", "aliyun", "gemini", "zhipu",
+                           "minimax", "ollama"]
     if _HAS_SENTENCE_TRANSFORMERS:
         embedding_providers.insert(0, "local")
 

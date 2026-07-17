@@ -37,6 +37,7 @@ class AgentRetrievalDependencies:
     build_numbered_context_and_citations: Callable[..., tuple[str, list[dict]]]
     generate_page_level_citations: Callable[..., list[dict]]
     build_agent_detail_citations: Callable[..., list[dict]]
+    build_visual_evidence_analyzer: Callable[..., Any] | None = None
 
 
 def _build_context_from_citation_candidates(citations: list[dict], fallback_context: str = "") -> str:
@@ -104,6 +105,9 @@ def _build_context_segments_from_agent_citations(citations: list[dict]) -> list[
             "group_id": citation.get("group_id", ""),
             "context_id": citation.get("context_id", ""),
             "evidence_id": citation.get("evidence_id", ""),
+            "asset_id": citation.get("asset_id", ""),
+            "analyzed_asset_id": citation.get("analyzed_asset_id", ""),
+            "block_id": citation.get("block_id", ""),
             "chunk_id": citation.get("chunk_id", ""),
             "child_chunk_id": citation.get("child_chunk_id", ""),
             "parent_id": citation.get("parent_id", ""),
@@ -111,6 +115,18 @@ def _build_context_segments_from_agent_citations(citations: list[dict]) -> list[
             "table_bundle_id": citation.get("table_bundle_id", ""),
             "evidence_unit_id": citation.get("evidence_unit_id", ""),
             "retrieval_type": citation.get("retrieval_type", ""),
+            "visual_evidence_id": citation.get("visual_evidence_id", ""),
+            "visual_enhancement": citation.get("visual_enhancement"),
+            "visual_source": citation.get("visual_source", ""),
+            "visual_supplement_revision": citation.get("visual_supplement_revision", ""),
+            "figure_id": citation.get("figure_id", ""),
+            "figure_bbox": citation.get("figure_bbox") or citation.get("bbox") or [],
+            "visual_model": citation.get("visual_model") or {},
+            "runtime_visual_analysis": citation.get("runtime_visual_analysis"),
+            "purpose": citation.get("purpose", ""),
+            "prompt_version": citation.get("prompt_version", ""),
+            "parse_generation": citation.get("parse_generation", ""),
+            "confidence": citation.get("confidence"),
         })
     return segments
 
@@ -258,6 +274,26 @@ async def run_agent_retrieval_for_context(
         rerank_api_key=request.rerank_api_key or "",
         rerank_endpoint=request.rerank_endpoint or "",
     )
+    visual_analyzer = None
+    if deps.build_visual_evidence_analyzer is not None:
+        try:
+            visual_analyzer = deps.build_visual_evidence_analyzer(
+                request=request,
+                doc=doc,
+                modal_asset_index=getattr(agent_doc_ctx, "modal_asset_index", {}) or {},
+            )
+        except Exception as exc:
+            logger.warning("[AgentRetrieval] 构建请求级视觉分析器失败，降级为文本检索: %s", exc)
+    configure_visual_analyzer = getattr(agent_doc_ctx, "configure_visual_analyzer", None)
+    if callable(configure_visual_analyzer):
+        configure_visual_analyzer(
+            visual_analyzer,
+            active_question=search_query or request.question or "",
+        )
+    visual_analysis_available = bool(
+        callable(getattr(agent_doc_ctx, "visual_analysis_available", None))
+        and agent_doc_ctx.visual_analysis_available()
+    )
     agent = RetrievalAgent(
         api_key=agent_api_key,
         model=agent_model,
@@ -281,6 +317,10 @@ async def run_agent_retrieval_for_context(
 
     agent_result: dict = {}
     agent_timeout = max(5.0, float(getattr(settings, "agent_total_timeout", 75.0) or 75.0))
+    if visual_analysis_available:
+        # Two selected figures run concurrently, but still need room for two
+        # planner rounds and ordinary retrieval around the visual call.
+        agent_timeout = max(agent_timeout, 105.0)
     try:
         agent_events = agent.run(
             question=search_query or request.question or "",

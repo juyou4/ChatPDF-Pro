@@ -20,8 +20,8 @@ const FIGURE_SOURCE_META = {
     className: 'border-[#f1d5ca] bg-[#fff4ef] text-[#a8553f]',
   },
   yolo: {
-    label: '视觉兜底',
-    detail: '主解析未定位图表时使用本地视觉检测',
+    label: '本地图表定位',
+    detail: '主解析未定位图表时使用 DocLayout-YOLO 定位与裁切',
     className: 'border-[#dbe5e1] bg-[#f2f7f5] text-[#4f7065]',
   },
   pdf_native: {
@@ -356,8 +356,8 @@ const OverviewPanel = ({
             </p>
             <p className="text-xs leading-relaxed text-gray-400">
               {parseRoute === 'mineru'
-                ? '重新生成会继续复用 MinerU 主解析结果；仅在结构化图表缺失时自动尝试本地视觉兜底。'
-                : '重新生成会优先检查 PDF 原生结构，仅在结构信息不足时自动尝试本地视觉兜底。'}
+                ? '重新生成会继续复用 MinerU 主解析结果；图表内容解读由已选视觉模型单独完成。'
+                : '重新生成会优先检查 PDF 原生结构，再使用本地图表定位；图表内容解读由已选视觉模型单独完成。'}
             </p>
             <button
               type="button"

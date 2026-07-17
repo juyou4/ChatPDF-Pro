@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -58,6 +59,13 @@ def _get_runtime_data_dir() -> str:
 
 # Lazy-loaded caches
 local_embedding_models = {}
+
+# Visual evidence is a small, revision-bound overlay.  It deliberately stays
+# outside the document FAISS index so local/MinerU parse identities remain
+# unchanged while a new VLM supplement is published.
+_VISUAL_EVIDENCE_VECTOR_CACHE: OrderedDict[str, np.ndarray] = OrderedDict()
+_VISUAL_EVIDENCE_VECTOR_CACHE_LOCK = threading.Lock()
+_VISUAL_EVIDENCE_VECTOR_CACHE_MAX_SIZE = 32
 
 # ---- OpenAI Client 连接池 ----
 _openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash) -> OpenAI
@@ -622,7 +630,7 @@ def _select_fallback_embedding_model(
         alias_targets = {
             "qwen/qwen-embedding-8b": "Qwen/Qwen3-Embedding-8B",
             "text-embedding-ada-002": "text-embedding-3-small",
-            "embo-01": "minimax-embedding-v2",
+            "minimax-embedding-v2": "embo-01",
         }
         mapped_target = alias_targets.get(preferred.lower())
         if mapped_target:
@@ -642,10 +650,9 @@ def _select_fallback_embedding_model(
         "text-embedding-3-small",
         "text-embedding-3-large",
         "text-embedding-v4",
-        "text-embedding-v3",
-        "minimax-embedding-v2",
-        "deepseek-embedding-v1",
-        "moonshot-embedding-v1",
+        "gemini-embedding-2-preview",
+        "gemini-embedding-001",
+        "embo-01",
         "embedding-3",
         "Qwen/Qwen-Embedding-8B",
     ]
@@ -805,6 +812,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
                 "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "moonshot": "https://api.moonshot.cn/v1",
                 "deepseek": "https://api.deepseek.com/v1",
+                "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
                 "zhipu": "https://open.bigmodel.cn/api/paas/v4",
                 "minimax": "https://api.minimax.chat/v1",
                 "openai": "https://api.openai.com/v1",
@@ -1769,6 +1777,227 @@ def _build_context_text_for_result(item: dict, query: str = "") -> str:
     if chunk_type == "formula" or looks_formula_like(query) or looks_formula_like(context_text):
         return build_formula_alias_text(context_text)
     return context_text
+
+
+_RUNTIME_VISUAL_PROVENANCE_FIELDS = (
+    "visual_evidence_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "bbox",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+)
+
+
+def _runtime_visual_provenance(item: dict) -> dict:
+    """Return copy-safe visual provenance for a request-local overlay result."""
+    if not isinstance(item, dict) or not (
+        item.get("runtime_visual_overlay") or item.get("visual_enhancement")
+    ):
+        return {}
+
+    provenance: dict = {}
+    for key in _RUNTIME_VISUAL_PROVENANCE_FIELDS:
+        value = item.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            provenance[key] = dict(value)
+        elif isinstance(value, list):
+            provenance[key] = list(value)
+        else:
+            provenance[key] = value
+
+    evidence_id = str(
+        provenance.get("visual_evidence_id") or item.get("visual_evidence_id") or ""
+    ).strip()
+    if evidence_id:
+        provenance["visual_evidence_id"] = evidence_id
+    provenance.setdefault("runtime_visual_overlay", True)
+    provenance.setdefault("visual_enhancement", True)
+    provenance.setdefault("visual_source", "visual_vlm")
+    return provenance
+
+
+def _copy_runtime_visual_provenance(item: dict, target: dict) -> dict:
+    """Copy visual provenance without changing non-visual retrieval records."""
+    if isinstance(target, dict):
+        target.update(_runtime_visual_provenance(item))
+    return target
+
+
+def _visual_overlay_group_id(item: dict, fallback: str = "") -> str:
+    if not isinstance(item, dict):
+        return fallback
+    evidence_id = str(item.get("visual_evidence_id") or "").strip()
+    if evidence_id and (item.get("runtime_visual_overlay") or item.get("visual_enhancement")):
+        return f"visual-{evidence_id}"
+    return str(item.get("group_id") or fallback)
+
+
+def _append_runtime_visual_overlay_group_context(
+    context_string: str,
+    retrieval_meta: dict,
+    results: List[dict],
+    *,
+    doc_id: str,
+    query: str,
+    limit: int = 1,
+) -> Tuple[str, dict]:
+    """Append one qualified VLM observation after semantic-group assembly.
+
+    Semantic groups are built from the persistent FAISS generation and cannot
+    own request-local VLM observations. Keeping the overlay as a standalone
+    numbered context block avoids contaminating groups while allowing the LLM
+    and final citation path to see the same committed evidence.
+    """
+    if not isinstance(retrieval_meta, dict) or not results or limit <= 0:
+        return context_string, retrieval_meta
+
+    candidates = [
+        item
+        for item in results
+        if isinstance(item, dict) and item.get("runtime_visual_overlay")
+    ]
+    if not candidates:
+        return context_string, retrieval_meta
+
+    def _score(item: dict) -> float:
+        for key in ("similarity", "combined_score", "rerank_score", "score"):
+            try:
+                return float(item.get(key))
+            except (TypeError, ValueError):
+                continue
+        return float("-inf")
+
+    citations = [
+        dict(item)
+        for item in (retrieval_meta.get("citations") or [])
+        if isinstance(item, dict)
+    ]
+    segments = [
+        dict(item)
+        for item in (retrieval_meta.get("_context_segments") or [])
+        if isinstance(item, dict)
+    ]
+    existing_visual_ids = {
+        str(item.get("visual_evidence_id") or "").strip()
+        for item in [*citations, *segments]
+        if isinstance(item, dict) and str(item.get("visual_evidence_id") or "").strip()
+    }
+    refs = []
+    for item in [*citations, *segments]:
+        try:
+            refs.append(int(item.get("ref") or 0))
+        except (TypeError, ValueError):
+            continue
+    next_ref = max(refs, default=0) + 1
+
+    appended = 0
+    context_parts = [str(context_string or "").rstrip()] if str(context_string or "").strip() else []
+    for item in sorted(candidates, key=_score, reverse=True):
+        evidence_id = str(item.get("visual_evidence_id") or "").strip()
+        if not evidence_id or evidence_id in existing_visual_ids:
+            continue
+        text = (_build_context_text_for_result(item, query=query) or "").strip()
+        if not text:
+            continue
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        page_range = [page, page] if page > 0 else []
+        page_label = str(page) if page > 0 else "未知"
+        revision = str(item.get("visual_supplement_revision") or "").strip()
+        context_id = str(item.get("context_id") or f"visual:{evidence_id}").strip()
+        citation = _copy_runtime_visual_provenance(item, {
+            "ref": next_ref,
+            "evidence_id": str(item.get("evidence_id") or f"visual:{revision or 'current'}:{evidence_id}"),
+            "context_id": context_id,
+            "group_id": _visual_overlay_group_id(item, f"visual-{evidence_id}"),
+            "block_id": item.get("block_id") or evidence_id,
+            "chunk_id": item.get("chunk_id"),
+            "page_range": page_range,
+            "source_text": text,
+            "display_text": text,
+            "highlight_text": str(item.get("snippet") or text[:200]).strip(),
+            "_full_text": text,
+            "chunk_type": item.get("chunk_type") or "visual_evidence",
+            "block_type": item.get("block_type") or "caption",
+            "retrieval_type": "visual_overlay",
+            "alignment_status": "candidate",
+            "score": item.get("score"),
+            "similarity": item.get("similarity"),
+        })
+        segment = _copy_runtime_visual_provenance(item, {
+            "ref": next_ref,
+            "evidence_id": citation["evidence_id"],
+            "context_id": context_id,
+            "group_id": citation["group_id"],
+            "block_id": citation["block_id"],
+            "chunk_id": citation.get("chunk_id"),
+            "doc_id": doc_id,
+            "text": text,
+            "page_range": page_range,
+            "modality": "visual",
+            "chunk_type": citation["chunk_type"],
+            "block_type": citation["block_type"],
+            "retrieval_type": "visual_overlay",
+            "score": item.get("similarity", item.get("score", 0.0)),
+        })
+        context_parts.append(
+            f"[{next_ref}]【图表视觉补充 | 页码: {page_label}】\n内容:\n{text}"
+        )
+        citations.append(citation)
+        segments.append(segment)
+        existing_visual_ids.add(evidence_id)
+        appended += 1
+        next_ref += 1
+        if appended >= limit:
+            break
+
+    if not appended:
+        return context_string, retrieval_meta
+
+    raw_chunks = retrieval_meta.get("_chunks")
+    if not isinstance(raw_chunks, list):
+        raw_chunks = []
+    for item in candidates:
+        evidence_id = str(item.get("visual_evidence_id") or "").strip()
+        if not evidence_id or evidence_id not in existing_visual_ids:
+            continue
+        matched = False
+        for chunk in raw_chunks:
+            if not isinstance(chunk, dict):
+                continue
+            if str(chunk.get("visual_evidence_id") or "").strip() == evidence_id:
+                _copy_runtime_visual_provenance(item, chunk)
+                matched = True
+                break
+        if not matched:
+            raw_chunks.append(_copy_runtime_visual_provenance(item, {
+                "text": item.get("chunk", ""),
+                "page": item.get("page", 0),
+                "group_id": _visual_overlay_group_id(item, f"visual-{evidence_id}"),
+                "context_id": item.get("context_id") or f"visual:{evidence_id}",
+                "evidence_id": item.get("evidence_id") or evidence_id,
+                "block_id": item.get("block_id") or evidence_id,
+                "chunk_id": item.get("chunk_id"),
+                "doc_id": doc_id,
+                "chunk_type": item.get("chunk_type") or "visual_evidence",
+                "block_type": item.get("block_type") or "caption",
+            }))
+
+    retrieval_meta["citations"] = citations
+    retrieval_meta["_context_segments"] = segments
+    retrieval_meta["_chunks"] = raw_chunks
+    retrieval_meta["visual_overlay_context_count"] = int(
+        retrieval_meta.get("visual_overlay_context_count") or 0
+    ) + appended
+    return "\n\n".join(context_parts), retrieval_meta
 
 
 def _is_delta_per_sample_metric_query(query: str, hints: Optional[dict[str, List[str]]] = None) -> bool:
@@ -11136,6 +11365,666 @@ def _finalize_with_optional_rerank(
     return final
 
 
+def _normalize_runtime_visual_evidence(visual_evidence: Optional[List[dict]], limit: int = 8) -> List[dict]:
+    """Normalize the small, committed VLM evidence overlay for one search."""
+    normalized: List[dict] = []
+    seen: set[str] = set()
+    for item in visual_evidence or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        text = " ".join(str(item.get("text") or item.get("analysis") or "").split())
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if not item_id or not text or page <= 0 or item_id in seen:
+            continue
+        seen.add(item_id)
+        normalized.append({
+            "id": item_id,
+            "page": page,
+            "text": text[:1600],
+            "caption": " ".join(str(item.get("caption") or "").split())[:400],
+            "figure_id": str(item.get("figure_id") or "").strip()[:160],
+            "bbox": list(item.get("bbox") or [])[:4],
+            "revision": str(item.get("visual_supplement_revision") or "").strip()[:80],
+            "visual_model": dict(item.get("visual_model") or {}),
+        })
+        if len(normalized) >= max(0, int(limit)):
+            break
+    return normalized
+
+
+def _visual_overlay_cache_key(embedding_model_id: str, evidence: List[dict]) -> str:
+    payload = {
+        "embedding_model": str(embedding_model_id or ""),
+        "items": [
+            {
+                "id": item["id"],
+                "revision": item["revision"],
+                "text": item["text"],
+                "caption": item["caption"],
+            }
+            for item in evidence
+        ],
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _get_visual_overlay_vectors(
+    evidence: List[dict],
+    *,
+    embedding_model_id: str,
+    embed_fn: Callable,
+    is_ip_index: bool,
+) -> np.ndarray:
+    cache_key = _visual_overlay_cache_key(embedding_model_id, evidence)
+    with _VISUAL_EVIDENCE_VECTOR_CACHE_LOCK:
+        cached = _VISUAL_EVIDENCE_VECTOR_CACHE.get(cache_key)
+        if cached is not None:
+            _VISUAL_EVIDENCE_VECTOR_CACHE.move_to_end(cache_key)
+            return cached.copy()
+
+    texts = [
+        "\n".join(part for part in ("[图表视觉补充]", item.get("caption") or "", item["text"]) if part)
+        for item in evidence
+    ]
+    vectors = np.asarray(embed_fn(texts), dtype="float32")
+    if vectors.ndim == 1:
+        vectors = vectors.reshape(1, -1)
+    if vectors.ndim != 2 or vectors.shape[0] != len(evidence):
+        raise ValueError("视觉补充 embedding 维度无效")
+    if is_ip_index:
+        faiss.normalize_L2(vectors)
+
+    with _VISUAL_EVIDENCE_VECTOR_CACHE_LOCK:
+        _VISUAL_EVIDENCE_VECTOR_CACHE[cache_key] = vectors.copy()
+        _VISUAL_EVIDENCE_VECTOR_CACHE.move_to_end(cache_key)
+        while len(_VISUAL_EVIDENCE_VECTOR_CACHE) > _VISUAL_EVIDENCE_VECTOR_CACHE_MAX_SIZE:
+            _VISUAL_EVIDENCE_VECTOR_CACHE.popitem(last=False)
+    return vectors
+
+
+def _append_runtime_visual_evidence_chunks(
+    chunks: List[str],
+    chunk_headings: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    visual_evidence: Optional[List[dict]],
+) -> List[int]:
+    """Append committed visual evidence as non-persistent runtime chunks."""
+    evidence = _normalize_runtime_visual_evidence(visual_evidence)
+    if not evidence:
+        return []
+
+    indices: List[int] = []
+    for item in evidence:
+        caption = item.get("caption") or f"图表 {item['figure_id'] or item['id']}"
+        chunk = "\n".join(part for part in ("[图表视觉补充]", caption, item["text"]) if part)
+        index = len(chunks)
+        chunks.append(chunk)
+        chunk_headings.append(f"图表视觉补充 · {caption}"[:480])
+        chunk_pages.append(item["page"])
+        chunk_types.append("visual_evidence")
+        chunk_metadata.append({
+            "source": "visual_vlm",
+            "visual_enhancement": True,
+            "visual_source": "visual_vlm",
+            # Keep the durable supplement id alongside the request-local
+            # chunk index so citations and diagnostics can trace the evidence
+            # back to the exact VLM figure reading after the request ends.
+            "visual_evidence_id": item["id"],
+            "context_id": f"visual:{item['id']}",
+            "evidence_id": item["id"],
+            "block_id": item["id"],
+            "visual_supplement_revision": item.get("revision") or "",
+            "figure_id": item.get("figure_id") or "",
+            "bbox": item.get("bbox") or [],
+            "figure_bbox": item.get("bbox") or [],
+            "visual_model": item.get("visual_model") or {},
+            "runtime_visual_overlay": True,
+        })
+        indices.append(index)
+    return indices
+
+
+def _build_runtime_visual_overlay_results(
+    *,
+    chunks: List[str],
+    chunk_headings: List[str],
+    chunk_pages: List[int],
+    chunk_types: List[str],
+    chunk_metadata: List[dict],
+    indices: List[int],
+    query: str,
+    query_vector: np.ndarray,
+    embedding_model_id: str,
+    embed_fn: Callable,
+    is_ip_index: bool,
+) -> List[dict]:
+    if not indices or query_vector is None:
+        return []
+    evidence = []
+    for index in indices:
+        if index >= len(chunks) or index >= len(chunk_metadata):
+            continue
+        metadata = chunk_metadata[index]
+        evidence.append({
+            "id": str(metadata.get("visual_evidence_id") or index),
+            "page": chunk_pages[index] if index < len(chunk_pages) else 0,
+            "text": chunks[index],
+            "caption": chunk_headings[index] if index < len(chunk_headings) else "",
+            "revision": str(metadata.get("visual_supplement_revision") or ""),
+            "visual_model": dict(metadata.get("visual_model") or {}),
+        })
+    if not evidence:
+        return []
+
+    vectors = _get_visual_overlay_vectors(
+        evidence,
+        embedding_model_id=embedding_model_id,
+        embed_fn=embed_fn,
+        is_ip_index=is_ip_index,
+    )
+    query_row = np.asarray(query_vector, dtype="float32").reshape(1, -1)
+    if vectors.shape[1] != query_row.shape[1]:
+        raise ValueError("视觉补充与查询 embedding 维度不一致")
+
+    if is_ip_index:
+        raw_scores = vectors @ query_row[0]
+    else:
+        raw_scores = np.sum((vectors - query_row[0]) ** 2, axis=1)
+
+    results: List[dict] = []
+    for index, raw_score in zip(indices, raw_scores):
+        similarity = _distance_to_similarity(float(raw_score), is_ip=is_ip_index)
+        # VLM output is supporting evidence.  It can enrich a chart answer,
+        # but it should not displace stronger original text/table evidence.
+        adjusted_similarity = min(0.72, similarity * 0.78)
+        if adjusted_similarity < 0.28:
+            continue
+        chunk_text = chunks[index]
+        metadata = chunk_metadata[index] if index < len(chunk_metadata) else {}
+        page_num = chunk_pages[index] if index < len(chunk_pages) else 0
+        snippet, highlights = _extract_snippet_and_highlights(chunk_text, query)
+        result = {
+            "chunk": chunk_text,
+            "page": page_num,
+            "score": float(raw_score),
+            "similarity": adjusted_similarity,
+            "similarity_percent": round(adjusted_similarity * 100, 2),
+            "visual_overlay_score": round(similarity, 6),
+            "snippet": snippet,
+            "highlights": highlights,
+            "reranked": False,
+            "chunk_id": index,
+            "chunk_heading": chunk_headings[index] if index < len(chunk_headings) else "图表视觉补充",
+            "section_path": chunk_headings[index] if index < len(chunk_headings) else "图表视觉补充",
+            "chunk_type": chunk_types[index] if index < len(chunk_types) else "visual_evidence",
+            "block_type": "caption",
+        }
+        _apply_chunk_metadata(result, metadata)
+        _append_retrieval_source(result, "visual_overlay")
+        results.append(result)
+    return sorted(results, key=lambda item: item.get("similarity", 0.0), reverse=True)[:2]
+
+
+def _merge_runtime_visual_overlay_results(results: List[dict], overlay_results: List[dict]) -> List[dict]:
+    if not overlay_results:
+        return results
+    existing_chunks = {str(item.get("chunk") or "") for item in results}
+    merged = [*results]
+    for item in overlay_results:
+        if str(item.get("chunk") or "") not in existing_chunks:
+            merged.append(item)
+    return sorted(merged, key=lambda item: item.get("similarity", 0.0), reverse=True)
+
+
+def _result_similarity_for_visual_slot(item: dict) -> float | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("similarity", "combined_score", "rerank_score", "score"):
+        try:
+            value = float(item.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _is_protected_from_visual_overlay_replacement(item: dict) -> bool:
+    """Never evict precise table evidence to make room for VLM commentary."""
+    if not isinstance(item, dict):
+        return True
+    chunk_type = str(item.get("chunk_type") or item.get("block_type") or "").strip().lower()
+    return bool(
+        chunk_type in {"table", "table_row", "table_cell"}
+        or item.get("table_id")
+        or item.get("table_bundle_id")
+        or item.get("numeric_table_exact_context_row_text")
+    )
+
+
+def _retain_runtime_visual_overlay_result(
+    results: List[dict],
+    overlay_results: List[dict],
+    *,
+    top_k: int,
+) -> List[dict]:
+    """Keep at most one qualified visual observation through final retrieval cuts.
+
+    VLM evidence is deliberately not part of the persistent index, so later
+    group fusion and reranking can legitimately omit it.  Once it has passed
+    the overlay relevance threshold, retain one only when it can replace a
+    weaker, non-structured result.  It cannot displace table/row evidence.
+    """
+    if top_k <= 0:
+        return []
+    final = list(results[:top_k])
+    if any(item.get("runtime_visual_overlay") for item in final if isinstance(item, dict)):
+        return final
+
+    candidates = [
+        item for item in overlay_results
+        if isinstance(item, dict) and item.get("runtime_visual_overlay")
+    ]
+    if not candidates:
+        return final
+    candidate = max(candidates, key=lambda item: _result_similarity_for_visual_slot(item) or float("-inf"))
+    candidate_score = _result_similarity_for_visual_slot(candidate)
+    if candidate_score is None:
+        return final
+
+    existing_chunks = {str(item.get("chunk") or "") for item in final if isinstance(item, dict)}
+    if str(candidate.get("chunk") or "") in existing_chunks:
+        return final
+    if len(final) < top_k:
+        return [*final, candidate]
+
+    replaceable = [
+        (index, item, _result_similarity_for_visual_slot(item))
+        for index, item in enumerate(final)
+        if isinstance(item, dict) and not _is_protected_from_visual_overlay_replacement(item)
+    ]
+    replaceable = [row for row in replaceable if row[2] is not None]
+    if not replaceable:
+        return final
+    replace_index, _incumbent, incumbent_score = min(replaceable, key=lambda row: row[2])
+    if candidate_score < incumbent_score:
+        return final
+
+    final[replace_index] = candidate
+    return final
+
+
+_CITATION_ANCHOR_BBOX_KEYS = (
+    "bbox",
+    "page_bbox",
+    "block_bbox",
+    "table_bbox",
+    "bounding_box",
+    "full_bbox_page_pts",
+    "body_bbox_page_pts",
+)
+
+_CITATION_ANCHOR_INDEX_CACHE: OrderedDict[str, tuple[tuple[int, int], dict]] = OrderedDict()
+_CITATION_ANCHOR_INDEX_CACHE_LOCK = threading.Lock()
+_CITATION_ANCHOR_INDEX_CACHE_MAX_SIZE = 24
+
+
+def _load_cached_citation_block_index(path: Path) -> dict | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    stamp = (int(stat.st_mtime_ns), int(stat.st_size))
+    cache_key = str(path.resolve())
+
+    with _CITATION_ANCHOR_INDEX_CACHE_LOCK:
+        cached = _CITATION_ANCHOR_INDEX_CACHE.get(cache_key)
+        if cached and cached[0] == stamp:
+            _CITATION_ANCHOR_INDEX_CACHE.move_to_end(cache_key)
+            return cached[1]
+
+    try:
+        block_index = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(block_index, dict):
+        return None
+
+    with _CITATION_ANCHOR_INDEX_CACHE_LOCK:
+        _CITATION_ANCHOR_INDEX_CACHE[cache_key] = (stamp, block_index)
+        _CITATION_ANCHOR_INDEX_CACHE.move_to_end(cache_key)
+        while len(_CITATION_ANCHOR_INDEX_CACHE) > _CITATION_ANCHOR_INDEX_CACHE_MAX_SIZE:
+            _CITATION_ANCHOR_INDEX_CACHE.popitem(last=False)
+    return block_index
+
+
+def _valid_citation_bbox(value) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        bbox = [float(item) for item in value[:4]]
+    except (TypeError, ValueError):
+        return None
+    if not all(np.isfinite(item) for item in bbox):
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox
+
+
+def _citation_anchor_value(item: dict, *keys):
+    containers = [item]
+    metadata = item.get("metadata") if isinstance(item, dict) else None
+    if isinstance(metadata, dict):
+        containers.append(metadata)
+    for container in containers:
+        for key in keys:
+            value = container.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def _citation_anchor_metadata_from_result(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+
+    anchor: dict = {}
+    page_range = _citation_anchor_value(item, "page_range")
+    page = _citation_anchor_value(item, "page")
+    if page in (None, "") and isinstance(page_range, (list, tuple)) and page_range:
+        page = page_range[0]
+    try:
+        page = int(page or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if page > 0:
+        anchor["page"] = page
+        anchor["page_range"] = [page, page]
+    elif isinstance(page_range, (list, tuple)) and page_range:
+        try:
+            start = int(page_range[0])
+            end = int(page_range[1] if len(page_range) > 1 else start)
+        except (TypeError, ValueError):
+            start = end = 0
+        if start > 0 and end >= start:
+            anchor["page_range"] = [start, end]
+
+    for key in ("block_id", "chunk_id"):
+        value = _citation_anchor_value(item, key)
+        if value not in (None, ""):
+            anchor[key] = value
+
+    for key in _CITATION_ANCHOR_BBOX_KEYS:
+        bbox = _valid_citation_bbox(_citation_anchor_value(item, key))
+        if bbox:
+            anchor["bbox"] = bbox
+            break
+
+    raw_rects = _citation_anchor_value(item, "rects", "line_rects")
+    if isinstance(raw_rects, list):
+        rects = [_valid_citation_bbox(value) for value in raw_rects]
+        rects = [value for value in rects if value]
+        if rects:
+            anchor["rects"] = rects[:64]
+
+    page_size = _citation_anchor_value(item, "page_size")
+    if not isinstance(page_size, (list, tuple)) or len(page_size) < 2:
+        width = _citation_anchor_value(item, "page_width", "width_pts")
+        height = _citation_anchor_value(item, "page_height", "height_pts")
+        page_size = [width, height] if width and height else None
+    if isinstance(page_size, (list, tuple)) and len(page_size) >= 2:
+        try:
+            width = float(page_size[0])
+            height = float(page_size[1])
+        except (TypeError, ValueError):
+            width = height = 0.0
+        if np.isfinite(width) and np.isfinite(height) and width > 0 and height > 0:
+            anchor["page_size"] = [width, height]
+
+    coordinate_space = str(
+        _citation_anchor_value(item, "coordinate_space") or ""
+    ).strip()
+    if coordinate_space:
+        anchor["coordinate_space"] = coordinate_space[:80]
+    parse_generation = str(
+        _citation_anchor_value(item, "parse_generation") or ""
+    ).strip()
+    if parse_generation:
+        anchor["parse_generation"] = parse_generation[:160]
+    return anchor
+
+
+def _citation_anchor_normalize_text(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _citation_anchor_bigrams(value) -> set[str]:
+    text = _citation_anchor_normalize_text(value)
+    if len(text) < 2:
+        return {text} if text else set()
+    return {text[index:index + 2] for index in range(len(text) - 1)}
+
+
+def _citation_anchor_text_similarity(left, right) -> float:
+    left_set = _citation_anchor_bigrams(left)
+    right_set = _citation_anchor_bigrams(right)
+    if not left_set or not right_set:
+        return 0.0
+    return (2.0 * len(left_set & right_set)) / (len(left_set) + len(right_set))
+
+
+def _citation_anchor_block_score(block: dict, result: dict, query: str) -> float:
+    block_text = str(block.get("text") or "")
+    normalized_block = _citation_anchor_normalize_text(block_text)
+    if not normalized_block:
+        return -1.0
+
+    focus_text = str(
+        result.get("highlight_text")
+        or result.get("snippet")
+        or query
+        or ""
+    )
+    chunk_text = str(result.get("chunk") or result.get("text") or "")
+    normalized_focus = _citation_anchor_normalize_text(focus_text)
+    normalized_chunk = _citation_anchor_normalize_text(chunk_text)
+    score = 0.0
+    if normalized_focus:
+        if normalized_focus in normalized_block:
+            score += 180.0 + min(len(normalized_focus), 240) / 8.0
+        elif len(normalized_block) >= 8 and normalized_block in normalized_focus:
+            score += 145.0 + min(len(normalized_block), 240) / 10.0
+        score += _citation_anchor_text_similarity(normalized_block, normalized_focus) * 70.0
+    if normalized_chunk:
+        if normalized_block in normalized_chunk:
+            score += 12.0 + min(len(normalized_block), 400) / 100.0
+        elif len(normalized_chunk) >= 12 and normalized_chunk in normalized_block:
+            score += 8.0
+    if str(block.get("type") or "").lower() == "artifact":
+        score -= 100.0
+    return score
+
+
+def _select_block_line_rects(block: dict, result: dict, query: str) -> list[list[float]]:
+    anchors = [
+        anchor
+        for anchor in (block.get("line_anchors") or [])
+        if isinstance(anchor, dict)
+        and anchor.get("text")
+        and _valid_citation_bbox(anchor.get("bbox"))
+    ]
+    if not anchors:
+        return []
+
+    focus_text = str(
+        result.get("highlight_text")
+        or result.get("snippet")
+        or query
+        or ""
+    )
+    normalized_focus = _citation_anchor_normalize_text(focus_text)
+    if len(normalized_focus) < 4:
+        return []
+
+    best: tuple[float, int, int] | None = None
+    max_window = min(5, len(anchors))
+    for start in range(len(anchors)):
+        for size in range(1, max_window + 1):
+            end = min(len(anchors), start + size)
+            if end <= start:
+                continue
+            window_text = " ".join(
+                str(anchor.get("text") or "")
+                for anchor in anchors[start:end]
+            )
+            normalized_window = _citation_anchor_normalize_text(window_text)
+            if not normalized_window:
+                continue
+            score = _citation_anchor_text_similarity(
+                normalized_window,
+                normalized_focus,
+            ) * 100.0
+            if normalized_focus in normalized_window:
+                score += 120.0
+            elif normalized_window in normalized_focus:
+                score += 90.0
+            score -= max(0, size - 1) * 1.5
+            if best is None or score > best[0]:
+                best = (score, start, end)
+
+    if best is None or best[0] < 45.0:
+        return []
+    return [
+        list(anchors[index]["bbox"])[:4]
+        for index in range(best[1], best[2])
+    ]
+
+
+def _load_block_index_for_citation_anchors(
+    doc_id: str,
+    vector_store_dir: str,
+    index_meta: dict,
+) -> dict | None:
+    if not doc_id or not vector_store_dir:
+        return None
+    path = Path(vector_store_dir).parent / "block_indexes" / f"{doc_id}.json"
+    block_index = _load_cached_citation_block_index(path)
+    if not block_index:
+        return None
+
+    metadata = index_meta if isinstance(index_meta, dict) else {}
+    expected_generation = str(metadata.get("parse_generation") or "").strip()
+    expected_source_hash = str(
+        metadata.get("document_source_hash") or metadata.get("source_hash") or ""
+    ).strip()
+    if expected_generation and str(block_index.get("parse_generation") or "") != expected_generation:
+        return None
+    if expected_source_hash and str(block_index.get("document_source_hash") or "") != expected_source_hash:
+        return None
+    return block_index
+
+
+def _attach_block_index_citation_anchors(
+    doc_id: str,
+    vector_store_dir: str,
+    results: List[dict],
+    *,
+    query: str = "",
+    index_meta: Optional[dict] = None,
+) -> List[dict]:
+    block_index = _load_block_index_for_citation_anchors(
+        doc_id,
+        vector_store_dir,
+        index_meta or {},
+    )
+    if not block_index or not results:
+        return results
+
+    pages_by_number = {
+        int(page.get("page") or 0): page
+        for page in (block_index.get("pages") or [])
+        if isinstance(page, dict) and int(page.get("page") or 0) > 0
+    }
+    parse_generation = str(block_index.get("parse_generation") or "")
+    attached = 0
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        try:
+            page_number = int(result.get("page") or (result.get("page_range") or [0])[0] or 0)
+        except (TypeError, ValueError, IndexError):
+            page_number = 0
+        page = pages_by_number.get(page_number)
+        if not page:
+            continue
+
+        page_size = [
+            float(page.get("width_pts") or 612.0),
+            float(page.get("height_pts") or 792.0),
+        ]
+        current_anchor = _citation_anchor_metadata_from_result(result)
+        if current_anchor.get("bbox"):
+            result.setdefault("coordinate_space", "pdf_top_left_points")
+            result.setdefault("page_size", page_size)
+            if parse_generation:
+                result.setdefault("parse_generation", parse_generation)
+            continue
+
+        blocks = [
+            block
+            for block in (page.get("blocks") or [])
+            if isinstance(block, dict) and _valid_citation_bbox(block.get("bbox"))
+        ]
+        if not blocks:
+            continue
+
+        matched_block = None
+        requested_block_id = str(result.get("block_id") or "")
+        if requested_block_id:
+            matched_block = next(
+                (
+                    block for block in blocks
+                    if str(block.get("block_id") or "") == requested_block_id
+                ),
+                None,
+            )
+        if matched_block is None:
+            scored = [
+                (_citation_anchor_block_score(block, result, query), block)
+                for block in blocks
+            ]
+            score, candidate = max(scored, key=lambda item: item[0])
+            if score >= 28.0:
+                matched_block = candidate
+        if matched_block is None:
+            continue
+
+        result["block_id"] = matched_block.get("block_id") or result.get("block_id") or ""
+        result["bbox"] = list(matched_block.get("bbox") or [])[:4]
+        line_rects = _select_block_line_rects(matched_block, result, query)
+        if line_rects:
+            result["rects"] = line_rects
+        result["coordinate_space"] = "pdf_top_left_points"
+        result["page_size"] = page_size
+        result["page_range"] = [page_number, page_number]
+        if parse_generation:
+            result["parse_generation"] = parse_generation
+        attached += 1
+
+    if attached:
+        logger.debug("[%s] attached block citation anchors to %s retrieval results", doc_id, attached)
+    return results
+
+
 def search_document_chunks(
     doc_id: str,
     query: str,
@@ -11157,6 +12046,7 @@ def search_document_chunks(
     query_expansion_model: str = "",
     query_expansion_provider: str = "",
     query_expansion_endpoint: str = "",
+    visual_evidence: Optional[List[dict]] = None,
 ) -> Tuple[List[dict], dict]:
     """检索文档 chunk，返回检索结果和各阶段耗时。
 
@@ -11272,6 +12162,24 @@ def search_document_chunks(
         chunk_types = (chunk_types[:len(chunks)] + [""] * len(chunks))[:len(chunks)]
     if len(chunk_metadata) != len(chunks):
         chunk_metadata = _normalize_chunk_metadata_list(chunk_metadata, len(chunks))
+
+    visual_overlay_indices: List[int] = []
+    if visual_evidence and "numeric_table" not in evidence_need:
+        # The index cache owns these lists.  Copy before adding a request-local
+        # overlay so one query cannot leak visual chunks into another request.
+        chunks = list(chunks)
+        chunk_headings = list(chunk_headings)
+        chunk_pages = list(chunk_pages)
+        chunk_types = list(chunk_types)
+        chunk_metadata = [dict(item) for item in chunk_metadata]
+        visual_overlay_indices = _append_runtime_visual_evidence_chunks(
+            chunks,
+            chunk_headings,
+            chunk_pages,
+            chunk_types,
+            chunk_metadata,
+            visual_evidence,
+        )
 
     _maybe_append_runtime_structured_table_bundle_chunks(
         doc_id,
@@ -11390,7 +12298,9 @@ def search_document_chunks(
         """从 FAISS 搜索结果构建结果列表"""
         results = []
         for dist, idx in zip(D_arr[0], I_arr[0]):
-            if idx < len(chunks):
+            # FAISS pads an undersized result set with ``-1``.  Python would
+            # otherwise treat that as the last request-local overlay chunk.
+            if 0 <= idx < len(chunks):
                 chunk_text = chunks[idx]
                 metadata = chunk_metadata[idx] if idx < len(chunk_metadata) else {}
                 page_num = chunk_pages[idx] if idx < len(chunk_pages) else 0
@@ -11551,6 +12461,30 @@ def search_document_chunks(
     else:
         vector_results = primary_results
     vector_results = filter_reference_trap_results(vector_results, query, evidence_need=evidence_need)
+
+    visual_overlay_results: List[dict] = []
+    if visual_overlay_indices and query_vector is not None:
+        try:
+            t_visual = time.perf_counter()
+            visual_overlay_results = _build_runtime_visual_overlay_results(
+                chunks=chunks,
+                chunk_headings=chunk_headings,
+                chunk_pages=chunk_pages,
+                chunk_types=chunk_types,
+                chunk_metadata=chunk_metadata,
+                indices=visual_overlay_indices,
+                query=query,
+                query_vector=query_vector,
+                embedding_model_id=embedding_model_id,
+                embed_fn=embed_fn,
+                is_ip_index=is_ip_index,
+            )
+            vector_results = _merge_runtime_visual_overlay_results(vector_results, visual_overlay_results)
+            if visual_overlay_results:
+                timings["visual_overlay_ms"] = round((time.perf_counter() - t_visual) * 1000, 1)
+                logger.info("[%s] merged %s committed visual evidence candidates", doc_id, len(visual_overlay_results))
+        except Exception as exc:
+            logger.warning("[%s] visual evidence overlay skipped: %s", doc_id, exc)
 
     for item in vector_results:
         vector_chunk_set.add(item.get("chunk", ""))
@@ -11796,7 +12730,26 @@ def search_document_chunks(
         top_k=_resolve_numeric_table_effective_top_k(analysis_query, top_k, results=results),
     )
     results = _prioritize_numeric_table_results(results, analysis_query)
+    if visual_overlay_results and "numeric_table" not in evidence_need:
+        before_visual_slot = len(results)
+        results = _retain_runtime_visual_overlay_result(
+            results,
+            visual_overlay_results,
+            top_k=top_k,
+        )
+        if any(item.get("runtime_visual_overlay") for item in results if isinstance(item, dict)):
+            timings["visual_overlay_retained"] = 1
+            if before_visual_slot:
+                logger.info("[%s] retained one qualified visual evidence result through final ranking", doc_id)
 
+
+    results = _attach_block_index_citation_anchors(
+        doc_id,
+        vector_store_dir,
+        results,
+        query=analysis_query,
+        index_meta=data.get("index_meta", {}) if isinstance(data, dict) else {},
+    )
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     logger.info(f"[{doc_id}] 检索耗时: {timings}")
@@ -11981,6 +12934,7 @@ def get_relevant_context(
     query_expansion_model: str = "",
     query_expansion_provider: str = "",
     query_expansion_endpoint: str = "",
+    visual_evidence: Optional[List[dict]] = None,
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -12036,6 +12990,7 @@ def get_relevant_context(
         query_expansion_model=query_expansion_model,
         query_expansion_provider=query_expansion_provider,
         query_expansion_endpoint=query_expansion_endpoint,
+        visual_evidence=visual_evidence,
     )
 
     config = _rag_config_singleton
@@ -12068,6 +13023,13 @@ def get_relevant_context(
                 timings=timings,
             )
             if context_str is not None:
+                context_str, retrieval_meta = _append_runtime_visual_overlay_group_context(
+                    context_str,
+                    retrieval_meta,
+                    results,
+                    doc_id=doc_id,
+                    query=query,
+                )
                 retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
                 retrieval_meta["evidence_need"] = list(evidence_need)
                 retrieval_meta["search_query"] = query
@@ -12268,11 +13230,14 @@ def get_relevant_context(
 
     # 传递原始 chunks 用于结构化引文匹配
     retrieval_meta["_chunks"] = [
-        {
+        _copy_runtime_visual_provenance(entry["item"], {
             "text": entry["text"],
             "raw_text": entry["item"].get("chunk", ""),
             "page": entry["item"].get("page", 0),
-            "group_id": entry["item"].get("group_id", f"chunk-{i}"),
+            "group_id": _visual_overlay_group_id(entry["item"], f"chunk-{i}"),
+            "context_id": entry["item"].get("context_id", ""),
+            "evidence_id": entry["item"].get("evidence_id", ""),
+            "block_id": entry["item"].get("block_id", ""),
             "chunk_id": entry["item"].get("chunk_id"),
             "parent_id": entry["item"].get("parent_id"),
             "doc_id": entry["item"].get("doc_id", doc_id),
@@ -12291,20 +13256,23 @@ def get_relevant_context(
             "evidence_units": entry["item"].get("evidence_units", []),
             "cell_evidence_units": entry["item"].get("cell_evidence_units", []),
             "context_role": entry.get("context_role", ""),
-        }
+            **_citation_anchor_metadata_from_result(entry["item"]),
+        })
         for i, entry in enumerate(layered_entries)
     ]
 
     # 回退路径：chunk 即为 LLM 看到的上下文段，直接复用
     retrieval_meta["_context_segments"] = [
-        {
+        _copy_runtime_visual_provenance(entry["item"], {
             "ref": idx + 1,
-            "evidence_id": f"{doc_id}:fallback:{idx + 1}",
+            "evidence_id": entry["item"].get("evidence_id") or f"{doc_id}:fallback:{idx + 1}",
             "doc_id": doc_id,
+            "context_id": entry["item"].get("context_id", ""),
+            "block_id": entry["item"].get("block_id", ""),
             "chunk_id": entry["item"].get("chunk_id"),
             "text": entry["text"],
             "page_range": entry["item"].get("page_range") or [entry["item"].get("page", 0), entry["item"].get("page", 0)],
-            "group_id": entry["item"].get("group_id", f"chunk-{idx}"),
+            "group_id": _visual_overlay_group_id(entry["item"], f"chunk-{idx}"),
             "modality": entry["item"].get("modality") or entry["item"].get("chunk_type") or "text",
             "chunk_type": entry["item"].get("chunk_type", ""),
             "block_type": entry["item"].get("block_type", entry["item"].get("chunk_type", "")),
@@ -12322,7 +13290,8 @@ def get_relevant_context(
             "table_row_slice_kind": entry["item"].get("table_row_slice_kind", ""),
             "score": entry["item"].get("similarity", entry["item"].get("score", 0.0)),
             "context_role": entry.get("context_role", ""),
-        }
+            **_citation_anchor_metadata_from_result(entry["item"]),
+        })
         for idx, entry in enumerate(layered_entries)
     ]
 
@@ -12401,10 +13370,13 @@ def _build_fallback_citation_from_result(
     if not highlight_text:
         highlight_text = display_text[:200]
 
-    citation = {
+    citation = _copy_runtime_visual_provenance(item, {
         "ref": ref,
-        "evidence_id": item.get("evidence_unit_id") or f"chunk-{ref - 1}:{page}",
-        "group_id": item.get("group_id", f"chunk-{ref - 1}"),
+        "evidence_id": item.get("evidence_unit_id") or item.get("evidence_id") or f"chunk-{ref - 1}:{page}",
+        "context_id": item.get("context_id", ""),
+        "block_id": item.get("block_id", ""),
+        "chunk_id": item.get("chunk_id"),
+        "group_id": _visual_overlay_group_id(item, f"chunk-{ref - 1}"),
         "page_range": page_range,
         "source_text": chunk_text,
         "display_text": display_text,
@@ -12425,7 +13397,8 @@ def _build_fallback_citation_from_result(
         "evidence_units": item.get("evidence_units", []),
         "cell_evidence_units": _extract_primary_cell_evidence_units(item),
         "context_role": context_role,
-    }
+    })
+    citation.update(_citation_anchor_metadata_from_result(item))
     if has_typed_table_evidence:
         citation["context_segment_text"] = chunk_text
     return citation
@@ -12585,7 +13558,13 @@ def _build_context_with_groups(
 
     # 步骤 2：根据搜索结果对意群进行排序
     # 将搜索结果中的 chunk 映射回对应的意群，按 RRF/相关性排序
-    ranked_groups, group_best_chunks = _rank_groups_by_results(groups, results, chunks=chunks)
+    group_best_chunk_meta: dict = {}
+    ranked_groups, group_best_chunks = _rank_groups_by_results(
+        groups,
+        results,
+        chunks=chunks,
+        best_chunk_meta_out=group_best_chunk_meta,
+    )
 
     if not ranked_groups:
         logger.info(f"[{doc_id}] 无法将搜索结果映射到意群，回退到简单拼接")
@@ -12628,7 +13607,10 @@ def _build_context_with_groups(
     # 步骤 5：使用 ContextBuilder 构建格式化上下文
     context_builder = ContextBuilder()
     context_string, citations = context_builder.build_context(
-        fitted_selections, group_best_chunks=group_best_chunks, query=query
+        fitted_selections,
+        group_best_chunks=group_best_chunks,
+        group_best_chunk_meta=group_best_chunk_meta,
+        query=query,
     )
 
     # P3.4 三层上下文格式化（仅 overview/analytical 启用，多粒度时生效）
@@ -12728,10 +13710,13 @@ def _build_context_with_groups(
 
     # 传递原始 chunks 用于结构化引文匹配
     retrieval_meta["_chunks"] = [
-        {
+        _copy_runtime_visual_provenance(item, {
             "text": item.get("chunk", ""),
             "page": item.get("page", 0),
-            "group_id": item.get("group_id", ""),
+            "group_id": _visual_overlay_group_id(item, ""),
+            "context_id": item.get("context_id", ""),
+            "evidence_id": item.get("evidence_id", ""),
+            "block_id": item.get("block_id", ""),
             "chunk_id": item.get("chunk_id"),
             "parent_id": item.get("parent_id"),
             "doc_id": item.get("doc_id", doc_id),
@@ -12739,18 +13724,25 @@ def _build_context_with_groups(
             "block_type": item.get("block_type", item.get("chunk_type", "")),
             "chunk_heading": item.get("chunk_heading", ""),
             "section_path": item.get("section_path", item.get("chunk_heading", "")),
-        }
+            **_citation_anchor_metadata_from_result(item),
+        })
         for item in results
     ]
 
-    # 传递意群级上下文段（LLM 实际看到的文本），用于精确引文匹配
+    # 传递意群级上下文段（LLM 实际看到的文本），并保留最佳 chunk 的定位锚点。
+    citation_by_group = {
+        citation.get("group_id"): citation
+        for citation in citations
+        if isinstance(citation, dict) and citation.get("group_id")
+    }
     _context_segments = []
     for idx, selection in enumerate(fitted_selections):
         group = selection["group"]
         granularity = selection.get("granularity", "full")
         text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}.get(granularity, "full_text")
         text = getattr(group, text_attr, "")
-        _context_segments.append({
+        citation = citation_by_group.get(group.group_id, {})
+        segment = {
             "ref": idx + 1,
             "evidence_id": f"{doc_id}:group:{idx + 1}",
             "doc_id": doc_id,
@@ -12760,7 +13752,9 @@ def _build_context_with_groups(
             "group_id": group.group_id,
             "modality": "text",
             "score": selection.get("score", 0.0),
-        })
+        }
+        segment.update(_citation_anchor_metadata_from_result(citation))
+        _context_segments.append(segment)
     retrieval_meta["_context_segments"] = _context_segments
 
     logger.info(
@@ -12777,6 +13771,7 @@ def _rank_groups_by_results(
     groups: list,
     results: List[dict],
     chunks: List[str] = None,
+    best_chunk_meta_out: Optional[dict] = None,
 ) -> tuple:
     """根据搜索结果对语义意群进行排序
 
@@ -12787,6 +13782,7 @@ def _rank_groups_by_results(
         groups: 语义意群列表
         results: search_document_chunks 返回的搜索结果
         chunks: 文档的所有文本分块列表（可选），用于构建 chunk_text -> chunk_index 映射
+        best_chunk_meta_out: 可选输出映射，保留 group_id 对应最佳检索结果的定位元数据
 
     Returns:
         (ranked_groups, group_best_chunks) 元组
@@ -12794,6 +13790,8 @@ def _rank_groups_by_results(
         - group_best_chunks: dict，group_id -> 最佳匹配的 chunk 文本（用于精确引用高亮）
     """
     if not groups or not results:
+        if isinstance(best_chunk_meta_out, dict):
+            best_chunk_meta_out.clear()
         return [], {}
 
     # 构建 chunk_index → group 的反向映射（基于意群的 chunk_indices 字段）
@@ -12811,6 +13809,7 @@ def _rank_groups_by_results(
     group_scores = {}  # group_id -> 最佳排名（越小越好）
     group_similarity = {}  # group_id -> 最佳相似度分数
     group_best_chunks = {}  # group_id -> 最佳匹配的 chunk 文本（用于精确引用高亮）
+    group_best_results = {}  # group_id -> 最佳匹配的原始检索结果
 
     for rank, result in enumerate(results):
         chunk_text = result.get("chunk", "")
@@ -12841,6 +13840,7 @@ def _rank_groups_by_results(
                 group_similarity[gid] = similarity
                 # 记录该意群最佳匹配的 chunk 文本（相似度最高的那个）
                 group_best_chunks[gid] = chunk_text
+                group_best_results[gid] = result
             else:
                 # 保留最高排名（最小的 rank 值）
                 if rank < group_scores[gid]:
@@ -12849,6 +13849,7 @@ def _rank_groups_by_results(
                 if similarity > group_similarity[gid]:
                     group_similarity[gid] = similarity
                     group_best_chunks[gid] = chunk_text
+                    group_best_results[gid] = result
 
     # 过滤掉相关性过低的意群
     # 策略：如果最佳意群的相似度 > 0.5，则过滤掉相似度低于最佳值 50% 的意群
@@ -12870,6 +13871,10 @@ def _rank_groups_by_results(
             group_scores = {gid: r for gid, r in group_scores.items() if gid in filtered_ids}
             # 同步清理 group_best_chunks
             group_best_chunks = {gid: t for gid, t in group_best_chunks.items() if gid in filtered_ids}
+            group_best_results = {
+                gid: item for gid, item in group_best_results.items()
+                if gid in filtered_ids
+            }
 
     # 按排名排序意群
     sorted_group_ids = sorted(group_scores.keys(), key=lambda gid: group_scores[gid])
@@ -12878,5 +13883,11 @@ def _rank_groups_by_results(
     group_map = {g.group_id: g for g in groups}
 
     ranked_groups = [group_map[gid] for gid in sorted_group_ids if gid in group_map]
+    if isinstance(best_chunk_meta_out, dict):
+        best_chunk_meta_out.clear()
+        best_chunk_meta_out.update({
+            gid: _citation_anchor_metadata_from_result(item)
+            for gid, item in group_best_results.items()
+        })
 
     return ranked_groups, group_best_chunks

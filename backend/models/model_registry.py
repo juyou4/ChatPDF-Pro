@@ -51,16 +51,6 @@ EMBEDDING_MODELS = {
         "price": "CNY 0.000514/1K tokens",
         "description": "Qwen3-Embedding based multilingual embedding model"
     },
-    "text-embedding-v3": {
-        "name": "Alibaba: text-embedding-v3",
-        "provider": "openai",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "embedding_endpoint": "/embeddings",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "$0.007/M tokens",
-        "description": "Chinese optimized, cheapest"
-    },
     "qwen3-rerank": {
         "name": "Alibaba: qwen3-rerank",
         "provider": "openai",
@@ -98,17 +88,6 @@ EMBEDDING_MODELS = {
         "max_tokens": 8192,
         "price": "Paid",
         "description": "High performance BGE-M3"
-    },
-    # Moonshot（moonshot-v1-8k 是 chat 模型，已移除；替换为正确的 embedding 模型）
-    "moonshot-embedding-v1": {
-        "name": "Moonshot: moonshot-embedding-v1",
-        "provider": "openai",
-        "base_url": "https://api.moonshot.cn/v1",
-        "embedding_endpoint": "/embeddings",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "Paid",
-        "description": "Moonshot AI 嵌入模型"
     },
     # Zhipu
     "embedding-3": {
@@ -168,48 +147,37 @@ EMBEDDING_MODELS = {
         "price": "Paid",
         "description": "Qwen3 embedding 0.6B, lightweight"
     },
-    # SiliconFlow - Qwen Embedding 8B（历史兼容键名，实际请求自动映射到 Qwen3）
-    "Qwen/Qwen-Embedding-8B": {
-        "name": "SiliconFlow: Qwen-Embedding-8B",
-        "provider": "openai",
-        "base_url": "https://api.siliconflow.cn/v1",
-        "embedding_endpoint": "/embeddings",
-        "model_name": "Qwen/Qwen3-Embedding-8B",
-        "dimension": 1024,
-        "max_tokens": 8192,
-        "price": "Paid",
-        "description": "历史模型 ID（已兼容映射到 Qwen3-Embedding-8B）"
-    },
-    # MiniMax（保留 embo-01 以兼容旧数据）
+    # MiniMax - 官方 Embeddings API
     "embo-01": {
         "name": "MiniMax: embo-01",
         "provider": "openai",
+        "provider_id": "minimax",
+        "type": "embedding",
         "base_url": "https://api.minimax.chat/v1",
-        "dimension": 1536,
+        "embedding_endpoint": "/embeddings",
         "max_tokens": 4096,
         "price": "Paid",
-        "description": "MiniMax embedding (旧版模型 ID，保留兼容)"
+        "description": "MiniMax official text embedding model"
     },
-    # MiniMax - 与前端 systemModels.ts 同步的模型 ID
-    "minimax-embedding-v2": {
-        "name": "MiniMax: minimax-embedding-v2",
+    # Gemini OpenAI compatibility embeddings
+    "gemini-embedding-2-preview": {
+        "name": "Gemini: gemini-embedding-2-preview",
         "provider": "openai",
-        "base_url": "https://api.minimax.chat/v1",
+        "provider_id": "gemini",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "embedding_endpoint": "/embeddings",
-        "dimension": 1024,
         "max_tokens": 8192,
-        "price": "Paid",
-        "description": "MiniMax 嵌入模型"
+        "price": "Preview",
+        "description": "Google multimodal embedding preview model"
     },
-    # DeepSeek - 与前端 systemModels.ts 同步
-    "deepseek-embedding-v1": {
-        "name": "DeepSeek: deepseek-embedding-v1",
+    "gemini-embedding-001": {
+        "name": "Gemini: gemini-embedding-001",
         "provider": "openai",
-        "base_url": "https://api.deepseek.com/v1",
+        "provider_id": "gemini",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "embedding_endpoint": "/embeddings",
-        "dimension": 1024,
-        "max_tokens": 8192,
+        "max_tokens": 2048,
         "price": "Paid",
-        "description": "DeepSeek 嵌入模型"
+        "description": "Google stable text embedding model"
     }
 }

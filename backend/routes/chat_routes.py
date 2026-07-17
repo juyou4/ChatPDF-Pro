@@ -5,12 +5,15 @@ import os
 import pickle
 from typing import Optional, List
 import json
+import math
 import logging
 import re
 import threading
 import time
 import uuid
 import hashlib
+from copy import deepcopy
+from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -45,6 +48,15 @@ from services.rag_config import (
     request_override_scope,
 )
 from services.table_visual_verifier import maybe_verify_numeric_table_visual
+from services.visual_document_enrichment_service import enrich_referenced_figure
+from services.visual_model_service import resolve_visual_enrichment_policy
+from services.visual_supplement_service import committed_visual_evidence_for_document
+from services.block_index_service import load_block_index
+from services.modal_asset_service import (
+    build_modal_asset_index,
+    looks_like_figure_query,
+)
+from services.modal_visual_evidence_service import analyze_modal_visual_evidence
 from services.document_parse_state import is_parse_prepared, read_parse_manifest
 from services.semantic_group_store import active_manifest_path, semantic_group_paths
 from services.citation_service import (
@@ -550,22 +562,52 @@ def _get_project_root() -> Path:
 
 
 def _resolve_chat_document_pdf_path(doc: dict) -> Path | None:
-    pdf_url = (doc or {}).get("pdf_url") or ""
-    if not pdf_url:
+    raw_url = str((doc or {}).get("pdf_url") or "").strip()
+    if not raw_url or "\x00" in raw_url:
         return None
-    pdf_name = pdf_url.split("/")[-1]
-    if not pdf_name:
+    try:
+        decoded_path = unquote(urlsplit(raw_url).path).replace("\\", "/")
+    except (TypeError, ValueError):
+        return None
+    if any(part in {".", ".."} for part in decoded_path.split("/")):
+        return None
+    pdf_name = decoded_path.rsplit("/", 1)[-1].strip()
+    if not pdf_name or pdf_name in {".", ".."} or not pdf_name.lower().endswith(".pdf"):
         return None
     data_dir = Path(runtime.data_dir) if getattr(runtime, "data_dir", None) else _get_project_root() / "data"
-    candidates = [
-        data_dir / "uploads" / pdf_name,
-        _get_project_root() / "backend" / "uploads" / pdf_name,
-        _get_project_root() / "uploads" / pdf_name,
+    roots = [
+        data_dir / "uploads",
+        _get_project_root() / "backend" / "uploads",
+        _get_project_root() / "uploads",
     ]
-    for candidate in candidates:
-        if candidate.exists():
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+            candidate = (resolved_root / pdf_name).resolve()
+            candidate.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate.is_file():
             return candidate
     return None
+
+
+def _chat_pdf_matches_source_hash(pdf_path: Path, source_hash: str) -> bool:
+    """Fail closed unless the resolved upload still matches its parse bytes."""
+    expected = str(source_hash or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return False
+    digest = hashlib.sha256()
+    try:
+        with pdf_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest() == expected
 
 
 def _normalize_doc_alignment_text(text: str, limit: int = 240) -> str:
@@ -778,6 +820,83 @@ def _load_doc_semantic_groups_for_agent(
     return []
 
 
+def _load_agent_modal_asset_index(
+    doc_id: str,
+    *,
+    parse_manifest: dict,
+    visual_evidence: list[dict],
+) -> dict:
+    """仅加载绑定到当前解析身份的请求级模态资产。"""
+    if not isinstance(parse_manifest, dict):
+        return {}
+    try:
+        block_index = load_block_index(runtime.data_dir, doc_id)
+    except Exception as exc:
+        logger.warning("[AgentDoc] 加载 block index 失败，禁用模态资产: doc_id=%s error=%s", doc_id, exc)
+        return {}
+    if not isinstance(block_index, dict):
+        return {}
+
+    metadata = parse_manifest.get("metadata") if isinstance(parse_manifest.get("metadata"), dict) else {}
+    if not metadata.get("legacy_inferred"):
+        expected_identity = (
+            str(parse_manifest.get("resolved_route") or "").strip().lower(),
+            str(parse_manifest.get("generation") or "").strip(),
+            str(parse_manifest.get("source_hash") or "").strip(),
+        )
+        block_identity = (
+            str(block_index.get("parser_route") or "").strip().lower(),
+            str(block_index.get("parse_generation") or "").strip(),
+            str(block_index.get("document_source_hash") or "").strip(),
+        )
+        if not all(expected_identity) or block_identity != expected_identity:
+            logger.warning(
+                "[AgentDoc] block index 与当前解析身份不匹配，禁用模态资产: doc_id=%s",
+                doc_id,
+            )
+            return {}
+
+    committed_revisions = {
+        str(item.get("visual_supplement_revision") or "").strip()
+        for item in visual_evidence
+        if isinstance(item, dict)
+        and str(item.get("visual_supplement_revision") or "").strip()
+    }
+    committed_revision = next(iter(committed_revisions)) if len(committed_revisions) == 1 else ""
+    safe_visual_evidence = list(visual_evidence) if len(committed_revisions) <= 1 else []
+    index_revision = str(block_index.get("visual_supplement_revision") or "").strip()
+    if index_revision != committed_revision:
+        # 视觉发布先写 staged block index，再提交文档 marker。读取侧只允许
+        # 暴露 marker 已确认的 revision，同时保留基础 Figure/Table 资产。
+        block_index = deepcopy(block_index)
+        block_index["visual_supplement_revision"] = committed_revision
+        for page in block_index.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            page["blocks"] = [
+                block
+                for block in (page.get("blocks") or [])
+                if not (
+                    isinstance(block, dict)
+                    and (
+                        block.get("visual_enhancement")
+                        or str(block.get("block_type") or "").strip().lower()
+                        == "visual_enrichment"
+                    )
+                )
+            ]
+
+    try:
+        modal_asset_index = build_modal_asset_index(
+            block_index=block_index,
+            visual_evidence=safe_visual_evidence,
+        )
+    except Exception as exc:
+        logger.warning("[AgentDoc] 构建模态资产索引失败: doc_id=%s error=%s", doc_id, exc)
+        return {}
+    return modal_asset_index if isinstance(modal_asset_index, dict) else {}
+
+
 def _build_agent_doc_context(
     doc_id: str,
     doc: dict,
@@ -795,7 +914,15 @@ def _build_agent_doc_context(
     pages = data.get("pages", []) or []
     chunks = _load_doc_chunks_for_agent(doc_id, vector_store_dir, full_text)
     chunk_metadata = _load_doc_chunk_metadata_for_agent(doc_id, vector_store_dir, chunks, full_text)
+    # Read once when the Agent request begins. The helper rejects MinerU,
+    # uncommitted, and parse-identity-mismatched visual supplements.
+    visual_evidence = committed_visual_evidence_for_document(doc)
     parse_manifest = read_parse_manifest(doc, doc_id=doc_id)
+    modal_asset_index = _load_agent_modal_asset_index(
+        doc_id,
+        parse_manifest=parse_manifest,
+        visual_evidence=visual_evidence,
+    )
     semantic_groups = _load_doc_semantic_groups_for_agent(
         doc_id,
         full_text,
@@ -815,6 +942,8 @@ def _build_agent_doc_context(
         rerank_provider=rerank_provider or "",
         rerank_api_key=rerank_api_key or "",
         rerank_endpoint=rerank_endpoint or "",
+        visual_evidence=visual_evidence,
+        modal_asset_index=modal_asset_index,
     )
 
 
@@ -1639,6 +1768,7 @@ def _build_agent_detail_citations(
         citation = {
             key: detail[key]
             for key in (
+                "block_id",
                 "chunk_id",
                 "child_chunk_id",
                 "parent_id",
@@ -1654,6 +1784,22 @@ def _build_agent_detail_citations(
                 "numeric_table_exact_context_header",
                 "table_row_evidence",
                 "table_row_slice_kind",
+                "visual_evidence_id",
+                "asset_id",
+                "analyzed_asset_id",
+                "visual_enhancement",
+                "visual_source",
+                "visual_supplement_revision",
+                "figure_id",
+                "bbox",
+                "figure_bbox",
+                "visual_model",
+                "runtime_visual_overlay",
+                "runtime_visual_analysis",
+                "purpose",
+                "prompt_version",
+                "parse_generation",
+                "confidence",
             )
             if detail.get(key) not in (None, "")
         }
@@ -2476,6 +2622,11 @@ async def _maybe_add_numeric_table_visual_verification(
 
     try:
         visual_provider, visual_model, visual_api_key, visual_endpoint = _resolve_numeric_table_visual_model_params(request)
+        visual_policy = _resolve_request_visual_policy(request)
+        visual_config = visual_policy.select(
+            risk_level="medium",
+            purpose="numeric_table_verification",
+        )
         visual_segment, visual_diag = await maybe_verify_numeric_table_visual(
             query=query or request.question,
             doc_id=request.doc_id,
@@ -2488,6 +2639,8 @@ async def _maybe_add_numeric_table_visual_verification(
             endpoint=visual_endpoint,
             custom_params=request.custom_params,
             background=_should_background_numeric_table_visual_verification(request),
+            visual_config=visual_config,
+            visual_policy=visual_policy,
         )
     except Exception as exc:
         visual_segment = {}
@@ -2525,6 +2678,187 @@ async def _maybe_add_numeric_table_visual_verification(
     retrieval_meta["citations"] = [visual_citation, *renumbered_existing]
 
 
+async def _maybe_add_explicit_figure_visual_enrichment(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    retrieval_meta: dict,
+    query: str,
+) -> None:
+    """在明确图号缺少文本证据时，按需追加一个可追踪的视觉证据段。"""
+    if not isinstance(retrieval_meta, dict):
+        return
+    diagnostics = retrieval_meta.setdefault("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        retrieval_meta["diagnostics"] = diagnostics
+
+    segments = _build_response_context_segments({
+        **retrieval_meta,
+        "search_query": query or retrieval_meta.get("search_query", ""),
+    })
+    if any(
+        isinstance(segment, dict)
+        and (
+            segment.get("runtime_visual_analysis")
+            or str(segment.get("retrieval_type") or "").strip() == "agent_visual_analysis"
+        )
+        for segment in segments
+    ):
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "skipped_reason": "agent_visual_analysis_present",
+        }
+        return
+    if retrieval_meta.get("agent_mode"):
+        # Agent visual evidence is request-local and asset-bound. Falling back
+        # to the historical enrichment path here could publish a result after
+        # an Agent analysis failure and silently change the document index.
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "skipped_reason": "agent_visual_pipeline_request_local",
+        }
+        return
+    text_evidence = "\n".join(
+        str(segment.get("text") or segment.get("chunk") or "")
+        for segment in segments
+        if isinstance(segment, dict)
+        and str(segment.get("block_type") or "").strip().lower() != "visual_enrichment"
+        and str(segment.get("source") or "").strip().lower() != "visual_vlm"
+        and not segment.get("visual_evidence_id")
+    )
+    try:
+        result = await enrich_referenced_figure(
+            doc_id=request.doc_id,
+            doc=doc,
+            pdf_path=_resolve_chat_document_pdf_path(doc),
+            query=query or request.question,
+            text_evidence=text_evidence,
+            visual_policy=_resolve_request_visual_policy(request),
+        )
+    except Exception as exc:
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "error": type(exc).__name__,
+        }
+        logger.debug("[FigureVisual] 按需图表分析失败: %s", exc)
+        return
+
+    figure_diag = dict(result.get("diagnostics") or {})
+    diagnostics["figure_visual_enrichment"] = figure_diag
+    item = result.get("item")
+    if not isinstance(item, dict):
+        return
+
+    reused_committed = bool(figure_diag.get("reused_committed"))
+    if reused_committed:
+        figure_diag["publication"] = {
+            "published": True,
+            "reused": True,
+            "revision": str(
+                figure_diag.get("visual_supplement_revision")
+                or item.get("visual_supplement_revision")
+                or ""
+            ),
+        }
+    elif str(result.get("route") or "").lower() == "local":
+        try:
+            from routes.document_routes import publish_visual_supplements
+
+            publication = publish_visual_supplements(
+                request.doc_id,
+                parse_generation=str(result.get("parse_generation") or ""),
+                document_source_hash=str(result.get("document_source_hash") or ""),
+                visual_model_identity=str(result.get("visual_model_identity") or ""),
+                items=[item],
+            )
+            figure_diag["publication"] = {
+                "published": bool(publication.get("published")),
+                "revision": str(publication.get("revision") or ""),
+            }
+        except Exception as exc:
+            # 当前请求仍可使用已经生成的局部证据；持久化失败不应中断回答。
+            figure_diag["publication"] = {
+                "published": False,
+                "error": type(exc).__name__,
+            }
+
+    evidence_id = str(item.get("id") or "").strip()
+    page = int(item.get("page") or 0)
+    segment = {
+        "text": str(item.get("text") or item.get("analysis") or "").strip(),
+        "page": page,
+        "page_range": [page, page] if page > 0 else [],
+        "bbox": list(item.get("bbox") or [])[:4],
+        "source": "visual_vlm",
+        "visual_source": "visual_vlm",
+        "visual_enhancement": True,
+        "segment_role": "figure_visual_enrichment",
+        "chunk_type": "visual_evidence",
+        "block_type": str(item.get("block_type") or "visual_enrichment"),
+        "block_id": evidence_id,
+        "evidence_id": evidence_id,
+        "visual_evidence_id": evidence_id,
+        "figure_id": str(item.get("figure_id") or ""),
+        "figure_bbox": list(item.get("bbox") or [])[:4],
+        "visual_model": dict(item.get("visual_model") or {}),
+        "visual_supplement_revision": str(
+            (figure_diag.get("publication") or {}).get("revision") or ""
+        ),
+    }
+    if not segment["text"] or segment["page"] <= 0:
+        return
+    retrieval_meta["_context_segments"] = _merge_response_context_segments(
+        [segment],
+        retrieval_meta.get("_context_segments") or [],
+    )
+
+    existing_citations = [
+        citation for citation in (retrieval_meta.get("citations") or [])
+        if isinstance(citation, dict)
+        and str(citation.get("visual_evidence_id") or citation.get("block_id") or "") != evidence_id
+    ]
+    visual_citation = _segment_to_recovery_citation(segment, 1)
+    renumbered = []
+    for index, citation in enumerate(existing_citations, start=2):
+        updated = dict(citation)
+        updated["ref"] = index
+        renumbered.append(updated)
+    retrieval_meta["citations"] = [visual_citation, *renumbered]
+
+
+def _sync_figure_visual_prompt_context(context: str, retrieval_meta: dict) -> str:
+    """确保按需图表证据在答案生成前进入 prompt，而不是只留在诊断信息。"""
+    segments = [
+        segment
+        for segment in (retrieval_meta.get("_context_segments") or [])
+        if isinstance(segment, dict)
+        and str(segment.get("segment_role") or "") == "figure_visual_enrichment"
+    ] if isinstance(retrieval_meta, dict) else []
+    if not segments:
+        return context
+    additions = []
+    for segment in segments:
+        page_range = segment.get("page_range") or []
+        try:
+            page = int(
+                segment.get("page")
+                or (page_range[0] if isinstance(page_range, (list, tuple)) and page_range else 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            page = 0
+        text = str(segment.get("text") or "").strip()
+        if text:
+            additions.append(f"[图表视觉补充][第{page}页]\n{text}")
+    if not additions:
+        return context
+    supplement = "\n\n".join(additions)
+    if supplement in str(context or ""):
+        return context
+    return f"{str(context or '').rstrip()}\n\n{supplement}\n\n"
+
+
 def _resolve_numeric_table_visual_model_params(request: ChatRequest) -> tuple[str, str, str, str]:
     params = request.custom_params if isinstance(request.custom_params, dict) else {}
 
@@ -2536,28 +2870,165 @@ def _resolve_numeric_table_visual_model_params(request: ChatRequest) -> tuple[st
         return ""
 
     provider = (
-        _first("numeric_table_visual_provider", "table_visual_provider", "visual_table_provider")
+        _first("visual_provider", "numeric_table_visual_provider", "table_visual_provider", "visual_table_provider")
         or os.getenv("CHATPDF_TABLE_VISUAL_PROVIDER", "")
         or request.api_provider
     )
     model = (
-        _first("numeric_table_visual_model", "table_visual_model", "visual_table_model")
+        _first("visual_model", "numeric_table_visual_model", "table_visual_model", "visual_table_model")
         or os.getenv("CHATPDF_TABLE_VISUAL_MODEL", "")
         or request.model
     )
     api_key = (
-        _first("numeric_table_visual_api_key", "table_visual_api_key", "visual_table_api_key")
+        _first("visual_api_key", "numeric_table_visual_api_key", "table_visual_api_key", "visual_table_api_key")
         or os.getenv("CHATPDF_TABLE_VISUAL_API_KEY", "")
         or request.api_key
         or ""
     )
     api_host = (
-        _first("numeric_table_visual_api_host", "table_visual_api_host", "visual_table_api_host")
+        _first("visual_api_host", "numeric_table_visual_api_host", "table_visual_api_host", "visual_table_api_host")
         or os.getenv("CHATPDF_TABLE_VISUAL_API_HOST", "")
         or request.api_host
         or ""
     )
     return provider, model, api_key, _get_provider_endpoint(provider, api_host)
+
+
+def _has_explicit_visual_model_params(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    return any(
+        params.get(key) not in (None, "")
+        for key in (
+            "visual_provider",
+            "visual_model",
+            "numeric_table_visual_provider",
+            "numeric_table_visual_model",
+            "table_visual_provider",
+            "table_visual_model",
+            "visual_table_provider",
+            "visual_table_model",
+        )
+    ) or bool(os.getenv("CHATPDF_TABLE_VISUAL_PROVIDER", "") or os.getenv("CHATPDF_TABLE_VISUAL_MODEL", ""))
+
+
+def _resolve_numeric_table_local_visual_model_params(request: ChatRequest) -> tuple[str, str, str, str]:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+
+    def _value(key: str) -> str:
+        value = params.get(key)
+        return str(value).strip() if value not in (None, "") else ""
+
+    provider = _value("local_visual_provider")
+    model = _value("local_visual_model")
+    api_key = _value("local_visual_api_key")
+    api_host = _value("local_visual_api_host")
+    return provider, model, api_key, _get_provider_endpoint(provider, api_host) if provider else ""
+
+
+def _resolve_visual_enrichment_strategy(request: ChatRequest) -> str:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    value = str(params.get("visual_strategy") or "balanced").strip().lower()
+    return value if value in {"privacy", "balanced", "quality"} else "balanced"
+
+
+def _resolve_numeric_table_visual_enabled(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    for key in ("visual_enabled", "numeric_table_visual_enabled", "table_visual_enabled"):
+        if key not in params:
+            continue
+        value = params.get(key)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return bool(value)
+    return True
+
+
+def _resolve_request_visual_policy(request: ChatRequest):
+    visual_provider, visual_model, visual_api_key, visual_endpoint = _resolve_numeric_table_visual_model_params(request)
+    local_provider, local_model, local_api_key, local_endpoint = _resolve_numeric_table_local_visual_model_params(request)
+    has_explicit_visual = _has_explicit_visual_model_params(request)
+    return resolve_visual_enrichment_policy(
+        strategy=_resolve_visual_enrichment_strategy(request),
+        primary_provider=request.api_provider,
+        primary_model=request.model,
+        primary_api_key=request.api_key or "",
+        primary_endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+        visual_provider=visual_provider if has_explicit_visual else "",
+        visual_model=visual_model if has_explicit_visual else "",
+        visual_api_key=visual_api_key if has_explicit_visual else "",
+        visual_endpoint=visual_endpoint if has_explicit_visual else "",
+        visual_enabled=_resolve_numeric_table_visual_enabled(request),
+        local_visual_provider=local_provider,
+        local_visual_model=local_model,
+        local_visual_api_key=local_api_key,
+        local_visual_endpoint=local_endpoint,
+    )
+
+
+def _build_agent_visual_evidence_analyzer(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    modal_asset_index: dict,
+):
+    """构建仅属于本次 Agent 请求的视觉取证闭包。"""
+    assets = modal_asset_index.get("assets") if isinstance(modal_asset_index, dict) else None
+    index_route = str(
+        modal_asset_index.get("route") or modal_asset_index.get("parser_route") or ""
+    ).strip().lower()
+    index_generation = str(
+        modal_asset_index.get("generation")
+        or modal_asset_index.get("parse_generation")
+        or ""
+    ).strip()
+    index_source_hash = str(
+        modal_asset_index.get("source_hash")
+        or modal_asset_index.get("document_source_hash")
+        or ""
+    ).strip().lower()
+    if (
+        index_route not in {"local", "mineru"}
+        or not index_generation
+        or not re.fullmatch(r"[0-9a-f]{64}", index_source_hash)
+        or not any(
+            key in modal_asset_index
+            for key in ("revision", "visual_supplement_revision")
+        )
+    ):
+        return None
+    if not any(
+        isinstance(asset, dict)
+        and str(asset.get("kind") or "").strip().lower() == "figure"
+        and _coerce_positive_int(asset.get("page"), 0) > 0
+        and isinstance(asset.get("bbox"), (list, tuple))
+        and len(asset.get("bbox") or []) >= 4
+        for asset in (assets if isinstance(assets, list) else [])
+    ):
+        return None
+    pdf_path = _resolve_chat_document_pdf_path(doc)
+    if not pdf_path or not _chat_pdf_matches_source_hash(pdf_path, index_source_hash):
+        return None
+    visual_policy = _resolve_request_visual_policy(request)
+    selected_model = visual_policy.select(
+        risk_level="medium",
+        purpose="modal_visual_evidence",
+    )
+    if not selected_model.can_call:
+        return None
+    index_snapshot = deepcopy(modal_asset_index)
+
+    async def analyzer(*, asset: dict, question: str):
+        asset_id = str((asset or {}).get("asset_id") or "").strip()
+        return await analyze_modal_visual_evidence(
+            doc_id=request.doc_id,
+            modal_asset_index=index_snapshot,
+            asset_id=asset_id,
+            question=question,
+            pdf_path=pdf_path,
+            visual_policy=visual_policy,
+        )
+
+    return analyzer
 
 
 def _should_background_numeric_table_visual_verification(request: ChatRequest) -> bool:
@@ -2614,7 +3085,7 @@ def _is_protected_evidence_selector_segment(segment: dict, evidence_need: set[st
     if not isinstance(segment, dict):
         return False
     role = str(segment.get("segment_role") or "").strip().lower()
-    if role == "numeric_table_execution":
+    if role in {"numeric_table_execution", "figure_visual_enrichment"}:
         return True
     chunk_type = str(segment.get("chunk_type") or segment.get("block_type") or "").strip().lower()
     if chunk_type in {"table_row", "table_cell"}:
@@ -4481,6 +4952,121 @@ def _build_focused_citation_context_text(citation: dict, window_chars: int = 900
     return highlight
 
 
+_PUBLIC_SENSITIVE_VISUAL_METADATA_RE = re.compile(
+    r"(?:https?://|file://|^[A-Za-z]:[\\/]|^\\\\|\b(?:bearer\s+|sk-)[A-Za-z0-9._-]{8,}|[\\/][^\s]*\.pdf(?:$|[?#]))",
+    re.IGNORECASE,
+)
+_PUBLIC_VISUAL_MODEL_TEXT_FIELDS = {"identity", "provider", "model", "source"}
+_PUBLIC_VISUAL_MODEL_BOOL_FIELDS = {"enabled", "available", "local_execution"}
+_PUBLIC_VISUAL_TEXT_LIMITS = {
+    "visual_evidence_id": 240,
+    "asset_id": 240,
+    "analyzed_asset_id": 240,
+    "visual_source": 80,
+    "visual_supplement_revision": 160,
+    "figure_id": 240,
+    "purpose": 120,
+    "prompt_version": 160,
+    "parse_generation": 160,
+}
+
+
+def _safe_public_visual_metadata_text(value, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or _PUBLIC_SENSITIVE_VISUAL_METADATA_RE.search(text):
+        return ""
+    return text[: max(0, int(limit))]
+
+
+def _safe_public_visual_number(value, *, minimum: float, maximum: float):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return max(float(minimum), min(float(maximum), number))
+
+
+def _sanitize_public_visual_model(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    public = {}
+    for key, item in value.items():
+        normalized_key = str(key)
+        if normalized_key in _PUBLIC_VISUAL_MODEL_TEXT_FIELDS:
+            text = _safe_public_visual_metadata_text(item, 240)
+            if text:
+                public[normalized_key] = text
+            continue
+        if normalized_key not in _PUBLIC_VISUAL_MODEL_BOOL_FIELDS:
+            continue
+        if isinstance(item, bool):
+            public[normalized_key] = item
+        elif isinstance(item, (int, float)) and item in (0, 1):
+            public[normalized_key] = bool(item)
+        elif isinstance(item, str) and item.strip().lower() in {
+            "true", "false", "1", "0", "yes", "no", "on", "off"
+        }:
+            public[normalized_key] = item.strip().lower() in {
+                "true", "1", "yes", "on"
+            }
+    return public
+
+
+def _sanitize_public_visual_field(key: str, value):
+    if key == "visual_model":
+        return _sanitize_public_visual_model(value)
+    if key == "figure_bbox":
+        return _normalize_public_bbox(value)
+    if key == "confidence":
+        return _safe_public_visual_number(value, minimum=0.0, maximum=1.0)
+    if key in {
+        "visual_enhancement",
+        "runtime_visual_overlay",
+        "runtime_visual_analysis",
+    }:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        return None
+    limit = _PUBLIC_VISUAL_TEXT_LIMITS.get(key)
+    if limit is not None:
+        return _safe_public_visual_metadata_text(value, limit)
+    return None
+
+
+_VISUAL_PROVENANCE_FIELDS = (
+    "visual_evidence_id",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
+)
+
+
+def _copy_visual_provenance(record: dict, target: dict) -> dict:
+    """Keep committed VLM provenance through citation/segment reshaping."""
+    if not isinstance(record, dict) or not isinstance(target, dict):
+        return target
+    for key in _VISUAL_PROVENANCE_FIELDS:
+        value = _sanitize_public_visual_field(key, record.get(key))
+        if value not in (None, "", [], {}):
+            target[key] = value
+    return target
+
+
 def _build_context_segments_from_citations(citations: list[dict], *, query: str = "") -> list[dict]:
     segments = []
     hints = _query_rewriter.extract_numeric_table_hints(query) if query else {}
@@ -4498,7 +5084,7 @@ def _build_context_segments_from_citations(citations: list[dict], *, query: str 
         if _is_internal_context_map_segment({"text": text}):
             continue
         formula_score = _calc_formula_citation_anchor_score(text)
-        segments.append({
+        segments.append(_copy_visual_provenance(c, {
             "ref": ref,
             "text": text,
             "page_range": c.get("page_range") or [],
@@ -4533,7 +5119,7 @@ def _build_context_segments_from_citations(citations: list[dict], *, query: str 
             "surrounding_context": _build_citation_surrounding_context(c, primary_text=text),
             "synthetic_description": bool(c.get("synthetic_description") or c.get("is_synthetic_description")),
             "source_ref": ref,
-        })
+        }))
         for row_idx, row_text in enumerate(c.get("numeric_table_comparison_rows") or [], 1):
             normalized_row = re.sub(r"\s+", " ", str(row_text or "")).strip()
             if not normalized_row:
@@ -4707,7 +5293,7 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
             or ""
         ),
     ).strip()
-    citation = {
+    citation = _copy_visual_provenance(segment, {
         "ref": ref,
         "source_text": text,
         "display_text": text,
@@ -4745,11 +5331,11 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
         "segment_role": segment.get("segment_role", ""),
         "visual_verdict": segment.get("visual_verdict", ""),
         "bbox": _normalize_public_bbox(segment.get("bbox")),
-        "citation_span": segment.get("citation_span") or {},
+        "citation_span": _sanitize_public_citation_span(segment.get("citation_span")),
         "surrounding_context": _compact_context_text(segment.get("surrounding_context") or "", limit=1200),
         "synthetic_description": bool(segment.get("synthetic_description")),
         "source_ref": segment.get("source_ref", segment.get("ref", ref)),
-    }
+    })
     return citation
 
 
@@ -4949,9 +5535,79 @@ def _normalize_public_bbox(value) -> list[float] | None:
         x0, y0, x1, y1 = [float(v) for v in value[:4]]
     except (TypeError, ValueError):
         return None
+    if not all(math.isfinite(item) and abs(item) <= 1_000_000 for item in (x0, y0, x1, y1)):
+        return None
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
+_PUBLIC_CITATION_COORDINATE_SPACES = {
+    "pdf_top_left_points",
+    "pdf_bottom_left_points",
+    "pdf_bottom_left",
+    "normalized",
+    "normalized_0_1",
+    "normalized_1000",
+    "mineru_1000",
+    "ratio",
+    "relative",
+}
+
+
+def _normalize_public_citation_rects(value) -> list[list[float]]:
+    if not isinstance(value, list):
+        return []
+    rects = []
+    for item in value[:64]:
+        rect = _normalize_public_bbox(item)
+        if rect:
+            rects.append(rect)
+    return rects
+
+
+def _normalize_public_page_size(value) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        width = float(value[0])
+        height = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not all(
+        math.isfinite(item) and 0 < item <= 1_000_000
+        for item in (width, height)
+    ):
+        return None
+    return [round(width, 2), round(height, 2)]
+
+
+def _normalize_public_coordinate_space(value) -> str:
+    coordinate_space = str(value or "").strip().lower()
+    return (
+        coordinate_space
+        if coordinate_space in _PUBLIC_CITATION_COORDINATE_SPACES
+        else ""
+    )
+
+def _normalize_public_page_range(value) -> list[int]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = [value, value]
+    if not isinstance(value, (list, tuple)) or not value:
+        return []
+    pages: list[int] = []
+    for item in value[:2]:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            return []
+        if not math.isfinite(number) or number < 0 or number > 1_000_000:
+            return []
+        pages.append(int(number))
+    if len(pages) == 1:
+        pages.append(pages[0])
+    if pages[1] < pages[0]:
+        pages.reverse()
+    return pages
+
 
 
 def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
@@ -4962,6 +5618,8 @@ def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
         "page_bbox",
         "block_bbox",
         "table_bbox",
+        "figure_bbox",
+        "table_row_bbox",
         "bounding_box",
         "full_bbox_page_pts",
         "body_bbox_page_pts",
@@ -4987,6 +5645,36 @@ def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
             if bbox:
                 return bbox
     return None
+
+
+_PUBLIC_CITATION_SPAN_TEXT_LIMITS = {
+    "text": 300,
+    "start_phrase": 120,
+    "end_phrase": 120,
+    "alignment_status": 80,
+}
+_PUBLIC_CITATION_SPAN_INT_FIELDS = {"start", "end", "page"}
+
+
+def _sanitize_public_citation_span(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    public = {}
+    for key, limit in _PUBLIC_CITATION_SPAN_TEXT_LIMITS.items():
+        text = _compact_context_text(value.get(key) or "", limit=limit)
+        if text:
+            public[key] = text
+    for key in _PUBLIC_CITATION_SPAN_INT_FIELDS:
+        if key not in value:
+            continue
+        try:
+            number = float(value.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(number) or number < 0 or number > 10_000_000:
+            continue
+        public[key] = int(number)
+    return public
 
 
 def _build_citation_span(citation: Optional[dict]) -> dict:
@@ -5151,10 +5839,20 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
     if not text:
         return None
     segment_role = str(seg.get("segment_role") or "").strip()
-    return {
+    page_range = seg.get("page_range") or []
+    try:
+        page = int(
+            seg.get("page")
+            or (page_range[0] if isinstance(page_range, (list, tuple)) and page_range else 0)
+            or 0
+        )
+    except (TypeError, ValueError):
+        page = 0
+    normalized = {
         "ref": seg.get("ref"),
         "text": text,
-        "page_range": seg.get("page_range") or [],
+        "page": page,
+        "page_range": page_range,
         "group_id": seg.get("group_id", ""),
         "context_id": seg.get("context_id", ""),
         "evidence_id": seg.get("evidence_id", ""),
@@ -5189,11 +5887,12 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
         "visual_matched_row": seg.get("visual_matched_row", ""),
         "visual_crops": seg.get("visual_crops", []),
         "bbox": _normalize_public_bbox(seg.get("bbox")),
-        "citation_span": seg.get("citation_span") or {},
+        "citation_span": _sanitize_public_citation_span(seg.get("citation_span")),
         "surrounding_context": _compact_context_text(seg.get("surrounding_context") or "", limit=1200),
         "synthetic_description": bool(seg.get("synthetic_description")),
         "source_ref": seg.get("source_ref"),
     }
+    return _copy_visual_provenance(seg, normalized)
 
 
 def _merge_response_context_segments(*segment_lists: list[dict]) -> list[dict]:
@@ -6433,6 +7132,16 @@ _PUBLIC_RETRIEVAL_META_DENY_KEYS = {
     "chunks",
     "retrieval_chunks",
     "raw_chunks",
+    "agent_detail",
+    "agent_search_history",
+    "task_status",
+    "visual_model",
+    "visual_provenance",
+    "pdf_path",
+    "endpoint",
+    "api_host",
+    "base_url",
+    "headers",
 }
 
 _PUBLIC_DIAGNOSTIC_SCALAR_KEYS = {
@@ -6514,8 +7223,43 @@ _PUBLIC_NUMERIC_REGEX_LOCATOR_DIAGNOSTIC_KEYS = {
     "explicit_table_labels",
     "filtered_count",
 }
+_PUBLIC_NUMERIC_TABLE_VISUAL_DIAGNOSTIC_KEYS = {
+    "enabled",
+    "mode",
+    "triggered",
+    "reasons",
+    "skipped_reason",
+    "state",
+    "verdict",
+    "visual_verdict",
+    "status",
+    "reason",
+    "rejected_reason",
+    "candidate_count",
+    "selection_score",
+    "table_id",
+    "table_caption",
+    "table_instance_id",
+    "cache_hit",
+    "stale_task_recovered",
+    "background",
+    "pending",
+    "task_id",
+    "page",
+    "crop_count",
+    "used_provider",
+    "used_model",
+    "confidence",
+    "created_at",
+    "updated_at",
+    "finished_at",
+    "visual_model",
+}
+
+
 _PUBLIC_AGENT_DIAGNOSTIC_KEYS = {
     "context_budget",
+    "modal_retrieval",
     "sub_questions",
     "sub_question_coverage",
     "planner_invocation_mode",
@@ -6545,6 +7289,21 @@ _PUBLIC_CITATION_KEYS = {
     "chunk_type",
     "block_type",
     "retrieval_type",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_evidence_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
     "segment_role",
     "visual_verdict",
     "alignment_status",
@@ -6601,6 +7360,21 @@ _PUBLIC_CONTEXT_SEGMENT_KEYS = {
     "chunk_type",
     "block_type",
     "retrieval_type",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_evidence_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
     "segment_role",
     "visual_verdict",
     "alignment_status",
@@ -6632,20 +7406,36 @@ _PUBLIC_CONTEXT_SEGMENT_TEXT_LIMITS = {
 }
 
 
+_PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS = {
+    "api_key",
+    "authorization",
+    "base_url",
+    "endpoint",
+    "headers",
+    "password",
+    "pdf_path",
+    "secret",
+    "source_hash",
+    "document_source_hash",
+    "token",
+}
+
+
 def _sanitize_public_diagnostic_value(value):
-    if isinstance(value, (bool, int, float)):
+    if isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return _compact_context_text(value, limit=240)
+        return _safe_public_visual_metadata_text(value, 240)
     if isinstance(value, list):
         safe_items = []
         for item in value[:24]:
-            if isinstance(item, (bool, int, float)):
-                safe_items.append(item)
-            elif isinstance(item, str):
-                safe_items.append(_compact_context_text(item, limit=160))
-            elif isinstance(item, dict):
-                safe_items.append(_sanitize_public_diagnostics_section(item, set(item.keys())))
+            safe_item = _sanitize_public_diagnostic_value(item)
+            if safe_item is not None:
+                safe_items.append(safe_item)
         return safe_items
     if isinstance(value, dict):
         return _sanitize_public_diagnostics_section(value, set(value.keys()))
@@ -6659,7 +7449,34 @@ def _sanitize_public_diagnostics_section(section: dict, allowed_keys: set[str]) 
     for key in allowed_keys:
         if key not in section:
             continue
-        value = _sanitize_public_diagnostic_value(section.get(key))
+        normalized_key = str(key).strip().lower()
+        if (
+            normalized_key in _PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS
+            or normalized_key.endswith(
+                ("_api_key", "_endpoint", "_pdf_path", "_secret", "_password")
+            )
+        ):
+            continue
+        if normalized_key == "visual_model":
+            value = _sanitize_public_visual_model(section.get(key))
+        else:
+            value = _sanitize_public_diagnostic_value(section.get(key))
+        if value not in (None, "", [], {}):
+            public[key] = value
+    return public
+
+
+def _sanitize_public_numeric_table_visual_diagnostics(section: dict) -> dict:
+    if not isinstance(section, dict):
+        return {}
+    public = {}
+    for key in _PUBLIC_NUMERIC_TABLE_VISUAL_DIAGNOSTIC_KEYS:
+        if key not in section:
+            continue
+        if key == "visual_model":
+            value = _sanitize_public_visual_model(section.get(key))
+        else:
+            value = _sanitize_public_diagnostic_value(section.get(key))
         if value not in (None, "", [], {}):
             public[key] = value
     return public
@@ -6708,9 +7525,8 @@ def _sanitize_public_diagnostics(diagnostics: dict) -> dict:
         if locator:
             public["numeric_regex_locator"] = locator
     if isinstance(diagnostics.get("numeric_table_visual_verification"), dict):
-        visual = _sanitize_public_diagnostics_section(
-            diagnostics.get("numeric_table_visual_verification") or {},
-            set((diagnostics.get("numeric_table_visual_verification") or {}).keys()),
+        visual = _sanitize_public_numeric_table_visual_diagnostics(
+            diagnostics.get("numeric_table_visual_verification") or {}
         )
         if visual:
             public["numeric_table_visual_verification"] = visual
@@ -6734,12 +7550,32 @@ def _augment_public_citation(citation: dict) -> dict:
         value = citation.get(key)
         if value in (None, "", [], {}):
             continue
-        if key in _PUBLIC_CITATION_TEXT_LIMITS:
+        if key in _VISUAL_PROVENANCE_FIELDS:
+            safe_value = _sanitize_public_visual_field(key, value)
+            if safe_value not in (None, "", [], {}):
+                public[key] = safe_value
+        elif key == "page_range":
+            page_range = _normalize_public_page_range(value)
+            if page_range:
+                public[key] = page_range
+        elif key in {"page", "ref", "display_ref", "source_ref"}:
+            public[key] = _debug_int(value)
+        elif key in {"best_ratio", "score", "similarity", "rerank_score", "combined_score"}:
+            number = _safe_public_visual_number(
+                value,
+                minimum=-1_000_000.0,
+                maximum=1_000_000.0,
+            )
+            if number is not None:
+                public[key] = number
+        elif key in _PUBLIC_CITATION_TEXT_LIMITS:
             public[key] = _compact_context_text(value, limit=_PUBLIC_CITATION_TEXT_LIMITS[key])
         else:
             public[key] = value
     bbox = _extract_citation_bbox(citation)
-    span = _build_citation_span(citation)
+    span = (
+        _sanitize_public_citation_span(citation.get("citation_span")) or _build_citation_span(citation)
+    )
     if bbox:
         public["bbox"] = bbox
     if span:
@@ -6753,10 +7589,21 @@ def _augment_public_citation(citation: dict) -> dict:
     page_range = public.get("page_range") or []
     page = page_range[0] if isinstance(page_range, list) and page_range else public.get("page")
     block_id = public.get("block_id") or public.get("evidence_block_id") or public.get("chunk_id")
+    rects = _normalize_public_citation_rects(
+        citation.get("rects") or citation.get("line_rects")
+    )
+    coordinate_space = _normalize_public_coordinate_space(
+        citation.get("coordinate_space")
+    )
+    page_size = _normalize_public_page_size(citation.get("page_size"))
     anchor = {
         "block_id": block_id or "",
         "page": page,
         "bbox": bbox,
+        "rects": rects,
+        "coordinate_space": coordinate_space,
+        "page_size": page_size,
+        "parse_generation": public.get("parse_generation") or "",
         "span": span,
     }
     public["citation_anchor"] = {k: v for k, v in anchor.items() if v}
@@ -6776,7 +7623,21 @@ def _sanitize_public_context_segment(segment) -> dict:
         value = segment.get(key)
         if value in (None, "", [], {}):
             continue
-        if key == "bbox":
+        if key in _VISUAL_PROVENANCE_FIELDS:
+            safe_value = _sanitize_public_visual_field(key, value)
+            if safe_value not in (None, "", [], {}):
+                public[key] = safe_value
+        elif key == "citation_span":
+            span = _sanitize_public_citation_span(value)
+            if span:
+                public[key] = span
+        elif key == "page_range":
+            page_range = _normalize_public_page_range(value)
+            if page_range:
+                public[key] = page_range
+        elif key == "page":
+            public[key] = _debug_int(value)
+        elif key == "bbox":
             bbox = _normalize_public_bbox(value)
             if bbox:
                 public[key] = bbox
@@ -6800,30 +7661,62 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
         or "",
         limit=max_text,
     )
+    raw_keywords = record.get("keywords")
+    if not isinstance(raw_keywords, (list, tuple, set)):
+        raw_keywords = []
+    keywords = []
+    for value in list(raw_keywords)[:16]:
+        safe_keyword = _safe_public_visual_metadata_text(value, 120)
+        if safe_keyword and safe_keyword not in keywords:
+            keywords.append(safe_keyword)
+        if len(keywords) >= 12:
+            break
+
     fields = {
-        "ref": record.get("ref"),
-        "source_ref": record.get("source_ref"),
-        "group_id": record.get("group_id", ""),
-        "context_id": record.get("context_id", ""),
-        "evidence_id": record.get("evidence_id", ""),
-        "block_id": record.get("block_id", ""),
-        "chunk_id": record.get("chunk_id", ""),
-        "child_chunk_id": record.get("child_chunk_id", ""),
-        "parent_id": record.get("parent_id", ""),
-        "page_range": record.get("page_range") or [],
+        "ref": _debug_int(record.get("ref")),
+        "source_ref": _debug_int(record.get("source_ref")),
+        "group_id": _safe_public_visual_metadata_text(record.get("group_id"), 240),
+        "context_id": _safe_public_visual_metadata_text(record.get("context_id"), 240),
+        "evidence_id": _safe_public_visual_metadata_text(record.get("evidence_id"), 240),
+        "block_id": _safe_public_visual_metadata_text(record.get("block_id"), 240),
+        "chunk_id": _safe_public_visual_metadata_text(record.get("chunk_id"), 240),
+        "child_chunk_id": _safe_public_visual_metadata_text(record.get("child_chunk_id"), 240),
+        "parent_id": _safe_public_visual_metadata_text(record.get("parent_id"), 240),
+        "granularity": _safe_public_visual_metadata_text(record.get("granularity"), 80),
+        "char_count": _debug_int(record.get("char_count")),
+        "keywords": keywords,
+        "compacted": bool(record.get("compacted")),
+        "truncated": bool(record.get("truncated")),
+        "page": _debug_int(record.get("page")),
+        "page_range": _normalize_public_page_range(record.get("page_range")),
         "chunk_type": record.get("chunk_type", ""),
         "block_type": record.get("block_type", ""),
         "retrieval_type": record.get("retrieval_type", ""),
+        "visual_evidence_id": _sanitize_public_visual_field("visual_evidence_id", record.get("visual_evidence_id")),
+        "asset_id": _sanitize_public_visual_field("asset_id", record.get("asset_id")),
+        "analyzed_asset_id": _sanitize_public_visual_field("analyzed_asset_id", record.get("analyzed_asset_id")),
+        "visual_enhancement": _sanitize_public_visual_field("visual_enhancement", record.get("visual_enhancement")),
+        "visual_source": _sanitize_public_visual_field("visual_source", record.get("visual_source")),
+        "visual_supplement_revision": _sanitize_public_visual_field("visual_supplement_revision", record.get("visual_supplement_revision")),
+        "figure_id": _sanitize_public_visual_field("figure_id", record.get("figure_id")),
+        "figure_bbox": _sanitize_public_visual_field("figure_bbox", record.get("figure_bbox")),
+        "visual_model": _sanitize_public_visual_field("visual_model", record.get("visual_model")),
+        "runtime_visual_overlay": _sanitize_public_visual_field("runtime_visual_overlay", record.get("runtime_visual_overlay")),
+        "runtime_visual_analysis": _sanitize_public_visual_field("runtime_visual_analysis", record.get("runtime_visual_analysis")),
+        "purpose": _sanitize_public_visual_field("purpose", record.get("purpose")),
+        "prompt_version": _sanitize_public_visual_field("prompt_version", record.get("prompt_version")),
+        "parse_generation": _sanitize_public_visual_field("parse_generation", record.get("parse_generation")),
+        "confidence": _sanitize_public_visual_field("confidence", record.get("confidence")),
         "segment_role": record.get("segment_role", ""),
         "alignment_status": record.get("alignment_status", ""),
         "start_phrase": _compact_context_text(record.get("start_phrase") or "", limit=160),
         "end_phrase": _compact_context_text(record.get("end_phrase") or "", limit=160),
         "highlight_text": _compact_context_text(record.get("highlight_text") or "", limit=360),
-        "best_ratio": record.get("best_ratio"),
-        "score": record.get("score"),
-        "similarity": record.get("similarity"),
-        "rerank_score": record.get("rerank_score"),
-        "combined_score": record.get("combined_score"),
+        "best_ratio": _safe_public_visual_number(record.get("best_ratio"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "score": _safe_public_visual_number(record.get("score"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "similarity": _safe_public_visual_number(record.get("similarity"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "rerank_score": _safe_public_visual_number(record.get("rerank_score"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "combined_score": _safe_public_visual_number(record.get("combined_score"), minimum=-1_000_000.0, maximum=1_000_000.0),
         "table_id": record.get("table_id", ""),
         "table_bundle_id": record.get("table_bundle_id", ""),
         "table_caption": record.get("table_caption") or record.get("numeric_table_exact_context_caption") or "",
@@ -6832,7 +7725,9 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
         "table_row_evidence": bool(record.get("table_row_evidence")),
         "table_row_slice_kind": record.get("table_row_slice_kind", ""),
         "bbox": _normalize_public_bbox(record.get("bbox")) or _extract_citation_bbox(record),
-        "citation_span": record.get("citation_span") or _build_citation_span(record),
+        "citation_span": (
+            _sanitize_public_citation_span(record.get("citation_span")) or _build_citation_span(record)
+        ),
         "surrounding_context": _compact_context_text(record.get("surrounding_context") or "", limit=900),
         "synthetic_description": bool(record.get("synthetic_description") or record.get("is_synthetic_description")),
         "text": text,
@@ -6843,7 +7738,7 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
 def _debug_int(value) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -7054,6 +7949,209 @@ def _should_include_evidence_raw(request: ChatRequest) -> bool:
     return bool(isinstance(params, dict) and params.get("include_evidence_raw"))
 
 
+def _sanitize_public_agent_detail(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    public = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        sanitized = _sanitize_evidence_raw_record(item, max_text=1400)
+        if sanitized:
+            public.append(sanitized)
+    return public
+
+
+def _sanitize_public_agent_search_history(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    public = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        tool_name = _safe_public_visual_metadata_text(item.get("tool"), 80)
+        query = _compact_context_text(item.get("query") or "", limit=400)
+        result_count = _debug_int(
+            item.get("resultCount")
+            if "resultCount" in item
+            else item.get("result_count")
+        )
+        row = {
+            "tool": tool_name,
+            "query": query,
+            "resultCount": result_count,
+        }
+        row = {key: item for key, item in row.items() if item not in ("", None, [], {})}
+        if row:
+            public.append(row)
+    return public
+
+
+def _sanitize_public_task_status(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    def _safe_status_list(items) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        result = []
+        for item in items[:24]:
+            text = _compact_context_text(item or "", limit=240)
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    public = {
+        "completed": _safe_status_list(value.get("completed")),
+        "current": _compact_context_text(value.get("current") or "", limit=240),
+        "pending": _safe_status_list(value.get("pending")),
+    }
+    return {key: item for key, item in public.items() if item not in ("", None, [], {})}
+
+
+def _sanitize_agent_progress_event(event) -> dict:
+    if not isinstance(event, dict):
+        return {}
+    public = {
+        "type": _safe_public_visual_metadata_text(event.get("type"), 80),
+        "phase": _safe_public_visual_metadata_text(event.get("phase"), 80),
+        "message": _compact_context_text(event.get("message") or "", limit=320),
+        "tool": _safe_public_visual_metadata_text(event.get("tool"), 80),
+        "round": _debug_int(event.get("round")),
+        "step": _debug_int(event.get("step")),
+        "result_count": _debug_int(event.get("result_count")),
+        "elapsed_ms": _safe_public_visual_number(
+            event.get("elapsed_ms"), minimum=0.0, maximum=3_600_000.0
+        ),
+    }
+    return {key: item for key, item in public.items() if item not in ("", None, [], {})}
+
+
+_PUBLIC_SENSITIVE_JSON_KEYS = _PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS | {
+    "api_host",
+    "client_secret",
+    "credential",
+    "credentials",
+    "private_key",
+    "access_token",
+    "refresh_token",
+}
+_PUBLIC_SENSITIVE_JSON_COMPACT_SUFFIXES = {
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "clientsecret",
+    "password",
+    "secret",
+    "endpoint",
+    "pdfpath",
+    "privatekey",
+    "sourcehash",
+}
+_PUBLIC_SENSITIVE_JSON_COMPACT_KEYS = {
+    "authorization",
+    "authorizationheader",
+    "baseurl",
+    "headers",
+    "credential",
+    "credentials",
+}
+_PUBLIC_FREE_TEXT_JSON_FIELDS = {
+    "analysis",
+    "caption",
+    "current",
+    "description",
+    "display_text",
+    "end_phrase",
+    "highlight_text",
+    "message",
+    "numeric_table_exact_context_caption",
+    "numeric_table_exact_context_header",
+    "numeric_table_exact_context_row_text",
+    "numeric_table_projected_cells",
+    "query",
+    "retrieval_query",
+    "search_query",
+    "section_title",
+    "source_text",
+    "start_phrase",
+    "summary",
+    "surrounding_context",
+    "table_caption",
+    "table_header",
+    "text",
+    "title",
+}
+
+
+def _is_sensitive_public_json_key(key) -> bool:
+    normalized = str(key or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return bool(
+        normalized in _PUBLIC_SENSITIVE_JSON_KEYS
+        or compact in _PUBLIC_SENSITIVE_JSON_COMPACT_KEYS
+        or any(compact.endswith(suffix) for suffix in _PUBLIC_SENSITIVE_JSON_COMPACT_SUFFIXES)
+    )
+
+
+def _is_public_free_text_json_path(path: tuple[str, ...]) -> bool:
+    if not path:
+        return False
+    field_name = path[-1]
+    if field_name not in _PUBLIC_FREE_TEXT_JSON_FIELDS:
+        return False
+    if len(path) == 1:
+        return field_name in {"query", "search_query"}
+    root = path[0]
+    if root in {"citations", "context_segments", "agent_detail"}:
+        return True
+    if root == "agent_search_history":
+        return field_name in {"query", "message"}
+    if root == "task_status":
+        return field_name in {"current", "message"}
+    if root == "evidence_raw":
+        if len(path) == 2 and field_name == "query":
+            return True
+        return len(path) >= 3 and path[1] in {
+            "citations",
+            "context_segments",
+            "retrieval_context_segments",
+            "chunks",
+        }
+    return False
+
+
+def _sanitize_public_json_value(value, *, path: tuple[str, ...] = ()):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        if _is_public_free_text_json_path(path):
+            return value
+        return _safe_public_visual_metadata_text(value, 320) or None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            safe_item = _sanitize_public_json_value(item, path=path)
+            if safe_item is not None:
+                result.append(safe_item)
+        return result
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if _is_sensitive_public_json_key(key):
+                continue
+            normalized_key = str(key or "").strip().lower()
+            safe_item = _sanitize_public_json_value(
+                item,
+                path=(*path, normalized_key),
+            )
+            if safe_item is not None:
+                result[str(key)] = safe_item
+        return result
+    return None
+
 def _build_public_retrieval_meta(
     retrieval_meta: dict,
     context_segments: list[dict],
@@ -7062,7 +8160,13 @@ def _build_public_retrieval_meta(
     extra: Optional[dict] = None,
 ) -> dict:
     if not isinstance(retrieval_meta, dict):
-        return {"context_segments": context_segments or []}
+        return _sanitize_public_json_value({
+            "context_segments": [
+                item
+                for item in (_sanitize_public_context_segment(segment) for segment in (context_segments or []))
+                if item
+            ]
+        }) or {}
     public = {
         k: v
         for k, v in retrieval_meta.items()
@@ -7082,11 +8186,26 @@ def _build_public_retrieval_meta(
         for item in (_sanitize_public_context_segment(segment) for segment in (context_segments or []))
         if item
     ]
+    agent_detail = _sanitize_public_agent_detail(retrieval_meta.get("agent_detail"))
+    if agent_detail:
+        public["agent_detail"] = agent_detail
+    agent_search_history = _sanitize_public_agent_search_history(
+        retrieval_meta.get("agent_search_history")
+    )
+    if agent_search_history:
+        public["agent_search_history"] = agent_search_history
+    task_status = _sanitize_public_task_status(retrieval_meta.get("task_status"))
+    if task_status:
+        public["task_status"] = task_status
     if include_evidence_raw:
         public["evidence_raw"] = _build_evidence_raw_debug(retrieval_meta, context_segments or [])
     if extra:
-        public.update(extra)
-    return public
+        stream_fallback_reason = _safe_public_visual_metadata_text(
+            extra.get("stream_fallback_reason"), 120
+        )
+        if stream_fallback_reason:
+            public["stream_fallback_reason"] = stream_fallback_reason
+    return _sanitize_public_json_value(public) or {}
 
 
 
@@ -8118,6 +9237,92 @@ def _build_fast_overview_context(
     return (full_text or "")[:max_total_chars]
 
 
+def _append_fast_overview_visual_evidence(
+    context: str,
+    citations: list[dict],
+    visual_evidence: list[dict] | None,
+    *,
+    max_items: int = 3,
+    max_total_chars: int = 2200,
+) -> tuple[str, list[dict]]:
+    """Append committed local VLM evidence without changing the document text.
+
+    Fast overview intentionally bypasses vector retrieval.  This bounded,
+    request-local append lets it see the same published visual evidence while
+    preserving a normal block/page citation anchor for each figure reading.
+    """
+    merged_citations = [dict(item) for item in citations or [] if isinstance(item, dict)]
+    parts = [str(context or "").rstrip()] if str(context or "").strip() else []
+    seen_ids: set[str] = set()
+    used_chars = 0
+    appended = 0
+    next_ref = max(
+        (
+            int(item.get("ref") or 0)
+            for item in merged_citations
+            if str(item.get("ref") or "").strip().isdigit()
+        ),
+        default=0,
+    ) + 1
+
+    for item in visual_evidence or []:
+        if appended >= max(0, int(max_items)) or used_chars >= max_total_chars:
+            break
+        if not isinstance(item, dict):
+            continue
+        evidence_id = str(item.get("id") or "").strip()
+        text = re.sub(r"\s+", " ", str(item.get("text") or item.get("analysis") or "")).strip()
+        caption = re.sub(r"\s+", " ", str(item.get("caption") or "")).strip()[:400]
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if not evidence_id or not text or page <= 0 or evidence_id in seen_ids:
+            continue
+        seen_ids.add(evidence_id)
+
+        available = max_total_chars - used_chars
+        body = text[: min(1200, max(0, available - len(caption) - 72))].strip()
+        if not body:
+            continue
+        label = caption or f"图表 {item.get('figure_id') or evidence_id}"
+        context_item = f"[图表视觉补充 · 第{page}页 · 证据{next_ref}]\n{label}\n{body}"
+        source_text = f"{label}\n{body}"
+        revision = str(item.get("visual_supplement_revision") or "").strip()
+        visual_model = item.get("visual_model") if isinstance(item.get("visual_model"), dict) else {}
+        citation = {
+            "ref": next_ref,
+            "evidence_id": f"visual:{revision or 'current'}:{evidence_id}",
+            "context_id": f"visual-{evidence_id}",
+            "group_id": f"visual-{evidence_id}",
+            "visual_evidence_id": evidence_id,
+            "block_id": evidence_id,
+            "chunk_id": evidence_id,
+            "page_range": [page, page],
+            "bbox": _normalize_public_bbox(item.get("bbox")),
+            "source_text": source_text,
+            "display_text": source_text,
+            "highlight_text": body[:180],
+            "_full_text": source_text,
+            "chunk_type": "visual_evidence",
+            "block_type": "caption",
+            "retrieval_type": "fallback",
+            "visual_enhancement": True,
+            "visual_source": "visual_vlm",
+            "visual_supplement_revision": revision,
+            "figure_id": str(item.get("figure_id") or "").strip(),
+            "visual_model": dict(visual_model),
+            "runtime_visual_overlay": True,
+        }
+        merged_citations.append({key: value for key, value in citation.items() if value not in (None, "", [], {})})
+        parts.append(context_item)
+        used_chars += len(context_item)
+        appended += 1
+        next_ref += 1
+
+    return "\n\n".join(parts), merged_citations
+
+
 def _should_use_fast_overview_context(
     query_type: str,
     *,
@@ -8141,6 +9346,7 @@ def _build_agent_retrieval_gate(
     selected_text: Optional[str],
     query_type: str,
     evidence_need: Optional[list[str]] = None,
+    question: str = "",
 ) -> dict:
     """返回 retrieval_agent 触发决策及其原因，便于诊断。
 
@@ -8172,6 +9378,7 @@ def _build_agent_retrieval_gate(
         else None
     )
 
+    matched_visual_intent = looks_like_figure_query(question)
     if not enable_agent_retrieval:
         return {
             "enabled": False,
@@ -8213,8 +9420,11 @@ def _build_agent_retrieval_gate(
             "agent_gate_source": "force_user",
         }
 
-    enabled = bool(matched_query_type or matched_needs)
-    if matched_needs:
+    enabled = bool(matched_query_type or matched_needs or matched_visual_intent)
+    if matched_visual_intent:
+        reason = "matched_visual_intent"
+        gate_source = "visual_intent"
+    elif matched_needs:
         reason = "matched_evidence_need"
         gate_source = "evidence_needs"
     elif matched_query_type:
@@ -8231,6 +9441,7 @@ def _build_agent_retrieval_gate(
         "evidence_need": normalized_needs,
         "matched_query_type": matched_query_type,
         "matched_evidence_need": matched_needs,
+        "matched_visual_intent": matched_visual_intent,
         "selected_text_present": False,
         "force_agent_retrieval": bool(force_agent_retrieval),
         "agent_gate_source": gate_source,
@@ -8371,6 +9582,7 @@ def _should_enable_agent_retrieval(
     selected_text: Optional[str],
     query_type: str,
     evidence_need: Optional[list[str]] = None,
+    question: str = "",
 ) -> bool:
     """仅对高价值题型启用 retrieval_agent，避免全局放大延迟。"""
     gate = _build_agent_retrieval_gate(
@@ -8379,6 +9591,7 @@ def _should_enable_agent_retrieval(
         selected_text=selected_text,
         query_type=query_type,
         evidence_need=evidence_need,
+        question=question,
     )
     return bool(gate.get("enabled"))
 
@@ -8426,6 +9639,7 @@ async def _run_agent_retrieval_for_context(
             build_numbered_context_and_citations=_build_numbered_context_and_citations,
             generate_page_level_citations=_generate_page_level_citations,
             build_agent_detail_citations=_build_agent_detail_citations,
+            build_visual_evidence_analyzer=_build_agent_visual_evidence_analyzer,
         ),
     )
 
@@ -8433,13 +9647,13 @@ async def _run_agent_retrieval_for_context(
 def _is_paragraph_fallback(citations: list[dict]) -> bool:
     """判断 citations 是否来自段落级兜底（非向量检索的语义 chunk）。
 
-    当 group_id 全部以 ``para-`` 或 ``page-`` 开头时，视为 fallback 引文，
+    当 group_id 全部以 ``para-``、``page-`` 或 ``visual-`` 开头时，视为 fallback 引文，
     不应触发结构化引文 prompt（CITATION LIST + FINAL ANSWER）。
     """
     if not citations:
         return False
     return all(
-        c.get("group_id", "").startswith(("para-", "page-"))
+        c.get("group_id", "").startswith(("para-", "page-", "visual-"))
         for c in citations
     )
 
@@ -10176,6 +11390,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             selected_text=request.selected_text,
             query_type=initial_strategy.get("query_type", ""),
             evidence_need=initial_strategy.get("evidence_need", []),
+            question=request.question or "",
         )
         use_agent = bool(agent_gate.get("enabled"))
         retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -10245,6 +11460,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     ],
                     selected_text=request.selected_text,
                     answer_max_tokens=_prelim_answer_tokens,
+                    visual_evidence=committed_visual_evidence_for_document(doc),
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = _merge_retrieval_meta(retrieval_meta, context_result.get("retrieval_meta", {}))
@@ -10312,10 +11528,17 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 sampled_context,
                 query=search_query,
             )
-            context = numbered_ctx
+            context, fb_cits = _append_fast_overview_visual_evidence(
+                numbered_ctx,
+                fb_cits,
+                committed_visual_evidence_for_document(doc, limit=4),
+            )
             retrieval_meta["citations"] = fb_cits
             retrieval_meta["query_type"] = query_type
             retrieval_meta["fast_overview"] = True
+            retrieval_meta["fast_overview_visual_evidence_count"] = sum(
+                1 for citation in fb_cits if citation.get("visual_enhancement")
+            )
         elif request.enable_vector_search:
             _validate_rerank_request(request)
             context_result = await vector_context(
@@ -10331,6 +11554,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     ErrorCaptureMiddleware()
                 ],
                 answer_max_tokens=_prelim_answer_tokens,
+                visual_evidence=committed_visual_evidence_for_document(doc),
             )
             relevant_text = context_result.get("context", "")
             retrieval_meta = _merge_retrieval_meta(retrieval_meta, context_result.get("retrieval_meta", {}))
@@ -10379,6 +11603,12 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             retrieval_meta=retrieval_meta,
             query=search_query,
         )
+        await _maybe_add_explicit_figure_visual_enrichment(
+            request=request,
+            doc=doc,
+            retrieval_meta=retrieval_meta,
+            query=search_query,
+        )
         await _maybe_add_numeric_table_visual_verification(
             request=request,
             doc=doc,
@@ -10402,6 +11632,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             provider=_cheap_provider,
             endpoint=_cheap_endpoint,
         )
+        context = _sync_figure_visual_prompt_context(context, retrieval_meta)
 
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
@@ -10652,6 +11883,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     selected_text=request.selected_text,
                     query_type=initial_strategy.get("query_type", ""),
                     evidence_need=initial_strategy.get("evidence_need", []),
+                    question=request.question or "",
                 )
                 use_agent = bool(agent_gate.get("enabled"))
                 retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -10779,6 +12011,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
                             progress_callback=_progress_forwarder,
+                            visual_evidence=committed_visual_evidence_for_document(doc),
                         ))
                         async for _progress_event in _yield_task_progress(
                             _vector_task,
@@ -10882,7 +12115,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         agent_progress_queue,
                         "Agent 检索仍在执行，请稍候...",
                     ):
-                        yield _sse_json(agent_event)
+                        public_agent_event = _sanitize_agent_progress_event(agent_event)
+                        if public_agent_event:
+                            yield _sse_json(public_agent_event)
 
                     context, retrieval_meta = await agent_task
                 elif _should_use_fast_overview_context(
@@ -10907,10 +12142,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         sampled_context,
                         query=search_query,
                     )
-                    context = numbered_ctx
+                    context, fb_cits = _append_fast_overview_visual_evidence(
+                        numbered_ctx,
+                        fb_cits,
+                        committed_visual_evidence_for_document(doc, limit=4),
+                    )
                     retrieval_meta["citations"] = fb_cits
                     retrieval_meta["query_type"] = query_type
                     retrieval_meta["fast_overview"] = True
+                    retrieval_meta["fast_overview_visual_evidence_count"] = sum(
+                        1 for citation in fb_cits if citation.get("visual_enhancement")
+                    )
                 elif request.enable_vector_search:
                     _validate_rerank_request(request)
                     _log_chat_trace(
@@ -10978,6 +12220,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
                             progress_callback=_progress_forwarder,
+                            visual_evidence=committed_visual_evidence_for_document(doc),
                         ))
                         async for _progress_event in _yield_task_progress(
                             _vector_task,
@@ -11164,6 +12407,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta=retrieval_meta,
                     query=search_query,
                 )
+                await _maybe_add_explicit_figure_visual_enrichment(
+                    request=request,
+                    doc=doc,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                )
                 await _maybe_add_numeric_table_visual_verification(
                     request=request,
                     doc=doc,
@@ -11177,6 +12426,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     query=search_query,
                     evidence_need=evidence_need,
                 )
+                context = await _apply_query_aware_evidence_selector(
+                    request=request,
+                    context=context,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                    evidence_need=evidence_need,
+                    model=_cheap_model,
+                    provider=_cheap_provider,
+                    endpoint=_cheap_endpoint,
+                )
+                context = _sync_figure_visual_prompt_context(context, retrieval_meta)
 
                 retrieval_preview = _build_retrieval_preview_message(retrieval_meta.get("citations", []))
                 if retrieval_preview:

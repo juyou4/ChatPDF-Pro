@@ -14,13 +14,14 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import fitz
 
 # 新增：Figure Pipeline 模块
@@ -29,7 +30,30 @@ from services.figure_builder import build_logical_figures, select_top_figures
 from services.figure_render import render_figure
 from services.figure_validation import validate_and_fallback
 from schemas.figure_schema import LogicalFigureSchema, OverviewFigureItem
-from services.document_parse_state import derive_source_hash, read_parse_manifest
+from services.document_parse_state import derive_source_hash, is_parse_prepared, read_parse_manifest
+from services.chat_service import call_ai_api
+from services.visual_model_service import (
+    VisualEnrichmentPolicy,
+    VisualModelConfig,
+    call_visual_model,
+    model_config_identity,
+    resolve_visual_enrichment_policy,
+    resolve_visual_model_config,
+)
+from services.visual_enrichment_service import (
+    VisualTaskPolicy,
+    build_visual_task_id,
+    execute_visual_task,
+)
+from services.visual_document_enrichment_service import recover_risky_local_pages
+from services.visual_risk_service import assess_figure_risk, page_text_for_risk
+from services.visual_supplement_service import (
+    VISUAL_SUPPLEMENT_FIGURE_ANALYSIS_PROMPT_VERSION as FIGURE_ANALYSIS_PROMPT_VERSION,
+    VISUAL_SUPPLEMENT_PROMPT_SUITE_IDENTITY,
+    build_visual_supplement,
+    visual_supplement_revision,
+    visual_supplements_are_committed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +85,7 @@ class KeyFigureItem(BaseModel):
     caption: str
     image_base64: Optional[str] = None
     analysis: str
+    confidence: Optional[float] = None
 
 
 class PaperSummary(BaseModel):
@@ -87,6 +112,9 @@ class OverviewData(BaseModel):
     # 解析 generation，作为文件名之外的第二层校验。
     parse_generation: str = ""
     document_source_hash: str = ""
+    text_model_identity: str = ""
+    visual_model_identity: str = ""
+    visual_supplement_revision: str = ""
 
 
 class OverviewTask(BaseModel):
@@ -98,6 +126,12 @@ class OverviewTask(BaseModel):
     model: str = "gpt-4o"
     provider: str = "openai"
     endpoint: str = ""
+    visual_api_key: str = ""
+    visual_model: str = ""
+    visual_provider: str = ""
+    visual_endpoint: str = ""
+    visual_enabled: bool = True
+    visual_policy_params: dict = Field(default_factory=dict)
     status: str  # pending, processing, completed, failed
     result: Optional[OverviewData] = None
     error: Optional[str] = None
@@ -119,7 +153,7 @@ try:
 except Exception:
     pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v13"
+OVERVIEW_CACHE_VERSION = "v17"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -178,6 +212,85 @@ FIGURE_PATTERNS = [
     r'^Figure\s+(\d+[a-zA-Z]?)',
     r'^Fig\.?\s+(\d+[a-zA-Z]?)',
 ]
+
+
+def _overview_visual_task_policy(document_budget: int | None = None) -> VisualTaskPolicy:
+    def _float(name: str, default: float, low: float, high: float) -> float:
+        try:
+            return max(low, min(high, float(os.getenv(name, str(default)))))
+        except (TypeError, ValueError):
+            return default
+
+    def _int(name: str, default: int, low: int, high: int) -> int:
+        try:
+            return max(low, min(high, int(os.getenv(name, str(default)))))
+        except (TypeError, ValueError):
+            return default
+
+    return VisualTaskPolicy(
+        timeout_seconds=_float("CHATPDF_OVERVIEW_VISUAL_TIMEOUT_S", 45.0, 8.0, 120.0),
+        max_retries=_int("CHATPDF_OVERVIEW_VISUAL_RETRIES", 1, 0, 3),
+        retry_delay_seconds=_float("CHATPDF_OVERVIEW_VISUAL_RETRY_DELAY", 0.4, 0.0, 5.0),
+        concurrency=_int("CHATPDF_VISUAL_CONCURRENCY", 2, 1, 8),
+        document_budget=(
+            max(1, min(1000, int(document_budget)))
+            if document_budget is not None
+            else _int("CHATPDF_VISUAL_DOCUMENT_BUDGET", 16, 1, 1000)
+        ),
+    )
+
+
+def _resolve_overview_visual_policy(
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    endpoint: str,
+    visual_provider: str,
+    visual_model: str,
+    visual_api_key: str,
+    visual_endpoint: str,
+    visual_enabled: bool,
+    visual_policy_params: Optional[dict],
+) -> VisualEnrichmentPolicy:
+    params = visual_policy_params if isinstance(visual_policy_params, dict) else {}
+    return resolve_visual_enrichment_policy(
+        strategy=str(params.get("strategy") or "balanced"),
+        primary_provider=provider,
+        primary_model=model,
+        primary_api_key=api_key,
+        primary_endpoint=endpoint,
+        visual_provider=visual_provider,
+        visual_model=visual_model,
+        visual_api_key=visual_api_key,
+        visual_endpoint=visual_endpoint,
+        visual_enabled=visual_enabled,
+        local_visual_provider=str(params.get("local_provider") or ""),
+        local_visual_model=str(params.get("local_model") or ""),
+        local_visual_api_key=str(params.get("local_api_key") or ""),
+        local_visual_endpoint=str(params.get("local_endpoint") or ""),
+    )
+
+
+def _summarize_visual_risk(items: list[dict]) -> dict:
+    reason_counts: dict[str, int] = {}
+    triggered = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("should_enrich"):
+            triggered += 1
+        for reason in item.get("reasons") or []:
+            key = str(reason or "").strip()
+            if key:
+                reason_counts[key] = reason_counts.get(key, 0) + 1
+    return {
+        "evaluated": len(items),
+        "triggered": triggered,
+        "reused_text_structure": max(0, len(items) - triggered),
+        "reason_counts": reason_counts,
+        "items": items[:8],
+    }
 
 
 def _build_document_excerpt(document_text: str, depth: str) -> str:
@@ -1328,7 +1441,9 @@ def _build_key_figure_from_rendered(
     )
     image_data = f"data:image/jpeg;base64,{image_b64}"
 
-    if reason == "analysis_unavailable":
+    if reason == "risk_not_triggered":
+        analysis = caption
+    elif reason == "analysis_unavailable":
         analysis = "图表已识别并裁剪完成。当前模型未返回可用的图表解析，可切换支持图片输入的模型后重新生成速览。"
     else:
         analysis = "图表已识别并裁剪完成，暂未生成详细解析。"
@@ -1345,6 +1460,7 @@ def _build_key_figure_from_legacy_crop(
     fig: Dict,
     index: int,
     display_image_data: Optional[str],
+    reason: str = "analysis_unavailable",
 ) -> Optional[KeyFigureItem]:
     """旧图表路径的展示兜底：PDF 裁剪成功时不要丢图。"""
     if not display_image_data:
@@ -1360,16 +1476,24 @@ def _build_key_figure_from_legacy_crop(
         figure_id=fig.get("figure_id", f"fig-{index + 1}"),
         caption=caption,
         image_base64=display_image_data,
-        analysis="图表已识别并裁剪完成。当前模型未返回可用的图表解析，可切换支持图片输入的模型后重新生成速览。",
+        analysis=(
+            caption
+            if reason == "risk_not_triggered"
+            else "图表已识别并裁剪完成。当前模型未返回可用的图表解析，可切换支持图片输入的模型后重新生成速览。"
+        ),
     )
 
 
 async def _generate_figure_analysis_via_pipeline(
     figure_data: Dict,
-    api_key: str,
-    model: str,
-    provider: str,
+    api_key: str = "",
+    model: str = "",
+    provider: str = "",
     endpoint: str = "",
+    visual_config: VisualModelConfig | None = None,
+    document_id: str = "",
+    parse_generation: str = "",
+    visual_document_budget: int | None = None,
 ) -> Optional[KeyFigureItem]:
     """
     使用新 pipeline 生成的 figure 数据进行 LLM 分析
@@ -1421,6 +1545,10 @@ async def _generate_figure_analysis_via_pipeline(
         endpoint=endpoint,
         display_image_data=figure_info.get("display_image_data"),
         caption=figure_info.get("caption"),
+        visual_config=visual_config,
+        document_id=document_id,
+        parse_generation=parse_generation,
+        visual_document_budget=visual_document_budget,
     )
     
     return result
@@ -1452,6 +1580,10 @@ async def _generate_single_figure_analysis(
     display_image_data: Optional[str] = None,
     caption: Optional[str] = None,
     sub_figures: Optional[List[dict]] = None,
+    visual_config: VisualModelConfig | None = None,
+    document_id: str = "",
+    parse_generation: str = "",
+    visual_document_budget: int | None = None,
 ) -> Optional[KeyFigureItem]:
     """
     调用多模态 LLM 对一个 figure（可能包含多张子图）生成标题与解析。
@@ -1467,7 +1599,16 @@ async def _generate_single_figure_analysis(
         else:
             return None
 
-    from services.chat_service import call_ai_api
+    resolved_visual_config = visual_config or resolve_visual_model_config(
+        primary_provider=provider,
+        primary_model=model,
+        primary_api_key=api_key,
+        primary_endpoint=endpoint,
+    )
+    # 图表理解是可选增强。没有可用的 VLM 时保留原始裁剪图，由上层走
+    # fallback item；绝不能让文字速览或主解析链路失败。
+    if not resolved_visual_config.can_call:
+        return None
 
     img_count = len(image_data_list)
     subfig_hint = f"（共 {img_count} 张子图）" if img_count > 1 else ""
@@ -1505,15 +1646,37 @@ async def _generate_single_figure_analysis(
     ]
 
     try:
-        response = await call_ai_api(
-            messages=messages,
-            api_key=api_key,
-            model=model,
-            provider=provider,
-            endpoint=endpoint,
-            max_tokens=FIGURE_ANALYSIS_MAX_TOKENS,
-            temperature=0.3,
-            purpose="figure_analysis",
+        async def _invoke_visual_model() -> Any:
+            return await call_visual_model(
+                messages=messages,
+                config=resolved_visual_config,
+                max_tokens=FIGURE_ANALYSIS_MAX_TOKENS,
+                temperature=0.3,
+                purpose="figure_analysis",
+            )
+
+        task_document_id = str(document_id or f"overview:{figure_id}")
+        response = await execute_visual_task(
+            task_id=build_visual_task_id({
+                "document_id": task_document_id,
+                "parse_generation": parse_generation,
+                "purpose": "figure_description",
+                "figure_id": figure_id,
+                "visual_model_identity": resolved_visual_config.identity,
+                "prompt_version": FIGURE_ANALYSIS_PROMPT_VERSION,
+            }),
+            document_id=task_document_id,
+            parse_generation=parse_generation,
+            purpose="figure_description",
+            operation=_invoke_visual_model,
+            policy=_overview_visual_task_policy(visual_document_budget),
+            metadata={
+                "provider": resolved_visual_config.provider,
+                "model": resolved_visual_config.model,
+                "source": resolved_visual_config.source,
+                "page": figure_index + 1,
+                "prompt_version": FIGURE_ANALYSIS_PROMPT_VERSION,
+            },
         )
 
         if isinstance(response, dict) and response.get("error"):
@@ -1606,17 +1769,45 @@ def _parse_cache_identity_token(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _overview_text_model_identity(
+    provider: str = "",
+    model: str = "",
+    endpoint: str = "",
+    api_key: str = "",
+) -> str:
+    """Bind textual overview caches to a non-secret model availability state."""
+    provider_l = str(provider or "").strip().lower()
+    can_call = bool(str(api_key or "").strip()) or provider_l in {"local", "ollama"}
+    return model_config_identity(
+        provider,
+        model,
+        endpoint,
+        available=can_call,
+    )
+
+
+def _identity_cache_token(value: str, fallback: str) -> str:
+    return re.sub(r"[^a-f0-9]", "", str(value or "").lower())[:24] or fallback
+
+
 def _get_cache_key(
     doc_id: str,
     depth: str,
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    visual_model_identity: str = "",
+    text_model_identity: str = "",
 ) -> str:
-    """生成绑定当前主解析 generation 的缓存键。"""
+    """Generate a cache key bound to parser, text-model, and VLM identities."""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     identity_token = _parse_cache_identity_token(parse_generation, document_source_hash)
-    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{identity_token}"
+    visual_token = _identity_cache_token(visual_model_identity, "none")
+    text_token = _identity_cache_token(text_model_identity, "none")
+    prompt_token = hashlib.sha256(
+        VISUAL_SUPPLEMENT_PROMPT_SUITE_IDENTITY.encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{identity_token}_{visual_token}_{text_token}_{prompt_token}"
 
 
 def _get_cache_path(
@@ -1625,6 +1816,8 @@ def _get_cache_path(
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    visual_model_identity: str = "",
+    text_model_identity: str = "",
 ) -> Path:
     """获取缓存文件路径"""
     key = _get_cache_key(
@@ -1633,6 +1826,8 @@ def _get_cache_path(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     return CACHE_DIR / f"{key}.json"
 
@@ -1643,6 +1838,8 @@ def _get_legacy_cache_path(
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    visual_model_identity: str = "",
+    text_model_identity: str = "",
 ) -> Path:
     """旧版 backend/data/overviews 缓存路径，用于一次性兼容迁移。"""
     key = _get_cache_key(
@@ -1651,6 +1848,8 @@ def _get_legacy_cache_path(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     return LEGACY_CACHE_DIR / f"{key}.json"
 
@@ -1659,13 +1858,113 @@ def _overview_matches_parse_identity(
     overview: OverviewData,
     parse_generation: str,
     document_source_hash: str,
+    visual_model_identity: str = "",
+    text_model_identity: str = "",
 ) -> bool:
     """即使文件名意外复用，也拒绝没有匹配 manifest 的旧缓存。"""
     return (
         str(overview.parse_generation or "").strip() == str(parse_generation or "").strip()
         and str(overview.document_source_hash or "").strip()
         == str(document_source_hash or "").strip()
+        and str(overview.visual_model_identity or "").strip()
+        == str(visual_model_identity or "").strip()
+        and str(overview.text_model_identity or "").strip()
+        == str(text_model_identity or "").strip()
     )
+
+
+def _cached_visual_supplement_is_active(
+    doc_id: str,
+    overview: OverviewData,
+    parse_generation: str,
+    document_source_hash: str,
+    visual_model_identity: str,
+) -> bool:
+    """Reject a cached VLM overview when another model owns active read blocks.
+
+    Only local-route VLM summaries publish visual blocks.  Switching from
+    model A to B changes those active blocks; reopening A must regenerate and
+    republish A instead of showing A's overview alongside B's evidence.
+    """
+    expected_revision = str(overview.visual_supplement_revision or "").strip()
+    cache_without_revision_is_valid = not bool(expected_revision)
+    try:
+        from routes.document_routes import documents_store
+
+        doc = documents_store.get(doc_id)
+        if not isinstance(doc, dict):
+            return cache_without_revision_is_valid
+        data = doc.get("data")
+        if not isinstance(data, dict):
+            return cache_without_revision_is_valid
+
+        # ``read_parse_manifest`` intentionally derives a compatibility
+        # identity for old documents. A visual supplement has stronger
+        # publication requirements: it must belong to a durable, explicit
+        # parser run, rather than an inferred legacy identity.
+        raw_manifest = data.get("parse_manifest")
+        if not isinstance(raw_manifest, dict):
+            return cache_without_revision_is_valid
+        raw_metadata = raw_manifest.get("metadata")
+        if isinstance(raw_metadata, dict) and raw_metadata.get("legacy_inferred"):
+            return cache_without_revision_is_valid
+        migrated_from_legacy = bool(
+            isinstance(raw_metadata, dict) and raw_metadata.get("migrated_from_legacy")
+        )
+        raw_generation = str(raw_manifest.get("generation") or "").strip()
+        raw_source_hash = str(raw_manifest.get("source_hash") or "").strip()
+        raw_resolved_route = str(raw_manifest.get("resolved_route") or "").strip().lower()
+        if (
+            not raw_generation
+            or not raw_source_hash
+            or raw_resolved_route != "local"
+            or (
+                not migrated_from_legacy
+                and (
+                    raw_generation.startswith("legacy-")
+                    or raw_source_hash.startswith("legacy-")
+                    or str(raw_manifest.get("stage") or "").strip().lower() == "legacy_ready"
+                )
+            )
+        ):
+            return cache_without_revision_is_valid
+
+        manifest = read_parse_manifest(doc, doc_id=doc_id)
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        if (
+            metadata.get("legacy_inferred")
+            or not is_parse_prepared(manifest, route="local")
+            or str(manifest.get("resolved_route") or "").strip().lower() != "local"
+            or str(manifest.get("generation") or "") != raw_generation
+            or str(manifest.get("source_hash") or "") != raw_source_hash
+        ):
+            return cache_without_revision_is_valid
+        parse_identity = {
+            "parser_route": "local",
+            "parse_generation": raw_generation,
+            "document_source_hash": raw_source_hash,
+        }
+        if not visual_supplements_are_committed(data, parse_identity=parse_identity):
+            return cache_without_revision_is_valid
+        envelope = data.get("visual_supplements")
+        if not isinstance(envelope, dict):
+            return cache_without_revision_is_valid
+        active_revision = visual_supplement_revision(data, parse_identity)
+        if not active_revision:
+            return cache_without_revision_is_valid
+        if not expected_revision:
+            # A text-only cache predates the now-published visual evidence.
+            # Regenerate it so the overview and shared reading blocks agree.
+            return False
+        return (
+            str(envelope.get("parse_generation") or "") == str(parse_generation or "")
+            and str(envelope.get("document_source_hash") or "") == str(document_source_hash or "")
+            and str(envelope.get("visual_model_identity") or "") == str(visual_model_identity or "")
+            and active_revision == expected_revision
+        )
+    except Exception as exc:
+        logger.debug("[Overview] skipped cached supplement activity check doc=%s: %s", doc_id, exc)
+        return cache_without_revision_is_valid
 
 
 async def clear_overview_cache(
@@ -1674,19 +1973,57 @@ async def clear_overview_cache(
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    visual_model_identity: str | None = None,
+    text_model_identity: str | None = None,
 ) -> None:
-    """删除当前解析 generation 的指定速览缓存，用于强制重新生成。"""
+    """Delete overview caches for a parser generation.
+
+    An omitted visual identity intentionally clears every VLM variant.  This is
+    used by route changes and manual cache clearing, where selecting only one
+    visual model would leave stale alternatives on disk.
+    """
     parse_generation, document_source_hash = await _resolve_parse_cache_identity(
         doc_id,
         parse_generation,
         document_source_hash,
     )
+    if visual_model_identity is None:
+        render_mode = _normalize_figure_render_mode(figure_render_mode)
+        parse_token = _parse_cache_identity_token(parse_generation, document_source_hash)
+        prefix = f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{parse_token}_"
+        for cache_key in [key for key in overview_cache if key.startswith(prefix)]:
+            overview_cache.pop(cache_key, None)
+        for directory in (CACHE_DIR, LEGACY_CACHE_DIR):
+            try:
+                for cache_path in directory.glob(f"{prefix}*.json"):
+                    cache_path.unlink()
+            except Exception as exc:
+                logger.warning("删除速览缓存失败 doc=%s: %s", doc_id, exc)
+        return
+
+    if text_model_identity is None:
+        render_mode = _normalize_figure_render_mode(figure_render_mode)
+        parse_token = _parse_cache_identity_token(parse_generation, document_source_hash)
+        visual_token = _identity_cache_token(visual_model_identity, "none")
+        prefix = f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{parse_token}_{visual_token}_"
+        for cache_key in [key for key in overview_cache if key.startswith(prefix)]:
+            overview_cache.pop(cache_key, None)
+        for directory in (CACHE_DIR, LEGACY_CACHE_DIR):
+            try:
+                for cache_path in directory.glob(f"{prefix}*.json"):
+                    cache_path.unlink()
+            except Exception as exc:
+                logger.warning("删除速览缓存失败 doc=%s: %s", doc_id, exc)
+        return
+
     cache_key = _get_cache_key(
         doc_id,
         depth,
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     overview_cache.pop(cache_key, None)
     cache_path = _get_cache_path(
@@ -1695,6 +2032,8 @@ async def clear_overview_cache(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     try:
         if cache_path.exists():
@@ -1709,6 +2048,8 @@ async def get_cached_overview(
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    visual_model_identity: str = "",
+    text_model_identity: str = "",
 ) -> Optional[OverviewData]:
     """获取与当前 primary parser generation 匹配的速览缓存。"""
     parse_generation, document_source_hash = await _resolve_parse_cache_identity(
@@ -1722,12 +2063,26 @@ async def get_cached_overview(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
 
     # 内存缓存
     cached = overview_cache.get(cache_key)
     if cached:
-        if _overview_matches_parse_identity(cached, parse_generation, document_source_hash):
+        if _overview_matches_parse_identity(
+            cached,
+            parse_generation,
+            document_source_hash,
+            visual_model_identity,
+            text_model_identity,
+        ) and _cached_visual_supplement_is_active(
+            doc_id,
+            cached,
+            parse_generation,
+            document_source_hash,
+            visual_model_identity,
+        ):
             return cached
         overview_cache.pop(cache_key, None)
 
@@ -1739,6 +2094,8 @@ async def get_cached_overview(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     legacy_cache_path = _get_legacy_cache_path(
         doc_id,
@@ -1746,6 +2103,8 @@ async def get_cached_overview(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        visual_model_identity,
+        text_model_identity,
     )
     source_path = cache_path if cache_path.exists() else legacy_cache_path
     if source_path.exists():
@@ -1757,6 +2116,14 @@ async def get_cached_overview(
                 overview,
                 parse_generation,
                 document_source_hash,
+                visual_model_identity,
+                text_model_identity,
+            ) or not _cached_visual_supplement_is_active(
+                doc_id,
+                overview,
+                parse_generation,
+                document_source_hash,
+                visual_model_identity,
             ):
                 logger.info(
                     "忽略过期速览缓存 doc=%s depth=%s generation=%s",
@@ -1805,10 +2172,9 @@ async def save_overview_cache(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        overview.visual_model_identity,
+        overview.text_model_identity,
     )
-
-    # 内存缓存
-    overview_cache[cache_key] = overview
 
     # 文件缓存
     cache_path = _get_cache_path(
@@ -1817,12 +2183,92 @@ async def save_overview_cache(
         figure_render_mode,
         parse_generation,
         document_source_hash,
+        overview.visual_model_identity,
+        overview.text_model_identity,
     )
+    temp_path: str | None = None
     try:
-        with open(cache_path, "w", encoding="utf-8") as f:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=cache_path.parent,
+            prefix=f".{cache_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            temp_path = f.name
             json.dump(overview.model_dump(), f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, cache_path)
+        overview_cache[cache_key] = overview
     except Exception as e:
         logger.warning(f"保存速览缓存失败: {e}")
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _build_pipeline_visual_supplement(
+    figure_data: dict,
+    item: KeyFigureItem,
+    visual_config: VisualModelConfig,
+    render_mode: str,
+) -> dict | None:
+    figure = figure_data.get("figure") if isinstance(figure_data, dict) else None
+    if not figure:
+        return None
+    bbox = getattr(figure, "full_bbox_page_pts", None) or getattr(figure, "body_bbox_page_pts", None)
+    return build_visual_supplement(
+        figure_id=str(getattr(figure, "figure_id", "") or item.figure_id),
+        page=int(getattr(figure, "page_idx", -1) if getattr(figure, "page_idx", None) is not None else -1) + 1,
+        bbox=bbox,
+        caption=item.caption,
+        analysis=item.analysis,
+        visual_model_identity=visual_config.identity,
+        provider=visual_config.provider,
+        model=visual_config.model,
+        render_mode=render_mode,
+        purpose="figure_description",
+        confidence=item.confidence,
+        prompt_version=FIGURE_ANALYSIS_PROMPT_VERSION,
+        route="local",
+    )
+
+
+def _build_legacy_visual_supplement(
+    figure: dict,
+    item: KeyFigureItem,
+    visual_config: VisualModelConfig,
+    render_mode: str,
+) -> dict | None:
+    if not isinstance(figure, dict):
+        return None
+    bbox = (
+        figure.get("group_bbox")
+        or figure.get("figure_bbox")
+        or figure.get("bbox")
+        or figure.get("image_bboxes", [None])[0]
+    )
+    page = figure.get("page_num") or figure.get("page") or 0
+    return build_visual_supplement(
+        figure_id=str(figure.get("figure_id") or item.figure_id),
+        page=int(page or 0),
+        bbox=bbox,
+        caption=item.caption,
+        analysis=item.analysis,
+        visual_model_identity=visual_config.identity,
+        provider=visual_config.provider,
+        model=visual_config.model,
+        render_mode=render_mode,
+        purpose="figure_description",
+        confidence=item.confidence,
+        prompt_version=FIGURE_ANALYSIS_PROMPT_VERSION,
+        route="local",
+    )
 
 
 async def generate_overview_content(
@@ -1833,26 +2279,46 @@ async def generate_overview_content(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    visual_api_key: str = "",
+    visual_model: str = "",
+    visual_provider: str = "",
+    visual_endpoint: str = "",
+    visual_enabled: bool = True,
+    visual_policy_params: Optional[dict] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
 ) -> OverviewData:
     """生成速览内容（调用 LLM）"""
-    from services.chat_service import call_ai_api
     figure_render_mode = _normalize_figure_render_mode(figure_render_mode)
+    visual_policy = _resolve_overview_visual_policy(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        endpoint=endpoint,
+        visual_provider=visual_provider,
+        visual_model=visual_model,
+        visual_api_key=visual_api_key,
+        visual_endpoint=visual_endpoint,
+        visual_enabled=visual_enabled,
+        visual_policy_params=visual_policy_params,
+    )
+    visual_config = visual_policy.strong_model
+    text_model_identity = _overview_text_model_identity(provider, model, endpoint, api_key)
     parse_generation, document_source_hash = await _resolve_parse_cache_identity(
         doc_id,
         parse_generation,
         document_source_hash,
     )
     logger.info(
-        "[AI-Audit] purpose=overview doc=%s provider=%s model=%s depth=%s render_mode=%s",
+        "[AI-Audit] purpose=overview doc=%s provider=%s model=%s depth=%s render_mode=%s visual=%s",
         doc_id,
         provider,
         model,
         depth,
         figure_render_mode,
+        visual_policy.identity,
     )
     
     # 获取文档信息
@@ -1921,11 +2387,16 @@ async def generate_overview_content(
                 "purpose": "overview",
                 "provider": provider,
                 "model": model,
+                "text_model_identity": text_model_identity,
                 "depth": depth,
                 "render_mode": figure_render_mode,
+                "visual_model": visual_config.public_metadata(),
+                "visual_policy": visual_policy.public_metadata(),
             },
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
+            text_model_identity=text_model_identity,
+            visual_model_identity=visual_policy.identity,
         )
         logger.info(
             "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=success depth=%s",
@@ -1943,7 +2414,10 @@ async def generate_overview_content(
 
             # 检查文档是否存在
             key_figures_list = []
+            visual_supplement_items: list[dict] = []
+            visual_risk_assessments: list[dict] = []
             pdf_doc = None
+            doc_data: dict = {}
 
             if doc_id in documents_store:
                 doc = documents_store[doc_id]
@@ -1977,18 +2451,74 @@ async def generate_overview_content(
                             figure_render_mode=figure_render_mode,
                         )
 
-                        analysis_tasks = [
-                            _generate_figure_analysis_via_pipeline(
-                                fig_data, api_key, model, provider, endpoint
+                        analysis_jobs: list[tuple[int, Any, VisualModelConfig]] = []
+                        figure_items_by_index: dict[int, KeyFigureItem] = {}
+                        for idx, fig_data in enumerate(rendered_figures):
+                            figure = fig_data.get("figure") if isinstance(fig_data, dict) else None
+                            if not figure:
+                                continue
+                            assessment = assess_figure_risk(
+                                figure,
+                                page_text=page_text_for_risk(doc_data, int(figure.page_idx) + 1),
+                                threshold=visual_policy.risk_threshold,
                             )
-                            for fig_data in rendered_figures
-                        ]
+                            selected_visual_config = visual_policy.select(
+                                risk_level=assessment.level,
+                                purpose="figure_description",
+                            )
+                            assessment_data = {
+                                "figure_id": str(figure.figure_id or ""),
+                                **assessment.to_dict(),
+                                "selected_model": selected_visual_config.public_metadata(),
+                            }
+                            visual_risk_assessments.append(assessment_data)
+                            fig_data["visual_risk"] = assessment_data
+                            if not assessment.should_enrich:
+                                fallback_item = _build_key_figure_from_rendered(
+                                    fig_data,
+                                    idx,
+                                    reason="risk_not_triggered",
+                                )
+                                if fallback_item:
+                                    figure_items_by_index[idx] = fallback_item
+                                continue
+                            if not selected_visual_config.can_call:
+                                fallback_item = _build_key_figure_from_rendered(fig_data, idx)
+                                if fallback_item:
+                                    figure_items_by_index[idx] = fallback_item
+                                continue
+                            analysis_jobs.append((
+                                idx,
+                                _generate_figure_analysis_via_pipeline(
+                                    fig_data,
+                                    api_key,
+                                    model,
+                                    provider,
+                                    endpoint,
+                                    visual_config=selected_visual_config,
+                                    document_id=doc_id,
+                                    parse_generation=parse_generation,
+                                    visual_document_budget=visual_policy.document_budget,
+                                ),
+                                selected_visual_config,
+                            ))
 
-                        analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+                        analysis_results = await asyncio.gather(
+                            *(job for _, job, _config in analysis_jobs),
+                            return_exceptions=True,
+                        ) if analysis_jobs else []
 
-                        for idx, result in enumerate(analysis_results):
+                        for (idx, _job, selected_visual_config), result in zip(analysis_jobs, analysis_results):
                             if isinstance(result, KeyFigureItem):
-                                key_figures_list.append(result)
+                                figure_items_by_index[idx] = result
+                                supplement = _build_pipeline_visual_supplement(
+                                    rendered_figures[idx],
+                                    result,
+                                    selected_visual_config,
+                                    figure_render_mode,
+                                )
+                                if supplement:
+                                    visual_supplement_items.append(supplement)
                             elif isinstance(result, Exception):
                                 logger.warning(f"Figure analysis failed: {result}")
                                 fallback_item = _build_key_figure_from_rendered(
@@ -1996,14 +2526,18 @@ async def generate_overview_content(
                                     idx,
                                 )
                                 if fallback_item:
-                                    key_figures_list.append(fallback_item)
+                                    figure_items_by_index[idx] = fallback_item
                             else:
                                 fallback_item = _build_key_figure_from_rendered(
                                     rendered_figures[idx],
                                     idx,
                                 )
                                 if fallback_item:
-                                    key_figures_list.append(fallback_item)
+                                    figure_items_by_index[idx] = fallback_item
+                        key_figures_list.extend(
+                            figure_items_by_index[idx]
+                            for idx in sorted(figure_items_by_index)
+                        )
                     except Exception as e:
                         logger.warning(f"New figure pipeline failed: {e}")
                     finally:
@@ -2037,27 +2571,64 @@ async def generate_overview_content(
                         previous_caption_bbox=fig.get("previous_caption_bbox"),
                         figure_render_mode=figure_render_mode,
                     )
-                    item = await _generate_single_figure_analysis(
-                        figure_id=fig["figure_id"],
-                        figure_index=i,
-                        image_data_list=fig.get("image_data_list", []),
-                        figure_label=fig.get("figure_label", ""),
-                        page_content_snippet=fig.get("page_content_snippet", ""),
-                        api_key=api_key,
-                        model=model,
-                        provider=provider,
-                        endpoint=endpoint,
-                        display_image_data=display_image_data,
-                        caption=fig.get("caption"),
-                        sub_figures=fig.get("sub_figures"),
+                    page_number = int(fig.get("page_num") or fig.get("page") or 0)
+                    assessment = assess_figure_risk(
+                        fig,
+                        page_text=(
+                            page_text_for_risk(doc_data, page_number)
+                            or str(fig.get("page_content_snippet") or "")
+                        ),
+                        threshold=visual_policy.risk_threshold,
                     )
+                    selected_visual_config = visual_policy.select(
+                        risk_level=assessment.level,
+                        purpose="figure_description",
+                    )
+                    visual_risk_assessments.append({
+                        "figure_id": str(fig.get("figure_id") or ""),
+                        **assessment.to_dict(),
+                        "selected_model": selected_visual_config.public_metadata(),
+                    })
+                    item = None
+                    if assessment.should_enrich and selected_visual_config.can_call:
+                        item = await _generate_single_figure_analysis(
+                            figure_id=fig["figure_id"],
+                            figure_index=i,
+                            image_data_list=fig.get("image_data_list", []),
+                            figure_label=fig.get("figure_label", ""),
+                            page_content_snippet=fig.get("page_content_snippet", ""),
+                            api_key=api_key,
+                            model=model,
+                            provider=provider,
+                            endpoint=endpoint,
+                            display_image_data=display_image_data,
+                            caption=fig.get("caption"),
+                            sub_figures=fig.get("sub_figures"),
+                            visual_config=selected_visual_config,
+                            document_id=doc_id,
+                            parse_generation=parse_generation,
+                            visual_document_budget=visual_policy.document_budget,
+                        )
                     if item:
                         key_figures_list.append(item)
+                        supplement = _build_legacy_visual_supplement(
+                            fig,
+                            item,
+                            selected_visual_config,
+                            figure_render_mode,
+                        )
+                        if supplement:
+                            visual_supplement_items.append(supplement)
                     else:
                         fallback_item = _build_key_figure_from_legacy_crop(
                             fig,
                             i,
                             display_image_data,
+                            reason=(
+                                "analysis_unavailable"
+                                if assessment.should_enrich
+                                else "risk_not_triggered"
+                            ),
                         )
                         if fallback_item:
                             key_figures_list.append(fallback_item)
@@ -2076,7 +2647,26 @@ async def generate_overview_content(
                 "source": figure_source,
                 "count": len(key_figures_list),
                 "render_mode": figure_render_mode,
+                "visual_model": visual_config.public_metadata(),
+                "visual_policy": visual_policy.public_metadata(),
+                "visual_risk": _summarize_visual_risk(visual_risk_assessments),
             }
+            if visual_supplement_items:
+                try:
+                    from routes.document_routes import publish_visual_supplements
+
+                    publication = publish_visual_supplements(
+                        doc_id,
+                        parse_generation=parse_generation,
+                        document_source_hash=document_source_hash,
+                        visual_model_identity=visual_policy.identity,
+                        items=visual_supplement_items,
+                    )
+                    overview.visual_supplement_revision = str(publication.get("revision") or "")
+                    overview.figure_meta["visual_supplement_revision"] = overview.visual_supplement_revision
+                    overview.figure_meta["visual_supplements_published"] = bool(publication.get("published"))
+                except Exception as exc:
+                    logger.warning("[Overview] visual supplement publication skipped doc=%s: %s", doc_id, exc)
                 
         except Exception as e:
             logger.warning(f"关键图表解读跳过: {e}")
@@ -2112,6 +2702,8 @@ async def build_fallback_overview_content(
     error: str = "",
     parse_generation: str = "",
     document_source_hash: str = "",
+    text_model_identity: str = "",
+    visual_model_identity: str = "",
 ) -> OverviewData:
     """模型不可用时的确定性基础速览，避免前端空白报错。"""
     parse_generation, document_source_hash = await _resolve_parse_cache_identity(
@@ -2160,13 +2752,17 @@ async def build_fallback_overview_content(
             "purpose": "overview",
             "provider": provider,
             "model": model,
+            "text_model_identity": text_model_identity,
             "depth": depth,
             "render_mode": _normalize_figure_render_mode(figure_render_mode),
             "fallback": True,
             "generation_error": error,
+            "visual_model_identity": visual_model_identity,
         },
         parse_generation=parse_generation,
         document_source_hash=document_source_hash,
+        text_model_identity=text_model_identity,
+        visual_model_identity=visual_model_identity,
     )
     await save_overview_cache(
         overview,
@@ -2183,6 +2779,12 @@ async def create_overview_task(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    visual_api_key: str = "",
+    visual_model: str = "",
+    visual_provider: str = "",
+    visual_endpoint: str = "",
+    visual_enabled: bool = True,
+    visual_policy_params: Optional[dict] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
 ) -> OverviewTask:
@@ -2198,6 +2800,12 @@ async def create_overview_task(
         model=model,
         provider=provider,
         endpoint=endpoint,
+        visual_api_key=visual_api_key,
+        visual_model=visual_model,
+        visual_provider=visual_provider,
+        visual_endpoint=visual_endpoint,
+        visual_enabled=visual_enabled,
+        visual_policy_params=dict(visual_policy_params or {}),
         status="pending",
         created_at=time.time(),
         updated_at=time.time(),
@@ -2230,6 +2838,24 @@ async def _process_overview_task(task_id: str):
         # 检查缓存
         _use_mineru = getattr(task, 'use_mineru_figures', False)
         _render_mode = _normalize_figure_render_mode(getattr(task, 'figure_render_mode', 'raw'))
+        visual_policy = _resolve_overview_visual_policy(
+            provider=task.provider,
+            model=task.model,
+            api_key=task.api_key,
+            endpoint=task.endpoint,
+            visual_provider=getattr(task, "visual_provider", ""),
+            visual_model=getattr(task, "visual_model", ""),
+            visual_api_key=getattr(task, "visual_api_key", ""),
+            visual_endpoint=getattr(task, "visual_endpoint", ""),
+            visual_enabled=getattr(task, "visual_enabled", True),
+            visual_policy_params=getattr(task, "visual_policy_params", {}),
+        )
+        text_model_identity = _overview_text_model_identity(
+            task.provider,
+            task.model,
+            task.endpoint,
+            task.api_key,
+        )
         parse_generation, document_source_hash = await _resolve_parse_cache_identity(
             task.doc_id,
             getattr(task, "parse_generation", ""),
@@ -2243,6 +2869,8 @@ async def _process_overview_task(task_id: str):
             _render_mode,
             parse_generation,
             document_source_hash,
+            visual_policy.identity,
+            text_model_identity,
         )
         if cached:
             if _use_mineru and (cached.figure_meta or {}).get("source") != "mineru":
@@ -2260,6 +2888,12 @@ async def _process_overview_task(task_id: str):
             model=task.model,
             provider=task.provider,
             endpoint=task.endpoint,
+            visual_api_key=getattr(task, "visual_api_key", ""),
+            visual_model=getattr(task, "visual_model", ""),
+            visual_provider=getattr(task, "visual_provider", ""),
+            visual_endpoint=getattr(task, "visual_endpoint", ""),
+            visual_enabled=getattr(task, "visual_enabled", True),
+            visual_policy_params=getattr(task, "visual_policy_params", {}),
             use_mineru_figures=getattr(task, 'use_mineru_figures', False),
             figure_render_mode=_render_mode,
             parse_generation=parse_generation,
@@ -2291,6 +2925,12 @@ async def _generate_or_wait_overview(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    visual_api_key: str = "",
+    visual_model: str = "",
+    visual_provider: str = "",
+    visual_endpoint: str = "",
+    visual_enabled: bool = True,
+    visual_policy_params: Optional[dict] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
     force: bool = False,
@@ -2299,6 +2939,19 @@ async def _generate_or_wait_overview(
 ) -> OverviewData:
     """相同 doc/depth 的 overview 只生成一次，其余请求直接复用。"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
+    visual_policy = _resolve_overview_visual_policy(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        endpoint=endpoint,
+        visual_provider=visual_provider,
+        visual_model=visual_model,
+        visual_api_key=visual_api_key,
+        visual_endpoint=visual_endpoint,
+        visual_enabled=visual_enabled,
+        visual_policy_params=visual_policy_params,
+    )
+    text_model_identity = _overview_text_model_identity(provider, model, endpoint, api_key)
     parse_generation, document_source_hash = await _resolve_parse_cache_identity(
         doc_id,
         parse_generation,
@@ -2310,6 +2963,8 @@ async def _generate_or_wait_overview(
         render_mode,
         parse_generation,
         document_source_hash,
+        visual_policy.identity,
+        text_model_identity,
     )
 
     cached = await get_cached_overview(
@@ -2318,6 +2973,8 @@ async def _generate_or_wait_overview(
         render_mode,
         parse_generation,
         document_source_hash,
+        visual_policy.identity,
+        text_model_identity,
     )
     if cached and not force:
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
@@ -2331,10 +2988,75 @@ async def _generate_or_wait_overview(
 
     async def _runner() -> OverviewData:
         document_text = await get_document_text(doc_id)
+        page_recovery_revision = ""
+        page_recovery_diagnostics: dict[str, Any] = {}
+        try:
+            from routes.document_routes import (
+                _resolve_document_pdf_path,
+                documents_store,
+                publish_visual_supplements,
+            )
+
+            active_doc = documents_store.get(doc_id)
+            if isinstance(active_doc, dict):
+                page_recovery = await recover_risky_local_pages(
+                    doc_id=doc_id,
+                    doc=active_doc,
+                    pdf_path=_resolve_document_pdf_path(active_doc),
+                    visual_policy=visual_policy,
+                )
+                recovered_text = str(page_recovery.get("text") or "").strip()
+                recovery_items = page_recovery.get("items") or []
+                page_recovery_revision = str(
+                    page_recovery.get("visual_supplement_revision") or ""
+                )
+                page_recovery_diagnostics = dict(page_recovery.get("diagnostics") or {})
+                recovery_generation = str(
+                    page_recovery.get("parse_generation") or parse_generation
+                )
+                recovery_source_hash = str(
+                    page_recovery.get("document_source_hash") or document_source_hash
+                )
+                recovery_is_published = not recovery_items
+                if recovery_items:
+                    publication = publish_visual_supplements(
+                        doc_id,
+                        parse_generation=recovery_generation,
+                        document_source_hash=recovery_source_hash,
+                        visual_model_identity=visual_policy.identity,
+                        items=recovery_items,
+                    )
+                    page_recovery_revision = str(publication.get("revision") or "")
+                    recovery_is_published = bool(
+                        publication.get("published") or publication.get("committed")
+                    )
+
+                current_doc = documents_store.get(doc_id)
+                current_manifest = (
+                    read_parse_manifest(current_doc, doc_id=doc_id)
+                    if isinstance(current_doc, dict)
+                    else {}
+                )
+                recovery_identity_is_current = bool(
+                    recovery_is_published
+                    and str(current_manifest.get("resolved_route") or "").strip().lower() == "local"
+                    and str(current_manifest.get("generation") or "") == recovery_generation
+                    and str(current_manifest.get("source_hash") or "") == recovery_source_hash
+                )
+                if recovered_text and recovery_identity_is_current:
+                    document_text = "\n\n".join(
+                        part for part in (str(document_text or "").strip(), recovered_text) if part
+                    )
+                elif recovered_text:
+                    page_recovery_revision = ""
+                    page_recovery_diagnostics["discarded_reason"] = "parse_identity_changed"
+        except Exception as exc:
+            # 页级视觉只是 local 的兜底增强，单页或整批失败都不能阻断已有文本速览。
+            logger.warning("[Overview] 页级视觉恢复跳过 doc=%s: %s", doc_id, exc)
         if not document_text:
             raise RuntimeError("文档未找到")
 
-        return await generate_overview_content(
+        result = await generate_overview_content(
             doc_id,
             depth,
             document_text,
@@ -2342,11 +3064,31 @@ async def _generate_or_wait_overview(
             model=model,
             provider=provider,
             endpoint=endpoint,
+            visual_api_key=visual_api_key,
+            visual_model=visual_model,
+            visual_provider=visual_provider,
+            visual_endpoint=visual_endpoint,
+            visual_enabled=visual_enabled,
+            visual_policy_params=visual_policy_params,
             use_mineru_figures=use_mineru_figures,
             figure_render_mode=render_mode,
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
         )
+        if page_recovery_diagnostics:
+            result.ai_meta = dict(result.ai_meta or {})
+            result.ai_meta["page_visual_recovery"] = page_recovery_diagnostics
+        if page_recovery_revision and not result.visual_supplement_revision:
+            result.visual_supplement_revision = page_recovery_revision
+            result.figure_meta = dict(result.figure_meta or {})
+            result.figure_meta["visual_supplement_revision"] = page_recovery_revision
+        if page_recovery_revision or page_recovery_diagnostics:
+            await save_overview_cache(
+                result,
+                parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
+            )
+        return result
 
     task = asyncio.create_task(_runner())
     overview_inflight[cache_key] = task
@@ -2364,12 +3106,31 @@ async def get_or_create_overview(
     model: str = "gpt-4o",
     provider: str = "openai",
     endpoint: str = "",
+    visual_api_key: str = "",
+    visual_model: str = "",
+    visual_provider: str = "",
+    visual_endpoint: str = "",
+    visual_enabled: bool = True,
+    visual_policy_params: Optional[dict] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
     force: bool = False,
 ) -> OverviewData:
     """获取或创建速览（同步接口）"""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
+    visual_policy = _resolve_overview_visual_policy(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        endpoint=endpoint,
+        visual_provider=visual_provider,
+        visual_model=visual_model,
+        visual_api_key=visual_api_key,
+        visual_endpoint=visual_endpoint,
+        visual_enabled=visual_enabled,
+        visual_policy_params=visual_policy_params,
+    )
+    text_model_identity = _overview_text_model_identity(provider, model, endpoint, api_key)
     parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
     cached = await get_cached_overview(
         doc_id,
@@ -2377,6 +3138,8 @@ async def get_or_create_overview(
         render_mode,
         parse_generation,
         document_source_hash,
+        visual_policy.identity,
+        text_model_identity,
     )
     if cached and not force:
         logger.info(
@@ -2397,6 +3160,12 @@ async def get_or_create_overview(
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
+                visual_api_key=visual_api_key,
+                visual_model=visual_model,
+                visual_provider=visual_provider,
+                visual_endpoint=visual_endpoint,
+                visual_enabled=visual_enabled,
+                visual_policy_params=visual_policy_params,
                 use_mineru_figures=use_mineru_figures,
                 figure_render_mode=render_mode,
                 force=force,
@@ -2427,6 +3196,8 @@ async def get_or_create_overview(
             error="速览生成超时",
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
+            text_model_identity=text_model_identity,
+            visual_model_identity=visual_policy.identity,
         )
     except Exception as e:
         if cached:
@@ -2450,4 +3221,6 @@ async def get_or_create_overview(
             error=str(e),
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
+            text_model_identity=text_model_identity,
+            visual_model_identity=visual_policy.identity,
         )

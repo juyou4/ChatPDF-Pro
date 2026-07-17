@@ -78,6 +78,31 @@ const getOverviewParseIdentity = (documentInfo) => {
   return `g=${encodeURIComponent(generation || 'legacy')}:s=${encodeURIComponent(sourceHash || 'legacy')}`;
 };
 
+const isKeylessLocalProvider = (provider) => ['local', 'ollama'].includes(String(provider || '').trim().toLowerCase());
+
+const getOverviewTextIdentity = (credentials) => {
+  const provider = String(credentials?.providerId || '').trim();
+  const model = String(credentials?.modelId || '').trim();
+  const host = String(credentials?.apiHost || '').trim().replace(/\/$/, '');
+  const available = Boolean(credentials?.apiKey) || isKeylessLocalProvider(provider);
+  return `p=${encodeURIComponent(provider || 'default')}:m=${encodeURIComponent(model || 'default')}:h=${encodeURIComponent(host)}:a=${available ? 'ready' : 'unavailable'}`;
+};
+
+const getOverviewVisualIdentity = (credentials) => {
+  const provider = String(credentials?.providerId || '').trim();
+  const model = String(credentials?.modelId || '').trim();
+  const host = String(credentials?.apiHost || '').trim().replace(/\/$/, '');
+  const visionCapable = credentials?.isVisionCapable === true;
+  const available = visionCapable && (Boolean(credentials?.apiKey) || isKeylessLocalProvider(provider));
+  const strategy = String(credentials?.strategy || 'balanced').trim();
+  const localProvider = String(credentials?.local?.providerId || '').trim();
+  const localModel = String(credentials?.local?.modelId || '').trim();
+  const localHost = String(credentials?.local?.apiHost || '').trim().replace(/\/$/, '');
+  const localAvailable = credentials?.local?.isVisionCapable === true
+    && (Boolean(credentials?.local?.apiKey) || isKeylessLocalProvider(localProvider));
+  return `s=${encodeURIComponent(strategy)}:p=${encodeURIComponent(provider || 'default')}:m=${encodeURIComponent(model || 'default')}:h=${encodeURIComponent(host)}:e=${visionCapable ? 'vision' : 'disabled'}:a=${available ? 'ready' : 'unavailable'}:lp=${encodeURIComponent(localProvider)}:lm=${encodeURIComponent(localModel)}:lh=${encodeURIComponent(localHost)}:la=${localAvailable ? 'ready' : 'unavailable'}`;
+};
+
 /**
  * 解析后端错误响应，尽量提取可读错误信息
  */
@@ -130,6 +155,7 @@ const getUploadErrorMessage = (xhr) => {
 export function useDocumentState({
   getEmbeddingConfig,
   getChatCredentials,
+  getVisualCredentials,
   getProviderById,
   setMessages,
   setCurrentPage,
@@ -165,11 +191,15 @@ export function useDocumentState({
   const currentOverviewKeyRef = useRef('');
   const overviewEpochRef = useRef(0);
   const overviewObservedContextRef = useRef(null);
-  const overviewContextRef = useRef({ docId: '', parseIdentity: '' });
+  const overviewContextRef = useRef({ docId: '', parseIdentity: '', textIdentity: '', visualIdentity: '' });
   const overviewParseIdentity = getOverviewParseIdentity(docInfo);
+  const overviewTextIdentity = getOverviewTextIdentity(getChatCredentials?.());
+  const overviewVisualIdentity = getOverviewVisualIdentity(getVisualCredentials?.());
   overviewContextRef.current = {
     docId: docId || '',
     parseIdentity: overviewParseIdentity,
+    textIdentity: overviewTextIdentity,
+    visualIdentity: overviewVisualIdentity,
   };
   // 文件输入引用
   const fileInputRef = useRef(null);
@@ -203,10 +233,16 @@ export function useDocumentState({
     }, 700);
   }, [clearUploadProcessingTimer]);
 
-  const buildOverviewKey = useCallback((currentDocId, depth, currentDocInfo = docInfo) => {
+  const buildOverviewKey = useCallback((
+    currentDocId,
+    depth,
+    currentDocInfo = docInfo,
+    visualIdentity = overviewVisualIdentity,
+    textIdentity = overviewTextIdentity,
+  ) => {
     if (!currentDocId) return '';
-    return `${currentDocId}:${getOverviewParseIdentity(currentDocInfo)}:${depth}`;
-  }, [docInfo]);
+    return `${currentDocId}:${getOverviewParseIdentity(currentDocInfo)}:${textIdentity}:${visualIdentity}:${depth}`;
+  }, [docInfo, overviewTextIdentity, overviewVisualIdentity]);
 
   const clearOverviewEntriesForDocument = useCallback((currentDocId) => {
     if (!currentDocId) return;
@@ -535,6 +571,8 @@ export function useDocumentState({
     const force = Boolean(options?.force);
     const requestDocId = docId;
     const requestParseIdentity = overviewParseIdentity;
+    const requestTextIdentity = overviewTextIdentity;
+    const requestVisualIdentity = overviewVisualIdentity;
     const requestEpoch = overviewEpochRef.current;
     const isCurrentOverviewRequest = () => {
       const currentContext = overviewContextRef.current;
@@ -542,6 +580,8 @@ export function useDocumentState({
         overviewEpochRef.current === requestEpoch
         && currentContext.docId === requestDocId
         && currentContext.parseIdentity === requestParseIdentity
+        && currentContext.textIdentity === requestTextIdentity
+        && currentContext.visualIdentity === requestVisualIdentity
       );
     };
 
@@ -550,7 +590,13 @@ export function useDocumentState({
     // not only after the network response.
     if (!isCurrentOverviewRequest()) return undefined;
 
-    const overviewKey = buildOverviewKey(requestDocId, depth, docInfo);
+    const overviewKey = buildOverviewKey(
+      requestDocId,
+      depth,
+      docInfo,
+      requestVisualIdentity,
+      requestTextIdentity,
+    );
     if (!force && currentOverviewKeyRef.current === overviewKey && overview) {
       return overview;
     }
@@ -576,6 +622,12 @@ export function useDocumentState({
     const chatModel = chatCredentials?.modelId || 'gpt-4o';
     const chatApiKey = chatCredentials?.apiKey || '';
     const chatProviderFull = getProviderById?.(chatProvider);
+    const visualCredentials = getVisualCredentials?.() || null;
+    const useDedicatedVisualModel = visualCredentials?.source === 'dedicated';
+    const visualProvider = useDedicatedVisualModel ? visualCredentials?.providerId || '' : '';
+    const visualModel = useDedicatedVisualModel ? visualCredentials?.modelId || '' : '';
+    const visualApiKey = visualCredentials?.apiKey || '';
+    const visualProviderFull = useDedicatedVisualModel ? getProviderById?.(visualProvider) : null;
 
     if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
       setOverviewError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
@@ -603,6 +655,30 @@ export function useDocumentState({
         }
         if (chatProviderFull?.apiHost) {
           headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
+        }
+      }
+      if (visualCredentials) {
+        headers['X-ChatPDF-Visual-Strategy'] = visualCredentials.strategy || 'balanced';
+        headers['X-ChatPDF-Visual-Enabled'] = String(visualCredentials.isVisionCapable === true);
+        if (useDedicatedVisualModel) {
+          headers['X-ChatPDF-Visual-Provider'] = visualProvider;
+          headers['X-ChatPDF-Visual-Model'] = visualModel;
+          if (visualApiKey) {
+            headers['X-ChatPDF-Visual-Api-Key'] = visualApiKey;
+          }
+          if (visualProviderFull?.apiHost) {
+            headers['X-ChatPDF-Visual-Api-Host'] = visualProviderFull.apiHost;
+          }
+        }
+        if (visualCredentials.local?.providerId && visualCredentials.local?.modelId) {
+          headers['X-ChatPDF-Local-Visual-Provider'] = visualCredentials.local.providerId;
+          headers['X-ChatPDF-Local-Visual-Model'] = visualCredentials.local.modelId;
+          if (visualCredentials.local.apiKey) {
+            headers['X-ChatPDF-Local-Visual-Api-Key'] = visualCredentials.local.apiKey;
+          }
+          if (visualCredentials.local.apiHost) {
+            headers['X-ChatPDF-Local-Visual-Api-Host'] = visualCredentials.local.apiHost;
+          }
         }
       }
 
@@ -651,13 +727,20 @@ export function useDocumentState({
     docId,
     docInfo,
     getChatCredentials,
+    getVisualCredentials,
     getProviderById,
     overview,
     overviewParseIdentity,
+    overviewTextIdentity,
+    overviewVisualIdentity,
   ]);
 
   useEffect(() => {
-    const nextContext = { docId: docId || '', parseIdentity: overviewParseIdentity };
+    const nextContext = {
+      docId: docId || '',
+      parseIdentity: overviewParseIdentity,
+      visualIdentity: overviewVisualIdentity,
+    };
     const previousContext = overviewObservedContextRef.current;
     overviewObservedContextRef.current = nextContext;
     if (!previousContext) return;
@@ -667,12 +750,17 @@ export function useDocumentState({
       previousContext.docId === nextContext.docId
       && previousContext.parseIdentity !== nextContext.parseIdentity
     );
-    if (!changedDocument && !changedParseGeneration) return;
+    const changedVisualModel = (
+      previousContext.docId === nextContext.docId
+      && previousContext.parseIdentity === nextContext.parseIdentity
+      && previousContext.visualIdentity !== nextContext.visualIdentity
+    );
+    if (!changedDocument && !changedParseGeneration && !changedVisualModel) return;
 
     invalidateOverviewEpoch(previousContext.docId || nextContext.docId, {
       clearDocumentCache: changedParseGeneration,
     });
-  }, [docId, invalidateOverviewEpoch, overviewParseIdentity]);
+  }, [docId, invalidateOverviewEpoch, overviewParseIdentity, overviewVisualIdentity]);
 
   // 初始化时加载历史
   useEffect(() => {

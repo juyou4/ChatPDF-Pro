@@ -16,6 +16,30 @@ const PRICING_OVERRIDES = [
     { match: /pro\/baai\/bge-m3/i, price: 0.07, currency: 'CNY' }
 ]
 
+const MODEL_TAG_LABELS = {
+    latest: '最新',
+    vision: '视觉',
+    reasoning: '推理',
+    embedding: '向量',
+    rerank: '重排',
+    free: '免费',
+    chinese_optimized: '中文优化',
+    function_calling: '工具调用',
+    web_search: '联网',
+}
+
+const MODEL_TAG_STYLES = {
+    latest: 'bg-violet-100 text-violet-700',
+    vision: 'bg-sky-100 text-sky-700',
+    reasoning: 'bg-amber-100 text-amber-700',
+    embedding: 'bg-purple-100 text-purple-700',
+    rerank: 'bg-orange-100 text-orange-700',
+    free: 'bg-emerald-100 text-emerald-700',
+    chinese_optimized: 'bg-rose-100 text-rose-700',
+    function_calling: 'bg-indigo-100 text-indigo-700',
+    web_search: 'bg-cyan-100 text-cyan-700',
+}
+
 // 简单格式化价格显示
 const getPricingLabel = (model) => {
     const pricing = model.pricing || model.metadata?.pricing
@@ -147,6 +171,7 @@ export default function ManageModelsPopup({ isOpen, onClose, providerId }) {
             metadata: {
                 dimension: newModelForm.dimension ? Number(newModelForm.dimension) : undefined
             },
+            tags: [],
             isSystem: false,
             isUserAdded: true
         }
@@ -534,6 +559,14 @@ function ModelCard({ model, isSelected, isAdded, onSelect, onAdd, onRemove }) {
                         }`}>
                             {model.type === 'chat' ? 'Chat' : model.type === 'embedding' ? 'Embedding' : 'Rerank'}
                         </span>
+                        {(model.tags || []).slice(0, 4).map(tag => (
+                            <span
+                                key={tag}
+                                className={`px-2 py-0.5 rounded text-xs font-semibold ${MODEL_TAG_STYLES[tag] || 'bg-slate-100 text-slate-600'}`}
+                            >
+                                {MODEL_TAG_LABELS[tag] || tag}
+                            </span>
+                        ))}
                         {model.isSystem && (
                             <span className="px-2 py-0.5 bg-gray-200 text-gray-700 rounded text-xs font-semibold">
                                 内置
@@ -649,9 +682,22 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
             {/* Type Badge */}
             <div>
                 <div className="inline-block px-3 py-1 bg-purple-100 text-purple-700 rounded-lg text-sm font-semibold">
-                    {model.type === 'embedding' ? 'Embedding 模型' : 'Rerank 模型'}
+                    {model.type === 'chat' ? 'Chat 模型' : model.type === 'embedding' ? 'Embedding 模型' : 'Rerank 模型'}
                 </div>
             </div>
+
+            {(model.tags || []).length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                    {model.tags.map(tag => (
+                        <span
+                            key={tag}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${MODEL_TAG_STYLES[tag] || 'bg-slate-100 text-slate-600'}`}
+                        >
+                            {MODEL_TAG_LABELS[tag] || tag}
+                        </span>
+                    ))}
+                </div>
+            )}
 
             {/* Metadata */}
             {model.metadata && (

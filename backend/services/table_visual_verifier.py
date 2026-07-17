@@ -21,8 +21,21 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from services.chat_service import call_ai_api
-from utils.middleware import RetryMiddleware
+from services.chat_service import call_ai_api as _default_call_ai_api
+from services.document_parse_state import read_parse_manifest
+from services.visual_enrichment_service import (
+    VisualTaskBudgetExceeded,
+    VisualTaskPolicy,
+    VisualTaskTimeoutError,
+    execute_visual_task,
+)
+from services.visual_model_service import (
+    VisualEnrichmentPolicy,
+    VisualModelConfig,
+    call_visual_model,
+    resolve_visual_model_config,
+)
+from services.visual_risk_service import assess_visual_region_risk
 
 try:
     from services.table_visual_metadata import build_table_visual_metadata
@@ -31,13 +44,18 @@ except ImportError:  # Kept for old documents while rolling out the metadata hel
 
 logger = logging.getLogger(__name__)
 
+# Keep the historic module-level hook available for downstream integrations and
+# existing tests.  Normal execution still enters through ``call_visual_model``.
+call_ai_api = _default_call_ai_api
+
 _VALID_MODES = {"off", "auto", "always"}
 _TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed"}
 _TASK_STATES = {"queued", "running", *_TERMINAL_STATES}
-_CACHE_SCHEMA_VERSION = 4
+_CACHE_SCHEMA_VERSION = 6
 _TASK_STORE_VERSION = 1
 _VISUAL_PROMPT_VERSION = 3
 _VISUAL_CROP_VERSION = 2
+_VISUAL_PURPOSE = "numeric_table_verification"
 _DEFAULT_CONCURRENCY = 2
 _DEFAULT_FAILURE_COOLDOWN_S = 300.0
 _DEFAULT_STALE_TASK_S = 600.0
@@ -45,7 +63,38 @@ _DEFAULT_INDETERMINATE_TTL_S = 86400.0
 _VISUAL_CACHE: dict[str, dict] = {}
 _VISUAL_PENDING: set[str] = set()
 _TASK_WRITE_LOCK = threading.Lock()
-_SEMAPHORES: dict[int, tuple[int, asyncio.Semaphore]] = {}
+
+
+async def _call_table_visual_model(
+    *,
+    messages: list[dict[str, Any]],
+    config: VisualModelConfig,
+    middlewares: list[Any] | None,
+    max_tokens: int,
+    temperature: float,
+    purpose: str = "numeric_table_visual_verification",
+) -> Any:
+    """Use the shared VLM gateway while retaining the legacy injection hook."""
+    if call_ai_api is not _default_call_ai_api:
+        return await call_ai_api(
+            messages,
+            config.api_key,
+            config.model,
+            config.provider,
+            endpoint=config.endpoint,
+            middlewares=middlewares,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            purpose=purpose,
+        )
+    return await call_visual_model(
+        messages=messages,
+        config=config,
+        middlewares=middlewares,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        purpose=purpose,
+    )
 
 _TABLE_REF_RE = re.compile(r"\btable\s*\.?\s*(\d+[a-z]?)\b|表\s*\.?\s*(\d+[a-z]?)", re.IGNORECASE)
 _COLUMN_PLACEHOLDER_RE = re.compile(r"\bcolumn\s*\d+\b|列\s*\d+", re.IGNORECASE)
@@ -128,19 +177,61 @@ def resolve_visual_mode(custom_params: Optional[dict]) -> str:
     return normalized if normalized in _VALID_MODES else "auto"
 
 
-def looks_vision_capable_model(provider: str = "", model: str = "") -> bool:
-    provider_l = str(provider or "").lower()
-    model_l = str(model or "").lower()
-    if provider_l in {"gemini", "openai", "openai_native", "anthropic", "moonshot", "grok", "xai"}:
+_VISION_CAPABLE_MODEL_RULES: dict[str, re.Pattern[str]] = {
+    # Keep these provider/model prefixes aligned with
+    # frontend/src/utils/visionDetectorUtils.js.  A provider alone never
+    # proves image-input support: users may configure text-only, embedding, or
+    # legacy models under the same provider.
+    "openai": re.compile(r"^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)", re.IGNORECASE),
+    "openai_native": re.compile(r"^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)", re.IGNORECASE),
+    "anthropic": re.compile(r"^(claude-3|claude-(fable|mythos|sonnet|opus|haiku))", re.IGNORECASE),
+    "gemini": re.compile(r"^gemini-(2|[3-9])", re.IGNORECASE),
+    "qwen": re.compile(r"^(qwen-vl|qwen-max)", re.IGNORECASE),
+    "aliyun": re.compile(r"^(qwen-vl|qwen-max|qwen3\.[567]|qwen3\.5-omni)", re.IGNORECASE),
+    "grok": re.compile(r"^(grok-vision|grok-4)", re.IGNORECASE),
+    "xai": re.compile(r"^(grok-vision|grok-4)", re.IGNORECASE),
+    "minimax": re.compile(r"^(minimax-m3|abab6\.5)", re.IGNORECASE),
+    "doubao": re.compile(r"^(doubao-1\.5-pro|doubao-seed)", re.IGNORECASE),
+    "moonshot": re.compile(r"^(moonshot-v1|kimi-k2)", re.IGNORECASE),
+}
+
+
+def looks_vision_capable_model(
+    provider: str = "",
+    model: str = "",
+    *,
+    capability_hint: Optional[bool] = None,
+) -> bool:
+    """Return whether a selected model can accept images.
+
+    The desktop client sends ``visual_enabled`` after consulting its model
+    metadata, including explicit ``vision`` tags for custom providers.  That
+    hint is authoritative when present.  API callers without that metadata use
+    the same conservative provider-plus-model matrix as the client.
+    """
+    if capability_hint is not None:
+        return bool(capability_hint)
+
+    provider_l = str(provider or "").strip().lower()
+    model_l = str(model or "").strip().lower()
+    rule = _VISION_CAPABLE_MODEL_RULES.get(provider_l)
+    if rule and rule.search(model_l):
         return True
-    return bool(
-        re.search(
-            r"vision|visual|\bvl\b|vlm|gpt-4o|gpt-5|o3|o4|gemini|claude-3|"
-            r"qwen.*vl|internvl|glm-4v|kimi.*vision|moonshot.*vision|grok|"
-            r"doubao[-_ ]?seed[-_ ]?2[-_.]?1",
-            model_l,
-        )
-    )
+
+    # Preserve the client-side fallback for dynamically registered VLMs while
+    # avoiding broad "visual"/"vlm" keyword guesses that mark text models as
+    # image-capable.
+    return "vision" in model_l or "-vl" in model_l
+
+
+def _visual_capability_hint(custom_params: Optional[dict]) -> Optional[bool]:
+    """Extract an explicit client capability decision without coercing absence."""
+    if not isinstance(custom_params, dict) or "visual_enabled" not in custom_params:
+        return None
+    value = custom_params.get("visual_enabled")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
 
 
 def should_verify_numeric_table_visual(
@@ -150,18 +241,19 @@ def should_verify_numeric_table_visual(
     mode: str = "auto",
     provider: str = "",
     model: str = "",
+    capability_hint: Optional[bool] = None,
 ) -> tuple[bool, list[str]]:
     """Deterministic risk gate for table-image verification."""
     mode = mode if mode in _VALID_MODES else "auto"
     reasons: list[str] = []
     if mode == "off":
         return False, ["mode_off"]
+    if not looks_vision_capable_model(provider, model, capability_hint=capability_hint):
+        return False, ["model_not_vision_capable"]
     if mode == "always":
         return True, ["mode_always"]
     if not segments:
         return False, ["no_segments"]
-    if not looks_vision_capable_model(provider, model):
-        return False, ["model_not_vision_capable"]
 
     table_refs = _extract_table_refs(query)
     if table_refs:
@@ -221,6 +313,8 @@ async def maybe_verify_numeric_table_visual(
     endpoint: str,
     custom_params: Optional[dict] = None,
     background: bool = False,
+    visual_config: VisualModelConfig | None = None,
+    visual_policy: VisualEnrichmentPolicy | None = None,
 ) -> tuple[dict, dict]:
     """Run or enqueue a post-retrieval visual check.
 
@@ -228,7 +322,24 @@ async def maybe_verify_numeric_table_visual(
     caller can still expose its diagnostic/task status without allowing the
     VLM to alter the answer or citations.
     """
+    resolved_visual_config = (
+        visual_policy.select(risk_level="medium", purpose=_VISUAL_PURPOSE)
+        if visual_policy is not None
+        else visual_config or resolve_visual_model_config(
+            primary_provider=provider,
+            primary_model=model,
+            primary_api_key=api_key,
+            primary_endpoint=endpoint,
+        )
+    )
+    provider = resolved_visual_config.provider
+    model = resolved_visual_config.model
+    api_key = resolved_visual_config.api_key
+    endpoint = resolved_visual_config.endpoint
     mode = resolve_visual_mode(custom_params)
+    capability_hint = _visual_capability_hint(custom_params)
+    if visual_policy is not None and resolved_visual_config.source == "local_tier":
+        capability_hint = True
     diagnostics: dict[str, Any] = {
         "enabled": mode != "off",
         "mode": mode,
@@ -237,6 +348,8 @@ async def maybe_verify_numeric_table_visual(
         "skipped_reason": "",
         "state": "not_started",
         "verdict": "indeterminate",
+        "visual_model": resolved_visual_config.public_metadata(),
+        "visual_policy": visual_policy.public_metadata() if visual_policy is not None else {},
     }
     should_verify, reasons = should_verify_numeric_table_visual(
         query=query,
@@ -244,13 +357,14 @@ async def maybe_verify_numeric_table_visual(
         mode=mode,
         provider=provider,
         model=model,
+        capability_hint=capability_hint,
     )
     diagnostics["reasons"] = reasons
     if not should_verify:
         diagnostics.update({"skipped_reason": reasons[0] if reasons else "not_risky", "state": "skipped"})
         return {}, diagnostics
-    if not api_key:
-        diagnostics.update({"skipped_reason": "missing_api_key", "state": "skipped"})
+    if not resolved_visual_config.can_call:
+        diagnostics.update({"skipped_reason": "missing_visual_model", "state": "skipped"})
         return {}, diagnostics
     if not pdf_path or not Path(pdf_path).exists():
         diagnostics.update({"skipped_reason": "missing_pdf", "state": "skipped"})
@@ -285,16 +399,63 @@ async def maybe_verify_numeric_table_visual(
             target["page"] = row_page
             page = row_page
     _ensure_target_metadata(target)
+    _attach_document_parse_identity(target, doc_data=doc_data, doc_id=doc_id)
+    target_bboxes = target.get("bboxes")
+    risk_bbox = target.get("bbox")
+    if not risk_bbox and isinstance(target_bboxes, list) and target_bboxes:
+        risk_bbox = target_bboxes[0]
+    region_risk = assess_visual_region_risk(
+        page=int(target.get("page") or 0),
+        bbox=risk_bbox,
+        source=str(target.get("selected_source") or target.get("source") or ""),
+        caption=str(target.get("caption") or target.get("table_caption") or ""),
+        page_text=_segments_text(segments),
+        structure_confidence=target.get("confidence"),
+        ocr_confidence=target.get("ocr_confidence"),
+        query=query,
+        text_evidence=_segments_text(segments),
+    )
+    if visual_policy is not None:
+        resolved_visual_config = visual_policy.select(
+            risk_level=region_risk.level,
+            purpose=_VISUAL_PURPOSE,
+        )
+        provider = resolved_visual_config.provider
+        model = resolved_visual_config.model
+        api_key = resolved_visual_config.api_key
+        endpoint = resolved_visual_config.endpoint
+        if not resolved_visual_config.can_call:
+            diagnostics.update({
+                "skipped_reason": "visual_policy_model_unavailable",
+                "state": "skipped",
+                "visual_risk": region_risk.to_dict(),
+                "visual_model": resolved_visual_config.public_metadata(),
+            })
+            return {}, diagnostics
     diagnostics.update({
         "table_id": target.get("table_id") or target.get("table_ref") or "",
         "table_caption": target.get("caption") or "",
         "table_instance_id": target.get("table_instance_id") or "",
+        "visual_risk": region_risk.to_dict(),
+        "visual_model": resolved_visual_config.public_metadata(),
     })
 
-    cache_key = _cache_key(doc_id, query, target, provider, model)
+    visual_cache_identity = (
+        f"{visual_policy.identity}:{resolved_visual_config.identity}"
+        if visual_policy is not None
+        else resolved_visual_config.identity
+    )
+    cache_key = _cache_key(doc_id, query, target, provider, model, visual_cache_identity)
     task_id = _task_id(cache_key)
     existing = _load_task_record(cache_key)
-    if _task_matches_request(existing, doc_id=doc_id, target=target, provider=provider, model=model):
+    if _task_matches_request(
+        existing,
+        doc_id=doc_id,
+        target=target,
+        provider=provider,
+        model=model,
+        visual_model_identity=visual_cache_identity,
+    ):
         state = str(existing.get("state") or "")
         if state in {"queued", "running"}:
             if _task_is_stale(existing):
@@ -317,7 +478,14 @@ async def maybe_verify_numeric_table_visual(
                 return dict(existing.get("segment") or {}), diagnostics
             return {}, diagnostics
 
-    request_info = _request_info(doc_id, query, target, provider, model)
+    request_info = _request_info(
+        doc_id,
+        query,
+        target,
+        provider,
+        model,
+        visual_cache_identity,
+    )
     if background and mode == "auto":
         record = _create_or_update_task(cache_key, request_info, state="queued", diagnostics=diagnostics)
         diagnostics.update(_task_diagnostics(record))
@@ -335,6 +503,8 @@ async def maybe_verify_numeric_table_visual(
             custom_params=dict(custom_params or {}),
             diagnostics=dict(diagnostics),
             request_info=request_info,
+            visual_config=resolved_visual_config,
+            visual_policy=visual_policy,
         )
         return {}, diagnostics
 
@@ -351,6 +521,8 @@ async def maybe_verify_numeric_table_visual(
         custom_params=custom_params,
         diagnostics=diagnostics,
         request_info=request_info,
+        visual_config=resolved_visual_config,
+        visual_policy=visual_policy,
     )
 
 
@@ -604,9 +776,41 @@ def _ensure_target_metadata(target: dict) -> None:
         target["table_source_hash"] = metadata.get("table_source_hash") or ""
 
 
-def _request_info(doc_id: str, query: str, target: dict, provider: str, model: str) -> dict:
+def _attach_document_parse_identity(target: dict, *, doc_data: dict, doc_id: str) -> None:
+    """Bind one visual check to the active primary-parser generation."""
+    manifest = read_parse_manifest(doc_data if isinstance(doc_data, dict) else {}, doc_id=doc_id)
+    target["parse_route"] = str(manifest.get("resolved_route") or "")
+    target["parse_generation"] = str(manifest.get("generation") or "")
+    target["document_source_hash"] = str(manifest.get("source_hash") or "")
+
+
+def _target_bbox_hash(target: dict) -> str:
+    payload = {
+        "page": target.get("page"),
+        "page_end": target.get("page_end"),
+        "bbox": target.get("bbox"),
+        "bboxes": target.get("bboxes"),
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _request_info(
+    doc_id: str,
+    query: str,
+    target: dict,
+    provider: str,
+    model: str,
+    visual_model_identity: str = "",
+) -> dict:
     return {
         "doc_id": doc_id,
+        "document_source_hash": target.get("document_source_hash") or "",
+        "parse_route": target.get("parse_route") or "",
+        "parse_generation": target.get("parse_generation") or "",
+        "page": target.get("page") or 0,
+        "bbox_hash": _target_bbox_hash(target),
+        "purpose": _VISUAL_PURPOSE,
         "table_instance_id": target.get("table_instance_id") or "",
         "table_source_hash": target.get("table_source_hash") or "",
         "requested_rows": target.get("requested_rows") or [],
@@ -614,17 +818,25 @@ def _request_info(doc_id: str, query: str, target: dict, provider: str, model: s
         "query_hash": _short_hash(_normal_query(query)),
         "provider": provider,
         "model": model,
+        "visual_model_identity": visual_model_identity,
         "prompt_version": _VISUAL_PROMPT_VERSION,
         "crop_version": _VISUAL_CROP_VERSION,
     }
 
 
-def _cache_key(doc_id: str, query: str, target: dict, provider: str, model: str) -> str:
+def _cache_key(
+    doc_id: str,
+    query: str,
+    target: dict,
+    provider: str,
+    model: str,
+    visual_model_identity: str = "",
+) -> str:
     _ensure_target_metadata(target)
     raw = json.dumps(
         {
             "schema_version": _CACHE_SCHEMA_VERSION,
-            **_request_info(doc_id, query, target, provider, model),
+            **_request_info(doc_id, query, target, provider, model, visual_model_identity),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -742,15 +954,30 @@ def _complete_task(
     return _persist_task_record(cache_key, record)
 
 
-def _task_matches_request(record: dict, *, doc_id: str, target: dict, provider: str, model: str) -> bool:
+def _task_matches_request(
+    record: dict,
+    *,
+    doc_id: str,
+    target: dict,
+    provider: str,
+    model: str,
+    visual_model_identity: str = "",
+) -> bool:
     if not record:
         return False
     return (
         record.get("doc_id") == doc_id
+        and record.get("document_source_hash") == target.get("document_source_hash")
+        and record.get("parse_route") == target.get("parse_route")
+        and record.get("parse_generation") == target.get("parse_generation")
+        and record.get("page") == (target.get("page") or 0)
+        and record.get("bbox_hash") == _target_bbox_hash(target)
+        and record.get("purpose") == _VISUAL_PURPOSE
         and record.get("table_instance_id") == target.get("table_instance_id")
         and record.get("table_source_hash") == target.get("table_source_hash")
         and record.get("provider") == provider
         and record.get("model") == model
+        and record.get("visual_model_identity") == visual_model_identity
         and record.get("prompt_version") == _VISUAL_PROMPT_VERSION
         and record.get("crop_version") == _VISUAL_CROP_VERSION
     )
@@ -838,6 +1065,8 @@ def _schedule_visual_background_task(
     custom_params: dict,
     diagnostics: dict,
     request_info: dict,
+    visual_config: VisualModelConfig | None = None,
+    visual_policy: VisualEnrichmentPolicy | None = None,
 ) -> None:
     if cache_key in _VISUAL_PENDING:
         return
@@ -861,6 +1090,8 @@ def _schedule_visual_background_task(
             custom_params={**dict(custom_params or {}), "_numeric_table_visual_background_task": True},
             diagnostics=diagnostics,
             request_info=request_info,
+            visual_config=visual_config,
+            visual_policy=visual_policy,
         )
     )
 
@@ -894,8 +1125,22 @@ async def _run_visual_verification(
     custom_params: Optional[dict],
     diagnostics: dict,
     request_info: dict,
+    visual_config: VisualModelConfig | None = None,
+    visual_policy: VisualEnrichmentPolicy | None = None,
 ) -> tuple[dict, dict]:
-    diagnostics.update({"triggered": True, "state": "running", "task_id": _task_id(cache_key), "table_instance_id": target.get("table_instance_id") or ""})
+    resolved_visual_config = visual_config or resolve_visual_model_config(
+        primary_provider=provider,
+        primary_model=model,
+        primary_api_key=api_key,
+        primary_endpoint=endpoint,
+    )
+    diagnostics.update({
+        "triggered": True,
+        "state": "running",
+        "task_id": _task_id(cache_key),
+        "table_instance_id": target.get("table_instance_id") or "",
+        "visual_model": resolved_visual_config.public_metadata(),
+    })
     _create_or_update_task(cache_key, request_info, state="running", diagnostics=diagnostics)
 
     if _unsafe_cross_page_target(target):
@@ -935,26 +1180,59 @@ async def _run_visual_verification(
     timeout_s = _resolve_visual_timeout_seconds(custom_params)
     retries = _resolve_visual_retry_retries(custom_params)
     retry_delay = _resolve_visual_retry_delay(custom_params)
-    semaphore = _get_visual_semaphore(_resolve_visual_concurrency(custom_params))
+    visual_task_policy = VisualTaskPolicy(
+        timeout_seconds=timeout_s,
+        max_retries=retries,
+        retry_delay_seconds=retry_delay,
+        concurrency=_resolve_visual_concurrency(custom_params),
+        document_budget=(
+            visual_policy.document_budget
+            if visual_policy is not None
+            else _resolve_visual_document_budget(custom_params)
+        ),
+    )
+
+    async def _invoke_visual_model() -> Any:
+        return await _call_table_visual_model(
+            messages=messages,
+            config=resolved_visual_config,
+            middlewares=None,
+            max_tokens=700,
+            temperature=0,
+            purpose="numeric_table_visual_verification",
+        )
+
     try:
-        async with semaphore:
-            response = await asyncio.wait_for(
-                call_ai_api(
-                    messages,
-                    api_key,
-                    model,
-                    provider,
-                    endpoint=endpoint,
-                    middlewares=[RetryMiddleware(retries=retries, delay=retry_delay)],
-                    max_tokens=700,
-                    temperature=0,
-                    purpose="numeric_table_visual_verification",
-                ),
-                timeout=timeout_s,
-            )
-    except asyncio.TimeoutError:
+        response = await execute_visual_task(
+            task_id=_task_id(cache_key),
+            document_id=str(request_info.get("doc_id") or ""),
+            parse_generation=str(request_info.get("parse_generation") or ""),
+            purpose=_VISUAL_PURPOSE,
+            operation=_invoke_visual_model,
+            policy=visual_task_policy,
+            metadata={
+                "provider": resolved_visual_config.provider,
+                "model": resolved_visual_config.model,
+                "source": resolved_visual_config.source,
+                "page": target.get("page"),
+                "bbox_hash": request_info.get("bbox_hash"),
+                "route": request_info.get("parse_route"),
+                "prompt_version": _VISUAL_PROMPT_VERSION,
+            },
+        )
+    except VisualTaskTimeoutError:
         diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"visual_timeout:{timeout_s:.0f}s", "rejected_reason": "timeout"})
         record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        return {}, _task_diagnostics(record)
+    except VisualTaskBudgetExceeded as exc:
+        diagnostics.update({
+            "state": "indeterminate",
+            "verdict": "indeterminate",
+            "error": str(exc),
+            "rejected_reason": "document_visual_budget_exhausted",
+            "skipped_reason": "document_visual_budget_exhausted",
+        })
+        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
         return {}, _task_diagnostics(record)
     except Exception as exc:
         diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"{type(exc).__name__}: {exc}"})
@@ -1003,17 +1281,6 @@ async def _run_visual_verification(
     return segment, _task_diagnostics(record)
 
 
-def _get_visual_semaphore(limit: int) -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    key = id(loop)
-    existing = _SEMAPHORES.get(key)
-    if existing and existing[0] == limit:
-        return existing[1]
-    semaphore = asyncio.Semaphore(limit)
-    _SEMAPHORES[key] = (limit, semaphore)
-    return semaphore
-
-
 def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:
     value = None
     if isinstance(custom_params, dict):
@@ -1055,6 +1322,16 @@ def _resolve_visual_retry_delay(custom_params: Optional[dict]) -> float:
         return max(0.0, min(5.0, float(value)))
     except (TypeError, ValueError):
         return 0.4
+
+
+def _resolve_visual_document_budget(custom_params: Optional[dict]) -> int:
+    value = custom_params.get("visual_document_budget") if isinstance(custom_params, dict) else None
+    if value in (None, ""):
+        value = os.getenv("CHATPDF_VISUAL_DOCUMENT_BUDGET", "16")
+    try:
+        return max(1, min(1000, int(value)))
+    except (TypeError, ValueError):
+        return 16
 
 
 def _resolve_visual_min_confidence(custom_params: Optional[dict]) -> float:

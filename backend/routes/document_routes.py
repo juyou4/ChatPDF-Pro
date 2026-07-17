@@ -8,8 +8,10 @@ import logging
 import pickle
 import re
 import shutil
+import tempfile
 import threading
 import uuid
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -21,7 +23,12 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from services.vector_service import create_index
 from services.url_loader_service import fetch_url_content
 from services.multi_format_loader import is_supported_format, extract_from_file
-from services.block_index_service import ensure_block_index, load_block_index, save_block_index
+from services.block_index_service import (
+    build_block_index,
+    ensure_block_index,
+    load_block_index,
+    save_block_index,
+)
 from services.mineru_block_index_service import (
     MINERU_BLOCK_INDEX_SOURCE,
     build_block_index_from_mineru_payload,
@@ -96,6 +103,7 @@ from services.section_outline_service import (
 )
 from services.table_visual_metadata import build_table_visual_metadata
 from services.table_visual_verifier import get_table_visual_verification_status
+from services.document_parse_adapter import DocumentParseSubmission, MinerUDocumentParseAdapter
 from runtime_mode import runtime
 from services.ocr_service import (
     is_ocr_available,
@@ -116,7 +124,6 @@ from services.ocr_service import (
     validate_external_ocr_service_url,
     MistralAdapter,
     MinerUAdapter,
-    Doc2XAdapter,
     WorkerOCRAdapter,
     MinerUDirectAdapter,
 )
@@ -343,15 +350,34 @@ def _merge_odl_pages_with_existing_ocr(
     return merged_pages, preserved_ocr
 
 
-def save_document(doc_id: str, data: dict):
+def save_document(doc_id: str, data: dict) -> bool:
+    """Atomically persist document state used by parser publication fences."""
+    temp_path: str | None = None
     try:
         file_path = DOCS_DIR / f"{doc_id}.json"
-        with open(file_path, "w", encoding="utf-8") as f:
-            import json
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=file_path.parent,
+            prefix=f".{file_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            temp_path = f.name
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, file_path)
         logger.debug("Saved document %s to %s", doc_id, file_path)
+        return True
     except Exception as e:
         logger.warning("Error saving document %s: %s", doc_id, e)
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        return False
 
 
 def load_documents():
@@ -475,9 +501,15 @@ def _write_document_parse_manifest(
     if not isinstance(target, dict):
         raise RuntimeError("文档记录不存在，无法更新解析状态")
     data = target.setdefault("data", {})
+    had_previous_manifest = "parse_manifest" in data
+    previous_manifest = data.get("parse_manifest")
     data["parse_manifest"] = dict(manifest)
-    if persist:
-        save_document(doc_id, target)
+    if persist and not save_document(doc_id, target):
+        if had_previous_manifest:
+            data["parse_manifest"] = previous_manifest
+        else:
+            data.pop("parse_manifest", None)
+        raise RuntimeError("解析状态写入失败")
     return data["parse_manifest"]
 
 
@@ -1043,8 +1075,8 @@ def _validate_mineru_access(config: dict) -> tuple[bool, str]:
         return False, f"MinerU Worker 验证失败: {exc}"
 
 
-def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> list[str]:
-    """Delete AI artifacts that bind to old block ids after deep parsing."""
+def _clear_block_bound_reading_cache(doc_id: str) -> list[str]:
+    """Delete artifacts whose evidence ids are coupled to the block index."""
     removed: list[str] = []
     cache_paths = {
         "reading_outline": get_reading_outline_path(DATA_DIR, doc_id),
@@ -1058,6 +1090,12 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
                 removed.append(name)
         except Exception as exc:
             logger.warning("[DeepParse] 删除 %s 缓存失败 doc=%s path=%s err=%s", name, doc_id, path, exc)
+    return removed
+
+
+def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> list[str]:
+    """Delete AI artifacts that bind to old block ids after deep parsing."""
+    removed = _clear_block_bound_reading_cache(doc_id)
 
     # 速览图表解读缓存是内存态（doc["data"]["logical_figures*"]），不是文件，
     # 需要单独失效，否则深度解析完成后速览仍会命中旧的 pdf_native/caption_only 结果。
@@ -1085,6 +1123,198 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
         logger.warning("[ParseRoute] 删除 GraphRAG 缓存失败 doc=%s err=%s", doc_id, exc)
 
     return removed
+
+
+def publish_visual_supplements(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    visual_model_identity: str,
+    items: list[dict],
+) -> dict:
+    """Publish local-route VLM supplements without changing the main parser route.
+
+    The document lock and parse-generation fence make this a small publication
+    transaction: an obsolete VLM response cannot alter a document that has
+    since been reparsed or switched to MinerU.
+    """
+    if not items:
+        return {"published": False, "reason": "no_items", "revision": ""}
+
+    from services.visual_supplement_service import (
+        mark_visual_supplements_committed,
+        upsert_visual_supplements,
+        visual_supplements_are_committed,
+    )
+
+    with _get_document_publication_lock(doc_id):
+        doc = documents_store.get(doc_id)
+        if not isinstance(doc, dict):
+            return {"published": False, "reason": "missing_document", "revision": ""}
+        manifest = _require_current_parse_generation(
+            doc_id,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+        )
+        if str(manifest.get("resolved_route") or "").strip().lower() != PARSE_ROUTE_LOCAL:
+            return {"published": False, "reason": "non_local_route", "revision": ""}
+
+        data = doc.setdefault("data", {})
+        if not isinstance(data, dict):
+            raise RuntimeError("文档数据格式异常，无法发布视觉补充")
+
+        # ``read_parse_manifest`` can infer a stable identity for legacy
+        # documents, but the block/RAG readers intentionally consume only a
+        # persisted modern manifest. Migrate under this publication lock so a
+        # successful VLM publication is immediately consumable everywhere.
+        had_persisted_manifest = "parse_manifest" in data
+        before_manifest = data.get("parse_manifest")
+        migrated_legacy_manifest = (
+            not isinstance(before_manifest, dict)
+            or _is_legacy_parse_manifest(manifest)
+        )
+        if migrated_legacy_manifest:
+            migrated_metadata = dict(manifest.get("metadata") or {})
+            migrated_metadata.pop("legacy_inferred", None)
+            migrated_metadata["migrated_from_legacy"] = True
+            migrated_manifest = dict(manifest)
+            migrated_manifest["metadata"] = migrated_metadata
+            data["parse_manifest"] = migrated_manifest
+            manifest = migrated_manifest
+
+        identity = {
+            "parser_route": PARSE_ROUTE_LOCAL,
+            "parse_generation": str(manifest.get("generation") or ""),
+            "document_source_hash": str(manifest.get("source_hash") or ""),
+        }
+        before = data.get("visual_supplements")
+        before_commit = data.get("visual_supplement_commit")
+
+        def restore_staged_document_data() -> None:
+            if before is None:
+                data.pop("visual_supplements", None)
+            else:
+                data["visual_supplements"] = before
+            if before_commit is None:
+                data.pop("visual_supplement_commit", None)
+            else:
+                data["visual_supplement_commit"] = before_commit
+            if had_persisted_manifest:
+                data["parse_manifest"] = before_manifest
+            else:
+                data.pop("parse_manifest", None)
+
+        changed, envelope = upsert_visual_supplements(
+            data,
+            parse_identity=identity,
+            visual_model_identity=visual_model_identity,
+            items=items,
+        )
+        revision = str(envelope.get("revision") or "")
+        if not changed:
+            if visual_supplements_are_committed(data, parse_identity=identity):
+                if migrated_legacy_manifest:
+                    if not save_document(doc_id, doc):
+                        restore_staged_document_data()
+                        raise RuntimeError("旧文档解析身份迁移写入失败")
+                    # The legacy block index has no modern identity. Rebuild
+                    # it after the persisted migration instead of retaining a
+                    # visually invisible legacy cache.
+                    try:
+                        ensure_block_index(
+                            doc_id=doc_id,
+                            doc=doc,
+                            data_dir=DATA_DIR,
+                            pdf_path=_resolve_document_pdf_path(doc),
+                            force_rebuild=True,
+                            preserve_active_source=False,
+                        )
+                    except Exception as exc:
+                        # The persisted modern manifest is already correct;
+                        # a later reader will retry its identity-bound build.
+                        logger.warning(
+                            "[VisualSupplement] legacy block-index migration deferred doc=%s: %s",
+                            doc_id,
+                            exc,
+                        )
+                    rotate_ai_cache_generation(DATA_DIR, doc_id)
+                    _clear_block_bound_reading_cache(doc_id)
+                return {
+                    "published": False,
+                    "reason": "unchanged",
+                    "revision": revision,
+                    "committed": True,
+                }
+        try:
+            # Build the pending index in memory. Writing it to the live path
+            # before the document commit lets unrelated readers race and
+            # overwrite the staging revision with a base index.
+            staged_block_index = build_block_index(
+                doc_id=doc_id,
+                doc=doc,
+                pdf_path=_resolve_document_pdf_path(doc),
+                include_uncommitted_visual_supplements=True,
+            )
+        except Exception:
+            restore_staged_document_data()
+            raise
+
+        # commit marker 只能先写入私有副本。聊天和搜索不会获取 publication
+        # lock，若直接改共享对象，它们可能在文档落盘失败前读到未提交证据。
+        committed_doc = deepcopy(doc)
+        committed_data = committed_doc.get("data")
+        if not isinstance(committed_data, dict):
+            restore_staged_document_data()
+            raise RuntimeError("文档数据格式异常，无法提交视觉补充")
+        committed, marker = mark_visual_supplements_committed(
+            committed_data,
+            parse_identity=identity,
+        )
+        if not save_block_index(DATA_DIR, doc_id, staged_block_index):
+            restore_staged_document_data()
+            raise RuntimeError("视觉补充阅读块索引写入失败")
+
+        if not marker or not save_document(doc_id, committed_doc):
+            restore_staged_document_data()
+            # The staged index was intentionally written before the marker.
+            # Restore the active file to the old visible document state.
+            try:
+                ensure_block_index(
+                    doc_id=doc_id,
+                    doc=doc,
+                    data_dir=DATA_DIR,
+                    pdf_path=_resolve_document_pdf_path(doc),
+                    force_rebuild=True,
+                    preserve_active_source=False,
+                )
+            except Exception as restore_exc:
+                logger.error(
+                    "[VisualSupplement] block-index rollback failed doc=%s: %s",
+                    doc_id,
+                    restore_exc,
+                )
+            raise RuntimeError("视觉补充提交写入失败")
+
+        # 两份文件均已持久化后再一次性替换共享引用。仍持有旧引用的并发
+        # 请求只会看到 uncommitted staging，新的请求才会看到 commit marker。
+        documents_store[doc_id] = committed_doc
+
+        # Existing summaries, outlines and translations may refer to an older
+        # block set.  Rotate their fence before deleting cache files so an
+        # in-flight writer cannot republish an old result after this point.
+        rotate_ai_cache_generation(DATA_DIR, doc_id)
+        removed = _clear_block_bound_reading_cache(doc_id)
+        result = {
+            "published": True,
+            "revision": revision,
+            "committed": committed,
+            "block_count": sum(len(page.get("blocks") or []) for page in staged_block_index.get("pages") or []),
+            "removed": removed,
+        }
+        if not changed:
+            result["reason"] = "recovered_publication"
+        return result
 
 
 def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: str = "", **extra) -> None:
@@ -1412,11 +1642,12 @@ def _run_mineru_deep_parse(
             if queued_model_version is not None
             else config.get("model_version")
         )
-        adapter = _make_mineru_adapter(
+        transport = _make_mineru_adapter(
             config,
             access_mode,
             model_version,
         )
+        adapter = MinerUDocumentParseAdapter(transport)
         if not adapter.is_available():
             raise RuntimeError("MinerU 未配置或不可用，请先在 OCR 设置中配置 Worker/直连模式和 Token")
 
@@ -1446,43 +1677,45 @@ def _run_mineru_deep_parse(
                 recovered_after_restart=True,
             )
             parser_attempted = True
-            payload = adapter.resume_batch(
-                str(remote_job["batch_id"]), data_id=str(remote_job.get("data_id") or ""),
-                progress_callback=_on_mineru_progress, cancel_event=cancel_event,
+            submission = DocumentParseSubmission(
+                provider="mineru",
+                job_id=str(remote_job["batch_id"]),
+                data_id=str(remote_job.get("data_id") or ""),
+                access_mode=access_mode,
             )
         else:
             _set_worker_status("running", stage="uploading", message="准备上传 PDF 到 MinerU")
             pdf_bytes = pdf_path.read_bytes()
             parser_attempted = True
-            payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
+            submission = adapter.submit(
+                pdf_bytes,
+                progress_callback=_on_mineru_progress,
+                cancel_event=cancel_event,
+            )
+        payload = adapter.poll(
+            submission,
+            progress_callback=_on_mineru_progress,
+            cancel_event=cancel_event,
+        )
         record_ocr_provider_use("mineru", outcome="success", operation="document_parse")
         parser_outcome_recorded = True
         payload.setdefault("model_version", model_version)
-        with _get_document_publication_lock(doc_id):
-            if not _worker_matches_current_generation():
-                logger.info("[DeepParse] discard stale MinerU payload for %s generation=%s", doc_id, parse_generation)
-                return
-            if cancel_event.is_set():
-                _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
-                return
-            save_mineru_result(
-                DATA_DIR,
-                doc_id,
-                payload,
-                parse_generation=parse_generation,
-                document_source_hash=parse_source_hash,
-            )
 
         _set_worker_status("running", stage="building_index", message="重建阅读块和大纲")
         if cancel_event.is_set():
             _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
             return
-        block_index = build_block_index_from_mineru_payload(
-            doc_id=doc_id,
-            doc=doc,
-            payload=payload,
-            pdf_path=pdf_path,
+        artifact = adapter.normalize(
+            submission,
+            payload,
+            normalizer=lambda raw_payload: build_block_index_from_mineru_payload(
+                doc_id=doc_id,
+                doc=doc,
+                payload=raw_payload,
+                pdf_path=pdf_path,
+            ),
         )
+        block_index = artifact.normalized
         removed: list[str] = []
         waiting_for_rag_rebuild = False
         with _get_document_publication_lock(doc_id):
@@ -1492,9 +1725,23 @@ def _run_mineru_deep_parse(
             if cancel_event.is_set():
                 _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消")
                 return
-            save_block_index(DATA_DIR, doc_id, block_index)
+            def _publish_mineru_artifact(current_artifact):
+                save_mineru_result(
+                    DATA_DIR,
+                    doc_id,
+                    current_artifact.raw_payload,
+                    parse_generation=parse_generation,
+                    document_source_hash=parse_source_hash,
+                )
+                if not save_block_index(DATA_DIR, doc_id, current_artifact.normalized):
+                    raise RuntimeError("MinerU 阅读块索引写入失败")
+                return current_artifact.normalized
+
+            block_index = adapter.publish(artifact, publisher=_publish_mineru_artifact)
             current_doc = documents_store.get(doc_id)
-            removed = _clear_block_dependent_ai_cache(doc_id, current_doc)
+            removed = adapter.invalidate(
+                invalidator=lambda: _clear_block_dependent_ai_cache(doc_id, current_doc)
+            )
 
             if full_mineru_route:
                 _transition_document_parse_manifest(
@@ -2122,6 +2369,7 @@ def _apply_mineru_rag_document_data(
     doc = documents_store.get(doc_id)
     if not isinstance(doc, dict):
         raise RuntimeError("文档记录不存在，无法切换问答数据源")
+    previous_data = doc.get("data")
     data = dict(doc.get("data") or {})
     pages = []
     for page in normalized.get("pages") or []:
@@ -2166,7 +2414,9 @@ def _apply_mineru_rag_document_data(
         data["parse_manifest"] = parse_manifest
     doc["data"] = data
     _normalize_page_keys(doc)
-    save_document(doc_id, doc)
+    if not save_document(doc_id, doc):
+        doc["data"] = previous_data
+        raise RuntimeError("MinerU 问答数据写入失败")
 
 
 def _restore_document_backup(doc_id: str, source: str = "pdf_native") -> dict:
@@ -2178,8 +2428,14 @@ def _restore_document_backup(doc_id: str, source: str = "pdf_native") -> dict:
         with open(path, "r", encoding="utf-8") as f:
             restored_doc = json.load(f)
         _normalize_page_keys(restored_doc)
+        previous_doc = documents_store.get(doc_id)
         documents_store[doc_id] = restored_doc
-        save_document(doc_id, restored_doc)
+        if not save_document(doc_id, restored_doc):
+            if previous_doc is None:
+                documents_store.pop(doc_id, None)
+            else:
+                documents_store[doc_id] = previous_doc
+            raise RuntimeError("文档备份恢复写入失败")
         return {"restored": True, "path": str(path)}
     except Exception as exc:
         logger.warning("[RagIndex] failed to restore document backup for %s: %s", doc_id, exc)
@@ -2191,8 +2447,37 @@ def _replace_vector_index_from_temp(doc_id: str, temp_dir: Path) -> None:
     if not temp_index.exists() or not temp_pkl.exists():
         raise RuntimeError("临时问答索引未生成完整 index/pkl 文件")
     index_path, pkl_path = _vector_index_paths(doc_id)
-    os.replace(str(temp_index), str(index_path))
-    os.replace(str(temp_pkl), str(pkl_path))
+    rollback_dir = temp_dir / f".swap-rollback-{uuid.uuid4().hex}"
+    rollback_index = rollback_dir / index_path.name
+    rollback_pkl = rollback_dir / pkl_path.name
+    had_index = index_path.exists()
+    had_pkl = pkl_path.exists()
+    try:
+        if had_index or had_pkl:
+            rollback_dir.mkdir(parents=True, exist_ok=True)
+        if had_index:
+            shutil.copy2(index_path, rollback_index)
+        if had_pkl:
+            shutil.copy2(pkl_path, rollback_pkl)
+        os.replace(str(temp_index), str(index_path))
+        os.replace(str(temp_pkl), str(pkl_path))
+    except Exception:
+        # The pair has no multi-file OS primitive. Restore both members before
+        # bubbling up so callers can run the larger transaction rollback.
+        try:
+            if had_index and rollback_index.exists():
+                shutil.copy2(rollback_index, index_path)
+            elif not had_index:
+                index_path.unlink(missing_ok=True)
+            if had_pkl and rollback_pkl.exists():
+                shutil.copy2(rollback_pkl, pkl_path)
+            elif not had_pkl:
+                pkl_path.unlink(missing_ok=True)
+        except Exception as restore_exc:
+            logger.error("[RagIndex] failed to restore partial vector swap doc=%s: %s", doc_id, restore_exc)
+        raise
+    finally:
+        shutil.rmtree(rollback_dir, ignore_errors=True)
     _index_cache.invalidate(doc_id)
 
 
@@ -2298,6 +2583,14 @@ def _restore_vector_index_backup(doc_id: str, source: str = "pdf_native") -> dic
         and (semantic_restore.get("restored") or not semantic_required)
     )
     _index_cache.invalidate(doc_id)
+    if not restored:
+        _set_document_index_status(
+            doc_id,
+            "failed",
+            stage="rollback_failed",
+            error="MinerU 问答索引回滚不完整",
+        )
+        raise RuntimeError("MinerU 问答索引回滚不完整")
     _set_document_index_status(doc_id, "ready", stage="ready")
     status = _get_rag_index_status(doc_id)
     status["restored"] = restored
@@ -2849,7 +3142,7 @@ def extract_text_from_pdf(
         pdf_file: pdfplumber 使用的文件对象
         pdf_bytes: PDF 原始字节（OCR 需要）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）
-        ocr_backend: OCR 后端 - "auto"、"tesseract"、"paddleocr"、"mistral"、"mineru" 或 "doc2x"
+        ocr_backend: 页级 OCR 后端 - "auto"、"tesseract"、"paddleocr" 或 "mistral"
         extract_images: 是否从 PDF 中提取图片
         ocr_dpi: OCR 图像转换分辨率（DPI），默认 200
         ocr_language: OCR 语言设置（Tesseract 语言代码），默认 "chi_sim+eng"
@@ -4847,7 +5140,8 @@ async def rebuild_document_deep_parse_index(doc_id: str):
                 parse_generation=str(parse_manifest.get("generation") or ""),
                 document_source_hash=str(parse_manifest.get("source_hash") or ""),
             )
-            save_block_index(DATA_DIR, doc_id, block_index)
+            if not save_block_index(DATA_DIR, doc_id, block_index):
+                raise RuntimeError("MinerU 阅读块索引写入失败")
             removed = _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
     except _SupersededParseGeneration:
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新执行 MinerU 阅读块重建")
@@ -5757,7 +6051,7 @@ async def get_ocr_status():
         "paddleocr": available_backends.get("paddleocr", False),
         "mistral": available_backends.get("mistral", False),  # 在线 OCR
         "mineru": available_document_parsers.get("mineru", False),  # 文档级深度解析
-        "doc2x": available_document_parsers.get("doc2x", False),  # legacy 文档解析
+        "doc2x": False,
     }
 
     # 检测 Poppler 可用性
@@ -5775,8 +6069,8 @@ async def get_ocr_status():
     online_services = {}
     for provider in _SUPPORTED_ONLINE_OCR_PROVIDERS:
         provider_config = _load_online_ocr_config(provider)
-        if provider in ("mineru", "doc2x"):
-            # MinerU 支持 Worker 代理和直连 API；Doc2X 仍为 Worker 代理。
+        if provider == "mineru":
+            # MinerU 支持 Worker 代理和直连 API。
             access_mode = provider_config.get("access_mode", "worker")
             worker_url = provider_config.get("worker_url", "")
             token = provider_config.get("token", "")
@@ -5790,7 +6084,6 @@ async def get_ocr_status():
                 "configured": configured,
                 "available": available,
                 "access_mode": access_mode,
-                "deprecated": provider == "doc2x",
                 "usage": get_ocr_provider_usage(provider),
             }
         else:
@@ -5855,7 +6148,7 @@ async def get_ocr_status():
 
 
 # 支持的在线 OCR 提供商列表
-_SUPPORTED_ONLINE_OCR_PROVIDERS = {"mistral", "mineru", "doc2x"}
+_SUPPORTED_ONLINE_OCR_PROVIDERS = {"mistral", "mineru"}
 
 
 @router.get("/api/layout/yolo/status")
@@ -5920,7 +6213,7 @@ async def save_online_ocr_config(request: Request):
     """
     保存在线 OCR 服务配置
 
-    支持 Mistral（API Key + Base URL）和 MinerU/Doc2X（Worker 代理模式）。
+    支持 Mistral（页级 OCR）和 MinerU（文档级解析）。
     持久化到本地配置文件，并重新注册对应的在线 OCR 适配器。
 
     请求体（Mistral）:
@@ -5940,15 +6233,6 @@ async def save_online_ocr_config(request: Request):
             "enable_ocr": true,  // 可选，默认 true
             "enable_formula": true,  // 可选，默认 true
             "enable_table": true  // 可选，默认 true
-        }
-
-    请求体（Doc2X）:
-        {
-            "provider": "doc2x",
-            "worker_url": "https://your-worker.workers.dev",
-            "auth_key": "your-auth-secret",  // 可选
-            "token_mode": "frontend",  // "frontend" 或 "worker"
-            "token": "your-doc2x-token"  // token_mode 为 frontend 时必填
         }
 
     响应:
@@ -5971,10 +6255,10 @@ async def save_online_ocr_config(request: Request):
         )
 
     # 根据 provider 类型构建配置字典
-    if provider in ("mineru", "doc2x"):
+    if provider == "mineru":
         # Worker 代理模式配置
         existing_config = _load_online_ocr_config(provider)
-        access_mode = body.get("access_mode", "worker").strip() if provider == "mineru" else "worker"
+        access_mode = body.get("access_mode", "worker").strip()
         if access_mode not in ("worker", "direct"):
             raise HTTPException(status_code=400, detail="access_mode 必须为 'worker' 或 'direct'")
         worker_url = body.get("worker_url", "").strip()
@@ -6097,22 +6381,8 @@ async def save_online_ocr_config(request: Request):
                     enable_table=full_config.get("enable_table", True),
                     model_version=full_config.get("model_version", "vlm"),
                 )
-            _document_parser_registry.register(new_adapter)
+            _document_parser_registry.register(MinerUDocumentParseAdapter(new_adapter))
             logger.info(f"MinerU 文档解析适配器已重新注册，可用: {new_adapter.is_available()}")
-        elif provider == "doc2x":
-            # 重新加载完整配置
-            full_config = _load_online_ocr_config("doc2x")
-            # Doc2X is retained only as a legacy document parser configuration.
-            _document_parser_registry.unregister("doc2x")
-            # 创建新的 Doc2XAdapter 实例并注册
-            new_adapter = Doc2XAdapter(
-                worker_url=full_config.get("worker_url", ""),
-                auth_key=full_config.get("auth_key", ""),
-                token=full_config.get("token", ""),
-                token_mode=full_config.get("token_mode", "frontend"),
-            )
-            _document_parser_registry.register(new_adapter)
-            logger.info(f"Doc2X 文档解析适配器已重新注册，可用: {new_adapter.is_available()}")
     except Exception as e:
         # 适配器注册失败不影响配置保存结果，仅记录警告
         logger.warning(f"重新注册在线 OCR 适配器失败: {e}")
@@ -6127,7 +6397,7 @@ async def get_online_ocr_config():
 
     返回各在线 OCR 提供商的配置状态，包括：
     - Mistral: API Key 是否已配置、脱敏后的 API Key 预览和 Base URL
-    - MinerU/Doc2X: Worker URL、Auth Key/Token 配置状态和脱敏预览、Token Mode 及 MinerU 特有选项
+    - MinerU: Worker/直连配置状态和脱敏后的凭据预览
 
     响应:
         {
@@ -6147,14 +6417,6 @@ async def get_online_ocr_config():
                 "enable_formula": true,
                 "enable_table": true
             },
-            "doc2x": {
-                "worker_url": "",
-                "auth_key_configured": false,
-                "auth_key_preview": "",
-                "token_mode": "frontend",
-                "token_configured": false,
-                "token_preview": ""
-            }
         }
     """
     result = {}
@@ -6162,7 +6424,7 @@ async def get_online_ocr_config():
     for provider in _SUPPORTED_ONLINE_OCR_PROVIDERS:
         config = _load_online_ocr_config(provider)
 
-        if provider in ("mineru", "doc2x"):
+        if provider == "mineru":
             # Worker 代理模式：返回 worker_url、auth_key/token 脱敏信息
             worker_url = config.get("worker_url", "")
             access_mode = config.get("access_mode", "worker")
@@ -6211,7 +6473,6 @@ async def validate_ocr_key(request: Request):
 
     - Mistral: 调用 GET /v1/files 接口验证 API Key
     - MinerU: 向 Worker URL 发送 GET 请求测试可达性和认证
-    - Doc2X: 向 Worker URL 发送 GET 请求测试可达性和认证
 
     请求体（Mistral）:
         {
@@ -6219,7 +6480,7 @@ async def validate_ocr_key(request: Request):
             "api_key": "sk-xxx..."
         }
 
-    请求体（MinerU/Doc2X）:
+    请求体（MinerU）:
         {
             "provider": "mineru",
             "worker_url": "https://your-worker.workers.dev",
@@ -6304,16 +6565,16 @@ async def validate_ocr_key(request: Request):
             logger.warning(f"Mistral API Key 验证网络错误: {e}")
             return {"valid": False, "message": f"Mistral 请求失败：{str(e) or '网络错误'}"}
 
-    elif provider in ("mineru", "doc2x"):
+    elif provider == "mineru":
         # Worker 代理模式验证：分两步——先测试 Worker 可达性，再测试 Token 有效性
         current_config = _load_online_ocr_config(provider)
-        access_mode = body.get("access_mode", current_config.get("access_mode", "worker")).strip() if provider == "mineru" else "worker"
+        access_mode = body.get("access_mode", current_config.get("access_mode", "worker")).strip()
         worker_url = body.get("worker_url", "").strip()
         auth_key = body.get("auth_key", "").strip()
         token = body.get("token", "").strip()
         token_mode = body.get("token_mode", current_config.get("token_mode", "frontend")).strip()
         base_url = body.get("base_url", current_config.get("base_url", "https://mineru.net/api/v4")).strip() or "https://mineru.net/api/v4"
-        provider_label = "MinerU" if provider == "mineru" else "Doc2X"
+        provider_label = "MinerU"
         if not worker_url:
             worker_url = current_config.get("worker_url", "")
         if not auth_key:
@@ -6321,7 +6582,7 @@ async def validate_ocr_key(request: Request):
         if not token:
             token = current_config.get("token", "")
 
-        if provider == "mineru" and access_mode == "direct":
+        if access_mode == "direct":
             if not token:
                 raise HTTPException(status_code=400, detail="直连模式下必须提供 MinerU Token")
             try:
@@ -6399,12 +6660,8 @@ async def validate_ocr_key(request: Request):
                         return {"valid": False, "message": "前端透传模式下必须提供 Token"}
 
                     token_headers = dict(health_headers)
-                    if provider == "mineru":
-                        token_headers["X-MinerU-Key"] = token
-                        token_test_url = f"{worker_url_clean}/mineru/result/__health__"
-                    else:
-                        token_headers["X-Doc2X-Key"] = token
-                        token_test_url = f"{worker_url_clean}/doc2x/status/__health__"
+                    token_headers["X-MinerU-Key"] = token
+                    token_test_url = f"{worker_url_clean}/mineru/result/__health__"
 
                     token_resp = client.get(token_test_url, headers=token_headers)
 
@@ -6494,6 +6751,91 @@ def _resolve_overview_runtime_params(
     resolved_api_key = (api_key or request.headers.get("X-ChatPDF-Api-Key") or "").strip()
     resolved_api_host = (api_host or request.headers.get("X-ChatPDF-Api-Host") or "").strip()
     return resolved_api_key, resolved_model, resolved_provider, resolved_api_host
+
+
+def _optional_bool(value: object, default: bool = True) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _resolve_overview_visual_runtime_params(
+    request: Request,
+    *,
+    primary_api_key: str,
+    primary_model: str,
+    primary_provider: str,
+    primary_api_host: str,
+    visual_api_key: Optional[str] = None,
+    visual_model: Optional[str] = None,
+    visual_provider: Optional[str] = None,
+    visual_api_host: Optional[str] = None,
+    visual_enabled: Optional[bool] = None,
+) -> tuple[str, str, str, str, bool]:
+    """Resolve only explicit VLM overrides; empty values mean follow chat."""
+    header = request.headers
+    provider = (visual_provider or header.get("X-ChatPDF-Visual-Provider") or "").strip()
+    model = (visual_model or header.get("X-ChatPDF-Visual-Model") or "").strip()
+    explicit = bool(provider or model)
+    api_key = (visual_api_key or header.get("X-ChatPDF-Visual-Api-Key") or "").strip() if explicit else ""
+    api_host = (visual_api_host or header.get("X-ChatPDF-Visual-Api-Host") or "").strip() if explicit else ""
+    header_enabled = header.get("X-ChatPDF-Visual-Enabled")
+    enabled = _optional_bool(visual_enabled if visual_enabled is not None else header_enabled, True)
+    if explicit and not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        api_key = str((merged.get(provider, {}) or {}).get("api_key") or "").strip()
+    return api_key, model, provider, api_host, enabled
+
+
+def _resolve_overview_visual_policy_params(
+    request: Request,
+    *,
+    visual_strategy: Optional[str] = None,
+    local_visual_api_key: Optional[str] = None,
+    local_visual_model: Optional[str] = None,
+    local_visual_provider: Optional[str] = None,
+    local_visual_api_host: Optional[str] = None,
+) -> dict:
+    header = request.headers
+    strategy = (
+        visual_strategy
+        or header.get("X-ChatPDF-Visual-Strategy")
+        or "balanced"
+    ).strip().lower()
+    if strategy not in {"privacy", "balanced", "quality"}:
+        strategy = "balanced"
+    provider = (
+        local_visual_provider
+        or header.get("X-ChatPDF-Local-Visual-Provider")
+        or ""
+    ).strip()
+    model = (
+        local_visual_model
+        or header.get("X-ChatPDF-Local-Visual-Model")
+        or ""
+    ).strip()
+    api_key = (
+        local_visual_api_key
+        or header.get("X-ChatPDF-Local-Visual-Api-Key")
+        or ""
+    ).strip()
+    api_host = (
+        local_visual_api_host
+        or header.get("X-ChatPDF-Local-Visual-Api-Host")
+        or ""
+    ).strip()
+    if provider and not api_key:
+        merged = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+        api_key = str((merged.get(provider, {}) or {}).get("api_key") or "").strip()
+    return {
+        "strategy": strategy,
+        "local_provider": provider,
+        "local_model": model,
+        "local_api_key": api_key,
+        "local_endpoint": _get_overview_provider_endpoint(provider, api_host) if provider else "",
+    }
 
 
 @router.get("/documents/{doc_id}/blocks/translations")
@@ -6760,6 +7102,16 @@ async def create_overview(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
+    visual_api_key: Optional[str] = None,
+    visual_model: Optional[str] = None,
+    visual_provider: Optional[str] = None,
+    visual_api_host: Optional[str] = None,
+    visual_enabled: Optional[bool] = None,
+    visual_strategy: Optional[str] = None,
+    local_visual_api_key: Optional[str] = None,
+    local_visual_model: Optional[str] = None,
+    local_visual_provider: Optional[str] = None,
+    local_visual_api_host: Optional[str] = None,
     figure_render_mode: str = "raw",
 ):
     """
@@ -6800,13 +7152,40 @@ async def create_overview(
         prov = merged.get(provider, {})
         api_key = (prov.get("api_key") or "").strip()
 
+    visual_api_key, visual_model, visual_provider, visual_api_host, visual_enabled = _resolve_overview_visual_runtime_params(
+        request,
+        primary_api_key=api_key,
+        primary_model=model,
+        primary_provider=provider,
+        primary_api_host=api_host,
+        visual_api_key=visual_api_key,
+        visual_model=visual_model,
+        visual_provider=visual_provider,
+        visual_api_host=visual_api_host,
+        visual_enabled=visual_enabled,
+    )
+    visual_policy_params = _resolve_overview_visual_policy_params(
+        request,
+        visual_strategy=visual_strategy,
+        local_visual_api_key=local_visual_api_key,
+        local_visual_model=local_visual_model,
+        local_visual_provider=local_visual_provider,
+        local_visual_api_host=local_visual_api_host,
+    )
+
     task = await create_overview_task(
-        doc_id,
-        depth,
-        api_key,
-        model,
-        provider,
-        _get_overview_provider_endpoint(provider, api_host),
+        doc_id=doc_id,
+        depth=depth,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=_get_overview_provider_endpoint(provider, api_host),
+        visual_api_key=visual_api_key,
+        visual_model=visual_model,
+        visual_provider=visual_provider,
+        visual_endpoint=_get_overview_provider_endpoint(visual_provider, visual_api_host),
+        visual_enabled=visual_enabled,
+        visual_policy_params=visual_policy_params,
         figure_render_mode=figure_render_mode,
     )
 
@@ -6893,6 +7272,16 @@ async def get_overview(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     api_host: Optional[str] = None,
+    visual_api_key: Optional[str] = None,
+    visual_model: Optional[str] = None,
+    visual_provider: Optional[str] = None,
+    visual_api_host: Optional[str] = None,
+    visual_enabled: Optional[bool] = None,
+    visual_strategy: Optional[str] = None,
+    local_visual_api_key: Optional[str] = None,
+    local_visual_model: Optional[str] = None,
+    local_visual_provider: Optional[str] = None,
+    local_visual_api_host: Optional[str] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
     force: bool = False,
@@ -6938,6 +7327,27 @@ async def get_overview(
         prov = merged.get(provider, {})
         api_key = (prov.get("api_key") or "").strip()
 
+    visual_api_key, visual_model, visual_provider, visual_api_host, visual_enabled = _resolve_overview_visual_runtime_params(
+        request,
+        primary_api_key=api_key,
+        primary_model=model,
+        primary_provider=provider,
+        primary_api_host=api_host,
+        visual_api_key=visual_api_key,
+        visual_model=visual_model,
+        visual_provider=visual_provider,
+        visual_api_host=visual_api_host,
+        visual_enabled=visual_enabled,
+    )
+    visual_policy_params = _resolve_overview_visual_policy_params(
+        request,
+        visual_strategy=visual_strategy,
+        local_visual_api_key=local_visual_api_key,
+        local_visual_model=local_visual_model,
+        local_visual_provider=local_visual_provider,
+        local_visual_api_host=local_visual_api_host,
+    )
+
     logger.info(
         "[Overview-Route] doc=%s depth=%s use_mineru_figures=%s figure_render_mode=%s force=%s",
         doc_id,
@@ -6954,6 +7364,12 @@ async def get_overview(
             model,
             provider,
             _get_overview_provider_endpoint(provider, api_host),
+            visual_api_key=visual_api_key,
+            visual_model=visual_model,
+            visual_provider=visual_provider,
+            visual_endpoint=_get_overview_provider_endpoint(visual_provider, visual_api_host),
+            visual_enabled=visual_enabled,
+            visual_policy_params=visual_policy_params,
             use_mineru_figures=use_mineru_figures,
             figure_render_mode=figure_render_mode,
             force=force,

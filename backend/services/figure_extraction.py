@@ -17,6 +17,7 @@ from typing import List, Optional
 import fitz
 
 from schemas.figure_schema import LogicalFigureSchema, FigureSource, FigureBlock
+from services.document_parse_state import read_parse_manifest
 from services.figure_adapter import FigureAdapterFactory
 from services.figure_builder import build_logical_figures, select_top_figures
 
@@ -31,6 +32,7 @@ def build_logical_figures_for_overview(
     doc_record: dict,
     depth: str = "standard",
     force_rebuild: bool = False,
+    reference: str = "",
 ) -> List[LogicalFigureSchema]:
     """
     为速览构建标准化 Figure 列表
@@ -53,6 +55,22 @@ def build_logical_figures_for_overview(
     - List[LogicalFigureSchema]: 标准化的 figure 列表
     """
     doc_data = doc_record.get("data", {})
+    parse_manifest = read_parse_manifest(doc_record, doc_id=doc_id)
+    resolved_route = str(parse_manifest.get("resolved_route") or "").strip().lower()
+    is_mineru_route = resolved_route == "mineru"
+    parse_metadata = (
+        parse_manifest.get("metadata")
+        if isinstance(parse_manifest.get("metadata"), dict)
+        else {}
+    )
+    has_explicit_parse_state = bool(
+        isinstance(doc_data.get("parse_manifest"), dict)
+        or isinstance(doc_data.get("document_parse_state"), dict)
+    )
+    allow_legacy_mineru = bool(
+        parse_metadata.get("legacy_inferred") and not has_explicit_parse_state
+    )
+    allow_mineru_sources = is_mineru_route or allow_legacy_mineru
 
     # ========== 1. 缓存命中判断 ==========
     if not force_rebuild:
@@ -61,14 +79,30 @@ def build_logical_figures_for_overview(
 
         if status.get("state") == "done":
             # 检查 schema 版本
-            if meta.get("schema_version") == SCHEMA_VERSION:
+            cached_source = str(meta.get("source") or "").strip().lower()
+            cached_is_mineru = cached_source in {"mineru", "mineru_deep_parse"}
+            cache_matches_route = (
+                cached_is_mineru
+                if is_mineru_route
+                else (not cached_is_mineru or allow_legacy_mineru)
+            )
+            if meta.get("schema_version") == SCHEMA_VERSION and cache_matches_route:
                 cached = doc_data.get("logical_figures", [])
                 if cached:
-                    logger.info(
-                        f"[FigureExtraction] Cache hit for doc {doc_id}: "
-                        f"{len(cached)} figures"
-                    )
-                    return [LogicalFigureSchema(**fig) for fig in cached]
+                    cached_figures = [LogicalFigureSchema(**fig) for fig in cached]
+                    if reference:
+                        matched = [
+                            figure for figure in cached_figures
+                            if _logical_figure_matches_reference(figure, reference)
+                        ]
+                        if matched:
+                            return matched[:1]
+                    else:
+                        logger.info(
+                            f"[FigureExtraction] Cache hit for doc {doc_id}: "
+                            f"{len(cached)} figures"
+                        )
+                        return cached_figures
 
     # ========== 2. 获取文档信息 ==========
     pdf_url = doc_record.get("pdf_url")
@@ -77,7 +111,7 @@ def build_logical_figures_for_overview(
 
     # MinerU 全程路线发布后，结构化块索引是图表定位的第一来源。
     # 先读取它再判断本地 images/figures，避免纯 MinerU 文档被提前判为空。
-    deep_parse_figures = _load_deep_parse_figures(doc_id)
+    deep_parse_figures = _load_deep_parse_figures(doc_id) if allow_mineru_sources else []
 
     # 没有任何结构信号且也没有原始 PDF 时，视觉兜底无从运行。
     if not deep_parse_figures and not images and not figures and not pdf_url:
@@ -103,7 +137,11 @@ def build_logical_figures_for_overview(
             logger.warning(f"[FigureExtraction] Failed to open PDF: {e}")
 
     # ========== 4. 尝试使用 Adapter 构建 ==========
-    source = "mineru_deep_parse" if deep_parse_figures else "pdf_native"
+    source = (
+        "mineru_deep_parse"
+        if deep_parse_figures
+        else ("mineru" if is_mineru_route else "pdf_native")
+    )
     fallback_used = False
     adapter_results = list(deep_parse_figures)
 
@@ -121,7 +159,11 @@ def build_logical_figures_for_overview(
     # 4.1 尝试 MinerU Adapter（如果上传阶段有 MinerU 结果）
     # 注意：当前上传阶段不会自动调用 MinerU 获取 figure 数据
     # 这里检查 ocr_result 中是否有 MinerU 格式的数据
-    mineru_figures = [] if adapter_results else doc_data.get("ocr_result", {}).get("figures", [])
+    mineru_figures = (
+        doc_data.get("ocr_result", {}).get("figures", [])
+        if allow_mineru_sources and not adapter_results
+        else []
+    )
     if mineru_figures:
         try:
             mineru_adapter = FigureAdapterFactory.get_adapter(FigureSource.MINERU)
@@ -140,7 +182,7 @@ def build_logical_figures_for_overview(
             fallback_used = True
 
     # 4.2 本地路线优先使用 PDF 原生图片与图注结构。
-    if not adapter_results and figures and images:
+    if not is_mineru_route and not adapter_results and figures and images:
         try:
             pdf_adapter = FigureAdapterFactory.get_adapter(FigureSource.PDF_NATIVE)
             pdf_blocks = pdf_adapter.parse(
@@ -158,7 +200,7 @@ def build_logical_figures_for_overview(
             fallback_used = True
 
     # 4.3 主解析与 PDF 原生结构均无结果时，才尝试本地视觉模型。
-    if not adapter_results and pdf_doc is not None:
+    if not is_mineru_route and not adapter_results and pdf_doc is not None:
         try:
             yolo_blocks = _build_figures_from_yolo_layout(pdf_doc, figures)
             if yolo_blocks:
@@ -170,7 +212,7 @@ def build_logical_figures_for_overview(
             fallback_used = True
 
     # 4.4 Caption-only fallback: 矢量图 PDF 没有光栅图片但有 figure 标题
-    if not adapter_results and not images and figures:
+    if not is_mineru_route and not adapter_results and not images and figures:
         try:
             caption_blocks = _build_figures_from_captions(
                 figures, page_width, page_height
@@ -187,7 +229,7 @@ def build_logical_figures_for_overview(
             fallback_used = True
 
     # 4.5 Fallback: 使用图片列表
-    if not adapter_results and images:
+    if not is_mineru_route and not adapter_results and images:
         try:
             fallback_adapter = FigureAdapterFactory.get_adapter(FigureSource.FALLBACK)
             fallback_blocks = fallback_adapter.parse(
@@ -218,8 +260,20 @@ def build_logical_figures_for_overview(
         page_height
     )
 
-    # 选取 top N
-    selected = select_top_figures(logical_figures, depth)
+    # 图号查询必须从完整结构源精确匹配，不能受速览 Top-N 缓存限制。
+    selected = (
+        [
+            figure for figure in logical_figures
+            if _logical_figure_matches_reference(figure, reference)
+        ][:1]
+        if reference
+        else select_top_figures(logical_figures, depth)
+    )
+
+    if reference:
+        if pdf_doc:
+            pdf_doc.close()
+        return selected
 
     # ========== 6. 质量校验（简单版）==========
     # 检查是否有 caption
@@ -263,6 +317,36 @@ def build_logical_figures_for_overview(
         pdf_doc.close()
 
     return selected
+
+
+def _logical_figure_matches_reference(
+    figure: LogicalFigureSchema,
+    reference: str,
+) -> bool:
+    match = re.search(
+        r"(?:\b(?:figure|fig\.?)\s*|图\s*)"
+        r"([a-z]?\d+(?:[.-]\d+)?(?:[a-z]|\s*\([a-z]\))?)(?![a-z0-9])",
+        str(reference or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False
+    target = re.sub(r"[^a-z0-9.-]+", "", match.group(1).lower()).lstrip("0") or "0"
+    text = " ".join((
+        str(figure.figure_index or ""),
+        str(figure.caption_text or ""),
+        str(figure.figure_id or ""),
+    ))
+    candidates = re.findall(
+        r"(?:\b(?:figure|fig\.?)\s*|图\s*|fig[_-]?)"
+        r"([a-z]?\d+(?:[.-]\d+)?(?:[a-z]|\s*\([a-z]\))?)(?![a-z0-9])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return any(
+        (re.sub(r"[^a-z0-9.-]+", "", value.lower()).lstrip("0") or "0") == target
+        for value in candidates
+    )
 
 
 def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:

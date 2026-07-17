@@ -56,7 +56,7 @@ export function parseOpenAIModels(
     return data.data.map((item: any) => {
         const modelId = item.id
         const modelType = detectModelType(modelId)
-        const modelTags = detectModelTags(modelId)
+        const modelTags = detectModelTags(modelId, modelType)
 
         return {
             id: modelId,
@@ -74,12 +74,19 @@ export function parseOpenAIModels(
 }
 
 /**
- * 根据模型ID推断标签（vision / reasoning）
+ * 根据模型 ID 与类型推断标签（embedding / rerank / vision / reasoning）
  * 用于API动态获取的模型自动分类，覆盖主流商业模型命名规律
  */
-export function detectModelTags(modelId: string): string[] {
+export function detectModelTags(modelId: string, modelType?: ModelType): string[] {
     const tags: string[] = []
     const id = modelId.toLowerCase()
+
+    if (modelType === 'embedding') tags.push('embedding')
+    if (modelType === 'rerank') tags.push('rerank')
+
+    // 向量/重排模型的名称可能包含 Gemini、Qwen、GPT 等聊天系列前缀，
+    // 不能因此被标为视觉或推理模型。
+    if (modelType === 'embedding' || modelType === 'rerank') return tags
 
     // 视觉能力检测
     const hasVision =
@@ -94,7 +101,8 @@ export function detectModelTags(modelId: string): string[] {
         /doubao-seed/.test(id) ||
         /moonshot-v1/.test(id) ||
         /qwen3\.[567]/.test(id) ||
-        /minimax-m3/.test(id)
+        /minimax-m3/.test(id) ||
+        /^mimo-v2\.5$/.test(id)
     if (hasVision) tags.push('vision')
 
     // 推理能力检测（含思维链/深度推理）
@@ -113,7 +121,8 @@ export function detectModelTags(modelId: string): string[] {
         /kimi-thinking-preview/.test(id) ||
         /kimi-k2(\.\d+)?|k2\.\d+/.test(id) ||
         /qwen3(\.\d+)?/.test(id) ||
-        /minimax-m[23]/.test(id)
+        /minimax-m[23]/.test(id) ||
+        /^mimo-v2\.5(?:-pro)?$/.test(id)
     if (hasReasoning) tags.push('reasoning')
 
     return tags
@@ -132,7 +141,7 @@ export function detectModelType(modelId: string): ModelType {
     }
 
     // Embedding模型识别（与后端 EMBEDDING_REGEX 对齐）
-    if (/(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)/i.test(lowerModelId)) {
+    if (/(?:^text-|embed|embo-|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)/i.test(lowerModelId)) {
         return 'embedding'
     }
 

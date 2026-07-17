@@ -79,7 +79,7 @@ const PARSE_ROUTE_OPTIONS = SHARED_PARSE_ROUTE_OPTIONS.map((option) => ({
 const PANEL_TABS = [
   { id: 'local', label: '扫描 OCR', icon: ScanText },
   { id: 'cloud', label: '云端解析', icon: Globe },
-  { id: 'figure', label: '图表兜底', icon: Crop },
+  { id: 'figure', label: '图表定位', icon: Crop },
 ]
 
 /**
@@ -1048,7 +1048,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
 
                 <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 text-[11px] text-gray-500">
                   <Crop className="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-400" />
-                  <span>YOLO 只用于图表裁切和版面增强，不是正文解析路线；MinerU 是全程文档解析路线。</span>
+                  <span>DocLayout-YOLO 只定位并裁切图表区域，不读取图片内容；MinerU 仍是独立的全程解析路线。</span>
                 </div>
               </div>
 
@@ -1890,6 +1890,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* Doc2X OCR 配置卡片（可折叠） */}
+              {false && (
               <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
@@ -2153,6 +2154,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 )}
                 </AnimatePresence>
               </div>
+              )}
               </motion.div>
               )}
               </AnimatePresence>
@@ -2182,7 +2184,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <div>
                       <div className="text-xs font-semibold text-gray-700">自动跟随当前文档的主解析路线</div>
                       <p className="mt-1 text-[11px] leading-5 text-gray-500">
-                        MinerU 文档优先使用结构化图表，本地文档优先使用 PDF 原生结构；只有主结果未定位到图表时，才调用本地视觉模型兜底。
+                        MinerU 文档优先使用结构化图表，本地文档优先使用 PDF 原生结构；只有主结果未定位到图表时，才调用本地图表定位兜底。
                       </p>
                     </div>
                   </div>
@@ -2193,7 +2195,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-medium text-gray-700">本地视觉模型</span>
+                          <span className="text-xs font-medium text-gray-700">本地图表定位模型</span>
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
                               yoloReady
@@ -2207,7 +2209,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </span>
                         </div>
                         <p className="text-[11px] text-gray-400 mt-0.5">
-                          可选资源，仅在主解析和 PDF 结构均未找到图表时自动使用
+                          DocLayout-YOLO 仅负责版面定位和裁切；图表内容理解在设置中心的「阅读」中单独选择
                         </p>
                       </div>
                       <button
