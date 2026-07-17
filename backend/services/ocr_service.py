@@ -429,6 +429,15 @@ _DEFAULT_CONFIG = {
 }
 
 
+_MINERU_MODEL_VERSIONS = {"vlm", "pipeline"}
+
+
+def normalize_mineru_model_version(value: Any) -> str:
+    """Return one supported MinerU model version for config and job records."""
+    model_version = str(value or "vlm").strip().lower()
+    return model_version if model_version in _MINERU_MODEL_VERSIONS else "vlm"
+
+
 def _load_online_ocr_config(provider: str) -> dict:
     """
     加载在线 OCR 配置，优先级：环境变量 > 配置文件 > 默认值
@@ -474,6 +483,11 @@ def _load_online_ocr_config(provider: str) -> dict:
         if env_value:
             result[field_name] = env_value
 
+    if provider == "mineru":
+        result["model_version"] = normalize_mineru_model_version(
+            result.get("model_version")
+        )
+
     return result
 
 
@@ -486,6 +500,11 @@ def _save_online_ocr_config(provider: str, config: dict) -> None:
         config: 配置字典，包含 api_key 和/或 base_url
     """
     try:
+        config = dict(config or {})
+        if provider == "mineru":
+            config["model_version"] = normalize_mineru_model_version(
+                config.get("model_version")
+            )
         # 确保目录存在
         _ONLINE_OCR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1100,7 +1119,7 @@ class MinerUAdapter(WorkerOCRAdapter):
         self._enable_ocr = enable_ocr
         self._enable_formula = enable_formula
         self._enable_table = enable_table
-        self._model_version = (model_version or "vlm").strip() or "vlm"
+        self._model_version = normalize_mineru_model_version(model_version)
 
     @property
     def name(self) -> str:

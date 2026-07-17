@@ -112,6 +112,7 @@ from services.ocr_service import (
     get_ocr_provider_usage,
     record_ocr_provider_use,
     select_ocr_target_pages,
+    normalize_mineru_model_version,
     validate_external_ocr_service_url,
     MistralAdapter,
     MinerUAdapter,
@@ -1292,7 +1293,14 @@ def _assess_deep_parse_recommendation(
     }
 
 
-def _make_mineru_adapter(config: dict, access_mode: str):
+def _make_mineru_adapter(
+    config: dict,
+    access_mode: str,
+    model_version: Optional[str] = None,
+):
+    effective_model_version = normalize_mineru_model_version(
+        model_version if model_version is not None else config.get("model_version")
+    )
     if access_mode == "direct":
         return MinerUDirectAdapter(
             token=config.get("token", ""),
@@ -1300,7 +1308,7 @@ def _make_mineru_adapter(config: dict, access_mode: str):
             enable_ocr=config.get("enable_ocr", False),
             enable_formula=config.get("enable_formula", True),
             enable_table=config.get("enable_table", True),
-            model_version=config.get("model_version", "vlm"),
+            model_version=effective_model_version,
         )
     return MinerUAdapter(
         worker_url=config.get("worker_url", ""),
@@ -1310,7 +1318,7 @@ def _make_mineru_adapter(config: dict, access_mode: str):
         enable_ocr=config.get("enable_ocr", False),
         enable_formula=config.get("enable_formula", True),
         enable_table=config.get("enable_table", True),
-        model_version=config.get("model_version", "vlm"),
+        model_version=effective_model_version,
     )
 
 
@@ -1398,7 +1406,17 @@ def _run_mineru_deep_parse(
 
         config = _load_online_ocr_config("mineru")
         access_mode = str((remote_job or {}).get("access_mode") or config.get("access_mode") or "worker").strip().lower()
-        adapter = _make_mineru_adapter(config, access_mode)
+        queued_model_version = (remote_job or {}).get("model_version")
+        model_version = normalize_mineru_model_version(
+            queued_model_version
+            if queued_model_version is not None
+            else config.get("model_version")
+        )
+        adapter = _make_mineru_adapter(
+            config,
+            access_mode,
+            model_version,
+        )
         if not adapter.is_available():
             raise RuntimeError("MinerU 未配置或不可用，请先在 OCR 设置中配置 Worker/直连模式和 Token")
 
@@ -1412,7 +1430,7 @@ def _run_mineru_deep_parse(
                 for key, value in progress.items()
                 if key not in {"stage", "message"}
             }
-            extra.setdefault("model_version", config.get("model_version", "vlm"))
+            extra.setdefault("model_version", model_version)
             _set_worker_status(
                 "running",
                 stage=stage,
@@ -1439,7 +1457,7 @@ def _run_mineru_deep_parse(
             payload = adapter.analyze_pdf(pdf_bytes, progress_callback=_on_mineru_progress, cancel_event=cancel_event)
         record_ocr_provider_use("mineru", outcome="success", operation="document_parse")
         parser_outcome_recorded = True
-        payload.setdefault("model_version", config.get("model_version", "vlm"))
+        payload.setdefault("model_version", model_version)
         with _get_document_publication_lock(doc_id):
             if not _worker_matches_current_generation():
                 logger.info("[DeepParse] discard stale MinerU payload for %s generation=%s", doc_id, parse_generation)
@@ -1547,7 +1565,7 @@ def _run_mineru_deep_parse(
             active_source=MINERU_BLOCK_INDEX_SOURCE,
             active_mineru=True,
             access_mode=access_mode,
-            model_version=config.get("model_version", "vlm"),
+            model_version=model_version,
         )
         logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
     except _SupersededParseGeneration:
@@ -1661,6 +1679,16 @@ def _queue_mineru_deep_parse(
             if previous_cancel_event:
                 previous_cancel_event.set()
 
+    mineru_config = _load_online_ocr_config("mineru")
+    access_mode = str(mineru_config.get("access_mode") or "worker").strip().lower()
+    model_version = normalize_mineru_model_version(
+        mineru_config.get("model_version")
+    )
+    task_snapshot = {
+        "access_mode": access_mode,
+        "model_version": model_version,
+    }
+
     cancel_event = threading.Event()
     with _DEEP_PARSE_LOCK:
         _DEEP_PARSE_CANCEL_EVENTS[doc_id] = cancel_event
@@ -1673,10 +1701,11 @@ def _queue_mineru_deep_parse(
         parse_generation=parse_generation,
         document_source_hash=parse_source_hash,
         full_route=full_mineru_route,
+        **task_snapshot,
     )
     thread = threading.Thread(
         target=_run_mineru_deep_parse,
-        args=(doc_id, cancel_event, None, parse_generation, full_route_options),
+        args=(doc_id, cancel_event, task_snapshot, parse_generation, full_route_options),
         name=f"chatpdf-mineru-{doc_id[:8]}",
         daemon=True,
     )
@@ -1748,8 +1777,17 @@ def _cancel_mineru_deep_parse(doc_id: str) -> dict:
     if batch_id:
         config = _load_online_ocr_config("mineru")
         access_mode = str(current.get("access_mode") or config.get("access_mode") or "worker").strip().lower()
+        model_version = normalize_mineru_model_version(
+            current.get("model_version")
+            if current.get("model_version") is not None
+            else config.get("model_version")
+        )
         try:
-            remote_cancel = _make_mineru_adapter(config, access_mode).cancel_batch(
+            remote_cancel = _make_mineru_adapter(
+                config,
+                access_mode,
+                model_version,
+            ).cancel_batch(
                 batch_id,
                 data_id=str(current.get("data_id") or ""),
             )
