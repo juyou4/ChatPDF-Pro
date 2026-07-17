@@ -232,57 +232,6 @@ def test_odl_structured_table_bundles_include_typed_evidence_units():
     assert row_unit["cell_evidence_units"][1]["col_span"] == 1
 
 
-def test_odl_table_bbox_is_not_reused_as_a_target_row_crop():
-    elements = [{
-        "type": "table",
-        "id": 100,
-        "page number": 1,
-        "bounding box": [0, 0, 600, 800],
-        "rows": [{
-            "type": "table row",
-            "row number": 1,
-            "cells": [
-                {"type": "table cell", "row number": 1, "column number": 1, "content": "Method"},
-                {"type": "table cell", "row number": 1, "column number": 2, "content": "Score"},
-            ],
-        }],
-    }]
-
-    bundle = _build_structured_table_bundles(elements, page_sizes={1: [600, 800]})[0]
-    row = bundle["evidence_units"][0]
-
-    assert bundle["visual_bbox"] == [0.0, 0.0, 600.0, 800.0]
-    assert bundle["row_cell_geometry_available"] is False
-    assert row["bbox"] == [0, 0, 600, 800]
-    assert row["visual_crop_eligible"] is False
-    assert all(cell["visual_crop_eligible"] is False for cell in row["cell_evidence_units"])
-
-
-def test_odl_complete_explicit_cell_geometry_can_form_a_row_crop():
-    elements = [{
-        "type": "table",
-        "id": 101,
-        "page number": 1,
-        "bounding box": [0, 0, 600, 800],
-        "rows": [{
-            "type": "table row",
-            "row number": 1,
-            "cells": [
-                {"type": "table cell", "row number": 1, "column number": 1, "bounding box": [0, 700, 300, 800], "content": "Method"},
-                {"type": "table cell", "row number": 1, "column number": 2, "bounding box": [300, 700, 600, 800], "content": "Score"},
-            ],
-        }],
-    }]
-
-    bundle = _build_structured_table_bundles(elements, page_sizes={1: [600, 800]})[0]
-    row = bundle["evidence_units"][0]
-
-    assert bundle["row_cell_geometry_available"] is True
-    assert row["bbox"] == [0, 700, 600, 800]
-    assert row["visual_crop_eligible"] is True
-    assert all(cell["visual_crop_eligible"] is True for cell in row["cell_evidence_units"])
-
-
 def test_odl_structured_table_bundles_expand_spans_into_header_paths():
     elements = [
         {

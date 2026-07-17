@@ -140,20 +140,20 @@ describe('ChatSettings - 开关单元测试', () => {
 
     it('应渲染「代码块设置」分组', () => {
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('代码块')).toBeTruthy();
-        expect(screen.getByText('折叠长代码')).toBeTruthy();
-        expect(screen.getByText('自动换行')).toBeTruthy();
+        expect(screen.getByText('代码块折叠')).toBeTruthy();
+        expect(screen.getByText('代码自动换行')).toBeTruthy();
         expect(screen.getByText('显示行号')).toBeTruthy();
     });
 
-    it('应渲染「气泡样式」开关', () => {
+    it('应渲染「消息样式」选择按钮', () => {
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('外观')).toBeTruthy();
-        expect(screen.getByText('气泡样式')).toBeTruthy();
+        expect(screen.getByText('消息样式')).toBeTruthy();
+        expect(screen.getByText('平铺')).toBeTruthy();
+        expect(screen.getByText('气泡')).toBeTruthy();
     });
 
     it('应渲染「消息字体大小」设置', () => {
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('字体大小')).toBeTruthy();
+        expect(screen.getByText('消息字体大小')).toBeTruthy();
     });
 });

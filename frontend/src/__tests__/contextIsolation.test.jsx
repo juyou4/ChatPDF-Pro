@@ -17,13 +17,6 @@ import { GlobalSettingsProvider } from '../contexts/GlobalSettingsContext';
 import { useFontSettings } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
-import { WebSearchProvider } from '../contexts/WebSearchContext';
-
-const TestProviders = ({ children }) => (
-  <WebSearchProvider>
-    <GlobalSettingsProvider>{children}</GlobalSettingsProvider>
-  </WebSearchProvider>
-);
 
 // ========== 渲染计数器测试组件 ==========
 
@@ -145,11 +138,11 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let chatParamsRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <FontConsumer onRender={(count) => { fontRenderCount = count; }} />
         <ChatParamsConsumer onRender={(count) => { chatParamsRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     // 初始渲染后，两个消费者各渲染 1 次
@@ -175,11 +168,11 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let chatParamsRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <FontConsumer onRender={(count) => { fontRenderCount = count; }} />
         <ChatParamsConsumer onRender={(count) => { chatParamsRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialChatParamsCount = chatParamsRenderCount;
@@ -203,11 +196,11 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let chatParamsRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <FontConsumer onRender={(count) => { fontRenderCount = count; }} />
         <ChatParamsConsumer onRender={(count) => { chatParamsRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialFontCount = fontRenderCount;
@@ -231,11 +224,11 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let chatParamsRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <FontConsumer onRender={(count) => { fontRenderCount = count; }} />
         <ChatParamsConsumer onRender={(count) => { chatParamsRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialFontCount = fontRenderCount;
@@ -258,10 +251,10 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let globalRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <GlobalConsumer onRender={(count) => { globalRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialGlobalCount = globalRenderCount;
@@ -280,10 +273,10 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let globalRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <GlobalConsumer onRender={(count) => { globalRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialGlobalCount = globalRenderCount;
@@ -303,11 +296,11 @@ describe('Property 2: Context 细粒度订阅隔离', () => {
     let chatParamsRenderCount = 0;
 
     const { getByTestId } = render(
-      <TestProviders>
+      <GlobalSettingsProvider>
         <FontConsumer onRender={(count) => { fontRenderCount = count; }} />
         <ChatParamsConsumer onRender={(count) => { chatParamsRenderCount = count; }} />
         <SettingsTrigger />
-      </TestProviders>
+      </GlobalSettingsProvider>
     );
 
     const initialFontCount = fontRenderCount;
