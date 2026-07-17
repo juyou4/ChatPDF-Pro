@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
 import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
+import { buildChatHistory } from '../utils/chatContextUsageUtils';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -14,14 +15,84 @@ const API_BASE_URL = (() => {
   return '';
 })();
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
+const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
+const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
+
+const TABLE_VISUAL_PENDING_STATES = new Set(['queued', 'running', 'pending']);
+const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed']);
+
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeVisualVerificationState = (value) => {
+  const state = String(value || '').trim().toLowerCase();
+  if (TABLE_VISUAL_PENDING_STATES.has(state) || TABLE_VISUAL_TERMINAL_STATES.has(state)) {
+    return state;
+  }
+  return '';
+};
+
+export const isVisualVerificationPending = (verification) =>
+  TABLE_VISUAL_PENDING_STATES.has(normalizeVisualVerificationState(verification?.state));
+
+export const isVisualVerificationTerminal = (verification) =>
+  TABLE_VISUAL_TERMINAL_STATES.has(normalizeVisualVerificationState(verification?.state));
+
+/**
+ * 兼容聊天诊断和状态接口的轻量包装，统一为消息可直接消费的视觉核验状态。
+ * 不主动推断未知结果，避免把非终态任务误标记为已确认。
+ */
+export const normalizeNumericTableVisualVerification = (payload) => {
+  if (!isPlainObject(payload)) return null;
+
+  const candidates = [
+    payload.verification,
+    payload.task,
+    payload.data,
+    payload.result,
+    payload,
+  ].filter(isPlainObject);
+  const record = candidates.find((candidate) => {
+    const state = normalizeVisualVerificationState(
+      candidate.state || candidate.verdict || candidate.status || (candidate.pending ? 'pending' : '')
+    );
+    return Boolean(candidate.task_id || state);
+  }) || payload;
+  const diagnostics = isPlainObject(record.diagnostics) ? record.diagnostics : {};
+  const state = [
+    record.state,
+    record.verdict,
+    record.status,
+    diagnostics.state,
+    diagnostics.verdict,
+    diagnostics.status,
+    record.pending ? 'pending' : '',
+  ].map(normalizeVisualVerificationState).find(Boolean) || '';
+
+  if (!state && !record.task_id && !payload.task_id) return null;
+
+  return {
+    ...payload,
+    ...record,
+    ...diagnostics,
+    task_id: record.task_id || payload.task_id || '',
+    state,
+  };
+};
+
+export const getNumericTableVisualVerification = (retrievalMeta) =>
+  normalizeNumericTableVisualVerification(
+    retrievalMeta?.diagnostics?.numeric_table_visual_verification
+  );
 
 const STREAM_RENDER_PROFILES = {
-  // flushChars 故意保持较小，确保“仅在 done 才拿到大块内容”时，
-  // 仍能明显看到逐步展开，而不是一帧内几乎全部冲完。
+  // 这些值控制小队列的基础节奏；大队列由 useSmoothStream 自适应提速，
+  // 不再让打字机动画落后于模型实际输出。
   fast: { minDelay: 16, frameChars: 4, flushChars: 10 },
   normal: { minDelay: 28, frameChars: 2, flushChars: 4 },
   slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
+
+export const STREAM_FINAL_FLUSH_GRACE_MS = 320;
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
@@ -60,27 +131,7 @@ const formatThinkingStageEvent = (payload) => {
   return null;
 };
 
-/**
- * 构建聊天历史记录
- * 过滤无效消息，取最近 contextCount*2 条作为上下文
- *
- * @param {Array} messages - 消息列表
- * @param {number} contextCount - 上下文轮数
- * @returns {Array} 格式化后的聊天历史
- */
-export const buildChatHistory = (messages, contextCount) => {
-  if (!contextCount || contextCount <= 0) return [];
-  const validMessages = messages.filter(msg =>
-    (msg.type === 'user' || msg.type === 'assistant') && !msg.hasImage
-    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('⚠️ AI未返回内容'))
-    && !(msg.type === 'assistant' && msg.content && msg.content.startsWith('❌'))
-  );
-  const recentMessages = validMessages.slice(-(contextCount * 2));
-  return recentMessages.map(msg => ({
-    role: msg.type === 'user' ? 'user' : 'assistant',
-    content: msg.content
-  }));
-};
+export { buildChatHistory } from '../utils/chatContextUsageUtils';
 
 const tokenizeForCitation = (text = '') => {
   const lowered = String(text).toLowerCase();
@@ -400,6 +451,7 @@ export const createInitialAgentTrace = () => ({
   error: '',
   fallbackReason: '',
   diagnostics: null,
+  evidenceState: null,
 });
 
 // 后端 retrieval_agent 会发出的 phase
@@ -544,6 +596,12 @@ export const mergeAgentMetaIntoTrace = (trace, meta) => {
   if (meta.diagnostics?.agent && typeof meta.diagnostics.agent === 'object') {
     trace.diagnostics = meta.diagnostics.agent;
   }
+  if (meta.agent_evidence_state && typeof meta.agent_evidence_state === 'object') {
+    trace.evidenceState = meta.agent_evidence_state;
+  } else if (meta.diagnostics?.agent?.evidence_state && typeof meta.diagnostics.agent.evidence_state === 'object') {
+    // Compatibility with older responses that only nest this state under diagnostics.
+    trace.evidenceState = meta.diagnostics.agent.evidence_state;
+  }
   if (Array.isArray(meta.agent_search_history)) {
     trace.searchHistory = meta.agent_search_history;
   }
@@ -584,6 +642,7 @@ export const finalizeThinkingDurationMs = ({
  * @param {Function} options.setScreenshots - 设置截图列表
  * @param {string} options.selectedText - 当前选中的文本
  * @param {Function} options.getChatCredentials - 获取聊天凭证
+ * @param {Function} options.getVisualCredentials - 获取独立视觉模型凭证
  * @param {Function} options.getCurrentChatModel - 获取当前聊天模型
  * @param {Function} options.getProviderById - 根据 ID 获取 provider
  * @param {string} options.streamSpeed - 流式输出速度设置
@@ -598,6 +657,7 @@ export function useMessageState({
   setScreenshots,
   selectedText = '',
   getChatCredentials,
+  getVisualCredentials,
   getCurrentChatModel,
   getProviderById,
   streamSpeed = 'normal',
@@ -646,9 +706,11 @@ export function useMessageState({
   const streamAgentTraceRef = useRef(null);
   const streamUsageRef = useRef(null);
   const streamCallInfoRef = useRef(null);
+  const streamVisualVerificationRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const visualVerificationPollersRef = useRef(new Map());
 
   // ========== 从全局设置中解构对话参数 ==========
   const {
@@ -657,6 +719,7 @@ export function useMessageState({
     customParams, reasoningEffort, answerDetailLevel,
     enableMemory,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    numericTableVisualVerification,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
   } = globalSettings;
 
@@ -693,6 +756,15 @@ export function useMessageState({
 
   // ========== 副作用 ==========
 
+  // 视觉核验属于回答后的异步旁路任务；切换文档或卸载时必须取消轮询，
+  // 以免旧文档结果写入新会话。
+  useEffect(() => () => {
+    for (const poller of visualVerificationPollersRef.current.values()) {
+      poller.cancel();
+    }
+    visualVerificationPollersRef.current.clear();
+  }, [docId]);
+
   // 消息变化时自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -713,6 +785,88 @@ export function useMessageState({
     setHasInput(!!(val && val.trim()));
   }, []);
 
+  const startVisualVerificationPolling = useCallback((messageId, initialVerification) => {
+    const verification = normalizeNumericTableVisualVerification(initialVerification);
+    const taskId = String(verification?.task_id || '').trim();
+    if (!docId || !taskId || !isVisualVerificationPending(verification)) return;
+
+    const pollerKey = `${docId}:${messageId}:${taskId}`;
+    if (visualVerificationPollersRef.current.has(pollerKey)) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    let timerId = null;
+    let attempts = 0;
+    let latestVerification = verification;
+    const updateMessageVerification = (nextVerification) => {
+      if (cancelled) return;
+      setMessages((previous) => previous.map((message) => (
+        message.id === messageId
+          ? { ...message, visualVerification: nextVerification }
+          : message
+      )));
+    };
+    const stop = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+      controller.abort();
+      visualVerificationPollersRef.current.delete(pollerKey);
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/documents/${encodeURIComponent(docId)}/table-visual-verifications/${encodeURIComponent(taskId)}`,
+          { signal: controller.signal }
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const result = normalizeNumericTableVisualVerification(payload);
+        if (result) {
+          const nextVerification = {
+            ...latestVerification,
+            ...result,
+            task_id: result.task_id || taskId,
+          };
+          latestVerification = nextVerification;
+          updateMessageVerification(nextVerification);
+          if (isVisualVerificationTerminal(nextVerification)) {
+            stop();
+            return;
+          }
+        }
+      } catch (error) {
+        if (cancelled || error?.name === 'AbortError') return;
+        if (attempts >= TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS) {
+          updateMessageVerification({
+            ...latestVerification,
+            state: 'failed',
+            polling_error: 'status_unavailable',
+          });
+          stop();
+          return;
+        }
+      }
+
+      if (attempts >= TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS) {
+        updateMessageVerification({
+          ...latestVerification,
+          state: 'failed',
+          polling_error: 'status_timeout',
+        });
+        stop();
+        return;
+      }
+      timerId = setTimeout(poll, TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS);
+    };
+
+    visualVerificationPollersRef.current.set(pollerKey, { cancel: stop });
+    void poll();
+  }, [docId]);
+
   /**
    * 发送消息
    * 处理用户输入、构建请求体、发起流式/非流式请求
@@ -722,6 +876,7 @@ export function useMessageState({
     if (!currentInput.trim() && screenshots.length === 0) return;
 
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
+    const visualCredentials = getVisualCredentials?.() || null;
     if (!docId) { alert('请先上传文档'); return; }
     if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
       alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
@@ -745,6 +900,33 @@ export function useMessageState({
 
     // 获取 provider 完整信息
     const chatProviderFull = getProviderById?.(chatProvider);
+    const useDedicatedVisualModel = visualCredentials?.source === 'dedicated';
+    const visualProviderFull = useDedicatedVisualModel
+      ? getProviderById?.(visualCredentials?.providerId || '')
+      : null;
+    const localVisualProviderFull = visualCredentials?.local?.providerId
+      ? getProviderById?.(visualCredentials.local.providerId)
+      : null;
+    const visualRequestParams = {
+      visual_strategy: visualCredentials?.strategy || 'balanced',
+      visual_enabled: visualCredentials ? visualCredentials.isVisionCapable === true : true,
+      ...(useDedicatedVisualModel
+        ? {
+          visual_provider: visualCredentials?.providerId || '',
+          visual_model: visualCredentials?.modelId || '',
+          visual_api_key: visualCredentials?.apiKey || '',
+          visual_api_host: visualProviderFull?.apiHost || visualCredentials?.apiHost || '',
+        }
+        : {}),
+      ...(visualCredentials?.local?.providerId && visualCredentials?.local?.modelId
+        ? {
+          local_visual_provider: visualCredentials.local.providerId,
+          local_visual_model: visualCredentials.local.modelId,
+          local_visual_api_key: visualCredentials.local.apiKey || '',
+          local_visual_api_host: localVisualProviderFull?.apiHost || visualCredentials.local.apiHost || '',
+        }
+        : {}),
+    };
 
     // 构建请求体
     const requestBody = {
@@ -772,9 +954,13 @@ export function useMessageState({
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
-      custom_params: customParams?.length > 0
-        ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
-        : null,
+      custom_params: {
+        ...(customParams?.length > 0
+          ? Object.fromEntries(customParams.filter(p => p.name).map(p => [p.name, p.value]))
+          : {}),
+        numeric_table_visual_verification: numericTableVisualVerification || 'auto',
+        ...visualRequestParams,
+      },
       enable_memory: enableMemory,
       enable_web_search: enableWebSearch,
       web_search_provider: webSearchProvider,
@@ -810,6 +996,7 @@ export function useMessageState({
     streamAgentTraceRef.current = null;
     streamUsageRef.current = null;
     streamCallInfoRef.current = null;
+    streamVisualVerificationRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -950,6 +1137,8 @@ export function useMessageState({
           if (data === '[DONE]') { sseDone = true; return; }
           try {
             const p = JSON.parse(data);
+            const visualVerification = getNumericTableVisualVerification(p.retrieval_meta);
+            if (visualVerification) streamVisualVerificationRef.current = visualVerification;
             if (p.error && p.type !== 'retrieval_progress') {
               const em = `❌ ${p.error}`;
               currentText = em;
@@ -1019,7 +1208,14 @@ export function useMessageState({
               if (cc) {
                 currentText += cc;
                 contentStream.addChunk(cc);
-                if (!contentStartTime) contentStartTime = Date.now();
+                if (!contentStartTime) {
+                  contentStartTime = Date.now();
+                  // 思考阶段结束信号：正文首 token 到达，让 ThinkingBlock 立即自动折叠，
+                  // 不必等整条回答流完
+                  setMessages(prev => prev.map(m =>
+                    m.id === tempMsgId ? { ...m, answerStarted: true } : m
+                  ));
+                }
               }
               if (ct) {
                 appendRealThinking(ct);
@@ -1101,29 +1297,33 @@ export function useMessageState({
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
         clearFirstEventTimer();
 
-        // 流结束，标记 streamDone 触发 smoothFlush 渐进渲染
+        // 流结束，标记 streamDone 触发短暂的自适应冲刷。
         setContentStreamDone(true);
         setThinkingStreamDone(true);
-        // 等待 smoothFlush 动画将队列排空后再同步最终状态（最多等 5 秒）
+        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
+        // 只给动画一个很短的收尾窗口；超过后立即同步最终文本，避免模型已完成
+        // 但界面仍卡在思考态或半截回答数秒。
         {
           const flushStart = Date.now();
           while (
             (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete()) &&
-            Date.now() - flushStart < 5000
+            Date.now() - flushStart < STREAM_FINAL_FLUSH_GRACE_MS
           ) {
             await new Promise(r => requestAnimationFrame(r));
           }
         }
+        contentStream.flushNow?.(streamedContent);
+        thinkingStream.flushNow?.(currentThinking);
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
           thinkingLastUpdateTime,
           contentStartTime,
         });
-        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
         const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
           streamedContent,
           streamCitationsRef.current
         );
+        const streamVisualVerification = streamVisualVerificationRef.current;
         if (streamCallInfoRef.current) {
           setLastCallInfo({
             ...streamCallInfoRef.current,
@@ -1132,9 +1332,10 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, visualVerification: streamVisualVerification }
             : m
         ));
+        startVisualVerificationPolling(tempMsgId, streamVisualVerification);
         activeStreamMsgIdRef.current = null;
         setStreamingMessageId(null);
       } else {
@@ -1160,6 +1361,7 @@ export function useMessageState({
           data.answer,
           data.retrieval_meta?.citations
         );
+        const nonStreamVisualVerification = getNumericTableVisualVerification(data.retrieval_meta);
         let nonStreamAgentTrace = null;
         if (data.retrieval_meta && (data.retrieval_meta.agent_mode || data.retrieval_meta.agent_gate)) {
           nonStreamAgentTrace = createInitialAgentTrace();
@@ -1173,9 +1375,10 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, visualVerification: nonStreamVisualVerification }
             : m
         ));
+        startVisualVerificationPolling(tempMsgId, nonStreamVisualVerification);
         setStreamingMessageId(null);
       }
     } catch (error) {
@@ -1198,7 +1401,7 @@ export function useMessageState({
   }, [
     docId, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
     enableAgentRetrieval,
-    getChatCredentials, getProviderById, contentStream, thinkingStream,
+    getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,
@@ -1206,6 +1409,7 @@ export function useMessageState({
     streamRenderProfile, shouldUseStreaming,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
+    startVisualVerificationPolling,
   ]);
 
   /**

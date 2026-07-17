@@ -359,7 +359,10 @@ class QueryRewriter:
         for pattern, label in self.GENERIC_METRIC_PATTERNS:
             if pattern.search(sample):
                 aliases.append(label)
-        return self._remove_composite_column_parts(self._dedupe_preserve_order(aliases))
+        return self._remove_composite_column_parts(
+            self._dedupe_preserve_order(aliases),
+            source_text=sample,
+        )
 
     def _extract_comparison_aliases(self, query: str) -> list[str]:
         aliases: list[str] = []
@@ -430,7 +433,7 @@ class QueryRewriter:
                 if not expanded or piece not in expanded:
                     expanded.append(piece)
         column_items = [item for item in expanded if item and not self._is_numeric_column_token(item)]
-        return self._remove_composite_column_parts(column_items)
+        return self._remove_composite_column_parts(column_items, source_text=text)
 
     def _looks_like_column_alias(self, value: str) -> bool:
         sample = re.sub(r"\s+", " ", str(value or "")).strip(" ,.;:[]{}，。；：、")
@@ -490,7 +493,12 @@ class QueryRewriter:
             return "Acc"
         return text
 
-    def _remove_composite_column_parts(self, column_items: list[str]) -> list[str]:
+    def _remove_composite_column_parts(
+        self,
+        column_items: list[str],
+        *,
+        source_text: str = "",
+    ) -> list[str]:
         expanded: list[str] = []
         for item in column_items:
             if "/" in item and not re.search(r"(?:\|\||∥)", item):
@@ -501,7 +509,40 @@ class QueryRewriter:
                 )
                 continue
             expanded.append(item)
-        return self._dedupe_preserve_order(expanded)
+        deduped = self._dedupe_preserve_order(expanded)
+        denominator_keys: set[str] = set()
+        denominator_labels: dict[str, str] = {}
+        explicit_denominator_keys: set[str] = set()
+        compact_source = re.sub(r"\s+", "", source_text).lower()
+        for item in deduped:
+            if "/" not in item or not re.search(r"(?:\|\||∥)", item):
+                continue
+            for denominator in item.split("/")[1:]:
+                key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", denominator.lower())
+                if key:
+                    denominator_keys.add(key)
+                    denominator_labels.setdefault(key, denominator.strip())
+                compact_denominator = re.sub(r"\s+", "", denominator).lower()
+                start = 0
+                while compact_source and compact_denominator:
+                    position = compact_source.find(compact_denominator, start)
+                    if position < 0:
+                        break
+                    if position == 0 or compact_source[position - 1] != "/":
+                        explicit_denominator_keys.add(key)
+                        break
+                    start = position + len(compact_denominator)
+
+        result: list[str] = []
+        for item in deduped:
+            item_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", item.lower())
+            if "/" not in item and item_key in denominator_keys:
+                if item_key not in explicit_denominator_keys:
+                    continue
+                item = denominator_labels.get(item_key, item)
+            if item not in result:
+                result.append(item)
+        return result
 
     def _extract_named_anchors(
         self,

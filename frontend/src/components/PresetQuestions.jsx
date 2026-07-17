@@ -88,19 +88,18 @@ function PresetQuestions({ onSelect, disabled = false }) {
 
   // 正常渲染预设问题按钮
   return (
-    <div className="flex flex-wrap gap-2 px-3 py-2">
+    <div className="flex flex-wrap gap-2">
       {presets.map((preset) => (
         <button
           key={preset.id}
           onClick={() => handleClick(preset.query)}
           disabled={disabled}
           className={`
-            inline-flex items-center px-3 py-1.5 rounded-full text-sm
-            border border-gray-300 dark:border-gray-600
-            transition-all duration-200 ease-in-out
+            inline-flex items-center px-3 py-1.5 rounded-full text-[12px] font-medium
+            border transition-all duration-200 ease-in-out
             ${disabled
-              ? 'opacity-50 cursor-not-allowed bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500'
-              : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-purple-50 dark:hover:bg-purple-900/30 hover:border-purple-400 dark:hover:border-purple-500 hover:text-purple-600 dark:hover:text-purple-400 cursor-pointer active:scale-95'
+              ? 'opacity-50 cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400'
+              : 'border-gray-200 bg-white text-gray-600 shadow-[0_1px_3px_rgba(30,30,35,0.05)] hover:border-[#FFA07A] hover:bg-[#FFF4EF] hover:text-[#B85F47] cursor-pointer active:scale-95'
             }
           `}
           title={preset.query}

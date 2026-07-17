@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "benchmark": "chatpdf.visual_retrieval",
+  "scope": {
+    "id": "synthetic-modal-assets-v1",
+    "data_policy": "仅含合成、非隐私的资产元数据；不含用户 PDF、文件路径、OCR 原文或模型凭据。",
+    "next_step": "后续应为公开可再分发 PDF 建立人工标注集，并沿用 page/kind/figure_id/block_id/bbox IoU gold 格式。"
+  },
+  "thresholds": {
+    "recall_at_1": {"min": 0.85},
+    "recall_at_3": {"min": 1.0},
+    "page_recall_at_3": {"min": 1.0},
+    "bbox_iou_recall_at_3": {"min": 1.0},
+    "negative_fpr": {"max": 0.0}
+  },
+  "index": {
+    "version": "v1",
+    "route": "local",
+    "generation": "synthetic-generation-1",
+    "source_hash": "synthetic-public-fixture-a1",
+    "revision": "synthetic-revision-1",
+    "index_id": "synthetic-modal-index-a1",
+    "assets": [
+      {
+        "asset_id": "ephemeral-fixture-figure-1",
+        "kind": "figure",
+        "page": 2,
+        "figure_id": "Figure 1",
+        "block_id": "p2_figure_calibration",
+        "bbox": [48, 96, 558, 344],
+        "caption": "Figure 1. Synthetic confidence calibration curve.",
+        "description": "The calibration error decreases as the confidence bins become more reliable.",
+        "text": "Figure 1 synthetic confidence calibration curve reliability error",
+        "confidence": 0.95
+      },
+      {
+        "asset_id": "ephemeral-fixture-table-2",
+        "kind": "table",
+        "page": 3,
+        "figure_id": "Table 2",
+        "block_id": "p3_table_runtime",
+        "bbox": [54, 118, 552, 356],
+        "caption": "Table 2. Synthetic runtime and memory comparison.",
+        "description": "Runtime comparison for three synthetic methods.",
+        "text": "Table 2 synthetic runtime memory comparison method latency",
+        "confidence": 0.92
+      },
+      {
+        "asset_id": "ephemeral-fixture-formula-1",
+        "kind": "formula",
+        "page": 4,
+        "figure_id": "Equation 1",
+        "block_id": "p4_equation_objective",
+        "bbox": [126, 204, 472, 252],
+        "caption": "Equation 1. Synthetic optimization objective.",
+        "description": "The objective balances reconstruction and regularisation terms.",
+        "text": "Equation 1 synthetic optimisation objective reconstruction regularisation",
+        "confidence": 0.89
+      },
+      {
+        "asset_id": "ephemeral-fixture-figure-3",
+        "kind": "figure",
+        "page": 5,
+        "figure_id": "Figure 3",
+        "block_id": "p5_figure_ablation",
+        "bbox": [42, 82, 562, 338],
+        "caption": "Figure 3. Synthetic ablation trend by component.",
+        "description": "Removing either component lowers the synthetic quality score.",
+        "text": "Figure 3 synthetic ablation trend component quality score",
+        "confidence": 0.91
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "figure_reference",
+      "query": "Figure 1 展示的置信度校准趋势是什么？",
+      "gold": [
+        {
+          "page": 2,
+          "kind": "figure",
+          "figure_id": "Figure 1",
+          "block_id": "p2_figure_calibration",
+          "bbox": [52, 100, 554, 340],
+          "bbox_iou_threshold": 0.9
+        }
+      ]
+    },
+    {
+      "id": "table_reference",
+      "query": "Table 2 的运行时间和内存对比是什么？",
+      "gold": [
+        {
+          "page": 3,
+          "kind": "table",
+          "figure_id": "Table 2",
+          "block_id": "p3_table_runtime",
+          "bbox": [58, 122, 548, 350],
+          "bbox_iou_threshold": 0.9
+        }
+      ]
+    },
+    {
+      "id": "formula_reference",
+      "query": "Equation 1 的优化目标包含哪些项？",
+      "gold": [
+        {
+          "page": 4,
+          "kind": "formula",
+          "figure_id": "Equation 1",
+          "block_id": "p4_equation_objective",
+          "bbox": [128, 206, 470, 250],
+          "bbox_iou_threshold": 0.85
+        }
+      ]
+    },
+    {
+      "id": "figure_ablation",
+      "query": "Figure 3 的消融趋势说明了什么？",
+      "gold": [
+        {
+          "page": 5,
+          "kind": "figure",
+          "figure_id": "Figure 3",
+          "block_id": "p5_figure_ablation",
+          "bbox": [48, 88, 556, 332],
+          "bbox_iou_threshold": 0.9
+        }
+      ]
+    },
+    {
+      "id": "query_only_ablation",
+      "query": "component ablation quality score",
+      "gold": [
+        {
+          "page": 5,
+          "kind": "figure",
+          "figure_id": "Figure 3",
+          "block_id": "p5_figure_ablation",
+          "bbox": [48, 88, 556, 332],
+          "bbox_iou_threshold": 0.9
+        }
+      ]
+    },
+    {
+      "id": "multi_figure_comparison",
+      "query": "Compare Figure 1 and Figure 3 trends.",
+      "gold": [
+        {
+          "page": 2,
+          "kind": "figure",
+          "figure_id": "Figure 1",
+          "block_id": "p2_figure_calibration",
+          "bbox": [52, 100, 554, 340],
+          "bbox_iou_threshold": 0.9,
+          "relevance": 2.0
+        },
+        {
+          "page": 5,
+          "kind": "figure",
+          "figure_id": "Figure 3",
+          "block_id": "p5_figure_ablation",
+          "bbox": [48, 88, 556, 332],
+          "bbox_iou_threshold": 0.9,
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "unrelated_negative",
+      "negative": true,
+      "query": "第 9 页作者单位的邮政编码是什么？"
+    }
+  ]
+}

@@ -91,9 +91,11 @@ class MemoryFileHandler(FileSystemEventHandler):
             all_entries = self.memory_service.store.get_all_entries()
             
             # 重建向量索引
-            self.memory_service.index.safe_reindex(all_entries, reason="file_sync")
-            
-            logger.info(f"索引重建完成，共 {len(all_entries)} 条记忆")
+            applied = self.memory_service.index.safe_reindex(all_entries, reason="file_sync")
+            if applied:
+                logger.info(f"索引重建完成，共 {len(all_entries)} 条记忆")
+            else:
+                logger.info("索引重建期间状态已更新，丢弃过期重建结果")
         except Exception as e:
             logger.error(f"异步重建索引失败: {e}")
 

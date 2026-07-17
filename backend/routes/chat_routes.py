@@ -5,12 +5,15 @@ import os
 import pickle
 from typing import Optional, List
 import json
+import math
 import logging
 import re
 import threading
 import time
 import uuid
 import hashlib
+from copy import deepcopy
+from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -42,8 +45,20 @@ from services.rag_config import (
     should_apply_numeric_table_specialization,
     should_enable_answer_critic,
     should_enable_llm_query_rewrite,
-    apply_request_overrides,
+    request_override_scope,
 )
+from services.table_visual_verifier import maybe_verify_numeric_table_visual
+from services.visual_document_enrichment_service import enrich_referenced_figure
+from services.visual_model_service import resolve_visual_enrichment_policy
+from services.visual_supplement_service import committed_visual_evidence_for_document
+from services.block_index_service import load_block_index
+from services.modal_asset_service import (
+    build_modal_asset_index,
+    looks_like_figure_query,
+)
+from services.modal_visual_evidence_service import analyze_modal_visual_evidence
+from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.semantic_group_store import active_manifest_path, semantic_group_paths
 from services.citation_service import (
     build_structured_citation_prompt,
     parse_citation_list,
@@ -88,6 +103,81 @@ _STRICT_CITATION_SUPPORT_THRESHOLDS = {
     "reference_meta": 0.1,
 }
 _CONSERVATIVE_REWRITE_EVIDENCE_NEEDS = {"reference_trap", "reference_meta"}
+_GRAPHRAG_PARSE_IDENTITY_FILE = "chatpdf_parse_identity.json"
+
+
+def _chat_vector_index_matches_parse(doc_id: str, manifest: dict) -> bool:
+    """Reject an old vector pair when a same-PDF reparse has a new generation."""
+    if bool((manifest.get("metadata") or {}).get("legacy_inferred")):
+        return True
+    vector_store_dir = str(getattr(router, "vector_store_dir", "") or "").strip()
+    if not vector_store_dir:
+        return True
+    chunks_path = Path(vector_store_dir) / f"{doc_id}.pkl"
+    if not chunks_path.exists():
+        # No artifact exists yet, so the normal retrieval fallback can still
+        # use the current document text without exposing an old generation.
+        return True
+    try:
+        with open(chunks_path, "rb") as handle:
+            data = pickle.load(handle)
+    except Exception:
+        return False
+    index_meta = data.get("index_meta") if isinstance(data, dict) else {}
+    if not isinstance(index_meta, dict):
+        return False
+    return (
+        str(index_meta.get("parse_generation") or "") == str(manifest.get("generation") or "")
+        and str(index_meta.get("document_source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
+def _chat_graphrag_index_matches_parse(working_dir: str | Path, manifest: dict) -> bool:
+    """Only attach a GraphRAG artifact from the active parse generation."""
+    if bool((manifest.get("metadata") or {}).get("legacy_inferred")):
+        return True
+    expected_generation = str(manifest.get("generation") or "")
+    expected_source_hash = str(manifest.get("source_hash") or "")
+    if not expected_generation or not expected_source_hash:
+        return False
+    try:
+        identity_path = Path(working_dir) / _GRAPHRAG_PARSE_IDENTITY_FILE
+        stored = json.loads(identity_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return (
+        str(stored.get("parse_generation") or "") == expected_generation
+        and str(stored.get("document_source_hash") or "") == expected_source_hash
+    )
+
+
+def _require_chat_document_parse_ready(doc_id: str, doc: dict) -> dict:
+    """Refuse provisional MinerU-first documents instead of answering from local scratch text."""
+    manifest = read_parse_manifest(doc or {}, doc_id=doc_id)
+    if is_parse_prepared(manifest):
+        if not _chat_vector_index_matches_parse(doc_id, manifest):
+            raise HTTPException(
+                status_code=409,
+                detail="当前文档的问答索引正在按新的解析结果更新，请稍后重试",
+            )
+        return manifest
+    route = str(
+        manifest.get("resolved_route")
+        or manifest.get("requested_route")
+        or manifest.get("route")
+        or "auto"
+    )
+    stage = str(manifest.get("stage") or "")
+    is_full_mineru_route = bool(
+        route == "mineru" and (manifest.get("metadata") or {}).get("full_route")
+    )
+    if is_full_mineru_route and stage == "awaiting_rag_index":
+        detail = "MinerU 已完成版面解析，正在等待问答索引发布"
+    elif is_full_mineru_route:
+        detail = "当前文档正在按 MinerU 全程解析，完成前不能发起问答"
+    else:
+        detail = "当前文档解析尚未完成，请稍后重试"
+    raise HTTPException(status_code=409, detail=detail)
 
 
 def _coerce_positive_int(value, default: int = 0) -> int:
@@ -471,6 +561,55 @@ def _get_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _resolve_chat_document_pdf_path(doc: dict) -> Path | None:
+    raw_url = str((doc or {}).get("pdf_url") or "").strip()
+    if not raw_url or "\x00" in raw_url:
+        return None
+    try:
+        decoded_path = unquote(urlsplit(raw_url).path).replace("\\", "/")
+    except (TypeError, ValueError):
+        return None
+    if any(part in {".", ".."} for part in decoded_path.split("/")):
+        return None
+    pdf_name = decoded_path.rsplit("/", 1)[-1].strip()
+    if not pdf_name or pdf_name in {".", ".."} or not pdf_name.lower().endswith(".pdf"):
+        return None
+    data_dir = Path(runtime.data_dir) if getattr(runtime, "data_dir", None) else _get_project_root() / "data"
+    roots = [
+        data_dir / "uploads",
+        _get_project_root() / "backend" / "uploads",
+        _get_project_root() / "uploads",
+    ]
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+            candidate = (resolved_root / pdf_name).resolve()
+            candidate.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _chat_pdf_matches_source_hash(pdf_path: Path, source_hash: str) -> bool:
+    """Fail closed unless the resolved upload still matches its parse bytes."""
+    expected = str(source_hash or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return False
+    digest = hashlib.sha256()
+    try:
+        with pdf_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest() == expected
+
+
 def _normalize_doc_alignment_text(text: str, limit: int = 240) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
     return normalized[:limit]
@@ -603,15 +742,61 @@ def _load_doc_chunk_metadata_for_agent(doc_id: str, vector_store_dir: str, chunk
     return []
 
 
-def _load_doc_semantic_groups_for_agent(doc_id: str, full_text: str = "") -> list[dict]:
-    """从落盘的 semantic_groups 中加载意群数据。"""
-    candidate_dirs = [
+def _is_legacy_parse_manifest(manifest: dict | None) -> bool:
+    return manifest is None or bool((manifest.get("metadata") or {}).get("legacy_inferred"))
+
+
+def _agent_semantic_groups_match_parse_manifest(
+    doc_id: str,
+    groups_root: Path,
+    manifest: dict | None,
+) -> bool:
+    """Only consume the semantic generation published for this parse identity."""
+    if _is_legacy_parse_manifest(manifest):
+        return True
+    try:
+        active_manifest = json.loads(
+            active_manifest_path(groups_root, doc_id).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return (
+        str(active_manifest.get("transaction_id") or "") == str(manifest.get("generation") or "")
+        and str(active_manifest.get("source_hash") or "") == str(manifest.get("source_hash") or "")
+    )
+
+
+def _load_doc_semantic_groups_for_agent(
+    doc_id: str,
+    full_text: str = "",
+    *,
+    parse_manifest: dict | None = None,
+) -> list[dict]:
+    """Load the active semantic-group generation, retaining legacy flat-file support."""
+    legacy_parse_manifest = _is_legacy_parse_manifest(parse_manifest)
+    candidate_roots = [
         Path(runtime.data_dir) / "semantic_groups",
         _get_project_root() / "data" / "semantic_groups",
         Path(__file__).resolve().parents[1] / "data" / "semantic_groups",
     ]
-    for groups_dir in candidate_dirs:
-        group_path = groups_dir / f"{doc_id}.json"
+    for groups_root in candidate_roots:
+        if not _agent_semantic_groups_match_parse_manifest(doc_id, groups_root, parse_manifest):
+            logger.warning(
+                "[AgentDoc] semantic_groups 解析身份不匹配，丢弃 stale groups: doc_id=%s root=%s",
+                doc_id,
+                groups_root,
+            )
+            continue
+        group_path = semantic_group_paths(groups_root, doc_id)["json"]
+        # A modern parse must not silently fall back to a root-level legacy
+        # file when its active generation is incomplete or unavailable.
+        if not legacy_parse_manifest and group_path.parent == groups_root:
+            logger.warning(
+                "[AgentDoc] 当前解析代际的 semantic_groups 不完整，拒绝 legacy fallback: doc_id=%s root=%s",
+                doc_id,
+                groups_root,
+            )
+            continue
         if not group_path.exists():
             continue
         try:
@@ -620,7 +805,9 @@ def _load_doc_semantic_groups_for_agent(doc_id: str, full_text: str = "") -> lis
             groups = data.get("groups") or []
             if isinstance(groups, list):
                 loaded_groups = [g for g in groups if isinstance(g, dict)]
-                if _semantic_groups_match_current_doc(loaded_groups, full_text):
+                # Old documents have no parse identity to bind against. Keep their
+                # historical flat-cache behavior; modern documents stay fail-closed.
+                if legacy_parse_manifest or _semantic_groups_match_current_doc(loaded_groups, full_text):
                     return loaded_groups
                 logger.warning(
                     "[AgentDoc] semantic_groups 与当前文档不匹配，丢弃 stale groups: doc_id=%s path=%s",
@@ -631,6 +818,150 @@ def _load_doc_semantic_groups_for_agent(doc_id: str, full_text: str = "") -> lis
         except Exception as exc:
             logger.warning(f"[AgentDoc] 加载意群失败: {group_path} -> {exc}")
     return []
+
+
+def _load_agent_modal_asset_index(
+    doc_id: str,
+    *,
+    parse_manifest: dict,
+    visual_evidence: list[dict],
+    block_index: dict | None = None,
+) -> dict:
+    """仅加载绑定到当前解析身份的请求级模态资产。"""
+    if not isinstance(parse_manifest, dict):
+        return {}
+    if block_index is None:
+        try:
+            block_index = load_block_index(runtime.data_dir, doc_id)
+        except Exception as exc:
+            logger.warning("[AgentDoc] 加载 block index 失败，禁用模态资产: doc_id=%s error=%s", doc_id, exc)
+            return {}
+    if not isinstance(block_index, dict):
+        return {}
+
+    metadata = parse_manifest.get("metadata") if isinstance(parse_manifest.get("metadata"), dict) else {}
+    if not metadata.get("legacy_inferred"):
+        expected_identity = (
+            str(parse_manifest.get("resolved_route") or "").strip().lower(),
+            str(parse_manifest.get("generation") or "").strip(),
+            str(parse_manifest.get("source_hash") or "").strip(),
+        )
+        block_identity = (
+            str(block_index.get("parser_route") or "").strip().lower(),
+            str(block_index.get("parse_generation") or "").strip(),
+            str(block_index.get("document_source_hash") or "").strip(),
+        )
+        if not all(expected_identity) or block_identity != expected_identity:
+            logger.warning(
+                "[AgentDoc] block index 与当前解析身份不匹配，禁用模态资产: doc_id=%s",
+                doc_id,
+            )
+            return {}
+
+    committed_revisions = {
+        str(item.get("visual_supplement_revision") or "").strip()
+        for item in visual_evidence
+        if isinstance(item, dict)
+        and str(item.get("visual_supplement_revision") or "").strip()
+    }
+    committed_revision = next(iter(committed_revisions)) if len(committed_revisions) == 1 else ""
+    safe_visual_evidence = list(visual_evidence) if len(committed_revisions) <= 1 else []
+    index_revision = str(block_index.get("visual_supplement_revision") or "").strip()
+    if index_revision != committed_revision:
+        # 视觉发布先写 staged block index，再提交文档 marker。读取侧只允许
+        # 暴露 marker 已确认的 revision，同时保留基础 Figure/Table 资产。
+        block_index = deepcopy(block_index)
+        block_index["visual_supplement_revision"] = committed_revision
+        for page in block_index.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            page["blocks"] = [
+                block
+                for block in (page.get("blocks") or [])
+                if not (
+                    isinstance(block, dict)
+                    and (
+                        block.get("visual_enhancement")
+                        or str(block.get("block_type") or "").strip().lower()
+                        == "visual_enrichment"
+                    )
+                )
+            ]
+
+    try:
+        modal_asset_index = build_modal_asset_index(
+            block_index=block_index,
+            visual_evidence=safe_visual_evidence,
+        )
+    except Exception as exc:
+        logger.warning("[AgentDoc] 构建模态资产索引失败: doc_id=%s error=%s", doc_id, exc)
+        return {}
+    return modal_asset_index if isinstance(modal_asset_index, dict) else {}
+
+
+def _load_agent_read_block_index(
+    doc_id: str,
+    *,
+    parse_manifest: dict,
+    visual_evidence: list[dict],
+) -> dict:
+    """Load a request-local block snapshot bound to the active parse identity."""
+    if not isinstance(parse_manifest, dict):
+        return {}
+    try:
+        block_index = load_block_index(runtime.data_dir, doc_id)
+    except Exception as exc:
+        logger.warning("[AgentDoc] 加载 block index 失败，禁用稳定块读取: doc_id=%s error=%s", doc_id, exc)
+        return {}
+    if not isinstance(block_index, dict):
+        return {}
+
+    metadata = parse_manifest.get("metadata") if isinstance(parse_manifest.get("metadata"), dict) else {}
+    if not metadata.get("legacy_inferred"):
+        expected_identity = (
+            str(parse_manifest.get("resolved_route") or "").strip().lower(),
+            str(parse_manifest.get("generation") or "").strip(),
+            str(parse_manifest.get("source_hash") or "").strip(),
+        )
+        block_identity = (
+            str(block_index.get("parser_route") or "").strip().lower(),
+            str(block_index.get("parse_generation") or "").strip(),
+            str(block_index.get("document_source_hash") or "").strip(),
+        )
+        if not all(expected_identity) or block_identity != expected_identity:
+            logger.warning(
+                "[AgentDoc] block index 与当前解析身份不匹配，禁用稳定块读取: doc_id=%s",
+                doc_id,
+            )
+            return {}
+
+    committed_revisions = {
+        str(item.get("visual_supplement_revision") or "").strip()
+        for item in visual_evidence
+        if isinstance(item, dict)
+        and str(item.get("visual_supplement_revision") or "").strip()
+    }
+    committed_revision = next(iter(committed_revisions)) if len(committed_revisions) == 1 else ""
+    if str(block_index.get("visual_supplement_revision") or "").strip() != committed_revision:
+        block_index = deepcopy(block_index)
+        block_index["visual_supplement_revision"] = committed_revision
+        for page in block_index.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            page["blocks"] = [
+                block
+                for block in page.get("blocks") or []
+                if not (
+                    isinstance(block, dict)
+                    and (
+                        block.get("visual_enhancement")
+                        or str(block.get("block_type") or "").strip().lower()
+                        == "visual_enrichment"
+                    )
+                )
+            ]
+    return block_index
+
 
 
 def _build_agent_doc_context(
@@ -644,13 +975,33 @@ def _build_agent_doc_context(
     rerank_provider: str = "",
     rerank_api_key: str = "",
     rerank_endpoint: str = "",
+    web_search_executor=None,
 ) -> DocContext:
     data = doc.get("data", {}) or {}
     full_text = data.get("full_text", "") or ""
     pages = data.get("pages", []) or []
     chunks = _load_doc_chunks_for_agent(doc_id, vector_store_dir, full_text)
     chunk_metadata = _load_doc_chunk_metadata_for_agent(doc_id, vector_store_dir, chunks, full_text)
-    semantic_groups = _load_doc_semantic_groups_for_agent(doc_id, full_text)
+    # Read once when the Agent request begins. The helper rejects MinerU,
+    # uncommitted, and parse-identity-mismatched visual supplements.
+    visual_evidence = committed_visual_evidence_for_document(doc)
+    parse_manifest = read_parse_manifest(doc, doc_id=doc_id)
+    block_index = _load_agent_read_block_index(
+        doc_id,
+        parse_manifest=parse_manifest,
+        visual_evidence=visual_evidence,
+    )
+    modal_asset_index = _load_agent_modal_asset_index(
+        doc_id,
+        parse_manifest=parse_manifest,
+        visual_evidence=visual_evidence,
+        block_index=block_index,
+    )
+    semantic_groups = _load_doc_semantic_groups_for_agent(
+        doc_id,
+        full_text,
+        parse_manifest=parse_manifest,
+    )
     return DocContext(
         doc_id=doc_id,
         full_text=full_text,
@@ -658,6 +1009,7 @@ def _build_agent_doc_context(
         pages=pages,
         semantic_groups=semantic_groups,
         chunk_metadata=chunk_metadata,
+        block_index=block_index,
         vector_store_dir=vector_store_dir,
         api_key=api_key or "",
         use_rerank=use_rerank,
@@ -665,6 +1017,9 @@ def _build_agent_doc_context(
         rerank_provider=rerank_provider or "",
         rerank_api_key=rerank_api_key or "",
         rerank_endpoint=rerank_endpoint or "",
+        web_search_executor=web_search_executor,
+        visual_evidence=visual_evidence,
+        modal_asset_index=modal_asset_index,
     )
 
 
@@ -798,6 +1153,12 @@ def _extract_paper_table_labels_from_record(record: dict, fallback_text: str = "
 def _record_matches_explicit_table_labels(record: dict, target_labels: set[str], fallback_text: str = "") -> bool:
     if not target_labels:
         return True
+    # A structured table identity is authoritative. A row can mention another
+    # table in a footnote or comparison sentence, which must not override its
+    # own table_id/caption when the user named an explicit Table N.
+    trusted_labels = _extract_trusted_paper_table_labels_from_record(record)
+    if trusted_labels:
+        return bool(trusted_labels & target_labels)
     record_labels = _extract_paper_table_labels_from_record(record, fallback_text=fallback_text)
     return bool(record_labels & target_labels)
 
@@ -1483,6 +1844,7 @@ def _build_agent_detail_citations(
         citation = {
             key: detail[key]
             for key in (
+                "block_id",
                 "chunk_id",
                 "child_chunk_id",
                 "parent_id",
@@ -1498,6 +1860,22 @@ def _build_agent_detail_citations(
                 "numeric_table_exact_context_header",
                 "table_row_evidence",
                 "table_row_slice_kind",
+                "visual_evidence_id",
+                "asset_id",
+                "analyzed_asset_id",
+                "visual_enhancement",
+                "visual_source",
+                "visual_supplement_revision",
+                "figure_id",
+                "bbox",
+                "figure_bbox",
+                "visual_model",
+                "runtime_visual_overlay",
+                "runtime_visual_analysis",
+                "purpose",
+                "prompt_version",
+                "parse_generation",
+                "confidence",
             )
             if detail.get(key) not in (None, "")
         }
@@ -1755,28 +2133,102 @@ def _auto_enable_rerank_if_beneficial(request, evidence_need: list, query_type: 
     return True
 
 
-def _retrieve_memory_context(question: str, api_key: str = None, doc_id: str = None) -> str:
+def _normalize_memory_parse_identity(parse_identity: dict | None) -> dict[str, str] | None:
+    """Normalize a parse manifest identity for memory reads and delayed writes."""
+    if not isinstance(parse_identity, dict):
+        return None
+    generation = str(
+        parse_identity.get("parse_generation")
+        or parse_identity.get("generation")
+        or ""
+    ).strip()
+    source_hash = str(
+        parse_identity.get("document_source_hash")
+        or parse_identity.get("source_hash")
+        or ""
+    ).strip()
+    if not generation or not source_hash:
+        return None
+    return {
+        "parse_generation": generation,
+        "document_source_hash": source_hash,
+    }
+
+
+def _memory_parse_identity_from_manifest(manifest: dict | None) -> dict[str, str] | None:
+    return _normalize_memory_parse_identity(manifest)
+
+
+def _memory_write_matches_current_parse(request, parse_identity: dict | None) -> bool:
+    """Fence delayed automatic memory writes against a later document reparse."""
+    if not getattr(request, "doc_id", None):
+        return True
+    expected = _normalize_memory_parse_identity(parse_identity)
+    if expected is None:
+        return False
+    try:
+        root_store = getattr(router, "documents_store", None)
+        if not isinstance(root_store, dict):
+            return False
+        store_key = getattr(request, "doc_store_key", "")
+        store = root_store.get(store_key, {}) if store_key else root_store
+        if not isinstance(store, dict):
+            return False
+        doc = store.get(request.doc_id)
+        if not isinstance(doc, dict):
+            return False
+        manifest = read_parse_manifest(doc, doc_id=request.doc_id)
+        current = _memory_parse_identity_from_manifest(manifest)
+        return bool(is_parse_prepared(manifest) and current == expected)
+    except Exception as exc:
+        logger.warning("[Memory] 无法复核异步写入的解析身份，跳过写入: %s", exc)
+        return False
+
+
+def _retrieve_memory_context(
+    question: str,
+    api_key: str = None,
+    doc_id: str = None,
+    parse_identity: dict | None = None,
+) -> str:
     if memory_service is None:
         return ""
     try:
         filter_by_doc = bool(doc_id)
-        return memory_service.retrieve_memories(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc
-        )
+        kwargs = {
+            "api_key": api_key,
+            "doc_id": doc_id,
+            "filter_by_doc": filter_by_doc,
+        }
+        if parse_identity is not None:
+            kwargs["parse_identity"] = parse_identity
+        return memory_service.retrieve_memories(question, **kwargs)
     except Exception as e:
         logger.error(f"记忆检索失败: {e}")
         return ""
 
 
-def _retrieve_raw_memories(question: str, api_key: str = None, doc_id: str = None, chat_history: list[dict] | None = None) -> list[dict]:
+def _retrieve_raw_memories(
+    question: str,
+    api_key: str = None,
+    doc_id: str = None,
+    chat_history: list[dict] | None = None,
+    parse_identity: dict | None = None,
+) -> list[dict]:
     """检索原始记忆列表（供 ContextInjector 使用）"""
     if memory_service is None:
         return []
     try:
         filter_by_doc = bool(doc_id)
-        return memory_service.retrieve_memories_raw(
-            question, api_key=api_key, doc_id=doc_id, filter_by_doc=filter_by_doc, chat_history=chat_history
-        )
+        kwargs = {
+            "api_key": api_key,
+            "doc_id": doc_id,
+            "filter_by_doc": filter_by_doc,
+            "chat_history": chat_history,
+        }
+        if parse_identity is not None:
+            kwargs["parse_identity"] = parse_identity
+        return memory_service.retrieve_memories_raw(question, **kwargs)
     except Exception as e:
         logger.error(f"记忆原始检索失败: {e}")
         return []
@@ -1820,6 +2272,7 @@ async def _retrieve_memory_for_stream(
     api_key: str = None,
     doc_id: str = None,
     chat_history: list[dict] | None = None,
+    parse_identity: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """在线程中读取记忆，保护流式接口不被同步检索卡住。"""
     if memory_service is None:
@@ -1827,7 +2280,12 @@ async def _retrieve_memory_for_stream(
 
     memory_context = await _run_memory_read_for_stream(
         "上下文",
-        lambda: _retrieve_memory_context(question, api_key=api_key, doc_id=doc_id),
+        lambda: _retrieve_memory_context(
+            question,
+            api_key=api_key,
+            doc_id=doc_id,
+            parse_identity=parse_identity,
+        ),
         "",
     )
     raw_memories = await _run_memory_read_for_stream(
@@ -1837,6 +2295,7 @@ async def _retrieve_memory_for_stream(
             api_key=api_key,
             doc_id=doc_id,
             chat_history=chat_history,
+            parse_identity=parse_identity,
         ),
         [],
     )
@@ -1890,9 +2349,12 @@ def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: 
     )
 
 
-def _async_memory_write(svc, request):
+def _async_memory_write(svc, request, parse_identity: dict | None = None):
     try:
         if request.doc_id:
+            if not _memory_write_matches_current_parse(request, parse_identity):
+                logger.info("[Memory] 解析身份已切换，跳过过期请求的自动记忆写入: doc_id=%s", request.doc_id)
+                return
             history = list(request.chat_history or [])
             history.append({"role": "user", "content": request.question})
             svc.save_qa_summary(
@@ -1901,6 +2363,7 @@ def _async_memory_write(svc, request):
                 api_key=getattr(request, "api_key", None),
                 model=getattr(request, "model", None),
                 api_provider=getattr(request, "api_provider", None),
+                parse_identity=_normalize_memory_parse_identity(parse_identity),
             )
         svc.update_keywords(request.question)
     except Exception as e:
@@ -1910,7 +2373,7 @@ def _async_memory_write(svc, request):
 _flushed_sessions: set = set()
 
 
-def _maybe_flush_memory(request) -> None:
+def _maybe_flush_memory(request, parse_identity: dict | None = None) -> None:
     if memory_service is None:
         return
     if not settings.memory_flush_enabled:
@@ -1919,10 +2382,18 @@ def _maybe_flush_memory(request) -> None:
     if not history:
         return
     doc_id = getattr(request, "doc_id", "")
-    if not doc_id or doc_id in _flushed_sessions:
+    identity = _normalize_memory_parse_identity(parse_identity)
+    if not doc_id or identity is None:
         return
-    from services.token_budget import TokenBudget
-    budget = TokenBudget()
+    session_key = (
+        doc_id,
+        identity["parse_generation"],
+        identity["document_source_hash"],
+    )
+    if session_key in _flushed_sessions:
+        return
+    from services.token_budget import TokenBudgetManager
+    budget = TokenBudgetManager()
     total_tokens = 0
     for msg in history:
         if isinstance(msg, dict):
@@ -1932,11 +2403,17 @@ def _maybe_flush_memory(request) -> None:
     threshold = settings.memory_flush_threshold_tokens
     if total_tokens < threshold:
         return
-    _flushed_sessions.add(doc_id)
-    logger.info(f"[Memory] Compaction flush 触发: doc_id={doc_id}, tokens={total_tokens}, threshold={threshold}")
+    _flushed_sessions.add(session_key)
+    logger.info(
+        "[Memory] Compaction flush 触发: doc_id=%s, generation=%s, tokens=%s, threshold=%s",
+        doc_id,
+        identity["parse_generation"],
+        total_tokens,
+        threshold,
+    )
     threading.Thread(
         target=_async_memory_write,
-        args=(memory_service, request),
+        args=(memory_service, request, identity),
         daemon=True,
     ).start()
 
@@ -2037,6 +2514,7 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
     surrounding context are sidecars to help the model interpret the row.
     """
     exact_rows: list[dict] = []
+    visual_rows: list[dict] = []
     comparison_rows: list[dict] = []
     support_rows: list[dict] = []
     seen: set[str] = set()
@@ -2056,14 +2534,16 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
             continue
         seen.add(key)
         role = str(segment.get("segment_role") or "").strip()
-        if _is_exact_table_evidence_segment(segment):
+        if _is_numeric_table_visual_verification_segment(segment):
+            visual_rows.append(segment)
+        elif _is_exact_table_evidence_segment(segment):
             exact_rows.append(segment)
         elif role == "numeric_comparison_row":
             comparison_rows.append(segment)
         else:
             support_rows.append(segment)
 
-    ordered = exact_rows + comparison_rows + support_rows
+    ordered = visual_rows + exact_rows + comparison_rows + support_rows
     lines: list[str] = []
     for idx, segment in enumerate(ordered[: max(1, int(max_segments or 1))], 1):
         try:
@@ -2102,6 +2582,15 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
         parts = [f"[{ref}] 数值表格证据"]
         if page_text:
             parts[0] += f"（{page_text}）"
+        if _is_numeric_table_visual_verification_segment(segment):
+            parts[0] = f"[{ref}] 数值表格视觉校验"
+            if page_text:
+                parts[0] += f"（{page_text}）"
+            visual_text = _compact_context_text(segment.get("text") or "", limit=1200)
+            if visual_text:
+                parts.append(visual_text)
+            lines.append("\n".join(parts))
+            continue
         if caption:
             parts.append(f"表题: {caption}")
         if header:
@@ -2145,7 +2634,491 @@ def _sync_numeric_table_prompt_context(
     graph_marker = "\n\n## 知识图谱关联信息"
     if graph_marker in str(context or ""):
         graph_suffix = str(context)[str(context).index(graph_marker):]
-    return f"根据用户问题检索到的相关文档片段：\n\n{formatted}\n\n{graph_suffix}"
+    safety_guard = _numeric_table_visual_conflict_guard(retrieval_meta)
+    return f"根据用户问题检索到的相关文档片段：\n\n{formatted}{safety_guard}\n\n{graph_suffix}"
+
+
+def _numeric_table_visual_conflict_guard(retrieval_meta: dict) -> str:
+    diagnostics = retrieval_meta.get("diagnostics") if isinstance(retrieval_meta, dict) else {}
+    visual = diagnostics.get("numeric_table_visual_verification") if isinstance(diagnostics, dict) else {}
+    verdict = str(
+        (visual or {}).get("visual_verdict")
+        or (visual or {}).get("verdict")
+        or (visual or {}).get("state")
+        or ""
+    ).strip().lower()
+    if verdict != "conflict":
+        return ""
+    return (
+        "\n\n[数值答案安全约束]\n"
+        "表格视觉核验与结构化文字证据发生冲突。不要给出任何确定数值、"
+        "不要猜测校正值；应明确说明当前证据冲突，并建议查看原始表格或重新解析文档。"
+    )
+
+
+def _is_numeric_table_visual_verification_segment(segment: dict) -> bool:
+    if not isinstance(segment, dict):
+        return False
+    is_visual_segment = (
+        str(segment.get("segment_role") or "").strip() == "numeric_table_visual_verification"
+        or "[numeric table visual verification" in str(segment.get("text") or "").lower()
+    )
+    # Visual extraction is a diagnostic by default.  Only a result that the
+    # verifier reconciled with structured cell evidence may affect the answer.
+    return is_visual_segment and str(segment.get("visual_verdict") or "").strip().lower() == "confirmed"
+
+
+async def _maybe_add_numeric_table_visual_verification(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    retrieval_meta: dict,
+    query: str,
+    evidence_need: list[str],
+) -> None:
+    needs = {str(item).strip() for item in (evidence_need or []) if str(item).strip()}
+    if "numeric_table" not in needs or not isinstance(retrieval_meta, dict):
+        return
+    diagnostics = retrieval_meta.setdefault("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        retrieval_meta["diagnostics"] = diagnostics
+
+    base_segments = _build_response_context_segments({
+        **retrieval_meta,
+        "search_query": query or retrieval_meta.get("search_query", ""),
+    })
+    if any(_is_numeric_table_visual_verification_segment(segment) for segment in base_segments):
+        diagnostics["numeric_table_visual_verification"] = {
+            "enabled": True,
+            "triggered": False,
+            "skipped_reason": "already_present",
+        }
+        return
+
+    try:
+        visual_provider, visual_model, visual_api_key, visual_endpoint = _resolve_numeric_table_visual_model_params(request)
+        visual_policy = _resolve_request_visual_policy(request)
+        visual_config = visual_policy.select(
+            risk_level="medium",
+            purpose="numeric_table_verification",
+        )
+        visual_segment, visual_diag = await maybe_verify_numeric_table_visual(
+            query=query or request.question,
+            doc_id=request.doc_id,
+            doc_data=(doc or {}).get("data") or {},
+            pdf_path=_resolve_chat_document_pdf_path(doc),
+            segments=base_segments,
+            api_key=visual_api_key,
+            model=visual_model,
+            provider=visual_provider,
+            endpoint=visual_endpoint,
+            custom_params=request.custom_params,
+            background=_should_background_numeric_table_visual_verification(request),
+            visual_config=visual_config,
+            visual_policy=visual_policy,
+        )
+    except Exception as exc:
+        visual_segment = {}
+        visual_diag = {
+            "enabled": True,
+            "triggered": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        logger.debug("[TableVisual] verification failed: %s", exc)
+
+    diagnostics["numeric_table_visual_verification"] = visual_diag
+    visual_verdict = str(
+        (visual_segment or {}).get("visual_verdict")
+        or (visual_diag or {}).get("visual_verdict")
+        or (visual_diag or {}).get("verdict")
+        or ""
+    ).strip().lower()
+    if not visual_segment or visual_verdict != "confirmed":
+        return
+
+    retrieval_meta["_context_segments"] = _merge_response_context_segments(
+        [visual_segment],
+        retrieval_meta.get("_context_segments") or [],
+    )
+    existing_citations = [
+        citation for citation in (retrieval_meta.get("citations") or [])
+        if isinstance(citation, dict)
+    ]
+    visual_citation = _segment_to_recovery_citation(visual_segment, 1)
+    renumbered_existing = []
+    for idx, citation in enumerate(existing_citations, start=2):
+        updated = dict(citation)
+        updated["ref"] = idx
+        renumbered_existing.append(updated)
+    retrieval_meta["citations"] = [visual_citation, *renumbered_existing]
+
+
+async def _maybe_add_explicit_figure_visual_enrichment(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    retrieval_meta: dict,
+    query: str,
+) -> None:
+    """在明确图号缺少文本证据时，按需追加一个可追踪的视觉证据段。"""
+    if not isinstance(retrieval_meta, dict):
+        return
+    diagnostics = retrieval_meta.setdefault("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        retrieval_meta["diagnostics"] = diagnostics
+
+    segments = _build_response_context_segments({
+        **retrieval_meta,
+        "search_query": query or retrieval_meta.get("search_query", ""),
+    })
+    if any(
+        isinstance(segment, dict)
+        and (
+            segment.get("runtime_visual_analysis")
+            or str(segment.get("retrieval_type") or "").strip() == "agent_visual_analysis"
+        )
+        for segment in segments
+    ):
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "skipped_reason": "agent_visual_analysis_present",
+        }
+        return
+    if retrieval_meta.get("agent_mode"):
+        # Agent visual evidence is request-local and asset-bound. Falling back
+        # to the historical enrichment path here could publish a result after
+        # an Agent analysis failure and silently change the document index.
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "skipped_reason": "agent_visual_pipeline_request_local",
+        }
+        return
+    text_evidence = "\n".join(
+        str(segment.get("text") or segment.get("chunk") or "")
+        for segment in segments
+        if isinstance(segment, dict)
+        and str(segment.get("block_type") or "").strip().lower() != "visual_enrichment"
+        and str(segment.get("source") or "").strip().lower() != "visual_vlm"
+        and not segment.get("visual_evidence_id")
+    )
+    try:
+        result = await enrich_referenced_figure(
+            doc_id=request.doc_id,
+            doc=doc,
+            pdf_path=_resolve_chat_document_pdf_path(doc),
+            query=query or request.question,
+            text_evidence=text_evidence,
+            visual_policy=_resolve_request_visual_policy(request),
+        )
+    except Exception as exc:
+        diagnostics["figure_visual_enrichment"] = {
+            "triggered": False,
+            "error": type(exc).__name__,
+        }
+        logger.debug("[FigureVisual] 按需图表分析失败: %s", exc)
+        return
+
+    figure_diag = dict(result.get("diagnostics") or {})
+    diagnostics["figure_visual_enrichment"] = figure_diag
+    item = result.get("item")
+    if not isinstance(item, dict):
+        return
+
+    reused_committed = bool(figure_diag.get("reused_committed"))
+    if reused_committed:
+        figure_diag["publication"] = {
+            "published": True,
+            "reused": True,
+            "revision": str(
+                figure_diag.get("visual_supplement_revision")
+                or item.get("visual_supplement_revision")
+                or ""
+            ),
+        }
+    elif str(result.get("route") or "").lower() == "local":
+        try:
+            from routes.document_routes import publish_visual_supplements
+
+            publication = publish_visual_supplements(
+                request.doc_id,
+                parse_generation=str(result.get("parse_generation") or ""),
+                document_source_hash=str(result.get("document_source_hash") or ""),
+                visual_model_identity=str(result.get("visual_model_identity") or ""),
+                items=[item],
+            )
+            figure_diag["publication"] = {
+                "published": bool(publication.get("published")),
+                "revision": str(publication.get("revision") or ""),
+            }
+        except Exception as exc:
+            # 当前请求仍可使用已经生成的局部证据；持久化失败不应中断回答。
+            figure_diag["publication"] = {
+                "published": False,
+                "error": type(exc).__name__,
+            }
+
+    evidence_id = str(item.get("id") or "").strip()
+    page = int(item.get("page") or 0)
+    segment = {
+        "text": str(item.get("text") or item.get("analysis") or "").strip(),
+        "page": page,
+        "page_range": [page, page] if page > 0 else [],
+        "bbox": list(item.get("bbox") or [])[:4],
+        "source": "visual_vlm",
+        "visual_source": "visual_vlm",
+        "visual_enhancement": True,
+        "segment_role": "figure_visual_enrichment",
+        "chunk_type": "visual_evidence",
+        "block_type": str(item.get("block_type") or "visual_enrichment"),
+        "block_id": evidence_id,
+        "evidence_id": evidence_id,
+        "visual_evidence_id": evidence_id,
+        "figure_id": str(item.get("figure_id") or ""),
+        "figure_bbox": list(item.get("bbox") or [])[:4],
+        "visual_model": dict(item.get("visual_model") or {}),
+        "visual_supplement_revision": str(
+            (figure_diag.get("publication") or {}).get("revision") or ""
+        ),
+    }
+    if not segment["text"] or segment["page"] <= 0:
+        return
+    retrieval_meta["_context_segments"] = _merge_response_context_segments(
+        [segment],
+        retrieval_meta.get("_context_segments") or [],
+    )
+
+    existing_citations = [
+        citation for citation in (retrieval_meta.get("citations") or [])
+        if isinstance(citation, dict)
+        and str(citation.get("visual_evidence_id") or citation.get("block_id") or "") != evidence_id
+    ]
+    visual_citation = _segment_to_recovery_citation(segment, 1)
+    renumbered = []
+    for index, citation in enumerate(existing_citations, start=2):
+        updated = dict(citation)
+        updated["ref"] = index
+        renumbered.append(updated)
+    retrieval_meta["citations"] = [visual_citation, *renumbered]
+
+
+def _sync_figure_visual_prompt_context(context: str, retrieval_meta: dict) -> str:
+    """确保按需图表证据在答案生成前进入 prompt，而不是只留在诊断信息。"""
+    segments = [
+        segment
+        for segment in (retrieval_meta.get("_context_segments") or [])
+        if isinstance(segment, dict)
+        and str(segment.get("segment_role") or "") == "figure_visual_enrichment"
+    ] if isinstance(retrieval_meta, dict) else []
+    if not segments:
+        return context
+    additions = []
+    for segment in segments:
+        page_range = segment.get("page_range") or []
+        try:
+            page = int(
+                segment.get("page")
+                or (page_range[0] if isinstance(page_range, (list, tuple)) and page_range else 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            page = 0
+        text = str(segment.get("text") or "").strip()
+        if text:
+            additions.append(f"[图表视觉补充][第{page}页]\n{text}")
+    if not additions:
+        return context
+    supplement = "\n\n".join(additions)
+    if supplement in str(context or ""):
+        return context
+    return f"{str(context or '').rstrip()}\n\n{supplement}\n\n"
+
+
+def _resolve_numeric_table_visual_model_params(request: ChatRequest) -> tuple[str, str, str, str]:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+
+    def _first(*keys: str) -> str:
+        for key in keys:
+            value = params.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    provider = (
+        _first("visual_provider", "numeric_table_visual_provider", "table_visual_provider", "visual_table_provider")
+        or os.getenv("CHATPDF_TABLE_VISUAL_PROVIDER", "")
+        or request.api_provider
+    )
+    model = (
+        _first("visual_model", "numeric_table_visual_model", "table_visual_model", "visual_table_model")
+        or os.getenv("CHATPDF_TABLE_VISUAL_MODEL", "")
+        or request.model
+    )
+    api_key = (
+        _first("visual_api_key", "numeric_table_visual_api_key", "table_visual_api_key", "visual_table_api_key")
+        or os.getenv("CHATPDF_TABLE_VISUAL_API_KEY", "")
+        or request.api_key
+        or ""
+    )
+    api_host = (
+        _first("visual_api_host", "numeric_table_visual_api_host", "table_visual_api_host", "visual_table_api_host")
+        or os.getenv("CHATPDF_TABLE_VISUAL_API_HOST", "")
+        or request.api_host
+        or ""
+    )
+    return provider, model, api_key, _get_provider_endpoint(provider, api_host)
+
+
+def _has_explicit_visual_model_params(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    return any(
+        params.get(key) not in (None, "")
+        for key in (
+            "visual_provider",
+            "visual_model",
+            "numeric_table_visual_provider",
+            "numeric_table_visual_model",
+            "table_visual_provider",
+            "table_visual_model",
+            "visual_table_provider",
+            "visual_table_model",
+        )
+    ) or bool(os.getenv("CHATPDF_TABLE_VISUAL_PROVIDER", "") or os.getenv("CHATPDF_TABLE_VISUAL_MODEL", ""))
+
+
+def _resolve_numeric_table_local_visual_model_params(request: ChatRequest) -> tuple[str, str, str, str]:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+
+    def _value(key: str) -> str:
+        value = params.get(key)
+        return str(value).strip() if value not in (None, "") else ""
+
+    provider = _value("local_visual_provider")
+    model = _value("local_visual_model")
+    api_key = _value("local_visual_api_key")
+    api_host = _value("local_visual_api_host")
+    return provider, model, api_key, _get_provider_endpoint(provider, api_host) if provider else ""
+
+
+def _resolve_visual_enrichment_strategy(request: ChatRequest) -> str:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    value = str(params.get("visual_strategy") or "balanced").strip().lower()
+    return value if value in {"privacy", "balanced", "quality"} else "balanced"
+
+
+def _resolve_numeric_table_visual_enabled(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    for key in ("visual_enabled", "numeric_table_visual_enabled", "table_visual_enabled"):
+        if key not in params:
+            continue
+        value = params.get(key)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return bool(value)
+    return True
+
+
+def _resolve_request_visual_policy(request: ChatRequest):
+    visual_provider, visual_model, visual_api_key, visual_endpoint = _resolve_numeric_table_visual_model_params(request)
+    local_provider, local_model, local_api_key, local_endpoint = _resolve_numeric_table_local_visual_model_params(request)
+    has_explicit_visual = _has_explicit_visual_model_params(request)
+    return resolve_visual_enrichment_policy(
+        strategy=_resolve_visual_enrichment_strategy(request),
+        primary_provider=request.api_provider,
+        primary_model=request.model,
+        primary_api_key=request.api_key or "",
+        primary_endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
+        visual_provider=visual_provider if has_explicit_visual else "",
+        visual_model=visual_model if has_explicit_visual else "",
+        visual_api_key=visual_api_key if has_explicit_visual else "",
+        visual_endpoint=visual_endpoint if has_explicit_visual else "",
+        visual_enabled=_resolve_numeric_table_visual_enabled(request),
+        local_visual_provider=local_provider,
+        local_visual_model=local_model,
+        local_visual_api_key=local_api_key,
+        local_visual_endpoint=local_endpoint,
+    )
+
+
+def _build_agent_visual_evidence_analyzer(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    modal_asset_index: dict,
+):
+    """构建仅属于本次 Agent 请求的视觉取证闭包。"""
+    assets = modal_asset_index.get("assets") if isinstance(modal_asset_index, dict) else None
+    index_route = str(
+        modal_asset_index.get("route") or modal_asset_index.get("parser_route") or ""
+    ).strip().lower()
+    index_generation = str(
+        modal_asset_index.get("generation")
+        or modal_asset_index.get("parse_generation")
+        or ""
+    ).strip()
+    index_source_hash = str(
+        modal_asset_index.get("source_hash")
+        or modal_asset_index.get("document_source_hash")
+        or ""
+    ).strip().lower()
+    if (
+        index_route not in {"local", "mineru"}
+        or not index_generation
+        or not re.fullmatch(r"[0-9a-f]{64}", index_source_hash)
+        or not any(
+            key in modal_asset_index
+            for key in ("revision", "visual_supplement_revision")
+        )
+    ):
+        return None
+    if not any(
+        isinstance(asset, dict)
+        and str(asset.get("kind") or "").strip().lower() == "figure"
+        and _coerce_positive_int(asset.get("page"), 0) > 0
+        and isinstance(asset.get("bbox"), (list, tuple))
+        and len(asset.get("bbox") or []) >= 4
+        for asset in (assets if isinstance(assets, list) else [])
+    ):
+        return None
+    pdf_path = _resolve_chat_document_pdf_path(doc)
+    if not pdf_path or not _chat_pdf_matches_source_hash(pdf_path, index_source_hash):
+        return None
+    visual_policy = _resolve_request_visual_policy(request)
+    selected_model = visual_policy.select(
+        risk_level="medium",
+        purpose="modal_visual_evidence",
+    )
+    if not selected_model.can_call:
+        return None
+    index_snapshot = deepcopy(modal_asset_index)
+
+    async def analyzer(*, asset: dict, question: str):
+        asset_id = str((asset or {}).get("asset_id") or "").strip()
+        return await analyze_modal_visual_evidence(
+            doc_id=request.doc_id,
+            modal_asset_index=index_snapshot,
+            asset_id=asset_id,
+            question=question,
+            pdf_path=pdf_path,
+            visual_policy=visual_policy,
+        )
+
+    return analyzer
+
+
+def _should_background_numeric_table_visual_verification(request: ChatRequest) -> bool:
+    params = request.custom_params if isinstance(request.custom_params, dict) else {}
+    for key in ("numeric_table_visual_background", "table_visual_background", "visual_table_background"):
+        if key in params:
+            value = params.get(key)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            return bool(value)
+    # A late conflict cannot safely retract an already-streamed numeric answer.
+    # Operators can still opt into background mode where latency matters more.
+    value = os.getenv("CHATPDF_TABLE_VISUAL_BACKGROUND", "false")
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _custom_bool(params: Optional[dict], *keys: str) -> bool:
@@ -2188,7 +3161,7 @@ def _is_protected_evidence_selector_segment(segment: dict, evidence_need: set[st
     if not isinstance(segment, dict):
         return False
     role = str(segment.get("segment_role") or "").strip().lower()
-    if role == "numeric_table_execution":
+    if role in {"numeric_table_execution", "figure_visual_enrichment"}:
         return True
     chunk_type = str(segment.get("chunk_type") or segment.get("block_type") or "").strip().lower()
     if chunk_type in {"table_row", "table_cell"}:
@@ -2289,8 +3262,8 @@ async def _apply_query_aware_evidence_selector(
         for idx, segment in enumerate(segments)
         if _is_protected_evidence_selector_segment(segment, evidence_set)
     }
-    if len(segments) < 3:
-        selector_diag["skipped_reason"] = "too_few_segments"
+    if not segments:
+        selector_diag["skipped_reason"] = "no_segments"
         selector_diag["candidate_count"] = len(segments)
         selector_diag["protected_count"] = len(protected_indices)
         return context
@@ -2704,6 +3677,19 @@ def _extract_numeric_table_target_methods(query: str = "", hints: Optional[dict]
         phrase = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
         if phrase:
             values.append(phrase)
+    explicit_short_values: set[str] = set()
+    for pattern in (
+        r"\bID\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"\b#?\s*Row\s*[:：]?\s*([A-Za-z0-9]+)\b",
+        r"(?:配置|实验)\s*ID\s*[:：]?\s*([A-Za-z0-9]+)",
+    ):
+        for match in re.finditer(pattern, sample, re.IGNORECASE):
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" ,.;:[]{}")
+            if value and len(value) <= 6:
+                values.append(value)
+                normalized = _normalize_numeric_table_method_token(value)
+                if normalized:
+                    explicit_short_values.add(normalized)
     for match in token_pattern.finditer(sample):
         token = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;:[]{}")
         if not token:
@@ -2724,7 +3710,7 @@ def _extract_numeric_table_target_methods(query: str = "", hints: Optional[dict]
         for value in values
         for normalized in (_normalize_numeric_table_method_token(value),)
         if normalized
-        and len(normalized) >= 3
+        and (len(normalized) >= 3 or normalized in explicit_short_values)
         and _normalize_numeric_table_column_key(value) not in known_column_tokens
         and (
             _normalize_numeric_table_column_key(value) not in target_columns
@@ -4042,6 +5028,121 @@ def _build_focused_citation_context_text(citation: dict, window_chars: int = 900
     return highlight
 
 
+_PUBLIC_SENSITIVE_VISUAL_METADATA_RE = re.compile(
+    r"(?:https?://|file://|^[A-Za-z]:[\\/]|^\\\\|\b(?:bearer\s+|sk-)[A-Za-z0-9._-]{8,}|[\\/][^\s]*\.pdf(?:$|[?#]))",
+    re.IGNORECASE,
+)
+_PUBLIC_VISUAL_MODEL_TEXT_FIELDS = {"identity", "provider", "model", "source"}
+_PUBLIC_VISUAL_MODEL_BOOL_FIELDS = {"enabled", "available", "local_execution"}
+_PUBLIC_VISUAL_TEXT_LIMITS = {
+    "visual_evidence_id": 240,
+    "asset_id": 240,
+    "analyzed_asset_id": 240,
+    "visual_source": 80,
+    "visual_supplement_revision": 160,
+    "figure_id": 240,
+    "purpose": 120,
+    "prompt_version": 160,
+    "parse_generation": 160,
+}
+
+
+def _safe_public_visual_metadata_text(value, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or _PUBLIC_SENSITIVE_VISUAL_METADATA_RE.search(text):
+        return ""
+    return text[: max(0, int(limit))]
+
+
+def _safe_public_visual_number(value, *, minimum: float, maximum: float):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return max(float(minimum), min(float(maximum), number))
+
+
+def _sanitize_public_visual_model(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    public = {}
+    for key, item in value.items():
+        normalized_key = str(key)
+        if normalized_key in _PUBLIC_VISUAL_MODEL_TEXT_FIELDS:
+            text = _safe_public_visual_metadata_text(item, 240)
+            if text:
+                public[normalized_key] = text
+            continue
+        if normalized_key not in _PUBLIC_VISUAL_MODEL_BOOL_FIELDS:
+            continue
+        if isinstance(item, bool):
+            public[normalized_key] = item
+        elif isinstance(item, (int, float)) and item in (0, 1):
+            public[normalized_key] = bool(item)
+        elif isinstance(item, str) and item.strip().lower() in {
+            "true", "false", "1", "0", "yes", "no", "on", "off"
+        }:
+            public[normalized_key] = item.strip().lower() in {
+                "true", "1", "yes", "on"
+            }
+    return public
+
+
+def _sanitize_public_visual_field(key: str, value):
+    if key == "visual_model":
+        return _sanitize_public_visual_model(value)
+    if key == "figure_bbox":
+        return _normalize_public_bbox(value)
+    if key == "confidence":
+        return _safe_public_visual_number(value, minimum=0.0, maximum=1.0)
+    if key in {
+        "visual_enhancement",
+        "runtime_visual_overlay",
+        "runtime_visual_analysis",
+    }:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        return None
+    limit = _PUBLIC_VISUAL_TEXT_LIMITS.get(key)
+    if limit is not None:
+        return _safe_public_visual_metadata_text(value, limit)
+    return None
+
+
+_VISUAL_PROVENANCE_FIELDS = (
+    "visual_evidence_id",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
+)
+
+
+def _copy_visual_provenance(record: dict, target: dict) -> dict:
+    """Keep committed VLM provenance through citation/segment reshaping."""
+    if not isinstance(record, dict) or not isinstance(target, dict):
+        return target
+    for key in _VISUAL_PROVENANCE_FIELDS:
+        value = _sanitize_public_visual_field(key, record.get(key))
+        if value not in (None, "", [], {}):
+            target[key] = value
+    return target
+
+
 def _build_context_segments_from_citations(citations: list[dict], *, query: str = "") -> list[dict]:
     segments = []
     hints = _query_rewriter.extract_numeric_table_hints(query) if query else {}
@@ -4059,7 +5160,7 @@ def _build_context_segments_from_citations(citations: list[dict], *, query: str 
         if _is_internal_context_map_segment({"text": text}):
             continue
         formula_score = _calc_formula_citation_anchor_score(text)
-        segments.append({
+        segments.append(_copy_visual_provenance(c, {
             "ref": ref,
             "text": text,
             "page_range": c.get("page_range") or [],
@@ -4094,7 +5195,7 @@ def _build_context_segments_from_citations(citations: list[dict], *, query: str 
             "surrounding_context": _build_citation_surrounding_context(c, primary_text=text),
             "synthetic_description": bool(c.get("synthetic_description") or c.get("is_synthetic_description")),
             "source_ref": ref,
-        })
+        }))
         for row_idx, row_text in enumerate(c.get("numeric_table_comparison_rows") or [], 1):
             normalized_row = re.sub(r"\s+", " ", str(row_text or "")).strip()
             if not normalized_row:
@@ -4268,7 +5369,7 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
             or ""
         ),
     ).strip()
-    citation = {
+    citation = _copy_visual_provenance(segment, {
         "ref": ref,
         "source_text": text,
         "display_text": text,
@@ -4286,6 +5387,7 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
         "block_type": segment.get("block_type", ""),
         "table_id": segment.get("table_id", ""),
         "table_bundle_id": segment.get("table_bundle_id", ""),
+        "table_instance_id": segment.get("table_instance_id", ""),
         "evidence_unit_id": segment.get("evidence_unit_id", ""),
         "table_caption": segment.get("numeric_table_exact_context_caption") or segment.get("table_caption", ""),
         "table_header": segment.get("numeric_table_exact_context_header") or segment.get("table_header", ""),
@@ -4303,12 +5405,13 @@ def _segment_to_recovery_citation(segment: dict, ref: int) -> dict:
         "table_row_slice_kind": segment.get("table_row_slice_kind", ""),
         "retrieval_type": segment.get("retrieval_type", ""),
         "segment_role": segment.get("segment_role", ""),
+        "visual_verdict": segment.get("visual_verdict", ""),
         "bbox": _normalize_public_bbox(segment.get("bbox")),
-        "citation_span": segment.get("citation_span") or {},
+        "citation_span": _sanitize_public_citation_span(segment.get("citation_span")),
         "surrounding_context": _compact_context_text(segment.get("surrounding_context") or "", limit=1200),
         "synthetic_description": bool(segment.get("synthetic_description")),
         "source_ref": segment.get("source_ref", segment.get("ref", ref)),
-    }
+    })
     return citation
 
 
@@ -4508,9 +5611,80 @@ def _normalize_public_bbox(value) -> list[float] | None:
         x0, y0, x1, y1 = [float(v) for v in value[:4]]
     except (TypeError, ValueError):
         return None
+    if not all(math.isfinite(item) and abs(item) <= 1_000_000 for item in (x0, y0, x1, y1)):
+        return None
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
+_PUBLIC_CITATION_COORDINATE_SPACES = {
+    "pdf_top_left_points",
+    "pdf_bottom_left_points",
+    "pdf_bottom_left",
+    "normalized",
+    "normalized_0_1",
+    "normalized_0_1000",
+    "normalized_1000",
+    "mineru_1000",
+    "ratio",
+    "relative",
+}
+
+
+def _normalize_public_citation_rects(value) -> list[list[float]]:
+    if not isinstance(value, list):
+        return []
+    rects = []
+    for item in value[:64]:
+        rect = _normalize_public_bbox(item)
+        if rect:
+            rects.append(rect)
+    return rects
+
+
+def _normalize_public_page_size(value) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        width = float(value[0])
+        height = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not all(
+        math.isfinite(item) and 0 < item <= 1_000_000
+        for item in (width, height)
+    ):
+        return None
+    return [round(width, 2), round(height, 2)]
+
+
+def _normalize_public_coordinate_space(value) -> str:
+    coordinate_space = str(value or "").strip().lower()
+    return (
+        coordinate_space
+        if coordinate_space in _PUBLIC_CITATION_COORDINATE_SPACES
+        else ""
+    )
+
+def _normalize_public_page_range(value) -> list[int]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = [value, value]
+    if not isinstance(value, (list, tuple)) or not value:
+        return []
+    pages: list[int] = []
+    for item in value[:2]:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            return []
+        if not math.isfinite(number) or number < 0 or number > 1_000_000:
+            return []
+        pages.append(int(number))
+    if len(pages) == 1:
+        pages.append(pages[0])
+    if pages[1] < pages[0]:
+        pages.reverse()
+    return pages
+
 
 
 def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
@@ -4521,6 +5695,8 @@ def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
         "page_bbox",
         "block_bbox",
         "table_bbox",
+        "figure_bbox",
+        "table_row_bbox",
         "bounding_box",
         "full_bbox_page_pts",
         "body_bbox_page_pts",
@@ -4546,6 +5722,36 @@ def _extract_citation_bbox(citation: Optional[dict]) -> list[float] | None:
             if bbox:
                 return bbox
     return None
+
+
+_PUBLIC_CITATION_SPAN_TEXT_LIMITS = {
+    "text": 300,
+    "start_phrase": 120,
+    "end_phrase": 120,
+    "alignment_status": 80,
+}
+_PUBLIC_CITATION_SPAN_INT_FIELDS = {"start", "end", "page"}
+
+
+def _sanitize_public_citation_span(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    public = {}
+    for key, limit in _PUBLIC_CITATION_SPAN_TEXT_LIMITS.items():
+        text = _compact_context_text(value.get(key) or "", limit=limit)
+        if text:
+            public[key] = text
+    for key in _PUBLIC_CITATION_SPAN_INT_FIELDS:
+        if key not in value:
+            continue
+        try:
+            number = float(value.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(number) or number < 0 or number > 10_000_000:
+            continue
+        public[key] = int(number)
+    return public
 
 
 def _build_citation_span(citation: Optional[dict]) -> dict:
@@ -4710,10 +5916,20 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
     if not text:
         return None
     segment_role = str(seg.get("segment_role") or "").strip()
-    return {
+    page_range = seg.get("page_range") or []
+    try:
+        page = int(
+            seg.get("page")
+            or (page_range[0] if isinstance(page_range, (list, tuple)) and page_range else 0)
+            or 0
+        )
+    except (TypeError, ValueError):
+        page = 0
+    normalized = {
         "ref": seg.get("ref"),
         "text": text,
-        "page_range": seg.get("page_range") or [],
+        "page": page,
+        "page_range": page_range,
         "group_id": seg.get("group_id", ""),
         "context_id": seg.get("context_id", ""),
         "evidence_id": seg.get("evidence_id", ""),
@@ -4725,6 +5941,8 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
         "block_type": seg.get("block_type", ""),
         "table_id": seg.get("table_id", ""),
         "table_bundle_id": seg.get("table_bundle_id", ""),
+        "table_instance_id": seg.get("table_instance_id", ""),
+        "table_source_hash": seg.get("table_source_hash", ""),
         "evidence_unit_id": seg.get("evidence_unit_id", ""),
         "table_caption": seg.get("table_caption", ""),
         "table_header": seg.get("table_header", ""),
@@ -4741,12 +5959,17 @@ def _normalize_response_context_segment(seg: dict) -> dict | None:
         "table_row_evidence": seg.get("table_row_evidence", False),
         "table_row_slice_kind": seg.get("table_row_slice_kind", ""),
         "segment_role": segment_role,
+        "visual_verdict": seg.get("visual_verdict", ""),
+        "visual_cells": seg.get("visual_cells", {}),
+        "visual_matched_row": seg.get("visual_matched_row", ""),
+        "visual_crops": seg.get("visual_crops", []),
         "bbox": _normalize_public_bbox(seg.get("bbox")),
-        "citation_span": seg.get("citation_span") or {},
+        "citation_span": _sanitize_public_citation_span(seg.get("citation_span")),
         "surrounding_context": _compact_context_text(seg.get("surrounding_context") or "", limit=1200),
         "synthetic_description": bool(seg.get("synthetic_description")),
         "source_ref": seg.get("source_ref"),
     }
+    return _copy_visual_provenance(seg, normalized)
 
 
 def _merge_response_context_segments(*segment_lists: list[dict]) -> list[dict]:
@@ -4923,6 +6146,27 @@ def _numeric_table_segment_support_text(segment: dict) -> str:
     ).strip()
 
 
+def _extract_response_numeric_table_dataset_mentions(text: str) -> set[str]:
+    mentions: set[str] = set()
+    sample = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not sample:
+        return mentions
+    token_pattern = re.compile(
+        r"\b(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z]*[A-Z][A-Za-z0-9.+/_-]*)(?:19|20)?\d{0,2}\b"
+    )
+    for match in token_pattern.finditer(sample):
+        token = match.group(0).strip(" ,.;:[]{}")
+        if not token:
+            continue
+        if (
+            re.search(r"(?:^|[-_])(?:LT|Dataset|Data)$", token, re.IGNORECASE)
+            or re.search(r"(?:19|20)\d{2}$", token)
+            or re.search(r"(?:^|[-_])(?:INat|Nat|Bench|Corpus|Set)(?:[-_]|$)", token, re.IGNORECASE)
+        ):
+            mentions.add(re.sub(r"\s+", "-", token).lower())
+    return mentions
+
+
 def _numeric_table_unit_row_text(unit: dict) -> str:
     if not isinstance(unit, dict):
         return ""
@@ -4975,6 +6219,9 @@ def _numeric_table_row_identity_text(row_text: str = "") -> str:
         "pre-train data",
         "pre-training data",
         "pretraining data",
+        "#row",
+        "row",
+        "id",
         "attack",
         "victim model",
         "dataset",
@@ -5093,7 +6340,7 @@ def _split_structured_table_row_shard_rows(text: str = "") -> list[str]:
     if not rows_part:
         return []
     row_start = re.compile(
-        r"(?=(?:^|\s)(?:#ID|Method|Model|Backbone|Pre-Train(?:ing)?(?: Data)?|Attack|Victim Model|Dataset|方法|模型|攻击|数据集)\s*[:：])",
+        r"(?=(?:^|\s)(?:#ID|ID|#Row|Row|Method|Model|Backbone|Pre-Train(?:ing)?(?: Data)?|Attack|Victim Model|Dataset|方法|模型|攻击|数据集)\s*[:：])",
         re.IGNORECASE,
     )
     starts = [match.start() for match in row_start.finditer(rows_part)]
@@ -5399,10 +6646,21 @@ def _select_numeric_table_evidence_packs(
     explicit_table_labels = _extract_paper_table_labels_from_query(query)
     target_columns = _extract_numeric_table_target_columns(query, hints)
     target_methods = _extract_numeric_table_target_methods(query, hints)
+    target_datasets = _extract_response_numeric_table_dataset_mentions(" ".join(hints.get("datasets", [])) + " " + query)
+    binary_factor_query = bool(
+        target_datasets
+        and re.search(
+            r"(?:\bIL\b|\bTL\b|image\s+list|text\s+list|combination|both|simultaneously|benefit|effect|同时|组合|都|影响|作用)",
+            query,
+            re.IGNORECASE,
+        )
+    )
     effective_max_rows_per_table = max(
         int(max_rows_per_table or 1),
         min(4, len([method for method in target_methods if method])),
     )
+    if binary_factor_query:
+        effective_max_rows_per_table = max(effective_max_rows_per_table, 4)
 
     grouped: dict[str, list[tuple[int, dict]]] = {}
     for idx, segment in enumerate(normalized):
@@ -5499,6 +6757,24 @@ def _select_numeric_table_evidence_packs(
             if _numeric_table_segment_row_text(segment, query=query, hints=hints)
         ]
         row_candidates.sort(key=_row_rank, reverse=True)
+        if binary_factor_query and target_datasets:
+            dataset_rows: list[tuple[int, dict]] = []
+            seen_dataset_rows: set[str] = set()
+            for idx, segment in row_candidates:
+                row_text = _numeric_table_segment_row_text(segment, query=query, hints=hints)
+                row_datasets = _extract_response_numeric_table_dataset_mentions(row_text)
+                if not (row_datasets & target_datasets):
+                    continue
+                row_key = _normalize_numeric_table_method_token(row_text) or row_text.casefold()
+                if row_key in seen_dataset_rows:
+                    continue
+                seen_dataset_rows.add(row_key)
+                dataset_rows.append((idx, segment))
+            if len(dataset_rows) >= 3:
+                row_candidates = dataset_rows + [
+                    row for row in row_candidates
+                    if id(row[1]) not in {id(segment) for _idx, segment in dataset_rows}
+                ]
         has_method_matched_row = bool(
             target_methods
             and any(
@@ -5827,14 +7103,17 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
         return []
 
     query = str(retrieval_meta.get("search_query") or retrieval_meta.get("query") or "").strip()
-    citation_segments = _build_context_segments_from_citations(
-        retrieval_meta.get("citations", []),
-        query=query,
-    )
     retrieval_segments = _merge_response_context_segments(
         retrieval_meta.get("_retrieval_context_segments") or [],
     )
     existing_segments = _merge_response_context_segments(retrieval_meta.get("_context_segments") or [])
+    citations = retrieval_meta.get("citations", [])
+    # Page/paragraph fallback citations are generated from the same raw context
+    # when structured citations are unavailable. Do not let them reintroduce an
+    # uncompressed duplicate after the evidence selector has pruned that context.
+    citation_segments = []
+    if not ((retrieval_segments or existing_segments) and _is_paragraph_fallback(citations)):
+        citation_segments = _build_context_segments_from_citations(citations, query=query)
 
     evidence_need = {
         str(item).strip()
@@ -5847,7 +7126,13 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
         for citation in retrieval_meta.get("citations", []) or []
     ):
         return citation_segments
-    if "numeric_table" in evidence_need and not _is_strong_numeric_table_context_query(query, evidence_need):
+    # Callers without a query have already classified the evidence explicitly;
+    # do not discard concrete table rows merely because no text heuristic can run.
+    if (
+        "numeric_table" in evidence_need
+        and query
+        and not _is_strong_numeric_table_context_query(query, evidence_need)
+    ):
         relaxed_need = {item for item in evidence_need if item != "numeric_table"}
         merged = _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
         return _filter_response_context_segments(
@@ -5857,6 +7142,11 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
             citation_count=len(citation_segments),
         )
     if "numeric_table" in evidence_need and (citation_segments or retrieval_segments or existing_segments):
+        visual_segments = [
+            segment
+            for segment in _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
+            if _is_numeric_table_visual_verification_segment(segment)
+        ]
         comparator_segments = _build_numeric_table_comparator_context_segments(retrieval_meta)
         exact_table_segments = _collect_exact_table_evidence_segments(
             retrieval_segments,
@@ -5890,14 +7180,17 @@ def _build_response_context_segments(retrieval_meta: dict) -> list[dict]:
                 execution_segment = {}
             if execution_segment:
                 packed_numeric = _merge_response_context_segments([execution_segment], packed_numeric)
-            return packed_numeric
+            return _merge_response_context_segments(visual_segments, packed_numeric)
         if exact_table_segments:
             # RAGAS/context display must keep exact table rows even when a broader
             # semantic-group digest scores well. This mirrors PaperQA/LightRAG:
             # answer context may be compressed, but evidence references stay concrete.
             protected = _merge_response_context_segments(exact_table_segments, filtered_numeric)
-            return protected[:12]
-        return filtered_numeric or comparator_segments or citation_segments
+            return _merge_response_context_segments(visual_segments, protected)[:12]
+        return _merge_response_context_segments(
+            visual_segments,
+            filtered_numeric or comparator_segments or citation_segments,
+        )
     merged = _merge_response_context_segments(retrieval_segments, existing_segments, citation_segments)
     return _filter_response_context_segments(
         merged,
@@ -5912,10 +7205,22 @@ _PUBLIC_RETRIEVAL_META_DENY_KEYS = {
     "rerank_api_key",
     "embedding_api_key",
     "web_search_api_key",
+    "web_search_context",
+    "web_search_sources",
     "diagnostics",
     "chunks",
     "retrieval_chunks",
     "raw_chunks",
+    "agent_detail",
+    "agent_search_history",
+    "task_status",
+    "visual_model",
+    "visual_provenance",
+    "pdf_path",
+    "endpoint",
+    "api_host",
+    "base_url",
+    "headers",
 }
 
 _PUBLIC_DIAGNOSTIC_SCALAR_KEYS = {
@@ -5997,8 +7302,43 @@ _PUBLIC_NUMERIC_REGEX_LOCATOR_DIAGNOSTIC_KEYS = {
     "explicit_table_labels",
     "filtered_count",
 }
+_PUBLIC_NUMERIC_TABLE_VISUAL_DIAGNOSTIC_KEYS = {
+    "enabled",
+    "mode",
+    "triggered",
+    "reasons",
+    "skipped_reason",
+    "state",
+    "verdict",
+    "visual_verdict",
+    "status",
+    "reason",
+    "rejected_reason",
+    "candidate_count",
+    "selection_score",
+    "table_id",
+    "table_caption",
+    "table_instance_id",
+    "cache_hit",
+    "stale_task_recovered",
+    "background",
+    "pending",
+    "task_id",
+    "page",
+    "crop_count",
+    "used_provider",
+    "used_model",
+    "confidence",
+    "created_at",
+    "updated_at",
+    "finished_at",
+    "visual_model",
+}
+
+
 _PUBLIC_AGENT_DIAGNOSTIC_KEYS = {
     "context_budget",
+    "modal_retrieval",
     "sub_questions",
     "sub_question_coverage",
     "planner_invocation_mode",
@@ -6028,7 +7368,23 @@ _PUBLIC_CITATION_KEYS = {
     "chunk_type",
     "block_type",
     "retrieval_type",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_evidence_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
     "segment_role",
+    "visual_verdict",
     "alignment_status",
     "start_phrase",
     "end_phrase",
@@ -6039,6 +7395,7 @@ _PUBLIC_CITATION_KEYS = {
     "combined_score",
     "table_id",
     "table_bundle_id",
+    "table_instance_id",
     "evidence_unit_id",
     "table_caption",
     "table_header",
@@ -6082,10 +7439,27 @@ _PUBLIC_CONTEXT_SEGMENT_KEYS = {
     "chunk_type",
     "block_type",
     "retrieval_type",
+    "asset_id",
+    "analyzed_asset_id",
+    "visual_evidence_id",
+    "visual_enhancement",
+    "visual_source",
+    "visual_supplement_revision",
+    "figure_id",
+    "figure_bbox",
+    "visual_model",
+    "runtime_visual_overlay",
+    "runtime_visual_analysis",
+    "purpose",
+    "prompt_version",
+    "parse_generation",
+    "confidence",
     "segment_role",
+    "visual_verdict",
     "alignment_status",
     "table_id",
     "table_bundle_id",
+    "table_instance_id",
     "evidence_unit_id",
     "table_caption",
     "table_header",
@@ -6111,20 +7485,36 @@ _PUBLIC_CONTEXT_SEGMENT_TEXT_LIMITS = {
 }
 
 
+_PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS = {
+    "api_key",
+    "authorization",
+    "base_url",
+    "endpoint",
+    "headers",
+    "password",
+    "pdf_path",
+    "secret",
+    "source_hash",
+    "document_source_hash",
+    "token",
+}
+
+
 def _sanitize_public_diagnostic_value(value):
-    if isinstance(value, (bool, int, float)):
+    if isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return _compact_context_text(value, limit=240)
+        return _safe_public_visual_metadata_text(value, 240)
     if isinstance(value, list):
         safe_items = []
         for item in value[:24]:
-            if isinstance(item, (bool, int, float)):
-                safe_items.append(item)
-            elif isinstance(item, str):
-                safe_items.append(_compact_context_text(item, limit=160))
-            elif isinstance(item, dict):
-                safe_items.append(_sanitize_public_diagnostics_section(item, set(item.keys())))
+            safe_item = _sanitize_public_diagnostic_value(item)
+            if safe_item is not None:
+                safe_items.append(safe_item)
         return safe_items
     if isinstance(value, dict):
         return _sanitize_public_diagnostics_section(value, set(value.keys()))
@@ -6138,7 +7528,34 @@ def _sanitize_public_diagnostics_section(section: dict, allowed_keys: set[str]) 
     for key in allowed_keys:
         if key not in section:
             continue
-        value = _sanitize_public_diagnostic_value(section.get(key))
+        normalized_key = str(key).strip().lower()
+        if (
+            normalized_key in _PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS
+            or normalized_key.endswith(
+                ("_api_key", "_endpoint", "_pdf_path", "_secret", "_password")
+            )
+        ):
+            continue
+        if normalized_key == "visual_model":
+            value = _sanitize_public_visual_model(section.get(key))
+        else:
+            value = _sanitize_public_diagnostic_value(section.get(key))
+        if value not in (None, "", [], {}):
+            public[key] = value
+    return public
+
+
+def _sanitize_public_numeric_table_visual_diagnostics(section: dict) -> dict:
+    if not isinstance(section, dict):
+        return {}
+    public = {}
+    for key in _PUBLIC_NUMERIC_TABLE_VISUAL_DIAGNOSTIC_KEYS:
+        if key not in section:
+            continue
+        if key == "visual_model":
+            value = _sanitize_public_visual_model(section.get(key))
+        else:
+            value = _sanitize_public_diagnostic_value(section.get(key))
         if value not in (None, "", [], {}):
             public[key] = value
     return public
@@ -6186,6 +7603,12 @@ def _sanitize_public_diagnostics(diagnostics: dict) -> dict:
         )
         if locator:
             public["numeric_regex_locator"] = locator
+    if isinstance(diagnostics.get("numeric_table_visual_verification"), dict):
+        visual = _sanitize_public_numeric_table_visual_diagnostics(
+            diagnostics.get("numeric_table_visual_verification") or {}
+        )
+        if visual:
+            public["numeric_table_visual_verification"] = visual
     if isinstance(diagnostics.get("agent"), dict):
         agent = _sanitize_public_diagnostics_section(
             diagnostics.get("agent") or {},
@@ -6206,12 +7629,32 @@ def _augment_public_citation(citation: dict) -> dict:
         value = citation.get(key)
         if value in (None, "", [], {}):
             continue
-        if key in _PUBLIC_CITATION_TEXT_LIMITS:
+        if key in _VISUAL_PROVENANCE_FIELDS:
+            safe_value = _sanitize_public_visual_field(key, value)
+            if safe_value not in (None, "", [], {}):
+                public[key] = safe_value
+        elif key == "page_range":
+            page_range = _normalize_public_page_range(value)
+            if page_range:
+                public[key] = page_range
+        elif key in {"page", "ref", "display_ref", "source_ref"}:
+            public[key] = _debug_int(value)
+        elif key in {"best_ratio", "score", "similarity", "rerank_score", "combined_score"}:
+            number = _safe_public_visual_number(
+                value,
+                minimum=-1_000_000.0,
+                maximum=1_000_000.0,
+            )
+            if number is not None:
+                public[key] = number
+        elif key in _PUBLIC_CITATION_TEXT_LIMITS:
             public[key] = _compact_context_text(value, limit=_PUBLIC_CITATION_TEXT_LIMITS[key])
         else:
             public[key] = value
     bbox = _extract_citation_bbox(citation)
-    span = _build_citation_span(citation)
+    span = (
+        _sanitize_public_citation_span(citation.get("citation_span")) or _build_citation_span(citation)
+    )
     if bbox:
         public["bbox"] = bbox
     if span:
@@ -6225,10 +7668,21 @@ def _augment_public_citation(citation: dict) -> dict:
     page_range = public.get("page_range") or []
     page = page_range[0] if isinstance(page_range, list) and page_range else public.get("page")
     block_id = public.get("block_id") or public.get("evidence_block_id") or public.get("chunk_id")
+    rects = _normalize_public_citation_rects(
+        citation.get("rects") or citation.get("line_rects")
+    )
+    coordinate_space = _normalize_public_coordinate_space(
+        citation.get("coordinate_space")
+    )
+    page_size = _normalize_public_page_size(citation.get("page_size"))
     anchor = {
         "block_id": block_id or "",
         "page": page,
         "bbox": bbox,
+        "rects": rects,
+        "coordinate_space": coordinate_space,
+        "page_size": page_size,
+        "parse_generation": public.get("parse_generation") or "",
         "span": span,
     }
     public["citation_anchor"] = {k: v for k, v in anchor.items() if v}
@@ -6248,7 +7702,21 @@ def _sanitize_public_context_segment(segment) -> dict:
         value = segment.get(key)
         if value in (None, "", [], {}):
             continue
-        if key == "bbox":
+        if key in _VISUAL_PROVENANCE_FIELDS:
+            safe_value = _sanitize_public_visual_field(key, value)
+            if safe_value not in (None, "", [], {}):
+                public[key] = safe_value
+        elif key == "citation_span":
+            span = _sanitize_public_citation_span(value)
+            if span:
+                public[key] = span
+        elif key == "page_range":
+            page_range = _normalize_public_page_range(value)
+            if page_range:
+                public[key] = page_range
+        elif key == "page":
+            public[key] = _debug_int(value)
+        elif key == "bbox":
             bbox = _normalize_public_bbox(value)
             if bbox:
                 public[key] = bbox
@@ -6272,30 +7740,62 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
         or "",
         limit=max_text,
     )
+    raw_keywords = record.get("keywords")
+    if not isinstance(raw_keywords, (list, tuple, set)):
+        raw_keywords = []
+    keywords = []
+    for value in list(raw_keywords)[:16]:
+        safe_keyword = _safe_public_visual_metadata_text(value, 120)
+        if safe_keyword and safe_keyword not in keywords:
+            keywords.append(safe_keyword)
+        if len(keywords) >= 12:
+            break
+
     fields = {
-        "ref": record.get("ref"),
-        "source_ref": record.get("source_ref"),
-        "group_id": record.get("group_id", ""),
-        "context_id": record.get("context_id", ""),
-        "evidence_id": record.get("evidence_id", ""),
-        "block_id": record.get("block_id", ""),
-        "chunk_id": record.get("chunk_id", ""),
-        "child_chunk_id": record.get("child_chunk_id", ""),
-        "parent_id": record.get("parent_id", ""),
-        "page_range": record.get("page_range") or [],
+        "ref": _debug_int(record.get("ref")),
+        "source_ref": _debug_int(record.get("source_ref")),
+        "group_id": _safe_public_visual_metadata_text(record.get("group_id"), 240),
+        "context_id": _safe_public_visual_metadata_text(record.get("context_id"), 240),
+        "evidence_id": _safe_public_visual_metadata_text(record.get("evidence_id"), 240),
+        "block_id": _safe_public_visual_metadata_text(record.get("block_id"), 240),
+        "chunk_id": _safe_public_visual_metadata_text(record.get("chunk_id"), 240),
+        "child_chunk_id": _safe_public_visual_metadata_text(record.get("child_chunk_id"), 240),
+        "parent_id": _safe_public_visual_metadata_text(record.get("parent_id"), 240),
+        "granularity": _safe_public_visual_metadata_text(record.get("granularity"), 80),
+        "char_count": _debug_int(record.get("char_count")),
+        "keywords": keywords,
+        "compacted": bool(record.get("compacted")),
+        "truncated": bool(record.get("truncated")),
+        "page": _debug_int(record.get("page")),
+        "page_range": _normalize_public_page_range(record.get("page_range")),
         "chunk_type": record.get("chunk_type", ""),
         "block_type": record.get("block_type", ""),
         "retrieval_type": record.get("retrieval_type", ""),
+        "visual_evidence_id": _sanitize_public_visual_field("visual_evidence_id", record.get("visual_evidence_id")),
+        "asset_id": _sanitize_public_visual_field("asset_id", record.get("asset_id")),
+        "analyzed_asset_id": _sanitize_public_visual_field("analyzed_asset_id", record.get("analyzed_asset_id")),
+        "visual_enhancement": _sanitize_public_visual_field("visual_enhancement", record.get("visual_enhancement")),
+        "visual_source": _sanitize_public_visual_field("visual_source", record.get("visual_source")),
+        "visual_supplement_revision": _sanitize_public_visual_field("visual_supplement_revision", record.get("visual_supplement_revision")),
+        "figure_id": _sanitize_public_visual_field("figure_id", record.get("figure_id")),
+        "figure_bbox": _sanitize_public_visual_field("figure_bbox", record.get("figure_bbox")),
+        "visual_model": _sanitize_public_visual_field("visual_model", record.get("visual_model")),
+        "runtime_visual_overlay": _sanitize_public_visual_field("runtime_visual_overlay", record.get("runtime_visual_overlay")),
+        "runtime_visual_analysis": _sanitize_public_visual_field("runtime_visual_analysis", record.get("runtime_visual_analysis")),
+        "purpose": _sanitize_public_visual_field("purpose", record.get("purpose")),
+        "prompt_version": _sanitize_public_visual_field("prompt_version", record.get("prompt_version")),
+        "parse_generation": _sanitize_public_visual_field("parse_generation", record.get("parse_generation")),
+        "confidence": _sanitize_public_visual_field("confidence", record.get("confidence")),
         "segment_role": record.get("segment_role", ""),
         "alignment_status": record.get("alignment_status", ""),
         "start_phrase": _compact_context_text(record.get("start_phrase") or "", limit=160),
         "end_phrase": _compact_context_text(record.get("end_phrase") or "", limit=160),
         "highlight_text": _compact_context_text(record.get("highlight_text") or "", limit=360),
-        "best_ratio": record.get("best_ratio"),
-        "score": record.get("score"),
-        "similarity": record.get("similarity"),
-        "rerank_score": record.get("rerank_score"),
-        "combined_score": record.get("combined_score"),
+        "best_ratio": _safe_public_visual_number(record.get("best_ratio"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "score": _safe_public_visual_number(record.get("score"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "similarity": _safe_public_visual_number(record.get("similarity"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "rerank_score": _safe_public_visual_number(record.get("rerank_score"), minimum=-1_000_000.0, maximum=1_000_000.0),
+        "combined_score": _safe_public_visual_number(record.get("combined_score"), minimum=-1_000_000.0, maximum=1_000_000.0),
         "table_id": record.get("table_id", ""),
         "table_bundle_id": record.get("table_bundle_id", ""),
         "table_caption": record.get("table_caption") or record.get("numeric_table_exact_context_caption") or "",
@@ -6304,7 +7804,9 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
         "table_row_evidence": bool(record.get("table_row_evidence")),
         "table_row_slice_kind": record.get("table_row_slice_kind", ""),
         "bbox": _normalize_public_bbox(record.get("bbox")) or _extract_citation_bbox(record),
-        "citation_span": record.get("citation_span") or _build_citation_span(record),
+        "citation_span": (
+            _sanitize_public_citation_span(record.get("citation_span")) or _build_citation_span(record)
+        ),
         "surrounding_context": _compact_context_text(record.get("surrounding_context") or "", limit=900),
         "synthetic_description": bool(record.get("synthetic_description") or record.get("is_synthetic_description")),
         "text": text,
@@ -6315,7 +7817,7 @@ def _sanitize_evidence_raw_record(record: dict, *, max_text: int = 1200) -> dict
 def _debug_int(value) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -6526,6 +8028,209 @@ def _should_include_evidence_raw(request: ChatRequest) -> bool:
     return bool(isinstance(params, dict) and params.get("include_evidence_raw"))
 
 
+def _sanitize_public_agent_detail(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    public = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        sanitized = _sanitize_evidence_raw_record(item, max_text=1400)
+        if sanitized:
+            public.append(sanitized)
+    return public
+
+
+def _sanitize_public_agent_search_history(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    public = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        tool_name = _safe_public_visual_metadata_text(item.get("tool"), 80)
+        query = _compact_context_text(item.get("query") or "", limit=400)
+        result_count = _debug_int(
+            item.get("resultCount")
+            if "resultCount" in item
+            else item.get("result_count")
+        )
+        row = {
+            "tool": tool_name,
+            "query": query,
+            "resultCount": result_count,
+        }
+        row = {key: item for key, item in row.items() if item not in ("", None, [], {})}
+        if row:
+            public.append(row)
+    return public
+
+
+def _sanitize_public_task_status(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    def _safe_status_list(items) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        result = []
+        for item in items[:24]:
+            text = _compact_context_text(item or "", limit=240)
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    public = {
+        "completed": _safe_status_list(value.get("completed")),
+        "current": _compact_context_text(value.get("current") or "", limit=240),
+        "pending": _safe_status_list(value.get("pending")),
+    }
+    return {key: item for key, item in public.items() if item not in ("", None, [], {})}
+
+
+def _sanitize_agent_progress_event(event) -> dict:
+    if not isinstance(event, dict):
+        return {}
+    public = {
+        "type": _safe_public_visual_metadata_text(event.get("type"), 80),
+        "phase": _safe_public_visual_metadata_text(event.get("phase"), 80),
+        "message": _compact_context_text(event.get("message") or "", limit=320),
+        "tool": _safe_public_visual_metadata_text(event.get("tool"), 80),
+        "round": _debug_int(event.get("round")),
+        "step": _debug_int(event.get("step")),
+        "result_count": _debug_int(event.get("result_count")),
+        "elapsed_ms": _safe_public_visual_number(
+            event.get("elapsed_ms"), minimum=0.0, maximum=3_600_000.0
+        ),
+    }
+    return {key: item for key, item in public.items() if item not in ("", None, [], {})}
+
+
+_PUBLIC_SENSITIVE_JSON_KEYS = _PUBLIC_SENSITIVE_DIAGNOSTIC_KEYS | {
+    "api_host",
+    "client_secret",
+    "credential",
+    "credentials",
+    "private_key",
+    "access_token",
+    "refresh_token",
+}
+_PUBLIC_SENSITIVE_JSON_COMPACT_SUFFIXES = {
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "clientsecret",
+    "password",
+    "secret",
+    "endpoint",
+    "pdfpath",
+    "privatekey",
+    "sourcehash",
+}
+_PUBLIC_SENSITIVE_JSON_COMPACT_KEYS = {
+    "authorization",
+    "authorizationheader",
+    "baseurl",
+    "headers",
+    "credential",
+    "credentials",
+}
+_PUBLIC_FREE_TEXT_JSON_FIELDS = {
+    "analysis",
+    "caption",
+    "current",
+    "description",
+    "display_text",
+    "end_phrase",
+    "highlight_text",
+    "message",
+    "numeric_table_exact_context_caption",
+    "numeric_table_exact_context_header",
+    "numeric_table_exact_context_row_text",
+    "numeric_table_projected_cells",
+    "query",
+    "retrieval_query",
+    "search_query",
+    "section_title",
+    "source_text",
+    "start_phrase",
+    "summary",
+    "surrounding_context",
+    "table_caption",
+    "table_header",
+    "text",
+    "title",
+}
+
+
+def _is_sensitive_public_json_key(key) -> bool:
+    normalized = str(key or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return bool(
+        normalized in _PUBLIC_SENSITIVE_JSON_KEYS
+        or compact in _PUBLIC_SENSITIVE_JSON_COMPACT_KEYS
+        or any(compact.endswith(suffix) for suffix in _PUBLIC_SENSITIVE_JSON_COMPACT_SUFFIXES)
+    )
+
+
+def _is_public_free_text_json_path(path: tuple[str, ...]) -> bool:
+    if not path:
+        return False
+    field_name = path[-1]
+    if field_name not in _PUBLIC_FREE_TEXT_JSON_FIELDS:
+        return False
+    if len(path) == 1:
+        return field_name in {"query", "search_query"}
+    root = path[0]
+    if root in {"citations", "context_segments", "agent_detail"}:
+        return True
+    if root == "agent_search_history":
+        return field_name in {"query", "message"}
+    if root == "task_status":
+        return field_name in {"current", "message"}
+    if root == "evidence_raw":
+        if len(path) == 2 and field_name == "query":
+            return True
+        return len(path) >= 3 and path[1] in {
+            "citations",
+            "context_segments",
+            "retrieval_context_segments",
+            "chunks",
+        }
+    return False
+
+
+def _sanitize_public_json_value(value, *, path: tuple[str, ...] = ()):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        if _is_public_free_text_json_path(path):
+            return value
+        return _safe_public_visual_metadata_text(value, 320) or None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            safe_item = _sanitize_public_json_value(item, path=path)
+            if safe_item is not None:
+                result.append(safe_item)
+        return result
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if _is_sensitive_public_json_key(key):
+                continue
+            normalized_key = str(key or "").strip().lower()
+            safe_item = _sanitize_public_json_value(
+                item,
+                path=(*path, normalized_key),
+            )
+            if safe_item is not None:
+                result[str(key)] = safe_item
+        return result
+    return None
+
 def _build_public_retrieval_meta(
     retrieval_meta: dict,
     context_segments: list[dict],
@@ -6534,7 +8239,13 @@ def _build_public_retrieval_meta(
     extra: Optional[dict] = None,
 ) -> dict:
     if not isinstance(retrieval_meta, dict):
-        return {"context_segments": context_segments or []}
+        return _sanitize_public_json_value({
+            "context_segments": [
+                item
+                for item in (_sanitize_public_context_segment(segment) for segment in (context_segments or []))
+                if item
+            ]
+        }) or {}
     public = {
         k: v
         for k, v in retrieval_meta.items()
@@ -6554,11 +8265,26 @@ def _build_public_retrieval_meta(
         for item in (_sanitize_public_context_segment(segment) for segment in (context_segments or []))
         if item
     ]
+    agent_detail = _sanitize_public_agent_detail(retrieval_meta.get("agent_detail"))
+    if agent_detail:
+        public["agent_detail"] = agent_detail
+    agent_search_history = _sanitize_public_agent_search_history(
+        retrieval_meta.get("agent_search_history")
+    )
+    if agent_search_history:
+        public["agent_search_history"] = agent_search_history
+    task_status = _sanitize_public_task_status(retrieval_meta.get("task_status"))
+    if task_status:
+        public["task_status"] = task_status
     if include_evidence_raw:
         public["evidence_raw"] = _build_evidence_raw_debug(retrieval_meta, context_segments or [])
     if extra:
-        public.update(extra)
-    return public
+        stream_fallback_reason = _safe_public_visual_metadata_text(
+            extra.get("stream_fallback_reason"), 120
+        )
+        if stream_fallback_reason:
+            public["stream_fallback_reason"] = stream_fallback_reason
+    return _sanitize_public_json_value(public) or {}
 
 
 
@@ -7590,6 +9316,92 @@ def _build_fast_overview_context(
     return (full_text or "")[:max_total_chars]
 
 
+def _append_fast_overview_visual_evidence(
+    context: str,
+    citations: list[dict],
+    visual_evidence: list[dict] | None,
+    *,
+    max_items: int = 3,
+    max_total_chars: int = 2200,
+) -> tuple[str, list[dict]]:
+    """Append committed local VLM evidence without changing the document text.
+
+    Fast overview intentionally bypasses vector retrieval.  This bounded,
+    request-local append lets it see the same published visual evidence while
+    preserving a normal block/page citation anchor for each figure reading.
+    """
+    merged_citations = [dict(item) for item in citations or [] if isinstance(item, dict)]
+    parts = [str(context or "").rstrip()] if str(context or "").strip() else []
+    seen_ids: set[str] = set()
+    used_chars = 0
+    appended = 0
+    next_ref = max(
+        (
+            int(item.get("ref") or 0)
+            for item in merged_citations
+            if str(item.get("ref") or "").strip().isdigit()
+        ),
+        default=0,
+    ) + 1
+
+    for item in visual_evidence or []:
+        if appended >= max(0, int(max_items)) or used_chars >= max_total_chars:
+            break
+        if not isinstance(item, dict):
+            continue
+        evidence_id = str(item.get("id") or "").strip()
+        text = re.sub(r"\s+", " ", str(item.get("text") or item.get("analysis") or "")).strip()
+        caption = re.sub(r"\s+", " ", str(item.get("caption") or "")).strip()[:400]
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if not evidence_id or not text or page <= 0 or evidence_id in seen_ids:
+            continue
+        seen_ids.add(evidence_id)
+
+        available = max_total_chars - used_chars
+        body = text[: min(1200, max(0, available - len(caption) - 72))].strip()
+        if not body:
+            continue
+        label = caption or f"图表 {item.get('figure_id') or evidence_id}"
+        context_item = f"[图表视觉补充 · 第{page}页 · 证据{next_ref}]\n{label}\n{body}"
+        source_text = f"{label}\n{body}"
+        revision = str(item.get("visual_supplement_revision") or "").strip()
+        visual_model = item.get("visual_model") if isinstance(item.get("visual_model"), dict) else {}
+        citation = {
+            "ref": next_ref,
+            "evidence_id": f"visual:{revision or 'current'}:{evidence_id}",
+            "context_id": f"visual-{evidence_id}",
+            "group_id": f"visual-{evidence_id}",
+            "visual_evidence_id": evidence_id,
+            "block_id": evidence_id,
+            "chunk_id": evidence_id,
+            "page_range": [page, page],
+            "bbox": _normalize_public_bbox(item.get("bbox")),
+            "source_text": source_text,
+            "display_text": source_text,
+            "highlight_text": body[:180],
+            "_full_text": source_text,
+            "chunk_type": "visual_evidence",
+            "block_type": "caption",
+            "retrieval_type": "fallback",
+            "visual_enhancement": True,
+            "visual_source": "visual_vlm",
+            "visual_supplement_revision": revision,
+            "figure_id": str(item.get("figure_id") or "").strip(),
+            "visual_model": dict(visual_model),
+            "runtime_visual_overlay": True,
+        }
+        merged_citations.append({key: value for key, value in citation.items() if value not in (None, "", [], {})})
+        parts.append(context_item)
+        used_chars += len(context_item)
+        appended += 1
+        next_ref += 1
+
+    return "\n\n".join(parts), merged_citations
+
+
 def _should_use_fast_overview_context(
     query_type: str,
     *,
@@ -7613,6 +9425,7 @@ def _build_agent_retrieval_gate(
     selected_text: Optional[str],
     query_type: str,
     evidence_need: Optional[list[str]] = None,
+    question: str = "",
 ) -> dict:
     """返回 retrieval_agent 触发决策及其原因，便于诊断。
 
@@ -7644,6 +9457,7 @@ def _build_agent_retrieval_gate(
         else None
     )
 
+    matched_visual_intent = looks_like_figure_query(question)
     if not enable_agent_retrieval:
         return {
             "enabled": False,
@@ -7685,13 +9499,16 @@ def _build_agent_retrieval_gate(
             "agent_gate_source": "force_user",
         }
 
-    enabled = bool(matched_query_type or matched_needs)
-    if matched_query_type:
-        reason = "matched_query_type"
-        gate_source = "query_type"
+    enabled = bool(matched_query_type or matched_needs or matched_visual_intent)
+    if matched_visual_intent:
+        reason = "matched_visual_intent"
+        gate_source = "visual_intent"
     elif matched_needs:
         reason = "matched_evidence_need"
         gate_source = "evidence_needs"
+    elif matched_query_type:
+        reason = "matched_query_type"
+        gate_source = "query_type"
     else:
         reason = "route_not_matched"
         gate_source = "denied"
@@ -7703,6 +9520,7 @@ def _build_agent_retrieval_gate(
         "evidence_need": normalized_needs,
         "matched_query_type": matched_query_type,
         "matched_evidence_need": matched_needs,
+        "matched_visual_intent": matched_visual_intent,
         "selected_text_present": False,
         "force_agent_retrieval": bool(force_agent_retrieval),
         "agent_gate_source": gate_source,
@@ -7843,6 +9661,7 @@ def _should_enable_agent_retrieval(
     selected_text: Optional[str],
     query_type: str,
     evidence_need: Optional[list[str]] = None,
+    question: str = "",
 ) -> bool:
     """仅对高价值题型启用 retrieval_agent，避免全局放大延迟。"""
     gate = _build_agent_retrieval_gate(
@@ -7851,6 +9670,7 @@ def _should_enable_agent_retrieval(
         selected_text=selected_text,
         query_type=query_type,
         evidence_need=evidence_need,
+        question=question,
     )
     return bool(gate.get("enabled"))
 
@@ -7898,6 +9718,8 @@ async def _run_agent_retrieval_for_context(
             build_numbered_context_and_citations=_build_numbered_context_and_citations,
             generate_page_level_citations=_generate_page_level_citations,
             build_agent_detail_citations=_build_agent_detail_citations,
+            build_visual_evidence_analyzer=_build_agent_visual_evidence_analyzer,
+            perform_web_search=_maybe_perform_web_search,
         ),
     )
 
@@ -7905,13 +9727,13 @@ async def _run_agent_retrieval_for_context(
 def _is_paragraph_fallback(citations: list[dict]) -> bool:
     """判断 citations 是否来自段落级兜底（非向量检索的语义 chunk）。
 
-    当 group_id 全部以 ``para-`` 或 ``page-`` 开头时，视为 fallback 引文，
+    当 group_id 全部以 ``para-``、``page-`` 或 ``visual-`` 开头时，视为 fallback 引文，
     不应触发结构化引文 prompt（CITATION LIST + FINAL ANSWER）。
     """
     if not citations:
         return False
     return all(
-        c.get("group_id", "").startswith(("para-", "page-"))
+        c.get("group_id", "").startswith(("para-", "page-", "visual-"))
         for c in citations
     )
 
@@ -9560,19 +11382,26 @@ async def _retry_generation_after_stream_error(
 
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
-    if not hasattr(router, "documents_store"):
-        raise HTTPException(status_code=500, detail="文档存储未初始化")
-    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
-    apply_request_overrides(
+    with request_override_scope(
         numeric_table=request.override_numeric_table,
         answer_critic=request.override_answer_critic,
         llm_query_rewrite=request.override_llm_query_rewrite,
         bm25_synonyms=request.override_bm25_synonyms,
-    )
+        jieba_bm25=request.enable_jieba_bm25,
+        context_chunk_expansion=request.num_expand_context_chunk,
+    ):
+        return await _chat_with_pdf_impl(request)
+
+
+async def _chat_with_pdf_impl(request: ChatRequest):
+    if not hasattr(router, "documents_store"):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
+    parse_manifest = _require_chat_document_parse_ready(request.doc_id, doc)
+    memory_parse_identity = _memory_parse_identity_from_manifest(parse_manifest)
     context = ""
     retrieval_meta = {}
     citations: list[dict] = []
@@ -9580,7 +11409,7 @@ async def chat_with_pdf(request: ChatRequest):
     web_search_context = ""
     use_memory = _should_use_memory(request)
     if use_memory:
-        _maybe_flush_memory(request)
+        _maybe_flush_memory(request, parse_identity=memory_parse_identity)
     memory_context = ""
     raw_memories = []
     memory_hits: list[dict] = []
@@ -9595,10 +11424,17 @@ async def chat_with_pdf(request: ChatRequest):
     }
     if use_memory:
         memory_context = _retrieve_memory_context(
-            request.question, api_key=request.api_key, doc_id=request.doc_id
+            request.question,
+            api_key=request.api_key,
+            doc_id=request.doc_id,
+            parse_identity=memory_parse_identity,
         )
     raw_memories = _retrieve_raw_memories(
-        request.question, api_key=request.api_key, doc_id=request.doc_id, chat_history=request.chat_history
+        request.question,
+        api_key=request.api_key,
+        doc_id=request.doc_id,
+        chat_history=request.chat_history,
+        parse_identity=memory_parse_identity,
     )
 
     # 支持多图逻辑
@@ -9634,6 +11470,7 @@ async def chat_with_pdf(request: ChatRequest):
             selected_text=request.selected_text,
             query_type=initial_strategy.get("query_type", ""),
             evidence_need=initial_strategy.get("evidence_need", []),
+            question=request.question or "",
         )
         use_agent = bool(agent_gate.get("enabled"))
         retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -9703,6 +11540,7 @@ async def chat_with_pdf(request: ChatRequest):
                     ],
                     selected_text=request.selected_text,
                     answer_max_tokens=_prelim_answer_tokens,
+                    visual_evidence=committed_visual_evidence_for_document(doc),
                 )
                 retrieval_context = context_result.get("context", "")
                 retrieval_meta = _merge_retrieval_meta(retrieval_meta, context_result.get("retrieval_meta", {}))
@@ -9755,6 +11593,12 @@ async def chat_with_pdf(request: ChatRequest):
                 agent_gate=agent_gate,
                 retrieval_meta=retrieval_meta,
             )
+            web_search_sources = [
+                dict(item)
+                for item in (retrieval_meta.get("web_search_sources") or [])
+                if isinstance(item, dict)
+            ]
+            web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
         elif _should_use_fast_overview_context(
             query_type,
             enable_vector_search=request.enable_vector_search,
@@ -9770,10 +11614,17 @@ async def chat_with_pdf(request: ChatRequest):
                 sampled_context,
                 query=search_query,
             )
-            context = numbered_ctx
+            context, fb_cits = _append_fast_overview_visual_evidence(
+                numbered_ctx,
+                fb_cits,
+                committed_visual_evidence_for_document(doc, limit=4),
+            )
             retrieval_meta["citations"] = fb_cits
             retrieval_meta["query_type"] = query_type
             retrieval_meta["fast_overview"] = True
+            retrieval_meta["fast_overview_visual_evidence_count"] = sum(
+                1 for citation in fb_cits if citation.get("visual_enhancement")
+            )
         elif request.enable_vector_search:
             _validate_rerank_request(request)
             context_result = await vector_context(
@@ -9789,6 +11640,7 @@ async def chat_with_pdf(request: ChatRequest):
                     ErrorCaptureMiddleware()
                 ],
                 answer_max_tokens=_prelim_answer_tokens,
+                visual_evidence=committed_visual_evidence_for_document(doc),
             )
             relevant_text = context_result.get("context", "")
             retrieval_meta = _merge_retrieval_meta(retrieval_meta, context_result.get("retrieval_meta", {}))
@@ -9823,6 +11675,7 @@ async def chat_with_pdf(request: ChatRequest):
         retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
         retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
         retrieval_meta["search_query"] = search_query
+        evidence_need = retrieval_meta.get("evidence_need") or evidence_need
         _maybe_add_numeric_regex_locator_segments(
             request=request,
             doc=doc,
@@ -9835,6 +11688,19 @@ async def chat_with_pdf(request: ChatRequest):
             doc=doc,
             retrieval_meta=retrieval_meta,
             query=search_query,
+        )
+        await _maybe_add_explicit_figure_visual_enrichment(
+            request=request,
+            doc=doc,
+            retrieval_meta=retrieval_meta,
+            query=search_query,
+        )
+        await _maybe_add_numeric_table_visual_verification(
+            request=request,
+            doc=doc,
+            retrieval_meta=retrieval_meta,
+            query=search_query,
+            evidence_need=evidence_need,
         )
         context = _sync_numeric_table_prompt_context(
             context,
@@ -9852,6 +11718,7 @@ async def chat_with_pdf(request: ChatRequest):
             provider=_cheap_provider,
             endpoint=_cheap_endpoint,
         )
+        context = _sync_figure_visual_prompt_context(context, retrieval_meta)
 
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = f"""你是专业的PDF文档智能助手。用户正在查看文档"{doc["filename"]}"。
@@ -9979,7 +11846,11 @@ async def chat_with_pdf(request: ChatRequest):
         response_context_segments = _build_response_context_segments(retrieval_meta)
 
         if use_memory:
-            threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
+            threading.Thread(
+                target=_async_memory_write,
+                args=(memory_service, request, memory_parse_identity),
+                daemon=True,
+            ).start()
         return {
             "answer": answer, "reasoning_content": reasoning_content,
             "doc_id": request.doc_id, "question": request.question,
@@ -10004,17 +11875,12 @@ async def chat_with_pdf(request: ChatRequest):
 async def chat_with_pdf_stream(request: ChatRequest):
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
-    # Per-request feature flag overrides（前端 GlobalSettings 可细化控制）
-    apply_request_overrides(
-        numeric_table=request.override_numeric_table,
-        answer_critic=request.override_answer_critic,
-        llm_query_rewrite=request.override_llm_query_rewrite,
-        bm25_synonyms=request.override_bm25_synonyms,
-    )
     store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
     if request.doc_id not in store:
         raise HTTPException(status_code=404, detail="文档未找到")
     doc = store[request.doc_id]
+    parse_manifest = _require_chat_document_parse_ready(request.doc_id, doc)
+    memory_parse_identity = _memory_parse_identity_from_manifest(parse_manifest)
     trace_id = _new_chat_trace_id()
     trace_started_at = time.perf_counter()
     _log_chat_trace(
@@ -10062,6 +11928,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     api_key=request.api_key,
                     doc_id=request.doc_id,
                     chat_history=request.chat_history,
+                    parse_identity=memory_parse_identity,
                 )
 
             image_list = (request.image_base64_list or [])
@@ -10094,10 +11961,6 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     mime = _detect_mime_type(img_b64)
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
             else:
-                # 应用前端传入的检索增强设置到全局配置（即时生效）
-                settings.bm25_use_jieba = request.enable_jieba_bm25
-                settings.num_expand_context_chunk = request.num_expand_context_chunk
-
                 _cheap_model, _cheap_provider, _cheap_endpoint = _get_cheap_model_params(request)
                 initial_strategy = get_retrieval_strategy(request.question or "")
                 agent_gate = _build_agent_retrieval_gate(
@@ -10106,6 +11969,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     selected_text=request.selected_text,
                     query_type=initial_strategy.get("query_type", ""),
                     evidence_need=initial_strategy.get("evidence_need", []),
+                    question=request.question or "",
                 )
                 use_agent = bool(agent_gate.get("enabled"))
                 retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -10233,6 +12097,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
                             progress_callback=_progress_forwarder,
+                            visual_evidence=committed_visual_evidence_for_document(doc),
                         ))
                         async for _progress_event in _yield_task_progress(
                             _vector_task,
@@ -10336,9 +12201,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         agent_progress_queue,
                         "Agent 检索仍在执行，请稍候...",
                     ):
-                        yield _sse_json(agent_event)
+                        public_agent_event = _sanitize_agent_progress_event(agent_event)
+                        if public_agent_event:
+                            yield _sse_json(public_agent_event)
 
                     context, retrieval_meta = await agent_task
+                    web_search_sources = [
+                        dict(item)
+                        for item in (retrieval_meta.get("web_search_sources") or [])
+                        if isinstance(item, dict)
+                    ]
+                    web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
                 elif _should_use_fast_overview_context(
                     query_type,
                     enable_vector_search=request.enable_vector_search,
@@ -10361,10 +12234,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         sampled_context,
                         query=search_query,
                     )
-                    context = numbered_ctx
+                    context, fb_cits = _append_fast_overview_visual_evidence(
+                        numbered_ctx,
+                        fb_cits,
+                        committed_visual_evidence_for_document(doc, limit=4),
+                    )
                     retrieval_meta["citations"] = fb_cits
                     retrieval_meta["query_type"] = query_type
                     retrieval_meta["fast_overview"] = True
+                    retrieval_meta["fast_overview_visual_evidence_count"] = sum(
+                        1 for citation in fb_cits if citation.get("visual_enhancement")
+                    )
                 elif request.enable_vector_search:
                     _validate_rerank_request(request)
                     _log_chat_trace(
@@ -10432,6 +12312,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             ],
                             answer_max_tokens=_prelim_answer_tokens_stream,
                             progress_callback=_progress_forwarder,
+                            visual_evidence=committed_visual_evidence_for_document(doc),
                         ))
                         async for _progress_event in _yield_task_progress(
                             _vector_task,
@@ -10508,12 +12389,33 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     try:
                         from services.graphrag import INSTANCES as _GRAPHRAG_INSTANCES
                         graphrag_inst = _GRAPHRAG_INSTANCES.get(request.doc_id)
+                        _gr_working_dir = os.path.join(settings.graphrag_working_dir, request.doc_id)
+                        _gr_parse_manifest = read_parse_manifest(doc, doc_id=request.doc_id)
+
+                        # The in-memory registry survives a same-PDF re-upload
+                        # inside one backend process. Check its persisted parse
+                        # identity before allowing it to contribute context.
+                        if (
+                            graphrag_inst is not None
+                            and not _chat_graphrag_index_matches_parse(
+                                _gr_working_dir,
+                                _gr_parse_manifest,
+                            )
+                        ):
+                            _GRAPHRAG_INSTANCES.pop(request.doc_id, None)
+                            graphrag_inst = None
+                            logger.info("[Chat] Ignore stale GraphRAG generation: %s", request.doc_id)
 
                         # 尝试从磁盘加载（重启后 INSTANCES 为空）
                         if graphrag_inst is None:
                             from services.graphrag import GraphRAG, GraphRAGConfig
-                            _gr_working_dir = os.path.join(settings.graphrag_working_dir, request.doc_id)
-                            if GraphRAG.has_persisted_index(_gr_working_dir):
+                            if (
+                                GraphRAG.has_persisted_index(_gr_working_dir)
+                                and _chat_graphrag_index_matches_parse(
+                                    _gr_working_dir,
+                                    _gr_parse_manifest,
+                                )
+                            ):
                                 _gr_meta = GraphRAG.load_metadata(_gr_working_dir)
                                 if _gr_meta and _gr_meta.status == "done":
                                     # 构建最小 config（不需要 api_key，仅用于加载存储）
@@ -10583,6 +12485,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
                 retrieval_meta["evidence_need"] = retrieval_meta.get("evidence_need") or evidence_need
                 retrieval_meta["search_query"] = search_query
+                evidence_need = retrieval_meta.get("evidence_need") or evidence_need
                 _maybe_add_numeric_regex_locator_segments(
                     request=request,
                     doc=doc,
@@ -10596,12 +12499,36 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta=retrieval_meta,
                     query=search_query,
                 )
+                await _maybe_add_explicit_figure_visual_enrichment(
+                    request=request,
+                    doc=doc,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                )
+                await _maybe_add_numeric_table_visual_verification(
+                    request=request,
+                    doc=doc,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                    evidence_need=evidence_need,
+                )
                 context = _sync_numeric_table_prompt_context(
                     context,
                     retrieval_meta,
                     query=search_query,
                     evidence_need=evidence_need,
                 )
+                context = await _apply_query_aware_evidence_selector(
+                    request=request,
+                    context=context,
+                    retrieval_meta=retrieval_meta,
+                    query=search_query,
+                    evidence_need=evidence_need,
+                    model=_cheap_model,
+                    provider=_cheap_provider,
+                    endpoint=_cheap_endpoint,
+                )
+                context = _sync_figure_visual_prompt_context(context, retrieval_meta)
 
                 retrieval_preview = _build_retrieval_preview_message(retrieval_meta.get("citations", []))
                 if retrieval_preview:
@@ -10712,14 +12639,14 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
                     yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources)}, ensure_ascii=False)}\n\n"
 
-                if web_search_context:
-                    system_prompt += (
-                        "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
-                        f"{web_search_context}\n"
-                        "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
-                        "\n不得与文档事实冲突。"
-                    )
-                    messages[0]["content"] = system_prompt
+            if web_search_context:
+                system_prompt += (
+                    "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
+                    f"{web_search_context}\n"
+                    "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
+                    "\n不得与文档事实冲突。"
+                )
+                messages[0]["content"] = system_prompt
 
             if web_search_sources:
                 yield f"data: {json.dumps({'type': 'web_search', 'sources': web_search_sources}, ensure_ascii=False)}\n\n"
@@ -11015,7 +12942,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     yield f"data: {json.dumps(chunk_data)}\n\n"
 
-                    if use_memory: threading.Thread(target=_async_memory_write, args=(memory_service, request), daemon=True).start()
+                    if use_memory:
+                        threading.Thread(
+                            target=_async_memory_write,
+                            args=(memory_service, request, memory_parse_identity),
+                            daemon=True,
+                        ).start()
 
                     # P1.5 优化：4 个后处理任务（followup/critic/conv_name/mindmap）改为并行执行
                     # 总耗时从 sum(各任务) → max(各任务)，按完成顺序 yield SSE 事件
@@ -11338,8 +13270,20 @@ async def chat_with_pdf_stream(request: ChatRequest):
             )
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
+    async def scoped_event_generator():
+        with request_override_scope(
+            numeric_table=request.override_numeric_table,
+            answer_critic=request.override_answer_critic,
+            llm_query_rewrite=request.override_llm_query_rewrite,
+            bm25_synonyms=request.override_bm25_synonyms,
+            jieba_bm25=request.enable_jieba_bm25,
+            context_chunk_expansion=request.num_expand_context_chunk,
+        ):
+            async for event in event_generator():
+                yield event
+
     return StreamingResponse(
-        event_generator(),
+        scoped_event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

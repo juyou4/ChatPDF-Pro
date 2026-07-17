@@ -37,6 +37,8 @@ class AgentRetrievalDependencies:
     build_numbered_context_and_citations: Callable[..., tuple[str, list[dict]]]
     generate_page_level_citations: Callable[..., list[dict]]
     build_agent_detail_citations: Callable[..., list[dict]]
+    build_visual_evidence_analyzer: Callable[..., Any] | None = None
+    perform_web_search: Callable[..., Any] | None = None
 
 
 def _build_context_from_citation_candidates(citations: list[dict], fallback_context: str = "") -> str:
@@ -104,6 +106,9 @@ def _build_context_segments_from_agent_citations(citations: list[dict]) -> list[
             "group_id": citation.get("group_id", ""),
             "context_id": citation.get("context_id", ""),
             "evidence_id": citation.get("evidence_id", ""),
+            "asset_id": citation.get("asset_id", ""),
+            "analyzed_asset_id": citation.get("analyzed_asset_id", ""),
+            "block_id": citation.get("block_id", ""),
             "chunk_id": citation.get("chunk_id", ""),
             "child_chunk_id": citation.get("child_chunk_id", ""),
             "parent_id": citation.get("parent_id", ""),
@@ -111,6 +116,18 @@ def _build_context_segments_from_agent_citations(citations: list[dict]) -> list[
             "table_bundle_id": citation.get("table_bundle_id", ""),
             "evidence_unit_id": citation.get("evidence_unit_id", ""),
             "retrieval_type": citation.get("retrieval_type", ""),
+            "visual_evidence_id": citation.get("visual_evidence_id", ""),
+            "visual_enhancement": citation.get("visual_enhancement"),
+            "visual_source": citation.get("visual_source", ""),
+            "visual_supplement_revision": citation.get("visual_supplement_revision", ""),
+            "figure_id": citation.get("figure_id", ""),
+            "figure_bbox": citation.get("figure_bbox") or citation.get("bbox") or [],
+            "visual_model": citation.get("visual_model") or {},
+            "runtime_visual_analysis": citation.get("runtime_visual_analysis"),
+            "purpose": citation.get("purpose", ""),
+            "prompt_version": citation.get("prompt_version", ""),
+            "parse_generation": citation.get("parse_generation", ""),
+            "confidence": citation.get("confidence"),
         })
     return segments
 
@@ -247,6 +264,25 @@ async def run_agent_retrieval_for_context(
             logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")
             sub_questions = []
 
+    web_search_executor = None
+    if bool(getattr(request, "enable_web_search", False)) and deps.perform_web_search is not None:
+        # Freeze the network query before the planner sees any untrusted PDF
+        # evidence. Later planner rounds may decide whether to use the one-shot
+        # tool, but document text can never become an outbound query.
+        frozen_web_query = str(search_query or request.question or "").strip()
+
+        async def _agent_web_search():
+            return await deps.perform_web_search(
+                request,
+                query_override=frozen_web_query,
+                doc_title=doc.get("filename", ""),
+                selected_text=request.selected_text or "",
+                doc_id=request.doc_id,
+                vector_store_dir=vector_store_dir,
+            )
+
+        web_search_executor = _agent_web_search
+
     agent_doc_ctx = deps.build_agent_doc_context(
         request.doc_id,
         doc,
@@ -257,6 +293,27 @@ async def run_agent_retrieval_for_context(
         rerank_provider=request.rerank_provider or "",
         rerank_api_key=request.rerank_api_key or "",
         rerank_endpoint=request.rerank_endpoint or "",
+        web_search_executor=web_search_executor,
+    )
+    visual_analyzer = None
+    if deps.build_visual_evidence_analyzer is not None:
+        try:
+            visual_analyzer = deps.build_visual_evidence_analyzer(
+                request=request,
+                doc=doc,
+                modal_asset_index=getattr(agent_doc_ctx, "modal_asset_index", {}) or {},
+            )
+        except Exception as exc:
+            logger.warning("[AgentRetrieval] 构建请求级视觉分析器失败，降级为文本检索: %s", exc)
+    configure_visual_analyzer = getattr(agent_doc_ctx, "configure_visual_analyzer", None)
+    if callable(configure_visual_analyzer):
+        configure_visual_analyzer(
+            visual_analyzer,
+            active_question=search_query or request.question or "",
+        )
+    visual_analysis_available = bool(
+        callable(getattr(agent_doc_ctx, "visual_analysis_available", None))
+        and agent_doc_ctx.visual_analysis_available()
     )
     agent = RetrievalAgent(
         api_key=agent_api_key,
@@ -281,6 +338,10 @@ async def run_agent_retrieval_for_context(
 
     agent_result: dict = {}
     agent_timeout = max(5.0, float(getattr(settings, "agent_total_timeout", 75.0) or 75.0))
+    if visual_analysis_available:
+        # Two selected figures run concurrently, but still need room for two
+        # planner rounds and ordinary retrieval around the visual call.
+        agent_timeout = max(agent_timeout, 105.0)
     try:
         agent_events = agent.run(
             question=search_query or request.question or "",
@@ -337,6 +398,8 @@ async def run_agent_retrieval_for_context(
             "task_status": {},
             "diagnostics": partial_agent_diag,
             "retrieval_diagnostics": partial_retrieval_diag,
+            "web_search_sources": list((agent._partial_state.get("web_search_sources") if hasattr(agent, "_partial_state") else None) or []),
+            "web_search_context": "\n\n".join((agent._partial_state.get("web_search_context_parts") if hasattr(agent, "_partial_state") else None) or []),
         }
     except Exception as exc:
         logger.warning(f"[Agent] 多轮检索失败，降级为全文编号上下文: {exc}")
@@ -348,6 +411,12 @@ async def run_agent_retrieval_for_context(
     if isinstance(agent_result, dict):
         if agent_result.get("search_history"):
             retrieval_meta["agent_search_history"] = agent_result.get("search_history")
+        web_sources = agent_result.get("web_search_sources")
+        if isinstance(web_sources, list):
+            retrieval_meta["web_search_sources"] = [dict(item) for item in web_sources if isinstance(item, dict)]
+        web_context = str(agent_result.get("web_search_context") or "").strip()
+        if web_context:
+            retrieval_meta["web_search_context"] = web_context
         if agent_result.get("task_status"):
             retrieval_meta["task_status"] = agent_result.get("task_status")
         agent_retrieval_diagnostics = agent_result.get("retrieval_diagnostics")
@@ -363,6 +432,9 @@ async def run_agent_retrieval_for_context(
                 {"diagnostics": merged_agent_diagnostics},
             )
         if isinstance(agent_diagnostics, dict):
+            evidence_state = agent_diagnostics.get("evidence_state")
+            if isinstance(evidence_state, dict):
+                retrieval_meta["agent_evidence_state"] = dict(evidence_state)
             if agent_diagnostics.get("last_error"):
                 retrieval_meta["agent_error"] = agent_diagnostics.get("last_error")
             if agent_diagnostics.get("fallback_reason"):

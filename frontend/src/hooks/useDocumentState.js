@@ -1,4 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { VALID_PARSE_ROUTES } from '../utils/parseRouteUtils';
+
+const VALID_PAGE_OCR_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral'];
+const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'doc2x'];
+const DEFAULT_OCR_SETTINGS = {
+  mode: 'auto',
+  backend: 'auto',
+  parseRoute: 'auto',
+  mineruFigureEnhance: true,
+  figureRenderMode: 'raw',
+};
 
 /**
  * 内联 OCR 设置读取
@@ -10,25 +21,87 @@ const loadOCRSettings = () => {
     if (raw) {
       const parsed = JSON.parse(raw);
       const validModes = ['auto', 'always', 'never'];
-      const validBackends = ['auto', 'tesseract', 'paddleocr', 'mistral', 'mineru', 'doc2x'];
       const validFigureRenderModes = ['raw', 'yolo'];
-      return {
+      const settings = {
         mode: validModes.includes(parsed.mode) ? parsed.mode : 'auto',
-        backend: validBackends.includes(parsed.backend) ? parsed.backend : 'auto',
+        backend: VALID_PAGE_OCR_BACKENDS.includes(parsed.backend) ? parsed.backend : 'auto',
+        parseRoute: VALID_PARSE_ROUTES.includes(parsed.parseRoute) ? parsed.parseRoute : 'auto',
         mineruFigureEnhance: typeof parsed.mineruFigureEnhance === 'boolean' ? parsed.mineruFigureEnhance : true,
         figureRenderMode: validFigureRenderModes.includes(parsed.figureRenderMode)
           ? parsed.figureRenderMode
           : 'raw',
       };
+      if (LEGACY_PAGE_OCR_BACKENDS.includes(parsed.backend)) {
+        localStorage.setItem('ocrSettings', JSON.stringify({
+          ...parsed,
+          backend: 'auto',
+          parseRoute: settings.parseRoute,
+        }));
+      }
+      return settings;
     }
   } catch { /* ignore */ }
-  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true, figureRenderMode: 'raw' };
+  return { ...DEFAULT_OCR_SETTINGS };
 };
 
 // API base URL
 const API_BASE_URL = '';
 const UPLOAD_PROGRESS_CAP = 42;
 const PROCESSING_PROGRESS_CAP = 88;
+
+const buildDocumentInfoUrl = (docId, includeContent) => (
+  `${API_BASE_URL}/document/${encodeURIComponent(docId)}?include_content=${includeContent ? 'true' : 'false'}&t=${Date.now()}`
+);
+
+const fetchDocumentInfo = async (docId) => {
+  const metadataResponse = await fetch(buildDocumentInfoUrl(docId, false));
+  if (!metadataResponse.ok) {
+    return { response: metadataResponse, data: null };
+  }
+
+  const metadata = await metadataResponse.json();
+  if (metadata.pdf_url) {
+    return { response: metadataResponse, data: metadata };
+  }
+
+  const contentResponse = await fetch(buildDocumentInfoUrl(docId, true));
+  if (!contentResponse.ok) {
+    return { response: contentResponse, data: null };
+  }
+  return { response: contentResponse, data: await contentResponse.json() };
+};
+
+const getOverviewParseIdentity = (documentInfo) => {
+  const manifest = documentInfo?.parse_manifest || {};
+  const generation = String(manifest.generation || '').trim();
+  const sourceHash = String(manifest.source_hash || '').trim();
+  return `g=${encodeURIComponent(generation || 'legacy')}:s=${encodeURIComponent(sourceHash || 'legacy')}`;
+};
+
+const isKeylessLocalProvider = (provider) => ['local', 'ollama'].includes(String(provider || '').trim().toLowerCase());
+
+const getOverviewTextIdentity = (credentials) => {
+  const provider = String(credentials?.providerId || '').trim();
+  const model = String(credentials?.modelId || '').trim();
+  const host = String(credentials?.apiHost || '').trim().replace(/\/$/, '');
+  const available = Boolean(credentials?.apiKey) || isKeylessLocalProvider(provider);
+  return `p=${encodeURIComponent(provider || 'default')}:m=${encodeURIComponent(model || 'default')}:h=${encodeURIComponent(host)}:a=${available ? 'ready' : 'unavailable'}`;
+};
+
+const getOverviewVisualIdentity = (credentials) => {
+  const provider = String(credentials?.providerId || '').trim();
+  const model = String(credentials?.modelId || '').trim();
+  const host = String(credentials?.apiHost || '').trim().replace(/\/$/, '');
+  const visionCapable = credentials?.isVisionCapable === true;
+  const available = visionCapable && (Boolean(credentials?.apiKey) || isKeylessLocalProvider(provider));
+  const strategy = String(credentials?.strategy || 'balanced').trim();
+  const localProvider = String(credentials?.local?.providerId || '').trim();
+  const localModel = String(credentials?.local?.modelId || '').trim();
+  const localHost = String(credentials?.local?.apiHost || '').trim().replace(/\/$/, '');
+  const localAvailable = credentials?.local?.isVisionCapable === true
+    && (Boolean(credentials?.local?.apiKey) || isKeylessLocalProvider(localProvider));
+  return `s=${encodeURIComponent(strategy)}:p=${encodeURIComponent(provider || 'default')}:m=${encodeURIComponent(model || 'default')}:h=${encodeURIComponent(host)}:e=${visionCapable ? 'vision' : 'disabled'}:a=${available ? 'ready' : 'unavailable'}:lp=${encodeURIComponent(localProvider)}:lm=${encodeURIComponent(localModel)}:lh=${encodeURIComponent(localHost)}:la=${localAvailable ? 'ready' : 'unavailable'}`;
+};
 
 /**
  * 解析后端错误响应，尽量提取可读错误信息
@@ -82,6 +155,7 @@ const getUploadErrorMessage = (xhr) => {
 export function useDocumentState({
   getEmbeddingConfig,
   getChatCredentials,
+  getVisualCredentials,
   getProviderById,
   setMessages,
   setCurrentPage,
@@ -97,7 +171,10 @@ export function useDocumentState({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('uploading');
+  const [uploadFileInfo, setUploadFileInfo] = useState(null);
   const uploadProcessingTimerRef = useRef(null);
+  const uploadResetTimerRef = useRef(null);
+  const uploadEpochRef = useRef(0);
 
   // 会话历史
   const [history, setHistory] = useState([]);
@@ -112,11 +189,18 @@ export function useDocumentState({
   const overviewCacheRef = useRef(new Map());
   const overviewInflightRef = useRef(new Map());
   const currentOverviewKeyRef = useRef('');
-  const getOverviewFigureMode = useCallback(() => {
-    const ocrCfg = loadOCRSettings();
-    return ocrCfg.figureRenderMode || 'raw';
-  }, []);
-
+  const overviewEpochRef = useRef(0);
+  const overviewObservedContextRef = useRef(null);
+  const overviewContextRef = useRef({ docId: '', parseIdentity: '', textIdentity: '', visualIdentity: '' });
+  const overviewParseIdentity = getOverviewParseIdentity(docInfo);
+  const overviewTextIdentity = getOverviewTextIdentity(getChatCredentials?.());
+  const overviewVisualIdentity = getOverviewVisualIdentity(getVisualCredentials?.());
+  overviewContextRef.current = {
+    docId: docId || '',
+    parseIdentity: overviewParseIdentity,
+    textIdentity: overviewTextIdentity,
+    visualIdentity: overviewVisualIdentity,
+  };
   // 文件输入引用
   const fileInputRef = useRef(null);
 
@@ -149,34 +233,52 @@ export function useDocumentState({
     }, 700);
   }, [clearUploadProcessingTimer]);
 
-  const buildOverviewKey = useCallback((currentDocId, depth) => {
+  const buildOverviewKey = useCallback((
+    currentDocId,
+    depth,
+    currentDocInfo = docInfo,
+    visualIdentity = overviewVisualIdentity,
+    textIdentity = overviewTextIdentity,
+  ) => {
     if (!currentDocId) return '';
-    const ocrCfg = loadOCRSettings();
-    const mineruFlag = ocrCfg.mineruFigureEnhance ? '1' : '0';
-    const renderMode = ocrCfg.figureRenderMode || 'raw';
-    return `${currentDocId}:${depth}:m${mineruFlag}:r${renderMode}`;
+    return `${currentDocId}:${getOverviewParseIdentity(currentDocInfo)}:${textIdentity}:${visualIdentity}:${depth}`;
+  }, [docInfo, overviewTextIdentity, overviewVisualIdentity]);
+
+  const clearOverviewEntriesForDocument = useCallback((currentDocId) => {
+    if (!currentDocId) return;
+    const prefix = `${currentDocId}:`;
+    [...overviewCacheRef.current.keys()].forEach((key) => {
+      if (key.startsWith(prefix)) overviewCacheRef.current.delete(key);
+    });
+    [...overviewInflightRef.current.keys()].forEach((key) => {
+      if (key.startsWith(prefix)) overviewInflightRef.current.delete(key);
+    });
   }, []);
 
-  const clearOverviewCache = useCallback((currentDocId = docId) => {
-    if (!currentDocId) {
+  const invalidateOverviewEpoch = useCallback((currentDocId, {
+    clearDocumentCache = false,
+    clearAllCaches = false,
+  } = {}) => {
+    overviewEpochRef.current += 1;
+    if (clearAllCaches) {
       overviewCacheRef.current.clear();
       overviewInflightRef.current.clear();
-    } else {
-      [...overviewCacheRef.current.keys()].forEach((key) => {
-        if (key.startsWith(`${currentDocId}:`)) {
-          overviewCacheRef.current.delete(key);
-        }
-      });
-      [...overviewInflightRef.current.keys()].forEach((key) => {
-        if (key.startsWith(`${currentDocId}:`)) {
-          overviewInflightRef.current.delete(key);
-        }
-      });
+    } else if (clearDocumentCache) {
+      clearOverviewEntriesForDocument(currentDocId);
     }
     currentOverviewKeyRef.current = '';
     setOverview(null);
     setOverviewError(null);
-  }, [docId]);
+    setOverviewLoading(false);
+    return overviewEpochRef.current;
+  }, [clearOverviewEntriesForDocument]);
+
+  const clearOverviewCache = useCallback((currentDocId = docId) => {
+    invalidateOverviewEpoch(currentDocId, {
+      clearDocumentCache: Boolean(currentDocId),
+      clearAllCaches: !currentDocId,
+    });
+  }, [docId, invalidateOverviewEpoch]);
 
   /**
    * 获取存储信息
@@ -201,18 +303,25 @@ export function useDocumentState({
   /**
    * 文件上传处理
    */
-  const handleFileUpload = useCallback(async (event) => {
+  const handleFileUpload = useCallback(async (event, options = {}) => {
     const file = event.target.files[0];
     if (!file) return;
+    const uploadEpoch = ++uploadEpochRef.current;
+    if (uploadResetTimerRef.current) {
+      window.clearTimeout(uploadResetTimerRef.current);
+      uploadResetTimerRef.current = null;
+    }
 
     setIsUploading(true);
     setUploadProgress(0);
     setUploadStatus('uploading');
+    setUploadFileInfo({
+      name: file.name || 'PDF 文档',
+      size: Number(file.size) || 0,
+    });
     clearUploadProcessingTimer();
-    setOverview(null);
-    setOverviewError(null);
-    setOverviewLoading(false);
-    currentOverviewKeyRef.current = '';
+    // 同一 PDF 重传会复用 docId，必须在上传开始时丢弃旧解析代际的速览结果。
+    invalidateOverviewEpoch(docId, { clearDocumentCache: Boolean(docId) });
 
     const formData = new FormData();
     formData.append('file', file);
@@ -230,6 +339,7 @@ export function useDocumentState({
       }
       alert(`${reasonHint}\n\n路径：右上角设置 → 模型服务 → EMBEDDING`);
       setIsUploading(false);
+      setUploadFileInfo(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
@@ -239,6 +349,8 @@ export function useDocumentState({
       if (!embeddingConfig.provider?.apiKey) {
         alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 API Key`);
         setIsUploading(false);
+        setUploadFileInfo(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
         return;
       }
       formData.append('embedding_api_key', embeddingConfig.provider.apiKey);
@@ -249,6 +361,10 @@ export function useDocumentState({
     const ocrSettings = loadOCRSettings();
     formData.append('enable_ocr', ocrSettings.mode || 'auto');
     formData.append('ocr_backend', ocrSettings.backend || 'auto');
+    const requestedParseRoute = VALID_PARSE_ROUTES.includes(options.parseRoute)
+      ? options.parseRoute
+      : ocrSettings.parseRoute || 'auto';
+    formData.append('parse_route', requestedParseRoute);
 
     // 桌面模式显式注入后端地址和 token，避免 XHR 拦截初始化时序导致 401
     let uploadUrl = `${API_BASE_URL}/upload`;
@@ -306,15 +422,24 @@ export function useDocumentState({
       setUploadProgress(93);
 
       // 获取文档详细信息
-      const dres = await fetch(`${API_BASE_URL}/document/${data.doc_id}?t=${Date.now()}`);
-      const ddata = await dres.json();
+      const { response: dres, data: ddata } = await fetchDocumentInfo(data.doc_id);
+      if (!dres.ok || !ddata) {
+        throw new Error('文档元数据加载失败');
+      }
       const full = { ...ddata, ...data };
       setDocInfo(full);
-      setUploadStatus('ready');
+      const uploadedManifest = full?.parse_manifest || data?.parse_manifest || {};
+      const isMinerUAccepted = uploadedManifest?.resolved_route === 'mineru'
+        && full?.parse_ready !== true
+        && uploadedManifest?.status !== 'ready';
+      setUploadStatus(isMinerUAccepted ? 'accepted' : 'ready');
       setUploadProgress(100);
 
       // 构建上传成功消息
       let uploadMsg = `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`;
+      if (uploadedManifest?.resolved_route === 'mineru' && uploadedManifest?.status !== 'ready') {
+        uploadMsg += '\n⏳ 已选择 MinerU 全程解析，正文、阅读、大纲、翻译、速览和问答索引会在同一解析结果发布后可用。';
+      }
       if (data.ocr_used) {
         uploadMsg += `\n🔍 已使用 OCR（${data.ocr_backend || '自动'}）处理部分页面。`;
       }
@@ -326,34 +451,44 @@ export function useDocumentState({
       alert(`上传失败: ${error.message}`);
     } finally {
       clearUploadProcessingTimer();
-      setTimeout(() => {
+      uploadResetTimerRef.current = window.setTimeout(() => {
+        if (uploadEpochRef.current !== uploadEpoch) return;
         setIsUploading(false);
         setUploadProgress(0);
         setUploadStatus('uploading');
+        setUploadFileInfo(null);
+        uploadResetTimerRef.current = null;
       }, 500);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  }, [clearUploadProcessingTimer, getEmbeddingConfig, setMessages, startUploadProcessingTimer]);
+  }, [
+    clearUploadProcessingTimer,
+    docId,
+    getEmbeddingConfig,
+    invalidateOverviewEpoch,
+    setMessages,
+    startUploadProcessingTimer,
+  ]);
 
   useEffect(() => {
-    return () => clearUploadProcessingTimer();
+    return () => {
+      clearUploadProcessingTimer();
+      if (uploadResetTimerRef.current) window.clearTimeout(uploadResetTimerRef.current);
+    };
   }, [clearUploadProcessingTimer]);
 
   /**
    * 开始新对话（重置文档和相关状态）
    */
   const startNewChat = useCallback(() => {
+    invalidateOverviewEpoch(docId);
     setDocId(null);
     setDocInfo(null);
-    setOverview(null);
-    setOverviewError(null);
-    setOverviewLoading(false);
-    currentOverviewKeyRef.current = '';
     setMessages?.([]);
     setCurrentPage?.(1);
     setSelectedText?.('');
     setScreenshots?.([]);
-  }, [setMessages, setCurrentPage, setSelectedText, setScreenshots]);
+  }, [docId, invalidateOverviewEpoch, setMessages, setCurrentPage, setSelectedText, setScreenshots]);
 
   /**
    * 加载历史会话
@@ -361,14 +496,14 @@ export function useDocumentState({
   const loadSession = useCallback(async (s) => {
     setIsLoading?.(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/document/${s.docId}?t=${Date.now()}`);
-      if (res.ok) {
+      const { response, data } = await fetchDocumentInfo(s.docId);
+      if (response.ok && data) {
+        // 重开当前会话时保留已展示的速览；只有实际切换文档才让旧请求失效。
+        if (String(s.docId || '') !== String(docId || '')) {
+          invalidateOverviewEpoch(docId);
+        }
         setDocId(s.docId);
-        setDocInfo(await res.json());
-        setOverview(null);
-        setOverviewError(null);
-        setOverviewLoading(false);
-        currentOverviewKeyRef.current = '';
+        setDocInfo(data);
         // 恢复历史消息：确保不存在"永久流式中"的脏消息（页面关闭时可能残留 isStreaming:true）
         const restoredMessages = (s.messages || []).map((m) =>
           m.isStreaming ? { ...m, isStreaming: false } : m
@@ -381,7 +516,7 @@ export function useDocumentState({
     } finally {
       setIsLoading?.(false);
     }
-  }, [setMessages, setCurrentPage, setIsLoading]);
+  }, [docId, invalidateOverviewEpoch, setMessages, setCurrentPage, setIsLoading]);
 
   /**
    * 删除历史会话
@@ -393,15 +528,12 @@ export function useDocumentState({
     localStorage.setItem('chatHistory', JSON.stringify(next));
     setHistory(next);
     if (sid === docId) {
+      invalidateOverviewEpoch(docId, { clearDocumentCache: true });
       setDocId(null);
       setDocInfo(null);
-      setOverview(null);
-      setOverviewError(null);
-      setOverviewLoading(false);
-      currentOverviewKeyRef.current = '';
       setMessages?.([]);
     }
-  }, [docId, setMessages]);
+  }, [docId, invalidateOverviewEpoch, setMessages]);
 
   /**
    * 保存当前会话到历史
@@ -437,8 +569,34 @@ export function useDocumentState({
       return;
     }
     const force = Boolean(options?.force);
+    const requestDocId = docId;
+    const requestParseIdentity = overviewParseIdentity;
+    const requestTextIdentity = overviewTextIdentity;
+    const requestVisualIdentity = overviewVisualIdentity;
+    const requestEpoch = overviewEpochRef.current;
+    const isCurrentOverviewRequest = () => {
+      const currentContext = overviewContextRef.current;
+      return (
+        overviewEpochRef.current === requestEpoch
+        && currentContext.docId === requestDocId
+        && currentContext.parseIdentity === requestParseIdentity
+        && currentContext.textIdentity === requestTextIdentity
+        && currentContext.visualIdentity === requestVisualIdentity
+      );
+    };
 
-    const overviewKey = buildOverviewKey(docId, depth);
+    // A caller can retain an older callback across a document or parse-route
+    // switch. Check before cache hits and local loading/error updates too,
+    // not only after the network response.
+    if (!isCurrentOverviewRequest()) return undefined;
+
+    const overviewKey = buildOverviewKey(
+      requestDocId,
+      depth,
+      docInfo,
+      requestVisualIdentity,
+      requestTextIdentity,
+    );
     if (!force && currentOverviewKeyRef.current === overviewKey && overview) {
       return overview;
     }
@@ -451,9 +609,12 @@ export function useDocumentState({
       return cachedOverview;
     }
 
-    const inflightRequest = overviewInflightRef.current.get(overviewKey);
-    if (!force && inflightRequest) {
-      return inflightRequest;
+    const inflightEntry = overviewInflightRef.current.get(overviewKey);
+    if (!force && inflightEntry?.epoch === requestEpoch) {
+      return inflightEntry.promise;
+    }
+    if (inflightEntry) {
+      overviewInflightRef.current.delete(overviewKey);
     }
 
     const chatCredentials = getChatCredentials?.();
@@ -461,6 +622,12 @@ export function useDocumentState({
     const chatModel = chatCredentials?.modelId || 'gpt-4o';
     const chatApiKey = chatCredentials?.apiKey || '';
     const chatProviderFull = getProviderById?.(chatProvider);
+    const visualCredentials = getVisualCredentials?.() || null;
+    const useDedicatedVisualModel = visualCredentials?.source === 'dedicated';
+    const visualProvider = useDedicatedVisualModel ? visualCredentials?.providerId || '' : '';
+    const visualModel = useDedicatedVisualModel ? visualCredentials?.modelId || '' : '';
+    const visualApiKey = visualCredentials?.apiKey || '';
+    const visualProviderFull = useDedicatedVisualModel ? getProviderById?.(visualProvider) : null;
 
     if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
       setOverviewError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
@@ -475,14 +642,7 @@ export function useDocumentState({
     setOverviewError(null);
 
     const requestPromise = (async () => {
-      const ocrSettings = loadOCRSettings();
       const params = new URLSearchParams({ depth });
-      if (ocrSettings.mineruFigureEnhance) {
-        params.set('use_mineru_figures', 'true');
-      }
-      if (ocrSettings.figureRenderMode === 'yolo') {
-        params.set('figure_render_mode', 'yolo');
-      }
       if (force) {
         params.set('force', 'true');
       }
@@ -497,8 +657,32 @@ export function useDocumentState({
           headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
         }
       }
+      if (visualCredentials) {
+        headers['X-ChatPDF-Visual-Strategy'] = visualCredentials.strategy || 'balanced';
+        headers['X-ChatPDF-Visual-Enabled'] = String(visualCredentials.isVisionCapable === true);
+        if (useDedicatedVisualModel) {
+          headers['X-ChatPDF-Visual-Provider'] = visualProvider;
+          headers['X-ChatPDF-Visual-Model'] = visualModel;
+          if (visualApiKey) {
+            headers['X-ChatPDF-Visual-Api-Key'] = visualApiKey;
+          }
+          if (visualProviderFull?.apiHost) {
+            headers['X-ChatPDF-Visual-Api-Host'] = visualProviderFull.apiHost;
+          }
+        }
+        if (visualCredentials.local?.providerId && visualCredentials.local?.modelId) {
+          headers['X-ChatPDF-Local-Visual-Provider'] = visualCredentials.local.providerId;
+          headers['X-ChatPDF-Local-Visual-Model'] = visualCredentials.local.modelId;
+          if (visualCredentials.local.apiKey) {
+            headers['X-ChatPDF-Local-Visual-Api-Key'] = visualCredentials.local.apiKey;
+          }
+          if (visualCredentials.local.apiHost) {
+            headers['X-ChatPDF-Local-Visual-Api-Host'] = visualCredentials.local.apiHost;
+          }
+        }
+      }
 
-      const res = await fetch(`${API_BASE_URL}/documents/${docId}/overview?${params}`, {
+      const res = await fetch(`${API_BASE_URL}/documents/${requestDocId}/overview?${params}`, {
         headers,
       });
 
@@ -508,32 +692,75 @@ export function useDocumentState({
       }
 
       const data = await res.json();
-      overviewCacheRef.current.set(overviewKey, data);
-      currentOverviewKeyRef.current = overviewKey;
-      setOverview(data);
+      if (isCurrentOverviewRequest()) {
+        overviewCacheRef.current.set(overviewKey, data);
+        currentOverviewKeyRef.current = overviewKey;
+        setOverview(data);
+      }
       return data;
     })();
 
-    overviewInflightRef.current.set(overviewKey, requestPromise);
+    overviewInflightRef.current.set(overviewKey, {
+      epoch: requestEpoch,
+      promise: requestPromise,
+    });
 
     try {
       return await requestPromise;
     } catch (err) {
       console.error('获取速览失败:', err);
-      setOverviewError(err.message || '获取速览失败');
+      if (isCurrentOverviewRequest()) {
+        setOverviewError(err.message || '获取速览失败');
+      }
       throw err;
     } finally {
-      overviewInflightRef.current.delete(overviewKey);
-      setOverviewLoading(false);
+      const activeEntry = overviewInflightRef.current.get(overviewKey);
+      if (activeEntry?.promise === requestPromise) {
+        overviewInflightRef.current.delete(overviewKey);
+      }
+      if (isCurrentOverviewRequest()) {
+        setOverviewLoading(false);
+      }
     }
-  }, [buildOverviewKey, docId, getChatCredentials, getProviderById, overview]);
+  }, [
+    buildOverviewKey,
+    docId,
+    docInfo,
+    getChatCredentials,
+    getVisualCredentials,
+    getProviderById,
+    overview,
+    overviewParseIdentity,
+    overviewTextIdentity,
+    overviewVisualIdentity,
+  ]);
 
   useEffect(() => {
-    setOverview(null);
-    setOverviewError(null);
-    setOverviewLoading(false);
-    currentOverviewKeyRef.current = '';
-  }, [docId]);
+    const nextContext = {
+      docId: docId || '',
+      parseIdentity: overviewParseIdentity,
+      visualIdentity: overviewVisualIdentity,
+    };
+    const previousContext = overviewObservedContextRef.current;
+    overviewObservedContextRef.current = nextContext;
+    if (!previousContext) return;
+
+    const changedDocument = previousContext.docId !== nextContext.docId;
+    const changedParseGeneration = (
+      previousContext.docId === nextContext.docId
+      && previousContext.parseIdentity !== nextContext.parseIdentity
+    );
+    const changedVisualModel = (
+      previousContext.docId === nextContext.docId
+      && previousContext.parseIdentity === nextContext.parseIdentity
+      && previousContext.visualIdentity !== nextContext.visualIdentity
+    );
+    if (!changedDocument && !changedParseGeneration && !changedVisualModel) return;
+
+    invalidateOverviewEpoch(previousContext.docId || nextContext.docId, {
+      clearDocumentCache: changedParseGeneration,
+    });
+  }, [docId, invalidateOverviewEpoch, overviewParseIdentity, overviewVisualIdentity]);
 
   // 初始化时加载历史
   useEffect(() => {
@@ -552,6 +779,7 @@ export function useDocumentState({
     isUploading,
     uploadProgress,
     uploadStatus,
+    uploadFileInfo,
 
     // 会话历史
     history,
@@ -567,7 +795,6 @@ export function useDocumentState({
     overviewError,
     fetchOverview,
     clearOverviewCache,
-    overviewFigureMode: getOverviewFigureMode(),
 
     // 引用
     fileInputRef,

@@ -14,6 +14,7 @@ const API_BASE_URL = '';
  * @param {Object} options - 配置选项
  * @param {string|null} options.docId - 当前文档 ID
  * @param {Object|null} options.docInfo - 当前文档信息
+ * @param {string} options.documentIdentity - 主解析代际标识
  * @param {boolean} options.useRerank - 是否启用重排
  * @param {string} options.rerankerModel - 重排模型名称
  * @param {Function} options.getRerankCredentials - 获取重排凭证
@@ -23,6 +24,7 @@ const API_BASE_URL = '';
 export function usePDFState({
   docId = null,
   docInfo = null,
+  documentIdentity = '',
   useRerank = false,
   rerankerModel = 'BAAI/bge-reranker-base',
   getRerankCredentials,
@@ -53,20 +55,23 @@ export function usePDFState({
 
   // ========== Refs ==========
   const pdfContainerRef = useRef(null);
+  const searchEpochRef = useRef(0);
 
   // ========== 文档切换时重置搜索状态 ==========
   useEffect(() => {
+    searchEpochRef.current += 1;
     setSearchQuery('');
     setSearchResults([]);
     setCurrentResultIndex(0);
     setActiveHighlight(null);
+    setIsSearching(false);
     if (docId) {
       const stored = JSON.parse(localStorage.getItem(`search_history_${docId}`) || '[]');
       setSearchHistory(stored);
     } else {
       setSearchHistory([]);
     }
-  }, [docId]);
+  }, [docId, documentIdentity]);
 
   // ========== 高亮自动消失定时器 ==========
   useEffect(() => {
@@ -97,6 +102,14 @@ export function usePDFState({
 
     setIsSearching(true);
     setSearchQuery(q);
+    const searchContext = {
+      docId,
+      documentIdentity,
+      epoch: searchEpochRef.current,
+    };
+    const isCurrentSearch = () => (
+      searchEpochRef.current === searchContext.epoch
+    );
 
     // 获取重排凭证
     const { providerId: rp, modelId: rm, apiKey: rk } = getRerankCredentials?.() || {};
@@ -122,6 +135,7 @@ export function usePDFState({
       });
       if (res.ok) {
         const data = await res.json();
+        if (!isCurrentSearch()) return;
         const results = Array.isArray(data.results) ? data.results : [];
         setSearchResults(results);
         if (results.length) {
@@ -139,9 +153,9 @@ export function usePDFState({
       // 静默处理（超时或取消）
     } finally {
       clearTimeout(tid);
-      setIsSearching(false);
+      if (isCurrentSearch()) setIsSearching(false);
     }
-  }, [docId, searchQuery, embeddingApiKey, apiKey, useRerank, rerankerModel, getRerankCredentials, searchHistory]);
+  }, [docId, documentIdentity, searchQuery, embeddingApiKey, apiKey, useRerank, rerankerModel, getRerankCredentials, searchHistory]);
 
   /**
    * 内部方法：聚焦到指定搜索结果
@@ -170,21 +184,46 @@ export function usePDFState({
    * @param {Object} citation - 引用信息
    */
   const handleCitationClick = useCallback((c) => {
-    if (!c?.page_range) return;
-    const tp = c.page_range[0];
-    if (typeof tp === 'number' && tp > 0) {
-      setActiveHighlight(null);
-      setCurrentPage(tp);
-      if (c.highlight_text) {
-        setTimeout(() => setActiveHighlight({
-          page: tp,
-          text: c.highlight_text,
-          startPhrase: c.start_phrase || '',
-          endPhrase: c.end_phrase || '',
-          alignmentStatus: c.alignment_status || '',
-          source: 'citation',
-        }), 400);
-      }
+    if (!c || typeof c !== 'object') return;
+    const rawAnchor = c.citation_anchor && typeof c.citation_anchor === 'object'
+      ? c.citation_anchor
+      : {};
+    const rawPage = rawAnchor.page ?? c.page_range?.[0] ?? c.page;
+    const targetPage = Number(rawPage);
+    if (!Number.isInteger(targetPage) || targetPage <= 0) return;
+
+    const span = rawAnchor.span && typeof rawAnchor.span === 'object'
+      ? rawAnchor.span
+      : (c.citation_span && typeof c.citation_span === 'object' ? c.citation_span : {});
+    const citationAnchor = {
+      blockId: rawAnchor.block_id || c.block_id || c.evidence_block_id || '',
+      bbox: rawAnchor.bbox || c.bbox || c.figure_bbox || null,
+      rects: rawAnchor.rects || c.rects || [],
+      coordinateSpace: rawAnchor.coordinate_space || c.coordinate_space || '',
+      pageSize: rawAnchor.page_size || c.page_size || null,
+      parseGeneration: rawAnchor.parse_generation || c.parse_generation || '',
+    };
+    const text = c.highlight_text || span.text || c.display_text || '';
+    const hasGeometry = Boolean(
+      citationAnchor.blockId
+      || citationAnchor.bbox
+      || citationAnchor.rects?.length
+    );
+
+    setActiveHighlight(null);
+    setCurrentPage(targetPage);
+    if (text || hasGeometry) {
+      setActiveHighlight({
+        page: targetPage,
+        text,
+        startPhrase: c.start_phrase || span.start_phrase || '',
+        endPhrase: c.end_phrase || span.end_phrase || '',
+        alignmentStatus: c.alignment_status || span.alignment_status || '',
+        parseGeneration: citationAnchor.parseGeneration,
+        citationAnchor,
+        source: 'citation',
+        at: Date.now(),
+      });
     }
   }, []);
 

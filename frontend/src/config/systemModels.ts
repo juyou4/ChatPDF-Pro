@@ -78,6 +78,40 @@ export const OPENAI_MODELS: Model[] = [
 ]
 
 /**
+ * Google Gemini embedding 模型
+ *
+ * Gemini OpenAI 兼容层支持 /embeddings；v2 为预览版多模态向量模型，
+ * 当前 ChatPDF 仅将其用于文本块索引。
+ */
+export const GEMINI_MODELS: Model[] = [
+    {
+        id: 'gemini-embedding-2-preview',
+        name: 'Gemini Embedding 2 Preview',
+        providerId: 'gemini',
+        type: 'embedding',
+        metadata: {
+            maxTokens: 8192,
+            description: 'Google 最新预览多模态向量模型；可用于文本、图片、视频、音频和 PDF 的统一检索空间'
+        },
+        tags: ['latest'],
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
+        id: 'gemini-embedding-001',
+        name: 'Gemini Embedding 001',
+        providerId: 'gemini',
+        type: 'embedding',
+        metadata: {
+            maxTokens: 2048,
+            description: 'Google 稳定版文本向量模型，适合语义搜索、文档检索与推荐'
+        },
+        isSystem: true,
+        isUserAdded: false
+    }
+]
+
+/**
  * 阿里云模型
  */
 export const ALIYUN_MODELS: Model[] = [
@@ -96,23 +130,6 @@ export const ALIYUN_MODELS: Model[] = [
         pricing: {
             input: 0.000514,
             currency: 'CNY'
-        }
-    },
-    {
-        id: 'text-embedding-v3',
-        name: 'text-embedding-v3',
-        providerId: 'aliyun',
-        type: 'embedding',
-        metadata: {
-            dimension: 1024,
-            maxTokens: 8192,
-            description: '中文优化，价格最便宜'
-        },
-        isSystem: true,
-        isUserAdded: false,
-        pricing: {
-            input: 0.007,
-            currency: 'USD'
         }
     },
     {
@@ -322,56 +339,46 @@ export const SILICON_MODELS: Model[] = [
 ]
 
 /**
- * Moonshot模型
- */
-export const MOONSHOT_MODELS: Model[] = [
-    {
-        id: 'moonshot-embedding-v1',
-        name: 'moonshot-embedding-v1',
-        providerId: 'moonshot',
-        type: 'embedding',
-        metadata: {
-            dimension: 1024,
-            maxTokens: 8192,
-            description: 'Moonshot AI 嵌入模型'
-        },
-        isSystem: true,
-        isUserAdded: false,
-        pricing: {
-            input: 0.011,
-            currency: 'USD'
-        }
-    }
-]
-
-/**
- * DeepSeek模型
- */
-export const DEEPSEEK_MODELS: Model[] = [
-    {
-        id: 'deepseek-embedding-v1',
-        name: 'deepseek-embedding-v1',
-        providerId: 'deepseek',
-        type: 'embedding',
-        metadata: {
-            dimension: 1024,
-            maxTokens: 8192,
-            description: 'DeepSeek 嵌入模型'
-        },
-        isSystem: true,
-        isUserAdded: false,
-        pricing: {
-            input: 0.01,
-            currency: 'USD'
-        }
-    }
-]
-
-/**
  * Chat 模型（对话）
  */
 export const CHAT_MODELS: Model[] = [
     // ── OpenAI GPT-5 系列 ──
+    {
+        id: 'gpt-5.6',
+        name: 'GPT-5.6',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI 最新旗舰别名，当前指向 GPT-5.6 Sol，适合复杂推理、编码和工具工作流' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI GPT-5.6 旗舰型号，适合复杂专业任务、深度推理和高质量编码' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.6-terra',
+        name: 'GPT-5.6 Terra',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI GPT-5.6 均衡型号，兼顾智能水平、延迟和成本' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'gpt-5.6-luna',
+        name: 'GPT-5.6 Luna',
+        providerId: 'openai',
+        type: 'chat',
+        metadata: { description: 'OpenAI GPT-5.6 高吞吐型号，适合成本敏感的批量和轻量任务' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     {
         id: 'gpt-5.5',
         name: 'GPT-5.5',
@@ -391,24 +398,6 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     {
-        id: 'gpt-5.4',
-        name: 'GPT-5.4',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'OpenAI 上一代默认文本与推理模型，适合已有 GPT-5.4 集成' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5.4-pro',
-        name: 'GPT-5.4 Pro',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'GPT-5.4 高质量版本，保留兼容已有 Pro 配置' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
         id: 'gpt-5.4-mini',
         name: 'GPT-5.4 mini',
         providerId: 'openai',
@@ -423,51 +412,6 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'openai',
         type: 'chat',
         metadata: { description: 'GPT-5.4 超轻量版，适合高吞吐分类和简单任务' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5.3-codex',
-        name: 'GPT-5.3 Codex',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'OpenAI 面向代码编辑、Agent 和工具密集流程优化的 Codex 模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5.1-codex-mini',
-        name: 'GPT-5.1 Codex mini',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'OpenAI 轻量 Codex 模型，适合低成本代码工作流' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5.2',
-        name: 'GPT-5.2',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'OpenAI 专业工作与长时 Agent 优化版本，保留兼容' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5.1',
-        name: 'GPT-5.1',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'GPT-5.1 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gpt-5',
-        name: 'GPT-5',
-        providerId: 'openai',
-        type: 'chat',
-        metadata: { description: 'GPT-5 经典旗舰模型，强推理与编程能力' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -563,95 +507,26 @@ export const CHAT_MODELS: Model[] = [
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
-    {
-        id: 'qwen3.5-flash',
-        name: 'Qwen3.5-Flash',
-        providerId: 'aliyun',
-        type: 'chat',
-        metadata: { description: 'Qwen3.5 快速多模态版，保留兼容' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'qwen3-max',
-        name: 'Qwen3-Max',
-        providerId: 'aliyun',
-        type: 'chat',
-        metadata: { description: '通义千问 3 Max，上一代旗舰兼容项' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'qwen-plus',
-        name: 'Qwen-Plus',
-        providerId: 'aliyun',
-        type: 'chat',
-        metadata: { description: '千问均衡版，性能与成本兼顾' },
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'qwen-turbo',
-        name: 'Qwen-Turbo',
-        providerId: 'aliyun',
-        type: 'chat',
-        metadata: { description: '千问快速版，低延迟低成本' },
-        isSystem: true, isUserAdded: false
-    },
     // ── DeepSeek ──
-    {
-        id: 'deepseek-v4-pro',
-        name: 'DeepSeek V4 Pro',
-        providerId: 'deepseek',
-        type: 'chat',
-        metadata: { description: 'DeepSeek 最新高质量 V4-Pro 模型，适合深度推理和复杂问答' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
     {
         id: 'deepseek-v4-flash',
         name: 'DeepSeek V4 Flash',
         providerId: 'deepseek',
         type: 'chat',
-        metadata: { description: 'DeepSeek 最新 V4-Flash 模型，兼容旧 deepseek-chat / deepseek-reasoner 模式' },
+        metadata: { description: 'DeepSeek 当前官方模型；兼容旧 deepseek-chat / deepseek-reasoner，并支持思考与非思考模式' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
-        id: 'deepseek-chat',
-        name: 'DeepSeek Chat (legacy)',
+        id: 'deepseek-v4-pro',
+        name: 'DeepSeek V4 Pro',
         providerId: 'deepseek',
         type: 'chat',
-        metadata: { description: '旧版兼容 ID，将迁移到 DeepSeek V4 Flash' },
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'deepseek-reasoner',
-        name: 'DeepSeek Reasoner (legacy)',
-        providerId: 'deepseek',
-        type: 'chat',
-        metadata: { description: '旧版推理兼容 ID，将迁移到 DeepSeek V4 Pro' },
+        metadata: { description: 'DeepSeek V4 高性能版，支持思考与非思考模式，适合复杂推理和长文档任务' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     // ── Moonshot (Kimi) ──
-    {
-        id: 'kimi-k2.7-code',
-        name: 'Kimi K2.7 Code',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi K2.7 代码与 Agent 模型，适合编程和工具调用' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'kimi-k2.7-code-highspeed',
-        name: 'Kimi K2.7 Code Highspeed',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi K2.7 代码高速版，适合低延迟开发助手场景' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
     {
         id: 'kimi-k2.6',
         name: 'Kimi K2.6',
@@ -659,51 +534,6 @@ export const CHAT_MODELS: Model[] = [
         type: 'chat',
         metadata: { description: 'Kimi 最新通用多模态模型，适合问答、文档和视觉任务' },
         tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'kimi-k2.5',
-        name: 'Kimi K2.5',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi K2.5 兼容模型，适合通用多模态任务' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'moonshot-v1-vision-preview',
-        name: 'Moonshot v1 Vision Preview',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Moonshot 视觉预览模型，兼容图片输入' },
-        tags: ['vision'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'moonshot-v1-128k',
-        name: 'Moonshot v1 128K',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi 128K 超长上下文' },
-        tags: ['vision'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'moonshot-v1-32k',
-        name: 'Moonshot v1 32K',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi 32K 长上下文' },
-        tags: ['vision'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'moonshot-v1-8k',
-        name: 'Moonshot v1 8K',
-        providerId: 'moonshot',
-        type: 'chat',
-        metadata: { description: 'Kimi 通用 8K' },
-        tags: ['vision'],
         isSystem: true, isUserAdded: false
     },
     // ── 智谱 GLM ──
@@ -725,59 +555,6 @@ export const CHAT_MODELS: Model[] = [
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
-    {
-        id: 'glm-5',
-        name: 'GLM-5',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: '智谱 GLM-5 系列基础旗舰，保留兼容' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'glm-4.7',
-        name: 'GLM-4.7',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: '智谱编程增强模型，Agentic Coding 能力优化' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'glm-4.6',
-        name: 'GLM-4.6',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: '智谱 GLM-4.6，增强推理与代码能力' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'glm-4.5',
-        name: 'GLM-4.5',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: '智谱 Agent 基座模型，推理+代码+Agentic 原生融合' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'glm-4.5-air',
-        name: 'GLM-4.5-Air',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: 'GLM-4.5 轻量版，高性价比' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'glm-4-air-250414',
-        name: 'GLM-4-Air 250414',
-        providerId: 'zhipu',
-        type: 'chat',
-        metadata: { description: 'GLM-4-Air 250414，前代轻量版' },
-        isSystem: true, isUserAdded: false
-    },
     // ── MiniMax ──
     {
         id: 'MiniMax-M3',
@@ -788,67 +565,23 @@ export const CHAT_MODELS: Model[] = [
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
+    // ── 小米 MiMo ──
     {
-        id: 'MiniMax-M2.7',
-        name: 'MiniMax M2.7',
-        providerId: 'minimax',
+        id: 'mimo-v2.5-pro',
+        name: 'MiMo V2.5 Pro',
+        providerId: 'xiaomi',
         type: 'chat',
-        metadata: { description: 'MiniMax M2.7，通用推理与长上下文增强版' },
+        metadata: { description: '小米 MiMo 旗舰文本模型，支持深度思考、函数调用、结构化输出和联网搜索' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
     {
-        id: 'MiniMax-M2.7-highspeed',
-        name: 'MiniMax M2.7 Highspeed',
-        providerId: 'minimax',
+        id: 'mimo-v2.5',
+        name: 'MiMo V2.5',
+        providerId: 'xiaomi',
         type: 'chat',
-        metadata: { description: 'MiniMax M2.7 高速版，适合低延迟场景' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'MiniMax-M2.5',
-        name: 'MiniMax M2.5',
-        providerId: 'minimax',
-        type: 'chat',
-        metadata: { description: 'MiniMax M2.5 兼容模型，百万长上下文' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'MiniMax-M2.5-highspeed',
-        name: 'MiniMax M2.5 Highspeed',
-        providerId: 'minimax',
-        type: 'chat',
-        metadata: { description: 'MiniMax M2.5 高速兼容模型' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'MiniMax-M2.1',
-        name: 'MiniMax M2.1',
-        providerId: 'minimax',
-        type: 'chat',
-        metadata: { description: 'MiniMax 均衡版，兼顾效果与成本' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'MiniMax-M2.1-highspeed',
-        name: 'MiniMax M2.1 Highspeed',
-        providerId: 'minimax',
-        type: 'chat',
-        metadata: { description: 'MiniMax M2.1 高速兼容模型' },
-        tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'MiniMax-M2',
-        name: 'MiniMax M2',
-        providerId: 'minimax',
-        type: 'chat',
-        metadata: { description: 'MiniMax 前代基座模型' },
-        tags: ['reasoning'],
+        metadata: { description: '小米 MiMo 全模态模型，支持图像、音频、视频理解，以及深度思考和工具调用' },
+        tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
     // ── Anthropic (Claude) ──
@@ -888,33 +621,6 @@ export const CHAT_MODELS: Model[] = [
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
-    {
-        id: 'claude-opus-4-1-20250805',
-        name: 'Claude Opus 4.1',
-        providerId: 'anthropic',
-        type: 'chat',
-        metadata: { description: 'Claude Opus 4.1 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'claude-opus-4-20250514',
-        name: 'Claude Opus 4',
-        providerId: 'anthropic',
-        type: 'chat',
-        metadata: { description: 'Claude Opus 4 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'claude-sonnet-4-20250514',
-        name: 'Claude Sonnet 4',
-        providerId: 'anthropic',
-        type: 'chat',
-        metadata: { description: 'Claude Sonnet 4 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
     // ── Google (Gemini) ──
     {
         id: 'gemini-3.5-flash',
@@ -931,15 +637,6 @@ export const CHAT_MODELS: Model[] = [
         providerId: 'gemini',
         type: 'chat',
         metadata: { description: 'Gemini 3.1 Pro 预览版，适合复杂多模态和推理任务' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'gemini-3-flash-preview',
-        name: 'Gemini 3 Flash Preview',
-        providerId: 'gemini',
-        type: 'chat',
-        metadata: { description: 'Gemini 3 Flash 预览版，保留兼容' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -998,33 +695,6 @@ export const CHAT_MODELS: Model[] = [
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
-    {
-        id: 'grok-4',
-        name: 'Grok 4',
-        providerId: 'grok',
-        type: 'chat',
-        metadata: { description: 'xAI Grok 4 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'grok-4-1-fast-reasoning',
-        name: 'Grok 4.1 Fast',
-        providerId: 'grok',
-        type: 'chat',
-        metadata: { description: 'Grok 4.1 快速推理版，保留兼容' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'grok-3',
-        name: 'Grok 3',
-        providerId: 'grok',
-        type: 'chat',
-        metadata: { description: 'Grok 3 兼容模型' },
-        tags: ['vision', 'reasoning'],
-        isSystem: true, isUserAdded: false
-    },
     // ── 硅基流动 (SiliconFlow) ──
     {
         id: 'deepseek-ai/DeepSeek-V4-Flash',
@@ -1054,28 +724,12 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     {
-        id: 'deepseek-ai/DeepSeek-V3.2',
-        name: 'DeepSeek V3.2 (SiliconFlow)',
-        providerId: 'silicon',
-        type: 'chat',
-        metadata: { description: '托管于硅基流动的 DeepSeek V3.2 兼容模型' },
-        isSystem: true, isUserAdded: false
-    },
-    {
         id: 'Qwen/Qwen3-32B',
         name: 'Qwen3-32B (SiliconFlow)',
         providerId: 'silicon',
         type: 'chat',
         metadata: { description: '托管于硅基流动的通义千问3 32B 开源版' },
         tags: ['reasoning'],
-        isSystem: true, isUserAdded: false
-    },
-    {
-        id: 'Qwen/Qwen2.5-7B-Instruct',
-        name: 'Qwen2.5 7B (SiliconFlow)',
-        providerId: 'silicon',
-        type: 'chat',
-        metadata: { description: '托管于硅基流动的通义 2.5 7B 指令模型' },
         isSystem: true, isUserAdded: false
     }
 ]
@@ -1132,65 +786,6 @@ export const DOUBAO_MODELS: Model[] = [
         isUserAdded: false
     },
     {
-        id: 'doubao-seed-2-0-pro-260215',
-        name: 'Doubao Seed 2.0 Pro',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包 2.0 Pro 兼容模型，支持长链路推理与多模态'
-        },
-        tags: ['vision', 'reasoning'],
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
-        id: 'doubao-seed-2-0-lite-260428',
-        name: 'Doubao Seed 2.0 Lite',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包 2.0 Lite 最新版本号，均衡性能与成本'
-        },
-        tags: ['vision', 'reasoning'],
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
-        id: 'doubao-seed-2-0-mini-260428',
-        name: 'Doubao Seed 2.0 Mini',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包 2.0 Mini 最新版本号，低延迟高并发，适合成本敏感场景'
-        },
-        tags: ['vision', 'reasoning'],
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
-        id: 'doubao-seed-1-8',
-        name: 'Doubao Seed 1.8',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包 1.8，上一代主力模型，多模态 Agent 场景优化'
-        },
-        tags: ['vision', 'reasoning'],
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
-        id: 'doubao-1-5-pro-32k-250115',
-        name: 'Doubao 1.5 Pro 32K',
-        providerId: 'doubao',
-        type: 'chat',
-        metadata: {
-            description: '豆包 1.5 Pro，32K 上下文'
-        },
-        isSystem: true,
-        isUserAdded: false
-    },
-    {
         id: 'doubao-embedding-large-250104',
         name: 'Doubao Embedding Large',
         providerId: 'doubao',
@@ -1231,39 +826,69 @@ export const DOUBAO_MODELS: Model[] = [
  */
 export const MINIMAX_MODELS: Model[] = [
     {
-        id: 'minimax-embedding-v2',
-        name: 'minimax-embedding-v2',
+        id: 'embo-01',
+        name: 'Embo-01',
         providerId: 'minimax',
         type: 'embedding',
         metadata: {
-            dimension: 1024,
-            maxTokens: 8192,
-            description: 'MiniMax 嵌入模型'
+            maxTokens: 4096,
+            description: 'MiniMax 官方文本向量模型，适合知识库与长记忆检索'
         },
         isSystem: true,
-        isUserAdded: false,
-        pricing: {
-            input: 0.014,
-            currency: 'USD'
-        }
+        isUserAdded: false
     }
 ]
 
+const LATEST_SYSTEM_MODEL_IDS = new Set([
+    'gpt-5.6',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'qwen3.7-max',
+    'qwen3.7-plus',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+    'kimi-k2.6',
+    'glm-5.2',
+    'MiniMax-M3',
+    'mimo-v2.5-pro',
+    'mimo-v2.5',
+    'claude-fable-5',
+    'claude-opus-4-8',
+    'claude-sonnet-5',
+    'gemini-3.5-flash',
+    'gemini-3.1-pro-preview',
+    'grok-4.3',
+    'grok-build-0.1',
+    'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-1-turbo-260628',
+])
+
+function withSystemModelTags(model: Model): Model {
+    const tags = new Set(model.tags || [])
+    if (model.type === 'embedding') tags.add('embedding')
+    if (model.type === 'rerank') tags.add('rerank')
+    if (model.providerId === 'local') tags.add('free')
+    if (LATEST_SYSTEM_MODEL_IDS.has(model.id)) tags.add('latest')
+    return { ...model, tags: Array.from(tags) }
+}
+
 /**
- * 所有系统预设模型
+ * 所有系统预设模型。每项都带有稳定 tags，供模型服务、快捷切换和视觉模型
+ * 选择共用；历史模型不再作为默认推荐暴露。
  */
 export const SYSTEM_MODELS: Model[] = [
     ...LOCAL_MODELS,
     ...OPENAI_MODELS,
+    ...GEMINI_MODELS,
     ...ALIYUN_MODELS,
     ...SILICON_MODELS,
-    ...MOONSHOT_MODELS,
-    ...DEEPSEEK_MODELS,
     ...ZHIPU_MODELS,
     ...MINIMAX_MODELS,
     ...DOUBAO_MODELS,
     ...CHAT_MODELS
 ]
+    .map(withSystemModelTags)
 
 /**
  * 根据provider ID获取系统模型

@@ -18,7 +18,7 @@ interface ProviderContextType {
 
 const ProviderContext = createContext<ProviderContextType | undefined>(undefined)
 
-const CONFIG_VERSION = '4.1'
+const CONFIG_VERSION = '4.2'
 const STORAGE_KEY = 'providers'
 const VERSION_KEY = 'providersVersion'
 

@@ -82,6 +82,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
     'openai',    // GPT-5/o3/o4 支持 reasoning_effort
     'minimax',   // M2 系列支持 reasoning_split
     'moonshot',  // Kimi 系列支持思考参数 / 思维链
+    'xiaomi',    // MiMo V2.5 系列支持深度思考
   ])
 
   // 原生推理模型自动思考的 provider（这些 provider 的推理模型无需额外参数，始终输出思考内容）

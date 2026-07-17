@@ -15,6 +15,8 @@
 export const VISION_CAPABLE_RULES = {
   // OpenAI: GPT-4o/4-Turbo/4.1/5 系列 + o3/o4 推理模型均支持视觉
   openai: /^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)/i,
+  // OpenAI 官方直连配置沿用同一模型矩阵，不能因为 provider 名称不同而失配。
+  openai_native: /^(gpt-4o|gpt-4-turbo|gpt-4\.1|gpt-5|o3|o4)/i,
   // Anthropic: Claude 3+、Claude 4/5、Fable/Mythos/Opus/Sonnet/Haiku 系列
   anthropic: /^(claude-3|claude-(fable|mythos|sonnet|opus|haiku))/i,
   // Google Gemini 2+ 全系均支持视觉
@@ -25,8 +27,11 @@ export const VISION_CAPABLE_RULES = {
   aliyun: /^(qwen-vl|qwen-max|qwen3\.[567]|qwen3\.5-omni)/i,
   // xAI Grok 4 系列及专用视觉模型
   grok: /^(grok-vision|grok-4)/i,
+  xai: /^(grok-vision|grok-4)/i,
   // MiniMax M3 / abab6.5 系列
   minimax: /^(MiniMax-M3|abab6\.5)/i,
+  // 小米 MiMo：V2.5 为全模态理解模型，Pro 为文本旗舰
+  xiaomi: /^mimo-v2\.5$/i,
   // 豆包：1.5-Pro 系列及全部 Seed 系列（Seed 1.x / 2.0 Pro / Lite / Mini 均为多模态通用模型）
   doubao: /^(doubao-1\.5-pro|doubao-seed)/i,
   // Moonshot：moonshot-v1 / Kimi K2 多模态系列支持图片输入

@@ -20,6 +20,20 @@ from models.api_key_selector import select_api_key
 router = APIRouter()
 
 
+_LATEST_MODEL_IDS = {
+    "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "qwen3.7-max", "qwen3.7-plus",
+    "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.6",
+    "glm-5.2", "MiniMax-M3",
+    "mimo-v2.5-pro", "mimo-v2.5",
+    "claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
+    "gemini-3.5-flash", "gemini-3.1-pro-preview",
+    "grok-4.3", "grok-build-0.1",
+    "doubao-seed-2-1-pro-260628", "doubao-seed-2-1-turbo-260628",
+    "gemini-embedding-2-preview",
+}
+
+
 def _pick_first(*values):
     """返回首个非空值。"""
     for value in values:
@@ -62,6 +76,26 @@ def _get_provider_type(provider_id: str) -> str:
     return merged_providers.get(provider_id, {}).get("type", provider_id)
 
 
+def _build_public_model_details(model_id: str, name: str, model_config: dict | None = None) -> dict:
+    """Keep the legacy ``models`` name map stable while exposing typed tags."""
+    config = model_config if isinstance(model_config, dict) else {}
+    model_type = str(config.get("type") or "").strip().lower()
+    if not model_type:
+        model_type = "rerank" if is_rerank_model(model_id) else "embedding" if is_embedding_model(model_id) else "chat"
+
+    configured_tags = config.get("tags") if isinstance(config.get("tags"), list) else []
+    tags = [str(tag).strip() for tag in configured_tags if str(tag).strip()]
+    tags.extend(infer_model_tags(model_id, model_type))
+    if model_id in _LATEST_MODEL_IDS:
+        tags.append("latest")
+    return {
+        "id": model_id,
+        "name": name,
+        "type": model_type,
+        "tags": list(dict.fromkeys(tags)),
+    }
+
+
 @router.get("/models")
 async def get_models():
     """获取可用模型/Provider列表（含静态+动态），按 provider 分组
@@ -88,21 +122,18 @@ async def get_models():
     merged_providers = {**PROVIDER_CONFIG, **load_dynamic_providers()}
     merged_models = {**EMBEDDING_MODELS, **load_dynamic_models()}
 
-    # 从前端 systemModels.ts 同步的 chat 模型列表
-    # 这些模型不在 EMBEDDING_MODELS 中，但前端需要通过 /models API 获取
+    # 与前端 systemModels.ts 对齐的推荐 chat 模型目录。
+    # 历史模型只保留在 DefaultsContext 的迁移映射中，不应再作为新配置默认展示。
     CHAT_MODELS = {
         "openai": {
+            "gpt-5.6": "GPT-5.6",
+            "gpt-5.6-sol": "GPT-5.6 Sol",
+            "gpt-5.6-terra": "GPT-5.6 Terra",
+            "gpt-5.6-luna": "GPT-5.6 Luna",
             "gpt-5.5": "GPT-5.5",
             "gpt-5.5-pro": "GPT-5.5 Pro",
-            "gpt-5.4": "GPT-5.4",
-            "gpt-5.4-pro": "GPT-5.4 Pro",
             "gpt-5.4-mini": "GPT-5.4 mini",
             "gpt-5.4-nano": "GPT-5.4 nano",
-            "gpt-5.3-codex": "GPT-5.3 Codex",
-            "gpt-5.1-codex-mini": "GPT-5.1 Codex mini",
-            "gpt-5.2": "GPT-5.2",
-            "gpt-5.1": "GPT-5.1",
-            "gpt-5": "GPT-5",
             "gpt-4.1": "GPT-4.1",
             "gpt-4.1-mini": "GPT-4.1 mini",
             "gpt-4.1-nano": "GPT-4.1 nano",
@@ -115,68 +146,40 @@ async def get_models():
             "qwen3.7-max": "Qwen3.7-Max",
             "qwen3.7-plus": "Qwen3.7-Plus",
             "qwen3.6-flash": "Qwen3.6-Flash",
-            "qwen3.5-flash": "Qwen3.5-Flash",
-            "qwen3-max": "Qwen3-Max",
-            "qwen-plus": "Qwen-Plus",
-            "qwen-turbo": "Qwen-Turbo",
         },
         "deepseek": {
-            "deepseek-v4-pro": "DeepSeek V4 Pro",
             "deepseek-v4-flash": "DeepSeek V4 Flash",
-            "deepseek-chat": "DeepSeek Chat (legacy)",
-            "deepseek-reasoner": "DeepSeek Reasoner (legacy)",
+            "deepseek-v4-pro": "DeepSeek V4 Pro",
         },
         "moonshot": {
-            "kimi-k2.7-code": "Kimi K2.7 Code",
-            "kimi-k2.7-code-highspeed": "Kimi K2.7 Code Highspeed",
             "kimi-k2.6": "Kimi K2.6",
-            "kimi-k2.5": "Kimi K2.5",
-            "moonshot-v1-vision-preview": "Moonshot v1 Vision Preview",
-            "moonshot-v1-128k": "Moonshot v1 128K",
-            "moonshot-v1-32k": "Moonshot v1 32K",
-            "moonshot-v1-8k": "Moonshot v1 8K",
         },
         "zhipu": {
             "glm-5.2": "GLM-5.2",
             "glm-5.1": "GLM-5.1",
-            "glm-5": "GLM-5",
-            "glm-4.7": "GLM-4.7",
-            "glm-4.6": "GLM-4.6",
-            "glm-4.5": "GLM-4.5",
-            "glm-4.5-air": "GLM-4.5-Air",
-            "glm-4-air-250414": "GLM-4-Air 250414",
         },
         "minimax": {
             "MiniMax-M3": "MiniMax M3",
-            "MiniMax-M2.7": "MiniMax M2.7",
-            "MiniMax-M2.7-highspeed": "MiniMax M2.7 Highspeed",
-            "MiniMax-M2.5": "MiniMax M2.5",
-            "MiniMax-M2.5-highspeed": "MiniMax M2.5 Highspeed",
-            "MiniMax-M2.1": "MiniMax M2.1",
-            "MiniMax-M2.1-highspeed": "MiniMax M2.1 Highspeed",
-            "MiniMax-M2": "MiniMax M2",
+        },
+        "xiaomi": {
+            "mimo-v2.5-pro": "MiMo V2.5 Pro",
+            "mimo-v2.5": "MiMo V2.5",
         },
         "silicon": {
             "deepseek-ai/DeepSeek-V4-Flash": "DeepSeek V4 Flash (SiliconFlow)",
             "Pro/zai-org/GLM-4.7": "GLM-4.7 Pro (SiliconFlow)",
             "deepseek-ai/DeepSeek-R1": "DeepSeek R1 (SiliconFlow)",
-            "deepseek-ai/DeepSeek-V3.2": "DeepSeek V3.2 (SiliconFlow)",
             "Qwen/Qwen3-32B": "Qwen3-32B (SiliconFlow)",
-            "Qwen/Qwen2.5-7B-Instruct": "Qwen2.5 7B (SiliconFlow)",
         },
         "anthropic": {
             "claude-fable-5": "Claude Fable 5",
             "claude-opus-4-8": "Claude Opus 4.8",
             "claude-sonnet-5": "Claude Sonnet 5",
             "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
-            "claude-opus-4-1-20250805": "Claude Opus 4.1",
-            "claude-opus-4-20250514": "Claude Opus 4",
-            "claude-sonnet-4-20250514": "Claude Sonnet 4",
         },
         "gemini": {
             "gemini-3.5-flash": "Gemini 3.5 Flash",
             "gemini-3.1-pro-preview": "Gemini 3.1 Pro Preview",
-            "gemini-3-flash-preview": "Gemini 3 Flash Preview",
             "gemini-3.1-flash-lite": "Gemini 3.1 Flash-Lite",
             "gemini-2.5-pro": "Gemini 2.5 Pro",
             "gemini-2.5-flash": "Gemini 2.5 Flash",
@@ -185,18 +188,10 @@ async def get_models():
         "grok": {
             "grok-4.3": "Grok 4.3",
             "grok-build-0.1": "Grok Build 0.1",
-            "grok-4": "Grok 4",
-            "grok-4-1-fast-reasoning": "Grok 4.1 Fast",
-            "grok-3": "Grok 3",
         },
         "doubao": {
             "doubao-seed-2-1-pro-260628": "Doubao Seed 2.1 Pro",
             "doubao-seed-2-1-turbo-260628": "Doubao Seed 2.1 Turbo",
-            "doubao-seed-2-0-pro-260215": "Doubao Seed 2.0 Pro",
-            "doubao-seed-2-0-lite-260428": "Doubao Seed 2.0 Lite",
-            "doubao-seed-2-0-mini-260428": "Doubao Seed 2.0 Mini",
-            "doubao-seed-1-8": "Doubao Seed 1.8",
-            "doubao-1-5-pro-32k-250115": "Doubao 1.5 Pro 32K",
         },
     }
 
@@ -253,10 +248,21 @@ async def get_models():
         # 合并 chat 模型
         chat_models = CHAT_MODELS.get(provider_id, {})
         provider_models.update(chat_models)
+        model_details = {
+            model_id: _build_public_model_details(
+                model_id,
+                model_name,
+                merged_models.get(model_id),
+            )
+            for model_id, model_name in provider_models.items()
+        }
 
         result[provider_id] = {
             **provider_config,
             "models": provider_models,
+            # ``models`` 仍保持旧版 id -> name 映射，避免 ChatPDF 现有选择器
+            # 破坏性变更；模型服务可使用 modelDetails 读取 tags/type。
+            "modelDetails": model_details,
         }
 
     return result
@@ -430,12 +436,6 @@ async def fetch_provider_models(request: ModelFetchRequest):
                  "metadata": {"description": "Claude Sonnet 5 均衡旗舰，适合编码、Agent 和通用推理"}},
                 {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "type": "chat",
                  "metadata": {"description": "Claude 高速轻量模型，适合低延迟和成本敏感场景"}},
-                {"id": "claude-opus-4-1-20250805", "name": "Claude Opus 4.1", "type": "chat",
-                 "metadata": {"description": "Claude Opus 4.1 兼容模型"}},
-                {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "type": "chat",
-                 "metadata": {"description": "Claude Opus 4 兼容模型"}},
-                {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "type": "chat",
-                 "metadata": {"description": "Claude Sonnet 4 兼容模型"}},
             ]
             return {
                 "models": [
@@ -445,7 +445,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                         "providerId": "anthropic",
                         "type": m["type"],
                         "capabilities": [{"type": m["type"], "isUserSelected": False}],
-                        "tags": infer_model_tags(m["id"]),
+                        "tags": infer_model_tags(m["id"], m["type"]),
                         "metadata": m["metadata"],
                         "isSystem": True,
                         "isUserAdded": False
@@ -464,8 +464,6 @@ async def fetch_provider_models(request: ModelFetchRequest):
                  "metadata": {"description": "Google 最新稳定 Gemini 3.5 Flash，强调速度、多模态与思考能力"}},
                 {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "type": "chat",
                  "metadata": {"description": "Gemini 3.1 Pro 预览版，适合复杂多模态和推理任务"}},
-                {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "type": "chat",
-                 "metadata": {"description": "Gemini 3 Flash 预览版，保留兼容"}},
                 {"id": "gemini-3.1-flash-lite", "name": "Gemini 3.1 Flash-Lite", "type": "chat",
                  "metadata": {"description": "Gemini 3.1 轻量高速版本，适合大规模低成本任务"}},
                 {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "type": "chat",
@@ -483,7 +481,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                         "providerId": "gemini",
                         "type": m["type"],
                         "capabilities": [{"type": m["type"], "isUserSelected": False}],
-                        "tags": infer_model_tags(m["id"]),
+                        "tags": infer_model_tags(m["id"], m["type"]),
                         "metadata": m["metadata"],
                         "isSystem": True,
                         "isUserAdded": False
@@ -516,16 +514,6 @@ async def fetch_provider_models(request: ModelFetchRequest):
                  "metadata": {"description": "豆包 Seed 2.1 旗舰模型，适合复杂推理、文档和多模态 Agent 场景"}},
                 {"id": "doubao-seed-2-1-turbo-260628", "name": "Doubao Seed 2.1 Turbo", "type": "chat",
                  "metadata": {"description": "豆包 Seed 2.1 高速版，兼顾推理质量与低延迟"}},
-                {"id": "doubao-seed-2-0-pro-260215", "name": "Doubao Seed 2.0 Pro", "type": "chat",
-                 "metadata": {"description": "豆包 2.0 Pro 兼容模型，支持长链路推理与多模态"}},
-                {"id": "doubao-seed-2-0-lite-260428", "name": "Doubao Seed 2.0 Lite", "type": "chat",
-                 "metadata": {"description": "豆包 2.0 Lite 最新版本号，均衡性能与成本"}},
-                {"id": "doubao-seed-2-0-mini-260428", "name": "Doubao Seed 2.0 Mini", "type": "chat",
-                 "metadata": {"description": "豆包 2.0 Mini 最新版本号，低延迟高并发，适合成本敏感场景"}},
-                {"id": "doubao-seed-1-8", "name": "Doubao Seed 1.8", "type": "chat",
-                 "metadata": {"description": "豆包 1.8，上一代主力模型，多模态 Agent 场景优化"}},
-                {"id": "doubao-1-5-pro-32k-250115", "name": "Doubao 1.5 Pro 32K", "type": "chat",
-                 "metadata": {"description": "豆包 1.5 Pro，32K 上下文"}},
                 {"id": "doubao-embedding-large-250104", "name": "Doubao Embedding Large", "type": "embedding",
                  "metadata": {"dimension": 4096, "maxTokens": 32768, "description": "豆包大尺寸嵌入模型"}},
                 {"id": "doubao-embedding-250104", "name": "Doubao Embedding", "type": "embedding",
@@ -539,7 +527,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                         "providerId": "doubao",
                         "type": m["type"],
                         "capabilities": [{"type": m["type"], "isUserSelected": False}],
-                        "tags": infer_model_tags(m["id"]),
+                        "tags": infer_model_tags(m["id"], m["type"]),
                         "metadata": m["metadata"],
                         "isSystem": True,
                         "isUserAdded": False
@@ -559,6 +547,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                         "name": "MiniLM-L6-v2",
                         "providerId": "local",
                         "type": "embedding",
+                        "tags": ["embedding", "free"],
                         "metadata": {"dimension": 384, "maxTokens": 256, "description": "快速通用模型"},
                         "isSystem": True,
                         "isUserAdded": False
@@ -568,6 +557,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                         "name": "Multilingual MiniLM-L12-v2",
                         "providerId": "local",
                         "type": "embedding",
+                        "tags": ["embedding", "free"],
                         "metadata": {"dimension": 384, "maxTokens": 128, "description": "多语言支持"},
                         "isSystem": True,
                         "isUserAdded": False
@@ -598,7 +588,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                     continue
                 model_type = _detect_model_type(model_id)
                 # 推断模型标签（如 free、vision、reasoning 等）
-                tags = infer_model_tags(model_id)
+                tags = infer_model_tags(model_id, model_type)
                 model = {
                     "id": model_id,
                     "name": model_id,

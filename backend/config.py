@@ -139,9 +139,10 @@ class AppSettings(BaseSettings):
     )
 
     # ==================== Agent 触发白名单与增强开关 ====================
-    # 允许进入 Agent 路径的 query_type 集合；ENV 可传逗号分隔字符串
+    # 仅概览/分析类问题默认直接进入 Agent。具体问答由 evidence_need 决定，
+    # 数值抽取保留给表格视觉核验链路；ENV 可传逗号分隔字符串覆盖。
     agent_trigger_query_types: list[str] = Field(
-        default=["overview", "specific", "extraction", "analytical"],
+        default=["overview", "analytical"],
         validation_alias=AliasChoices(
             "agent_trigger_query_types",
             "AGENT_TRIGGER_QUERY_TYPES",

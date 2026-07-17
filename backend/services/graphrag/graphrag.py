@@ -5,6 +5,8 @@
 支持通过配置项灵活切换 LLM 提供商和模型。
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import json
@@ -55,6 +57,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "TRUE"
 @dataclass
 class BuildProgress:
     """GraphRAG 构建进度与元数据"""
+    # 绑定主解析代际，防止同一 doc_id 的旧任务污染新文档状态
+    parse_generation: str = ""
+    document_source_hash: str = ""
     # 构建状态: pending / building / done / failed
     status: str = "pending"
     # 当前阶段: chunking / extracting / clustering / reporting / persisting

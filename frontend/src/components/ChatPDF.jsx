@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical } from 'lucide-react';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
 import 'katex/dist/katex.min.css';
@@ -12,9 +13,12 @@ import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
 import { useCapabilities } from '../contexts/CapabilitiesContext';
-const EmbeddingSettings = lazy(() => import('./EmbeddingSettings'));
+const loadEmbeddingSettings = () => import('./EmbeddingSettings');
+const preloadEmbeddingSettings = () => { void loadEmbeddingSettings().catch(() => {}); };
+const EmbeddingSettings = lazy(loadEmbeddingSettings);
 const OCRSettingsPanel = lazy(() => import('./OCRSettingsPanel'));
 const GlobalSettings = lazy(() => import('./GlobalSettings'));
+import { TriStateToggle, VisualVerificationMode } from './RetrievalTuningControls';
 const ChatSettings = lazy(() => import('./ChatSettings'));
 const OverviewPanel = lazy(() => import('./OverviewPanel'));
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
@@ -28,6 +32,7 @@ import { usePDFState } from '../hooks/usePDFState';
 import { useScreenshotState } from '../hooks/useScreenshotState';
 import PresetQuestions from './PresetQuestions';
 import ModelQuickSwitch from './ModelQuickSwitch';
+import ChatContextIndicator from './ChatContextIndicator';
 import ThinkingBlock from './ThinkingBlock';
 import EvidencePanel from './EvidencePanel';
 import MindmapView from './MindmapView';
@@ -36,7 +41,39 @@ import WebSearchButton from './WebSearchButton';
 import DocumentOutline from './DocumentOutline';
 import ReadingAnalysisPanel from './ReadingAnalysisPanel';
 import ReadingSummaryPanel from './ReadingSummaryPanel';
+import SettingsSegmentedControl from './SettingsSegmentedControl';
+import ParseRouteSelect from './ParseRouteSelect';
+import DocumentParseStatusBar from './DocumentParseStatusBar';
+import BackgroundTaskPanel, {
+  getBackgroundTaskSummary,
+  getVisibleBackgroundTasks,
+} from './BackgroundTaskPanel';
+import { loadStoredParseRoute, saveStoredParseRoute } from '../utils/parseRouteUtils';
 import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
+import {
+  blockIndexMatchesParseContext,
+  buildPretranslateAutoIdentity,
+  executePretranslateBatches,
+  selectPendingPretranslateBlocks,
+  shouldForcePretranslateRequest,
+} from '../utils/pretranslateUtils';
+
+const isLoopbackApiHost = (value) => {
+  const input = String(value || '').trim();
+  if (!input || input.startsWith('/')) return true;
+  try {
+    const parsed = new URL(input.includes('://') ? input : `http://${input}`);
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    return host === 'localhost'
+      || host.endsWith('.localhost')
+      || host === '::1'
+      || host === '::'
+      || host === '0.0.0.0'
+      || host.startsWith('127.');
+  } catch {
+    return false;
+  }
+};
 
 const WebSearchSourcesBadge = ({ sources }) => {
   const [expanded, setExpanded] = useState(false);
@@ -129,18 +166,145 @@ const MemoryHitsBadge = ({ hits, meta }) => {
   );
 };
 
+const TABLE_VISUAL_VERIFICATION_STATUS_META = {
+  pending: {
+    label: '正在核验',
+    Icon: Loader2,
+    className: 'border-sky-200 bg-sky-50 text-sky-700',
+    iconClassName: 'animate-spin',
+  },
+  confirmed: {
+    label: '核验确认',
+    Icon: Check,
+    className: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    iconClassName: '',
+  },
+  conflict: {
+    label: '发现冲突',
+    Icon: Scan,
+    className: 'border-amber-200 bg-amber-50 text-amber-700',
+    iconClassName: '',
+  },
+  indeterminate: {
+    label: '无法确定',
+    Icon: ScanText,
+    className: 'border-slate-200 bg-slate-50 text-slate-700',
+    iconClassName: '',
+  },
+  failed: {
+    label: '核验失败',
+    Icon: X,
+    className: 'border-rose-200 bg-rose-50 text-rose-700',
+    iconClassName: '',
+  },
+};
+
+export const resolveTableVisualVerificationStatus = (verification) => {
+  const rawState = String(verification?.state || '').trim().toLowerCase();
+  const state = ['queued', 'running', 'pending'].includes(rawState) ? 'pending' : rawState;
+  return TABLE_VISUAL_VERIFICATION_STATUS_META[state]
+    ? { state, ...TABLE_VISUAL_VERIFICATION_STATUS_META[state] }
+    : null;
+};
+
+const getTableVisualVerificationDetail = (verification, state) => {
+  const explicitDetail = [
+    verification?.summary,
+    verification?.message,
+    verification?.note,
+    verification?.table_caption,
+    verification?.table_id,
+  ].find((value) => typeof value === 'string' && value.trim());
+  if (explicitDetail) return explicitDetail.trim();
+  if (state === 'pending') return '正在比对表格截图与结构化单元格';
+  if (state === 'confirmed') return '视觉结果与结构化表格证据一致';
+  if (state === 'conflict') return '视觉结果与结构化表格证据存在差异';
+  if (state === 'indeterminate') return '图像证据不足以作出可靠判断';
+  return '本次视觉核验未完成';
+};
+
+const TableVisualVerificationStatus = ({ verification }) => {
+  const status = resolveTableVisualVerificationStatus(verification);
+  if (!status) return null;
+
+  const { Icon } = status;
+  const detail = getTableVisualVerificationDetail(verification, status.state);
+  return (
+    <div
+      className={`mt-3 flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-xs ${status.className}`}
+      role="status"
+      aria-live={status.state === 'pending' ? 'polite' : 'off'}
+    >
+      <Icon className={`h-3.5 w-3.5 shrink-0 ${status.iconClassName}`} />
+      <span className="shrink-0 font-medium">表格视觉核验</span>
+      <span className="shrink-0">{status.label}</span>
+      <span className="min-w-0 truncate opacity-80" title={detail}>{detail}</span>
+    </div>
+  );
+};
+
 const SendIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
     <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
   </svg>
 );
 
 const PauseIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
     <rect x="7" y="6" width="4" height="12" rx="2" />
     <rect x="13" y="6" width="4" height="12" rx="2" />
   </svg>
 );
+
+const ICON_SWAP_VISIBLE = { opacity: 1, filter: 'blur(0px)', scale: 1 };
+const ICON_SWAP_HIDDEN = { opacity: 0, filter: 'blur(3px)', scale: 0.28 };
+
+const getIconSwapTransition = (visible, reduceMotion) => {
+  if (reduceMotion) return { duration: 0 };
+
+  if (!visible) {
+    return {
+      opacity: { duration: 0.12, ease: [0.4, 0, 1, 1] },
+      filter: { duration: 0.14, ease: [0.4, 0, 1, 1] },
+      scale: { duration: 0.14, ease: [0.4, 0, 1, 1] },
+    };
+  }
+
+  return {
+    opacity: { duration: 0.2, delay: 0.045, ease: [0.22, 1, 0.36, 1] },
+    filter: { duration: 0.24, delay: 0.035, ease: [0.22, 1, 0.36, 1] },
+    scale: { type: 'spring', stiffness: 520, damping: 28, mass: 0.5, delay: 0.035 },
+  };
+};
+
+const SendPauseIconSwap = ({ isPaused }) => {
+  const reduceMotion = useReducedMotion();
+  const sendVisible = !isPaused;
+  const pauseVisible = isPaused;
+
+  return (
+    <span className="chat-send-icon-swap" data-state={isPaused ? 'pause' : 'send'} aria-hidden="true">
+      <motion.span
+        className="chat-send-icon-swap__icon ml-0.5"
+        data-icon="send"
+        initial={false}
+        animate={sendVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
+        transition={getIconSwapTransition(sendVisible, reduceMotion)}
+      >
+        <SendIcon />
+      </motion.span>
+      <motion.span
+        className="chat-send-icon-swap__icon"
+        data-icon="pause"
+        initial={false}
+        animate={pauseVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
+        transition={getIconSwapTransition(pauseVisible, reduceMotion)}
+      >
+        <PauseIcon />
+      </motion.span>
+    </span>
+  );
+};
 
 const SummaryIcon = ({ className = '' }) => (
   <svg
@@ -164,21 +328,11 @@ const SummaryIcon = ({ className = '' }) => (
 
 // GraphRAG 构建/查询端点使用本常量。其他 fetch 依赖均已在各自 hooks 内部维护同名常量。
 const API_BASE_URL = '';
-
-const UPLOAD_RING_CONFIGS = [
-  { s: 298, w: 14, c: 'rgba(100, 50, 255, 0.5)',  br: '52% 48% 55% 45% / 48% 52% 48% 52%', dur: 4.2, del: -2.1, dir: 'normal',  mix: 'screen' },
-  { s: 302, w: 22, c: 'rgba(50, 150, 255, 0.5)',  br: '45% 55% 48% 52% / 55% 45% 52% 48%', dur: 6.8, del: -4.3, dir: 'reverse', mix: 'screen' },
-  { s: 295, w: 17, c: 'rgba(0, 200, 255, 0.4)',   br: '58% 42% 45% 55% / 42% 58% 48% 52%', dur: 3.5, del: -1.7, dir: 'normal',  mix: 'overlay' },
-  { s: 304, w: 20, c: 'rgba(255, 100, 50, 0.5)',  br: '48% 52% 52% 48% / 58% 42% 55% 45%', dur: 7.3, del: -3.6, dir: 'reverse', mix: 'screen' },
-  { s: 293, w: 13, c: 'rgba(255, 200, 50, 0.4)',  br: '55% 45% 48% 52% / 45% 55% 42% 58%', dur: 5.1, del: -0.8, dir: 'normal',  mix: 'screen' },
-  { s: 301, w: 19, c: 'rgba(150, 50, 200, 0.5)',  br: '42% 58% 55% 45% / 52% 48% 58% 42%', dur: 4.7, del: -2.9, dir: 'reverse', mix: 'overlay' },
-  { s: 297, w: 16, c: 'rgba(100, 50, 255, 0.4)',  br: '50% 50% 52% 48% / 55% 45% 50% 50%', dur: 6.2, del: -4.8, dir: 'normal',  mix: 'screen' },
-  { s: 303, w: 23, c: 'rgba(50, 150, 255, 0.4)',  br: '46% 54% 50% 50% / 48% 52% 45% 55%', dur: 3.8, del: -1.2, dir: 'reverse', mix: 'screen' },
-  { s: 299, w: 15, c: 'rgba(0, 200, 255, 0.5)',   br: '53% 47% 46% 54% / 50% 50% 53% 47%', dur: 7.6, del: -3.1, dir: 'normal',  mix: 'overlay' },
-  { s: 305, w: 21, c: 'rgba(255, 100, 50, 0.4)',  br: '49% 51% 53% 47% / 46% 54% 49% 51%', dur: 4.9, del: -2.4, dir: 'reverse', mix: 'screen' },
-  { s: 292, w: 18, c: 'rgba(255, 200, 50, 0.5)',  br: '57% 43% 49% 51% / 53% 47% 46% 54%', dur: 5.5, del: -0.5, dir: 'normal',  mix: 'screen' },
-  { s: 300, w: 12, c: 'rgba(150, 50, 200, 0.4)',  br: '44% 56% 51% 49% / 57% 43% 52% 48%', dur: 6.5, del: -4.0, dir: 'reverse', mix: 'overlay' },
-];
+const SIDEBAR_DEFAULT_WIDTH = 280;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 420;
+const MAIN_PANEL_MIN_WIDTH = 780;
+const SIDEBAR_KEYBOARD_STEP = 16;
 
 const UPLOAD_STATUS_META = {
   uploading: {
@@ -206,11 +360,170 @@ const UPLOAD_STATUS_META = {
     title: '正在加载文档信息...',
     desc: '即将打开阅读界面',
   },
+  accepted: {
+    label: 'Accepted',
+    title: '文件已接收，MinerU 解析已开始',
+    desc: '100% 表示文件传输完成；主解析进度会在工作区继续显示',
+  },
   ready: {
     label: 'Ready',
     title: '文档准备完成',
     desc: '正在进入阅读界面',
   },
+};
+
+const formatUploadFileSize = (bytes) => {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size <= 0) return '';
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
+  return `${Math.round(size)} B`;
+};
+
+export const UploadDocumentCard = ({
+  darkMode,
+  isUploading,
+  uploadProgress,
+  uploadStatus,
+  uploadStatusMeta,
+  uploadFileInfo,
+  parseRoute,
+  onParseRouteChange,
+  onSelect,
+}) => {
+  const progress = Math.max(0, Math.min(100, Math.round(Number(uploadProgress) || 0)));
+  const fileSize = formatUploadFileSize(uploadFileInfo?.size);
+  const isReady = uploadStatus === 'ready';
+
+  return (
+    <AnimatePresence initial={false} mode="wait">
+      {isUploading ? (
+        <motion.div
+          key="upload-progress"
+          role="status"
+          aria-live="polite"
+          aria-label={`${uploadStatusMeta.title} ${progress}%`}
+          title={uploadStatusMeta.desc}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          className={`upload-document-card relative min-h-[108px] w-full overflow-hidden rounded-[24px] border ${
+            darkMode
+              ? 'border-white/[0.08] bg-[#24272d]'
+              : 'border-[#eadfd8] bg-white'
+          }`}
+        >
+          <motion.div
+            aria-hidden="true"
+            className={`absolute inset-y-0 left-0 w-full origin-left ${darkMode ? 'bg-[#FFA07A]/[0.08]' : 'bg-[#FFF4EF]'}`}
+            initial={false}
+            animate={{ scaleX: progress / 100 }}
+            transition={{ duration: 0.45, ease: 'linear' }}
+          />
+          <div
+            aria-hidden="true"
+            className={`absolute bottom-4 left-5 right-5 z-20 h-[5px] overflow-hidden rounded-full ${
+              darkMode ? 'bg-white/[0.10]' : 'bg-[#ECE8E5]'
+            }`}
+          >
+            <motion.div
+              className={`absolute inset-y-0 -left-5 w-[calc(100%+40px)] origin-left ${darkMode ? 'bg-[#FFA07A]' : 'bg-[#D97A5D]'}`}
+              initial={false}
+              animate={{ scaleX: progress / 100 }}
+              transition={{ duration: 0.45, ease: 'linear' }}
+            />
+          </div>
+
+          <div className="relative z-10 flex min-h-[108px] items-center gap-4 px-5 pb-8 pt-4">
+            <img
+              src={pdfFiletypeIcon}
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+              className="h-12 w-12 shrink-0 select-none"
+            />
+
+            <div className="min-w-0 flex-1">
+              <div className={`truncate text-[15px] font-semibold ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+                {uploadFileInfo?.name || 'PDF 文档'}
+              </div>
+              <div className="mt-1 flex min-h-[18px] items-center gap-1.5 text-[12px]">
+                <AnimatePresence initial={false} mode="wait">
+                  <motion.span
+                    key={uploadStatus}
+                    initial={{ opacity: 0, y: 7 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -7 }}
+                    transition={{ duration: 0.2 }}
+                    className={isReady ? 'font-medium text-emerald-600 dark:text-emerald-300' : 'font-medium text-[#B85F47] dark:text-[#FFA07A]'}
+                  >
+                    {uploadStatusMeta.title}
+                  </motion.span>
+                </AnimatePresence>
+                {fileSize && (
+                  <>
+                    <span className={darkMode ? 'text-gray-600' : 'text-gray-300'}>•</span>
+                    <span className={darkMode ? 'text-gray-400' : 'text-gray-500'}>{fileSize}</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="flex min-w-[72px] shrink-0 flex-col items-end">
+              <span className={`text-[17px] font-semibold tabular-nums ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{progress}%</span>
+              <span className={`mt-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                {uploadStatusMeta.label}
+              </span>
+            </div>
+          </div>
+        </motion.div>
+      ) : (
+        <motion.div
+          key="upload-idle"
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          className={`upload-document-card flex min-h-[108px] w-full items-center gap-4 rounded-[24px] p-5 text-left transition-[box-shadow,background-color] ${
+            darkMode
+              ? 'bg-white/[0.05]'
+              : 'bg-white'
+          }`}
+        >
+          <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ${darkMode ? 'bg-[#FFA07A]/10 text-[#FFA07A]' : 'bg-[#FFF4EF] text-[#D97A5D]'}`}>
+            <Upload className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={onSelect}
+              className="block max-w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/30"
+            >
+              <span className={`block text-[15px] font-bold ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>上传 PDF 文档</span>
+              <span className={`mt-0.5 block text-[12px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>解析完成后即可速览、翻译和提问</span>
+            </button>
+            <div className={`mt-1.5 flex max-w-full items-center gap-1.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+              <ScanText className="h-3.5 w-3.5 shrink-0" />
+              <span className="shrink-0">解析路线</span>
+              <ParseRouteSelect
+                value={parseRoute}
+                onChange={onParseRouteChange}
+                darkMode={darkMode}
+              />
+            </div>
+          </div>
+          <motion.button
+            type="button"
+            onClick={onSelect}
+            whileTap={{ scale: 0.98 }}
+            className="accent-cta shrink-0 rounded-full px-4 py-2 text-[12px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35"
+          >
+            选择文件
+          </motion.button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 };
 
 const buildClientReadingFallback = (blockIndex) => {
@@ -248,7 +561,7 @@ const isTranslatableReadingBlock = (block) => {
 const isValidBlockTranslationText = (value) => {
   const text = String(value || '').trim();
   if (!text) return false;
-  if (/^\s*[\{\[]?['"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['"]?\s*[:=]/s.test(text)) {
+  if (/^\s*[{[]?['"]?(?:error|_used_provider|_used_model|_usage_meta|fallback_used|raw_usage|completion_tokens|prompt_tokens)['"]?\s*[:=]/s.test(text)) {
     return false;
   }
   if (text.includes('_used_provider') && text.includes('_usage_meta')) return false;
@@ -286,6 +599,60 @@ const sanitizeTranslationError = (message, fallback = '段落翻译失败，请�
     return '翻译请求超时，已保留成功缓存；可稍后继续补齐';
   }
   return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+};
+
+const isMinerUFullRoute = (manifest) => {
+  const route = String(
+    manifest?.resolved_route || manifest?.requested_route || manifest?.route || ''
+  ).trim().toLowerCase();
+  return route === 'mineru';
+};
+
+const getParseIdentity = (manifest) => {
+  const route = String(
+    manifest?.resolved_route || manifest?.requested_route || manifest?.route || ''
+  ).trim().toLowerCase();
+  const generation = String(manifest?.generation || '').trim();
+  const sourceHash = String(manifest?.source_hash || '').trim();
+  return `r=${encodeURIComponent(route || 'legacy')}:g=${encodeURIComponent(generation || 'legacy')}:s=${encodeURIComponent(sourceHash || 'legacy')}`;
+};
+
+const getStatusParseIdentity = (status) => getParseIdentity(status?.parse_manifest);
+
+const buildOutlineCacheKey = (docId, parseIdentity, blockIndex) => (
+  `${docId || ''}:${parseIdentity || ''}:${blockIndex?.visual_supplement_revision || blockIndex?.source_hash || blockIndex?.generated_at || ''}`
+);
+
+const matchesOutlineGenerationFailure = (data, providerId, modelId) => {
+  const meta = data?.meta || {};
+  return Boolean(meta.generation_error)
+    && String(meta.provider || '').toLowerCase() === String(providerId || '').toLowerCase()
+    && String(meta.model || '') === String(modelId || '');
+};
+
+const isReusableOutlineResult = (data, kind, providerId, modelId) => {
+  if (!data) return false;
+  if (data.source === 'ai') return true;
+  if (kind === 'section' && ['toc', 'bookmark'].includes(data.source)) return true;
+  return matchesOutlineGenerationFailure(data, providerId, modelId);
+};
+
+const isMinerUParseGateError = (error) => {
+  if (Number(error?.status) !== 409) return false;
+  return /mineru|全程解析/i.test(String(error?.message || ''));
+};
+
+const getMinerUParsePendingNotice = (manifest, deepParseStatus) => {
+  const status = String(manifest?.status || '').trim().toLowerCase();
+  const stage = String(manifest?.stage || deepParseStatus?.stage || '').trim().toLowerCase();
+  const error = String(manifest?.error || deepParseStatus?.error || '').trim();
+
+  if (status === 'failed') return error || 'MinerU 全程解析失败，请重新上传后选择 MinerU 路线重试';
+  if (status === 'cancelled') return 'MinerU 全程解析已取消，请重新上传后选择 MinerU 路线重试';
+  if (stage === 'awaiting_rag_index') {
+    return 'MinerU 版面解析已完成，正在等待问答索引发布后统一开放阅读、翻译、速览和问答';
+  }
+  return 'MinerU 全程解析中，完成后将自动加载阅读结构、大纲、翻译、速览和问答';
 };
 
 const normalizeOutlineText = (value) => String(value || '')
@@ -373,17 +740,40 @@ const isUsefulOutline = (items = [], source = '') => {
 const ChatPDF = () => {
   // ========== Context Hooks ==========
   const { getProviderById } = useProvider();
-  const { getModelById } = useModel();
+  const { getModelById, allModels } = useModel();
   const { getDefaultModel } = useDefaults();
   const { hasLocalRerank } = useCapabilities();
   const globalSettings = useGlobalSettings();
-  const { setReasoningEffort, reasoningEffort, streamOutput, setStreamOutput } = globalSettings;
-  const { sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers } = useChatParams();
+  const {
+    setReasoningEffort,
+    reasoningEffort,
+    streamOutput,
+    setStreamOutput,
+    contextCount,
+    enableMemory,
+  } = globalSettings;
+  const {
+    sendShortcut, confirmDeleteMessage, confirmRegenerateMessage, messageStyle, messageFontSize, codeCollapsible, codeWrappable, codeShowLineNumbers,
+    overrideNumericTable, setOverrideNumericTable,
+    overrideAnswerCritic, setOverrideAnswerCritic,
+    overrideLLMQueryRewrite, setOverrideLLMQueryRewrite,
+    overrideBM25Synonyms, setOverrideBM25Synonyms,
+    numericTableVisualVerification, setNumericTableVisualVerification,
+    visualModelKey, setVisualModelKey,
+    visualStrategy, setVisualStrategy,
+    localVisualModelKey, setLocalVisualModelKey,
+    cheapModel, setCheapModel,
+    cheapModelProvider, setCheapModelProvider,
+  } = useChatParams();
   const {
     aiAutoProcess,
+    setAiAutoProcess,
     autoOutlineSummary,
+    setAutoOutlineSummary,
     autoPretranslate: enableHoverPretranslate,
+    setAutoPretranslate,
     pretranslateConcurrency,
+    setPretranslateConcurrency,
     overviewDefaultDepth,
     setOverviewDefaultDepth,
   } = useReadingSettings();
@@ -406,6 +796,17 @@ const ChatPDF = () => {
   const [streamSpeed, setStreamSpeed] = useDebouncedLocalStorage('streamSpeed', 'normal');
   const [enableBlurReveal, setEnableBlurReveal] = useDebouncedLocalStorage('enableBlurReveal', true);
   const [blurIntensity, setBlurIntensity] = useDebouncedLocalStorage('blurIntensity', 'medium');
+  // v2 曾强制关闭模糊渐显。只修正受该迁移影响的用户一次，之后仍尊重手动设置。
+  useEffect(() => {
+    if (
+      localStorage.getItem('_migrated_stream_reveal_v2') &&
+      !localStorage.getItem('_restored_stream_reveal_v3')
+    ) {
+      setEnableBlurReveal(true);
+      setBlurIntensity('medium');
+      localStorage.setItem('_restored_stream_reveal_v3', '1');
+    }
+  }, []);
   const [searchEngine, setSearchEngine] = useDebouncedLocalStorage('searchEngine', 'google');
   const [searchEngineUrl, setSearchEngineUrl] = useDebouncedLocalStorage('searchEngineUrl', 'https://www.google.com/search?q={query}');
   const [toolbarSize, setToolbarSize] = useDebouncedLocalStorage('toolbarSize', 'normal');
@@ -423,6 +824,10 @@ const ChatPDF = () => {
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
   const [sidebarMode, setSidebarMode] = useState('history');
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const [settingsSection, setSettingsSection] = useState('common');
+  const [pendingSettingsPanel, setPendingSettingsPanel] = useState(null);
+  const [showRetrievalTuning, setShowRetrievalTuning] = useState(false);
   const [blockIndex, setBlockIndex] = useState(null);
   const [blockIndexLoading, setBlockIndexLoading] = useState(false);
   const [blockIndexError, setBlockIndexError] = useState('');
@@ -430,10 +835,12 @@ const ChatPDF = () => {
   const [readingOutline, setReadingOutline] = useState(null);
   const [readingOutlineLoading, setReadingOutlineLoading] = useState(false);
   const [readingOutlineError, setReadingOutlineError] = useState('');
+  const [readingOutlineFallbackNotice, setReadingOutlineFallbackNotice] = useState('');
   const [readingOutlineReloadKey, setReadingOutlineReloadKey] = useState(0);
   const [sectionOutline, setSectionOutline] = useState(null);
   const [sectionOutlineLoading, setSectionOutlineLoading] = useState(false);
   const [sectionOutlineError, setSectionOutlineError] = useState('');
+  const [sectionOutlineFallbackNotice, setSectionOutlineFallbackNotice] = useState('');
   const [sectionOutlineReloadKey, setSectionOutlineReloadKey] = useState(0);
   const [activeReadingNodeId, setActiveReadingNodeId] = useState(null);
   const [visitedReadingNodeIds, setVisitedReadingNodeIds] = useState(new Set());
@@ -444,25 +851,38 @@ const ChatPDF = () => {
   const [blockTranslateError, setBlockTranslateError] = useState('');
   const [translatingBlockIds, setTranslatingBlockIds] = useState(new Set());
   const [blockTranslationsLoaded, setBlockTranslationsLoaded] = useState(false);
+  const [blockTranslationsLoadedIdentity, setBlockTranslationsLoadedIdentity] = useState('');
   const [pretranslateProgress, setPretranslateProgress] = useState({ running: false, done: 0, total: 0 });
   const [failedTranslationBlockIds, setFailedTranslationBlockIds] = useState(new Set());
   const [pretranslateNotice, setPretranslateNotice] = useState('');
+  const [pretranslateError, setPretranslateError] = useState('');
   const [showAiProcessingPanel, setShowAiProcessingPanel] = useState(false);
   const [deepParseStatus, setDeepParseStatus] = useState(null);
   const [deepParseNotice, setDeepParseNotice] = useState('');
   const [ragIndexStatus, setRagIndexStatus] = useState(null);
   const [ragIndexBusy, setRagIndexBusy] = useState(false);
   const [ragIndexNotice, setRagIndexNotice] = useState('');
+  const [ragIndexError, setRagIndexError] = useState('');
+  const [selectedParseRoute, setSelectedParseRoute] = useState(loadStoredParseRoute);
   const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
   const [pinnedReadingBlockId, setPinnedReadingBlockId] = useState(null);
+  const [readingJumpPulseToken, setReadingJumpPulseToken] = useState(0);
   const pretranslateRunRef = useRef(0);
   const pretranslateStartedDocRef = useRef(null);
   const pretranslateAbortRef = useRef(null);
+  const blockTranslationEpochRef = useRef(0);
+  const visualSupplementRevisionRef = useRef('');
+  const parseContextRef = useRef({ docId: '', parseIdentity: '', epoch: 0 });
   const prevShouldAutoPretranslateRef = useRef(shouldAutoPretranslate);
   const readingOutlineRequestRef = useRef(0);
   const readingOutlineForceRef = useRef(false);
+  const readingOutlineCacheRef = useRef(new Map());
+  const sectionOutlineRequestRef = useRef(0);
   const sectionOutlineForceRef = useRef(false);
+  const sectionOutlineCacheRef = useRef(new Map());
   const streamConfigMigratedRef = useRef(false);
+  const uploadStartsNewChatRef = useRef(true);
+  const sidebarResizeRef = useRef({ active: false, pointerId: null, startX: 0, startWidth: SIDEBAR_DEFAULT_WIDTH, maxWidth: SIDEBAR_MAX_WIDTH });
 
   // 兼容旧配置：streamSpeed 和 streamOutput 过去分别持久化，
   // 会留下“速度仍开启，但隐藏的流式开关已关闭”的冲突状态。
@@ -478,8 +898,10 @@ const ChatPDF = () => {
 
   // ========== UI 状态 Hook（需求 1.3） ==========
   const {
+    isNarrowDesktop,
     showSidebar, setShowSidebar,
     isHeaderExpanded, setIsHeaderExpanded,
+    sidebarWidth, setSidebarWidth,
     pdfPanelWidth, setPdfPanelWidth,
     darkMode, setDarkMode,
     showSettings, setShowSettings,
@@ -493,10 +915,42 @@ const ChatPDF = () => {
   } = useUIState();
 
   useEffect(() => {
+    if (!isNarrowDesktop || !showSidebar) return undefined;
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') setShowSidebar(false);
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [isNarrowDesktop, setShowSidebar, showSidebar]);
+
+  useEffect(() => {
+    if (isNarrowDesktop && (pdfPanelWidth < 38 || pdfPanelWidth > 62)) {
+      setPdfPanelWidth(50);
+    }
+  }, [isNarrowDesktop, pdfPanelWidth, setPdfPanelWidth]);
+
+  // 设置中心打开后利用空闲帧预热模型服务代码与初始状态，避免点击时才解析懒加载模块。
+  useEffect(() => {
+    if (!showSettings || showEmbeddingSettings) return undefined;
+
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(preloadEmbeddingSettings, { timeout: 600 });
+      return () => window.cancelIdleCallback?.(idleId);
+    }
+
+    const timerId = window.setTimeout(preloadEmbeddingSettings, 80);
+    return () => window.clearTimeout(timerId);
+  }, [showEmbeddingSettings, showSettings]);
+
+  useEffect(() => {
     if (overviewDefaultDepth && overviewDefaultDepth !== overviewDepth) {
       setOverviewDepth(overviewDefaultDepth);
     }
   }, [overviewDefaultDepth, overviewDepth, setOverviewDepth]);
+
+  useEffect(() => {
+    if (!showOCRSettings) setSelectedParseRoute(loadStoredParseRoute());
+  }, [showOCRSettings]);
 
   const handleOverviewDepthChange = useCallback((nextDepth) => {
     setOverviewDepth(nextDepth);
@@ -565,10 +1019,49 @@ const ChatPDF = () => {
     const { providerId, modelId } = getCurrentChatModel();
     const provider = getProviderById(providerId);
     if (chatKey) {
-      return { providerId, modelId, apiKey: provider?.apiKey || '' };
+      return { providerId, modelId, apiKey: provider?.apiKey || '', apiHost: provider?.apiHost || '' };
     }
-    return { providerId, modelId, apiKey: provider?.apiKey || apiKey };
+    return { providerId, modelId, apiKey: provider?.apiKey || apiKey, apiHost: provider?.apiHost || '' };
   }, [getDefaultModel, getCurrentChatModel, getProviderById, apiKey]);
+
+  const getVisualCredentials = useCallback(() => {
+    const chatCredentials = getChatCredentials?.() || {};
+    const chatProvider = chatCredentials.providerId || 'openai';
+    const chatModel = chatCredentials.modelId || 'gpt-4o';
+    const useDedicatedModel = Boolean(visualModelKey && visualModelKey !== 'follow_chat' && visualModelKey.includes(':'));
+    const separator = useDedicatedModel ? visualModelKey.indexOf(':') : -1;
+    const providerId = useDedicatedModel ? visualModelKey.slice(0, separator) : chatProvider;
+    const modelId = useDedicatedModel ? visualModelKey.slice(separator + 1) : chatModel;
+    const provider = getProviderById?.(providerId);
+    const modelObject = getModelById?.(modelId, providerId) || { id: modelId, providerId };
+    const useLocalModel = Boolean(localVisualModelKey && localVisualModelKey !== 'none' && localVisualModelKey.includes(':'));
+    const localSeparator = useLocalModel ? localVisualModelKey.indexOf(':') : -1;
+    const localProviderId = useLocalModel ? localVisualModelKey.slice(0, localSeparator) : '';
+    const localModelId = useLocalModel ? localVisualModelKey.slice(localSeparator + 1) : '';
+    const localProvider = useLocalModel ? getProviderById?.(localProviderId) : null;
+    const localModelObject = useLocalModel
+      ? getModelById?.(localModelId, localProviderId) || { id: localModelId, providerId: localProviderId }
+      : null;
+    const strongIsVisionCapable = supportsVision(modelObject);
+    const localIsVisionCapable = useLocalModel && supportsVision(localModelObject);
+    return {
+      providerId,
+      modelId,
+      apiKey: provider?.apiKey || (useDedicatedModel ? '' : chatCredentials.apiKey || ''),
+      apiHost: provider?.apiHost || '',
+      isVisionCapable: strongIsVisionCapable,
+      policyVisionCapable: strongIsVisionCapable || localIsVisionCapable,
+      source: useDedicatedModel ? 'dedicated' : 'follow_chat',
+      strategy: visualStrategy || 'balanced',
+      local: useLocalModel ? {
+        providerId: localProviderId,
+        modelId: localModelId,
+        apiKey: localProvider?.apiKey || '',
+        apiHost: localProvider?.apiHost || '',
+        isVisionCapable: localIsVisionCapable,
+      } : null,
+    };
+  }, [getChatCredentials, getModelById, getProviderById, localVisualModelKey, visualModelKey, visualStrategy]);
 
   const getChatRequestConfig = useCallback(() => {
     const chatCredentials = getChatCredentials?.();
@@ -580,9 +1073,9 @@ const ChatPDF = () => {
     const canCallModel = Boolean(chatApiKey) || providerLower === 'local' || providerLower === 'ollama';
     const headers = { 'Content-Type': 'application/json' };
 
+    headers['X-ChatPDF-Provider'] = chatProvider;
+    headers['X-ChatPDF-Model'] = chatModel;
     if (chatCredentials) {
-      headers['X-ChatPDF-Provider'] = chatProvider;
-      headers['X-ChatPDF-Model'] = chatModel;
       if (chatApiKey) {
         headers['X-ChatPDF-Api-Key'] = chatApiKey;
       }
@@ -594,6 +1087,7 @@ const ChatPDF = () => {
     return {
       headers,
       providerId: chatProvider,
+      modelId: chatModel,
       providerName: chatProviderFull?.name || chatProvider,
       canCallModel,
     };
@@ -635,7 +1129,55 @@ const ChatPDF = () => {
     return getModelById(mid, pid);
   }, [getDefaultModel, getModelById]);
 
-  const isVisionCapable = useMemo(() => supportsVision(currentChatModelObj), [currentChatModelObj]);
+  const isVisionCapable = useMemo(() => {
+    const current = currentChatModelObj || {
+      id: getCurrentChatModel().modelId,
+      providerId: getCurrentChatModel().providerId,
+    };
+    return supportsVision(current);
+  }, [currentChatModelObj, getCurrentChatModel]);
+
+  const visualModelOptions = useMemo(() => {
+    const chatCredentials = getChatCredentials?.() || {};
+    const followingLabel = isVisionCapable
+      ? `跟随对话模型（${chatCredentials.modelId || '当前模型'}）`
+      : `跟随对话模型（${chatCredentials.modelId || '当前模型'}，未检测到视觉能力）`;
+    const candidates = (allModels || [])
+      .filter((candidate) => candidate?.type === 'chat' && supportsVision(candidate))
+      .map((candidate) => ({
+        value: `${candidate.providerId}:${candidate.id}`,
+        label: `${getProviderById?.(candidate.providerId)?.name || candidate.providerId} · ${candidate.name || candidate.id}`,
+      }));
+    const seen = new Set();
+    return [
+      { value: 'follow_chat', label: followingLabel },
+      ...candidates.filter((candidate) => !seen.has(candidate.value) && seen.add(candidate.value)),
+    ];
+  }, [allModels, getChatCredentials, getProviderById, isVisionCapable]);
+
+  const localVisualModelOptions = useMemo(() => {
+    const candidates = (allModels || [])
+      .filter((candidate) => (
+        candidate?.type === 'chat'
+        && ['local', 'ollama'].includes(String(candidate.providerId || '').toLowerCase())
+        && isLoopbackApiHost(getProviderById?.(candidate.providerId)?.apiHost)
+        && supportsVision(candidate)
+      ))
+      .map((candidate) => ({
+        value: `${candidate.providerId}:${candidate.id}`,
+        label: `${getProviderById?.(candidate.providerId)?.name || candidate.providerId} · ${candidate.name || candidate.id}`,
+      }));
+    const seen = new Set();
+    return [
+      { value: 'none', label: '未配置本地视觉模型' },
+      ...candidates.filter((candidate) => !seen.has(candidate.value) && seen.add(candidate.value)),
+    ];
+  }, [allModels, getProviderById]);
+  const hasLocalVisualModel = localVisualModelKey !== 'none'
+    && localVisualModelOptions.some((option) => option.value === localVisualModelKey);
+  const visualPolicyReady = visualStrategy === 'privacy'
+    ? hasLocalVisualModel
+    : (isVisionCapable || visualModelKey !== 'follow_chat' || hasLocalVisualModel);
 
   // ========== 文档状态 Hook（需求 1.1） ==========
   // useDocumentState 内部管理 docId/docInfo，需要其他 Hook 的 setter 函数
@@ -647,6 +1189,7 @@ const ChatPDF = () => {
   const documentState = useDocumentState({
     getEmbeddingConfig,
     getChatCredentials,
+    getVisualCredentials,
     getProviderById,
     setMessages: (...args) => messageSettersRef.current.setMessages?.(...args),
     setCurrentPage: (...args) => pdfSettersRef.current.setCurrentPage?.(...args),
@@ -657,18 +1200,140 @@ const ChatPDF = () => {
   const {
     docId, setDocId,
     docInfo, setDocInfo,
-    isUploading, uploadProgress, uploadStatus,
+    isUploading, uploadProgress, uploadStatus, uploadFileInfo,
     history, storageInfo,
     fileInputRef,
     handleFileUpload, startNewChat, loadSession, deleteSession,
     saveCurrentSession, fetchStorageInfo,
-    overview, overviewLoading, overviewError, fetchOverview, clearOverviewCache, overviewFigureMode,
+    overview, overviewLoading, overviewError, fetchOverview, clearOverviewCache,
   } = documentState;
+
+  const openUploadHome = useCallback(() => {
+    uploadStartsNewChatRef.current = false;
+    setSelectedParseRoute(loadStoredParseRoute());
+    setSidebarMode('history');
+    startNewChat();
+  }, [startNewChat]);
+
+  const handleUploadRouteChange = useCallback((route) => {
+    const nextRoute = saveStoredParseRoute(route);
+    setSelectedParseRoute(nextRoute);
+  }, []);
+
+  const handleChooseUploadFile = useCallback((startsNewChat = true) => {
+    uploadStartsNewChatRef.current = typeof startsNewChat === 'boolean' ? startsNewChat : true;
+    fileInputRef.current?.click();
+  }, [fileInputRef]);
+
+  const handleUploadInputChange = useCallback((event) => {
+    if (!event.target.files?.[0]) return;
+    if (uploadStartsNewChatRef.current) startNewChat();
+    handleFileUpload(event, { parseRoute: selectedParseRoute });
+  }, [handleFileUpload, selectedParseRoute, startNewChat]);
+  const docInfoParseIdentity = getParseIdentity(docInfo?.parse_manifest);
+  const deepParseStatusMatchesDocument = Boolean(
+    deepParseStatus
+    && (!deepParseStatus.doc_id || String(deepParseStatus.doc_id) === String(docId || ''))
+    && (
+      !docInfo?.parse_manifest
+      || !deepParseStatus?.parse_manifest
+      || getStatusParseIdentity(deepParseStatus) === docInfoParseIdentity
+    )
+  );
+  const currentDeepParseStatus = deepParseStatusMatchesDocument ? deepParseStatus : null;
+  const documentParseManifest = currentDeepParseStatus?.parse_manifest || docInfo?.parse_manifest || null;
+  const documentParseIdentity = getParseIdentity(documentParseManifest);
+  const currentTranslationCredentials = getChatCredentials?.() || {};
+  const translationProviderId = String(currentTranslationCredentials.providerId || 'openai');
+  const translationModelId = String(currentTranslationCredentials.modelId || 'gpt-4o');
+  const pretranslateAutoIdentity = buildPretranslateAutoIdentity({
+    docId,
+    parseIdentity: documentParseIdentity,
+    providerId: translationProviderId,
+    modelId: translationModelId,
+  });
+  const blockIndexMatchesCurrentParse = blockIndexMatchesParseContext({
+    blockIndex,
+    docId,
+    parseManifest: documentParseManifest,
+  });
+  if (
+    parseContextRef.current.docId !== (docId || '')
+    || parseContextRef.current.parseIdentity !== documentParseIdentity
+  ) {
+    parseContextRef.current = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch + 1,
+    };
+  }
+  const isCurrentParseContext = useCallback((context) => (
+    parseContextRef.current.docId === context.docId
+    && parseContextRef.current.parseIdentity === context.parseIdentity
+    && parseContextRef.current.epoch === context.epoch
+  ), []);
+
+  useEffect(() => {
+    blockTranslationEpochRef.current += 1;
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    pretranslateStartedDocRef.current = null;
+    setBlockTranslations({});
+    setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
+    setFailedTranslationBlockIds(new Set());
+    setTranslatingBlockIds(new Set());
+    setBlockTranslateLoading(false);
+    setBlockTranslateError('');
+    setPretranslateNotice('');
+    setPretranslateError('');
+    setPretranslateProgress({ running: false, done: 0, total: 0 });
+  }, [translationModelId, translationProviderId]);
+  const documentParseReady = typeof currentDeepParseStatus?.parse_ready === 'boolean'
+    ? currentDeepParseStatus.parse_ready
+    : typeof docInfo?.parse_ready === 'boolean'
+      ? docInfo.parse_ready
+      : documentParseManifest?.status === 'ready';
+  const currentParseStatus = String(
+    currentDeepParseStatus?.status || documentParseManifest?.status || ''
+  ).trim().toLowerCase();
+  const isMinerUFullRouteFailed = isMinerUFullRoute(documentParseManifest)
+    && currentParseStatus === 'failed';
+  const isMinerUFullRouteCancelled = isMinerUFullRoute(documentParseManifest)
+    && currentParseStatus === 'cancelled';
+  const isMinerUFullRoutePending = isMinerUFullRoute(documentParseManifest)
+    && (!documentParseReady || documentParseManifest?.status !== 'ready');
+  const minerUParsePendingNotice = getMinerUParsePendingNotice(documentParseManifest, currentDeepParseStatus);
+  const isLegacyParseManifest = Boolean(documentParseManifest?.metadata?.legacy_inferred);
+  const primaryParseRoute = String(documentParseManifest?.resolved_route || '').trim().toLowerCase();
+  const isNewLocalPrimaryRoute = Boolean(
+    documentParseManifest && !isLegacyParseManifest && primaryParseRoute === 'local'
+  );
+  const isNewMinerUPrimaryRoute = Boolean(
+    documentParseManifest && !isLegacyParseManifest && primaryParseRoute === 'mineru'
+  );
+  const canUseLegacyMinerUActions = !documentParseManifest || isLegacyParseManifest;
+  const canPublishPendingMinerURag = isNewMinerUPrimaryRoute
+    && documentParseManifest?.stage === 'awaiting_rag_index';
+  const minerUActionLockedNotice = isNewLocalPrimaryRoute
+    ? '当前文档已按本地路线完成解析；如需 MinerU，请重新上传时选择 MinerU 全程解析'
+    : '当前文档由 MinerU 全程路线管理；请等待统一发布，或重新上传时选择其他路线';
+  const [pendingHistoryId, setPendingHistoryId] = useState(null);
+  const handleHistorySessionClick = useCallback(async (item) => {
+    setPendingHistoryId(item.id);
+    try {
+      await loadSession(item);
+    } finally {
+      setPendingHistoryId((currentId) => currentId === item.id ? null : currentId);
+    }
+  }, [loadSession]);
 
   // ========== PDF 状态 Hook（需求 1.1） ==========
   const pdfState = usePDFState({
     docId,
     docInfo,
+    documentIdentity: documentParseIdentity,
     useRerank: useRerankSetting,
     rerankerModel,
     getRerankCredentials,
@@ -694,6 +1359,13 @@ const ChatPDF = () => {
 
   useEffect(() => {
     let cancelled = false;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isActiveRequest = () => !cancelled && isCurrentParseContext(requestContext);
+    blockTranslationEpochRef.current += 1;
 
     if (!docId) {
       setBlockIndex(null);
@@ -701,9 +1373,11 @@ const ChatPDF = () => {
       setBlockIndexLoading(false);
       setReadingOutline(null);
       setReadingOutlineError('');
+      setReadingOutlineFallbackNotice('');
       setReadingOutlineLoading(false);
       setSectionOutline(null);
       setSectionOutlineError('');
+      setSectionOutlineFallbackNotice('');
       setSectionOutlineLoading(false);
       setActiveReadingNodeId(null);
       setVisitedReadingNodeIds(new Set());
@@ -712,13 +1386,16 @@ const ChatPDF = () => {
       setBlockTranslations({});
       setBlockTranslateError('');
       setPretranslateNotice('');
+      setPretranslateError('');
       setBlockTranslateLoading(false);
       setTranslatingBlockIds(new Set());
       setBlockTranslationsLoaded(false);
+      setBlockTranslationsLoadedIdentity('');
       setPretranslateProgress({ running: false, done: 0, total: 0 });
       setFailedTranslationBlockIds(new Set());
       setDeepParseStatus(null);
       setDeepParseNotice('');
+      setRagIndexError('');
       setHoveredReadingBlockId(null);
       setPinnedReadingBlockId(null);
       pretranslateRunRef.current += 1;
@@ -734,9 +1411,11 @@ const ChatPDF = () => {
     setBlockIndexLoading(true);
     setReadingOutline(null);
     setReadingOutlineError('');
+    setReadingOutlineFallbackNotice('');
     setReadingOutlineLoading(false);
     setSectionOutline(null);
     setSectionOutlineError('');
+    setSectionOutlineFallbackNotice('');
     setSectionOutlineLoading(false);
     setActiveReadingNodeId(null);
     setVisitedReadingNodeIds(new Set());
@@ -745,15 +1424,18 @@ const ChatPDF = () => {
     setBlockTranslations({});
     setBlockTranslateError('');
     setPretranslateNotice('');
+    setPretranslateError('');
     setBlockTranslateLoading(false);
     setTranslatingBlockIds(new Set());
     setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setFailedTranslationBlockIds(new Set());
     setDeepParseStatus(null);
     setDeepParseNotice('');
     setRagIndexStatus(null);
     setRagIndexNotice('');
+    setRagIndexError('');
     setRagIndexBusy(false);
     setHoveredReadingBlockId(null);
     setPinnedReadingBlockId(null);
@@ -762,61 +1444,150 @@ const ChatPDF = () => {
     pretranslateAbortRef.current = null;
     pretranslateStartedDocRef.current = null;
 
+    if (isMinerUFullRoutePending) {
+      setBlockIndexError(minerUParsePendingNotice);
+      setBlockIndexLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     fetch(`${API_BASE_URL}/documents/${docId}/blocks?t=${Date.now()}`)
       .then(async (res) => {
         if (!res.ok) {
           const detail = await res.json().catch(() => ({}));
-          throw new Error(detail?.detail || `HTTP ${res.status}`);
+          const error = new Error(detail?.detail || `HTTP ${res.status}`);
+          error.status = res.status;
+          throw error;
         }
         return res.json();
       })
       .then((data) => {
-        if (!cancelled) setBlockIndex(data);
+        if (!isActiveRequest()) return;
+        if (!blockIndexMatchesParseContext({
+          blockIndex: data,
+          docId: requestContext.docId,
+          parseManifest: documentParseManifest,
+        })) {
+          throw new Error('阅读结构与当前解析路线不一致');
+        }
+        setBlockIndex(data);
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (isActiveRequest()) {
           console.warn('[ImmersiveReading] blocks 加载失败', error);
-          setBlockIndexError('大纲加载失败');
+          setBlockIndexError(
+            isMinerUFullRoutePending || isMinerUParseGateError(error)
+              ? minerUParsePendingNotice
+              : '大纲加载失败'
+          );
         }
       })
       .finally(() => {
-        if (!cancelled) setBlockIndexLoading(false);
+        if (isActiveRequest()) setBlockIndexLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [docId, blockIndexReloadKey]);
+  }, [
+    docId,
+    documentParseIdentity,
+    blockIndexReloadKey,
+    documentParseManifest,
+    isCurrentParseContext,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+  ]);
 
   const refreshDeepParseStatus = useCallback(async () => {
     if (!docId) return null;
-    const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse/status?t=${Date.now()}`);
+    const requestContext = {
+      docId,
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const res = await fetch(`${API_BASE_URL}/documents/${requestContext.docId}/deep-parse/status?t=${Date.now()}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    if (
+      !isCurrentParseContext(requestContext)
+      || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
+    ) {
+      return null;
+    }
     setDeepParseStatus(data);
-    if (data?.rag_index) setRagIndexStatus(data.rag_index);
+    if (data?.parse_manifest || typeof data?.parse_ready === 'boolean') {
+      setDocInfo((current) => {
+        if (!current) return current;
+        const currentDocId = current.doc_id || current.docId || current.id;
+        if (currentDocId && String(currentDocId) !== String(requestContext.docId)) return current;
+        if (
+          current?.parse_manifest
+          && getParseIdentity(current.parse_manifest) !== requestContext.parseIdentity
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          ...(data.parse_manifest ? { parse_manifest: data.parse_manifest } : {}),
+          ...(typeof data.parse_ready === 'boolean' ? { parse_ready: data.parse_ready } : {}),
+        };
+      });
+    }
+    if (data?.rag_index) {
+      setRagIndexStatus(data.rag_index);
+      setRagIndexError(
+        data.rag_index.status === 'failed'
+          ? data.rag_index.error || '问答索引处理失败'
+          : ''
+      );
+    }
     return data;
-  }, [docId]);
+  }, [docId, documentParseIdentity, isCurrentParseContext, setDocInfo]);
 
   const refreshRagIndexStatus = useCallback(async () => {
     if (!docId) return null;
-    const res = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/status?t=${Date.now()}`);
+    const requestContext = {
+      docId,
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const res = await fetch(`${API_BASE_URL}/documents/${requestContext.docId}/rag-index/status?t=${Date.now()}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    if (
+      !isCurrentParseContext(requestContext)
+      || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
+    ) {
+      return null;
+    }
     setRagIndexStatus(data);
+    setRagIndexError(data?.status === 'failed' ? data.error || '问答索引处理失败' : '');
     return data;
-  }, [docId]);
+  }, [docId, documentParseIdentity, isCurrentParseContext]);
 
   const refreshReadingBlocksAfterDeepParse = useCallback(() => {
+    // MinerU 发布后旧 block id 不再可信，先让所有旧翻译请求失效。
+    blockTranslationEpochRef.current += 1;
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    pretranslateStartedDocRef.current = null;
     setBlockTranslations({});
     setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
     setFailedTranslationBlockIds(new Set());
     setTranslatingBlockIds(new Set());
     setBlockTranslateError('');
+    setBlockTranslateLoading(false);
     setPretranslateNotice('');
+    setPretranslateError('');
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setReadingOutline(null);
     setSectionOutline(null);
+    setReadingOutlineFallbackNotice('');
+    setSectionOutlineFallbackNotice('');
     setReadingOutlineReloadKey((value) => value + 1);
     setSectionOutlineReloadKey((value) => value + 1);
     setActiveReadingNodeId(null);
@@ -830,6 +1601,47 @@ const ChatPDF = () => {
     // 速览缓存，避免用户已经打开过速览时仍显示深度解析前的旧图表结果。
     clearOverviewCache?.(docId);
   }, [clearOverviewCache, docId]);
+
+  const refreshReadingBlocksAfterVisualSupplement = useCallback(() => {
+    // A local VLM supplement adds parse-bound caption blocks.  Existing
+    // translation/outline state may be keyed to the prior block collection,
+    // but the current overview itself remains valid and must not be cleared.
+    blockTranslationEpochRef.current += 1;
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    pretranslateStartedDocRef.current = null;
+    setBlockTranslations({});
+    setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
+    setFailedTranslationBlockIds(new Set());
+    setTranslatingBlockIds(new Set());
+    setBlockTranslateError('');
+    setBlockTranslateLoading(false);
+    setPretranslateNotice('');
+    setPretranslateError('');
+    setPretranslateProgress({ running: false, done: 0, total: 0 });
+    setReadingOutline(null);
+    setSectionOutline(null);
+    setReadingOutlineFallbackNotice('');
+    setSectionOutlineFallbackNotice('');
+    setReadingOutlineReloadKey((value) => value + 1);
+    setSectionOutlineReloadKey((value) => value + 1);
+    setBlockIndexReloadKey((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    const revision = String(
+      overview?.visual_supplement_revision
+      || overview?.figure_meta?.visual_supplement_revision
+      || ''
+    ).trim();
+    if (!docId || !revision) return;
+    const token = `${docId}:${documentParseIdentity}:${revision}`;
+    if (visualSupplementRevisionRef.current === token) return;
+    visualSupplementRevisionRef.current = token;
+    refreshReadingBlocksAfterVisualSupplement();
+  }, [docId, documentParseIdentity, overview, refreshReadingBlocksAfterVisualSupplement]);
 
   useEffect(() => {
     let cancelled = false;
@@ -850,7 +1662,7 @@ const ChatPDF = () => {
   }, [docId, refreshDeepParseStatus, refreshRagIndexStatus]);
 
   useEffect(() => {
-    if (!docId || !['queued', 'running'].includes(deepParseStatus?.status)) {
+    if (!docId || !['queued', 'running'].includes(currentDeepParseStatus?.status)) {
       return () => {};
     }
     let cancelled = false;
@@ -858,13 +1670,16 @@ const ChatPDF = () => {
       try {
         const data = await refreshDeepParseStatus();
         if (cancelled || !data) return;
-        if (data.status === 'ready' && data.active_mineru) {
+        if (data.status === 'ready' && data.active_mineru && data.parse_ready === true) {
           setDeepParseNotice(
             data.recommend_rag_index_rebuild
               ? 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
               : 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新'
           );
           refreshReadingBlocksAfterDeepParse();
+          window.clearInterval(timer);
+        } else if (data.status === 'ready' && data.active_mineru) {
+          setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
           window.clearInterval(timer);
         } else if (data.status === 'failed') {
           setDeepParseNotice(data.error || 'MinerU 深度解析失败');
@@ -883,71 +1698,131 @@ const ChatPDF = () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [deepParseStatus?.status, docId, refreshDeepParseStatus, refreshReadingBlocksAfterDeepParse]);
+  }, [
+    currentDeepParseStatus?.status,
+    docId,
+    documentParseIdentity,
+    refreshDeepParseStatus,
+    refreshReadingBlocksAfterDeepParse,
+  ]);
 
-  const handleStartMinerUDeepParse = useCallback(async () => {
-    if (!docId || ['queued', 'running'].includes(deepParseStatus?.status)) return;
-    const activeMinerU = Boolean(deepParseStatus?.active_mineru);
-    const parseTarget = deepParseStatus?.access_mode === 'direct'
+  const handleStartMinerUDeepParse = useCallback(async (options = {}) => {
+    const retryFullRoute = options?.retryFullRoute === true;
+    const canRetryFullRoute = retryFullRoute && isNewMinerUPrimaryRoute && isMinerUFullRouteFailed;
+    if (!canUseLegacyMinerUActions && !canRetryFullRoute) {
+      setDeepParseNotice(minerUActionLockedNotice);
+      return;
+    }
+    if (!docId || ['queued', 'running'].includes(currentDeepParseStatus?.status)) return;
+    const activeMinerU = Boolean(currentDeepParseStatus?.active_mineru);
+    const parseTarget = currentDeepParseStatus?.access_mode === 'direct'
       ? 'MinerU 官方 API'
       : '你配置的 MinerU Worker 服务';
     const confirmed = window.confirm(
-      activeMinerU
+      canRetryFullRoute
+        ? `重试 MinerU 全程解析会把当前 PDF 重新上传到${parseTarget}，成功后统一替换正文、阅读、问答索引、大纲、总结、翻译与速览。是否继续？`
+        : activeMinerU
         ? `重新运行 MinerU 深度解析会把当前 PDF 上传到${parseTarget}，并替换阅读块、大纲、翻译缓存和速览图表。是否继续？`
         : `MinerU 深度解析会把当前 PDF 上传到${parseTarget}，用于生成带坐标的结构化解析结果，速览图表也会随之升级。是否继续？`
     );
     if (!confirmed) return;
 
     setDeepParseNotice('');
+    const requestContext = {
+      docId,
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
     try {
-      const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse`, {
+      const res = await fetch(`${API_BASE_URL}/documents/${requestContext.docId}/deep-parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: 'mineru', force: activeMinerU }),
+        body: JSON.stringify({ provider: 'mineru', force: activeMinerU || canRetryFullRoute }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (
+        !isCurrentParseContext(requestContext)
+        || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
+      ) return;
       setDeepParseStatus(data);
-      if (data.status === 'ready' && data.active_mineru) {
+      if (data.status === 'ready' && data.active_mineru && data.parse_ready === true) {
         setDeepParseNotice(
           data.recommend_rag_index_rebuild
             ? 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
             : 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新'
         );
         refreshReadingBlocksAfterDeepParse();
+      } else if (data.status === 'ready' && data.active_mineru) {
+        setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
       } else {
         setDeepParseNotice('MinerU 深度解析已开始，可继续阅读，完成后阅读结构与速览图表会自动刷新');
       }
     } catch (error) {
+      if (!isCurrentParseContext(requestContext)) return;
       setDeepParseNotice(error.message || 'MinerU 深度解析启动失败');
       setDeepParseStatus((prev) => ({ ...(prev || {}), status: 'failed', error: error.message || '启动失败' }));
     }
-  }, [deepParseStatus?.access_mode, deepParseStatus?.active_mineru, deepParseStatus?.status, docId, refreshReadingBlocksAfterDeepParse]);
+  }, [
+    canUseLegacyMinerUActions,
+    currentDeepParseStatus?.access_mode,
+    currentDeepParseStatus?.active_mineru,
+    currentDeepParseStatus?.status,
+    docId,
+    documentParseIdentity,
+    isCurrentParseContext,
+    isMinerUFullRouteFailed,
+    isNewMinerUPrimaryRoute,
+    minerUActionLockedNotice,
+    refreshReadingBlocksAfterDeepParse,
+  ]);
 
   const handleCancelMinerUDeepParse = useCallback(async () => {
-    if (!docId || !['queued', 'running'].includes(deepParseStatus?.status)) return;
+    if (!docId || !['queued', 'running'].includes(currentDeepParseStatus?.status)) return;
+    const requestContext = {
+      docId,
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
     try {
-      const res = await fetch(`${API_BASE_URL}/documents/${docId}/deep-parse/cancel`, {
+      const res = await fetch(`${API_BASE_URL}/documents/${requestContext.docId}/deep-parse/cancel`, {
         method: 'POST',
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (
+        !isCurrentParseContext(requestContext)
+        || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
+      ) return;
       setDeepParseStatus(data);
       setDeepParseNotice('MinerU 深度解析已取消');
     } catch (error) {
+      if (!isCurrentParseContext(requestContext)) return;
       setDeepParseNotice(error.message || 'MinerU 深度解析取消失败');
     }
-  }, [deepParseStatus?.status, docId]);
+  }, [currentDeepParseStatus?.status, docId, documentParseIdentity, isCurrentParseContext]);
 
   const handleRebuildMinerURagIndex = useCallback(async () => {
+    if (isNewLocalPrimaryRoute) {
+      setRagIndexNotice('当前文档已固定为本地解析路线，不能单独切换到 MinerU 问答索引');
+      return;
+    }
+    if (isNewMinerUPrimaryRoute && !canPublishPendingMinerURag) {
+      setRagIndexNotice('当前 MinerU 全程解析会统一管理问答索引，无需单独重建');
+      return;
+    }
     if (!docId || ragIndexBusy) return;
-    if (!deepParseStatus?.active_mineru) {
-      setRagIndexNotice('请先完成 MinerU 深度解析');
+    if (!canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru) {
+      const message = '请先完成 MinerU 深度解析';
+      setRagIndexNotice(message);
+      setRagIndexError(message);
       return;
     }
     const embedConfig = getEmbeddingConfig?.() || {};
     if (!embedConfig.isValid) {
-      setRagIndexNotice('请先在模型设置里选择可用的 Embedding 模型');
+      const message = '请先在模型设置里选择可用的 Embedding 模型';
+      setRagIndexNotice(message);
+      setRagIndexError(message);
       return;
     }
     const embeddingModel = embedConfig.compositeKey || getDefaultModel('embeddingModel') || 'local-minilm';
@@ -955,6 +1830,7 @@ const ChatPDF = () => {
     const embeddingApiHost = embedConfig.provider?.apiHost || '';
 
     setRagIndexBusy(true);
+    setRagIndexError('');
     setRagIndexNotice('正在评估 MinerU 问答索引重建成本...');
     try {
       const estimateRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
@@ -998,24 +1874,39 @@ const ChatPDF = () => {
         throw new Error(typeof detail === 'string' ? detail : detail?.message || `HTTP ${rebuildRes.status}`);
       }
       setRagIndexStatus(rebuildData.rag_index || null);
+      setRagIndexError('');
       setRagIndexNotice('MinerU 问答索引已重建，表格问答会优先使用结构化证据');
-      refreshDeepParseStatus().catch(() => {});
+      const status = await refreshDeepParseStatus();
+      if (status?.active_mineru && status?.parse_ready === true) {
+        setDeepParseNotice('MinerU 问答索引已发布，阅读结构、大纲、翻译、速览和问答现已同步切换');
+        refreshReadingBlocksAfterDeepParse();
+      }
     } catch (error) {
-      setRagIndexNotice(error.message || 'MinerU 问答索引重建失败，已保留原索引');
+      const message = error.message || 'MinerU 问答索引重建失败，已保留原索引';
+      setRagIndexNotice(message);
+      setRagIndexError(message);
     } finally {
       setRagIndexBusy(false);
     }
   }, [
-    deepParseStatus?.active_mineru,
+    canPublishPendingMinerURag,
+    currentDeepParseStatus?.active_mineru,
     docId,
     getDefaultModel,
     getEmbeddingApiKey,
     getEmbeddingConfig,
+    isNewLocalPrimaryRoute,
+    isNewMinerUPrimaryRoute,
     ragIndexBusy,
     refreshDeepParseStatus,
+    refreshReadingBlocksAfterDeepParse,
   ]);
 
   const handleRollbackRagIndex = useCallback(async () => {
+    if (!canUseLegacyMinerUActions) {
+      setRagIndexNotice(minerUActionLockedNotice);
+      return;
+    }
     if (!docId || ragIndexBusy) return;
     const confirmed = window.confirm('将回退到本地 PDF 解析生成的问答索引。阅读侧 MinerU 解析不受影响。是否继续？');
     if (!confirmed) return;
@@ -1033,57 +1924,99 @@ const ChatPDF = () => {
     } finally {
       setRagIndexBusy(false);
     }
-  }, [docId, ragIndexBusy, refreshDeepParseStatus]);
+  }, [canUseLegacyMinerUActions, docId, minerUActionLockedNotice, ragIndexBusy, refreshDeepParseStatus]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isActiveRequest = () => !cancelled && isCurrentParseContext(requestContext);
     if (!docId || !blockIndex) {
       setReadingOutline(null);
-      setReadingOutlineError('');
+      setReadingOutlineError(isMinerUFullRoutePending ? minerUParsePendingNotice : '');
+      setReadingOutlineFallbackNotice('');
       setReadingOutlineLoading(false);
       return () => {};
     }
 
     const requestId = readingOutlineRequestRef.current + 1;
     readingOutlineRequestRef.current = requestId;
-    const { headers, canCallModel } = getChatRequestConfig();
+    const { headers, canCallModel, providerId, modelId } = getChatRequestConfig();
     const shouldForce = canCallModel && readingOutlineForceRef.current;
     readingOutlineForceRef.current = false;
-    const shouldGenerate = canCallModel && (shouldForce || (aiAutoProcess && autoOutlineSummary));
-    const method = shouldGenerate ? 'POST' : 'GET';
-    const url = shouldGenerate
-      ? `${API_BASE_URL}/documents/${docId}/reading-outline`
-      : `${API_BASE_URL}/documents/${docId}/reading-outline?t=${Date.now()}`;
-    const requestOptions = shouldGenerate
-      ? {
-          method,
-          headers,
-          body: JSON.stringify({ force: shouldForce }),
-        }
-      : { method };
+    const shouldAutoGenerate = canCallModel && aiAutoProcess && autoOutlineSummary;
+    const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
+    const cachedOutline = readingOutlineCacheRef.current.get(cacheKey);
+    if (
+      !shouldForce
+      && cachedOutline
+      && (!shouldAutoGenerate || isReusableOutlineResult(cachedOutline, 'reading', providerId, modelId))
+    ) {
+      setReadingOutline(cachedOutline);
+      setReadingOutlineError('');
+      setReadingOutlineFallbackNotice(
+        cachedOutline?.meta?.generation_error ? 'AI 总结生成失败，当前显示本地基础结果' : ''
+      );
+      setReadingOutlineLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     setReadingOutlineLoading(true);
     setReadingOutlineError('');
-    fetch(url, requestOptions)
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
-        return data;
-      })
+    setReadingOutlineFallbackNotice('');
+
+    const requestOutline = async (method, force = false) => {
+      const url = method === 'POST'
+        ? `${API_BASE_URL}/documents/${docId}/reading-outline`
+        : `${API_BASE_URL}/documents/${docId}/reading-outline?t=${Date.now()}`;
+      const res = await fetch(url, method === 'POST' ? {
+        method,
+        headers,
+        body: JSON.stringify({ force }),
+      } : { method });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      return data;
+    };
+
+    (async () => {
+      let data;
+      if (shouldForce) {
+        data = await requestOutline('POST', true);
+      } else {
+        data = await requestOutline('GET');
+        if (shouldAutoGenerate && !isReusableOutlineResult(data, 'reading', providerId, modelId)) {
+          data = await requestOutline('POST', false);
+        }
+      }
+      return data;
+    })()
       .then((data) => {
-        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+        if (isActiveRequest() && readingOutlineRequestRef.current === requestId) {
+          readingOutlineCacheRef.current.set(cacheKey, data);
           setReadingOutline(data);
+          setReadingOutlineFallbackNotice(
+            data?.meta?.generation_error ? 'AI 总结生成失败，当前显示本地基础结果' : ''
+          );
         }
       })
       .catch((error) => {
-        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+        if (isActiveRequest() && readingOutlineRequestRef.current === requestId) {
           console.warn('[ImmersiveReading] AI 大纲加载失败', error);
           setReadingOutline(buildClientReadingFallback(blockIndex));
           setReadingOutlineError('');
+          setReadingOutlineFallbackNotice(
+            shouldForce || shouldAutoGenerate ? 'AI 总结生成失败，当前显示本地基础结果' : ''
+          );
         }
       })
       .finally(() => {
-        if (!cancelled && readingOutlineRequestRef.current === requestId) {
+        if (isActiveRequest() && readingOutlineRequestRef.current === requestId) {
           setReadingOutlineLoading(false);
         }
       });
@@ -1091,9 +2024,24 @@ const ChatPDF = () => {
     return () => {
       cancelled = true;
     };
-  }, [docId, blockIndex, getChatRequestConfig, readingOutlineReloadKey, aiAutoProcess, autoOutlineSummary]);
+  }, [
+    docId,
+    documentParseIdentity,
+    blockIndex,
+    getChatRequestConfig,
+    isCurrentParseContext,
+    readingOutlineReloadKey,
+    aiAutoProcess,
+    autoOutlineSummary,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+  ]);
 
   const handleRegenerateReadingOutline = useCallback(() => {
+    if (isMinerUFullRoutePending) {
+      setReadingOutlineError(minerUParsePendingNotice);
+      return;
+    }
     const { canCallModel, providerName } = getChatRequestConfig();
     if (!canCallModel) {
       setReadingOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
@@ -1101,9 +2049,13 @@ const ChatPDF = () => {
     }
     readingOutlineForceRef.current = true;
     setReadingOutlineReloadKey((value) => value + 1);
-  }, [getChatRequestConfig]);
+  }, [getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
 
   const handleRegenerateSectionOutline = useCallback(() => {
+    if (isMinerUFullRoutePending) {
+      setSectionOutlineError(minerUParsePendingNotice);
+      return;
+    }
     const { canCallModel, providerName } = getChatRequestConfig();
     if (!canCallModel) {
       setSectionOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
@@ -1111,89 +2063,188 @@ const ChatPDF = () => {
     }
     sectionOutlineForceRef.current = true;
     setSectionOutlineReloadKey((value) => value + 1);
-  }, [getChatRequestConfig]);
+  }, [getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isActiveRequest = () => !cancelled && isCurrentParseContext(requestContext);
     if (!docId || !blockIndex) {
       setSectionOutline(null);
-      setSectionOutlineError('');
+      setSectionOutlineError(isMinerUFullRoutePending ? minerUParsePendingNotice : '');
+      setSectionOutlineFallbackNotice('');
       setSectionOutlineLoading(false);
       return () => {};
     }
 
-    const { headers, canCallModel } = getChatRequestConfig();
+    const requestId = sectionOutlineRequestRef.current + 1;
+    sectionOutlineRequestRef.current = requestId;
+    const { headers, canCallModel, providerId, modelId } = getChatRequestConfig();
     const shouldForce = canCallModel && sectionOutlineForceRef.current;
     sectionOutlineForceRef.current = false;
-    const shouldGenerate = canCallModel && (shouldForce || (aiAutoProcess && autoOutlineSummary));
-    const method = shouldGenerate ? 'POST' : 'GET';
-    const url = shouldGenerate
-      ? `${API_BASE_URL}/documents/${docId}/section-outline`
-      : `${API_BASE_URL}/documents/${docId}/section-outline?t=${Date.now()}`;
+    const shouldAutoGenerate = canCallModel && aiAutoProcess && autoOutlineSummary;
+    const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
+    const cachedOutline = sectionOutlineCacheRef.current.get(cacheKey);
+    if (
+      !shouldForce
+      && cachedOutline
+      && (!shouldAutoGenerate || isReusableOutlineResult(cachedOutline, 'section', providerId, modelId))
+    ) {
+      setSectionOutline(cachedOutline);
+      setSectionOutlineError('');
+      setSectionOutlineFallbackNotice(
+        cachedOutline?.meta?.generation_error ? 'AI 章节大纲生成失败，当前显示文档基础结构' : ''
+      );
+      setSectionOutlineLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     setSectionOutlineLoading(true);
     setSectionOutlineError('');
-    fetch(url, shouldGenerate ? {
-      method,
-      headers,
-      body: JSON.stringify({ force: shouldForce }),
-    } : { method })
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
-        return data;
-      })
+    setSectionOutlineFallbackNotice('');
+
+    const requestOutline = async (method, force = false) => {
+      const url = method === 'POST'
+        ? `${API_BASE_URL}/documents/${docId}/section-outline`
+        : `${API_BASE_URL}/documents/${docId}/section-outline?t=${Date.now()}`;
+      const res = await fetch(url, method === 'POST' ? {
+        method,
+        headers,
+        body: JSON.stringify({ force }),
+      } : { method });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      return data;
+    };
+
+    (async () => {
+      let data;
+      if (shouldForce) {
+        data = await requestOutline('POST', true);
+      } else {
+        data = await requestOutline('GET');
+        if (shouldAutoGenerate && !isReusableOutlineResult(data, 'section', providerId, modelId)) {
+          data = await requestOutline('POST', false);
+        }
+      }
+      return data;
+    })()
       .then((data) => {
-        if (!cancelled) setSectionOutline(data);
+        if (isActiveRequest() && sectionOutlineRequestRef.current === requestId) {
+          sectionOutlineCacheRef.current.set(cacheKey, data);
+          setSectionOutline(data);
+          setSectionOutlineFallbackNotice(
+            data?.meta?.generation_error ? 'AI 章节大纲生成失败，当前显示文档基础结构' : ''
+          );
+        }
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (isActiveRequest() && sectionOutlineRequestRef.current === requestId) {
           console.warn('[ImmersiveReading] 章节大纲加载失败，回退启发式大纲', error);
           setSectionOutline(null);
           setSectionOutlineError('');
+          setSectionOutlineFallbackNotice(
+            shouldForce || shouldAutoGenerate ? 'AI 章节大纲生成失败，当前显示文档基础结构' : ''
+          );
         }
       })
       .finally(() => {
-        if (!cancelled) setSectionOutlineLoading(false);
+        if (isActiveRequest() && sectionOutlineRequestRef.current === requestId) {
+          setSectionOutlineLoading(false);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [docId, blockIndex, getChatRequestConfig, sectionOutlineReloadKey, aiAutoProcess, autoOutlineSummary]);
+  }, [
+    docId,
+    documentParseIdentity,
+    blockIndex,
+    getChatRequestConfig,
+    isCurrentParseContext,
+    sectionOutlineReloadKey,
+    aiAutoProcess,
+    autoOutlineSummary,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!docId || !blockIndex) {
+    const translationEpoch = blockTranslationEpochRef.current;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isActiveRequest = () => (
+      !cancelled
+      && blockTranslationEpochRef.current === translationEpoch
+      && isCurrentParseContext(requestContext)
+    );
+    if (!docId || !blockIndex || !blockIndexMatchesCurrentParse) {
       setBlockTranslations({});
       setBlockTranslationsLoaded(false);
+      setBlockTranslationsLoadedIdentity('');
       setFailedTranslationBlockIds(new Set());
+      setBlockTranslateError('');
+      setPretranslateNotice('');
+      setPretranslateError('');
       return () => {};
     }
     setBlockTranslationsLoaded(false);
+    setBlockTranslationsLoadedIdentity('');
     setFailedTranslationBlockIds(new Set());
+    setBlockTranslateError('');
+    setPretranslateNotice('');
+    setPretranslateError('');
 
-    fetch(`${API_BASE_URL}/documents/${docId}/blocks/translations?target_lang=zh&t=${Date.now()}`)
+    const { headers } = getChatRequestConfig();
+    fetch(`${API_BASE_URL}/documents/${docId}/blocks/translations?target_lang=zh&t=${Date.now()}`, {
+      headers,
+    })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
       .then((data) => {
-        if (!cancelled) setBlockTranslations(filterValidBlockTranslations(data?.items || {}));
+        if (isActiveRequest()) {
+          setBlockTranslations(filterValidBlockTranslations(data?.items || {}));
+        }
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (isActiveRequest()) {
           console.warn('[ImmersiveReading] 翻译缓存加载失败', error);
         }
       })
       .finally(() => {
-        if (!cancelled) setBlockTranslationsLoaded(true);
+        if (isActiveRequest()) {
+          setBlockTranslationsLoaded(true);
+          setBlockTranslationsLoadedIdentity(pretranslateAutoIdentity);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [docId, blockIndex]);
+  }, [
+    blockIndex,
+    blockIndexMatchesCurrentParse,
+    docId,
+    documentParseIdentity,
+    getChatRequestConfig,
+    isCurrentParseContext,
+    pretranslateAutoIdentity,
+    translationModelId,
+    translationProviderId,
+  ]);
 
   const blockMap = useMemo(() => {
     const result = {};
@@ -1344,13 +2395,14 @@ const ChatPDF = () => {
   const activeReadingBlockId = hoveredReadingBlockId || focusedReadingBlockIds[0] || pinnedReadingBlockId;
 
   const allTranslatableReadingBlocks = useMemo(() => {
+    if (!blockIndexMatchesCurrentParse) return [];
     return (blockIndex?.pages || []).flatMap((page) => {
       const pageNumber = Number(page.page) || 1;
       return (page.blocks || [])
         .filter(isTranslatableReadingBlock)
         .map((block) => ({ ...block, page: pageNumber }));
     });
-  }, [blockIndex]);
+  }, [blockIndex, blockIndexMatchesCurrentParse]);
 
   const translatedReadingBlockCount = useMemo(() => {
     return allTranslatableReadingBlocks.filter((block) => blockTranslations[block.block_id]).length;
@@ -1363,28 +2415,65 @@ const ChatPDF = () => {
   }, [allTranslatableReadingBlocks, failedTranslationBlockIds]);
 
   useEffect(() => {
-    if (!pretranslateProgress.running || !docId || !blockIndex || allTranslatableReadingBlocks.length === 0) {
+    if (pretranslateProgress.running || pretranslateProgress.coverageLocked) return;
+    const total = allTranslatableReadingBlocks.length;
+    const done = Math.min(total, translatedReadingBlockCount);
+    setPretranslateProgress((prev) => (
+      prev.done === done && prev.total === total && !prev.force
+        ? prev
+        : { ...prev, running: false, done, total, force: false }
+    ));
+  }, [
+    allTranslatableReadingBlocks.length,
+    pretranslateProgress.coverageLocked,
+    pretranslateProgress.running,
+    translatedReadingBlockCount,
+  ]);
+
+  useEffect(() => {
+    if (
+      !pretranslateProgress.running
+      || !docId
+      || !blockIndex
+      || !blockIndexMatchesCurrentParse
+      || allTranslatableReadingBlocks.length === 0
+    ) {
       return () => {};
     }
 
     let cancelled = false;
+    const translationEpoch = blockTranslationEpochRef.current;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isActiveRequest = () => (
+      !cancelled
+      && blockTranslationEpochRef.current === translationEpoch
+      && isCurrentParseContext(requestContext)
+    );
     const pollCachedTranslations = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/documents/${docId}/blocks/translations?target_lang=zh&t=${Date.now()}`);
+        const { headers } = getChatRequestConfig();
+        const res = await fetch(
+          `${API_BASE_URL}/documents/${requestContext.docId}/blocks/translations?target_lang=zh&t=${Date.now()}`,
+          { headers },
+        );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (cancelled) return;
+        if (!isActiveRequest()) return;
 
         const items = data?.items || {};
         setBlockTranslations((prev) => ({ ...prev, ...items }));
         const done = allTranslatableReadingBlocks.filter((block) => items[block.block_id]).length;
         setPretranslateProgress((prev) => (
-          prev.running
+          prev.running && !prev.force && !prev.retryFailed
             ? { ...prev, done: Math.max(prev.done || 0, Math.min(done, prev.total || allTranslatableReadingBlocks.length)) }
             : prev
         ));
       } catch (error) {
-        if (!cancelled) {
+        if (isActiveRequest()) {
           console.warn('[ImmersiveReading] 预翻译进度同步失败', error);
         }
       }
@@ -1396,7 +2485,18 @@ const ChatPDF = () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [allTranslatableReadingBlocks, blockIndex, docId, pretranslateProgress.running]);
+  }, [
+    allTranslatableReadingBlocks,
+    blockIndex,
+    blockIndexMatchesCurrentParse,
+    docId,
+    documentParseIdentity,
+    getChatRequestConfig,
+    isCurrentParseContext,
+    pretranslateProgress.running,
+    translationModelId,
+    translationProviderId,
+  ]);
 
   const currentPageBlocks = useMemo(() => {
     const page = blockIndex?.pages?.find((item) => Number(item.page) === Number(currentPage));
@@ -1434,6 +2534,9 @@ const ChatPDF = () => {
       });
     }
     setPinnedReadingBlockId(firstBlock);
+    if (firstBlock) {
+      setReadingJumpPulseToken((value) => value + 1);
+    }
     setHoveredReadingBlockId(null);
   }, [setCurrentPage]);
 
@@ -1456,6 +2559,9 @@ const ChatPDF = () => {
       });
     }
     setPinnedReadingBlockId(firstBlock);
+    if (firstBlock) {
+      setReadingJumpPulseToken((value) => value + 1);
+    }
     setHoveredReadingBlockId(null);
   }, [blockMap, resolveSectionOutlineAnchor, setCurrentPage]);
 
@@ -1477,7 +2583,20 @@ const ChatPDF = () => {
   const translateReadingBlocks = useCallback(async (blocksToTranslate, options = {}) => {
     const selectedBlocks = (blocksToTranslate || []).filter((block) => block?.block_id);
     if (!docId || selectedBlocks.length === 0) return null;
+    if (isMinerUFullRoutePending) {
+      setBlockTranslateError(minerUParsePendingNotice);
+      return null;
+    }
     const blockIds = selectedBlocks.map((block) => block.block_id);
+    const translationEpoch = options.translationEpoch ?? blockTranslationEpochRef.current;
+    const canApply = () => (
+      blockTranslationEpochRef.current === translationEpoch
+      && (typeof options.isCurrent !== 'function' || options.isCurrent())
+    );
+    const staleResult = () => (
+      options.returnRaw ? { stale: true, items: {}, failed_block_ids: [] } : null
+    );
+    if (!canApply()) return staleResult();
 
     const chatCredentials = getChatCredentials?.();
     const chatProvider = chatCredentials?.providerId || 'openai';
@@ -1486,8 +2605,9 @@ const ChatPDF = () => {
     const chatProviderFull = getProviderById?.(chatProvider);
 
     if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
-      setBlockTranslateError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
-      return null;
+      const message = `请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`;
+      setBlockTranslateError(message);
+      return options.returnRaw ? { items: {}, failed_block_ids: [], error: message } : null;
     }
 
     if (options.showPanelLoading) {
@@ -1536,6 +2656,7 @@ const ChatPDF = () => {
       }
 
       const data = await res.json();
+      if (!canApply()) return staleResult();
       const translatedItems = filterValidBlockTranslations(data?.items || {});
       const translatedIds = Object.keys(translatedItems);
       const invalidReturnedIds = Object.keys(data?.items || {}).filter((blockId) => !translatedItems[blockId]);
@@ -1559,19 +2680,32 @@ const ChatPDF = () => {
       if (error?.name === 'AbortError') {
         return null;
       }
-      setBlockTranslateError(sanitizeTranslationError(error.message));
-      return null;
+      if (canApply()) {
+        const message = sanitizeTranslationError(error.message);
+        setBlockTranslateError(message);
+        return options.returnRaw ? { items: {}, failed_block_ids: [], error: message } : null;
+      }
+      return staleResult();
     } finally {
-      setTranslatingBlockIds((prev) => {
-        const next = new Set(prev);
-        blockIds.forEach((blockId) => next.delete(blockId));
-        return next;
-      });
-      if (options.showPanelLoading) {
-        setBlockTranslateLoading(false);
+      if (canApply()) {
+        setTranslatingBlockIds((prev) => {
+          const next = new Set(prev);
+          blockIds.forEach((blockId) => next.delete(blockId));
+          return next;
+        });
+        if (options.showPanelLoading) {
+          setBlockTranslateLoading(false);
+        }
       }
     }
-  }, [docId, getChatCredentials, getProviderById, pretranslateConcurrency]);
+  }, [
+    docId,
+    getChatCredentials,
+    getProviderById,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+    pretranslateConcurrency,
+  ]);
 
   const handleTranslateCurrentPage = useCallback(() => {
     translateReadingBlocks(currentPageBlocks, { showPanelLoading: true });
@@ -1584,6 +2718,7 @@ const ChatPDF = () => {
       force: true,
       returnRaw: true,
     });
+    if (data?.stale) return;
     const translated = data?.items?.[block.block_id]?.translation;
     if (isValidBlockTranslationText(translated)) {
       setPretranslateNotice(`已重译 ${block.block_id}`);
@@ -1595,31 +2730,50 @@ const ChatPDF = () => {
   }, [translateReadingBlocks]);
 
   const pretranslateReadingDocument = useCallback(async ({ force = false, retryFailed = false } = {}) => {
+    if (!blockIndexMatchesCurrentParse) {
+      setPretranslateNotice('阅读结构正在同步当前解析路线，请稍后重试');
+      setPretranslateError('');
+      return;
+    }
     if (!docId || allTranslatableReadingBlocks.length === 0) {
       setPretranslateProgress({ running: false, done: 0, total: 0 });
       setPretranslateNotice('当前文档还没有可缓存的文本块');
+      setPretranslateError('');
       return;
     }
 
     const { canCallModel, providerName } = getChatRequestConfig();
     if (!canCallModel) {
-      setBlockTranslateError(`请先为 ${providerName} 配置 API Key，再开启悬浮预翻译`);
+      const message = `请先为 ${providerName} 配置 API Key，再开启悬浮预翻译`;
+      setBlockTranslateError(message);
       setPretranslateNotice(`请先为 ${providerName} 配置 API Key`);
+      setPretranslateError(message);
       return;
     }
 
-    const translatedIds = new Set(Object.keys(blockTranslations || {}));
     const failedIds = new Set(failedTranslationBlockIds || []);
-    const pendingBlocks = allTranslatableReadingBlocks.filter((block) => {
-      if (retryFailed) return failedIds.has(block.block_id);
-      return force || !translatedIds.has(block.block_id);
+    const pendingBlocks = selectPendingPretranslateBlocks({
+      blocks: allTranslatableReadingBlocks,
+      translations: blockTranslations,
+      failedBlockIds: failedIds,
+      force,
+      retryFailed,
     });
     const total = allTranslatableReadingBlocks.length;
-    const initialDone = force ? 0 : translatedReadingBlockCount;
+    const failedCachedCount = retryFailed
+      ? allTranslatableReadingBlocks.filter((block) => (
+        failedIds.has(block.block_id) && blockTranslations?.[block.block_id]
+      )).length
+      : 0;
+    const initialDone = force
+      ? 0
+      : Math.max(0, translatedReadingBlockCount - failedCachedCount);
+    const requestForce = shouldForcePretranslateRequest({ force, retryFailed });
 
     if (pendingBlocks.length === 0) {
       setBlockTranslateError('');
       setPretranslateNotice('全文翻译缓存已是最新');
+      setPretranslateError('');
       setPretranslateProgress({ running: false, done: translatedReadingBlockCount, total });
       return;
     }
@@ -1629,44 +2783,128 @@ const ChatPDF = () => {
     pretranslateAbortRef.current?.abort();
     const abortController = new AbortController();
     pretranslateAbortRef.current = abortController;
+    const translationEpoch = blockTranslationEpochRef.current;
+    const requestContext = {
+      docId: docId || '',
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const isRunCurrent = () => (
+      pretranslateRunRef.current === runId
+      && !abortController.signal.aborted
+      && blockTranslationEpochRef.current === translationEpoch
+      && isCurrentParseContext(requestContext)
+    );
     setBlockTranslateError('');
+    setPretranslateError('');
     setPretranslateNotice(`正在缓存 ${pendingBlocks.length} 个段落译文`);
-    setPretranslateProgress({ running: true, done: initialDone, total });
+    setPretranslateProgress((prev) => ({
+      running: true,
+      done: initialDone,
+      total,
+      force: Boolean(force),
+      retryFailed: Boolean(retryFailed),
+      coverageLocked: Boolean(prev.coverageLocked || force || retryFailed),
+    }));
 
-    const data = await translateReadingBlocks(pendingBlocks, {
-      force,
-      bulk: true,
-      returnRaw: true,
-      signal: abortController.signal,
+    const result = await executePretranslateBatches({
+      blocks: pendingBlocks,
+      isCurrent: isRunCurrent,
+      translateBatch: (batch) => translateReadingBlocks(batch, {
+        force: requestForce,
+        bulk: true,
+        returnRaw: true,
+        signal: abortController.signal,
+        translationEpoch,
+        isCurrent: isRunCurrent,
+      }),
+      onBatchStart: ({ batchNumber, batchCount }) => {
+        if (isRunCurrent() && batchCount > 1) {
+          setPretranslateNotice(`正在缓存第 ${batchNumber}/${batchCount} 批 · 共 ${pendingBlocks.length} 个段落`);
+        }
+      },
+      onBatchComplete: ({ batchNumber, batchCount, successfulCount }) => {
+        if (!isRunCurrent()) return;
+        const done = Math.min(total, force ? successfulCount : initialDone + successfulCount);
+        setPretranslateProgress((prev) => ({
+          ...prev,
+          running: true,
+          done: Math.max(prev.done || 0, done),
+          total,
+          force: Boolean(force),
+          batch: batchNumber,
+          batches: batchCount,
+        }));
+      },
     });
 
-    if (pretranslateRunRef.current === runId) {
-      pretranslateAbortRef.current = null;
-      if (!data && abortController.signal.aborted) {
-        pretranslateStartedDocRef.current = docId;
-        setPretranslateProgress({ running: false, done: initialDone, total });
-        setBlockTranslateError(`已取消预翻译，已保留 ${initialDone}/${total} 个缓存译文`);
-        setPretranslateNotice(`已取消，保留 ${initialDone}/${total} 个缓存译文`);
-        return;
-      }
-      const successCount = Object.keys(data?.items || {}).length;
-      const failedCount = Array.isArray(data?.failed_block_ids) ? data.failed_block_ids.length : pendingBlocks.length;
-      const done = Math.min(total, force ? successCount : initialDone + successCount);
-      setPretranslateProgress({ running: false, done, total });
-      if (!data || failedCount > 0) {
-        pretranslateStartedDocRef.current = docId;
-        setBlockTranslateError(`部分段落暂未翻译成功，已保留 ${done}/${total} 个缓存译文，可稍后继续补齐`);
-        setPretranslateNotice(`部分完成：${done}/${total}`);
-      } else {
-        setPretranslateNotice(`缓存完成：${done}/${total}`);
-      }
+    if (result?.stale || pretranslateRunRef.current !== runId) return;
+    pretranslateAbortRef.current = null;
+
+    if (result?.aborted || abortController.signal.aborted) {
+      pretranslateStartedDocRef.current = pretranslateAutoIdentity;
+      setPretranslateProgress((prev) => ({
+        ...prev,
+        running: false,
+        coverageLocked: Boolean(prev.coverageLocked || prev.force || prev.retryFailed),
+        force: false,
+        retryFailed: false,
+      }));
+      setBlockTranslateError('');
+      setPretranslateNotice('已取消，已完成的译文缓存会保留');
+      setPretranslateError('');
+      return;
+    }
+
+    const successfulIds = new Set(result?.successfulBlockIds || []);
+    const aggregatedFailedIds = new Set(result?.failedBlockIds || []);
+    setFailedTranslationBlockIds((prev) => {
+      const next = new Set(prev);
+      successfulIds.forEach((blockId) => next.delete(blockId));
+      aggregatedFailedIds.forEach((blockId) => next.add(blockId));
+      return next;
+    });
+
+    const done = Math.min(total, force ? successfulIds.size : initialDone + successfulIds.size);
+    const batchError = String(result?.error || '').trim();
+    const coverageLocked = Boolean(
+      (force || retryFailed) && (batchError || aggregatedFailedIds.size > 0)
+    );
+    setPretranslateProgress((prev) => ({
+      ...prev,
+      running: false,
+      done: Math.max(prev.done || 0, done),
+      total,
+      force: false,
+      retryFailed: false,
+      coverageLocked,
+    }));
+
+    if (batchError) {
+      pretranslateStartedDocRef.current = pretranslateAutoIdentity;
+      setPretranslateError(batchError);
+      setBlockTranslateError(batchError);
+      setPretranslateNotice('缓存请求中断，已完成的译文已保留，可稍后继续补齐');
+    } else if (aggregatedFailedIds.size > 0) {
+      pretranslateStartedDocRef.current = pretranslateAutoIdentity;
+      setPretranslateError('');
+      setBlockTranslateError(`有 ${aggregatedFailedIds.size} 个段落暂未翻译成功，已完成 ${done}/${total}，可稍后继续补齐`);
+      setPretranslateNotice(`部分完成：${done}/${total}`);
+    } else {
+      setPretranslateError('');
+      setBlockTranslateError('');
+      setPretranslateNotice(`缓存完成：${done}/${total}`);
     }
   }, [
     allTranslatableReadingBlocks,
+    blockIndexMatchesCurrentParse,
     blockTranslations,
     docId,
+    documentParseIdentity,
     failedTranslationBlockIds,
     getChatRequestConfig,
+    isCurrentParseContext,
+    pretranslateAutoIdentity,
     translatedReadingBlockCount,
     translateReadingBlocks,
   ]);
@@ -1674,21 +2912,32 @@ const ChatPDF = () => {
   const cancelPretranslateReadingDocument = useCallback(() => {
     const wasRunning = pretranslateProgress.running;
     pretranslateRunRef.current += 1;
-    pretranslateStartedDocRef.current = docId || null;
+    pretranslateStartedDocRef.current = pretranslateAutoIdentity || null;
     pretranslateAbortRef.current?.abort();
     pretranslateAbortRef.current = null;
     setPretranslateProgress((prev) => (
-      prev.running ? { ...prev, running: false } : prev
+      prev.running
+        ? {
+          ...prev,
+          running: false,
+          coverageLocked: Boolean(prev.coverageLocked || prev.force || prev.retryFailed),
+          force: false,
+          retryFailed: false,
+        }
+        : prev
     ));
     setTranslatingBlockIds(new Set());
     if (wasRunning) {
-      setBlockTranslateError('已取消预翻译，已完成的译文缓存会保留');
+      setBlockTranslateError('');
       setPretranslateNotice('已取消，已完成的译文缓存会保留');
+      setPretranslateError('');
     }
-  }, [docId, pretranslateProgress.running]);
+  }, [pretranslateAutoIdentity, pretranslateProgress.running]);
 
   const handleStartPretranslate = useCallback((options = {}) => {
-    const retryFailed = options.retryFailed ?? failedReadingBlockCount > 0;
+    const retryFailed = options.force
+      ? false
+      : (options.retryFailed ?? failedReadingBlockCount > 0);
     pretranslateReadingDocument({ ...options, retryFailed });
   }, [failedReadingBlockCount, pretranslateReadingDocument]);
 
@@ -1701,14 +2950,22 @@ const ChatPDF = () => {
   }, [cancelPretranslateReadingDocument, shouldAutoPretranslate]);
 
   useEffect(() => {
-    if (!shouldAutoPretranslate || !docId || !blockIndex || !blockTranslationsLoaded) return;
-    if (pretranslateStartedDocRef.current === docId) return;
+    if (
+      !shouldAutoPretranslate
+      || !docId
+      || !blockIndex
+      || !blockIndexMatchesCurrentParse
+      || !blockTranslationsLoaded
+      || blockTranslationsLoadedIdentity !== pretranslateAutoIdentity
+      || !pretranslateAutoIdentity
+    ) return;
+    if (pretranslateStartedDocRef.current === pretranslateAutoIdentity) return;
     const { canCallModel } = getChatRequestConfig();
     if (!canCallModel) return;
 
     const hasPendingBlocks = allTranslatableReadingBlocks.some((block) => !blockTranslations[block.block_id]);
     if (!hasPendingBlocks) {
-      pretranslateStartedDocRef.current = docId;
+      pretranslateStartedDocRef.current = pretranslateAutoIdentity;
       setPretranslateProgress({
         running: false,
         done: allTranslatableReadingBlocks.length,
@@ -1717,16 +2974,19 @@ const ChatPDF = () => {
       return;
     }
 
-    pretranslateStartedDocRef.current = docId;
+    pretranslateStartedDocRef.current = pretranslateAutoIdentity;
     pretranslateReadingDocument();
   }, [
     allTranslatableReadingBlocks,
     blockIndex,
+    blockIndexMatchesCurrentParse,
     blockTranslations,
     blockTranslationsLoaded,
+    blockTranslationsLoadedIdentity,
     docId,
     shouldAutoPretranslate,
     getChatRequestConfig,
+    pretranslateAutoIdentity,
     pretranslateReadingDocument,
   ]);
 
@@ -1746,6 +3006,13 @@ const ChatPDF = () => {
     handleAreaSelected, handleSelectionCancel,
     handleScreenshotAction, handleScreenshotClose,
   } = screenshotState;
+  const handleParseAwareScreenshotAction = useCallback((...args) => {
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
+    handleScreenshotAction(...args);
+  }, [handleScreenshotAction, isMinerUFullRoutePending, minerUParsePendingNotice]);
 
   // ========== 消息状态 Hook（需求 1.2） ==========
   const messageState = useMessageState({
@@ -1753,6 +3020,7 @@ const ChatPDF = () => {
     screenshots,
     selectedText,
     getChatCredentials,
+    getVisualCredentials,
     getCurrentChatModel,
     getProviderById,
     streamSpeed,
@@ -1839,7 +3107,7 @@ const ChatPDF = () => {
   // `data/graphrag/<doc_id>/` 目录存在但没有自动 reload 逻辑，所以这里只能拿
   // 到「本次进程已构建」的状态。
   useEffect(() => {
-    if (!docId) {
+    if (!docId || isMinerUFullRoutePending) {
       setGraphragStatus('unknown');
       setGraphragStats(null);
       setGraphragError('');
@@ -1877,10 +3145,14 @@ const ChatPDF = () => {
     return () => {
       cancelled = true;
     };
-  }, [docId]);
+  }, [docId, isMinerUFullRoutePending]);
 
   const handleBuildGraphRAG = useCallback(async (opts = {}) => {
     if (!docId) { alert('请先上传文档'); return; }
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
     if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
       alert('请先配置对话模型的 API Key');
@@ -1967,7 +3239,15 @@ const ChatPDF = () => {
       setGraphragError(String(e?.message || e));
       setGraphragStatus('error');
     }
-  }, [docId, getChatCredentials, getProviderById, getEmbeddingConfig, getEmbeddingApiKey]);
+  }, [
+    docId,
+    getChatCredentials,
+    getProviderById,
+    getEmbeddingConfig,
+    getEmbeddingApiKey,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+  ]);
 
   // ========== 数据获取函数（useCallback 包裹，稳定引用） ==========
   const fetchAvailableModels = useCallback(async () => {
@@ -2062,16 +3342,38 @@ const ChatPDF = () => {
   }, [docId, selectedText, currentPage]);
 
   const handleAIExplain = useCallback(() => {
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     setInputValue(`请解释这段话：\n\n"${selectedText}"`);
     setShowTextMenu(false);
     setTimeout(() => sendMessage(), 100);
-  }, [selectedText, setInputValue, sendMessage, setShowTextMenu]);
+  }, [
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+    selectedText,
+    setInputValue,
+    sendMessage,
+    setShowTextMenu,
+  ]);
 
   const handleTranslate = useCallback(() => {
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     setInputValue(`请将以下内容翻译成中文：\n\n"${selectedText}"`);
     setShowTextMenu(false);
     setTimeout(() => sendMessage(), 100);
-  }, [selectedText, setInputValue, sendMessage, setShowTextMenu]);
+  }, [
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+    selectedText,
+    setInputValue,
+    sendMessage,
+    setShowTextMenu,
+  ]);
 
   const handleWebSearch = useCallback(() => {
     const q = encodeURIComponent(selectedText);
@@ -2114,28 +3416,44 @@ const ChatPDF = () => {
 
   const handleClearDocumentAICache = useCallback(async () => {
     if (!docId) return;
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     if (!window.confirm('只清理当前文档的 AI 辅助缓存，不会删除原始 PDF、向量索引或对话历史。确定继续吗？')) {
       return;
     }
+    blockTranslationEpochRef.current += 1;
+    pretranslateRunRef.current += 1;
+    pretranslateAbortRef.current?.abort();
+    pretranslateAbortRef.current = null;
+    setPretranslateProgress((current) => ({ ...current, running: false }));
+    setTranslatingBlockIds(new Set());
+    setBlockTranslateLoading(false);
     try {
       const res = await fetch(`${API_BASE_URL}/documents/${docId}/ai-cache`, { method: 'DELETE' });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ detail: '清理缓存失败' }));
         throw new Error(errData.detail || `HTTP ${res.status}`);
       }
+      readingOutlineCacheRef.current.clear();
+      sectionOutlineCacheRef.current.clear();
       setReadingOutline(null);
       setReadingOutlineError('');
+      setReadingOutlineFallbackNotice('');
       setReadingOutlineReloadKey((prev) => prev + 1);
       setSectionOutline(null);
       setSectionOutlineError('');
+      setSectionOutlineFallbackNotice('');
       setSectionOutlineReloadKey((prev) => prev + 1);
       setBlockTranslations({});
       setFailedTranslationBlockIds(new Set());
       setBlockTranslateError('');
+      setPretranslateError('');
       setBlockTranslationsLoaded(false);
+      setBlockTranslationsLoadedIdentity('');
       setPretranslateProgress({ running: false, done: 0, total: allTranslatableReadingBlocks.length });
       setPretranslateNotice(allTranslatableReadingBlocks.length > 0 ? '缓存已清理，可重新开始全文缓存' : '');
-      pretranslateRunRef.current += 1;
       pretranslateStartedDocRef.current = null;
       clearOverviewCache?.(docId);
       setShowAiProcessingPanel(false);
@@ -2143,13 +3461,30 @@ const ChatPDF = () => {
     } catch (error) {
       alert(error.message || '清理缓存失败');
     }
-  }, [allTranslatableReadingBlocks.length, clearOverviewCache, docId]);
+  }, [
+    allTranslatableReadingBlocks.length,
+    clearOverviewCache,
+    docId,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+  ]);
 
   const handleRegenerateOverview = useCallback(() => {
     if (!docId) return;
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     fetchOverview?.(overviewDepth, { force: true }).catch(() => {});
     setRightPanelMode('overview');
-  }, [docId, fetchOverview, overviewDepth, setRightPanelMode]);
+  }, [
+    docId,
+    fetchOverview,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+    overviewDepth,
+    setRightPanelMode,
+  ]);
 
   // ========== 预设问题（useMemo 缓存计算结果） ==========
   const showPresetQuestions = useMemo(() => docId && messages.filter(
@@ -2157,15 +3492,109 @@ const ChatPDF = () => {
   ).length === 0, [docId, messages]);
 
   const handlePresetSelect = useCallback((query) => {
+    if (isMinerUFullRoutePending) {
+      setDeepParseNotice(minerUParsePendingNotice);
+      return;
+    }
     setInputValue(query);
     requestAnimationFrame(() => sendMessage());
-  }, [setInputValue, sendMessage]);
+  }, [isMinerUFullRoutePending, minerUParsePendingNotice, setInputValue, sendMessage]);
 
   // ========== 懒加载设置面板关闭回调（useCallback 稳定引用） ==========
-  const handleEmbeddingSettingsClose = useCallback(() => setShowEmbeddingSettings(false), [setShowEmbeddingSettings]);
-  const handleGlobalSettingsClose = useCallback(() => { setShowGlobalSettings(false); setShowSettings(true); }, [setShowGlobalSettings, setShowSettings]);
-  const handleChatSettingsClose = useCallback(() => { setShowChatSettings(false); setShowSettings(true); }, [setShowChatSettings, setShowSettings]);
-  const handleOCRSettingsClose = useCallback(() => { setShowOCRSettings(false); setShowSettings(true); }, [setShowOCRSettings, setShowSettings]);
+  const openSettings = useCallback(() => {
+    setSettingsSection('common');
+    setShowSettings(true);
+    fetchStorageInfo();
+  }, [fetchStorageInfo, setShowSettings]);
+  const handleSettingsSectionChange = useCallback((section) => {
+    setSettingsSection(section);
+    if (section === 'storage') fetchStorageInfo();
+  }, [fetchStorageInfo]);
+  const handleOpenEmbeddingSettings = useCallback(() => {
+    preloadEmbeddingSettings();
+    setPendingSettingsPanel('embedding');
+    setShowSettings(false);
+  }, [setShowSettings]);
+  const handleSettingsModalExitComplete = useCallback(() => {
+    if (pendingSettingsPanel !== 'embedding') return;
+    setShowEmbeddingSettings(true);
+    setPendingSettingsPanel(null);
+  }, [pendingSettingsPanel, setShowEmbeddingSettings]);
+  const handleEmbeddingSettingsClose = useCallback(() => {
+    setPendingSettingsPanel('settings');
+    setShowEmbeddingSettings(false);
+  }, [setShowEmbeddingSettings]);
+  const handleEmbeddingSettingsExitComplete = useCallback(() => {
+    if (pendingSettingsPanel !== 'settings') return;
+    setSettingsSection('common');
+    setShowSettings(true);
+    setPendingSettingsPanel(null);
+  }, [pendingSettingsPanel, setShowSettings]);
+  const handleGlobalSettingsClose = useCallback(() => { setShowGlobalSettings(false); setSettingsSection('common'); setShowSettings(true); }, [setShowGlobalSettings, setShowSettings]);
+  const handleChatSettingsClose = useCallback(() => { setShowChatSettings(false); setSettingsSection('common'); setShowSettings(true); }, [setShowChatSettings, setShowSettings]);
+  const handleOCRSettingsClose = useCallback(() => { setShowOCRSettings(false); setSettingsSection('common'); setShowSettings(true); }, [setShowOCRSettings, setShowSettings]);
+
+  const getSidebarMaxWidth = useCallback((handleElement) => {
+    const container = handleElement?.parentElement;
+    if (!container) return SIDEBAR_MAX_WIDTH;
+    const containerStyle = window.getComputedStyle(container);
+    const horizontalPadding = (Number.parseFloat(containerStyle.paddingLeft) || 0)
+      + (Number.parseFloat(containerStyle.paddingRight) || 0);
+    const availableWidth = container.getBoundingClientRect().width
+      - horizontalPadding
+      - handleElement.getBoundingClientRect().width
+      - MAIN_PANEL_MIN_WIDTH;
+    return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, availableWidth));
+  }, []);
+
+  const handleSidebarResizeStart = useCallback((event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    sidebarResizeRef.current = {
+      active: true,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidth,
+      maxWidth: getSidebarMaxWidth(event.currentTarget),
+    };
+    setIsSidebarResizing(true);
+  }, [getSidebarMaxWidth, sidebarWidth]);
+
+  const handleSidebarResizeMove = useCallback((event) => {
+    const resizeState = sidebarResizeRef.current;
+    if (!resizeState.active || resizeState.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const nextWidth = Math.round(Math.max(
+      SIDEBAR_MIN_WIDTH,
+      Math.min(resizeState.maxWidth, resizeState.startWidth + event.clientX - resizeState.startX),
+    ));
+    setSidebarWidth(nextWidth);
+  }, [setSidebarWidth]);
+
+  const handleSidebarResizeEnd = useCallback((event) => {
+    const resizeState = sidebarResizeRef.current;
+    if (!resizeState.active || resizeState.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    sidebarResizeRef.current = { ...resizeState, active: false, pointerId: null };
+    setIsSidebarResizing(false);
+  }, []);
+
+  const handleSidebarResizeKeyDown = useCallback((event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const maxWidth = getSidebarMaxWidth(event.currentTarget);
+    const nextWidth = event.key === 'Home'
+      ? SIDEBAR_MIN_WIDTH
+      : event.key === 'End'
+        ? maxWidth
+        : sidebarWidth + (event.key === 'ArrowRight' ? SIDEBAR_KEYBOARD_STEP : -SIDEBAR_KEYBOARD_STEP);
+    setSidebarWidth(Math.round(Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, nextWidth))));
+  }, [getSidebarMaxWidth, setSidebarWidth, sidebarWidth]);
 
   // ========== 根容器点击回调（useCallback 稳定引用） ==========
   const handleRootClick = useCallback((e) => {
@@ -2212,7 +3641,7 @@ const ChatPDF = () => {
         >
           {msg.type === 'assistant' && (
             <div className="flex items-center gap-2 mb-2 select-none">
-              <span className="px-3 py-1 bg-[#eeeffe] text-[#4f46e5] dark:bg-[#4f46e5]/20 dark:text-[#a5b4fc] rounded-[24px] text-[11px] font-bold uppercase tracking-wider">
+              <span className="px-3 py-1 bg-[#FFF4EF] text-[#B85F47] dark:bg-[#FFA07A]/20 dark:text-[#FFDCCF] rounded-[24px] text-[11px] font-bold uppercase tracking-wider">
                 {msg.model || 'ASSISTANT'}
               </span>
             </div>
@@ -2221,6 +3650,7 @@ const ChatPDF = () => {
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={isStreamingCurrentMessage}
+              answerStarted={Boolean(msg.answerStarted)}
               darkMode={darkMode}
               thinkingMs={msg.thinkingMs || 0}
               streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
@@ -2273,6 +3703,9 @@ const ChatPDF = () => {
             <MemoryHitsBadge hits={msg.memoryHits} meta={msg.memoryMeta} />
           )}
         </div>
+        {msg.type === 'assistant' && !msg.isStreaming && msg.visualVerification && (
+          <TableVisualVerificationStatus verification={msg.visualVerification} />
+        )}
         {/* 证据面板 */}
         {msg.type === 'assistant' && !msg.isStreaming && msg.citations && msg.citations.length > 0 && (
           <EvidencePanel
@@ -2384,69 +3817,121 @@ const ChatPDF = () => {
   const activeSidebarTabIndex = Math.max(0, sidebarTabs.findIndex((item) => item.id === sidebarMode));
   const rightPanelTabs = [
     { id: 'overview', label: '速览' },
-    { id: 'analysis', label: '解析' },
+    { id: 'analysis', label: '阅读' },
     { id: 'chat', label: '对话' },
   ];
   const activeRightPanelTabIndex = Math.max(0, rightPanelTabs.findIndex((item) => item.id === rightPanelMode));
-  const deepParseRunning = ['queued', 'running'].includes(deepParseStatus?.status);
-  const aiProcessingRunning = readingOutlineLoading || sectionOutlineLoading || overviewLoading || pretranslateProgress.running || deepParseRunning;
-  const aiProcessingStatusText = aiAutoProcess
-    ? (autoOutlineSummary || enableHoverPretranslate ? '自动处理开启' : '按需生成')
-    : '自动处理已关闭';
+  const deepParseStatusValue = String(currentDeepParseStatus?.status || '').trim().toLowerCase();
+  const deepParseFailed = isMinerUFullRouteFailed || deepParseStatusValue === 'failed';
+  const deepParseRunning = ['queued', 'running'].includes(deepParseStatusValue) || Boolean(
+    isNewMinerUPrimaryRoute
+    && isMinerUFullRoutePending
+    && !deepParseFailed
+    && !isMinerUFullRouteCancelled
+    && documentParseManifest?.stage !== 'awaiting_rag_index'
+  );
   const aiProcessingItems = useMemo(() => {
-    const summaryStatus = readingOutlineLoading
-      ? '生成中'
-      : readingOutlineItems.length > 0
-        ? (readingOutline?.source === 'fallback' ? '基础结果' : '已完成')
-        : (aiAutoProcess && autoOutlineSummary ? '等待生成' : '自动已关');
-    const outlineStatus = sectionOutlineLoading
-      ? '生成中'
-      : sectionOutlineItems.length > 0
-        ? (sectionOutline?.source === 'fallback' || sectionOutline?.source === 'heuristic' ? '基础大纲' : '已完成')
-        : (aiAutoProcess && autoOutlineSummary ? '等待生成' : '自动已关');
-    const overviewStatus = overviewLoading
-      ? '生成中'
-      : overview
-        ? '已完成'
-        : '按需生成';
-    const translationStatus = pretranslateProgress.running
-      ? `${Math.min(pretranslateProgress.done, pretranslateProgress.total)}/${pretranslateProgress.total || allTranslatableReadingBlocks.length}`
-      : failedReadingBlockCount > 0
-        ? `失败 ${failedReadingBlockCount}`
-        : translatedReadingBlockCount > 0
-          ? `${translatedReadingBlockCount}/${allTranslatableReadingBlocks.length}`
-          : (aiAutoProcess && enableHoverPretranslate ? '等待缓存' : '未开始');
-    const deepParseStatusText = deepParseRunning
-      ? (deepParseStatus?.poll_attempt && deepParseStatus?.poll_total
-        ? `等待处理 ${deepParseStatus.poll_attempt}/${deepParseStatus.poll_total}`
-        : deepParseStatus?.stage === 'requesting_upload'
+    const suppressDependentTasks = isMinerUFullRoutePending;
+    const summaryState = suppressDependentTasks
+      ? 'idle'
+      : readingOutlineLoading
+        ? 'running'
+        : readingOutlineError
+          ? 'failed'
+          : readingOutlineFallbackNotice
+            ? 'recommended'
+            : 'idle';
+    const outlineState = suppressDependentTasks
+      ? 'idle'
+      : sectionOutlineLoading
+        ? 'running'
+        : sectionOutlineError
+          ? 'failed'
+          : sectionOutlineFallbackNotice
+            ? 'recommended'
+            : 'idle';
+    const overviewState = suppressDependentTasks
+      ? 'idle'
+      : overviewLoading
+        ? 'running'
+        : overviewError
+          ? 'failed'
+          : 'idle';
+    const translationState = suppressDependentTasks
+      ? 'idle'
+      : pretranslateProgress.running
+        ? 'running'
+        : pretranslateError || failedReadingBlockCount > 0
+          ? 'failed'
+          : 'idle';
+    const deepParseStage = currentDeepParseStatus?.stage || documentParseManifest?.stage;
+    const deepParseStatusText = deepParseFailed
+      ? '失败'
+      : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
+        ? '已取消'
+        : deepParseRunning
+      ? (currentDeepParseStatus?.poll_attempt && currentDeepParseStatus?.poll_total
+        ? `等待处理 ${currentDeepParseStatus.poll_attempt}/${currentDeepParseStatus.poll_total}`
+        : deepParseStage === 'requesting_upload'
           ? '申请上传中'
-          : deepParseStatus?.stage === 'uploading'
+          : deepParseStage === 'uploading'
             ? '上传中'
-            : deepParseStatus?.stage === 'polling'
+            : deepParseStage === 'polling'
               ? '等待处理'
-              : deepParseStatus?.stage === 'downloading'
+              : deepParseStage === 'downloading'
                 ? '下载结果中'
-                : deepParseStatus?.stage === 'building_index'
+                : deepParseStage === 'building_index'
                   ? '重建索引中'
                   : '解析中')
-      : deepParseStatus?.status === 'ready' && deepParseStatus?.active_mineru
-        ? '已完成'
-      : deepParseStatus?.status === 'failed'
-        ? '失败'
-        : deepParseStatus?.status === 'cancelled'
-          ? '已取消'
-        : deepParseStatus?.configured === false
-          ? '未配置'
-          : '按需解析';
+        : currentDeepParseStatus?.status === 'ready' && currentDeepParseStatus?.active_mineru
+          ? '已完成'
+          : currentDeepParseStatus?.configured === false
+            ? '未配置'
+            : '按需解析';
 
     const deepParseRecommended = Boolean(
-      !deepParseStatus?.active_mineru && !deepParseRunning && deepParseStatus?.recommend_deep_parse
+      !isMinerUFullRoutePending
+      && !currentDeepParseStatus?.active_mineru
+      && !deepParseRunning
+      && !deepParseFailed
+      && currentDeepParseStatus?.configured !== false
+      && currentDeepParseStatus?.recommend_deep_parse
     );
+    const deepParseState = deepParseFailed
+      ? 'failed'
+      : deepParseRunning
+        ? 'running'
+        : deepParseRecommended
+          ? 'recommended'
+          : 'idle';
+    const canCancelDeepParse = ['queued', 'running'].includes(deepParseStatusValue);
+    const canRetryFullRoute = isNewMinerUPrimaryRoute && deepParseFailed;
     const ragIndexSource = ragIndexStatus?.index_source || (ragIndexStatus?.ready ? 'pdf_native' : '');
     const ragIndexIsMinerU = ragIndexSource === 'mineru';
-    const ragIndexRecommended = Boolean(deepParseStatus?.recommend_rag_index_rebuild && !ragIndexBusy);
-    const ragIndexStatusText = ragIndexBusy
+    const ragIndexRecommended = Boolean(
+      canPublishPendingMinerURag || (
+        isLegacyParseManifest
+        && currentDeepParseStatus?.active_mineru
+        && currentDeepParseStatus?.recommend_rag_index_rebuild
+        && !ragIndexBusy
+      )
+    );
+    const persistentRagIndexError = ragIndexStatus?.status === 'failed'
+      ? ragIndexStatus?.error || '问答索引处理失败'
+      : '';
+    const ragIndexTaskError = ragIndexError || persistentRagIndexError;
+    const ragIndexState = ragIndexTaskError
+      ? 'failed'
+      : ragIndexBusy
+        ? 'running'
+        : ragIndexRecommended
+          ? 'recommended'
+          : 'idle';
+    const ragIndexStatusText = ragIndexTaskError
+      ? '处理失败'
+      : canPublishPendingMinerURag
+      ? '待发布'
+      : ragIndexBusy
       ? '处理中'
       : !ragIndexStatus?.ready
         ? '未就绪'
@@ -2455,164 +3940,220 @@ const ChatPDF = () => {
           : ragIndexRecommended
             ? '建议重建'
             : '本地';
-    const ragIndexDesc = !deepParseStatus?.active_mineru
+    const ragIndexDesc = canPublishPendingMinerURag
+      ? 'MinerU 版面结果已就绪，使用当前 Embedding 配置发布问答索引后会统一开放全部能力'
+      : !currentDeepParseStatus?.active_mineru
       ? '先完成 MinerU 深度解析后，才能把问答索引升级为同源结构化结果'
       : ragIndexIsMinerU
         ? `问答检索已使用 MinerU 结构化结果${ragIndexStatus?.table_chunk_count ? `，${ragIndexStatus.table_chunk_count} 个结构化表格块` : ''}`
-        : deepParseStatus?.recommend_rag_index_reason
+        : currentDeepParseStatus?.recommend_rag_index_reason
           || '当前问答仍使用本地 PDF 解析索引，建议重建为 MinerU 结构化问答索引以改善表格和双栏问答';
 
-    return [
+    const minerUActionItems = isNewLocalPrimaryRoute ? [] : [
       {
         id: 'deep_parse',
         title: 'MinerU 深度解析',
-        recommended: deepParseRecommended,
-        desc: deepParseStatus?.active_mineru
-          ? `当前阅读结构、大纲与速览图表均来自 MinerU${deepParseStatus?.block_count ? `，${deepParseStatus.block_count} 个块` : ''}${deepParseStatus?.figure_count ? `，${deepParseStatus.figure_count} 个图表` : ''}`
-          : deepParseRunning && deepParseStatus?.message
-            ? deepParseStatus.message
-            : deepParseStatus?.status === 'failed' && deepParseStatus?.error
-              ? deepParseStatus.error
+        state: deepParseState,
+        desc: deepParseFailed
+          ? currentDeepParseStatus?.error || documentParseManifest?.error || deepParseNotice || 'MinerU 深度解析失败'
+          : isMinerUFullRoutePending
+          ? minerUParsePendingNotice
+          : currentDeepParseStatus?.active_mineru
+          ? `当前阅读结构、大纲与速览图表均来自 MinerU${currentDeepParseStatus?.block_count ? `，${currentDeepParseStatus.block_count} 个块` : ''}${currentDeepParseStatus?.figure_count ? `，${currentDeepParseStatus.figure_count} 个图表` : ''}`
+          : deepParseRunning && currentDeepParseStatus?.message
+            ? currentDeepParseStatus.message
+            : currentDeepParseStatus?.status === 'failed' && currentDeepParseStatus?.error
+              ? currentDeepParseStatus.error
               : deepParseRecommended
-                ? deepParseStatus.recommend_reason
-                : `用 MinerU 重建带坐标的阅读块、大纲和速览图表，手动触发才会上传 PDF${deepParseStatus?.access_mode === 'direct' ? '到官方 API' : '到 Worker'}`,
+                ? currentDeepParseStatus.recommend_reason
+                : `用 MinerU 重建带坐标的阅读块、大纲和速览图表，手动触发才会上传 PDF${currentDeepParseStatus?.access_mode === 'direct' ? '到官方 API' : '到 Worker'}`,
         status: deepParseStatusText,
         busy: deepParseRunning,
-        actionLabel: deepParseRunning
+        actionLabel: deepParseRunning && canCancelDeepParse
           ? '取消'
-          : deepParseStatus?.active_mineru
-            ? '重新解析'
-            : '开始解析',
-        onAction: deepParseRunning ? handleCancelMinerUDeepParse : handleStartMinerUDeepParse,
-        disabled: !docId || deepParseStatus?.configured === false,
+          : deepParseFailed
+            ? '重试'
+            : deepParseRecommended
+              ? '开始解析'
+              : null,
+        onAction: deepParseRunning && canCancelDeepParse
+          ? handleCancelMinerUDeepParse
+          : canRetryFullRoute
+            ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
+            : canUseLegacyMinerUActions
+              ? handleStartMinerUDeepParse
+              : undefined,
+        disabled: !docId || currentDeepParseStatus?.configured === false || (!canUseLegacyMinerUActions && !canRetryFullRoute && !canCancelDeepParse),
       },
-      {
+      ...(isLegacyParseManifest || canPublishPendingMinerURag ? [{
         id: 'rag_index',
         title: '问答索引',
-        recommended: ragIndexRecommended,
-        desc: ragIndexDesc,
+        state: ragIndexState,
+        desc: ragIndexTaskError || ragIndexNotice || ragIndexDesc,
         status: ragIndexStatusText,
         busy: ragIndexBusy,
-        actionLabel: ragIndexBusy
-          ? '处理中'
-          : ragIndexIsMinerU
-            ? '回退'
-            : deepParseStatus?.active_mineru
+        actionLabel: ragIndexState === 'failed'
+          ? (canPublishPendingMinerURag ? '重试发布' : '重试重建')
+          : canPublishPendingMinerURag
+            ? '发布'
+            : currentDeepParseStatus?.active_mineru
               ? '重建'
-              : '需解析',
-        onAction: ragIndexIsMinerU ? handleRollbackRagIndex : handleRebuildMinerURagIndex,
-        disabled: !docId || ragIndexBusy || (!deepParseStatus?.active_mineru && !ragIndexIsMinerU) || (ragIndexIsMinerU && !ragIndexStatus?.can_rollback),
-      },
+              : null,
+        onAction: handleRebuildMinerURagIndex,
+        disabled: !docId || ragIndexBusy || (!canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru),
+      }] : []),
+    ];
+
+    return [
+      ...minerUActionItems,
       {
         id: 'summary',
         title: 'AI 总结',
-        desc: '左侧总结栏的结构化论文梳理',
-        status: summaryStatus,
+        state: summaryState,
+        desc: readingOutlineError || readingOutlineFallbackNotice || '左侧总结栏的结构化论文梳理',
+        status: summaryState === 'failed' ? '生成失败' : summaryState === 'recommended' ? '已降级' : '生成中',
         busy: readingOutlineLoading,
-        actionLabel: readingOutlineLoading ? '生成中' : (readingOutlineItems.length > 0 ? '重新生成' : '立即生成'),
+        actionLabel: ['failed', 'recommended'].includes(summaryState) ? '重试' : null,
         onAction: handleRegenerateReadingOutline,
-        disabled: readingOutlineLoading || !docId,
+        disabled: readingOutlineLoading || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'outline',
         title: '章节大纲',
-        desc: '左侧大纲栏的原文章节树',
-        status: outlineStatus,
+        state: outlineState,
+        desc: sectionOutlineError || sectionOutlineFallbackNotice || '左侧大纲栏的原文章节树',
+        status: outlineState === 'failed' ? '生成失败' : outlineState === 'recommended' ? '已降级' : '生成中',
         busy: sectionOutlineLoading,
-        actionLabel: sectionOutlineLoading ? '生成中' : (sectionOutlineItems.length > 0 ? '重新生成' : '立即生成'),
+        actionLabel: ['failed', 'recommended'].includes(outlineState) ? '重试' : null,
         onAction: handleRegenerateSectionOutline,
-        disabled: sectionOutlineLoading || !docId,
+        disabled: sectionOutlineLoading || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'overview',
         title: '速览',
-        desc: `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`,
-        status: overviewStatus,
+        state: overviewState,
+        desc: overviewError || `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`,
+        status: overviewState === 'failed' ? '生成失败' : '生成中',
         busy: overviewLoading,
-        actionLabel: overviewLoading ? '生成中' : (overview ? '重新生成' : '生成速览'),
+        actionLabel: overviewState === 'failed' ? '重试' : null,
         onAction: handleRegenerateOverview,
-        disabled: overviewLoading || !docId,
+        disabled: overviewLoading || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'translation',
         title: '悬浮翻译',
-        desc: '预缓存段落翻译，悬浮时直接显示',
-        status: translationStatus,
+        state: translationState,
+        desc: pretranslateError || pretranslateNotice || (failedReadingBlockCount > 0
+          ? `有 ${failedReadingBlockCount} 个段落尚未完成，可继续补齐`
+          : '预缓存段落翻译，悬浮时直接显示'),
+        status: pretranslateProgress.running
+          ? `${Math.min(pretranslateProgress.done, pretranslateProgress.total)}/${pretranslateProgress.total || allTranslatableReadingBlocks.length}`
+          : failedReadingBlockCount > 0
+            ? `失败 ${failedReadingBlockCount}`
+            : '缓存失败',
         busy: pretranslateProgress.running,
         actionLabel: pretranslateProgress.running
           ? '取消'
-          : failedReadingBlockCount > 0
-            ? '补齐失败'
-            : translatedReadingBlockCount > 0
-              ? '补齐全文'
-              : '开始缓存',
+          : translationState === 'failed'
+            ? (failedReadingBlockCount > 0 ? '补齐失败' : '重试')
+            : null,
         onAction: pretranslateProgress.running
           ? cancelPretranslateReadingDocument
           : handleStartPretranslate,
-        disabled: !docId || allTranslatableReadingBlocks.length === 0,
+        disabled: !docId || isMinerUFullRoutePending || allTranslatableReadingBlocks.length === 0,
       },
     ];
   }, [
-    aiAutoProcess,
     allTranslatableReadingBlocks.length,
-    autoOutlineSummary,
+    canPublishPendingMinerURag,
+    canUseLegacyMinerUActions,
     cancelPretranslateReadingDocument,
+    deepParseFailed,
+    deepParseNotice,
     docId,
     deepParseRunning,
-    deepParseStatus?.active_mineru,
-    deepParseStatus?.access_mode,
-    deepParseStatus?.recommend_deep_parse,
-    deepParseStatus?.recommend_rag_index_rebuild,
-    deepParseStatus?.recommend_rag_index_reason,
-    deepParseStatus?.recommend_reason,
-    deepParseStatus?.block_count,
-    deepParseStatus?.figure_count,
-    deepParseStatus?.configured,
-    deepParseStatus?.stage,
-    deepParseStatus?.status,
-    enableHoverPretranslate,
+    deepParseStatusValue,
+    documentParseManifest?.error,
+    documentParseManifest?.stage,
+    currentDeepParseStatus?.active_mineru,
+    currentDeepParseStatus?.access_mode,
+    currentDeepParseStatus?.recommend_deep_parse,
+    currentDeepParseStatus?.recommend_rag_index_rebuild,
+    currentDeepParseStatus?.recommend_rag_index_reason,
+    currentDeepParseStatus?.recommend_reason,
+    currentDeepParseStatus?.block_count,
+    currentDeepParseStatus?.figure_count,
+    currentDeepParseStatus?.configured,
+    currentDeepParseStatus?.message,
+    currentDeepParseStatus?.poll_attempt,
+    currentDeepParseStatus?.poll_total,
+    currentDeepParseStatus?.stage,
+    currentDeepParseStatus?.status,
     failedReadingBlockCount,
     handleRebuildMinerURagIndex,
-    handleRollbackRagIndex,
     handleStartPretranslate,
     handleRegenerateOverview,
     handleRegenerateReadingOutline,
     handleRegenerateSectionOutline,
     handleCancelMinerUDeepParse,
     handleStartMinerUDeepParse,
-    overview,
     overviewDepth,
+    overviewError,
     overviewLoading,
     pretranslateProgress.done,
     pretranslateProgress.running,
     pretranslateProgress.total,
+    pretranslateError,
+    pretranslateNotice,
     ragIndexBusy,
-    ragIndexStatus?.can_rollback,
+    ragIndexError,
+    ragIndexNotice,
     ragIndexStatus?.index_source,
+    ragIndexStatus?.error,
     ragIndexStatus?.ready,
+    ragIndexStatus?.status,
     ragIndexStatus?.table_chunk_count,
-    readingOutline?.source,
-    readingOutlineItems.length,
+    readingOutlineError,
+    readingOutlineFallbackNotice,
     readingOutlineLoading,
-    sectionOutline?.source,
-    sectionOutlineItems.length,
+    sectionOutlineError,
+    sectionOutlineFallbackNotice,
     sectionOutlineLoading,
-    translatedReadingBlockCount,
+    isMinerUFullRoutePending,
+    isMinerUFullRouteFailed,
+    isMinerUFullRouteCancelled,
+    isLegacyParseManifest,
+    isNewLocalPrimaryRoute,
+    isNewMinerUPrimaryRoute,
+    minerUParsePendingNotice,
   ]);
-  const hasAiRecommendation = aiProcessingItems.some((item) => item.recommended);
 
   const uploadStatusMeta = UPLOAD_STATUS_META[uploadStatus] || UPLOAD_STATUS_META.uploading;
   const uploadProgressLabel = Math.max(0, Math.min(100, Math.round(Number(uploadProgress) || 0)));
-  const deepParsePanelNotice = deepParseNotice || (
-    deepParseStatus?.status === 'ready' && deepParseStatus?.active_mineru
-      ? 'MinerU 深度解析已完成，阅读结构、大纲与速览图表均已切换为 MinerU'
-      : ''
+  const showDocumentWorkspace = Boolean(docId && !isUploading);
+  const canRollbackCurrentRagIndex = Boolean(
+    canUseLegacyMinerUActions
+    && ragIndexStatus?.index_source === 'mineru'
+    && ragIndexStatus?.can_rollback
+    && !ragIndexBusy
   );
+  const visibleBackgroundTasks = useMemo(
+    () => getVisibleBackgroundTasks(aiProcessingItems, showDocumentWorkspace),
+    [aiProcessingItems, showDocumentWorkspace]
+  );
+  const backgroundTaskSummary = useMemo(
+    () => getBackgroundTaskSummary(visibleBackgroundTasks),
+    [visibleBackgroundTasks]
+  );
+
+  useEffect(() => {
+    if (!showDocumentWorkspace) setShowAiProcessingPanel(false);
+  }, [showDocumentWorkspace]);
 
   // ========== 渲染 ==========
   return (
     <div
-      className={`h-screen w-full flex overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-[#0f1115] text-gray-200' : 'bg-transparent text-[var(--color-text-main)]'}`}
+      className={`chatpdf-shell ${docId ? 'chatpdf-shell--document' : 'chatpdf-shell--welcome'} ${darkMode ? 'chatpdf-shell--dark' : ''} h-screen w-full overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-[#0f1115] text-gray-200' : 'text-[var(--color-text-main)]'}`}
       onClick={handleRootClick}
     >
       {/* 划词工具栏 */}
@@ -2637,50 +4178,63 @@ const ChatPDF = () => {
         </div>
       )}
 
+      {/* 统一应用外壳：2K 屏基本铺满，超宽屏保留上限；阅读态继续使用紧凑间距。 */}
+      <div className={`relative mx-auto flex h-full w-full max-w-[2400px] ${docId ? 'px-3 py-3' : 'px-3 py-4 sm:px-4 sm:py-5'}`}>
+
       {/* 侧边栏（历史记录） */}
+      {isNarrowDesktop && showSidebar && (
+        <button
+          type="button"
+          aria-label="关闭侧边栏"
+          onClick={() => setShowSidebar(false)}
+          className="absolute inset-0 z-40 bg-black/20 backdrop-blur-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#FFA07A]/35"
+        />
+      )}
       <motion.div
         initial={false}
-        animate={{ width: showSidebar ? 320 : 0, opacity: showSidebar ? 1 : 0 }}
-        transition={{ duration: 0.2, ease: "easeInOut" }}
+        animate={{ width: showSidebar ? sidebarWidth : 0, opacity: showSidebar ? 1 : 0 }}
+        transition={{ duration: isSidebarResizing ? 0 : 0.2, ease: "easeInOut" }}
         style={{ pointerEvents: showSidebar ? 'auto' : 'none' }}
-        className={`flex-shrink-0 m-6 mr-0 h-[calc(100vh-3rem)] flex flex-col z-20 overflow-hidden ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150 rounded-[40px]' : 'bg-white/80 backdrop-blur-2xl border border-white/70 rounded-[40px] shadow-2xl shadow-gray-300/40 shadow-[inset_0_1px_1px_rgba(255,255,255,0.8)]'}`}
+        className={`flex flex-col overflow-hidden rounded-[28px] ${
+          isNarrowDesktop
+            ? `absolute left-3 z-50 h-auto ${docId ? 'bottom-3 top-3' : 'bottom-4 top-4 sm:bottom-5 sm:left-4 sm:top-5'}`
+            : 'z-20 h-full flex-shrink-0'
+        } ${darkMode ? 'bg-[#1a1d21]/90 border-white/5 backdrop-blur-3xl backdrop-saturate-150' : 'bg-[#26272b] shadow-[0_20px_44px_-20px_rgba(28,30,34,0.5)]'}`}
       >
-        <div className="w-[320px] mx-auto flex flex-col h-full items-stretch relative">
-          <div className="px-8 py-8 flex items-center justify-between mb-2">
-            <div className="flex items-center gap-3 font-bold text-2xl text-purple-600 tracking-tight pl-2">
-              <Bot className="w-9 h-9" />
-              <span>ChatPDF</span>
+        <div className="mx-auto flex h-full flex-col items-stretch relative" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
+          <div className="px-5 pt-6 pb-4 flex items-center justify-between mb-1">
+            <div className="flex items-center gap-2.5 font-bold text-lg tracking-tight pl-1">
+              <Bot className="w-7 h-7 text-purple-400" />
+              <span className="text-gray-100">ChatPDF</span>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setDarkMode(!darkMode)} className={`p-2 rounded-full transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400 hover:text-yellow-400' : 'hover:bg-black/5'}`}>
+              <button
+                type="button"
+                onClick={() => setDarkMode(!darkMode)}
+                aria-label={darkMode ? '切换到浅色模式' : '切换到深色模式'}
+                title={darkMode ? '浅色模式' : '深色模式'}
+                className={`p-2 rounded-full transition-colors text-gray-400 hover:bg-white/10 ${darkMode ? 'hover:text-yellow-400' : 'hover:text-gray-200'}`}
+              >
                 {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
             </div>
           </div>
 
-          <div className="px-5 mb-4 flex justify-center">
+          <div className="px-4 mb-4 flex justify-center">
             <button
-              onClick={() => { startNewChat(); fileInputRef.current?.click(); }}
-              className="tanya-btn max-w-[260px]"
+              onClick={openUploadHome}
+              className="tanya-btn w-full"
             >
-              <Plus className="w-5 h-5 opacity-70" />
-              <span>上传文件/新对话</span>
+              <Plus className="w-4 h-4 opacity-70" />
+              <span>上传 PDF</span>
             </button>
-            <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} className="hidden" />
+            <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleUploadInputChange} className="hidden" />
           </div>
 
-          <div className="px-6 mb-4">
-            <div className={`relative grid grid-cols-3 overflow-hidden rounded-[22px] p-1 border shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] backdrop-blur-xl ${
-              darkMode
-                ? 'bg-white/[0.05] border-white/10'
-                : 'bg-white/35 border-white/70 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_8px_24px_rgba(148,163,184,0.10)]'
-            }`}>
+          <div className="px-4 mb-3">
+            <div className="relative grid grid-cols-3 overflow-hidden rounded-[20px] border border-white/[0.12] bg-[#202126] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
               <motion.div
-                className={`absolute top-1 bottom-1 left-1 rounded-[18px] ${
-                  darkMode
-                    ? 'bg-white/12 shadow-[0_8px_22px_rgba(0,0,0,0.22)]'
-                    : 'bg-white/90 shadow-[0_10px_24px_rgba(139,124,200,0.14),0_2px_6px_rgba(31,41,55,0.06),inset_0_1px_0_rgba(255,255,255,0.95)]'
-                }`}
+                className="absolute bottom-1 left-1 top-1 rounded-[16px] bg-[#484a52] ring-1 ring-inset ring-white/[0.14] shadow-[0_5px_14px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.14)]"
                 initial={false}
                 style={{ width: 'calc((100% - 0.5rem) / 3)' }}
                 animate={{ x: `${activeSidebarTabIndex * 100}%` }}
@@ -2694,13 +4248,11 @@ const ChatPDF = () => {
                     type="button"
                     onClick={() => setSidebarMode(id)}
                     whileTap={{ scale: 0.97 }}
-                    className={`relative z-10 flex h-10 items-center justify-center gap-2 rounded-[18px] text-[13px] font-semibold transition-colors duration-200 ${
-                      isActive
-                        ? (darkMode ? 'text-white' : 'text-[#8b7cc8]')
-                        : (darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600')
+                    className={`relative z-10 flex h-8 items-center justify-center gap-1.5 rounded-[16px] text-[12px] font-semibold transition-colors duration-200 ${
+                      isActive ? 'text-white' : 'text-gray-500 hover:text-gray-300'
                     }`}
                   >
-                    <Icon className={`h-4 w-4 transition-all duration-200 ${isActive ? 'scale-105' : 'scale-100 opacity-80'}`} />
+                    <Icon className={`h-3.5 w-3.5 transition-all duration-200 ${isActive ? 'scale-105 text-[#FFA07A]' : 'scale-100 opacity-80'}`} />
                     <span>{label}</span>
                   </motion.button>
                 );
@@ -2709,45 +4261,64 @@ const ChatPDF = () => {
           </div>
 
           {sidebarMode === 'history' ? (
-            <div className="flex-1 overflow-y-auto px-8">
-              <h2 className="text-[11px] font-bold text-gray-500 tracking-wider mb-4 pl-4">
-                会话历史
-              </h2>
-              <ul className="space-y-2 relative">
-                {history.map((item, idx) => {
-                  const isActive = item.id === docId;
-                  return (
-                    <li key={idx}>
-                      <div
-                        onClick={() => loadSession(item)}
-                        className={`w-full flex items-center justify-between px-5 py-4 rounded-3xl cursor-pointer group transition-all duration-300 ${
-                          isActive
-                            ? (darkMode ? 'bg-white/10 backdrop-blur-md border border-white/10 text-white font-bold shadow-[0_10px_25px_rgba(0,0,0,0.2)]' : 'bg-white/80 backdrop-blur-md border border-white/80 text-gray-900 font-bold shadow-[0_10px_25px_rgba(0,0,0,0.06)]')
-                            : (darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40')
-                        }`}
-                      >
-                        <div className="flex items-center gap-4 overflow-hidden">
-                          <MessageSquare
-                            size={22}
-                            className={`${isActive ? 'text-[#9333ea]' : 'text-gray-500'} transition-colors flex-shrink-0`}
-                            strokeWidth={isActive ? 2.5 : 2}
-                          />
-                          <span className="text-[15px] truncate">{item.filename}</span>
-                        </div>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
-                          className={`opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-red-50 hover:text-red-500 transition-all flex-shrink-0 ${isActive ? 'text-gray-400' : 'text-gray-400'}`}
+            /* 与总结/大纲一致：内容统一放浅色内嵌卡，切 tab 不再明暗跳变 */
+            <div className={`flex-1 min-h-0 mx-3 mb-2 p-2.5 overflow-hidden rounded-[16px] ${darkMode ? 'bg-white/[0.03]' : 'bg-[#f5f4f2]'}`}>
+              <div className="h-full overflow-y-auto custom-scrollbar">
+                <h2 className="text-[11px] font-bold text-gray-500 tracking-wider mb-2.5 pl-2 pt-1">
+                  会话历史
+                </h2>
+                <ul className="space-y-1 relative">
+                  {history.map((item, idx) => {
+                    const isActive = item.id === (pendingHistoryId ?? docId);
+                    return (
+                      <li key={item.id ?? item.docId ?? idx}>
+                        <motion.div
+                          onClick={() => handleHistorySessionClick(item)}
+                          className={`relative isolate w-full flex items-center justify-between px-3 py-2.5 rounded-[12px] cursor-pointer group transition-colors duration-200 ${
+                            isActive
+                              ? (darkMode ? 'z-10 text-white font-bold' : 'z-10 text-gray-900 font-bold')
+                              : (darkMode ? 'text-gray-400 font-medium hover:bg-white/5 hover:text-gray-200' : 'text-gray-600 font-medium hover:bg-white/80 hover:text-gray-900')
+                          }`}
                         >
-                          <Trash2 size={18} strokeWidth={2} />
-                        </button>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+                          {isActive && (
+                            <motion.div
+                              layoutId="history-active-session-card"
+                              aria-hidden="true"
+                              initial={false}
+                              className={`absolute inset-0 z-0 rounded-[12px] will-change-transform ${
+                                darkMode
+                                  ? 'bg-white/10 ring-1 ring-inset ring-white/[0.08] shadow-[0_4px_12px_rgba(0,0,0,0.16)]'
+                                  : 'bg-white ring-1 ring-inset ring-black/[0.025] shadow-[0_4px_12px_rgba(31,41,55,0.08),0_1px_2px_rgba(31,41,55,0.04)]'
+                              }`}
+                              transition={{ type: 'tween', duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                            />
+                          )}
+                          <div className="relative z-10 flex items-center gap-2.5 overflow-hidden">
+                            <MessageSquare
+                              size={16}
+                              className={`${isActive ? 'text-[#B85F47]' : 'text-gray-400'} transition-colors duration-200 flex-shrink-0`}
+                              strokeWidth={isActive ? 2.5 : 2}
+                            />
+                            <span className="text-[13px] truncate">{item.filename}</span>
+                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
+                            aria-label={`删除会话 ${item.filename}`}
+                            title="删除会话"
+                            className={`relative z-10 opacity-0 group-hover:opacity-100 p-1 rounded-full text-gray-400 transition-all flex-shrink-0 ${darkMode ? 'hover:bg-red-500/15 hover:text-red-400' : 'hover:bg-red-50 hover:text-red-500'}`}
+                          >
+                            <Trash2 size={15} strokeWidth={2} />
+                          </button>
+                        </motion.div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
             </div>
           ) : sidebarMode === 'summary' ? (
-            <div className="flex-1 min-h-0 px-5 overflow-hidden">
+            /* 长文阅读内容放浅色内嵌卡：深色栏只当外框，可读性优先 */
+            <div className={`flex-1 min-h-0 mx-3 mb-2 p-2.5 overflow-hidden rounded-[16px] ${darkMode ? 'bg-white/[0.03]' : 'bg-[#f5f4f2]'}`}>
               <ReadingSummaryPanel
                 items={readingOutlineItems}
                 loading={readingOutlineLoading}
@@ -2763,7 +4334,7 @@ const ChatPDF = () => {
               />
             </div>
           ) : (
-            <div className="flex-1 min-h-0 px-5 overflow-hidden">
+            <div className={`flex-1 min-h-0 mx-3 mb-2 p-2.5 overflow-hidden rounded-[16px] ${darkMode ? 'bg-white/[0.03]' : 'bg-[#f5f4f2]'}`}>
               <DocumentOutline
                 outline={pdfOutlineItems}
                 loading={pdfOutlineLoading}
@@ -2779,24 +4350,56 @@ const ChatPDF = () => {
             </div>
           )}
 
-          <div className="px-8 py-6">
-            <button 
-              onClick={() => { setShowSettings(true); fetchStorageInfo(); }} 
-              className={`w-full flex items-center gap-4 px-5 py-4 rounded-3xl transition-all duration-300 ${darkMode ? 'text-gray-400 font-medium hover:bg-white/5' : 'text-gray-600 font-medium hover:bg-white/40'}`}
+          <div className="px-4 py-4 border-t border-white/[0.06]">
+            <button
+              onClick={openSettings}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[14px] transition-all duration-300 text-gray-400 font-medium hover:bg-white/5 hover:text-gray-200"
             >
-              <Settings size={22} className="text-gray-500" strokeWidth={2} />
-              <span className="text-[15px]">设置 & API Key</span>
+              <Settings size={17} className="text-gray-500" strokeWidth={2} />
+              <span className="text-[13px]">设置中心</span>
             </button>
           </div>
         </div>
       </motion.div>
 
-      {/* 主内容区域 */}
-      <div className="flex-1 flex flex-col h-full relative transition-all duration-200 ease-in-out">
+      {showSidebar && !isNarrowDesktop && (
+        <div
+          role="separator"
+          aria-label="调整侧边栏宽度"
+          aria-orientation="vertical"
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuenow={Math.round(sidebarWidth)}
+          tabIndex={0}
+          title="拖拽调整侧边栏宽度，双击恢复默认"
+          onPointerDown={handleSidebarResizeStart}
+          onPointerMove={handleSidebarResizeMove}
+          onPointerUp={handleSidebarResizeEnd}
+          onPointerCancel={handleSidebarResizeEnd}
+          onKeyDown={handleSidebarResizeKeyDown}
+          onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+          className={`group relative z-30 flex h-full flex-shrink-0 touch-none select-none cursor-col-resize items-center justify-center focus-visible:outline-none ${docId ? 'w-3' : 'w-4'}`}
+        >
+          <div className={`flex h-12 w-3 items-center justify-center rounded-full border transition-all duration-200 group-focus-visible:ring-2 group-focus-visible:ring-[#FFA07A]/40 ${
+            isSidebarResizing
+              ? 'scale-110 accent-control shadow-[0_7px_18px_rgba(184,95,71,0.18)]'
+              : darkMode
+                ? 'border-white/10 bg-[#30333a] text-gray-500 group-hover:border-white/20 group-hover:bg-[#3a3e46] group-hover:text-[#FFA07A]'
+                : 'border-white/90 bg-white/85 text-gray-400 shadow-[0_5px_14px_rgba(60,56,52,0.16)] group-hover:text-[#B85F47]'
+          }`}>
+            <GripVertical className="h-4 w-3" />
+          </div>
+        </div>
+      )}
+
+      {/* 主内容区域：统一承托 PDF 预览与对话面板的工作台底板 */}
+      <div className={`workspace-surface flex-1 min-w-0 flex flex-col h-full relative rounded-[28px] overflow-hidden ${isSidebarResizing ? 'transition-none' : 'transition-[background-color,border-color,box-shadow] duration-200 ease-out'} ${darkMode ? 'workspace-surface-dark' : ''}`}>
         {/* 侧边栏展开按钮 (未打开文档时显示) */}
-        {!showSidebar && !docId && (
+        {!showSidebar && (!docId || isNarrowDesktop) && (
           <button
             onClick={() => setShowSidebar(true)}
+            type="button"
+            aria-label="显示侧边栏"
             className={`absolute top-4 left-4 z-20 p-2 backdrop-blur-md shadow-sm rounded-full hover:scale-105 transition-all border ${darkMode ? 'bg-white/10 text-gray-300 border-white/10 hover:bg-white/20' : 'bg-white/80 text-gray-700 border-white/50 hover:bg-white'}`}
             title="显示侧边栏"
           >
@@ -2804,14 +4407,14 @@ const ChatPDF = () => {
           </button>
         )}
 
-        {/* 内容区域 */}
-        <div className="flex-1 flex overflow-hidden px-8 pb-6 gap-4 pt-6">
+        {/* 内容区域：阅读态用更小的内边距 */}
+        <div className={`flex-1 flex overflow-hidden ${showDocumentWorkspace ? 'p-3 gap-3' : `p-5 gap-4 ${isNarrowDesktop ? 'pt-14' : ''}`}`}>
           {/* 左侧：PDF 预览 */}
-          {docId ? (
+          {showDocumentWorkspace ? (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`soft-panel overflow-hidden flex flex-col relative flex-shrink-0 rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+              className={`workspace-pane workspace-pane-pdf overflow-hidden flex flex-col relative flex-shrink-0 min-w-0 ${darkMode ? 'workspace-pane-dark' : ''}`}
               style={{ width: `${pdfPanelWidth}%`, minWidth: '350px' }}
             >
               <div className="flex-1 overflow-hidden">
@@ -2831,6 +4434,7 @@ const ChatPDF = () => {
                     blockIndex={blockIndex}
                     activeBlockId={activeReadingBlockId}
                     focusedBlockIds={focusedReadingBlockIds}
+                    focusPulseToken={readingJumpPulseToken}
                     visitedBlockIds={[]}
                     inlineTranslationBlockIds={[]}
                     onBlockHover={handleReadingBlockHover}
@@ -2870,212 +4474,229 @@ const ChatPDF = () => {
               </div>
             </motion.div>
           ) : (
-            /* 空状态 */
-            <div className="flex-1 flex items-center justify-center relative overflow-hidden">
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full max-w-lg max-h-lg pointer-events-none">
-                <div className="blob bg-purple-200 w-72 h-72 top-0 left-0 mix-blend-multiply animate-blob"></div>
-                <div className="blob bg-cyan-100 w-72 h-72 bottom-0 right-0 mix-blend-multiply animate-blob animation-delay-2000"></div>
+            /* 空状态：左栏工作台（问候 + 上传 + 功能 + 最近文件），不再留大面积空白 */
+            <div className="flex-1 min-w-0 flex flex-col overflow-y-auto custom-scrollbar px-3 pt-4">
+              <div className="mb-6 px-1">
+                <h1 className={`text-[32px] font-extrabold tracking-tight leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>开始阅读论文</h1>
+                <p className={`text-[14px] mt-1.5 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>上传 PDF，AI 帮你速览、解析和对话</p>
               </div>
-              <div className="text-center space-y-8 max-w-md relative z-10">
-                <div className="w-24 h-24 bg-white/50 backdrop-blur-md rounded-[32px] flex items-center justify-center mx-auto shadow-sm border border-white/60">
-                  <Upload className="w-10 h-10 text-purple-500/80" />
-                </div>
-                <div className="space-y-2">
-                  <h2 className="text-3xl font-bold text-gray-800 tracking-tight">Upload a PDF to Start</h2>
-                  <p className="text-gray-500 text-lg">Chat with your documents using AI.</p>
+
+              <UploadDocumentCard
+                darkMode={darkMode}
+                isUploading={isUploading}
+                uploadProgress={uploadProgressLabel}
+                uploadStatus={uploadStatus}
+                uploadStatusMeta={uploadStatusMeta}
+                uploadFileInfo={uploadFileInfo}
+                parseRoute={selectedParseRoute}
+                onParseRouteChange={handleUploadRouteChange}
+                onSelect={() => handleChooseUploadFile(true)}
+              />
+
+              <div className="mt-6 px-1">
+                <h3 className={`text-[13px] font-bold mb-3 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>支持功能</h3>
+                <div className="grid grid-cols-5 gap-2">
+                  {[
+                    { Icon: Sparkles, label: '智能速览' },
+                    { Icon: ListFilter, label: '章节大纲' },
+                    { Icon: Globe, label: '划词翻译' },
+                    { Icon: Database, label: '表格问答' },
+                    { Icon: ArrowUpRight, label: '引用溯源' },
+                  ].map(({ Icon, label }) => (
+                    <div key={label} className="flex flex-col items-center gap-2">
+                      <div className={`w-12 h-12 rounded-full flex items-center justify-center ${darkMode ? 'bg-white/[0.06] text-gray-300' : 'bg-white text-gray-600 shadow-[var(--shadow-sm)]'}`}>
+                        <Icon className="w-[18px] h-[18px]" />
+                      </div>
+                      <span className={`text-[11px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{label}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
+
+              {history.length === 0 && (
+                <div className="mt-7 px-1 pb-4">
+                  <h3 className={`text-[13px] font-bold mb-3 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>工作流程</h3>
+                  <div className={`rounded-[18px] p-5 space-y-4 ${darkMode ? 'bg-white/[0.04]' : 'bg-white shadow-[var(--shadow-sm)]'}`}>
+                    {[
+                      { n: '1', title: '上传文档', desc: 'PDF 自动解析文字、表格与版面结构' },
+                      { n: '2', title: '生成速览', desc: 'AI 提炼大纲、总结和关键结论' },
+                      { n: '3', title: '开始对话', desc: '基于原文提问，回答附引用可溯源' },
+                    ].map(({ n, title, desc }) => (
+                      <div key={n} className="flex items-start gap-3.5">
+                        <div className="w-7 h-7 rounded-full bg-[#FFF4EF] text-[#B85F47] flex items-center justify-center text-[12px] font-bold shrink-0">{n}</div>
+                        <div className="min-w-0 pt-0.5">
+                          <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{title}</div>
+                          <div className={`text-[12px] mt-0.5 ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{desc}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {history.length > 0 && (
+                <div className="mt-7 px-1 pb-4">
+                  <h3 className={`text-[13px] font-bold mb-3 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>最近文件</h3>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {history.slice(0, 6).map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => loadSession(item)}
+                        className={`flex items-center gap-3 p-3.5 rounded-[16px] text-left transition-all hover:-translate-y-0.5 ${darkMode ? 'bg-white/[0.04] hover:bg-white/[0.07]' : 'bg-white shadow-[var(--shadow-sm)] hover:shadow-[var(--shadow-card)]'}`}
+                      >
+                        <div className={`w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0 ${darkMode ? 'bg-purple-500/10 text-purple-300' : 'bg-purple-50 text-purple-500'}`}>
+                          <MessageSquare size={15} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className={`text-[13px] font-semibold truncate ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{item.filename}</div>
+                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>点击继续对话</div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* 可拖拽分隔线 */}
           <div
+            role="separator"
+            aria-label="调整 PDF 与 AI 面板宽度"
+            aria-orientation="vertical"
+            aria-valuemin={isNarrowDesktop ? 38 : 30}
+            aria-valuemax={isNarrowDesktop ? 62 : 70}
+            aria-valuenow={Math.round(pdfPanelWidth)}
+            tabIndex={0}
+            title="拖拽或使用左右方向键调整面板宽度"
             className="w-4 cursor-col-resize flex-shrink-0 relative group -ml-2 z-10 flex justify-center"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const startX = e.clientX;
+            onPointerDown={(event) => {
+              event.preventDefault();
+              const startX = event.clientX;
               const startWidth = pdfPanelWidth;
-              const handleMouseMove = (e) => {
-                const containerWidth = e.currentTarget?.parentElement?.offsetWidth || window.innerWidth;
-                const deltaX = e.clientX - startX;
+              const containerWidth = event.currentTarget?.parentElement?.offsetWidth || window.innerWidth;
+              const minWidth = isNarrowDesktop ? 38 : 30;
+              const maxWidth = isNarrowDesktop ? 62 : 70;
+              const handlePointerMove = (moveEvent) => {
+                const deltaX = moveEvent.clientX - startX;
                 const deltaPercent = (deltaX / containerWidth) * 100;
-                const newWidth = Math.max(30, Math.min(70, startWidth + deltaPercent));
+                const newWidth = Math.max(minWidth, Math.min(maxWidth, startWidth + deltaPercent));
                 setPdfPanelWidth(newWidth);
               };
-              const handleMouseUp = () => {
-                document.removeEventListener('mousemove', handleMouseMove);
-                document.removeEventListener('mouseup', handleMouseUp);
+              const handlePointerUp = () => {
+                document.removeEventListener('pointermove', handlePointerMove);
+                document.removeEventListener('pointerup', handlePointerUp);
+                document.removeEventListener('pointercancel', handlePointerUp);
               };
-              document.addEventListener('mousemove', handleMouseMove);
-              document.addEventListener('mouseup', handleMouseUp);
+              document.addEventListener('pointermove', handlePointerMove);
+              document.addEventListener('pointerup', handlePointerUp);
+              document.addEventListener('pointercancel', handlePointerUp);
+            }}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
+              event.preventDefault();
+              const minWidth = isNarrowDesktop ? 38 : 30;
+              const maxWidth = isNarrowDesktop ? 62 : 70;
+              const nextWidth = event.key === 'Home'
+                ? 50
+                : pdfPanelWidth + (event.key === 'ArrowRight' ? 2 : -2);
+              setPdfPanelWidth(Math.max(minWidth, Math.min(maxWidth, nextWidth)));
             }}
           >
-            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-purple-500/50 transition-colors duration-200" />
+            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-[#B85F47]/45 transition-colors duration-200" />
           </div>
 
           {/* 右侧：聊天/速览/解析区域 */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
-            className={`soft-panel relative flex flex-col overflow-hidden rounded-[var(--radius-panel)] min-w-0 ${darkMode ? 'bg-gray-800/50' : ''}`}
+            className={`workspace-pane workspace-pane-chat relative flex flex-col overflow-hidden min-w-0 ${darkMode ? 'workspace-pane-dark' : ''}`}
             style={{ width: `calc(${100 - pdfPanelWidth}% - 2rem)`, minWidth: '350px' }}
           >
-            <div className="absolute right-5 top-5 z-30">
+            {showDocumentWorkspace && <div className="absolute right-5 top-5 z-30">
               <button
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
                   setShowAiProcessingPanel((prev) => !prev);
                 }}
-                className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-[0_10px_24px_rgba(148,163,184,0.14),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all hover:-translate-y-0.5 ${
+                className={`relative z-50 inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-[0_10px_24px_rgba(148,163,184,0.14),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 ${
                   darkMode
                     ? 'border-white/10 bg-white/[0.06] text-gray-200 hover:bg-white/[0.09]'
-                    : 'border-white/70 bg-white/75 text-gray-600 hover:text-[#8871e4]'
+                    : 'border-white/70 bg-white/75 text-gray-600 hover:text-[#ed8c68]'
                 }`}
+                aria-label={`查看后台任务：${backgroundTaskSummary.label}`}
+                title={backgroundTaskSummary.label}
               >
                 <span className={`relative flex h-2 w-2 rounded-full ${
-                  aiProcessingRunning
-                    ? 'bg-[#8871e4]'
-                    : hasAiRecommendation
+                  backgroundTaskSummary.state === 'failed'
+                    ? 'bg-rose-400'
+                    : backgroundTaskSummary.state === 'running'
+                    ? 'bg-[#ed8c68]'
+                    : backgroundTaskSummary.state === 'recommended'
                       ? 'bg-amber-400'
-                      : aiAutoProcess ? 'bg-emerald-400' : 'bg-gray-300'
+                      : darkMode ? 'bg-gray-600' : 'bg-gray-300'
                 }`}>
-                  {aiProcessingRunning && <span className="absolute inset-0 animate-ping rounded-full bg-[#8871e4]/50" />}
-                  {!aiProcessingRunning && hasAiRecommendation && <span className="absolute inset-0 animate-ping rounded-full bg-amber-400/60" />}
+                  {backgroundTaskSummary.state === 'running' && <span className="absolute inset-0 animate-ping rounded-full bg-[#ed8c68]/50" />}
+                  {backgroundTaskSummary.state === 'recommended' && <span className="absolute inset-0 animate-ping rounded-full bg-amber-400/60" />}
                 </span>
-                AI 处理
+                {backgroundTaskSummary.label}
               </button>
 
-              {showAiProcessingPanel && (
+              <DocumentParseStatusBar
+                documentId={docId}
+                manifest={documentParseManifest}
+                parseReady={documentParseReady}
+                deepParseStatus={currentDeepParseStatus}
+                ragIndexStatus={ragIndexStatus}
+                darkMode={darkMode}
+                suppressed={showAiProcessingPanel}
+                onOpenProcessing={visibleBackgroundTasks.length > 0 ? () => setShowAiProcessingPanel(true) : undefined}
+                onRetry={currentDeepParseStatus?.configured === false
+                  ? undefined
+                  : () => handleStartMinerUDeepParse({ retryFullRoute: true })}
+                onChooseRoute={openUploadHome}
+              />
+
+              <AnimatePresence initial={false}>
+                {showAiProcessingPanel && (
+                  <BackgroundTaskPanel
+                    items={visibleBackgroundTasks}
+                    autoEnabled={aiAutoProcess}
+                    onAutoEnabledChange={setAiAutoProcess}
+                    onClose={() => setShowAiProcessingPanel(false)}
+                    onClearCache={handleClearDocumentAICache}
+                    canClearCache={Boolean(docId) && !isMinerUFullRoutePending}
+                    onRollbackRagIndex={handleRollbackRagIndex}
+                    canRollbackRagIndex={canRollbackCurrentRagIndex}
+                    darkMode={darkMode}
+                  />
+                )}
+              </AnimatePresence>
+            </div>}
+
+            {/* 顶部导航：速览 / 阅读 / 对话 */}
+              <div className={`pt-6 pb-2 flex shrink-0 ${isNarrowDesktop ? 'justify-start pl-4' : 'justify-center'}`}>
                 <div
-                  onClick={(event) => event.stopPropagation()}
-                  className={`absolute right-0 top-12 w-[340px] rounded-[24px] border p-4 shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl ${
+                  role="group"
+                  aria-label="右侧面板视图"
+                  className={`relative isolate grid grid-cols-3 rounded-[20px] border p-1 backdrop-blur-xl ${isNarrowDesktop ? 'w-[210px]' : 'w-[240px]'} ${
                     darkMode
-                      ? 'border-white/10 bg-[#1f2329]/95 text-gray-100'
-                      : 'border-white/80 bg-white/95 text-gray-900'
+                      ? 'border-white/[0.07] bg-white/[0.04] shadow-[inset_0_1px_1px_rgba(255,255,255,0.04)]'
+                      : 'border-black/[0.03] bg-[#f5f5f6]/90 shadow-[inset_0_1px_1px_rgba(17,24,39,0.035)]'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-[14px] font-bold">当前文档 AI 处理</div>
-                      <div className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{aiProcessingStatusText}</div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAiProcessingPanel(false)}
-                      className={`rounded-full p-1.5 transition-colors ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600'}`}
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-
-                  <div className="mt-4 space-y-2.5">
-                    {aiProcessingItems.map((item) => (
-                      <div
-                        key={item.id}
-                        className={`rounded-[18px] border p-3 ${
-                          item.recommended
-                            ? darkMode ? 'border-[#8871e4]/40 bg-[#8871e4]/[0.08]' : 'border-[#8871e4]/30 bg-[#8871e4]/[0.05]'
-                            : darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-100 bg-gray-50/70'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[13px] font-bold">{item.title}</span>
-                              {item.recommended && (
-                                <span className="rounded-full bg-[#8871e4] px-2 py-0.5 text-[10px] font-semibold text-white">
-                                  推荐
-                                </span>
-                              )}
-                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                                item.busy
-                                  ? 'bg-[#8871e4]/10 text-[#8871e4]'
-                                  : darkMode ? 'bg-white/10 text-gray-300' : 'bg-white text-gray-500'
-                              }`}>
-                                {item.status}
-                              </span>
-                            </div>
-                            <div className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{item.desc}</div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              item.onAction?.();
-                            }}
-                            disabled={item.disabled}
-                            className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                              item.busy
-                                ? darkMode ? 'bg-white/10 text-gray-300' : 'bg-gray-200 text-gray-500'
-                                : darkMode ? 'bg-white/10 text-gray-100 hover:bg-white/15' : 'bg-white text-gray-700 shadow-sm hover:text-[#8871e4]'
-                            }`}
-                          >
-                            {item.actionLabel}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="mt-3 flex items-center justify-between gap-3">
-                    {!aiAutoProcess && (
-                      <span className={`text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>自动关闭时不会主动消耗 token</span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleClearDocumentAICache}
-                      disabled={!docId}
-                      className={`ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                        darkMode ? 'text-gray-300 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
-                      }`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      清理缓存
-                    </button>
-                  </div>
-                  {pretranslateNotice && (
-                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
-                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
-                    }`}>
-                      {pretranslateNotice}
-                    </div>
-                  )}
-                  {deepParsePanelNotice && (
-                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
-                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
-                    }`}>
-                      {deepParsePanelNotice}
-                    </div>
-                  )}
-                  {ragIndexNotice && (
-                    <div className={`mt-2 rounded-2xl px-3 py-2 text-[11px] ${
-                      darkMode ? 'bg-white/[0.05] text-gray-300' : 'bg-[#f6f3ff] text-[#6f5cc2]'
-                    }`}>
-                      {ragIndexNotice}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* 顶部导航：速览 / 解析 / 对话 */}
-              <div className="pt-6 pb-2 flex justify-center shrink-0">
-                <div className={`relative grid w-[240px] grid-cols-3 overflow-hidden rounded-[22px] p-1 border shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] backdrop-blur-xl ${
-                  darkMode
-                    ? 'bg-white/[0.05] border-white/10'
-                    : 'bg-white/35 border-white/70 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_8px_24px_rgba(148,163,184,0.10)]'
-                }`}>
                   <motion.div
-                    className={`absolute top-1 bottom-1 left-1 rounded-[18px] z-0 ${
+                    aria-hidden="true"
+                    className={`absolute bottom-1 left-1 top-1 z-0 rounded-[16px] will-change-transform ${
                       darkMode
-                        ? 'bg-white/12 shadow-[0_8px_22px_rgba(0,0,0,0.22)]'
-                        : 'bg-white/90 shadow-[0_10px_24px_rgba(139,124,200,0.14),0_2px_6px_rgba(31,41,55,0.06),inset_0_1px_0_rgba(255,255,255,0.95)]'
+                        ? 'bg-[#383a41] ring-1 ring-inset ring-white/[0.10] shadow-[0_7px_18px_rgba(0,0,0,0.28),0_1px_3px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.10)]'
+                        : 'bg-white ring-1 ring-inset ring-black/[0.035] shadow-[0_7px_18px_rgba(31,41,55,0.12),0_1px_3px_rgba(31,41,55,0.08),inset_0_1px_0_rgba(255,255,255,0.98)]'
                     }`}
                     initial={false}
                     style={{ width: 'calc((100% - 0.5rem) / 3)' }}
                     animate={{ x: `${activeRightPanelTabIndex * 100}%` }}
-                    transition={{ type: 'spring', stiffness: 430, damping: 34, mass: 0.72 }}
+                    transition={{ type: 'spring', stiffness: 360, damping: 28, mass: 0.72 }}
                   />
 
                   {rightPanelTabs.map(({ id, label }) => {
@@ -3084,12 +4705,13 @@ const ChatPDF = () => {
                       <motion.button
                         key={id}
                         type="button"
+                        aria-pressed={isActive}
                         onClick={() => setRightPanelMode(id)}
                         whileTap={{ scale: 0.97 }}
-                        className={`relative z-10 h-9 rounded-[18px] text-[13px] font-semibold transition-colors duration-200 ${
+                        className={`relative z-10 h-9 rounded-[16px] text-[13px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#8b95a3]/60 ${
                           isActive
-                            ? (darkMode ? 'text-white' : 'text-[#8b7cc8]')
-                            : (darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600')
+                            ? (darkMode ? 'text-white' : 'text-[#bd6a4e]')
+                            : (darkMode ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-600')
                         }`}
                       >
                         {label}
@@ -3114,9 +4736,21 @@ const ChatPDF = () => {
                     loading={overviewLoading}
                     error={overviewError}
                     depth={overviewDepth}
-                    figureMode={overviewFigureMode}
+                    parseRoute={primaryParseRoute}
                     onDepthChange={handleOverviewDepthChange}
-                    onFetch={fetchOverview}
+                    onFetch={isMinerUFullRoutePending ? undefined : fetchOverview}
+                    availabilityState={isMinerUFullRouteFailed
+                      ? 'failed'
+                      : isMinerUFullRouteCancelled
+                        ? 'cancelled'
+                        : isMinerUFullRoutePending ? 'processing' : ''}
+                    availabilityMessage={isMinerUFullRoutePending ? minerUParsePendingNotice : ''}
+                    availabilityActionLabel={isMinerUFullRouteFailed
+                      ? '重试 MinerU'
+                      : isMinerUFullRouteCancelled ? '重新上传' : ''}
+                    onAvailabilityAction={isMinerUFullRouteFailed
+                      ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
+                      : isMinerUFullRouteCancelled ? openUploadHome : undefined}
                   />
                 </Suspense>
               ) : rightPanelMode === 'analysis' ? (
@@ -3143,13 +4777,6 @@ const ChatPDF = () => {
                 />
               ) : (
                 <>
-                  {/* 预设问题 */}
-                  {showPresetQuestions && (
-                    <div className="p-6 pb-0">
-                      <PresetQuestions onSelect={handlePresetSelect} disabled={isLoading} />
-                    </div>
-                  )}
-
                   {/* 虚拟消息列表 - 替代原有的 messages.map 渲染（需求 3.1） */}
                   <VirtualMessageList
                     messages={messages}
@@ -3157,6 +4784,14 @@ const ChatPDF = () => {
                     streamingMessageId={streamingMessageId}
                     className="flex-1 overflow-y-auto overflow-x-hidden p-6 pb-36 space-y-6 min-w-0"
                   />
+
+                  {/* 预设问题：空对话时贴近输入框显示，形成「看到建议 → 提问」的动线 */}
+                  {showPresetQuestions && (
+                    <div className="px-6 pb-[130px]">
+                      <div className={`mb-2 text-[11px] font-semibold ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>试试这样问</div>
+                      <PresetQuestions onSelect={handlePresetSelect} disabled={isLoading || isMinerUFullRoutePending} />
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -3164,87 +4799,92 @@ const ChatPDF = () => {
             {/* 输入区域：仅在对话模式显示，避免遮挡速览/解析内容 */}
             {rightPanelMode === 'chat' && (
             <div className="p-6 pt-0 bg-transparent relative z-10">
-              <div className="absolute bottom-5 left-3 right-3 bg-[#f2f3f9] shadow-[0_12px_40px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] border border-white/80 rounded-[2rem] p-2.5 z-20">
+              <div className={`absolute bottom-5 left-3 right-3 z-20 rounded-[26px] p-3 transition-shadow focus-within:ring-2 ${
+                darkMode
+                  ? 'bg-[#24272d] shadow-[0_18px_46px_-24px_rgba(0,0,0,0.72)] focus-within:ring-[#FFA07A]/15'
+                  : 'bg-white shadow-[0_16px_40px_-18px_rgba(60,55,50,0.28),0_4px_12px_-8px_rgba(60,55,50,0.12)] focus-within:ring-[#FFA07A]/25'
+              }`}>
                 {/* 截图预览 - 嵌入输入框顶部，避免被遮挡 */}
                 <ScreenshotPreview
                   screenshots={screenshots}
-                  onAction={handleScreenshotAction}
+                  onAction={handleParseAwareScreenshotAction}
                   onClose={handleScreenshotClose}
                 />
-                {/* 上半部分：模型选择、状态、工具图标 */}
-                <div className="flex items-center justify-between mb-2.5 px-1">
-                  <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
-                  
-                  {/* 右侧工具图标 */}
-                  <div className="flex items-center gap-2 text-gray-500 shrink-0">
-                    <button onClick={() => setShowSettings(true)} className="hover:text-gray-800 transition-colors p-1 rounded-md">
-                      <Settings size={15} />
-                    </button>
-                    <button onClick={() => fileInputRef.current?.click()} className="hover:text-gray-800 transition-colors p-1 rounded-md">
-                      <Paperclip size={15} />
-                    </button>
-                    <WebSearchButton />
-                    {isVisionCapable && (
-                      <button
-                        onClick={() => setIsSelectingArea(true)}
-                        disabled={!docId}
-                        className={`transition-colors p-1 rounded-md ${docId ? isSelectingArea ? 'text-purple-600' : 'hover:text-gray-800' : 'text-gray-300 cursor-not-allowed'}`}
-                        title={!docId ? '请先上传文档' : isSelectingArea ? '框选模式已开启' : '区域截图'}
-                      >
-                        <Scan size={15} />
-                      </button>
-                    )}
-                  </div>
-                </div>
+                {/* 第一行：输入文本（参考版式：文本在上，工具在下） */}
+                <textarea
+                  ref={textareaRef}
+                  disabled={isMinerUFullRoutePending}
+                  onChange={(e) => {
+                    e.target.style.height = '24px';
+                    e.target.style.height = e.target.scrollHeight + 'px';
+                    const newHasInput = !!e.target.value.trim();
+                    if (newHasInput !== hasInput) setHasInput(newHasInput);
+                  }}
+                  onKeyDown={(e) => {
+                    if (isMinerUFullRoutePending) return;
+                    if (sendShortcut === 'Ctrl+Enter') {
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+                    } else {
+                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                    }
+                  }}
+                  placeholder={isMinerUFullRoutePending ? minerUParsePendingNotice : 'Summarize, rephrase, convert...'}
+                  className={`w-full bg-transparent outline-none px-2 pt-1 text-[14px] min-w-0 resize-none h-[24px] overflow-hidden leading-relaxed ${darkMode ? 'text-gray-100 placeholder:text-gray-500' : 'text-gray-800 placeholder:text-gray-400'} ${isMinerUFullRoutePending ? 'cursor-not-allowed opacity-60' : ''}`}
+                  rows={1}
+                  style={{ minHeight: '24px', maxHeight: '120px' }}
+                />
 
-                {/* 下半部分：输入区 */}
-                <div className="flex items-center bg-white rounded-full p-1.5 shadow-sm border border-black/5 focus-within:ring-2 focus-within:ring-purple-100 focus-within:border-purple-200 transition-all">
-                  <textarea
-                    ref={textareaRef}
-                    onChange={(e) => {
-                      e.target.style.height = '24px';
-                      e.target.style.height = e.target.scrollHeight + 'px';
-                      const newHasInput = !!e.target.value.trim();
-                      if (newHasInput !== hasInput) setHasInput(newHasInput);
-                    }}
-                    onKeyDown={(e) => {
-                      if (sendShortcut === 'Ctrl+Enter') {
-                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
-                      } else {
-                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-                      }
-                    }}
-                    placeholder="Summarize, rephrase, convert..."
-                    className="flex-1 bg-transparent outline-none px-4 text-[14px] text-gray-800 min-w-0 resize-none h-[24px] overflow-hidden leading-relaxed py-0"
-                    rows={1}
-                    style={{ minHeight: '24px', maxHeight: '120px' }}
-                  />
-                  
-                  {/* Send 文字和发送按钮，固定在右侧 */}
-                  <div className="flex items-center gap-3 pr-1 shrink-0">
-                    <span className="text-[#aba6d1] text-[13px] font-medium select-none pointer-events-none">Send</span>
-                    <button
-                      onClick={isLoading ? handleStop : sendMessage}
-                      disabled={!isLoading && (!hasInput && screenshots.length === 0)}
-                      className={`w-9 h-9 rounded-full transition-colors flex items-center justify-center shadow-sm ${
-                        isLoading || hasInput || screenshots.length > 0 
-                          ? 'bg-[#f0efff] text-[#7c3aed] hover:bg-[#7c3aed] hover:text-white' 
-                          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                      }`}
-                    >
-                      <AnimatePresence initial={false}>
-                        {isLoading ? (
-                          <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center">
-                            <PauseIcon />
-                          </motion.div>
-                        ) : (
-                          <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center ml-0.5">
-                            <SendIcon />
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </button>
+                {/* 第二行：模型与工具在左，发送在右 */}
+                <div className="flex items-center justify-between mt-2 px-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <ModelQuickSwitch onThinkingChange={handleThinkingChange} />
+                    <ChatContextIndicator
+                      messages={messages}
+                      contextCount={contextCount}
+                      memoryEnabled={enableMemory}
+                      lastUsage={lastCallInfo?.usage}
+                      darkMode={darkMode}
+                    />
+                    <div aria-hidden="true" className={`mx-1 h-4 w-px shrink-0 ${darkMode ? 'bg-white/10' : 'bg-gray-200'}`} />
+                    <div className={`flex items-center gap-2 shrink-0 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <button onClick={openSettings} className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`} title="设置中心" aria-label="设置中心">
+                        <Settings size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={openUploadHome}
+                        aria-label="上传 PDF"
+                        title="上传新 PDF"
+                        className={`transition-colors p-1 rounded-md ${darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800'}`}
+                      >
+                        <Paperclip size={15} />
+                      </button>
+                      <WebSearchButton />
+                      {isVisionCapable && (
+                        <button
+                          onClick={() => setIsSelectingArea(true)}
+                          disabled={!docId || isMinerUFullRoutePending}
+                          className={`transition-colors p-1 rounded-md ${docId && !isMinerUFullRoutePending ? isSelectingArea ? 'text-[#B85F47] dark:text-[#FFA07A]' : darkMode ? 'hover:text-gray-200' : 'hover:text-gray-800' : 'text-gray-300 cursor-not-allowed'}`}
+                          title={!docId ? '请先上传文档' : isMinerUFullRoutePending ? minerUParsePendingNotice : isSelectingArea ? '框选模式已开启' : '区域截图'}
+                        >
+                          <Scan size={15} />
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  <button
+                    onClick={isLoading ? handleStop : sendMessage}
+                    disabled={isMinerUFullRoutePending || (!isLoading && (!hasInput && screenshots.length === 0))}
+                    aria-label={isLoading ? '停止生成' : '发送'}
+                    className={`w-9 h-9 shrink-0 rounded-full transition-all flex items-center justify-center ${
+                      !isMinerUFullRoutePending && (isLoading || hasInput || screenshots.length > 0)
+                        ? 'bg-[#F0653A] text-white shadow-[0_6px_16px_-6px_rgba(240,101,58,0.55)] hover:bg-[#D9552B] active:scale-95'
+                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <SendPauseIconSwap isPaused={isLoading} />
+                  </button>
                 </div>
               </div>
             </div>
@@ -3253,155 +4893,264 @@ const ChatPDF = () => {
         </div>
       </div>
 
-      {/* 上传进度模态框 */}
-      <AnimatePresence>
-        {isUploading && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90">
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-              className="flex flex-col items-center"
-            >
-              <div style={{ position: 'relative', width: 300, height: 300 }}>
-                <div style={{ position: 'absolute', inset: 0, filter: 'blur(0.5px) contrast(1.2)' }}>
-                  {UPLOAD_RING_CONFIGS.map((cfg, i) => (
-                    <div key={i} style={{
-                      position: 'absolute', top: '50%', left: '50%',
-                      width: cfg.s, height: cfg.s, borderRadius: cfg.br,
-                      border: `${cfg.w}px solid ${cfg.c}`, background: 'transparent',
-                      mixBlendMode: cfg.mix, pointerEvents: 'none',
-                      animation: `chatpdf-spin ${cfg.dur}s linear ${cfg.del}s infinite ${cfg.dir}`,
-                    }} />
-                  ))}
-                </div>
-                <div style={{
-                  position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center', zIndex: 10, pointerEvents: 'none',
-                }}>
-                  <span style={{ color: 'rgba(255, 255, 255, 0.9)', fontSize: '2.5rem', fontWeight: 200, letterSpacing: '2px', textShadow: '0 0 15px rgba(255, 255, 255, 0.3)', fontVariantNumeric: 'tabular-nums' }}>
-                    {uploadProgressLabel}%
-                  </span>
-                  <span style={{ color: 'rgba(255, 255, 255, 0.55)', fontSize: '0.7rem', letterSpacing: '4px', textTransform: 'uppercase', marginTop: '6px' }}>
-                    {uploadStatusMeta.label}
-                  </span>
-                </div>
-              </div>
-              <motion.p
-                key={uploadStatus}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                style={{ color: 'rgba(255, 255, 255, 0.6)', fontSize: '0.9rem', fontWeight: 300, letterSpacing: '0.5px', marginTop: '8px' }}
-              >
-                {uploadStatusMeta.title}
-              </motion.p>
-              <motion.p
-                key={`${uploadStatus}-desc`}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                style={{ color: 'rgba(255, 255, 255, 0.38)', fontSize: '0.75rem', fontWeight: 300, letterSpacing: '0.2px', marginTop: '6px', maxWidth: 340, textAlign: 'center', lineHeight: 1.6 }}
-              >
-                {uploadStatusMeta.desc}
-              </motion.p>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      </div>{/* /统一应用外壳 */}
 
       {/* 设置模态框 */}
-      <AnimatePresence initial={false}>
+      <AnimatePresence initial={false} onExitComplete={handleSettingsModalExitComplete}>
         {showSettings && (
           <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            transition={{ duration: 0.12 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4"
+            transition={{ duration: 0.1 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/25 p-4"
             onClick={() => setShowSettings(false)}
           >
             <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 10 }}
-              transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0, transition: { duration: 0.16, ease: [0.22, 1, 0.36, 1] } }}
+              exit={{ opacity: 0, y: 6, transition: { duration: 0.09, ease: [0.4, 0, 1, 1] } }}
               onClick={(e) => e.stopPropagation()}
-              className={`w-[460px] max-w-full max-h-[90vh] overflow-hidden flex flex-col ${darkMode ? 'bg-[#1a1d21]/95 border border-white/5 backdrop-blur-md rounded-[36px] shadow-2xl' : 'bg-white/90 backdrop-blur-md border border-white/60 rounded-[36px] shadow-[0_32px_80px_-20px_rgba(0,0,0,0.12)] relative'}`}
+              className={`settings-modal-surface settings-solid settings-shell w-[780px] max-w-[94vw] h-[min(620px,88vh)] overflow-hidden flex flex-col border ${darkMode ? 'settings-shell-dark bg-[#1d2026] border-[#353941]' : 'bg-[#f6f7f9] border-white/80 relative'}`}
             >
               <div className="p-6 pb-2 flex-shrink-0 flex items-center justify-between mt-1 px-7">
                 <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-2xl shadow-sm border ${darkMode ? 'bg-white/10 border-white/10' : 'bg-white/60 border-white/50'}`}>
-                    <Settings className="text-[#7c4dff]" size={22} />
+                  <div className={`p-2 rounded-[12px] border ${darkMode ? 'bg-[#292d35] border-[#3b4049]' : 'bg-white border-gray-200'}`}>
+                    <Settings className="text-[#B85F47]" size={22} />
                   </div>
-                  <h2 className={`text-xl font-bold tracking-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Settings</h2>
+                  <h2 className={`text-xl font-bold tracking-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>设置中心</h2>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => { setShowSettings(false); setShowEmbeddingSettings(true); }} className={`transition-all duration-300 hover:shadow-[0_8px_20px_rgba(42,36,66,0.3)] hover:-translate-y-0.5 text-white text-xs font-semibold px-3.5 py-2 rounded-full ${darkMode ? 'bg-[#3a3452] hover:bg-[#2a2442]' : 'bg-[#2a2442] hover:bg-[#1a1528]'}`}>
-                    Manage Models
+                  <button
+                    onClick={handleOpenEmbeddingSettings}
+                    onPointerEnter={preloadEmbeddingSettings}
+                    onFocus={preloadEmbeddingSettings}
+                    className={`transition-all duration-300 hover:-translate-y-0.5 text-xs font-semibold px-3.5 py-2 rounded-full ${darkMode ? 'bg-white/10 text-gray-200 hover:bg-white/15' : 'bg-gray-800 text-white hover:bg-gray-900'}`}
+                  >
+                    模型服务
                   </button>
-                  <button onClick={() => setShowSettings(false)} className={`p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`}>
+                  <button onClick={() => setShowSettings(false)} className={`p-2 rounded-full transition-colors z-10 ${darkMode ? 'hover:bg-white/10 text-gray-500 hover:text-gray-300' : 'hover:bg-black/5 text-gray-400 hover:text-gray-700'}`} title="关闭设置中心" aria-label="关闭设置中心">
                     <X className="w-5 h-5" />
                   </button>
                 </div>
               </div>
 
-              <div className="space-y-5 px-6 overflow-y-auto flex-1 pb-6 custom-scrollbar">
+              <div className="settings-segment relative grid grid-cols-5 mx-7 mb-3 max-w-[440px] p-1 rounded-[20px] flex-shrink-0" role="tablist" aria-label="设置分类">
+                <span
+                  aria-hidden="true"
+                  className="settings-segment-indicator absolute left-1 top-1 bottom-1 rounded-[16px] transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
+                  style={{
+                    width: 'calc((100% - 0.5rem) / 5)',
+                    transform: `translateX(${['common', 'reading', 'retrieval', 'interface', 'storage'].indexOf(settingsSection) * 100}%)`,
+                  }}
+                />
+                {[
+                  { id: 'common', label: '常用' },
+                  { id: 'reading', label: '阅读' },
+                  { id: 'retrieval', label: '检索' },
+                  { id: 'interface', label: '界面' },
+                  { id: 'storage', label: '存储' },
+                ].map((section) => (
+                  <button
+                    key={section.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={settingsSection === section.id}
+                    onClick={() => handleSettingsSectionChange(section.id)}
+                    className={`relative z-10 min-w-0 rounded-[16px] px-2 py-2 text-[12px] font-semibold transition-colors ${
+                      settingsSection === section.id
+                        ? darkMode
+                          ? 'text-white'
+                          : 'text-gray-900'
+                        : darkMode
+                          ? 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+                          : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200/70'
+                    }`}
+                  >
+                    {section.label}
+                  </button>
+                ))}
+              </div>
+
+              <motion.div
+                key={settingsSection}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className="space-y-5 px-6 overflow-y-auto flex-1 pb-6 custom-scrollbar"
+              >
                 
-                <div className="space-y-3.5 px-1">
-                  {/* Chat Model Card */}
-                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
-                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
-                      <MessageSquare size={22} />
-                    </div>
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                        CHAT MODEL
-                      </h3>
-                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('assistantModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('assistantModel')) || '未设置'}
-                      </p>
-                    </div>
+                {settingsSection === 'common' && (
+                <div className="px-1">
+                  {/* 模型概览：单卡片紧凑列表，不再是三张大卡 */}
+                  <div className={`settings-card border overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    {[
+                      { Icon: MessageSquare, label: '对话模型', value: getDefaultModelLabel(getDefaultModel('assistantModel')) },
+                      { Icon: Database, label: '嵌入模型', value: getDefaultModelLabel(getDefaultModel('embeddingModel')) },
+                      { Icon: ArrowUpDown, label: '重排模型', value: getDefaultModelLabel(getDefaultModel('rerankModel')) },
+                    ].map(({ Icon, label, value }, i) => (
+                      <div key={label} className={`px-4 py-3 flex items-center gap-3 ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''}`}>
+                        <div className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
+                          <Icon size={15} />
+                        </div>
+                        <span className={`text-[13px] font-bold w-[72px] shrink-0 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{label}</span>
+                        <span className={`text-[12px] font-medium truncate flex-1 text-right ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={value}>
+                          {value || '未设置'}
+                        </span>
+                      </div>
+                    ))}
                   </div>
+                </div>
+                )}
 
-                  {/* Embedding Model Card */}
-                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
-                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
-                      <Database size={22} />
+                {/* 智能阅读 — 从「全局设置 > 阅读」上移为一级分区：
+                    大纲/总结/预翻译/速览是产品核心能力，不应藏在三级深度 */}
+                {settingsSection === 'reading' && (
+                <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${aiAutoProcess ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {aiAutoProcess && <Check size={13} strokeWidth={3.5} />}
                     </div>
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                        EMBEDDING
-                      </h3>
-                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('embeddingModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('embeddingModel')) || '未设置'}
+                    <div className="flex flex-col flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>智能阅读</h4>
+                        <input type="checkbox" checked={aiAutoProcess} onChange={e => setAiAutoProcess(e.target.checked)} className="hidden" />
+                      </div>
+                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        控制文档打开后是否自动生成 AI 阅读辅助；关闭后打开文档零模型调用
                       </p>
                     </div>
-                  </div>
+                  </label>
 
-                  {/* Rerank Model Card */}
-                  <div className={`backdrop-blur-md rounded-[24px] p-4 flex items-center space-x-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
-                    <div className="w-[46px] h-[46px] rounded-[16px] bg-[#7c4dff]/10 flex items-center justify-center text-[#7c4dff] shrink-0 border border-white/50 shadow-inner">
-                      <ArrowUpDown size={22} />
+                  <div className={`space-y-3 pt-1 ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
+                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${autoOutlineSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                        {autoOutlineSummary && <Check size={13} strokeWidth={3.5} />}
+                      </div>
+                      <div className="flex flex-col flex-1">
+                        <div className="flex items-center justify-between">
+                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>自动生成大纲与总结</h4>
+                          <input type="checkbox" checked={autoOutlineSummary} onChange={e => setAutoOutlineSummary(e.target.checked)} className="hidden" />
+                        </div>
+                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          打开文档后自动生成左侧 AI 总结和章节大纲；关闭后只读取已有缓存
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableHoverPretranslate ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                        {enableHoverPretranslate && <Check size={13} strokeWidth={3.5} />}
+                      </div>
+                      <div className="flex flex-col flex-1">
+                        <div className="flex items-center justify-between">
+                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>自动预翻译全文</h4>
+                          <input type="checkbox" checked={enableHoverPretranslate} onChange={e => setAutoPretranslate(e.target.checked)} className="hidden" />
+                        </div>
+                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          提前缓存正文、标题和图注翻译，悬浮时直接显示；会产生较多模型调用
+                        </p>
+                      </div>
+                    </label>
+
+                    <div className="settings-inset p-3.5 rounded-[14px]">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>预翻译并发</div>
+                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>限速模型建议 3-6，付费高速模型可用 8-16</div>
+                        </div>
+                        <span className="text-[12px] font-bold text-[#B85F47] tabular-nums">{pretranslateConcurrency}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="1"
+                        max="16"
+                        step="1"
+                        value={pretranslateConcurrency}
+                        onChange={(e) => setPretranslateConcurrency(Number(e.target.value))}
+                        className="mt-3 w-full accent-[#FFA07A]"
+                      />
                     </div>
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <h3 className={`text-[13px] font-bold uppercase tracking-wider ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                        RERANK
-                      </h3>
-                      <p className={`text-[12px] mt-0.5 font-medium truncate ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} title={getDefaultModelLabel(getDefaultModel('rerankModel'))}>
-                        {getDefaultModelLabel(getDefaultModel('rerankModel')) || '未设置'}
-                      </p>
+
+                    <div className="settings-inset p-3.5 rounded-[14px]">
+                      <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>速览默认详细度</div>
+                      <SettingsSegmentedControl
+                        ariaLabel="速览默认详细度"
+                        value={overviewDefaultDepth}
+                        onChange={setOverviewDefaultDepth}
+                        options={[
+                          { value: 'brief', label: '简略' },
+                          { value: 'standard', label: '标准' },
+                          { value: 'detailed', label: '详细' },
+                        ]}
+                        className="mt-2 rounded-[12px]"
+                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                        indicatorClassName="rounded-[9px]"
+                      />
+                      <p className={`mt-2 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>速览仍然按需触发，不会因这个选项自动消耗 token</p>
+                    </div>
+
+                    <div className="settings-inset p-3.5 rounded-[14px]">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>图表理解模型</div>
+                          <p className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                            用于速览图表解读与高风险表格核验；未配置视觉能力时只保留定位和裁剪结果
+                          </p>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visualPolicyReady ? 'bg-emerald-500/10 text-emerald-600' : 'bg-[#FBE9E2] text-[#B85F47]'}`}>
+                          {visualStrategy === 'privacy'
+                            ? (hasLocalVisualModel ? '仅本地' : '需本地模型')
+                            : (visualPolicyReady ? '可用' : '需选择')}
+                        </span>
+                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="视觉增强策略"
+                        value={visualStrategy}
+                        onChange={setVisualStrategy}
+                        options={[
+                          { value: 'privacy', label: '隐私优先' },
+                          { value: 'balanced', label: '平衡' },
+                          { value: 'quality', label: '质量优先' },
+                        ]}
+                        className="mt-2.5 rounded-[12px]"
+                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                        indicatorClassName="rounded-[9px]"
+                      />
+                      <div className="mt-3">
+                        <div className={`mb-1.5 text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>强视觉模型</div>
+                        <CustomSelect
+                          value={visualModelKey}
+                          onChange={setVisualModelKey}
+                          options={visualModelOptions}
+                        />
+                      </div>
+                      <div className="mt-2.5">
+                        <div className={`mb-1.5 flex items-center justify-between text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          <span>本地视觉模型</span>
+                          {visualStrategy === 'privacy' && <span className="text-[#B85F47]">仅本地</span>}
+                        </div>
+                        <CustomSelect
+                          value={localVisualModelKey}
+                          onChange={setLocalVisualModelKey}
+                          options={localVisualModelOptions}
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>
+                )}
 
                 {/* Features Section - Glass Inner Panel */}
-                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-3 mt-2 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                {(settingsSection === 'retrieval' || settingsSection === 'interface') && (
+                <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                   
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {settingsSection === 'retrieval' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableVectorSearch && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Vector Search</h4>
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>向量检索</h4>
                         <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="hidden" />
                       </div>
                       <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -3409,14 +5158,16 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+                  )}
 
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {settingsSection === 'interface' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableScreenshot && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Screenshot Analysis</h4>
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>截图分析</h4>
                         <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="hidden" />
                       </div>
                       <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -3424,9 +5175,11 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+                  )}
 
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {settingsSection === 'retrieval' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableGraphRAG && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
@@ -3439,13 +5192,16 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+                  )}
 
                   {/* GraphRAG 构建控制：仅在勾选 + 有活动文档时显示 */}
-                  {enableGraphRAG && docId && (
+                  {settingsSection === 'retrieval' && enableGraphRAG && docId && (
                     <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-purple-500/10 border-purple-400/20' : 'bg-purple-50/80 border-purple-200'}`}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="text-[12px] leading-relaxed flex-1 min-w-0">
-                          {graphragStatus === 'built' && graphragStats ? (
+                          {isMinerUFullRoutePending ? (
+                            <span className={darkMode ? 'text-gray-400' : 'text-gray-600'}>{minerUParsePendingNotice}</span>
+                          ) : graphragStatus === 'built' && graphragStats ? (
                             <span className={`inline-flex items-center gap-1.5 font-medium ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>
                               <Check size={12} strokeWidth={3} className="shrink-0" />
                               已构建：{graphragStats.num_nodes ?? 0} 实体 · {graphragStats.num_edges ?? 0} 关系 · {graphragStats.num_chunks ?? 0} 分块
@@ -3473,14 +5229,14 @@ const ChatPDF = () => {
                         <button
                           type="button"
                           onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBuildGraphRAG(); }}
-                          disabled={graphragStatus === 'building'}
+                          disabled={graphragStatus === 'building' || isMinerUFullRoutePending}
                           className={`shrink-0 px-3 py-1 rounded-full text-[11px] font-semibold transition-colors ${
-                            graphragStatus === 'building'
+                            graphragStatus === 'building' || isMinerUFullRoutePending
                               ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                              : 'bg-[#7c4dff] text-white hover:bg-[#6a3ff0] shadow-[0_2px_8px_rgba(124,77,255,0.25)]'
+                              : 'accent-surface shadow-[0_2px_8px_rgba(184,95,71,0.12)]'
                           }`}
                         >
-                          {graphragStatus === 'built' ? '重新构建' : graphragStatus === 'building' ? '构建中' : '立即构建'}
+                          {isMinerUFullRoutePending ? '等待解析' : graphragStatus === 'built' ? '重新构建' : graphragStatus === 'building' ? '构建中' : '立即构建'}
                         </button>
                       </div>
                       {graphragStatus === 'error' && graphragError && (
@@ -3488,7 +5244,7 @@ const ChatPDF = () => {
                           {graphragError}
                         </div>
                       )}
-                      {graphragStatus === 'idle' && (
+                      {graphragStatus === 'idle' && !isMinerUFullRoutePending && (
                         <p className={`mt-1.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
                           首次构建会调用对话模型逐块提取，通常耗时 30 秒至数分钟。构建后知识图谱会自动注入聊天上下文。
                         </p>
@@ -3497,8 +5253,9 @@ const ChatPDF = () => {
                   )}
 
                   {/* 检索代理：多轮规划 + 工具集 */}
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {settingsSection === 'retrieval' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableAgentRetrieval && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
@@ -3511,8 +5268,9 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+                  )}
 
-                  {enableAgentRetrieval && (
+                  {settingsSection === 'retrieval' && enableAgentRetrieval && (
                     <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-violet-500/10 border-violet-400/20' : 'bg-violet-50/80 border-violet-200'}`}>
                       <p className={`text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
                         启用后，对「综述全文 / 多角度比较 / 章节解读 / 文献元信息」等高价值问题会自动进入多轮代理：
@@ -3523,7 +5281,7 @@ const ChatPDF = () => {
                     </div>
                   )}
 
-                  {enableAgentRetrieval && (
+                  {settingsSection === 'retrieval' && enableAgentRetrieval && (
                     <label className="ml-[34px] mt-1 flex items-center gap-2 text-[12px] text-gray-600 dark:text-gray-400 cursor-pointer">
                       <input
                         type="checkbox"
@@ -3537,8 +5295,9 @@ const ChatPDF = () => {
                     </label>
                   )}
 
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {settingsSection === 'retrieval' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableJiebaBM25 && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
@@ -3551,46 +5310,111 @@ const ChatPDF = () => {
                       </p>
                     </div>
                   </label>
+                  )}
 
-                  <label className="flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl hover:bg-white/40 transition-colors">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#7c4dff] text-white shadow-[0_4px_12px_rgba(124,77,255,0.3)]' : 'border-2 border-gray-300 bg-transparent'}`}>
+                  {/* 检索增强调优：从「全局设置 > 高级」上移到这里，
+                      和上面的检索开关同域，不再分散到两处 tab */}
+                  {settingsSection === 'retrieval' && (
+                  <div className={`pt-2 mt-1 border-t ${darkMode ? 'border-white/10' : 'border-gray-100/70'}`}>
+                    <button onClick={() => setShowRetrievalTuning(!showRetrievalTuning)} className="settings-row w-full flex items-center justify-between text-left p-1 rounded-2xl">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${darkMode ? 'bg-violet-500/10 text-violet-300' : 'bg-violet-50 text-violet-500'}`}>
+                          <Sparkles className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>检索增强调优</h4>
+                          <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>对当前会话覆盖后端检索开关，不持久化到后端 config</p>
+                        </div>
+                      </div>
+                      <div className={`transform transition-transform text-gray-400 ${showRetrievalTuning ? 'rotate-180' : ''}`}>▼</div>
+                    </button>
+
+                    {showRetrievalTuning && (
+                      <div className={`mt-2 ml-[44px] pt-3 border-t space-y-1 ${darkMode ? 'border-white/10' : 'border-gray-100/50'}`}>
+                        <TriStateToggle
+                          title="numeric_table 专项增强"
+                          desc="表格数值比较类查询（如「第二好的方法」「Table 7 DiffuLT」）的专项检索增强"
+                          value={overrideNumericTable}
+                          onChange={setOverrideNumericTable}
+                        />
+                        <TriStateToggle
+                          title="BM25 同义词扩展"
+                          desc="查询时自动扩展同义词，提升召回率"
+                          value={overrideBM25Synonyms}
+                          onChange={setOverrideBM25Synonyms}
+                        />
+                        <TriStateToggle
+                          title="LLM 查询改写"
+                          desc="多轮对话中用 LLM 消解指代（代词/省略），长查询自动跳过"
+                          value={overrideLLMQueryRewrite}
+                          onChange={setOverrideLLMQueryRewrite}
+                        />
+                        <TriStateToggle
+                          title="答案自审"
+                          desc="回答结束后用 cheap model 检测幻觉；会增加 1-3s 延迟"
+                          value={overrideAnswerCritic}
+                          onChange={setOverrideAnswerCritic}
+                        />
+                        <VisualVerificationMode
+                          value={numericTableVisualVerification}
+                          onChange={setNumericTableVisualVerification}
+                        />
+
+                        {/* Cheap Model 配置 */}
+                        <div className={`p-3 rounded-[14px] border space-y-2 ${darkMode ? 'bg-[#1d2026] border-[#353941]' : 'bg-gray-50 border-gray-200'}`}>
+                          <div className="flex items-center justify-between px-1">
+                            <span className={`text-[12px] font-bold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>辅助模型（双模型策略）</span>
+                            <span className="text-[10px] text-gray-500">为空则跟随后端默认</span>
+                          </div>
+                          <p className="text-[11px] text-gray-500 px-1">
+                            用于非核心 LLM 任务（查询改写 / 追问建议 / 自动命名 / 答案自审）
+                          </p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="text"
+                              value={cheapModelProvider || ''}
+                              onChange={(e) => setCheapModelProvider(e.target.value)}
+                              placeholder="provider (如 openai)"
+                              className={`text-[12px] font-mono rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm border ${darkMode ? 'bg-black/20 border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}
+                            />
+                            <input
+                              type="text"
+                              value={cheapModel || ''}
+                              onChange={(e) => setCheapModel(e.target.value)}
+                              placeholder="model (如 gpt-4o-mini)"
+                              className={`text-[12px] font-mono rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm border ${darkMode ? 'bg-black/20 border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  )}
+
+                  {settingsSection === 'interface' && (
+                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
                       {enableBlurReveal && <Check size={13} strokeWidth={3.5} />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Blur Reveal 效果</h4>
+                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>模糊渐显效果</h4>
                         <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="hidden" />
                       </div>
                       <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        流式输出时每个新字符从模糊到清晰的渐变效果
+                        流式输出时，新字符从模糊逐渐变得清晰
                       </p>
                     </div>
                   </label>
-
-                  <div className={`rounded-[18px] border px-4 py-3 ${darkMode ? 'bg-white/[0.04] border-white/10' : 'bg-gray-50/80 border-gray-200/70'}`}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <h4 className={`text-[13px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>智能阅读自动处理</h4>
-                        <p className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-                          大纲、总结、悬浮预翻译和速览默认值已统一到全局设置的「智能阅读」分组。
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }}
-                        className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-                          darkMode ? 'bg-white/10 text-gray-100 hover:bg-white/15' : 'bg-white text-gray-700 shadow-sm hover:text-[#8871e4]'
-                        }`}
-                      >
-                        去设置
-                      </button>
-                    </div>
-                  </div>
+                  )}
                 </div>
+                )}
 
                 {/* Toolbar and Storage Settings Area */}
-                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
+                {(settingsSection === 'interface' || settingsSection === 'storage') && (
+                <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                   {/* Toolbar Settings */}
+                  {settingsSection === 'interface' && (
                   <div className="space-y-3">
                     <h3 className={`text-[13px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>工具栏配置</h3>
                     <div className="space-y-3">
@@ -3609,7 +5433,7 @@ const ChatPDF = () => {
                         />
                         {searchEngine === 'custom' && (
                           <div className="mt-1">
-                            <input type="text" value={searchEngineUrl} onChange={(e) => setSearchEngineUrl(e.target.value)} className={`w-full p-2.5 rounded-[12px] border text-sm outline-none transition-all ${darkMode ? 'bg-black/20 border-white/10 text-white focus:border-[#7c4dff]/50' : 'bg-white/50 border-gray-200 focus:border-[#7c4dff]/50'}`} placeholder="例如：https://www.google.com/search?q={query}" />
+                            <input type="text" value={searchEngineUrl} onChange={(e) => setSearchEngineUrl(e.target.value)} className={`w-full p-2.5 rounded-[12px] border text-sm outline-none transition-colors ${darkMode ? 'bg-[#1d2026] border-[#353941] text-white focus:border-[#FFA07A]/50' : 'bg-white border-gray-200 focus:border-[#FFA07A]/50'}`} placeholder="例如：https://www.google.com/search?q={query}" />
                             <p className="text-[11px] text-gray-500 mt-1">使用 <code className="font-mono bg-black/5 px-1 rounded">{'<query>'}</code> 作为搜索词占位符</p>
                           </div>
                         )}
@@ -3628,13 +5452,15 @@ const ChatPDF = () => {
                       </div>
                     </div>
                   </div>
+                  )}
 
                   {/* Storage Info */}
-                  <div className="pt-4 border-t border-gray-200/50">
+                  {settingsSection === 'storage' && (
+                  <div>
                     <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>存储信息</h3>
                     {storageInfo ? (
                       <div className="space-y-2">
-                        <div className={`p-3 rounded-[16px] transition-colors ${darkMode ? 'bg-black/20 hover:bg-black/30' : 'bg-white/50 hover:bg-white/80'}`}>
+                        <div className={`p-3 rounded-[14px] border transition-colors ${darkMode ? 'bg-[#1d2026] border-[#353941] hover:bg-[#20242b]' : 'bg-gray-50 border-gray-200 hover:bg-gray-100'}`}>
                           <div className="flex items-center justify-between mb-1.5">
                             <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>PDF文件 ({storageInfo.pdf_count})</span>
                           </div>
@@ -3642,12 +5468,12 @@ const ChatPDF = () => {
                             <div className={`flex-1 text-[11px] px-2.5 py-1.5 rounded-[8px] overflow-x-auto whitespace-nowrap font-mono border ${darkMode ? 'bg-black/40 border-white/5 text-gray-400' : 'bg-white border-gray-100 text-gray-500'}`}>
                               {storageInfo.uploads_dir}
                             </div>
-                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.uploads_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#7c4dff]/10 text-[#7c4dff] hover:bg-[#7c4dff]/20 transition-colors shrink-0" title="复制路径">
+                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.uploads_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#FFA07A]/10 text-[#B85F47] hover:bg-[#FFA07A]/20 transition-colors shrink-0" title="复制路径">
                               <Copy size={14} />
                             </button>
                           </div>
                         </div>
-                        <div className={`p-3 rounded-[16px] transition-colors ${darkMode ? 'bg-black/20 hover:bg-black/30' : 'bg-white/50 hover:bg-white/80'}`}>
+                        <div className={`p-3 rounded-[14px] border transition-colors ${darkMode ? 'bg-[#1d2026] border-[#353941] hover:bg-[#20242b]' : 'bg-gray-50 border-gray-200 hover:bg-gray-100'}`}>
                           <div className="flex items-center justify-between mb-1.5">
                             <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>对话历史 ({storageInfo.doc_count})</span>
                           </div>
@@ -3655,7 +5481,7 @@ const ChatPDF = () => {
                             <div className={`flex-1 text-[11px] px-2.5 py-1.5 rounded-[8px] overflow-x-auto whitespace-nowrap font-mono border ${darkMode ? 'bg-black/40 border-white/5 text-gray-400' : 'bg-white border-gray-100 text-gray-500'}`}>
                               {storageInfo.data_dir}
                             </div>
-                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.data_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#7c4dff]/10 text-[#7c4dff] hover:bg-[#7c4dff]/20 transition-colors shrink-0" title="复制路径">
+                            <button onClick={() => { navigator.clipboard.writeText(storageInfo.data_dir); alert('路径已复制到剪贴板！'); }} className="p-1.5 rounded-[8px] bg-[#FFA07A]/10 text-[#B85F47] hover:bg-[#FFA07A]/20 transition-colors shrink-0" title="复制路径">
                               <Copy size={14} />
                             </button>
                           </div>
@@ -3663,7 +5489,7 @@ const ChatPDF = () => {
                         <p className="text-[11px] text-gray-500 mt-2 px-1">
                           在 {storageInfo.platform === 'Windows' ? '文件资源管理器' : storageInfo.platform === 'Darwin' ? 'Finder' : '文件管理器'} 中打开以管理文件
                         </p>
-                        <div className={`mt-3 rounded-[16px] border p-3 ${darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-gray-200/70 bg-white/60'}`}>
+                        <div className={`mt-3 rounded-[14px] border p-3 ${darkMode ? 'border-[#353941] bg-[#1d2026]' : 'border-gray-200 bg-white'}`}>
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
                               <div className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
@@ -3676,7 +5502,7 @@ const ChatPDF = () => {
                             <button
                               type="button"
                               onClick={handleClearDocumentAICache}
-                              disabled={!docId}
+                              disabled={!docId || isMinerUFullRoutePending}
                               className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                                 darkMode
                                   ? 'bg-white/10 text-gray-100 hover:bg-white/15'
@@ -3693,13 +5519,19 @@ const ChatPDF = () => {
                       <div className="text-[12px] text-gray-500 py-2">加载中...</div>
                     )}
                   </div>
+                  )}
                 </div>
+                )}
 
                 {/* Advanced Configuration Section */}
-                <div className={`backdrop-blur-md rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.03)] border space-y-4 mt-4 mx-1 ${darkMode ? 'bg-white/5 border-white/10' : 'bg-white/80 border-white/60'}`}>
-                  <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>高级配置</h3>
+                {(settingsSection === 'retrieval' || settingsSection === 'interface') && (
+                <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                  <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {settingsSection === 'retrieval' ? '检索参数' : '交互效果'}
+                  </h3>
                   
                   <div className="space-y-3">
+                    {settingsSection === 'retrieval' && (
                     <div className="flex flex-col gap-1.5">
                       <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>邻居上下文扩展</label>
                       <CustomSelect
@@ -3714,40 +5546,43 @@ const ChatPDF = () => {
                       />
                       <p className="text-[11px] text-gray-500 mt-0.5">命中 chunk 前后各扩展 N 个邻居块作为上下文</p>
                     </div>
+                    )}
 
+                    {settingsSection === 'interface' && (
                     <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
                       <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>流式输出速度</label>
                         <CustomSelect
                           value={streamSpeed}
                           onChange={setStreamSpeed}
                           options={[
-                          { value: 'fast', label: '快速 (4字符/次, ~16ms)' },
-                          { value: 'normal', label: '正常 (2字符/次, ~28ms)' },
-                          { value: 'slow', label: '慢速 (1字符/次, ~48ms)' },
+                          { value: 'fast', label: '即时（紧跟模型输出）' },
+                          { value: 'normal', label: '平滑（推荐）' },
+                          { value: 'slow', label: '逐字（更明显的打字感）' },
                           { value: 'off', label: '关闭流式（直接显示）' }
                         ]}
                       />
-                      <p className="text-[11px] text-gray-500 mt-0.5">调整AI回复的打字机效果速度</p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">保持逐字节奏，流结束后只适度加速收尾</p>
                     </div>
+                    )}
 
-                    {enableBlurReveal && (
+                    {settingsSection === 'interface' && enableBlurReveal && (
                       <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
                         <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>模糊效果强度</label>
                         <CustomSelect
                           value={blurIntensity}
                           onChange={setBlurIntensity}
                           options={[
-                            { value: 'light', label: '轻度 (3px blur, 0.2s)' },
-                            { value: 'medium', label: '中度 (5px blur, 0.25s)' },
-                            { value: 'strong', label: '强烈 (8px blur, 0.3s)' }
+                            { value: 'light', label: '轻度（1.5px · 0.18 秒）' },
+                            { value: 'medium', label: '中度（3px · 0.25 秒）' },
+                            { value: 'strong', label: '明显（5px · 0.35 秒）' }
                           ]}
                         />
                       </div>
                     )}
                   </div>
 
-                  {lastCallInfo && (
-                    <div className={`mt-4 p-3.5 rounded-[16px] border text-[12px] ${darkMode ? 'bg-black/20 border-white/5' : 'bg-white/50 border-gray-100'}`}>
+                  {settingsSection === 'retrieval' && lastCallInfo && (
+                    <div className={`mt-4 p-3.5 rounded-[14px] border text-[12px] ${darkMode ? 'bg-[#1d2026] border-[#353941]' : 'bg-gray-50 border-gray-200'}`}>
                       <div className="flex justify-between items-center mb-1.5">
                         <span className="text-gray-500">调用来源</span>
                         <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.provider || '未知'}</strong>
@@ -3792,28 +5627,46 @@ const ChatPDF = () => {
                     </div>
                   )}
                 </div>
+                )}
 
-                {/* Other Settings Access */}
-                <div className="grid grid-cols-3 gap-3 px-1 mt-4">
-                  <button onClick={() => { setShowSettings(false); setShowGlobalSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
-                    <Type className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
-                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>全局设置</span>
-                  </button>
-                  <button onClick={() => { setShowSettings(false); setShowChatSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
-                    <SlidersHorizontal className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
-                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>对话设置</span>
-                  </button>
-                  <button onClick={() => { setShowSettings(false); setShowOCRSettings(true); }} className={`flex flex-col items-center justify-center p-3 rounded-[20px] border transition-all hover:-translate-y-1 ${darkMode ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-white/60 border-white/50 hover:bg-white/80'}`}>
-                    <ScanText className={`w-5 h-5 mb-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} />
-                    <span className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>解析设置</span>
-                  </button>
+                {/* Other Settings Access：列表行式入口，带说明与方向暗示 */}
+                {settingsSection === 'common' && (
+                <div className="px-1 mt-4">
+                  <div className={`settings-card border overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    {[
+                      { Icon: Type, label: '全局设置', desc: '字体缩放 · 记忆与联网 · 配置导入导出', onClick: () => { setShowSettings(false); setShowGlobalSettings(true); } },
+                      { Icon: SlidersHorizontal, label: '对话设置', desc: '发送快捷键 · 消息样式 · 代码块显示', onClick: () => { setShowSettings(false); setShowChatSettings(true); } },
+                      { Icon: ScanText, label: '解析设置', desc: 'OCR 引擎 · 表格与公式 · 深度解析路线', onClick: () => { setShowSettings(false); setShowOCRSettings(true); } },
+                    ].map(({ Icon, label, desc, onClick }, i) => (
+                      <button
+                        key={label}
+                        onClick={onClick}
+                        className={`settings-entry-row w-full px-4 py-3 flex items-center gap-3 text-left transition-colors ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''} ${darkMode ? 'hover:bg-white/[0.04]' : 'hover:bg-gray-50'}`}
+                      >
+                        <div className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
+                          <Icon size={15} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{label}</div>
+                          <div className={`text-[11px] mt-0.5 truncate ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{desc}</div>
+                        </div>
+                        <span className="settings-entry-arrow" aria-hidden="true">
+                          <ChevronRight className="h-4 w-4" strokeWidth={2.5} />
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+                )}
+              </motion.div>
 
-              <div className="p-6 pt-2 pb-8 flex-shrink-0 relative">
-                <button onClick={() => setShowSettings(false)} className="w-full bg-[#7c4dff] hover:bg-[#6836f5] transition-all duration-300 text-white text-[15px] font-semibold py-4 rounded-[22px] shadow-[0_12px_30px_rgba(124,77,255,0.3)] hover:shadow-[0_16px_40px_rgba(124,77,255,0.45)] hover:-translate-y-1 relative overflow-hidden group">
-                  <span className="relative z-10">Save Changes</span>
-                  <div className="absolute top-0 -inset-full h-full w-1/2 z-5 block transform -skew-x-12 bg-gradient-to-r from-transparent to-white opacity-20 group-hover:animate-shimmer"></div>
+              <div className={`settings-chrome px-7 py-4 flex-shrink-0 flex items-center justify-end gap-2.5 border-t ${darkMode ? 'border-[#353941]' : 'border-gray-200/80'}`}>
+                <button onClick={() => setShowSettings(false)} className={`px-5 py-2.5 rounded-[12px] text-[13px] font-semibold transition-colors ${darkMode ? 'text-gray-300 hover:bg-white/5' : 'text-gray-600 hover:bg-gray-100'}`}>
+                  取消
+                </button>
+                <button onClick={() => setShowSettings(false)} className="accent-cta text-[13px] font-semibold px-5 py-2.5 rounded-full flex items-center gap-1.5">
+                  <Check size={15} strokeWidth={2.5} />
+                  <span>保存设置</span>
                 </button>
               </div>
             </motion.div>
@@ -3823,7 +5676,11 @@ const ChatPDF = () => {
 
       {/* 懒加载设置面板（使用 useCallback 稳定的关闭回调） */}
       <Suspense fallback={null}>
-        <EmbeddingSettings isOpen={showEmbeddingSettings} onClose={handleEmbeddingSettingsClose} />
+        <EmbeddingSettings
+          isOpen={showEmbeddingSettings}
+          onClose={handleEmbeddingSettingsClose}
+          onExitComplete={handleEmbeddingSettingsExitComplete}
+        />
       </Suspense>
       <Suspense fallback={null}>
         <GlobalSettings isOpen={showGlobalSettings} onClose={handleGlobalSettingsClose} />
@@ -3917,6 +5774,7 @@ const FeedbackModal = ({ onSubmit, onClose }) => {
 // 自定义下拉选择组件
 const CustomSelect = ({ value, onChange, options }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [opensUpward, setOpensUpward] = useState(false);
   const containerRef = useRef(null);
 
   useEffect(() => {
@@ -3931,13 +5789,46 @@ const CustomSelect = ({ value, onChange, options }) => {
 
   const selectedOption = options.find(opt => opt.value === value);
 
+  const toggleMenu = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+
+    const trigger = containerRef.current;
+    if (trigger) {
+      const triggerRect = trigger.getBoundingClientRect();
+      let boundary = null;
+      let ancestor = trigger.parentElement;
+      while (ancestor) {
+        const overflowY = window.getComputedStyle(ancestor).overflowY;
+        if (overflowY === 'auto' || overflowY === 'scroll') {
+          boundary = ancestor.getBoundingClientRect();
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+
+      const menuHeight = Math.min(240, options.length * 42 + 12);
+      const safeBoundary = boundary || {
+        top: 8,
+        bottom: window.innerHeight - 8,
+      };
+      const roomAbove = triggerRect.top - safeBoundary.top - 8;
+      const roomBelow = safeBoundary.bottom - triggerRect.bottom - 8;
+      setOpensUpward(roomBelow < Math.min(menuHeight, 160) && roomAbove > roomBelow);
+    }
+
+    setIsOpen(true);
+  };
+
   return (
     <div className="relative w-full" ref={containerRef}>
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm hover:border-[#7c4dff]/50 transition-all outline-none"
+        onClick={toggleMenu}
+        className="w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm hover:border-[#FFA07A]/50 transition-all outline-none"
       >
-        <span className="text-gray-700 dark:text-gray-300 font-medium">
+        <span className="min-w-0 flex-1 truncate pr-3 text-left text-gray-700 dark:text-gray-300 font-medium" title={selectedOption?.label}>
           {selectedOption ? selectedOption.label : 'Select...'}
         </span>
         <ChevronDown size={14} className={`text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
@@ -3946,11 +5837,11 @@ const CustomSelect = ({ value, onChange, options }) => {
       <AnimatePresence>
         {isOpen && (
           <motion.div
-            initial={{ opacity: 0, y: -5, scale: 0.95 }}
+            initial={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -5, scale: 0.95 }}
+            exit={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
             transition={{ duration: 0.15 }}
-            className="absolute z-50 w-full mt-1.5 p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto"
+            className={`absolute z-50 w-full p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto ${opensUpward ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
           >
             {options.map((option) => (
               <button
@@ -3961,12 +5852,12 @@ const CustomSelect = ({ value, onChange, options }) => {
                 }}
                 className={`w-full text-left px-3 py-2.5 rounded-[10px] text-[13px] transition-colors flex items-center justify-between ${
                   value === option.value
-                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] font-semibold'
+                    ? 'bg-[#FFA07A]/10 text-[#B85F47] font-semibold'
                     : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/50 dark:hover:bg-white/5'
                 }`}
               >
                 {option.label}
-                {value === option.value && <Check size={14} className="text-[#7c4dff]" />}
+                {value === option.value && <Check size={14} className="text-[#B85F47]" />}
               </button>
             ))}
           </motion.div>
@@ -3977,32 +5868,3 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

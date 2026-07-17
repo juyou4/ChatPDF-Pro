@@ -39,19 +39,51 @@ def get_mineru_result_path(data_dir: Path | str, doc_id: str) -> Path:
     return get_mineru_result_dir(data_dir) / f"{doc_id}.json"
 
 
-def save_mineru_result(data_dir: Path | str, doc_id: str, payload: dict[str, Any]) -> None:
+def save_mineru_result(
+    data_dir: Path | str,
+    doc_id: str,
+    payload: dict[str, Any],
+    *,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> None:
+    """Persist a raw MinerU result with the parse run that produced it.
+
+    ``doc_id`` is derived from the original PDF bytes, so the same PDF can be
+    uploaded again with a different primary parse route.  Raw MinerU output
+    must therefore be tied to the parse generation rather than being treated
+    as an unqualified document-level cache.
+    """
     path = get_mineru_result_path(data_dir, doc_id)
     serializable = {
         "version": MINERU_RAW_VERSION,
         "doc_id": doc_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "parse_generation": str(parse_generation or ""),
+        "document_source_hash": str(document_source_hash or ""),
         "payload": payload,
     }
-    with open(path, "w", encoding="utf-8") as f:
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
+    temp_path.replace(path)
 
 
-def load_mineru_result(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:
+def load_mineru_result(
+    data_dir: Path | str,
+    doc_id: str,
+    *,
+    parse_generation: str | None = None,
+    document_source_hash: str | None = None,
+    require_identity: bool = False,
+) -> dict[str, Any] | None:
+    """Load raw MinerU output, optionally only for one parse generation.
+
+    Legacy records predate parse manifests and do not carry an identity.  They
+    remain readable unless a caller explicitly requests identity validation;
+    newly routed documents must use that validation before rebuilding blocks or
+    an index from the raw payload.
+    """
     path = get_mineru_result_path(data_dir, doc_id)
     if not path.exists():
         return None
@@ -59,6 +91,14 @@ def load_mineru_result(data_dir: Path | str, doc_id: str) -> dict[str, Any] | No
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if data.get("version") != MINERU_RAW_VERSION:
+            return None
+        stored_generation = str(data.get("parse_generation") or "")
+        stored_source_hash = str(data.get("document_source_hash") or "")
+        if require_identity and (not stored_generation or not stored_source_hash):
+            return None
+        if parse_generation is not None and stored_generation != str(parse_generation or ""):
+            return None
+        if document_source_hash is not None and stored_source_hash != str(document_source_hash or ""):
             return None
         payload = data.get("payload")
         return payload if isinstance(payload, dict) else None
@@ -115,6 +155,21 @@ def build_block_index_from_mineru_payload(
 
     outline = _build_outline([], pages)
     _assign_sections(pages, outline)
+    data = doc.get("data", {}) if isinstance(doc, dict) else {}
+    manifest = data.get("parse_manifest") if isinstance(data, dict) else {}
+    parse_identity = {}
+    if isinstance(manifest, dict):
+        generation = str(manifest.get("generation") or "").strip()
+        source_hash = str(manifest.get("source_hash") or "").strip()
+        route = str(manifest.get("resolved_route") or "").strip().lower()
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        if generation and source_hash and route:
+            parse_identity = {
+                "parser_route": route,
+                "parse_generation": generation,
+                "document_source_hash": source_hash,
+                "full_route": bool(metadata.get("full_route")),
+            }
 
     return {
         "version": BLOCK_INDEX_VERSION,
@@ -124,6 +179,7 @@ def build_block_index_from_mineru_payload(
         "page_count": len(pages),
         "pages": pages,
         "outline": outline,
+        **parse_identity,
         "mineru_meta": {
             "raw_hash": _payload_hash(payload),
             "has_middle_json": isinstance(middle_json, (dict, list)),
@@ -276,6 +332,14 @@ def _convert_mineru_item(
         "source": MINERU_BLOCK_INDEX_SOURCE,
         "mineru_type": raw_type or block_type,
     }
+    line_anchors = _mineru_line_anchors(
+        item,
+        page_width=float(page_spec.get("width") or 612.0),
+        page_height=float(page_spec.get("height") or 792.0),
+        source_size=page_source_size,
+    )
+    if line_anchors:
+        block["line_anchors"] = line_anchors
     if block_type == "heading":
         block["level"] = _infer_heading_level(text)
     if block_type == "artifact":
@@ -452,6 +516,88 @@ def _clip_bbox(bbox: list[float], page_width: float, page_height: float) -> list
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)]
+
+
+def _mineru_line_text(line: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("text", "content", "latex"):
+        value = line.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    for span in line.get("spans", []) or []:
+        if not isinstance(span, dict):
+            continue
+        for key in ("text", "content", "latex"):
+            value = span.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+                break
+    return _clean_text(" ".join(_dedupe(parts)))
+
+
+def _mineru_line_bbox(line: dict[str, Any]) -> list[float] | None:
+    direct = _item_bbox(line)
+    if direct:
+        return direct
+    boxes = [
+        _item_bbox(span)
+        for span in (line.get("spans", []) or [])
+        if isinstance(span, dict)
+    ]
+    boxes = [box for box in boxes if box]
+    if not boxes:
+        return None
+    return [
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    ]
+
+
+def _iter_mineru_lines(item: dict[str, Any]):
+    seen: set[int] = set()
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        lines = node.get("lines")
+        if isinstance(lines, list):
+            for line in lines:
+                if not isinstance(line, dict) or id(line) in seen:
+                    continue
+                seen.add(id(line))
+                yield line
+        for key in ("blocks", "content"):
+            children = node.get(key)
+            if not isinstance(children, list):
+                continue
+            for child in children:
+                if isinstance(child, dict):
+                    yield from visit(child)
+
+    yield from visit(item)
+
+
+def _mineru_line_anchors(
+    item: dict[str, Any],
+    *,
+    page_width: float,
+    page_height: float,
+    source_size: tuple[float, float] | None,
+) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    for line in _iter_mineru_lines(item):
+        text = _mineru_line_text(line)
+        bbox = _bbox_to_page_pts(
+            _mineru_line_bbox(line),
+            page_width=page_width,
+            page_height=page_height,
+            source_size=source_size,
+        )
+        if text and bbox:
+            anchors.append({"text": _limit_text(text, 800), "bbox": bbox})
+    return anchors
 
 
 def _page_num(item: dict[str, Any]) -> int:

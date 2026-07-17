@@ -51,10 +51,10 @@ function ReadingAnalysisPanel({
             type="button"
             onClick={onTranslate}
             disabled={loading || translatableCount === 0}
-            className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+            className={`shrink-0 inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-xs font-bold transition-[transform,background-color,box-shadow] duration-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 ${
               darkMode
-                ? 'bg-white/10 text-gray-100 hover:bg-white/15'
-                : 'bg-purple-600 text-white hover:bg-purple-700'
+                ? 'bg-[#F0653A] text-white shadow-[0_9px_22px_-8px_rgba(240,101,58,0.45)] hover:-translate-y-0.5 hover:bg-[#F5713F] hover:shadow-[0_12px_26px_-8px_rgba(240,101,58,0.52)]'
+                : 'accent-cta'
             }`}
           >
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Languages className="w-3.5 h-3.5" />}
@@ -77,7 +77,7 @@ function ReadingAnalysisPanel({
                   {pretranslateProgress.running ? '正在补齐全文缓存' : '已缓存可悬浮翻译'} · {pretranslateDone}/{pretranslateTotal}
                 </div>
                 {notice && !error && (
-                  <div className={`mt-1 text-[10px] font-medium ${darkMode ? 'text-[#b8adff]' : 'text-[#8871e4]'}`}>
+                  <div className={`mt-1 text-[10px] font-medium ${darkMode ? 'text-[#fdc4af]' : 'text-[#ed8c68]'}`}>
                     {notice}
                   </div>
                 )}
@@ -86,10 +86,10 @@ function ReadingAnalysisPanel({
                 type="button"
                 onClick={() => onPretranslate?.()}
                 disabled={pretranslateProgress.running}
-                className={`shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                className={`shrink-0 rounded-full px-3.5 py-2 text-[11px] font-bold transition-[transform,background-color,box-shadow] duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 ${
                   darkMode
-                    ? 'bg-white/10 text-gray-100 hover:bg-white/15'
-                    : 'bg-gray-900 text-white hover:bg-gray-800'
+                    ? 'bg-white/10 text-gray-100 shadow-[0_8px_20px_-10px_rgba(0,0,0,0.65)] hover:bg-white/15 focus-visible:ring-white/20'
+                    : 'bg-[#111827] text-white shadow-[0_9px_22px_-9px_rgba(17,24,39,0.48)] hover:bg-[#1f2937] hover:shadow-[0_12px_26px_-9px_rgba(17,24,39,0.54)] focus-visible:ring-gray-400/35'
                 }`}
               >
                 {pretranslateProgress.running ? '处理中' : pretranslateDone > 0 ? '补齐全文' : '开始缓存'}
@@ -201,7 +201,7 @@ function ReadingAnalysisPanel({
                     className={`shrink-0 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                       darkMode
                         ? 'bg-white/10 text-gray-200 hover:bg-white/15'
-                        : 'bg-white text-gray-500 shadow-sm ring-1 ring-gray-100 hover:text-[#8871e4] hover:ring-[#d9d1ff]'
+                        : 'bg-white text-gray-500 shadow-sm ring-1 ring-gray-100 hover:text-[#ed8c68] hover:ring-[#feded2]'
                     }`}
                   >
                     {isTranslatingBlock ? (

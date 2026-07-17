@@ -1,5 +1,6 @@
 import React, { memo, useMemo } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react';
+import { AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
+import BreatheLoader from './BreatheLoader';
 
 const AtomIcon = ({ className = '' }) => (
   <svg
@@ -46,9 +47,13 @@ function ReadingSummaryPanel({
 
   if (loading) {
     return (
-      <div className={`h-full flex items-center justify-center text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-        生成总结中
+      <div
+        className={`flex h-full flex-col items-center justify-center gap-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        role="status"
+        aria-live="polite"
+      >
+        <BreatheLoader className={darkMode ? 'text-[#FFA07A]' : 'text-[#D97A5D]'} />
+        <span>生成总结中</span>
       </div>
     );
   }
@@ -107,7 +112,7 @@ function ReadingSummaryPanel({
         >
           <div className="flex items-start">
             <span className="flex min-w-0 flex-1 items-start gap-1.5">
-              {isActive && <CheckCircle2 className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[#9333ea]" strokeWidth={2.5} />}
+              {isActive && <CheckCircle2 className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[#f85d25]" strokeWidth={2.5} />}
               {isVisited && <span className="mt-[6px] h-[7px] w-[7px] shrink-0 rounded-full bg-amber-400" />}
               <span className={`min-w-0 text-[12.5px] font-semibold leading-snug ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>
                 {item.title}
@@ -155,7 +160,7 @@ function ReadingSummaryPanel({
           <div className="flex items-start">
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               {isActive ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-[#9333ea]" strokeWidth={2.5} />
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-[#f85d25]" strokeWidth={2.5} />
               ) : isVisited ? (
                 <span className="h-[8px] w-[8px] shrink-0 rounded-full bg-amber-400" />
               ) : (
@@ -185,7 +190,7 @@ function ReadingSummaryPanel({
   };
 
   return (
-    <div className="h-full overflow-y-auto pr-1 pl-0.5">
+    <div className="h-full overflow-y-auto custom-scrollbar pr-1 pl-0.5">
       <div className="space-y-5 pb-4">
         <div className="flex items-center justify-between gap-2">
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${

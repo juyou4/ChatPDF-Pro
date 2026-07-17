@@ -108,6 +108,7 @@ async def vector_search(
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
+    visual_evidence: Optional[List[dict]] = None,
     middlewares: Optional[List[BaseMiddleware]] = None,
     progress_callback=None,
 ):
@@ -129,7 +130,8 @@ async def vector_search(
         "reranker_model": reranker_model,
         "rerank_provider": rerank_provider,
         "rerank_api_key": rerank_api_key,
-        "rerank_endpoint": rerank_endpoint
+        "rerank_endpoint": rerank_endpoint,
+        "visual_evidence": visual_evidence,
     }
 
     payload = await apply_middlewares_before(payload, middlewares or [])
@@ -151,7 +153,8 @@ async def vector_search(
                 reranker_model=reranker_model,
                 rerank_provider=rerank_provider,
                 rerank_api_key=rerank_api_key,
-                rerank_endpoint=rerank_endpoint
+                rerank_endpoint=rerank_endpoint,
+                visual_evidence=visual_evidence,
             ),
             timeout=60.0  # 60 秒超时
         )
@@ -180,6 +183,7 @@ async def vector_context(
     rerank_provider: Optional[str] = None,
     rerank_api_key: Optional[str] = None,
     rerank_endpoint: Optional[str] = None,
+    visual_evidence: Optional[List[dict]] = None,
     middlewares: Optional[List[BaseMiddleware]] = None,
     model_context_window: int = 0,
     selected_text: Optional[str] = None,  # 框选文本，用于融合检索
@@ -210,7 +214,8 @@ async def vector_context(
         "reranker_model": reranker_model,
         "rerank_provider": rerank_provider,
         "rerank_api_key": rerank_api_key,
-        "rerank_endpoint": rerank_endpoint
+        "rerank_endpoint": rerank_endpoint,
+        "visual_evidence": visual_evidence,
     }
 
     payload = await apply_middlewares_before(payload, middlewares or [])
@@ -232,6 +237,7 @@ async def vector_context(
                 rerank_provider=rerank_provider,
                 rerank_api_key=rerank_api_key,
                 rerank_endpoint=rerank_endpoint,
+                visual_evidence=visual_evidence,
                 model_context_window=model_context_window,
                 selected_text=selected_text,  # 透传框选文本
                 answer_max_tokens=answer_max_tokens,

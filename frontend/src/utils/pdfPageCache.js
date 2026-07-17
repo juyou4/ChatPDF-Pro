@@ -4,7 +4,7 @@
  * 基于 LRU 策略缓存已渲染 PDF 页面的 canvas 数据（dataURL），
  * 在短时间内回到同一页面时直接使用缓存图像，避免重新渲染。
  *
- * 缓存键格式：`${pageNumber}_${scale}`
+ * 缓存键格式：`${documentKey}::${pageNumber}_${scale}`
  * 最大缓存 10 页，LRU 淘汰最久未访问的页面。
  *
  * 复用 katexCache 中的 LRU 实现模式（Map 插入顺序）。
@@ -35,8 +35,9 @@ class PdfPageCache {
    * @param {number} scale - 缩放比例
    * @returns {string} 缓存键
    */
-  static makeKey(pageNumber, scale) {
-    return `${pageNumber}_${scale}`;
+  static makeKey(pageNumber, scale, documentKey = '') {
+    const pageKey = `${pageNumber}_${scale}`;
+    return documentKey ? `${documentKey}::${pageKey}` : pageKey;
   }
 
   /**
@@ -45,8 +46,8 @@ class PdfPageCache {
    * @param {number} scale - 缩放比例
    * @returns {string|undefined} 缓存的 dataURL 或 undefined
    */
-  get(pageNumber, scale) {
-    const key = PdfPageCache.makeKey(pageNumber, scale);
+  get(pageNumber, scale, documentKey = '') {
+    const key = PdfPageCache.makeKey(pageNumber, scale, documentKey);
     if (!this._map.has(key)) {
       return undefined;
     }
@@ -63,8 +64,8 @@ class PdfPageCache {
    * @param {number} scale - 缩放比例
    * @param {string} dataURL - canvas.toDataURL() 的结果
    */
-  set(pageNumber, scale, dataURL) {
-    const key = PdfPageCache.makeKey(pageNumber, scale);
+  set(pageNumber, scale, dataURL, documentKey = '') {
+    const key = PdfPageCache.makeKey(pageNumber, scale, documentKey);
     // 如果 key 已存在，先删除以更新顺序
     if (this._map.has(key)) {
       this._map.delete(key);
@@ -84,8 +85,8 @@ class PdfPageCache {
    * @param {number} scale - 缩放比例
    * @returns {boolean}
    */
-  has(pageNumber, scale) {
-    const key = PdfPageCache.makeKey(pageNumber, scale);
+  has(pageNumber, scale, documentKey = '') {
+    const key = PdfPageCache.makeKey(pageNumber, scale, documentKey);
     return this._map.has(key);
   }
 

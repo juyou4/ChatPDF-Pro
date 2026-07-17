@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
-import { Copy, Check, ChevronDown, BrainCircuit } from 'lucide-react'
+import { Copy, Check, ChevronDown } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
 import { useChatParams } from '../contexts/ChatParamsContext'
 import AgentTracePanel from './AgentTracePanel'
+import CellsLoader from './CellsLoader'
 
 /**
  * 实时思考计时器组件
@@ -40,7 +41,7 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
   const seconds = (Math.max(100, displayMs) / 1000).toFixed(1)
 
   return (
-    <span className="text-[10px] text-gray-500 bg-gray-200/50 px-1.5 py-0.5 rounded-md ml-1 whitespace-nowrap dark:bg-gray-700/50 dark:text-gray-400">
+    <span className="whitespace-nowrap text-[10px] font-medium tabular-nums text-gray-500 dark:text-gray-400">
       {isThinking ? `思考中 ${seconds}s` : `已深度思考 ${seconds}s`}
     </span>
   )
@@ -50,14 +51,20 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs }) => {
  * 深度思考展示组件
  * 采用全新的胶囊式开关和展开面板 UI 设计
  */
-const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRef, agentTrace }) => {
+const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, thinkingMs, streamingRef, agentTrace }) => {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
   const [hasStreamingText, setHasStreamingText] = useState(false)
   const [progressLineCount, setProgressLineCount] = useState(1)
-  const wasStreamingRef = useRef(false)
+  const autoCollapsedRef = useRef(false)
   const { thoughtAutoCollapse } = useChatParams()
   const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
+  const hasThinkingContent = Boolean(content && content.trim())
+
+  // 思考阶段是否已结束：流式中以「正文首 token 到达」为准（answerStarted），
+  // 兜底用整条消息结束（!isStreaming），不必等回答全部生成完
+  const isThinkingPhase = isStreaming && !answerStarted
+  const thinkingFinished = hasThinkingContent && !isThinkingPhase
 
   const getProgressLineCount = useCallback((text = '') => {
     const lines = String(text)
@@ -66,15 +73,15 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
     return Math.max(1, lines.length)
   }, [])
 
-  // 思考完成后自动折叠（受 thoughtAutoCollapse 设置控制）
+  // 思考完成后自动折叠（受 thoughtAutoCollapse 设置控制）。
+  // 只自动折叠一次：用户手动展开后不会被再次收起。
   useEffect(() => {
-    if (wasStreamingRef.current && !isStreaming && content && thoughtAutoCollapse) {
-      // 延迟折叠，让用户看到完成状态
-      const timer = setTimeout(() => setExpanded(false), 600)
-      return () => clearTimeout(timer)
-    }
-    wasStreamingRef.current = isStreaming
-  }, [isStreaming, content, thoughtAutoCollapse])
+    if (!thoughtAutoCollapse || autoCollapsedRef.current || !thinkingFinished) return undefined
+    autoCollapsedRef.current = true
+    // 延迟折叠，让用户看到完成状态
+    const timer = setTimeout(() => setExpanded(false), 600)
+    return () => clearTimeout(timer)
+  }, [thinkingFinished, thoughtAutoCollapse])
 
   // 观察流式 DOM 的直接写入内容，任何检索/思考文本出现后都隐藏占位提示。
   useEffect(() => {
@@ -113,88 +120,115 @@ const ThinkingBlock = ({ content, isStreaming, darkMode, thinkingMs, streamingRe
 
   // 深度思考在首个 reasoning_content 到来前，直接给出可见的阶段提示，
   // 避免面板只有三个点、看起来像“卡住了”。
-  const shouldShowStreamingHint = isStreaming && !(content && content.trim()) && !hasStreamingText
-  const shouldShowTimeline = shouldShowStreamingHint || isStreaming || Boolean(content && content.trim())
+  const shouldShowStreamingHint = isThinkingPhase && !hasThinkingContent && !hasStreamingText
+  const shouldShowTimeline = shouldShowStreamingHint || isThinkingPhase || hasThinkingContent
   const timelineDotOffset = Math.min(280, Math.max(0, (progressLineCount - 1) * 23))
 
+  // 普通模型可能不返回 reasoning_content。正文开始后不要继续展示一个
+  // “已深度思考 0.1s”的空壳；有真实思考或 Agent 轨迹时仍保留历史过程。
+  if (answerStarted && !hasThinkingContent && !hasAgentTrace) return null
+
   return (
-    <div className={`flex flex-col items-start gap-2 my-2 ${darkMode ? 'dark' : ''}`}>
-      {/* Expandable Pill (开关样式，与展开状态绑定) */}
-      <div 
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm cursor-pointer transition-colors select-none ${darkMode ? 'bg-gray-800 border-gray-700 hover:bg-gray-700' : 'bg-[#f4f5f9] border-gray-200/60 hover:bg-gray-100'}`}
-        onClick={() => setExpanded(!expanded)}
-      >
-        {/* Toggle Switch 视觉还原 */}
-        <div className={`w-8 h-4 rounded-full flex items-center relative shadow-inner transition-colors duration-300 ${expanded ? 'bg-[#7c3aed]' : (darkMode ? 'bg-gray-600' : 'bg-gray-300')}`}>
-           <div className={`w-3 h-3 bg-white rounded-full absolute shadow-sm transition-all duration-300 ${expanded ? 'right-0.5' : 'left-0.5'}`}></div>
-        </div>
-
-        <span className={`text-[11px] font-medium ${darkMode ? 'text-gray-300' : 'text-gray-800'}`}>Deep Thinking</span>
-        
-        <div className="flex items-center">
-          <ThinkingTimer isThinking={isStreaming} thinkingMs={thinkingMs || 0} />
-          <ChevronDown size={14} className={`ml-1 transition-transform duration-300 ${darkMode ? 'text-gray-500' : 'text-gray-400'} ${expanded ? 'rotate-180' : ''}`} />
-        </div>
-      </div>
-
-      {/* Expanded Thought Process */}
-      <div 
-        className={`overflow-hidden transition-all duration-300 ease-in-out origin-top w-full ${
-          expanded ? 'max-h-[3000px] opacity-100 scale-100 mb-2' : 'max-h-0 opacity-0 scale-95 mb-0'
+    <div className={`my-2 w-full ${darkMode ? 'dark' : ''}`}>
+      <section
+        className={`w-full overflow-hidden rounded-[18px] border text-[13px] transition-[transform,box-shadow,border-color] duration-300 ease-out hover:-translate-y-px motion-reduce:transform-none motion-reduce:transition-none ${
+          darkMode
+            ? 'border-white/[0.09] bg-[#25282f] text-gray-300 shadow-[0_16px_34px_-24px_rgba(0,0,0,0.82),inset_0_1px_0_rgba(255,255,255,0.04)] hover:border-white/[0.13] hover:shadow-[0_20px_38px_-24px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.05)]'
+            : 'border-[#eadfd8] bg-white text-gray-600 shadow-[0_14px_30px_-23px_rgba(91,65,52,0.52),0_3px_8px_-6px_rgba(91,65,52,0.18),inset_0_1px_0_rgba(255,255,255,0.96)] hover:border-[#e3d4cc] hover:shadow-[0_20px_38px_-24px_rgba(91,65,52,0.58),0_6px_14px_-10px_rgba(91,65,52,0.22),inset_0_1px_0_rgba(255,255,255,0.98)]'
         }`}
       >
-        <div className={`backdrop-blur-sm border shadow-[0_4px_15px_rgba(124,58,237,0.06)] rounded-lg p-4 w-full text-[13px] relative ml-1 ${darkMode ? 'bg-gray-800/90 border-purple-900/50 text-gray-300' : 'bg-white/90 border-purple-100 text-gray-600'}`}>
-          
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-1.5 text-purple-600 font-medium">
-              <BrainCircuit size={15} className={isStreaming ? "animate-pulse" : ""} />
-              <span>思考过程</span>
-            </div>
-            
-            {/* 复制按钮 */}
-            {!isStreaming && content && (
-              <button
-                className={`p-1.5 rounded-md transition-colors ${darkMode ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-700' : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'}`}
-                onClick={handleCopy}
-                title="复制思考内容"
-              >
-                {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
-              </button>
-            )}
-          </div>
-          
-          {shouldShowTimeline && (
-            <div className={`pl-2 border-l-2 py-0.5 ${darkMode ? 'border-purple-900/50' : 'border-purple-100/70'} ml-1.5`}>
-              <div className="relative">
-                {/* 活动进度点：随检索/思考阶段行数下移，避免一直停在第一行。 */}
-                <span
-                  className={`absolute -left-[13px] top-1.5 w-2 h-2 rounded-full transition-transform duration-300 ease-out ${isStreaming ? 'bg-purple-500 shadow-[0_0_8px_rgba(124,58,237,0.4)]' : 'bg-purple-200 dark:bg-purple-800/50'}`}
-                  style={{ transform: `translateY(${timelineDotOffset}px)` }}
-                />
-                {shouldShowStreamingHint && (
-                  <div className={`mb-2 text-[12px] leading-relaxed italic ${darkMode ? 'text-purple-300/90' : 'text-purple-500/90'}`}>
-                    正在检索并组织思考内容...
-                  </div>
-                )}
-                <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
-                  <StreamingMarkdown
-                    content={content}
-                    isStreaming={isStreaming}
-                    enableBlurReveal={false}
-                    blurIntensity="light"
-                    streamingRef={streamingRef}
-                    suppressInitialDots={shouldShowStreamingHint}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
+        <button
+          type="button"
+          className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset ${
+            darkMode
+              ? 'hover:bg-white/[0.035] focus-visible:ring-[#FFA07A]/45'
+              : 'hover:bg-[#fcfaf8] focus-visible:ring-[#D99178]/45'
+          }`}
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-expanded={expanded}
+        >
+          <span
+            className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px] ${
+              darkMode ? 'bg-[#FFA07A]/10 text-[#FFA07A]' : 'bg-[#FFF0E9] text-[#B85F47]'
+            }`}
+          >
+            <CellsLoader active={isThinkingPhase} />
+          </span>
+          <span className={`text-[11px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-700'} ${isThinkingPhase ? 'thinking-text-pulse' : ''}`}>
+            Deep Thinking
+          </span>
+          <span className={`h-3 w-px ${darkMode ? 'bg-white/10' : 'bg-[#e9dfda]'}`} aria-hidden="true" />
+          <ThinkingTimer isThinking={isThinkingPhase} thinkingMs={thinkingMs || 0} />
+          <ChevronDown
+            size={15}
+            className={`ml-auto flex-shrink-0 transition-transform duration-300 ${
+              darkMode ? 'text-gray-500' : 'text-gray-400'
+            } ${expanded ? 'rotate-180' : ''}`}
+          />
+        </button>
 
-          {hasAgentTrace && (
-            <AgentTracePanel trace={agentTrace} embedded />
-          )}
+        <div
+          className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none ${
+            expanded
+              ? 'visible grid-rows-[1fr] opacity-100'
+              : 'invisible pointer-events-none grid-rows-[0fr] opacity-0'
+          }`}
+          aria-hidden={!expanded}
+          inert={expanded ? undefined : ''}
+        >
+          <div className="min-h-0 overflow-hidden">
+            <div className={`relative border-t px-4 pb-4 pt-3 ${darkMode ? 'border-white/[0.07]' : 'border-[#f0e8e3]'}`}>
+              {!isStreaming && content && (
+                <button
+                  className={`absolute right-2.5 top-2.5 z-[1] rounded-[8px] p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+                    darkMode
+                      ? 'text-gray-500 hover:bg-white/[0.06] hover:text-gray-200 focus-visible:ring-[#FFA07A]/45'
+                      : 'text-gray-400 hover:bg-[#f6f1ee] hover:text-gray-700 focus-visible:ring-[#D99178]/45'
+                  }`}
+                  onClick={handleCopy}
+                  title="复制思考内容"
+                  aria-label="复制思考内容"
+                >
+                  {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                </button>
+              )}
+
+              {shouldShowTimeline && (
+                <div className={`ml-1.5 border-l py-0.5 pl-3 pr-7 ${darkMode ? 'border-[#FFA07A]/20' : 'border-[#eaded8]'}`}>
+                  <div className="relative">
+                    {/* 活动进度点：随检索/思考阶段行数下移，避免一直停在第一行。 */}
+                    <span
+                      className={`absolute -left-[17px] top-1.5 h-2 w-2 rounded-full transition-transform duration-300 ease-out ${
+                        isThinkingPhase
+                          ? 'bg-[#B85F47] shadow-[0_0_8px_rgba(184,95,71,0.28)]'
+                          : 'bg-[#FFDCCF] dark:bg-[#FFA07A]/30'
+                      }`}
+                      style={{ transform: `translateY(${timelineDotOffset}px)` }}
+                    />
+                    {shouldShowStreamingHint && (
+                      <div className={`mb-2 text-[12px] italic leading-relaxed ${darkMode ? 'text-[#FFA07A]/90' : 'text-[#B85F47]/90'}`}>
+                        正在检索并组织思考内容...
+                      </div>
+                    )}
+                    <div className={`prose prose-sm max-w-none text-[13px] leading-relaxed ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
+                      <StreamingMarkdown
+                        content={content}
+                        isStreaming={isStreaming}
+                        enableBlurReveal={false}
+                        blurIntensity="light"
+                        streamingRef={streamingRef}
+                        suppressInitialDots={shouldShowStreamingHint}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hasAgentTrace && <AgentTracePanel trace={agentTrace} embedded />}
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   )
 }

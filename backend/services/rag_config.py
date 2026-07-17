@@ -6,9 +6,12 @@ RAG 系统配置模块
 """
 
 import os
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterator, Optional
+
+MAX_CONTEXT_CHUNK_EXPANSION = 3
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -126,6 +129,12 @@ _llm_query_rewrite_override: ContextVar[Optional[bool]] = ContextVar(
 _bm25_synonyms_override: ContextVar[Optional[bool]] = ContextVar(
     "chatpdf_bm25_synonyms_override", default=None
 )
+_jieba_bm25_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_jieba_bm25_override", default=None
+)
+_context_chunk_expansion_override: ContextVar[Optional[int]] = ContextVar(
+    "chatpdf_context_chunk_expansion_override", default=None
+)
 
 
 def apply_request_overrides(
@@ -134,19 +143,50 @@ def apply_request_overrides(
     answer_critic: Optional[bool] = None,
     llm_query_rewrite: Optional[bool] = None,
     bm25_synonyms: Optional[bool] = None,
-) -> None:
+    jieba_bm25: Optional[bool] = None,
+    context_chunk_expansion: Optional[int] = None,
+) -> list[tuple[ContextVar, object]]:
     """在请求入口一次性设置 per-request feature flag 覆盖。
 
     仅在传入非 None 时生效；None 表示"跟随全局 settings"。
     """
+    tokens: list[tuple[ContextVar, object]] = []
+
+    def _set(variable: ContextVar, value: object) -> None:
+        tokens.append((variable, variable.set(value)))
+
     if numeric_table is not None:
-        _numeric_table_override.set(bool(numeric_table))
+        _set(_numeric_table_override, bool(numeric_table))
     if answer_critic is not None:
-        _answer_critic_override.set(bool(answer_critic))
+        _set(_answer_critic_override, bool(answer_critic))
     if llm_query_rewrite is not None:
-        _llm_query_rewrite_override.set(bool(llm_query_rewrite))
+        _set(_llm_query_rewrite_override, bool(llm_query_rewrite))
     if bm25_synonyms is not None:
-        _bm25_synonyms_override.set(bool(bm25_synonyms))
+        _set(_bm25_synonyms_override, bool(bm25_synonyms))
+    if jieba_bm25 is not None:
+        _set(_jieba_bm25_override, bool(jieba_bm25))
+    if context_chunk_expansion is not None:
+        _set(
+            _context_chunk_expansion_override,
+            min(MAX_CONTEXT_CHUNK_EXPANSION, max(0, int(context_chunk_expansion))),
+        )
+    return tokens
+
+
+def reset_request_overrides(tokens: list[tuple[ContextVar, object]]) -> None:
+    """按设置的逆序恢复请求覆盖，避免同一任务复用时泄漏状态。"""
+    for variable, token in reversed(tokens):
+        variable.reset(token)
+
+
+@contextmanager
+def request_override_scope(**overrides: object) -> Iterator[None]:
+    """在当前请求上下文内临时应用检索开关。"""
+    tokens = apply_request_overrides(**overrides)
+    try:
+        yield
+    finally:
+        reset_request_overrides(tokens)
 
 
 def should_apply_numeric_table_specialization() -> bool:
@@ -206,3 +246,27 @@ def should_expand_bm25_synonyms() -> bool:
         return bool(getattr(settings, "bm25_expand_synonyms", True))
     except Exception:
         return True
+
+
+def should_use_jieba_bm25() -> bool:
+    """返回当前请求是否应使用 jieba 分词。"""
+    override = _jieba_bm25_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return bool(getattr(settings, "bm25_use_jieba", True))
+    except Exception:
+        return True
+
+
+def get_context_chunk_expansion() -> int:
+    """返回当前请求命中块前后各扩展的邻块数。"""
+    override = _context_chunk_expansion_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return max(0, int(getattr(settings, "num_expand_context_chunk", 1)))
+    except Exception:
+        return 1

@@ -19,9 +19,14 @@ import {
   ScanText,
   Wifi,
   WifiOff,
-  X,
+  ChevronLeft,
   XCircle,
 } from 'lucide-react'
+import SettingsSegmentedControl from './SettingsSegmentedControl'
+import {
+  PARSE_ROUTE_OPTIONS as SHARED_PARSE_ROUTE_OPTIONS,
+  VALID_PARSE_ROUTES,
+} from '../utils/parseRouteUtils'
 
 /**
  * localStorage 中 OCR 设置的键名
@@ -54,12 +59,27 @@ const OCR_MODES = [
 ]
 
 /**
+ * 文档上传时的主解析路线。OCR、YOLO 等能力只作为路线内的增强，
+ * 不应再被误解为另一套正文来源。
+ */
+const PARSE_ROUTE_ICONS = {
+  auto: FileSearch,
+  local: ScanText,
+  mineru: Globe,
+}
+
+const PARSE_ROUTE_OPTIONS = SHARED_PARSE_ROUTE_OPTIONS.map((option) => ({
+  ...option,
+  icon: PARSE_ROUTE_ICONS[option.value],
+}))
+
+/**
  * 面板分区导航定义
  */
 const PANEL_TABS = [
   { id: 'local', label: '扫描 OCR', icon: ScanText },
-  { id: 'cloud', label: '云端服务', icon: Globe },
-  { id: 'figure', label: '图表识别', icon: Crop },
+  { id: 'cloud', label: '云端解析', icon: Globe },
+  { id: 'figure', label: '图表定位', icon: Crop },
 ]
 
 /**
@@ -69,7 +89,7 @@ const BACKEND_LABELS = {
   tesseract: 'Tesseract',
   paddleocr: 'PaddleOCR',
   mistral: 'Mistral OCR',
-  mineru: 'MinerU OCR',
+  mineru: 'MinerU 深度解析',
   doc2x: 'Doc2X OCR',
 }
 
@@ -98,16 +118,6 @@ const BACKEND_OPTIONS = [
     label: 'Mistral OCR',
     description: '在线 OCR 服务，需配置 API Key',
   },
-  {
-    value: 'mineru',
-    label: 'MinerU OCR',
-    description: '在线 OCR 服务，通过 Worker 代理，支持公式和表格识别',
-  },
-  {
-    value: 'doc2x',
-    label: 'Doc2X OCR',
-    description: '在线 OCR 服务，通过 Worker 代理，支持 Dollar 公式模式',
-  },
 ]
 
 /**
@@ -123,28 +133,34 @@ const VALID_MODES = ['auto', 'always', 'never']
 /**
  * 合法的 OCR 引擎后端值
  */
-const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral', 'mineru', 'doc2x']
+const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral']
 
 /**
- * 合法的速览图表预览模式
+ * 合法的主解析路线值
  */
+const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'doc2x']
+
+const DEFAULT_OCR_SETTINGS = {
+  mode: 'auto',
+  backend: 'auto',
+  parseRoute: 'auto',
+  mineruFigureEnhance: true,
+  figureRenderMode: 'raw',
+}
+
+/** 旧版速览图表模式，仅用于兼容读取已有 localStorage。 */
 const VALID_FIGURE_RENDER_MODES = ['raw', 'yolo']
 
 /**
  * 从 localStorage 读取 OCR 设置
- * @returns {object} OCR 设置对象，包含 mode 和 backend
+ * @returns {object} OCR 与主解析路线设置
  */
 export function loadOCRSettings() {
   try {
     const raw = localStorage.getItem(OCR_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      const result = {
-        mode: 'auto',
-        backend: 'auto',
-        mineruFigureEnhance: true,
-        figureRenderMode: 'raw',
-      }
+      const result = { ...DEFAULT_OCR_SETTINGS }
       // 校验 mode 值是否合法
       if (VALID_MODES.includes(parsed.mode)) {
         result.mode = parsed.mode
@@ -153,20 +169,31 @@ export function loadOCRSettings() {
       if (VALID_BACKENDS.includes(parsed.backend)) {
         result.backend = parsed.backend
       }
-      // 图表增强识别开关
+      // 旧版本曾把 MinerU/Doc2X 当作逐页 OCR；读取时统一迁回自动 OCR。
+      const migratedLegacyPageOcr = LEGACY_PAGE_OCR_BACKENDS.includes(parsed.backend)
+      // 校验上传主解析路线
+      if (VALID_PARSE_ROUTES.includes(parsed.parseRoute)) {
+        result.parseRoute = parsed.parseRoute
+      }
+      // 旧版图表字段继续透传，避免保存其他设置时破坏历史数据。
       if (typeof parsed.mineruFigureEnhance === 'boolean') {
         result.mineruFigureEnhance = parsed.mineruFigureEnhance
       }
-      // 速览图表预览模式
       if (VALID_FIGURE_RENDER_MODES.includes(parsed.figureRenderMode)) {
         result.figureRenderMode = parsed.figureRenderMode
+      }
+      if (migratedLegacyPageOcr) {
+        localStorage.setItem(
+          OCR_SETTINGS_KEY,
+          JSON.stringify({ ...parsed, backend: 'auto', parseRoute: result.parseRoute })
+        )
       }
       return result
     }
   } catch (err) {
     console.error('读取 OCR 设置失败:', err)
   }
-  return { mode: 'auto', backend: 'auto', mineruFigureEnhance: true, figureRenderMode: 'raw' }
+  return { ...DEFAULT_OCR_SETTINGS }
 }
 
 /**
@@ -175,7 +202,14 @@ export function loadOCRSettings() {
  */
 export function saveOCRSettings(settings) {
   try {
-    localStorage.setItem(OCR_SETTINGS_KEY, JSON.stringify(settings))
+    const nextSettings = { ...settings }
+    if (LEGACY_PAGE_OCR_BACKENDS.includes(nextSettings.backend)) {
+      nextSettings.backend = 'auto'
+    }
+    if (!VALID_PARSE_ROUTES.includes(nextSettings.parseRoute)) {
+      nextSettings.parseRoute = 'auto'
+    }
+    localStorage.setItem(OCR_SETTINGS_KEY, JSON.stringify(nextSettings))
   } catch (err) {
     console.error('保存 OCR 设置失败:', err)
   }
@@ -199,12 +233,14 @@ const getApiErrorMessage = async (res, fallback) => {
  * @param {function} props.onClose - 关闭面板的回调
  */
 export default function OCRSettingsPanel({ isOpen, onClose }) {
-  // 面板分区导航：local=扫描 OCR，cloud=云端服务，figure=图表识别
+  // 面板分区导航：local=扫描 OCR，cloud=云端解析，figure=图表兜底资源
   const [activePanelTab, setActivePanelTab] = useState('local')
   // OCR 模式状态
   const [mode, setMode] = useState('auto')
   // OCR 引擎后端选择状态
   const [backend, setBackend] = useState('auto')
+  // 上传时固定的主解析路线
+  const [parseRoute, setParseRoute] = useState('auto')
   // 后端 OCR 状态数据
   const [ocrStatus, setOcrStatus] = useState(null)
   // 加载状态
@@ -249,6 +285,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [mineruEnableOcr, setMineruEnableOcr] = useState(false)
   const [mineruEnableFormula, setMineruEnableFormula] = useState(true)
   const [mineruEnableTable, setMineruEnableTable] = useState(true)
+  const [mineruModelVersion, setMineruModelVersion] = useState('vlm')
   // 是否显示 MinerU Auth Key 明文
   const [showMineruAuthKey, setShowMineruAuthKey] = useState(false)
   // 是否显示 MinerU Token 明文
@@ -263,10 +300,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [mineruSaveMessage, setMineruSaveMessage] = useState('')
   // MinerU 配置卡片展开/折叠状态
   const [mineruExpanded, setMineruExpanded] = useState(false)
-  // MinerU 图表增强识别开关
-  const [mineruFigureEnhance, setMineruFigureEnhance] = useState(true)
-  // 速览图表预览模式：raw 更快，yolo 更准
-  const [figureRenderMode, setFigureRenderMode] = useState('raw')
   // YOLO 资源状态
   const [yoloStatus, setYoloStatus] = useState(null)
   // YOLO 权重安装目录
@@ -310,12 +343,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       const settings = loadOCRSettings()
       setMode(settings.mode)
       setBackend(settings.backend)
-      setMineruFigureEnhance(settings.mineruFigureEnhance !== false)
-      setFigureRenderMode(
-        VALID_FIGURE_RENDER_MODES.includes(settings.figureRenderMode)
-          ? settings.figureRenderMode
-          : 'raw'
-      )
+      setParseRoute(settings.parseRoute)
     }
   }, [isOpen])
 
@@ -404,6 +432,9 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         }
         if (data.mineru.enable_table !== undefined) {
           setMineruEnableTable(data.mineru.enable_table)
+        }
+        if (data.mineru.model_version) {
+          setMineruModelVersion(data.mineru.model_version)
         }
       }
       // 加载 Doc2X 已保存配置（回填非敏感字段）
@@ -514,6 +545,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           auth_key: mineruAuthKey.trim(),
           token: mineruToken.trim(),
           token_mode: mineruTokenMode,
+          model_version: mineruModelVersion,
         }),
       })
       const data = await res.json()
@@ -536,6 +568,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
             auth_key: mineruAuthKey.trim(),
             token: mineruToken.trim(),
             token_mode: mineruTokenMode,
+            model_version: mineruModelVersion,
             enable_ocr: mineruEnableOcr,
             enable_formula: mineruEnableFormula,
             enable_table: mineruEnableTable,
@@ -569,6 +602,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     mineruAuthKey,
     mineruToken,
     mineruTokenMode,
+    mineruModelVersion,
     mineruEnableOcr,
     mineruEnableFormula,
     mineruEnableTable,
@@ -592,6 +626,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         auth_key: mineruAuthKey.trim(),
         token_mode: mineruTokenMode,
         token: mineruToken.trim(),
+        model_version: mineruModelVersion,
         enable_ocr: mineruEnableOcr,
         enable_formula: mineruEnableFormula,
         enable_table: mineruEnableTable,
@@ -623,7 +658,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       // 3 秒后清除保存消息
       setTimeout(() => setMineruSaveMessage(''), 3000)
     }
-  }, [mineruAccessMode, mineruBaseUrl, mineruWorkerUrl, mineruAuthKey, mineruTokenMode, mineruToken, mineruEnableOcr, mineruEnableFormula, mineruEnableTable, fetchOnlineConfig, fetchOCRStatus])
+  }, [mineruAccessMode, mineruBaseUrl, mineruWorkerUrl, mineruAuthKey, mineruTokenMode, mineruToken, mineruModelVersion, mineruEnableOcr, mineruEnableFormula, mineruEnableTable, fetchOnlineConfig, fetchOCRStatus])
 
   /**
    * Doc2X 测试连接：验证 Worker 可达性
@@ -854,22 +889,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   }
 
   /**
-   * 切换速览图表预览模式并持久化
-   * @param {'raw'|'yolo'} nextMode - 新的预览模式
+   * 切换上传主解析路线并持久化。路线只影响后续上传，不改写已上传文档。
+   * @param {'auto'|'local'|'mineru'} newRoute - 主解析路线
    */
-  const handleFigureRenderModeChange = (nextMode) => {
-    if (!VALID_FIGURE_RENDER_MODES.includes(nextMode)) return
-    setFigureRenderMode(nextMode)
+  const handleParseRouteChange = (newRoute) => {
+    if (!VALID_PARSE_ROUTES.includes(newRoute)) return
+    setParseRoute(newRoute)
     const settings = loadOCRSettings()
-    saveOCRSettings({ ...settings, figureRenderMode: nextMode })
-    if (nextMode === 'yolo' && yoloStatus && !yoloStatus.available) {
-      setYoloMessageType('error')
-      setYoloMessage(
-        !yoloStatus.dependencies_available
-          ? '当前后端缺少 YOLO 运行依赖，请使用桌面完整包或安装依赖后再启用'
-          : 'YOLO 权重尚未配置，请先一键下载或手动指定 .pt 权重'
-      )
-    }
+    saveOCRSettings({ ...settings, parseRoute: newRoute })
   }
 
   const yoloReady = yoloStatus?.available === true
@@ -890,19 +917,27 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all opacity-100"
+          className="fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all opacity-100"
         >
           <motion.div
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-            className="w-full max-w-[640px] max-h-[92vh] bg-[#fbfbfc] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.1)] rounded-[32px] overflow-hidden flex flex-col"
+            className="settings-solid settings-shell w-full max-w-[640px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col"
           >
             {/* 顶部标题栏 */}
-            <div className="flex items-center justify-between px-6 py-5 sticky top-0 bg-[#fbfbfc]/90 backdrop-blur-md z-10 border-b border-gray-100/50">
+            <div className="settings-chrome flex items-center px-6 py-5 sticky top-0 z-10 border-b border-gray-200">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-[#8871e4]/10 rounded-2xl flex items-center justify-center text-[#8871e4]">
+                <button
+                  onClick={onClose}
+                  className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+                  title="返回设置中心"
+                  aria-label="返回设置中心"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+                <div className="w-10 h-10 bg-[#fcede8] rounded-[14px] flex items-center justify-center text-[#ed8c68]">
                   <ScanText className="w-5 h-5" />
                 </div>
                 <div>
@@ -914,12 +949,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                   </div>
                 </div>
               </div>
-              <button
-                onClick={onClose}
-                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
             </div>
 
             {/* 主内容区（单栏） */}
@@ -935,11 +964,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 </div>
               )}
 
-              {/* 分区导航：扫描 OCR / 云端服务 / 图表识别 —— 三条互相独立的链路，
-                  分开后每次只需要看和改其中一块，避免全部堆成一条长列表 */}
-              <div className="relative flex items-center p-1 rounded-2xl bg-gray-100/70">
+              {/* 主解析与能力配置分区展示；图表兜底不是第三条主解析路线。 */}
+              <div className="settings-segment relative flex items-center p-1 rounded-2xl">
                 <motion.div
-                  className="absolute inset-y-1 left-1 rounded-xl bg-white shadow-sm"
+                  className="settings-segment-indicator absolute inset-y-1 left-1 rounded-xl"
                   initial={false}
                   animate={{ x: `${PANEL_TABS.findIndex((t) => t.id === activePanelTab) * 100}%` }}
                   transition={{ type: 'spring', stiffness: 420, damping: 32, mass: 0.7 }}
@@ -954,7 +982,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       onClick={() => setActivePanelTab(id)}
                       className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-semibold transition-colors duration-200 ${
                         isActive
-                          ? 'text-[#8871e4]'
+                          ? 'text-[#ed8c68]'
                           : 'text-gray-500 hover:text-gray-700'
                       }`}
                     >
@@ -971,6 +999,59 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 })}
               </div>
 
+              {/* 上传前确定一份文档的主解析来源，避免正文、索引和阅读块混用不同路线。 */}
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
+                <div className="flex items-start gap-2 mb-4">
+                  <FileSearch className="w-4 h-4 text-gray-500 mt-0.5" />
+                  <div>
+                    <span className="text-sm font-semibold text-gray-800">上传解析路线</span>
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      仅影响下一次上传；同一份文档的正文、阅读、大纲、总结、翻译、速览和问答索引会使用同一主路线。
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {PARSE_ROUTE_OPTIONS.map((option) => {
+                    const Icon = option.icon
+                    const isActive = parseRoute === option.value
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        aria-pressed={isActive}
+                        onClick={() => handleParseRouteChange(option.value)}
+                        className={`settings-inset w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all ${
+                          isActive
+                            ? 'accent-surface'
+                            : 'hover:border-[#FFDCCF] hover:bg-[#FFF4EF] text-gray-700'
+                        }`}
+                      >
+                        <div
+                          className={`p-1.5 rounded-lg ${
+                            isActive ? 'bg-[#fcede8] text-[#ed8c68]' : 'bg-gray-100 text-gray-500'
+                          }`}
+                        >
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium">{option.label}</div>
+                          <div className={`text-xs mt-0.5 ${isActive ? 'text-[#d2633b]' : 'text-gray-400'}`}>
+                            {option.description}
+                          </div>
+                        </div>
+                        {isActive && <CheckCircle2 className="w-5 h-5 flex-shrink-0" />}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 text-[11px] text-gray-500">
+                  <Crop className="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-400" />
+                  <span>DocLayout-YOLO 只定位并裁切图表区域，不读取图片内容；MinerU 仍是独立的全程解析路线。</span>
+                </div>
+              </div>
+
               <AnimatePresence mode="wait">
               {activePanelTab === 'local' && (
               <motion.div
@@ -982,7 +1063,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
               {/* OCR 可用状态卡片 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <Info className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1019,7 +1100,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         )}
                       </span>
                       {ocrStatus.recommended && (
-                        <span className="ml-auto text-xs text-[#8871e4] bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
+                        <span className="ml-auto text-xs text-[#ed8c68] bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
                           推荐：{BACKEND_LABELS[ocrStatus.recommended] || ocrStatus.recommended}
                         </span>
                       )}
@@ -1085,7 +1166,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 模式选择 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1103,14 +1184,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         onClick={() => handleModeChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                            : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
+                            ? 'border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] shadow-sm'
+                            : 'border-gray-100 hover:border-[#ed8c68]/30 hover:bg-[#ed8c68]/5 text-gray-700'
                         }`}
                       >
                         <div
                           className={`p-1.5 rounded-lg ${
                             isActive
-                              ? 'bg-purple-100 text-[#8871e4]'
+                              ? 'bg-purple-100 text-[#ed8c68]'
                               : 'bg-gray-100 text-gray-500'
                           }`}
                         >
@@ -1122,14 +1203,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-[#8871e4]' : 'text-gray-400'
+                              isActive ? 'text-[#ed8c68]' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-[#8871e4] flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-[#ed8c68] flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -1138,7 +1219,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* OCR 引擎选择 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <ScanText className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
@@ -1149,14 +1230,22 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 <div className="space-y-2">
                   {BACKEND_OPTIONS.map((option) => {
                     const isActive = backend === option.value
+                    const localProviderUnavailable =
+                      ['tesseract', 'paddleocr'].includes(option.value) &&
+                      ocrStatus?.backends?.[option.value] === false
+                    const disabled = Boolean(option.deprecatedForPageOcr || localProviderUnavailable)
                     return (
                       <button
                         key={option.value}
-                        onClick={() => handleBackendChange(option.value)}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => !disabled && handleBackendChange(option.value)}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
                           isActive
-                            ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                            : 'border-gray-100 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5 text-gray-700'
+                            ? 'border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] shadow-sm'
+                            : disabled
+                              ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed opacity-70'
+                              : 'border-gray-100 hover:border-[#ed8c68]/30 hover:bg-[#ed8c68]/5 text-gray-700'
                         }`}
                       >
                         <div className="flex-1 min-w-0">
@@ -1165,14 +1254,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </div>
                           <div
                             className={`text-xs mt-0.5 ${
-                              isActive ? 'text-[#8871e4]' : 'text-gray-400'
+                              isActive ? 'text-[#ed8c68]' : 'text-gray-400'
                             }`}
                           >
                             {option.description}
                           </div>
                         </div>
                         {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-[#8871e4] flex-shrink-0" />
+                          <CheckCircle2 className="w-5 h-5 text-[#ed8c68] flex-shrink-0" />
                         )}
                       </button>
                     )
@@ -1193,16 +1282,15 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
-              {/* 说明：这里的连接配置同时服务于两条链路——
-                  ① 扫描页 OCR 兜底选中该引擎时，② MinerU 深度解析（阅读结构/大纲/速览图表）。
-                  两者共用同一份 Token/Worker 配置，不需要重复填写。 */}
-              <div className="flex items-start gap-2 px-4 py-3 rounded-2xl bg-[#8871e4]/5 border border-[#8871e4]/15 text-xs text-[#5d45c8]">
+              {/* MinerU only performs document-level deep parsing. Page OCR uses
+                  local engines or the explicitly selected Mistral provider. */}
+              <div className="flex items-start gap-2 px-4 py-3 rounded-2xl bg-[#ed8c68]/5 border border-[#ed8c68]/15 text-xs text-[#d2633b]">
                 <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                <span>下方的连接配置会同时用于「扫描页 OCR 兜底」和「MinerU 深度解析」两个功能，只需配置一次。</span>
+                <span>下方配置仅用于 MinerU 深度解析，包括阅读结构、大纲与速览图表；扫描页 OCR 请使用本地引擎或 Mistral OCR。</span>
               </div>
 
               {/* 在线 OCR 服务配置卡片（可折叠，与 MinerU/Doc2X 卡片风格一致） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <button
                   onClick={() => setMistralExpanded(!mistralExpanded)}
                   className="w-full flex items-center gap-2"
@@ -1361,7 +1449,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <button
                       onClick={handleValidateKey}
                       disabled={(!mistralApiKey.trim() && !onlineConfig?.mistral?.api_key_configured) || validateStatus === 'loading'}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
                       {validateStatus === 'loading' ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1392,7 +1480,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* MinerU OCR 配置卡片（可折叠） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setMineruExpanded(!mineruExpanded)}
@@ -1400,7 +1488,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 >
                   <Globe className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
-                    MinerU OCR 服务
+                    MinerU 深度解析服务
                   </span>
                   {/* 已配置状态指示 */}
                   {(onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) && (
@@ -1483,30 +1571,16 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <label className="text-xs font-medium text-gray-600 mb-1.5 block">
                         接入模式
                       </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setMineruAccessMode('worker')}
-                          className={`px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            mineruAccessMode === 'worker'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          Worker 代理
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setMineruAccessMode('direct')}
-                          className={`px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            mineruAccessMode === 'direct'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          直连 API
-                        </button>
-                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="MinerU 接入模式"
+                        value={mineruAccessMode}
+                        onChange={setMineruAccessMode}
+                        options={[
+                          { value: 'worker', label: 'Worker 代理' },
+                          { value: 'direct', label: '直连 API' },
+                        ]}
+                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                      />
                       <div className="text-xs text-gray-400 mt-1">
                         {mineruAccessMode === 'worker'
                           ? '通过你部署的 pb-ocr-proxy 转发 MinerU 请求'
@@ -1601,28 +1675,16 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <label className="text-xs font-medium text-gray-600 mb-1.5 block">
                         Token 模式
                       </label>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setMineruTokenMode('frontend')}
-                          className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            mineruTokenMode === 'frontend'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          前端透传
-                        </button>
-                        <button
-                          onClick={() => setMineruTokenMode('worker')}
-                          className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            mineruTokenMode === 'worker'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          Worker 配置
-                        </button>
-                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="MinerU Token 模式"
+                        value={mineruTokenMode}
+                        onChange={setMineruTokenMode}
+                        options={[
+                          { value: 'frontend', label: '前端透传' },
+                          { value: 'worker', label: 'Worker 配置' },
+                        ]}
+                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                      />
                       <div className="text-xs text-gray-400 mt-1">
                         {mineruTokenMode === 'frontend'
                           ? '由前端传递 Token 到 Worker'
@@ -1673,16 +1735,16 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         OCR 处理选项
                       </label>
                       <div className="space-y-2">
-                        {/* 扫描件 OCR */}
-                        <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
-                          <span>
-                            <span className="block text-xs text-gray-700">扫描件 OCR</span>
-                            <span className="block text-[10px] text-gray-400 mt-0.5">同时影响 OCR 兜底和深度解析；普通论文建议关闭，扫描 PDF 再开启</span>
+                    {/* 深度解析中的扫描件识别 */}
+                    <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
+                      <span>
+                        <span className="block text-xs text-gray-700">扫描件 OCR</span>
+                        <span className="block text-[10px] text-gray-400 mt-0.5">仅影响 MinerU 深度解析；普通论文建议关闭，扫描 PDF 再开启</span>
                           </span>
                           <div
                             onClick={() => setMineruEnableOcr(!mineruEnableOcr)}
                             className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableOcr ? 'bg-[#8871e4]' : 'bg-gray-300'
+                              mineruEnableOcr ? 'accent-control' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1698,7 +1760,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <div
                             onClick={() => setMineruEnableFormula(!mineruEnableFormula)}
                             className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableFormula ? 'bg-[#8871e4]' : 'bg-gray-300'
+                              mineruEnableFormula ? 'accent-control' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1714,7 +1776,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           <div
                             onClick={() => setMineruEnableTable(!mineruEnableTable)}
                             className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableTable ? 'bg-[#8871e4]' : 'bg-gray-300'
+                              mineruEnableTable ? 'accent-control' : 'bg-gray-300'
                             }`}
                           >
                             <div
@@ -1724,6 +1786,26 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                             />
                           </div>
                         </label>
+                        <div className="px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100">
+                          <div className="flex items-center justify-between gap-3">
+                            <span>
+                              <span className="block text-xs text-gray-700">解析模型</span>
+                              <span className="block text-[10px] text-gray-400 mt-0.5">VLM 适合复杂版式和表格；Pipeline 可作为兼容回退</span>
+                            </span>
+                            <SettingsSegmentedControl
+                              ariaLabel="MinerU 解析模型"
+                              value={mineruModelVersion}
+                              onChange={setMineruModelVersion}
+                              options={[
+                                { value: 'vlm', label: 'VLM' },
+                                { value: 'pipeline', label: 'Pipeline' },
+                              ]}
+                              className="w-[152px] rounded-lg"
+                              buttonClassName="px-2 py-1 text-[11px] font-medium text-center rounded-md"
+                              indicatorClassName="rounded-md"
+                            />
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1773,7 +1855,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           || (mineruAccessMode === 'worker' && !mineruWorkerUrl.trim())
                           || (mineruAccessMode === 'direct' && !mineruToken.trim() && !onlineConfig?.mineru?.token_configured)
                         }
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {mineruValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1808,7 +1890,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </div>
 
               {/* Doc2X OCR 配置卡片（可折叠） */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              {false && (
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
                   onClick={() => setDoc2xExpanded(!doc2xExpanded)}
@@ -1947,28 +2030,16 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <label className="text-xs font-medium text-gray-600 mb-1.5 block">
                         Token 模式
                       </label>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setDoc2xTokenMode('frontend')}
-                          className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            doc2xTokenMode === 'frontend'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          前端透传
-                        </button>
-                        <button
-                          onClick={() => setDoc2xTokenMode('worker')}
-                          className={`flex-1 px-3 py-2 text-xs font-medium rounded-xl border transition-all ${
-                            doc2xTokenMode === 'worker'
-                              ? 'border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] shadow-sm'
-                              : 'border-gray-200 bg-white/60 text-gray-600 hover:border-[#8871e4]/30 hover:bg-[#8871e4]/5'
-                          }`}
-                        >
-                          Worker 配置
-                        </button>
-                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="Doc2X Token 模式"
+                        value={doc2xTokenMode}
+                        onChange={setDoc2xTokenMode}
+                        options={[
+                          { value: 'frontend', label: '前端透传' },
+                          { value: 'worker', label: 'Worker 配置' },
+                        ]}
+                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                      />
                       <div className="text-xs text-gray-400 mt-1">
                         {doc2xTokenMode === 'frontend'
                           ? '由前端传递 Token 到 Worker'
@@ -2054,7 +2125,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <button
                         onClick={handleDoc2xValidate}
                         disabled={!doc2xWorkerUrl.trim() || doc2xValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                       >
                         {doc2xValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -2083,6 +2154,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 )}
                 </AnimatePresence>
               </div>
+              )}
               </motion.div>
               )}
               </AnimatePresence>
@@ -2097,81 +2169,33 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
-              {/* 速览图表增强与识别方式 —— 从 MinerU 卡片里独立出来：
-                  这块只关心"图表怎么识别/怎么裁切"，和是否配置了 MinerU 账号无关，
-                  raw 模式零依赖，yolo 模式用本地模型，不需要联网。 */}
-              <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+              {/* 图表定位遵循主解析路线，视觉模型只在结构结果缺失时兜底。 */}
+              <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
                   <Crop className="w-4 h-4 text-gray-500" />
                   <span className="text-sm font-semibold text-gray-800">
-                    速览图表识别
+                    图表兜底
                   </span>
                 </div>
 
-                {/* 图表增强识别开关 */}
-                <div className="flex items-center justify-between px-1">
-                  <div className="flex-1 mr-3">
-                    <span className="text-xs font-medium text-gray-700">速览图表增强识别</span>
-                    <p className="text-[11px] text-gray-400 mt-0.5">使用 MinerU 版面分析精确识别完整 Figure 区域（需已配置 MinerU 云端服务）</p>
-                  </div>
-                  <button
-                    onClick={() => {
-                      const next = !mineruFigureEnhance
-                      setMineruFigureEnhance(next)
-                      const settings = loadOCRSettings()
-                      saveOCRSettings({ ...settings, mineruFigureEnhance: next })
-                    }}
-                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      mineruFigureEnhance ? 'bg-[#8871e4]' : 'bg-gray-300'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform ring-0 transition duration-200 ease-in-out ${
-                        mineruFigureEnhance ? 'translate-x-[18px]' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                {/* 速览图表预览模式 */}
-                <div className="mt-4 px-1">
-                  <div className="flex items-start gap-2 mb-2">
-                    <Crop className="w-3.5 h-3.5 text-gray-500 mt-0.5 shrink-0" />
+                <div className="rounded-[12px] border border-[#eadfd9] bg-[#faf7f5] px-4 py-3">
+                  <div className="flex items-start gap-2.5">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#b85f47]" />
                     <div>
-                      <span className="text-xs font-medium text-gray-700">速览图表预览模式</span>
-                      <p className="text-[11px] text-gray-400 mt-0.5">控制关键图表卡片的裁切方式</p>
+                      <div className="text-xs font-semibold text-gray-700">自动跟随当前文档的主解析路线</div>
+                      <p className="mt-1 text-[11px] leading-5 text-gray-500">
+                        MinerU 文档优先使用结构化图表，本地文档优先使用 PDF 原生结构；只有主结果未定位到图表时，才调用本地图表定位兜底。
+                      </p>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => handleFigureRenderModeChange('raw')}
-                      className={`text-left rounded-xl border px-3 py-2 transition-all ${
-                        figureRenderMode === 'raw'
-                          ? 'border-[#8871e4]/45 bg-[#8871e4]/8 text-[#5d45c8]'
-                          : 'border-gray-100 bg-gray-50/70 text-gray-600 hover:bg-gray-100/70'
-                      }`}
-                    >
-                      <span className="block text-xs font-semibold">原始</span>
-                      <span className="block text-[11px] text-gray-400 mt-0.5">更快，直接按 PDF 区域预览</span>
-                    </button>
-                    <button
-                      onClick={() => handleFigureRenderModeChange('yolo')}
-                      className={`text-left rounded-xl border px-3 py-2 transition-all ${
-                        figureRenderMode === 'yolo'
-                          ? 'border-[#8871e4]/45 bg-[#8871e4]/8 text-[#5d45c8]'
-                          : 'border-gray-100 bg-gray-50/70 text-gray-600 hover:bg-gray-100/70'
-                      }`}
-                    >
-                      <span className="block text-xs font-semibold">YOLO</span>
-                      <span className="block text-[11px] text-gray-400 mt-0.5">更准，使用本地图像主体检测</span>
-                    </button>
-                  </div>
+                </div>
 
+                <div className="mt-4 px-1">
                   <div className="mt-3 rounded-2xl border border-gray-100 bg-gray-50/70 p-3 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-medium text-gray-700">YOLO 资源</span>
+                          <span className="text-xs font-medium text-gray-700">本地图表定位模型</span>
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
                               yoloReady
@@ -2185,7 +2209,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </span>
                         </div>
                         <p className="text-[11px] text-gray-400 mt-0.5">
-                          软件包不内置权重，可下载到用户目录或指定已有 .pt 文件
+                          DocLayout-YOLO 仅负责版面定位和裁切；图表内容理解在设置中心的「阅读」中单独选择
                         </p>
                       </div>
                       <button
@@ -2220,7 +2244,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           value={yoloInstallDir}
                           onChange={(e) => setYoloInstallDir(e.target.value)}
                           placeholder={yoloStatus?.default_install_dir || '默认用户数据目录'}
-                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#8871e4]/50"
+                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
                         />
                         {window.chatpdfDesktop?.selectDirectory && (
                           <button
@@ -2235,7 +2259,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         <button
                           onClick={handleDownloadYoloModel}
                           disabled={yoloBusy}
-                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-[#8871e4]/30 bg-[#8871e4]/5 text-[#8871e4] hover:bg-[#8871e4]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                         >
                           {yoloBusy ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -2255,7 +2279,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           value={yoloModelPath}
                           onChange={(e) => setYoloModelPath(e.target.value)}
                           placeholder="选择或输入 doclayout_yolo_*.pt 路径"
-                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#8871e4]/50"
+                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
                         />
                         {window.chatpdfDesktop?.selectFile && (
                           <button
@@ -2330,7 +2354,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               >
               {/* Poppler 不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.poppler_available && (
-                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                <div className="settings-card bg-white p-5 border border-gray-200/90">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
                     <div>
@@ -2367,7 +2391,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
 
               {/* OCR 后端不可用时的安装指引 */}
               {ocrStatus && !ocrStatus.available && (
-                <div className="bg-white rounded-[24px] p-5 shadow-sm border border-gray-100/80">
+                <div className="settings-card bg-white p-5 border border-gray-200/90">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                     <div>
@@ -2407,7 +2431,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
             </div>
 
             {/* 底部状态栏 */}
-            <div className="px-6 py-3 border-t border-gray-100 flex items-center justify-between">
+            <div className="settings-chrome px-6 py-3 border-t border-gray-200 flex items-center justify-between">
               <div className="text-xs text-gray-400">
                 设置已自动保存到本地
               </div>

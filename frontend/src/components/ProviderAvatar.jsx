@@ -22,7 +22,7 @@ export default function ProviderAvatar({
    * 生成颜色（基于provider名称）
    */
   const generateColor = (name) => {
-    if (!name) return '#6366f1'
+    if (!name) return '#fc8458'
 
     let hash = 0
     for (let i = 0; i < name.length; i++) {
@@ -112,6 +112,8 @@ export default function ProviderAvatar({
         <img
           src={displayLogo}
           alt={safeProvider.name}
+          loading="lazy"
+          decoding="async"
           className="w-full h-full object-contain"
           onError={() => setImageError(true)}
           style={{ imageRendering: 'crisp-edges' }}

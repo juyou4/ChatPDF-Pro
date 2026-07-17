@@ -57,6 +57,11 @@ PROVIDER_CONFIG = {
         "endpoint": "https://api.minimaxi.com/v1/chat/completions",
         "type": "openai"
     },
+    "xiaomi": {
+        "name": "Xiaomi MiMo",
+        "endpoint": "https://api.xiaomimimo.com/v1/chat/completions",
+        "type": "openai"
+    },
     "qwen": {
         "name": "Qwen",
         "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",

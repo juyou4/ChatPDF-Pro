@@ -15,10 +15,14 @@ BM25检索服务 - 轻量级关键词检索，作为向量检索的补充
 import math
 import logging
 import re
+import threading
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
+
+BM25_TOKENIZER_VERSION = 3
 
 try:
     import jieba
@@ -26,22 +30,50 @@ try:
 except ImportError:
     _HAS_JIEBA = False
 
-# 运行时开关：由 config.settings.bm25_use_jieba 控制
-_use_jieba: Optional[bool] = None
-
-
 def _should_use_jieba() -> bool:
-    """判断是否使用 jieba 分词（每次从 settings 读取，支持运行时切换）"""
+    """判断当前请求是否使用 jieba 分词。"""
     if not _HAS_JIEBA:
         return False
     try:
-        from config import settings
-        return settings.bm25_use_jieba
+        from services.rag_config import should_use_jieba_bm25
+        return should_use_jieba_bm25()
     except Exception:
         return _HAS_JIEBA
 
 
-def _tokenize(text: str) -> List[str]:
+def _tokenizer_signature(use_jieba: bool) -> str:
+    mode = "jieba" if use_jieba else "char_ngram"
+    return f"v{BM25_TOKENIZER_VERSION}:{mode}"
+
+
+def get_bm25_tokenizer_signature() -> str:
+    return _tokenizer_signature(_should_use_jieba())
+
+
+def _merge_token_channels(*channels: List[str]) -> List[str]:
+    """合并不同分词通道，去除特征重叠但保留文本中的真实词频。"""
+    normalized_channels = [
+        [str(token).strip() for token in channel if str(token).strip()]
+        for channel in channels
+    ]
+    target_counts: Counter[str] = Counter()
+    for channel in normalized_channels:
+        channel_counts = Counter(channel)
+        for token, count in channel_counts.items():
+            target_counts[token] = max(target_counts[token], count)
+
+    merged: List[str] = []
+    emitted: Counter[str] = Counter()
+    for channel in normalized_channels:
+        for token in channel:
+            if emitted[token] >= target_counts[token]:
+                continue
+            merged.append(token)
+            emitted[token] += 1
+    return merged
+
+
+def _tokenize(text: str, *, use_jieba: Optional[bool] = None) -> List[str]:
     """
     混合分词：中文用 jieba 分词（可选）或字符级 n-gram，英文用空格分词
 
@@ -61,17 +93,25 @@ def _tokenize(text: str) -> List[str]:
     # 分离中文和英文/数字片段
     segments = re.findall(r'[\u4e00-\u9fff]+|[a-z0-9]+', text)
 
-    use_jieba = _should_use_jieba()
+    if use_jieba is None:
+        use_jieba = _should_use_jieba()
 
     for seg in segments:
         if re.match(r'[\u4e00-\u9fff]', seg):
             if use_jieba:
-                # jieba 分词 + bigram 补充
-                words = list(jieba.cut(seg))
-                tokens.extend(w for w in words if w.strip())
-                # 补充 bigram 提升短语匹配
+                words = [word for word in jieba.cut(seg) if word.strip()]
+                word_tokens = list(words)
+                # 相邻词组合保留词组级精度。
                 for i in range(len(words) - 1):
-                    tokens.append(words[i] + words[i + 1])
+                    word_tokens.append(words[i] + words[i + 1])
+                # jieba 会把“编程语言”之类的复合词保留为一个词；查询“编程”
+                # 因而无法命中。补充字符级 n-gram，保留词级精度同时恢复子词召回。
+                character_tokens = []
+                for i in range(len(seg) - 1):
+                    character_tokens.append(seg[i:i + 2])
+                for i in range(len(seg) - 2):
+                    character_tokens.append(seg[i:i + 3])
+                tokens.extend(_merge_token_channels(word_tokens, character_tokens))
             else:
                 # 回退：unigram + bigram + trigram
                 for ch in seg:
@@ -97,9 +137,18 @@ class BM25Index:
     - b: 文档长度归一化参数，默认0.75
     """
 
-    def __init__(self, k1: float = 1.5, b: float = 0.75):
+    def __init__(
+        self,
+        k1: float = 1.5,
+        b: float = 0.75,
+        *,
+        use_jieba: Optional[bool] = None,
+    ):
         self.k1 = k1
         self.b = b
+        self.use_jieba = _should_use_jieba() if use_jieba is None else bool(use_jieba)
+        self.tokenizer_version = BM25_TOKENIZER_VERSION
+        self.tokenizer_signature = _tokenizer_signature(self.use_jieba)
         self.doc_count = 0
         self.avg_dl = 0.0
         self.doc_lengths: List[int] = []
@@ -112,14 +161,18 @@ class BM25Index:
 
     def build(self, chunks: List[str]):
         """构建BM25索引"""
-        self.chunks = chunks
-        self.doc_count = len(chunks)
+        self.tokenizer_version = BM25_TOKENIZER_VERSION
+        self.tokenizer_signature = _tokenizer_signature(self.use_jieba)
+        # 调用方通常会复用 pages/chunks 列表；必须保存快照，否则原地修改
+        # 会让缓存内容校验失效，并造成倒排索引与返回文本错位。
+        self.chunks = list(chunks)
+        self.doc_count = len(self.chunks)
         self.doc_lengths = []
         self.doc_freqs = {}
         self.term_freqs = []
 
-        for chunk in chunks:
-            tokens = _tokenize(chunk)
+        for chunk in self.chunks:
+            tokens = _tokenize(chunk, use_jieba=self.use_jieba)
             self.doc_lengths.append(len(tokens))
 
             # 统计该文档的term频率
@@ -151,7 +204,7 @@ class BM25Index:
 
     def score(self, query: str) -> List[float]:
         """计算查询与所有文档的BM25分数（使用倒排索引加速）"""
-        query_tokens = _tokenize(query)
+        query_tokens = _tokenize(query, use_jieba=self.use_jieba)
         scores = [0.0] * self.doc_count
 
         for token in query_tokens:
@@ -180,7 +233,7 @@ class BM25Index:
         """
         from services.synonym_service import get_synonym_dict, _fine_grained_tokenize
 
-        query_tokens = _tokenize(query)
+        query_tokens = _tokenize(query, use_jieba=self.use_jieba)
         syn_dict = get_synonym_dict()
 
         # 扩展：原始 token + 同义词（带权重）
@@ -268,31 +321,51 @@ def _should_expand_synonyms() -> bool:
 
 
 # ============================================================
-# 全局BM25索引缓存（按doc_id）
+# 全局BM25索引缓存（按 doc_id + tokenizer signature）
 # ============================================================
-_bm25_cache: Dict[str, BM25Index] = {}
+_bm25_cache: Dict[Tuple[str, str], BM25Index] = {}
+_bm25_cache_lock = threading.RLock()
 
 
 def get_or_build_bm25(doc_id: str, chunks: List[str]) -> BM25Index:
     """获取或构建BM25索引（带缓存）"""
-    if doc_id in _bm25_cache:
-        cached = _bm25_cache[doc_id]
-        # 简单校验：chunk数量一致就复用
-        if len(cached.chunks) == len(chunks):
+    use_jieba = _should_use_jieba()
+    signature = _tokenizer_signature(use_jieba)
+    cache_key = (doc_id, signature)
+    chunks_snapshot = list(chunks)
+
+    with _bm25_cache_lock:
+        cached = _bm25_cache.get(cache_key)
+        if (
+            cached is not None
+            and cached.chunks == chunks_snapshot
+            and getattr(cached, "tokenizer_signature", "") == signature
+        ):
             return cached
 
-    idx = BM25Index()
-    idx.build(chunks)
-    _bm25_cache[doc_id] = idx
-    return idx
+    # 构建使用实例冻结的分词模式，不受其他并发请求影响。
+    candidate = BM25Index(use_jieba=use_jieba)
+    candidate.build(chunks_snapshot)
+    with _bm25_cache_lock:
+        cached = _bm25_cache.get(cache_key)
+        if (
+            cached is not None
+            and cached.chunks == chunks_snapshot
+            and getattr(cached, "tokenizer_signature", "") == signature
+        ):
+            return cached
+        _bm25_cache[cache_key] = candidate
+        return candidate
 
 
 def clear_bm25_cache(doc_id: Optional[str] = None):
     """清除BM25缓存"""
-    if doc_id:
-        _bm25_cache.pop(doc_id, None)
-    else:
-        _bm25_cache.clear()
+    with _bm25_cache_lock:
+        if doc_id:
+            for cache_key in [key for key in _bm25_cache if key[0] == doc_id]:
+                _bm25_cache.pop(cache_key, None)
+        else:
+            _bm25_cache.clear()
 
 
 def bm25_search(doc_id: str, query: str, chunks: List[str], top_k: int = 10) -> List[dict]:

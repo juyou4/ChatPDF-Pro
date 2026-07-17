@@ -93,13 +93,12 @@ export const SYSTEM_PROVIDERS: Provider[] = [
         isSystem: true,
         capabilities: {
             chat: true,
-            embedding: true,
+            embedding: false,
             rerank: false
         },
         apiConfig: {
             fetchModelsEndpoint: '/models',
-            chatEndpoint: '/chat/completions',
-            embeddingEndpoint: '/embeddings'
+            chatEndpoint: '/chat/completions'
         }
     },
     {
@@ -112,13 +111,12 @@ export const SYSTEM_PROVIDERS: Provider[] = [
         isSystem: true,
         capabilities: {
             chat: true,
-            embedding: true,
+            embedding: false,
             rerank: false
         },
         apiConfig: {
             fetchModelsEndpoint: '/models',
-            chatEndpoint: '/chat/completions',
-            embeddingEndpoint: '/embeddings'
+            chatEndpoint: '/chat/completions'
         }
     },
     {
@@ -156,6 +154,24 @@ export const SYSTEM_PROVIDERS: Provider[] = [
             fetchModelsEndpoint: '/models',
             chatEndpoint: '/chat/completions',
             embeddingEndpoint: '/embeddings'
+        }
+    },
+    {
+        id: 'xiaomi',
+        name: '小米 MiMo',
+        logo: getProviderLogo('xiaomi'),
+        apiKey: '',
+        apiHost: 'https://api.xiaomimimo.com/v1',
+        enabled: false,
+        isSystem: true,
+        capabilities: {
+            chat: true,
+            embedding: false,
+            rerank: false
+        },
+        apiConfig: {
+            fetchModelsEndpoint: '/models',
+            chatEndpoint: '/chat/completions'
         }
     },
     {
@@ -205,12 +221,13 @@ export const SYSTEM_PROVIDERS: Provider[] = [
         isSystem: true,
         capabilities: {
             chat: true,
-            embedding: false,
+            embedding: true,
             rerank: false
         },
         apiConfig: {
             fetchModelsEndpoint: '/models',
-            chatEndpoint: '/chat/completions'
+            chatEndpoint: '/chat/completions',
+            embeddingEndpoint: '/embeddings'
         }
     },
     {

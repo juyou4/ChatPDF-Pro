@@ -32,6 +32,7 @@ import BaichuanProviderLogo from '../assets/images/providers/baichuan.svg'
 import StepProviderLogo from '../assets/images/providers/step.svg'
 import HunyuanProviderLogo from '../assets/images/providers/hunyuan.svg'
 import YiProviderLogo from '../assets/images/providers/yi.svg'
+import XiaomiProviderLogo from '../assets/images/providers/xiaomi.svg'
 
 export const PROVIDER_LOGO_MAP: Record<string, string> = {
   openai: OpenAIProviderLogo,
@@ -60,6 +61,7 @@ export const PROVIDER_LOGO_MAP: Record<string, string> = {
   step: StepProviderLogo,
   hunyuan: HunyuanProviderLogo,
   yi: YiProviderLogo,
+  xiaomi: XiaomiProviderLogo,
 }
 
 /**

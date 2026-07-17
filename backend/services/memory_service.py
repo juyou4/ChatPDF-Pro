@@ -41,6 +41,10 @@ DEFAULT_RETRIEVAL_TOP_K = 3  # 记忆检索返回条数
 QUESTION_MAX_LEN = 100  # 问题截取最大长度
 ANSWER_MAX_LEN = 200  # 回答截取最大长度
 
+# 文档内容会随着重新解析切换 generation。自动生成的文档记忆必须绑定
+# 当时的解析身份；用户主动保存/点赞的记忆则是用户意图，不应随之丢失。
+_AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES = {"auto_qa", "llm_distilled", "compressed"}
+
 
 class MemoryService:
     """记忆管理核心服务（单例）"""
@@ -239,6 +243,95 @@ class MemoryService:
     def _find_entry(self, entry_id: str) -> Optional[MemoryEntry]:
         return self._get_entry_map().get(entry_id)
 
+    @staticmethod
+    def _normalize_parse_identity(parse_identity: dict | None) -> dict[str, str] | None:
+        """Normalize the parse identity accepted from document-facing callers.
+
+        ``generation``/``source_hash`` are the manifest names; the persisted
+        source reference uses the artifact-wide ``parse_generation`` /
+        ``document_source_hash`` pair. Accept both to keep service callers
+        small and legacy JSON untouched.
+        """
+        if not isinstance(parse_identity, dict):
+            return None
+        generation = str(
+            parse_identity.get("parse_generation")
+            or parse_identity.get("generation")
+            or ""
+        ).strip()
+        source_hash = str(
+            parse_identity.get("document_source_hash")
+            or parse_identity.get("source_hash")
+            or ""
+        ).strip()
+        if not generation or not source_hash:
+            return None
+        return {
+            "parse_generation": generation,
+            "document_source_hash": source_hash,
+        }
+
+    @classmethod
+    def _entry_matches_parse_identity(
+        cls,
+        entry: MemoryEntry | None,
+        *,
+        doc_id: str | None,
+        parse_identity: dict | None,
+    ) -> bool:
+        """Keep user-curated memories while fencing automatic document facts."""
+        identity = cls._normalize_parse_identity(parse_identity)
+        if identity is None or entry is None or not doc_id or entry.doc_id != doc_id:
+            return True
+        if entry.source_type not in _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES:
+            return True
+        source_ref = entry.source_ref if isinstance(entry.source_ref, dict) else {}
+        return (
+            str(source_ref.get("parse_generation") or "") == identity["parse_generation"]
+            and str(
+                source_ref.get("document_source_hash")
+                or source_ref.get("source_hash")
+                or ""
+            ) == identity["document_source_hash"]
+        )
+
+    @classmethod
+    def _filter_retrieved_memories_for_parse_identity(
+        cls,
+        memories: list[dict],
+        *,
+        entry_map: dict[str, MemoryEntry],
+        doc_id: str | None,
+        parse_identity: dict | None,
+    ) -> list[dict]:
+        """Drop stale automatic hits returned by a shared memory index."""
+        identity = cls._normalize_parse_identity(parse_identity)
+        if identity is None or not doc_id:
+            return list(memories or [])
+
+        filtered: list[dict] = []
+        for memory in memories or []:
+            entry = entry_map.get(memory.get("entry_id", "")) if isinstance(memory, dict) else None
+            if entry is not None:
+                if cls._entry_matches_parse_identity(
+                    entry,
+                    doc_id=doc_id,
+                    parse_identity=identity,
+                ):
+                    filtered.append(memory)
+                continue
+
+            # An orphaned index hit cannot prove the generation. Only reject
+            # automatic document memories; manual/liked hits remain durable.
+            if (
+                isinstance(memory, dict)
+                and memory.get("doc_id") == doc_id
+                and memory.get("source_type") in _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES
+            ):
+                continue
+            filtered.append(memory)
+        return filtered
+
     def _build_working_memory_hits(self, chat_history: list[dict] | None, doc_id: str | None = None) -> list[dict[str, Any]]:
         """将最近两轮对话转成工作记忆命中。"""
         if not chat_history:
@@ -289,12 +382,17 @@ class MemoryService:
         )
         return any(keyword in lowered for keyword in keywords)
 
-    def _build_graph_memory_hits(self, doc_id: str | None, query: str) -> list[dict[str, Any]]:
+    def _build_graph_memory_hits(
+        self,
+        doc_id: str | None,
+        query: str,
+        parse_identity: dict | None = None,
+    ) -> list[dict[str, Any]]:
         """根据论文图谱摘要生成轻量 graph memory 命中。"""
         if not doc_id or not self._detect_graph_memory_needed(query):
             return []
 
-        graph = self.get_graph_summary(doc_id)
+        graph = self.get_graph_summary(doc_id, parse_identity=parse_identity)
         nodes = graph.get("nodes", [])
         edges = graph.get("edges", [])
         if not nodes:
@@ -360,7 +458,8 @@ class MemoryService:
 
     def retrieve_memories(
         self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
-        doc_id: str = None, filter_by_doc: bool = False
+        doc_id: str = None, filter_by_doc: bool = False,
+        parse_identity: dict | None = None,
     ) -> str:
         """检索相关记忆并返回格式化的上下文字符串
 
@@ -370,6 +469,7 @@ class MemoryService:
             api_key: API 密钥（远程模型需要）
             doc_id: 当前文档 ID，用于文档相关性加权（可选）
             filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
+            parse_identity: 当前文档解析身份；提供后自动文档记忆必须匹配
 
         Returns:
             格式化的记忆上下文字符串，无记忆时返回空字符串
@@ -383,11 +483,19 @@ class MemoryService:
                 except Exception as e:
                     logger.debug(f"定期重要性评估失败（不影响检索）: {e}")
             
+            entry_map = {e.id: e for e in self.store.get_all_entries()}
+            identity = self._normalize_parse_identity(parse_identity)
+            retrieval_top_k = max(top_k * 4, top_k + 8) if identity and doc_id else top_k
             memories = self.retriever.retrieve(
-                query, top_k=top_k, api_key=api_key, 
+                query, top_k=retrieval_top_k, api_key=api_key,
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
-            entry_map = {e.id: e for e in self.store.get_all_entries()}
+            memories = self._filter_retrieved_memories_for_parse_identity(
+                memories,
+                entry_map=entry_map,
+                doc_id=doc_id,
+                parse_identity=identity,
+            )[:top_k]
             
             # 检索后触发晋升检查
             for mem in memories:
@@ -415,7 +523,8 @@ class MemoryService:
 
     def retrieve_memories_raw(
         self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
-        doc_id: str = None, filter_by_doc: bool = False, chat_history: list[dict] | None = None
+        doc_id: str = None, filter_by_doc: bool = False, chat_history: list[dict] | None = None,
+        parse_identity: dict | None = None,
     ) -> list[dict]:
         """检索相关记忆并返回原始记忆列表（供 ContextInjector 使用）
 
@@ -425,18 +534,27 @@ class MemoryService:
             api_key: API 密钥
             doc_id: 当前文档 ID
             filter_by_doc: 是否只返回当前文档的记忆
+            parse_identity: 当前文档解析身份；提供后自动文档记忆必须匹配
 
         Returns:
             记忆字典列表，每条包含 content, memory_tier, importance 等字段
         """
         try:
             working_hits = self._build_working_memory_hits(chat_history, doc_id=doc_id)
-            memories = self.retriever.retrieve(
-                query, top_k=top_k, api_key=api_key,
-                doc_id=doc_id, filter_by_doc=filter_by_doc
-            )
             all_entries = self.store.get_all_entries()
             entry_map = {e.id: e for e in all_entries}
+            identity = self._normalize_parse_identity(parse_identity)
+            retrieval_top_k = max(top_k * 4, top_k + 8) if identity and doc_id else top_k
+            memories = self.retriever.retrieve(
+                query, top_k=retrieval_top_k, api_key=api_key,
+                doc_id=doc_id, filter_by_doc=filter_by_doc
+            )
+            memories = self._filter_retrieved_memories_for_parse_identity(
+                memories,
+                entry_map=entry_map,
+                doc_id=doc_id,
+                parse_identity=identity,
+            )[:top_k]
             enriched = []
             for mem in memories:
                 entry_id = mem.get("entry_id", "")
@@ -462,7 +580,7 @@ class MemoryService:
                         content_override=mem.get("text", ""),
                     )
                 enriched.append(enriched_mem)
-            graph_hits = self._build_graph_memory_hits(doc_id, query)
+            graph_hits = self._build_graph_memory_hits(doc_id, query, parse_identity=identity)
             return self._dedupe_memory_hits([*working_hits, *graph_hits, *enriched])
         except Exception as e:
             logger.error(f"记忆原始检索失败: {e}")
@@ -649,6 +767,7 @@ class MemoryService:
         api_key: str = None,
         model: str = None,
         api_provider: str = None,
+        parse_identity: dict | None = None,
     ) -> None:
         """从对话历史中提取最后 N 轮 QA 摘要并保存
 
@@ -662,6 +781,7 @@ class MemoryService:
             api_key: LLM API 密钥（用于记忆提炼）
             model: LLM 模型名称
             api_provider: LLM 提供商
+            parse_identity: 生成该对话答案时的文档解析身份
         """
         if not chat_history or not doc_id:
             return
@@ -677,6 +797,8 @@ class MemoryService:
         # 加载当前 session
         session = self.store.load_session(doc_id)
         created_entries: list[MemoryEntry] = []
+        identity = self._normalize_parse_identity(parse_identity)
+        source_ref = dict(identity or {})
 
         # 尝试 LLM 提炼
         distilled_facts = None
@@ -701,6 +823,7 @@ class MemoryService:
                     "status": "active",
                     "title": "文档事实",
                     "summary": self._truncate_text(fact),
+                    "source_ref": dict(source_ref),
                     "trace": {
                         "kind": "distilled_fact",
                         "source": "qa_history",
@@ -718,6 +841,7 @@ class MemoryService:
                     memory_scope="document",
                     title="文档事实",
                     summary=summary["summary"],
+                    source_ref=dict(source_ref),
                     trace=dict(summary["trace"]),
                 ))
             logger.info(f"LLM 记忆提炼: {len(distilled_facts)} 条事实")
@@ -740,6 +864,7 @@ class MemoryService:
                     "status": "active",
                     "title": truncated_q[:60] or "对话摘要",
                     "summary": self._truncate_text(f"Q: {truncated_q}\nA: {truncated_a}"),
+                    "source_ref": dict(source_ref),
                     "trace": {
                         "kind": "qa_summary",
                         "source": "chat_history",
@@ -757,6 +882,7 @@ class MemoryService:
                     memory_scope="document",
                     title=summary["title"],
                     summary=summary["summary"],
+                    source_ref=dict(source_ref),
                     trace=dict(summary["trace"]),
                 ))
 
@@ -784,9 +910,27 @@ class MemoryService:
                 logger.error(f"添加 QA 摘要到向量索引失败: {e}")
 
         # 保存完成后检查是否需要压缩（安全执行）
-        self._safe_execute("MemoryCompressor.check", self._check_and_compress, doc_id, api_key, model, api_provider)
+        self._safe_execute(
+            "MemoryCompressor.check",
+            self._check_and_compress,
+            doc_id,
+            api_key,
+            model,
+            api_provider,
+            identity,
+        )
+        # QA 摘要直接更新 session，不会经过 MemoryStore.add_entry。
+        # 在压缩收敛后才失效缓存，避免压缩阶段读取到半更新会话。
+        self.store.cache.invalidate()
 
-    def _check_and_compress(self, doc_id: str, api_key: str = None, model: str = None, api_provider: str = None) -> None:
+    def _check_and_compress(
+        self,
+        doc_id: str,
+        api_key: str = None,
+        model: str = None,
+        api_provider: str = None,
+        parse_identity: dict | None = None,
+    ) -> None:
         """检查并执行记忆压缩
 
         当同一文档的记忆条目数量超过压缩阈值时，触发压缩流程。
@@ -806,11 +950,20 @@ class MemoryService:
             and e.status == "active"
             and e.source_type in {"auto_qa", "llm_distilled"}
             and e.memory_kind != "consolidated"
+            and self._entry_matches_parse_identity(
+                e,
+                doc_id=doc_id,
+                parse_identity=parse_identity,
+            )
         ]
         if not self.compressor.should_compress(doc_id, doc_entries):
             return
         compressed = self.compressor.compress(doc_entries, api_key=api_key, model=model, api_provider=api_provider)
         if compressed:
+            identity = self._normalize_parse_identity(parse_identity)
+            if identity:
+                for entry in compressed:
+                    entry.source_ref = dict(identity)
             compressed_ids = [c.id for c in compressed]
             for e in doc_entries:
                 archived_trace = dict(e.trace or {})
@@ -1165,7 +1318,11 @@ class MemoryService:
             "source_ref": dict(entry.source_ref or {}),
         }
 
-    def get_graph_summary(self, doc_id: str | None = None) -> dict[str, Any]:
+    def get_graph_summary(
+        self,
+        doc_id: str | None = None,
+        parse_identity: dict | None = None,
+    ) -> dict[str, Any]:
         """基于文档事实/压缩记忆生成轻量图谱摘要。"""
         entries = [
             entry for entry in self.store.get_all_entries()
@@ -1174,6 +1331,15 @@ class MemoryService:
             entry for entry in self.store.get_all_entries()
             if entry.memory_kind in {"doc_fact", "consolidated", "graph"}
         ]
+        if doc_id and self._normalize_parse_identity(parse_identity):
+            entries = [
+                entry for entry in entries
+                if self._entry_matches_parse_identity(
+                    entry,
+                    doc_id=doc_id,
+                    parse_identity=parse_identity,
+                )
+            ]
 
         node_map: dict[tuple[str, str], dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []

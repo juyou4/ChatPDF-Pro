@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { FileText, BookOpen, FlaskConical, Image, Award, Loader2, RefreshCw } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { AlertCircle, FileText, BookOpen, FlaskConical, Image, Award, Loader2, RefreshCw } from 'lucide-react';
 
 const DEPTH_OPTIONS = [
   { id: 'brief', label: '简略' },
@@ -7,26 +8,40 @@ const DEPTH_OPTIONS = [
   { id: 'detailed', label: '详细' },
 ];
 
-const getFigureMetaLabel = (meta) => {
-  if (!meta?.source || meta.source === 'none') return '';
-  const sourceLabels = {
-    mineru: 'MinerU 增强',
-    yolo: 'YOLO 识别',
-    pdf_native: 'PDF 原生',
-    caption_only: '矢量兜底',
-    fallback: '图片兜底',
-  };
-  const sourceLabel = sourceLabels[meta.source] || meta.source;
-  if (meta.render_mode === 'yolo' && meta.source !== 'yolo') {
-    return `YOLO 裁剪 · ${sourceLabel}`;
-  }
-  return sourceLabel;
+const FIGURE_SOURCE_META = {
+  mineru: {
+    label: '结构化图表',
+    detail: '来自 MinerU 主解析结果',
+    className: 'border-[#f1d5ca] bg-[#fff4ef] text-[#a8553f]',
+  },
+  mineru_deep_parse: {
+    label: '结构化图表',
+    detail: '来自 MinerU 主解析结果',
+    className: 'border-[#f1d5ca] bg-[#fff4ef] text-[#a8553f]',
+  },
+  yolo: {
+    label: '本地图表定位',
+    detail: '主解析未定位图表时使用 DocLayout-YOLO 定位与裁切',
+    className: 'border-[#dbe5e1] bg-[#f2f7f5] text-[#4f7065]',
+  },
+  pdf_native: {
+    label: 'PDF 图表',
+    detail: '来自 PDF 原生图像与图注结构',
+    className: 'border-[#dde3eb] bg-[#f4f7fa] text-[#5b6878]',
+  },
+  caption_only: {
+    label: '图注兜底',
+    detail: '根据图注位置恢复图表区域',
+    className: 'border-[#e4e0db] bg-[#f8f6f3] text-[#756c64]',
+  },
+  fallback: {
+    label: '图片兜底',
+    detail: '使用文档内嵌图片作为基础结果',
+    className: 'border-[#e4e0db] bg-[#f8f6f3] text-[#756c64]',
+  },
 };
 
-const getFigureModeLabel = (mode) => {
-  if (mode === 'yolo') return 'YOLO 模式';
-  return '原始模式';
-};
+const getFigureSourceMeta = (meta) => FIGURE_SOURCE_META[meta?.source] || null;
 
 /**
  * 速览（Overview）面板组件
@@ -37,21 +52,24 @@ const OverviewPanel = ({
   loading,
   error,
   depth,
-  figureMode = 'raw',
+  parseRoute = '',
   onDepthChange,
   onFetch,
   docId,
+  availabilityState = '',
+  availabilityMessage = '',
+  availabilityActionLabel = '',
+  onAvailabilityAction,
 }) => {
-  const figureMetaLabel = getFigureMetaLabel(overview?.figure_meta);
-  const figureModeLabel = getFigureModeLabel(overview?.figure_meta?.render_mode || figureMode);
+  const figureSourceMeta = getFigureSourceMeta(overview?.figure_meta);
   const activeDepth = depth || 'standard';
   const [regenerating, setRegenerating] = useState(false);
   const busy = loading || regenerating;
   const handleRegenerate = async () => {
-    if (!docId || busy) return;
+    if (!docId || busy || !onFetch) return;
     setRegenerating(true);
     try {
-      await onFetch?.(activeDepth, { force: true });
+      await onFetch(activeDepth, { force: true });
     } catch {
       // fetchOverview 会写入 error 状态，这里只负责恢复按钮反馈。
     } finally {
@@ -68,12 +86,12 @@ const OverviewPanel = ({
 
   const toolbar = (
     <div className="shrink-0 px-4 pb-3">
-      <div className="flex items-center justify-between gap-3 rounded-[22px] border border-white/70 bg-white/60 px-3 py-2 shadow-[0_12px_32px_rgba(148,163,184,0.16),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-3 rounded-[16px] border border-[#ebe5e0] bg-white/75 px-3 py-2 shadow-[0_8px_24px_rgba(104,88,79,0.08),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-xl">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="hidden text-[12px] font-semibold text-gray-400 sm:inline">速览深度</span>
-          <div className="relative grid w-[150px] grid-cols-3 rounded-[18px] bg-gray-100/80 p-1">
+          <span className="text-[12px] font-semibold text-gray-400">速览深度</span>
+          <div className="relative grid w-[150px] grid-cols-3 rounded-[12px] bg-[#f3f2f1] p-1">
             <div
-              className="absolute bottom-1 top-1 rounded-[14px] bg-white shadow-[0_8px_20px_rgba(139,124,200,0.14),0_1px_4px_rgba(31,41,55,0.08)] transition-transform duration-300"
+              className="absolute bottom-1 top-1 rounded-[9px] bg-white shadow-[0_5px_14px_rgba(184,95,71,0.1),0_1px_3px_rgba(31,41,55,0.07)] transition-transform duration-300"
               style={{
                 width: 'calc((100% - 0.5rem) / 3)',
                 transform: `translateX(${Math.max(0, DEPTH_OPTIONS.findIndex((item) => item.id === activeDepth)) * 100}%)`,
@@ -86,8 +104,9 @@ const OverviewPanel = ({
                   key={item.id}
                   type="button"
                   onClick={() => onDepthChange?.(item.id)}
-                  className={`relative z-10 h-7 rounded-[14px] text-[12px] font-semibold transition-colors ${
-                    isActive ? 'text-[#8b7cc8]' : 'text-gray-400 hover:text-gray-600'
+                  aria-pressed={isActive}
+                  className={`relative z-10 h-7 rounded-[9px] text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${
+                    isActive ? 'text-[#ce8e76]' : 'text-gray-400 hover:text-gray-600'
                   }`}
                 >
                   {item.label}
@@ -95,19 +114,16 @@ const OverviewPanel = ({
               );
             })}
           </div>
-          <span className="hidden shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-400 shadow-sm sm:inline-flex">
-            {figureModeLabel}
-          </span>
         </div>
 
         <button
           type="button"
           onClick={handleRegenerate}
-          disabled={busy || !docId}
-          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[16px] bg-white px-3 text-[12px] font-semibold text-gray-600 shadow-[0_8px_18px_rgba(148,163,184,0.16),inset_0_1px_0_rgba(255,255,255,0.95)] transition-all hover:-translate-y-0.5 hover:text-[#8b7cc8] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+          disabled={busy || !docId || !onFetch}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[10px] border border-[#ebe5e0] bg-white px-3 text-[12px] font-semibold text-gray-600 shadow-[0_4px_12px_rgba(104,88,79,0.07)] transition-[border-color,color,box-shadow] hover:border-[#e2c8bc] hover:text-[#b85f47] hover:shadow-[0_6px_16px_rgba(104,88,79,0.1)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          {busy ? '重新生成中' : '重新生成'}
+          {busy ? '重新生成中' : availabilityState ? '等待解析' : '重新生成'}
         </button>
       </div>
       {activeDepth === 'detailed' && (
@@ -118,13 +134,49 @@ const OverviewPanel = ({
     </div>
   );
 
+  if (availabilityState) {
+    const failed = availabilityState === 'failed' || availabilityState === 'cancelled';
+    return (
+      <div className="flex h-full flex-col">
+        {toolbar}
+        <div className="flex flex-1 flex-col items-center justify-center px-8 text-center text-gray-400">
+          {failed ? (
+            <AlertCircle className="mb-3 h-9 w-9 text-rose-400" />
+          ) : (
+            <Loader2 className="mb-3 h-9 w-9 animate-spin text-[#ed8c68]" />
+          )}
+          <p className={`text-sm font-semibold ${failed ? 'text-rose-500' : 'text-gray-600'}`}>
+            {failed ? '主解析未完成' : '正在准备速览内容'}
+          </p>
+          <p className="mt-1.5 max-w-md text-xs leading-5 text-gray-400">
+            {availabilityMessage || '主解析完成后会自动开放速览生成'}
+          </p>
+          {availabilityActionLabel && onAvailabilityAction && (
+            <button
+              type="button"
+              onClick={onAvailabilityAction}
+              className={`mt-4 inline-flex items-center gap-1.5 rounded-[11px] px-4 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+                failed
+                  ? 'bg-rose-50 text-rose-700 hover:bg-rose-100 focus-visible:ring-rose-200'
+                  : 'bg-[#FFF4EF] text-[#B85F47] hover:bg-[#FFE8DF] focus-visible:ring-[#D97A5D]/30'
+              }`}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              {availabilityActionLabel}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // 加载状态
   if (loading) {
     return (
       <div className="flex h-full flex-col">
         {toolbar}
         <div className="flex flex-1 flex-col items-center justify-center text-gray-400">
-          <Loader2 className="w-8 h-8 animate-spin mb-3 text-purple-500" />
+          <Loader2 className="w-8 h-8 animate-spin mb-3 text-[#F0653A]" />
           <p className="text-sm">正在生成速览...</p>
           <p className="text-xs mt-1 text-gray-300">根据文档内容进行分析</p>
         </div>
@@ -141,7 +193,8 @@ const OverviewPanel = ({
           <div className="text-red-400 mb-2 text-sm">{error}</div>
           <button
             onClick={handleRegenerate}
-            className="text-xs px-3 py-1.5 rounded-lg bg-purple-100 text-purple-600 hover:bg-purple-200 transition-colors"
+            disabled={!onFetch}
+            className="text-xs px-3.5 py-2 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
           >
             重试
           </button>
@@ -150,20 +203,48 @@ const OverviewPanel = ({
     );
   }
 
-  // 无数据状态
+  // 无数据状态：组合式引导，预告速览会生成哪些内容
   if (!overview) {
     return (
       <div className="flex h-full flex-col">
         {toolbar}
-        <div className="flex flex-1 flex-col items-center justify-center text-gray-400">
-          <FileText className="w-12 h-12 mb-3 opacity-30" />
-          <p className="text-sm">暂无速览数据</p>
-          <button
-            onClick={handleRegenerate}
-            className="mt-3 text-xs px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 transition-colors"
-          >
-            生成速览
-          </button>
+        <div className="flex flex-1 flex-col items-center justify-center px-8">
+          <div className="w-full max-w-[320px]">
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-100/80 text-gray-400">
+                <FileText className="h-6 w-6" />
+              </div>
+              <p className="mt-4 text-[14px] font-bold text-gray-700">还没有生成速览</p>
+              <p className="mt-1 text-[12px] leading-relaxed text-gray-400">
+                AI 会通读全文，提炼出下面几部分内容；详略可用上方「速览深度」调整
+              </p>
+            </div>
+            <div className="mt-5 space-y-2">
+              {[
+                { Icon: BookOpen, label: '全文概述', bar: 'w-20' },
+                { Icon: FlaskConical, label: '研究方法', bar: 'w-14' },
+                { Icon: Award, label: '关键结论', bar: 'w-24' },
+                { Icon: Image, label: '图表解读', bar: 'w-12' },
+              ].map(({ Icon, label, bar }) => (
+                <div key={label} className="flex items-center gap-3 rounded-[12px] bg-gray-50/80 px-3.5 py-2.5">
+                  <Icon className="h-4 w-4 shrink-0 text-gray-400" />
+                  <span className="text-[12px] font-semibold text-gray-500">{label}</span>
+                  <span aria-hidden="true" className={`ml-auto h-1.5 rounded-full bg-gray-200/80 ${bar}`} />
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 flex justify-center">
+              <motion.button
+                type="button"
+                onClick={handleRegenerate}
+                disabled={!onFetch}
+                whileTap={{ scale: 0.98 }}
+                className="accent-cta shrink-0 rounded-full px-5 py-2.5 text-[12px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                生成速览
+              </motion.button>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -194,7 +275,7 @@ const OverviewPanel = ({
           <div className="space-y-4">
             {overview.terminology.map((item, idx) => (
               <div key={idx} className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4">
-                <span className="inline-flex w-fit bg-[#F3E8FF] text-[#6B21A8] px-2.5 py-1 rounded-md text-sm font-medium shrink-0">
+                <span className="inline-flex w-fit bg-[#ffeee8] text-[#b24017] px-2.5 py-1 rounded-md text-sm font-medium shrink-0">
                   {item.term}
                 </span>
                 <span className="text-gray-600 text-[15px] leading-relaxed sm:pt-1">
@@ -239,9 +320,13 @@ const OverviewPanel = ({
             <Image className="w-5 h-5 text-gray-700" strokeWidth={2} />
             <h3 className="text-lg font-semibold text-gray-900">关键图表解读</h3>
           </div>
-          {(figureMetaLabel || figureModeLabel) && (
-            <span className="bg-[#EEF2FF] text-[#4F46E5] px-3 py-1 rounded-full text-xs font-semibold tracking-wide">
-              {[figureModeLabel, figureMetaLabel].filter(Boolean).join(' · ')}
+          {figureSourceMeta && (
+            <span
+              title={figureSourceMeta.detail}
+              className={`inline-flex items-center gap-1.5 rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold ${figureSourceMeta.className}`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
+              {figureSourceMeta.label}
             </span>
           )}
         </div>
@@ -267,16 +352,18 @@ const OverviewPanel = ({
         ) : (
           <div className="flex flex-col gap-3 rounded-2xl border border-dashed border-gray-200 bg-gray-50/70 p-4">
             <p className="text-gray-400 text-[15px]">
-              暂无图表解读（重新生成速览可能获取）
+              当前解析结果未定位到可用图表
             </p>
             <p className="text-xs leading-relaxed text-gray-400">
-              当前使用{figureModeLabel}；图表来源为{figureMetaLabel || '未识别'}。如果正文有复杂架构图，可在设置中切换到 YOLO 模式后重新生成。
+              {parseRoute === 'mineru'
+                ? '重新生成会继续复用 MinerU 主解析结果；图表内容解读由已选视觉模型单独完成。'
+                : '重新生成会优先检查 PDF 原生结构，再使用本地图表定位；图表内容解读由已选视觉模型单独完成。'}
             </p>
             <button
               type="button"
               onClick={handleRegenerate}
-              disabled={busy || !docId}
-              className="inline-flex w-fit items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:text-[#8b7cc8] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busy || !docId || !onFetch}
+              className="inline-flex w-fit items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:text-[#ce8e76] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               {busy ? '重新生成中' : '重新生成速览'}

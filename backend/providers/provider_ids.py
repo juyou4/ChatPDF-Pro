@@ -1,4 +1,4 @@
-OPENAI_LIKE = {"openai", "aliyun", "silicon", "moonshot", "deepseek", "zhipu", "minimax", "grok", "qwen", "doubao"}
+OPENAI_LIKE = {"openai", "aliyun", "silicon", "moonshot", "deepseek", "zhipu", "minimax", "xiaomi", "grok", "qwen", "doubao"}
 ANTHROPIC = {"anthropic"}
 GEMINI = {"gemini"}
 OLLAMA = {"ollama"}

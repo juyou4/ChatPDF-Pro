@@ -2,7 +2,7 @@ import re
 from typing import Optional
 
 # Embedding and rerank model detection regex (inspired by cherry-studio)
-EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)', re.I)
+EMBEDDING_REGEX = re.compile(r'(?:^text-|embed|embo-|bge-|e5-|LLM2Vec|retrieval|uae-|gte-|jina-clip|jina-embeddings|voyage-|minilm|qwen.*embedding)', re.I)
 
 # 不支持的模型（TTS、语音、审核等），同步时应过滤
 NOT_SUPPORTED_REGEX = re.compile(r'(?:^tts|whisper|speech|audio|moderation|canary)', re.I)
@@ -40,6 +40,8 @@ def get_model_provider(model_id: str) -> str:
         return "zhipu"
     if "minimax" in model_id_lower:
         return "minimax"
+    if "mimo" in model_id_lower:
+        return "xiaomi"
     if "deepseek" in model_id_lower:
         return "deepseek"
     if "grok" in model_id_lower:
@@ -64,7 +66,7 @@ def normalize_embedding_model_id(embedding_model_id: Optional[str]) -> Optional[
 
 # 预定义标签集合
 PREDEFINED_TAGS = {
-    "vision", "embedding", "rerank", "free", "reasoning",
+    "vision", "embedding", "rerank", "free", "reasoning", "latest",
     "function_calling", "web_search", "chinese_optimized"
 }
 
@@ -103,7 +105,7 @@ def get_model_type_with_capabilities(
     return "chat"
 
 
-def infer_model_tags(model_id: str) -> list[str]:
+def infer_model_tags(model_id: str, model_type: str | None = None) -> list[str]:
     """根据模型 ID 推断标签
 
     基于模型 ID 中的关键字匹配，自动推断模型能力标签。
@@ -111,6 +113,17 @@ def infer_model_tags(model_id: str) -> list[str]:
     """
     tags = []
     lower_id = model_id.lower()
+
+    normalized_type = (model_type or "").strip().lower()
+    if normalized_type == "rerank" or (not normalized_type and is_rerank_model(model_id)):
+        tags.append("rerank")
+    elif normalized_type == "embedding" or (not normalized_type and is_embedding_model(model_id)):
+        tags.append("embedding")
+
+    # 向量与重排模型的名称可能包含 Qwen/GPT 等聊天系列前缀，但不能因此
+    # 被标成视觉或推理模型，避免视觉模型选择器误选它们。
+    if normalized_type in {"embedding", "rerank"}:
+        return tags
 
     # 免费模型标签
     if "free" in lower_id:
@@ -156,6 +169,9 @@ def infer_model_tags(model_id: str) -> list[str]:
     elif re.search(r'^minimax-m3', lower_id):
         # MiniMax M3 多模态旗舰
         tags.append("vision")
+    elif re.search(r'^mimo-v2\.5$', lower_id):
+        # 小米 MiMo V2.5 是全模态理解模型；Pro 为文本旗舰
+        tags.append("vision")
 
     # 中文优化标签
     if any(k in lower_id for k in ["chinese", "zh", "multilingual"]):
@@ -184,6 +200,9 @@ def infer_model_tags(model_id: str) -> list[str]:
         tags.append("reasoning")
     elif re.search(r'minimax-m[23]', lower_id):
         # MiniMax M2/M3 系列原生支持思考
+        tags.append("reasoning")
+    elif re.search(r'^mimo-v2\.5(?:-pro)?$', lower_id):
+        # 小米 MiMo V2.5 系列支持深度思考
         tags.append("reasoning")
     elif "deepseek-r" in lower_id or "deepseek-v4" in lower_id:
         # DeepSeek-R1 / V4 等推理模型

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "chinese_scan",
+      "path": "../../../opendataloader-pdf/samples/pdf/chinese_scan.pdf",
+      "tags": ["scanned", "chinese", "ocr"],
+      "expectations": {"requires_ocr": true}
+    },
+    {
+      "id": "academic_multicolumn",
+      "path": "../../../opendataloader-pdf/samples/pdf/2408.02509v1.pdf",
+      "tags": ["academic", "multicolumn", "tables"],
+      "expectations": {"min_pages": 2}
+    },
+    {
+      "id": "invoice_complex_header",
+      "path": "../../../opendataloader-pdf/samples/pdf/pdfua-1-reference-suite-1-1/PDFUA-Ref-2-02_Invoice.pdf",
+      "tags": ["complex_header", "table", "form"],
+      "expectations": {"min_pages": 1}
+    },
+    {
+      "id": "table_layout",
+      "path": "../../../kotaemon/libs/kotaemon/tests/resources/table.pdf",
+      "tags": ["table", "numeric", "visual_grounding"],
+      "expectations": {"min_pages": 1}
+    },
+    {
+      "id": "book_chapter_mixed_layout",
+      "path": "../../../opendataloader-pdf/samples/pdf/pdfua-1-reference-suite-1-1/PDFUA-Ref-2-08_BookChapter.pdf",
+      "tags": ["multicolumn", "mixed_layout", "headers_footers"],
+      "expectations": {"min_pages": 2}
+    }
+  ]
+}

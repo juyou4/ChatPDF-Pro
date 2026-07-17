@@ -53,6 +53,7 @@ class ContextBuilder:
         self,
         selections: List[dict],
         group_best_chunks: dict = None,
+        group_best_chunk_meta: dict = None,
         query: str = "",
         selected_text: str = "",
     ) -> Tuple[str, List[dict]]:
@@ -73,6 +74,8 @@ class ContextBuilder:
                 }
             group_best_chunks: 可选，group_id -> 最佳匹配 chunk 文本的映射，
                 用于生成更精确的引用高亮文本。如果未提供，回退到取文本前100字符。
+            group_best_chunk_meta: 可选，group_id -> 最佳匹配 chunk 元数据。
+                用于将精确页码、block_id、bbox 与解析代际写入引用锚点。
             query: 用户查询文本，用于从 chunk 中提取与查询最相关的片段作为 highlight_text。
             selected_text: 用户框选的文本，关键词也纳入高亮匹配范围。
 
@@ -149,18 +152,60 @@ class ContextBuilder:
                 highlight_text = self._extract_relevant_snippet(
                     text, query, max_len=150, selected_text=selected_text
                 ) if text else ""
-            citations.append({
+            best_meta = (
+                group_best_chunk_meta.get(group_id, {})
+                if isinstance(group_best_chunk_meta, dict)
+                else {}
+            )
+            if not isinstance(best_meta, dict):
+                best_meta = {}
+
+            citation_page_range = [page_start, page_end]
+            precise_page = best_meta.get("page")
+            try:
+                precise_page = int(precise_page)
+            except (TypeError, ValueError):
+                precise_page = 0
+            if precise_page > 0:
+                citation_page_range = [precise_page, precise_page]
+            elif isinstance(best_meta.get("page_range"), (list, tuple)) and best_meta["page_range"]:
+                try:
+                    range_start = int(best_meta["page_range"][0])
+                    range_end = int(
+                        best_meta["page_range"][1]
+                        if len(best_meta["page_range"]) > 1
+                        else range_start
+                    )
+                    if range_start > 0 and range_end >= range_start:
+                        citation_page_range = [range_start, range_end]
+                except (TypeError, ValueError):
+                    pass
+
+            citation = {
                 "ref": ref_num,
                 "evidence_id": f"{group_id}:{granularity}:{ref_num}",
                 "group_id": group_id,
-                "page_range": [page_start, page_end],
+                "page_range": citation_page_range,
                 "source_text": text,
                 "display_text": text,
                 "highlight_text": highlight_text,
                 "_full_text": text,
                 "alignment_status": "candidate",
                 "retrieval_type": "vector",
-            })
+            }
+            for key in (
+                "block_id",
+                "chunk_id",
+                "bbox",
+                "rects",
+                "coordinate_space",
+                "page_size",
+                "parse_generation",
+            ):
+                value = best_meta.get(key)
+                if value not in (None, "", [], {}):
+                    citation[key] = value
+            citations.append(citation)
 
         # 用双换行分隔各意群的上下文块
         context_string = "\n\n".join(context_parts)

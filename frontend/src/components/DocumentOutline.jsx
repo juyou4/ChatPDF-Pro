@@ -1,5 +1,6 @@
 import React, { memo, useMemo } from 'react';
-import { BookOpen, CheckCircle2, Loader2 } from 'lucide-react';
+import { BookOpen, CheckCircle2 } from 'lucide-react';
+import BreatheLoader from './BreatheLoader';
 
 const getOutlineSourceMeta = (source) => {
   if (source === 'ai') return { label: 'AI 章节树', tone: 'ai' };
@@ -49,9 +50,13 @@ function DocumentOutline({
 
   if (loading) {
     return (
-      <div className={`h-full flex items-center justify-center text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-        生成大纲中
+      <div
+        className={`flex h-full flex-col items-center justify-center gap-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        role="status"
+        aria-live="polite"
+      >
+        <BreatheLoader className={darkMode ? 'text-[#FFA07A]' : 'text-[#D97A5D]'} />
+        <span>生成大纲中</span>
       </div>
     );
   }
@@ -87,7 +92,7 @@ function DocumentOutline({
   };
 
   return (
-    <div className="h-full overflow-y-auto pr-1 pl-0.5">
+    <div className="h-full overflow-y-auto custom-scrollbar pr-1 pl-0.5">
       <div className="pb-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
@@ -138,7 +143,7 @@ function DocumentOutline({
               <span className="flex min-w-0 flex-1 items-center gap-2 py-[7px]">
                 <span className="flex w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
                   {isActive ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-[#9333ea]" strokeWidth={2.5} />
+                    <CheckCircle2 className="h-3.5 w-3.5 text-[#f85d25]" strokeWidth={2.5} />
                   ) : isVisited ? (
                     <span className="h-[7px] w-[7px] rounded-full bg-amber-400" />
                   ) : (
