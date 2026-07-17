@@ -154,13 +154,14 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             <div className="space-y-4">
                                 <div>
                                     <h3 className="text-[17px] font-bold text-gray-900">全局字体设置</h3>
-                                    <p className="text-[13px] text-gray-500 mt-1">选择用于界面与助手的全局基础字体。</p>
+                                    <p className="text-[13px] text-gray-500 mt-1">选择用于界面与助手的标题、正文配对字体。</p>
                                 </div>
 
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                     {PRESET_FONTS.map((font) => (
                                         <button
                                             key={font.id} onClick={() => setFontFamily(font.id)}
+                                            aria-pressed={fontFamily === font.id}
                                             className={`settings-card settings-card-interactive relative p-4 rounded-[20px] text-left ${
                                                 fontFamily === font.id
                                                     ? 'accent-surface'
@@ -174,13 +175,19 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                                 </div>
                                                 {fontFamily === font.id && <span className="accent-surface text-[10px] uppercase font-bold px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">Default</span>}
                                             </div>
-                                            <div className="font-bold text-[15px] mb-1 text-gray-900 truncate">{font.name}</div>
-                                            <div className="text-[11px] text-gray-500 leading-tight pr-2" style={{ fontFamily: font.value }}>
-                                                {font.id === 'inter' && '严谨、几何感的无衬线体。'}
-                                                {font.id === 'noto-sans-sc' && '完美的 CJK 多语言字重协调。'}
-                                                {font.id === 'outfit' && '现代科技感的规整骨架。'}
-                                                {font.id === 'lato' && '清爽干净的高级阅读体验。'}
-                                                {font.id === 'lora' && '古典、优雅的衬线字体。'}
+                                            <div
+                                                className="font-bold text-[15px] leading-tight min-h-[36px] mb-1 text-gray-900 line-clamp-2"
+                                                style={{ fontFamily: font.headingValue || font.value }}
+                                            >
+                                                {font.name}
+                                            </div>
+                                            <div className="text-[11px] text-gray-500 leading-tight pr-2 min-h-[28px] line-clamp-2" style={{ fontFamily: font.bodyValue || font.value }}>
+                                                {font.description}
+                                                {!font.description && font.id === 'inter' && '严谨、几何感的无衬线体。'}
+                                                {!font.description && font.id === 'noto-sans-sc' && '完美的 CJK 多语言字重协调。'}
+                                                {!font.description && font.id === 'outfit' && '现代科技感的规整骨架。'}
+                                                {!font.description && font.id === 'lato' && '清爽干净的高级阅读体验。'}
+                                                {!font.description && font.id === 'lora' && '古典、优雅的衬线字体。'}
                                             </div>
                                         </button>
                                     ))}

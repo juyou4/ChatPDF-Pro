@@ -4,9 +4,89 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes ldBreathe {
+    0%, 100% {
+        border-radius: 6px;
+        transform: scale(1) rotate(0deg);
+    }
+
+    50% {
+        border-radius: 50%;
+        transform: scale(0.7) rotate(90deg);
+    }
+}
+
+.ld-breathe {
+    display: block;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
+    border-radius: 6px;
+    background: currentColor;
+    animation: ldBreathe 2s ease-in-out infinite;
+    will-change: transform, border-radius;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ld-breathe {
+        animation: none;
+    }
+}
+
+@keyframes ldCells {
+    0%, 70%, 100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    35% {
+        opacity: 0.3;
+        transform: scale(0.1);
+    }
+}
+
+.ld-cells {
+    display: grid;
+    grid-template-columns: repeat(3, 4px);
+    gap: 2px;
+}
+
+.ld-cells i {
+    display: block;
+    width: 4px;
+    height: 4px;
+    border-radius: 1.5px;
+    background: currentColor;
+    opacity: 0.55;
+    transform: scale(1);
+}
+
+.ld-cells[data-active='true'] i {
+    animation: ldCells 1.3s ease-in-out infinite;
+}
+
+.ld-cells i:nth-child(1) { animation-delay: 0s; }
+.ld-cells i:nth-child(2) { animation-delay: 0.1s; }
+.ld-cells i:nth-child(3) { animation-delay: 0.2s; }
+.ld-cells i:nth-child(4) { animation-delay: 0.1s; }
+.ld-cells i:nth-child(5) { animation-delay: 0.2s; }
+.ld-cells i:nth-child(6) { animation-delay: 0.3s; }
+.ld-cells i:nth-child(7) { animation-delay: 0.2s; }
+.ld-cells i:nth-child(8) { animation-delay: 0.3s; }
+.ld-cells i:nth-child(9) { animation-delay: 0.4s; }
+
+@media (prefers-reduced-motion: reduce) {
+    .ld-cells[data-active='true'] i {
+        opacity: 1;
+        animation: none;
+    }
+}
+
 :root {
     /* --- Global Typography --- */
     --global-font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --body-font: var(--global-font-family);
+    --heading-font: var(--global-font-family);
     --global-scale: 1;
 
     /* --- 2. Material Neutrality --- */
@@ -84,6 +164,11 @@
     --blur-duration: 0.3s;
 }
 
+body,
+#root {
+    font-family: var(--body-font);
+}
+
 #root {
     width: 100%;
     min-height: 100vh;
@@ -92,7 +177,14 @@
     z-index: 0;
 
     color: var(--color-text-main);
-    font-family: var(--global-font-family);
+}
+
+:where(#root h1, #root h2, #root h3, #root h4, #root h5, #root h6, #root .heading) {
+    font-family: var(--heading-font);
+}
+
+:where(#root .body-text) {
+    font-family: var(--body-font);
 }
 
 /* 全幅品牌弥散背景：欢迎态保留完整色彩，阅读态降低干扰。 */
@@ -125,7 +217,8 @@
 
 /* PDF 与对话区的统一工作台：浅米白底板从页面暖灰背景中自然浮起。 */
 .workspace-surface {
-    background-color: #faf8f5;
+    /* 比面板白明显深一档的暖灰：白色面板靠底色对比浮出来，边界一眼可辨 */
+    background-color: #f0edea;
     border: 1px solid rgba(255, 253, 250, 0.96);
     box-shadow:
         0 0 0 1px rgba(125, 103, 91, 0.12),
@@ -219,7 +312,8 @@
 /* Solid floating panel: no translucent lighting borders or blur. */
 .soft-panel {
     background: #ffffff;
-    border: 1px solid transparent;
+    /* 极细暖灰描边：在浅底上为面板定形，投影只负责悬浮感 */
+    border: 1px solid rgba(70, 60, 52, 0.07);
     box-shadow: var(--shadow-float);
     border-radius: var(--radius-panel);
     transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -418,6 +512,62 @@
 
 .settings-row {
     transition: background-color 220ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.settings-entry-arrow {
+    display: flex;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    background: #17191e;
+    border: 1px solid rgba(0, 0, 0, 0.9);
+    border-radius: 50%;
+    box-shadow:
+        0 3px 0 #050607,
+        0 9px 16px -9px rgba(15, 23, 42, 0.72),
+        inset 0 1px 0 rgba(255, 255, 255, 0.24);
+    transform: translate3d(0, 0, 0);
+    transition:
+        transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        background-color 180ms ease;
+    will-change: transform;
+}
+
+.settings-entry-row:hover .settings-entry-arrow {
+    background: #0d0f13;
+    box-shadow:
+        0 4px 0 #030405,
+        0 12px 20px -10px rgba(15, 23, 42, 0.82),
+        inset 0 1px 0 rgba(255, 255, 255, 0.28);
+    transform: translate3d(2px, -1px, 0);
+}
+
+.settings-entry-row:active .settings-entry-arrow {
+    box-shadow:
+        0 1px 0 #030405,
+        0 5px 10px -7px rgba(15, 23, 42, 0.72),
+        inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    transform: translate3d(1px, 2px, 0);
+}
+
+.dark .settings-entry-arrow {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #090a0d;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-entry-arrow {
+        transition: none;
+    }
+
+    .settings-entry-row:hover .settings-entry-arrow,
+    .settings-entry-row:active .settings-entry-arrow {
+        transform: none;
+    }
 }
 
 @media (hover: hover) {
@@ -685,6 +835,36 @@
     filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.9));
 }
 
+.chat-send-icon-swap {
+    position: relative;
+    display: inline-grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+}
+
+.chat-send-icon-swap .glass-btn-icon {
+    width: 19px;
+    height: 19px;
+    color: inherit;
+    filter: none;
+    transition: none;
+}
+
+.chat-send-icon-swap [data-icon='send'] .glass-btn-icon {
+    width: 22px;
+    height: 22px;
+}
+
+.chat-send-icon-swap__icon {
+    display: flex;
+    grid-area: 1 / 1;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    will-change: opacity, filter, transform;
+}
+
 .glass-btn-3d:hover .glass-btn-icon {
     color: #6B728E;
 }
@@ -889,16 +1069,16 @@
     background: rgba(255, 255, 255, 0.15);
 }
 
-/* 流式输出 Blur Reveal 效果 */
+/* 流式输出柔和淡入：不使用 blur，保证正文始终清晰且降低 GPU 合成开销。 */
 
 @keyframes blur-reveal-first {
     0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0;
+        opacity: 0.45;
+        transform: translateY(1px);
     }
     100% {
-        filter: blur(0);
         opacity: 1;
+        transform: translateY(0);
     }
 }
 
@@ -923,17 +1103,17 @@
 
 .blur-reveal-animate {
     animation: blur-reveal-smooth var(--blur-duration, 0.25s) ease-out forwards;
-    will-change: filter, opacity;
+    will-change: transform, opacity;
 }
 
 @keyframes blur-reveal-smooth {
     0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0.15;
+        opacity: 0.45;
+        transform: translateY(1px);
     }
     100% {
-        filter: blur(0);
         opacity: 1;
+        transform: translateY(0);
     }
 }
 
@@ -1028,17 +1208,17 @@
 }
 
 /* ============================================================
-   流式输出动画系统 - 统一的 Blur Reveal + 打字光标效果
+   流式输出动画系统 - 统一的柔和淡入 + 打字光标效果
    ============================================================ */
 
 @keyframes blur-reveal {
     0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0;
+        opacity: 0.45;
+        transform: translateY(1px);
     }
     100% {
-        filter: blur(0);
         opacity: 1;
+        transform: translateY(0);
     }
 }
 
@@ -1382,6 +1562,36 @@
     font-weight: 500;
 }
 
+@keyframes thinkingTextPulse {
+    0%, 100% {
+        opacity: 0.55;
+        text-shadow: 0 0 0 rgba(184, 95, 71, 0);
+    }
+
+    50% {
+        opacity: 1;
+        text-shadow: 0 0 10px rgba(184, 95, 71, 0.24);
+    }
+}
+
+.thinking-text-pulse {
+    color: #b85f47;
+    animation: thinkingTextPulse 1.35s ease-in-out infinite;
+    will-change: opacity, text-shadow;
+}
+
+.dark .thinking-text-pulse {
+    color: #ffa07a;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .thinking-text-pulse {
+        opacity: 1;
+        text-shadow: none;
+        animation: none;
+    }
+}
+
 /* 右侧箭头 */
 .thinking-block-arrow {
     width: 36px;
@@ -1570,6 +1780,107 @@
     --tw-prose-td-borders: #374151;/* gray-700 */
 }
 
+/* ==================== PDF 阅读区跳转定位 ==================== */
+@keyframes pdfReadingJumpFrame {
+    0% {
+        opacity: 0;
+        transform: scale(0.985);
+        box-shadow: 0 0 0 0 rgba(184, 95, 71, 0);
+    }
+    16% {
+        opacity: 1;
+        transform: scale(1);
+        box-shadow:
+            0 0 0 2px rgba(184, 95, 71, 0.18),
+            0 6px 18px -8px rgba(184, 95, 71, 0.42);
+    }
+    66% {
+        opacity: 1;
+        transform: scale(1);
+        box-shadow:
+            0 0 0 3px rgba(184, 95, 71, 0.08),
+            0 6px 18px -8px rgba(184, 95, 71, 0.26);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1.006);
+        box-shadow: 0 0 0 5px rgba(184, 95, 71, 0);
+    }
+}
+
+@keyframes pdfReadingJumpSweep {
+    0% {
+        opacity: 0;
+        transform: translate3d(-145%, 0, 0);
+    }
+    14% { opacity: 1; }
+    78% { opacity: 1; }
+    100% {
+        opacity: 0;
+        transform: translate3d(250%, 0, 0);
+    }
+}
+
+.pdf-reading-jump-pulse {
+    position: absolute;
+    inset: -3px;
+    overflow: hidden;
+    border: 2px solid rgba(184, 95, 71, 0.82);
+    border-radius: 7px;
+    background: rgba(255, 240, 233, 0.12);
+    pointer-events: none;
+    transform-origin: center;
+    will-change: transform, opacity;
+    animation: pdfReadingJumpFrame 1050ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pdf-reading-jump-pulse::after {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 42%;
+    content: '';
+    background: linear-gradient(
+        100deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 240, 233, 0.16) 22%,
+        rgba(255, 255, 255, 0.78) 50%,
+        rgba(255, 188, 162, 0.24) 74%,
+        rgba(255, 255, 255, 0) 100%
+    );
+    transform: translate3d(-145%, 0, 0);
+    will-change: transform, opacity;
+    animation: pdfReadingJumpSweep 820ms 90ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pdf-reading-jump-pulse--dark {
+    border-color: rgba(255, 160, 122, 0.78);
+    background: rgba(255, 160, 122, 0.08);
+}
+
+.pdf-reading-jump-pulse--dark::after {
+    background: linear-gradient(
+        100deg,
+        rgba(255, 160, 122, 0) 0%,
+        rgba(255, 160, 122, 0.08) 22%,
+        rgba(255, 236, 228, 0.28) 50%,
+        rgba(255, 160, 122, 0.2) 74%,
+        rgba(255, 160, 122, 0) 100%
+    );
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pdf-reading-jump-pulse {
+        animation-duration: 420ms;
+        animation-timing-function: ease-out;
+    }
+
+    .pdf-reading-jump-pulse::after {
+        display: none;
+    }
+}
+
 /* ==================== Agent 检索轨迹动画 ==================== */
 @keyframes agentFadeSlideIn {
     from { opacity: 0; transform: translateY(4px); }
@@ -1596,24 +1907,6 @@
     bottom: 0;
     width: 38%;
     border-radius: 9999px;
-    background: linear-gradient(90deg, transparent, rgba(252, 130, 86, 0.75), transparent);
+    background: linear-gradient(90deg, transparent, rgba(65, 68, 73, 0.58), transparent);
     animation: agentShimmerSweep 1.4s ease-in-out infinite;
-}
-
-@keyframes agentBreath {
-    0%, 100% { background-color: rgba(252, 130, 86, 0.04); }
-    50% { background-color: rgba(252, 130, 86, 0.12); }
-}
-
-.agent-op-running {
-    animation: agentBreath 1.6s ease-in-out infinite;
-}
-
-.dark .agent-op-running {
-    animation-name: agentBreathDark;
-}
-
-@keyframes agentBreathDark {
-    0%, 100% { background-color: rgba(252, 130, 86, 0.08); }
-    50% { background-color: rgba(252, 130, 86, 0.18); }
 }

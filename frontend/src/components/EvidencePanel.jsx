@@ -39,7 +39,8 @@ export const partitionEvidenceCitations = (citations = []) => {
  */
 export default function EvidencePanel({ citations, docId, onCitationClick, activeRef, onRefHover }) {
   const [expandedRefs, setExpandedRefs] = useState(new Set());
-  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  // 面板只在流式回答完成后挂载，默认折叠可避免一条长回答被引用列表打断。
+  const [panelCollapsed, setPanelCollapsed] = useState(true);
   // thumbnail cache: page -> {url, loading, error}
   const [thumbnails, setThumbnails] = useState({});
   const fetchingRef = useRef(new Set());

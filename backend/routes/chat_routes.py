@@ -825,15 +825,17 @@ def _load_agent_modal_asset_index(
     *,
     parse_manifest: dict,
     visual_evidence: list[dict],
+    block_index: dict | None = None,
 ) -> dict:
     """仅加载绑定到当前解析身份的请求级模态资产。"""
     if not isinstance(parse_manifest, dict):
         return {}
-    try:
-        block_index = load_block_index(runtime.data_dir, doc_id)
-    except Exception as exc:
-        logger.warning("[AgentDoc] 加载 block index 失败，禁用模态资产: doc_id=%s error=%s", doc_id, exc)
-        return {}
+    if block_index is None:
+        try:
+            block_index = load_block_index(runtime.data_dir, doc_id)
+        except Exception as exc:
+            logger.warning("[AgentDoc] 加载 block index 失败，禁用模态资产: doc_id=%s error=%s", doc_id, exc)
+            return {}
     if not isinstance(block_index, dict):
         return {}
 
@@ -897,6 +899,71 @@ def _load_agent_modal_asset_index(
     return modal_asset_index if isinstance(modal_asset_index, dict) else {}
 
 
+def _load_agent_read_block_index(
+    doc_id: str,
+    *,
+    parse_manifest: dict,
+    visual_evidence: list[dict],
+) -> dict:
+    """Load a request-local block snapshot bound to the active parse identity."""
+    if not isinstance(parse_manifest, dict):
+        return {}
+    try:
+        block_index = load_block_index(runtime.data_dir, doc_id)
+    except Exception as exc:
+        logger.warning("[AgentDoc] 加载 block index 失败，禁用稳定块读取: doc_id=%s error=%s", doc_id, exc)
+        return {}
+    if not isinstance(block_index, dict):
+        return {}
+
+    metadata = parse_manifest.get("metadata") if isinstance(parse_manifest.get("metadata"), dict) else {}
+    if not metadata.get("legacy_inferred"):
+        expected_identity = (
+            str(parse_manifest.get("resolved_route") or "").strip().lower(),
+            str(parse_manifest.get("generation") or "").strip(),
+            str(parse_manifest.get("source_hash") or "").strip(),
+        )
+        block_identity = (
+            str(block_index.get("parser_route") or "").strip().lower(),
+            str(block_index.get("parse_generation") or "").strip(),
+            str(block_index.get("document_source_hash") or "").strip(),
+        )
+        if not all(expected_identity) or block_identity != expected_identity:
+            logger.warning(
+                "[AgentDoc] block index 与当前解析身份不匹配，禁用稳定块读取: doc_id=%s",
+                doc_id,
+            )
+            return {}
+
+    committed_revisions = {
+        str(item.get("visual_supplement_revision") or "").strip()
+        for item in visual_evidence
+        if isinstance(item, dict)
+        and str(item.get("visual_supplement_revision") or "").strip()
+    }
+    committed_revision = next(iter(committed_revisions)) if len(committed_revisions) == 1 else ""
+    if str(block_index.get("visual_supplement_revision") or "").strip() != committed_revision:
+        block_index = deepcopy(block_index)
+        block_index["visual_supplement_revision"] = committed_revision
+        for page in block_index.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            page["blocks"] = [
+                block
+                for block in page.get("blocks") or []
+                if not (
+                    isinstance(block, dict)
+                    and (
+                        block.get("visual_enhancement")
+                        or str(block.get("block_type") or "").strip().lower()
+                        == "visual_enrichment"
+                    )
+                )
+            ]
+    return block_index
+
+
+
 def _build_agent_doc_context(
     doc_id: str,
     doc: dict,
@@ -908,6 +975,7 @@ def _build_agent_doc_context(
     rerank_provider: str = "",
     rerank_api_key: str = "",
     rerank_endpoint: str = "",
+    web_search_executor=None,
 ) -> DocContext:
     data = doc.get("data", {}) or {}
     full_text = data.get("full_text", "") or ""
@@ -918,10 +986,16 @@ def _build_agent_doc_context(
     # uncommitted, and parse-identity-mismatched visual supplements.
     visual_evidence = committed_visual_evidence_for_document(doc)
     parse_manifest = read_parse_manifest(doc, doc_id=doc_id)
+    block_index = _load_agent_read_block_index(
+        doc_id,
+        parse_manifest=parse_manifest,
+        visual_evidence=visual_evidence,
+    )
     modal_asset_index = _load_agent_modal_asset_index(
         doc_id,
         parse_manifest=parse_manifest,
         visual_evidence=visual_evidence,
+        block_index=block_index,
     )
     semantic_groups = _load_doc_semantic_groups_for_agent(
         doc_id,
@@ -935,6 +1009,7 @@ def _build_agent_doc_context(
         pages=pages,
         semantic_groups=semantic_groups,
         chunk_metadata=chunk_metadata,
+        block_index=block_index,
         vector_store_dir=vector_store_dir,
         api_key=api_key or "",
         use_rerank=use_rerank,
@@ -942,6 +1017,7 @@ def _build_agent_doc_context(
         rerank_provider=rerank_provider or "",
         rerank_api_key=rerank_api_key or "",
         rerank_endpoint=rerank_endpoint or "",
+        web_search_executor=web_search_executor,
         visual_evidence=visual_evidence,
         modal_asset_index=modal_asset_index,
     )
@@ -5546,6 +5622,7 @@ _PUBLIC_CITATION_COORDINATE_SPACES = {
     "pdf_bottom_left",
     "normalized",
     "normalized_0_1",
+    "normalized_0_1000",
     "normalized_1000",
     "mineru_1000",
     "ratio",
@@ -7128,6 +7205,8 @@ _PUBLIC_RETRIEVAL_META_DENY_KEYS = {
     "rerank_api_key",
     "embedding_api_key",
     "web_search_api_key",
+    "web_search_context",
+    "web_search_sources",
     "diagnostics",
     "chunks",
     "retrieval_chunks",
@@ -9640,6 +9719,7 @@ async def _run_agent_retrieval_for_context(
             generate_page_level_citations=_generate_page_level_citations,
             build_agent_detail_citations=_build_agent_detail_citations,
             build_visual_evidence_analyzer=_build_agent_visual_evidence_analyzer,
+            perform_web_search=_maybe_perform_web_search,
         ),
     )
 
@@ -11513,6 +11593,12 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 agent_gate=agent_gate,
                 retrieval_meta=retrieval_meta,
             )
+            web_search_sources = [
+                dict(item)
+                for item in (retrieval_meta.get("web_search_sources") or [])
+                if isinstance(item, dict)
+            ]
+            web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
         elif _should_use_fast_overview_context(
             query_type,
             enable_vector_search=request.enable_vector_search,
@@ -12120,6 +12206,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             yield _sse_json(public_agent_event)
 
                     context, retrieval_meta = await agent_task
+                    web_search_sources = [
+                        dict(item)
+                        for item in (retrieval_meta.get("web_search_sources") or [])
+                        if isinstance(item, dict)
+                    ]
+                    web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
                 elif _should_use_fast_overview_context(
                     query_type,
                     enable_vector_search=request.enable_vector_search,
@@ -12547,14 +12639,14 @@ async def chat_with_pdf_stream(request: ChatRequest):
 
                     yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources)}, ensure_ascii=False)}\n\n"
 
-                if web_search_context:
-                    system_prompt += (
-                        "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
-                        f"{web_search_context}\n"
-                        "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
-                        "\n不得与文档事实冲突。"
-                    )
-                    messages[0]["content"] = system_prompt
+            if web_search_context:
+                system_prompt += (
+                    "\n\n联网搜索结果（用于补充最新信息，优先保证与文档内容一致）：\n"
+                    f"{web_search_context}\n"
+                    "\n回答时，在引用联网信息的句子末尾标注来源序号，格式为 [1]、[2] 等（对应上方搜索结果编号）。"
+                    "\n不得与文档事实冲突。"
+                )
+                messages[0]["content"] = system_prompt
 
             if web_search_sources:
                 yield f"data: {json.dumps({'type': 'web_search', 'sources': web_search_sources}, ensure_ascii=False)}\n\n"

@@ -332,6 +332,14 @@ def _convert_mineru_item(
         "source": MINERU_BLOCK_INDEX_SOURCE,
         "mineru_type": raw_type or block_type,
     }
+    line_anchors = _mineru_line_anchors(
+        item,
+        page_width=float(page_spec.get("width") or 612.0),
+        page_height=float(page_spec.get("height") or 792.0),
+        source_size=page_source_size,
+    )
+    if line_anchors:
+        block["line_anchors"] = line_anchors
     if block_type == "heading":
         block["level"] = _infer_heading_level(text)
     if block_type == "artifact":
@@ -508,6 +516,88 @@ def _clip_bbox(bbox: list[float], page_width: float, page_height: float) -> list
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)]
+
+
+def _mineru_line_text(line: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("text", "content", "latex"):
+        value = line.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    for span in line.get("spans", []) or []:
+        if not isinstance(span, dict):
+            continue
+        for key in ("text", "content", "latex"):
+            value = span.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+                break
+    return _clean_text(" ".join(_dedupe(parts)))
+
+
+def _mineru_line_bbox(line: dict[str, Any]) -> list[float] | None:
+    direct = _item_bbox(line)
+    if direct:
+        return direct
+    boxes = [
+        _item_bbox(span)
+        for span in (line.get("spans", []) or [])
+        if isinstance(span, dict)
+    ]
+    boxes = [box for box in boxes if box]
+    if not boxes:
+        return None
+    return [
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    ]
+
+
+def _iter_mineru_lines(item: dict[str, Any]):
+    seen: set[int] = set()
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        lines = node.get("lines")
+        if isinstance(lines, list):
+            for line in lines:
+                if not isinstance(line, dict) or id(line) in seen:
+                    continue
+                seen.add(id(line))
+                yield line
+        for key in ("blocks", "content"):
+            children = node.get(key)
+            if not isinstance(children, list):
+                continue
+            for child in children:
+                if isinstance(child, dict):
+                    yield from visit(child)
+
+    yield from visit(item)
+
+
+def _mineru_line_anchors(
+    item: dict[str, Any],
+    *,
+    page_width: float,
+    page_height: float,
+    source_size: tuple[float, float] | None,
+) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    for line in _iter_mineru_lines(item):
+        text = _mineru_line_text(line)
+        bbox = _bbox_to_page_pts(
+            _mineru_line_bbox(line),
+            page_width=page_width,
+            page_height=page_height,
+            source_size=source_size,
+        )
+        if text and bbox:
+            anchors.append({"text": _limit_text(text, 800), "bbox": bbox})
+    return anchors
 
 
 def _page_num(item: dict[str, Any]) -> int:

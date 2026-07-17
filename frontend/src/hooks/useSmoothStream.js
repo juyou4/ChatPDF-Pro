@@ -42,7 +42,7 @@ function splitChunk(chunk) {
  * @param {string} [options.blurIntensity='medium'] - Blur Reveal 强度（light|medium|strong）
  * @param {number} [options.frameChars=2] - 流式阶段每帧最多渲染字符数
  * @param {number} [options.flushChars=80] - 结束冲刷阶段每帧最多渲染字符数
- * @returns {{ addChunk: Function, reset: Function, contentRef: React.RefObject, getFinalText: Function }}
+ * @returns {{ addChunk: Function, reset: Function, replace: Function, flushNow: Function, contentRef: React.RefObject, getFinalText: Function, isFlushComplete: Function }}
  */
 export { splitChunk }
 
@@ -54,6 +54,10 @@ const appendBlurRevealChars = (container, chars, intensity = 'medium') => {
     const span = document.createElement('span')
     span.className = `animate-blur-reveal blur-reveal-animate ${intensityClass}`
     span.textContent = ch
+    // 动画结束后移除 filter/will-change，保留视觉特色但不让长回答持续占用合成层。
+    span.addEventListener('animationend', () => {
+      span.removeAttribute('class')
+    }, { once: true })
     fragment.appendChild(span)
   }
   container.appendChild(fragment)
@@ -140,6 +144,32 @@ export const useSmoothStream = ({
   )
 
   /**
+   * 超过收尾宽限后立即排空待渲染队列，仅作为后台节流等异常场景的兜底。
+   * 可传入后端最终文本，确保 DOM 与随后进入 ReactMarkdown 的内容一致。
+   */
+  const flushNow = useCallback(
+    (finalText) => {
+      const queuedText = chunkQueueRef.current.join('')
+      const nextText = typeof finalText === 'string'
+        ? finalText
+        : displayedTextRef.current + queuedText
+
+      chunkQueueRef.current = []
+      displayedTextRef.current = nextText
+      finalTextRef.current = nextText
+      lastUpdateTimeRef.current = 0
+      if (contentRef.current) {
+        contentRef.current.textContent = nextText
+      }
+      if (onUpdate) {
+        onUpdate(nextText)
+      }
+      return nextText
+    },
+    [onUpdate]
+  )
+
+  /**
    * 获取流结束后的最终文本
    * 供调用方在流结束后同步到 React 状态
    * @returns {string} 最终文本
@@ -190,14 +220,19 @@ export const useSmoothStream = ({
         }
         lastUpdateTimeRef.current = currentTime
 
-        // 3. 计算本帧渲染字符数
+        // 3. 流式阶段始终遵守用户选择的逐字速度，不因队列积压突然整段出现。
+        const pendingChars = chunkQueueRef.current.length
         let charsToRenderCount = Math.max(1, frameChars)
 
         // 4. 流已结束时的渲染策略
         if (streamDone) {
           if (smoothFlush) {
-            // 渐进刷新：结束时加快速度，但仍保持逐帧展开而非一次性 dump
-            charsToRenderCount = Math.max(charsToRenderCount, flushChars)
+            // 最多约 48 个渲染帧平滑排空：比正常逐字稍快，但仍保留连续渐显。
+            charsToRenderCount = Math.max(
+              charsToRenderCount,
+              flushChars,
+              Math.ceil(pendingChars / 48)
+            )
           } else {
             // 标准模式：一次性渲染所有剩余字符
             charsToRenderCount = chunkQueueRef.current.length
@@ -264,5 +299,5 @@ export const useSmoothStream = ({
 
   const isFlushComplete = useCallback(() => chunkQueueRef.current.length === 0, [])
 
-  return { addChunk, reset, replace, contentRef, getFinalText, isFlushComplete }
+  return { addChunk, reset, replace, flushNow, contentRef, getFinalText, isFlushComplete }
 }

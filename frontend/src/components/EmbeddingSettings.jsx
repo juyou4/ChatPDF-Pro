@@ -45,22 +45,31 @@ const Tag = ({ text, active, onClick }) => (
   </span>
 );
 
+/* 扁平列表行：选中态 = 白色悬浮卡（中性投影），切换时卡片在行间滑动跟随 */
 const ProviderItem = ({ provider, isActive, onClick }) => (
-  <div 
+  <div
     onClick={onClick}
-    className={`settings-card settings-card-interactive flex items-center p-3 rounded-[20px] cursor-pointer ${
-    isActive 
-      ? 'settings-card-selected'
-      : 'bg-white'
-  }`}>
-    <div className={`w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner bg-gray-50 border border-gray-100 overflow-hidden`}>
-      <ProviderAvatar providerId={provider.id} size={24} />
+    className={`relative flex items-center px-2.5 py-2 rounded-[14px] cursor-pointer transition-colors ${
+      isActive ? '' : 'hover:bg-gray-100/70'
+    }`}>
+    {isActive && (
+      <motion.span
+        layoutId="provider-active-card"
+        transition={{ type: 'spring', stiffness: 420, damping: 34, mass: 0.8 }}
+        aria-hidden="true"
+        className="absolute inset-0 rounded-[14px] bg-white ring-1 ring-gray-200/80 shadow-[0_10px_24px_-8px_rgba(30,30,35,0.2),0_3px_8px_-2px_rgba(30,30,35,0.08)]"
+      >
+        <span className="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-[#F0653A]" />
+      </motion.span>
+    )}
+    <div className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center shrink-0 overflow-hidden bg-white ${isActive ? 'shadow-[0_2px_6px_rgba(30,30,35,0.12)]' : 'shadow-[0_1px_3px_rgba(30,30,35,0.08)]'}`}>
+      <ProviderAvatar providerId={provider.id} size={22} />
     </div>
-    <div className="ml-3 flex-1 min-w-0">
-      <h3 className={`text-[14px] font-bold truncate ${isActive ? 'text-[#B85F47]' : 'text-gray-800'}`}>{provider.name}</h3>
-      <p className="text-[12px] text-gray-500 font-medium truncate">{provider.id}</p>
+    <div className="relative z-10 ml-2.5 flex-1 min-w-0">
+      <h3 className={`text-[13px] truncate ${isActive ? 'font-extrabold text-gray-900' : 'font-bold text-gray-800'}`}>{provider.name}</h3>
+      <p className={`text-[11px] font-medium truncate ${isActive ? 'text-[#B85F47]' : 'text-gray-400'}`}>{provider.id}</p>
     </div>
-    <div className={`w-2 h-2 rounded-full shrink-0 ml-2 ${provider.enabled ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-gray-300 shadow-sm'}`}></div>
+    <div className={`relative z-10 w-2 h-2 rounded-full shrink-0 ml-2 ${provider.enabled ? 'bg-green-400' : 'bg-gray-300'}`}></div>
   </div>
 );
 import { useProvider } from '../contexts/ProviderContext'
@@ -580,15 +589,21 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       </div>
                     </div>
                     <div className="flex items-center space-x-4">
-                      <label className="flex items-center space-x-2 bg-gray-50 px-3 py-1.5 rounded-[12px] border border-gray-200 cursor-pointer hover:bg-gray-100 transition-colors">
+                      <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                        <span className={`text-[13px] font-bold ${activeProvider?.enabled ? 'text-gray-800' : 'text-gray-400'}`}>
+                          {activeProvider?.enabled ? '已启用' : '已停用'}
+                        </span>
                         <input
                           type="checkbox"
                           checked={!!activeProvider?.enabled}
                           onChange={e => handleProviderUpdate('enabled', e.target.checked)}
-                          className="w-4 h-4 accent-[#FFA07A] rounded"
+                          className="sr-only"
                         />
-                        <span className={`text-[13px] font-bold ${activeProvider?.enabled ? 'text-[#B85F47]' : 'text-gray-500'}`}>
-                          {activeProvider?.enabled ? '已启用' : '已停用'}
+                        <span
+                          aria-hidden="true"
+                          className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors ${activeProvider?.enabled ? 'bg-[#F0653A]' : 'bg-gray-300'}`}
+                        >
+                          <span className={`absolute top-[3px] h-4 w-4 rounded-full bg-white shadow-sm transition-[left] duration-200 ${activeProvider?.enabled ? 'left-[18px]' : 'left-[3px]'}`} />
                         </span>
                       </label>
                     </div>
@@ -616,10 +631,10 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       />
                     </div>
                     <div className="flex gap-4 pt-3">
-                      <button 
+                      <button
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="accent-surface flex-1 disabled:opacity-70 transition-colors text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
+                        className="accent-cta flex-1 disabled:opacity-60 disabled:cursor-not-allowed text-[14px] font-bold py-3 rounded-full flex items-center justify-center gap-2"
                       >
                         {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-current" />}
                         <span>测试连接</span>
@@ -705,9 +720,9 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     </div>
 
                     <div className="pt-4 shrink-0">
-                      <button 
+                      <button
                         onClick={handleAddModel}
-                        className="accent-surface w-full transition-colors text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
+                        className="accent-cta w-full text-[14px] font-bold py-3 rounded-full flex items-center justify-center gap-2"
                       >
                         <Plus size={18} />
                         <span>保存模型</span>
@@ -727,6 +742,19 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                   <p className="text-[12px] text-gray-500 font-medium mt-1 mb-4">按类型分组: 对话 / 嵌入 / 重排</p>
                   
                   <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4">
+                    {['chat', 'embedding', 'rerank', 'image'].every(t => !(modelsByType[t] || []).length) && (
+                      <div className="flex flex-col items-center justify-center py-12 text-center">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gray-100/80 text-gray-400">
+                          <Cpu size={20} />
+                        </div>
+                        <p className="mt-3 text-[13px] font-semibold text-gray-500">这个平台还没有模型</p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                          填好 API Key 后点「同步模型」自动拉取，
+                          <br />
+                          或在「手动新增模型」中添加
+                        </p>
+                      </div>
+                    )}
                     {['chat', 'embedding', 'rerank', 'image'].map(type => {
                       const list = modelsByType[type] || [];
                       if (list.length === 0) return null;

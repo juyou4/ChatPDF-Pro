@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
@@ -244,17 +244,67 @@ const TableVisualVerificationStatus = ({ verification }) => {
 };
 
 const SendIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
     <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
   </svg>
 );
 
 const PauseIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
     <rect x="7" y="6" width="4" height="12" rx="2" />
     <rect x="13" y="6" width="4" height="12" rx="2" />
   </svg>
 );
+
+const ICON_SWAP_VISIBLE = { opacity: 1, filter: 'blur(0px)', scale: 1 };
+const ICON_SWAP_HIDDEN = { opacity: 0, filter: 'blur(3px)', scale: 0.28 };
+
+const getIconSwapTransition = (visible, reduceMotion) => {
+  if (reduceMotion) return { duration: 0 };
+
+  if (!visible) {
+    return {
+      opacity: { duration: 0.12, ease: [0.4, 0, 1, 1] },
+      filter: { duration: 0.14, ease: [0.4, 0, 1, 1] },
+      scale: { duration: 0.14, ease: [0.4, 0, 1, 1] },
+    };
+  }
+
+  return {
+    opacity: { duration: 0.2, delay: 0.045, ease: [0.22, 1, 0.36, 1] },
+    filter: { duration: 0.24, delay: 0.035, ease: [0.22, 1, 0.36, 1] },
+    scale: { type: 'spring', stiffness: 520, damping: 28, mass: 0.5, delay: 0.035 },
+  };
+};
+
+const SendPauseIconSwap = ({ isPaused }) => {
+  const reduceMotion = useReducedMotion();
+  const sendVisible = !isPaused;
+  const pauseVisible = isPaused;
+
+  return (
+    <span className="chat-send-icon-swap" data-state={isPaused ? 'pause' : 'send'} aria-hidden="true">
+      <motion.span
+        className="chat-send-icon-swap__icon ml-0.5"
+        data-icon="send"
+        initial={false}
+        animate={sendVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
+        transition={getIconSwapTransition(sendVisible, reduceMotion)}
+      >
+        <SendIcon />
+      </motion.span>
+      <motion.span
+        className="chat-send-icon-swap__icon"
+        data-icon="pause"
+        initial={false}
+        animate={pauseVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
+        transition={getIconSwapTransition(pauseVisible, reduceMotion)}
+      >
+        <PauseIcon />
+      </motion.span>
+    </span>
+  );
+};
 
 const SummaryIcon = ({ className = '' }) => (
   <svg
@@ -746,6 +796,17 @@ const ChatPDF = () => {
   const [streamSpeed, setStreamSpeed] = useDebouncedLocalStorage('streamSpeed', 'normal');
   const [enableBlurReveal, setEnableBlurReveal] = useDebouncedLocalStorage('enableBlurReveal', true);
   const [blurIntensity, setBlurIntensity] = useDebouncedLocalStorage('blurIntensity', 'medium');
+  // v2 曾强制关闭模糊渐显。只修正受该迁移影响的用户一次，之后仍尊重手动设置。
+  useEffect(() => {
+    if (
+      localStorage.getItem('_migrated_stream_reveal_v2') &&
+      !localStorage.getItem('_restored_stream_reveal_v3')
+    ) {
+      setEnableBlurReveal(true);
+      setBlurIntensity('medium');
+      localStorage.setItem('_restored_stream_reveal_v3', '1');
+    }
+  }, []);
   const [searchEngine, setSearchEngine] = useDebouncedLocalStorage('searchEngine', 'google');
   const [searchEngineUrl, setSearchEngineUrl] = useDebouncedLocalStorage('searchEngineUrl', 'https://www.google.com/search?q={query}');
   const [toolbarSize, setToolbarSize] = useDebouncedLocalStorage('toolbarSize', 'normal');
@@ -4822,17 +4883,7 @@ const ChatPDF = () => {
                         : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     }`}
                   >
-                    <AnimatePresence initial={false}>
-                      {isLoading ? (
-                        <motion.div key="pause" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center">
-                          <PauseIcon />
-                        </motion.div>
-                      ) : (
-                        <motion.div key="send" initial={{ rotate: -90, scale: 0.5, opacity: 0 }} animate={{ rotate: 0, scale: 1, opacity: 1 }} exit={{ rotate: 90, scale: 0.5, opacity: 0 }} transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }} className="absolute flex items-center justify-center ml-0.5">
-                          <SendIcon />
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                    <SendPauseIconSwap isPaused={isLoading} />
                   </button>
                 </div>
               </div>
@@ -5351,7 +5402,7 @@ const ChatPDF = () => {
                         <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="hidden" />
                       </div>
                       <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        流式输出时每个新字符从模糊到清晰的渐变效果
+                        流式输出时，新字符从模糊逐渐变得清晰
                       </p>
                     </div>
                   </label>
@@ -5504,13 +5555,13 @@ const ChatPDF = () => {
                           value={streamSpeed}
                           onChange={setStreamSpeed}
                           options={[
-                          { value: 'fast', label: '快速 (4字符/次, ~16ms)' },
-                          { value: 'normal', label: '正常 (2字符/次, ~28ms)' },
-                          { value: 'slow', label: '慢速 (1字符/次, ~48ms)' },
+                          { value: 'fast', label: '即时（紧跟模型输出）' },
+                          { value: 'normal', label: '平滑（推荐）' },
+                          { value: 'slow', label: '逐字（更明显的打字感）' },
                           { value: 'off', label: '关闭流式（直接显示）' }
                         ]}
                       />
-                      <p className="text-[11px] text-gray-500 mt-0.5">调整AI回复的打字机效果速度</p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">保持逐字节奏，流结束后只适度加速收尾</p>
                     </div>
                     )}
 
@@ -5521,9 +5572,9 @@ const ChatPDF = () => {
                           value={blurIntensity}
                           onChange={setBlurIntensity}
                           options={[
-                            { value: 'light', label: '轻度 (3px blur, 0.2s)' },
-                            { value: 'medium', label: '中度 (5px blur, 0.25s)' },
-                            { value: 'strong', label: '强烈 (8px blur, 0.3s)' }
+                            { value: 'light', label: '轻度（1.5px · 0.18 秒）' },
+                            { value: 'medium', label: '中度（3px · 0.25 秒）' },
+                            { value: 'strong', label: '明显（5px · 0.35 秒）' }
                           ]}
                         />
                       </div>
@@ -5590,7 +5641,7 @@ const ChatPDF = () => {
                       <button
                         key={label}
                         onClick={onClick}
-                        className={`w-full px-4 py-3 flex items-center gap-3 text-left transition-colors ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''} ${darkMode ? 'hover:bg-white/[0.04]' : 'hover:bg-gray-50'}`}
+                        className={`settings-entry-row w-full px-4 py-3 flex items-center gap-3 text-left transition-colors ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''} ${darkMode ? 'hover:bg-white/[0.04]' : 'hover:bg-gray-50'}`}
                       >
                         <div className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
                           <Icon size={15} />
@@ -5599,7 +5650,9 @@ const ChatPDF = () => {
                           <div className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{label}</div>
                           <div className={`text-[11px] mt-0.5 truncate ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{desc}</div>
                         </div>
-                        <ChevronRight className={`w-4 h-4 shrink-0 ${darkMode ? 'text-gray-600' : 'text-gray-300'}`} />
+                        <span className="settings-entry-arrow" aria-hidden="true">
+                          <ChevronRight className="h-4 w-4" strokeWidth={2.5} />
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -5815,6 +5868,3 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default ChatPDF;
-
-
-

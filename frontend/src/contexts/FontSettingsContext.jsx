@@ -9,6 +9,33 @@ const FontSettingsContext = createContext();
 // 预设字体列表
 export const PRESET_FONTS = [
     { id: 'inter', name: 'Inter', value: 'Inter, sans-serif', googleFont: 'Inter:wght@300;400;500;600;700' },
+    {
+        id: 'outfit-plus',
+        name: 'Outfit + Plus',
+        value: '"Plus Jakarta Sans", "Noto Sans SC", sans-serif',
+        headingValue: 'Outfit, "Noto Sans SC", sans-serif',
+        bodyValue: '"Plus Jakarta Sans", "Noto Sans SC", sans-serif',
+        googleFont: 'Outfit:wght@400;700&family=Plus+Jakarta+Sans:wght@400;700',
+        description: 'Outfit 标题 · Plus Jakarta Sans 正文',
+    },
+    {
+        id: 'cormorant-work',
+        name: 'Cormorant + Work',
+        value: '"Work Sans", "Noto Sans SC", sans-serif',
+        headingValue: 'Cormorant, "Noto Sans SC", sans-serif',
+        bodyValue: '"Work Sans", "Noto Sans SC", sans-serif',
+        googleFont: 'Cormorant:wght@400;700&family=Work+Sans:wght@400;700',
+        description: 'Cormorant 标题 · Work Sans 正文',
+    },
+    {
+        id: 'fraunces-karla',
+        name: 'Fraunces + Karla',
+        value: 'Karla, "Noto Sans SC", sans-serif',
+        headingValue: 'Fraunces, "Noto Sans SC", sans-serif',
+        bodyValue: 'Karla, "Noto Sans SC", sans-serif',
+        googleFont: 'Fraunces:wght@400;700&family=Karla:wght@400;700',
+        description: 'Fraunces 标题 · Karla 正文',
+    },
     { id: 'roboto', name: 'Roboto', value: 'Roboto, sans-serif', googleFont: 'Roboto:wght@300;400;500;700' },
     { id: 'noto-sans-sc', name: 'Noto Sans SC', value: '"Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700' },
     { id: 'source-han-sans', name: 'Source Han Sans', value: '"Source Han Sans SC", "Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700' },
@@ -137,24 +164,31 @@ export const FontSettingsProvider = ({ children }) => {
 
     // 应用字体到 CSS 变量
     useEffect(() => {
-        let fontValue;
+        let bodyFontValue;
+        let headingFontValue;
 
         if (fontFamily === 'custom' && customFont) {
             // 使用自定义字体
-            fontValue = `"${customFont}", sans-serif`;
+            bodyFontValue = `"${customFont}", sans-serif`;
+            headingFontValue = bodyFontValue;
             loadGoogleFont(customFont);
         } else {
             // 使用预设字体
             const preset = PRESET_FONTS.find(f => f.id === fontFamily);
             if (preset) {
-                fontValue = preset.value;
+                bodyFontValue = preset.bodyValue || preset.value;
+                headingFontValue = preset.headingValue || bodyFontValue;
                 loadGoogleFont(preset.googleFont);
             } else {
-                fontValue = PRESET_FONTS[0].value; // 默认 Inter
+                bodyFontValue = PRESET_FONTS[0].value; // 默认 Inter
+                headingFontValue = bodyFontValue;
             }
         }
 
-        document.documentElement.style.setProperty('--global-font-family', fontValue);
+        // 保留旧变量以兼容现有样式，同时提供标题/正文双字体变量。
+        document.documentElement.style.setProperty('--global-font-family', bodyFontValue);
+        document.documentElement.style.setProperty('--body-font', bodyFontValue);
+        document.documentElement.style.setProperty('--heading-font', headingFontValue);
     }, [fontFamily, customFont]);
 
     // 应用缩放到 html 根元素

@@ -184,21 +184,46 @@ export function usePDFState({
    * @param {Object} citation - 引用信息
    */
   const handleCitationClick = useCallback((c) => {
-    if (!c?.page_range) return;
-    const tp = c.page_range[0];
-    if (typeof tp === 'number' && tp > 0) {
-      setActiveHighlight(null);
-      setCurrentPage(tp);
-      if (c.highlight_text) {
-        setTimeout(() => setActiveHighlight({
-          page: tp,
-          text: c.highlight_text,
-          startPhrase: c.start_phrase || '',
-          endPhrase: c.end_phrase || '',
-          alignmentStatus: c.alignment_status || '',
-          source: 'citation',
-        }), 400);
-      }
+    if (!c || typeof c !== 'object') return;
+    const rawAnchor = c.citation_anchor && typeof c.citation_anchor === 'object'
+      ? c.citation_anchor
+      : {};
+    const rawPage = rawAnchor.page ?? c.page_range?.[0] ?? c.page;
+    const targetPage = Number(rawPage);
+    if (!Number.isInteger(targetPage) || targetPage <= 0) return;
+
+    const span = rawAnchor.span && typeof rawAnchor.span === 'object'
+      ? rawAnchor.span
+      : (c.citation_span && typeof c.citation_span === 'object' ? c.citation_span : {});
+    const citationAnchor = {
+      blockId: rawAnchor.block_id || c.block_id || c.evidence_block_id || '',
+      bbox: rawAnchor.bbox || c.bbox || c.figure_bbox || null,
+      rects: rawAnchor.rects || c.rects || [],
+      coordinateSpace: rawAnchor.coordinate_space || c.coordinate_space || '',
+      pageSize: rawAnchor.page_size || c.page_size || null,
+      parseGeneration: rawAnchor.parse_generation || c.parse_generation || '',
+    };
+    const text = c.highlight_text || span.text || c.display_text || '';
+    const hasGeometry = Boolean(
+      citationAnchor.blockId
+      || citationAnchor.bbox
+      || citationAnchor.rects?.length
+    );
+
+    setActiveHighlight(null);
+    setCurrentPage(targetPage);
+    if (text || hasGeometry) {
+      setActiveHighlight({
+        page: targetPage,
+        text,
+        startPhrase: c.start_phrase || span.start_phrase || '',
+        endPhrase: c.end_phrase || span.end_phrase || '',
+        alignmentStatus: c.alignment_status || span.alignment_status || '',
+        parseGeneration: citationAnchor.parseGeneration,
+        citationAnchor,
+        source: 'citation',
+        at: Date.now(),
+      });
     }
   }, []);
 

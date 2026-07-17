@@ -2,16 +2,37 @@ import React, { useState, useEffect, useRef, useCallback, forwardRef, useMemo } 
 import { Document, Page, pdfjs } from 'react-pdf';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Sidebar, FileText, Languages, Loader2, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import BreatheLoader from './BreatheLoader';
 import SelectionOverlay from './SelectionOverlay';
 import StreamingMarkdown from './StreamingMarkdown';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import pdfPageCache from '../utils/pdfPageCache';
+import {
+    citationRectsToRendered,
+    collectTextRangeClientRects,
+    findBestCitationBlock,
+    findCitationTextRange,
+    isCitationGeometryCurrent,
+    mergeClientRectsByLine,
+    normalizeCitationBBox,
+} from '../utils/citationHighlightUtils';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 // Configure worker - 直接指定版本以确保匹配
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+
+const PDFLoadingState = ({ darkMode }) => (
+    <div
+        className={`flex h-full flex-col items-center justify-center gap-4 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        role="status"
+        aria-live="polite"
+    >
+        <BreatheLoader className={darkMode ? 'text-[#FFA07A]' : 'text-[#D97A5D]'} />
+        <span>加载 PDF 中...</span>
+    </div>
+);
 
 const getPageBlockData = (blockIndex, pageNumber) => {
     if (!blockIndex?.pages || !pageNumber) return null;
@@ -129,7 +150,7 @@ const cancelIdleTask = (task) => {
     window.clearTimeout(task.id);
 };
 
-const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -310,6 +331,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const [highlightRect, setHighlightRect] = useState(null);
     const [highlightRects, setHighlightRects] = useState([]);
     const pageRef = useRef(null);
+    const pageRenderEpoch = useMemo(() => ({
+        documentKey: pdfCacheKey,
+        pageNumber,
+        scale: debouncedScale,
+    }), [debouncedScale, pageNumber, pdfCacheKey]);
+    const activePageRenderEpochRef = useRef(pageRenderEpoch);
+    activePageRenderEpochRef.current = pageRenderEpoch;
+    const [renderedPageEpoch, setRenderedPageEpoch] = useState(null);
 
     // ── PDF 页面 canvas 缓存：渲染完成后捕获 canvas 数据 ──
     // 缓存的图片 dataURL，用于在页面加载/重渲染期间显示占位图
@@ -339,7 +368,15 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     }, [pdfCacheKey, pageNumber, debouncedScale, cancelBackgroundWork]);
 
     // 首屏绘制完成后再异步缓存，并只预取下一页的解析数据，避免与当前页抢资源。
-    const handlePageRenderSuccess = useCallback(() => {
+    const handlePageRenderSuccess = useCallback((renderedPage) => {
+        const renderedPageNumber = Number(renderedPage?.pageNumber);
+        if (
+            activePageRenderEpochRef.current !== pageRenderEpoch
+            || (Number.isFinite(renderedPageNumber) && renderedPageNumber !== pageRenderEpoch.pageNumber)
+        ) {
+            return;
+        }
+        setRenderedPageEpoch(pageRenderEpoch);
         cancelBackgroundWork();
         const generation = backgroundGenerationRef.current;
         const cachePage = pageNumber;
@@ -378,7 +415,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 }
             }, 1200);
         }, 180);
-    }, [cancelBackgroundWork, debouncedScale, numPages, pageNumber, pdfCacheKey]);
+    }, [cancelBackgroundWork, debouncedScale, numPages, pageNumber, pageRenderEpoch, pdfCacheKey]);
 
     const currentBlockPage = useMemo(
         () => getPageBlockData(blockIndex, pageNumber),
@@ -580,13 +617,61 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         document.addEventListener('mouseup', onUp);
     }, []);
 
+
+    const scrollHighlightIntoView = useCallback((rects) => {
+        const firstRect = Array.isArray(rects) ? rects[0] : null;
+        const scroller = pdfScrollRef.current;
+        const pageElement = pageRef.current;
+        if (!firstRect || !scroller || !pageElement) return;
+
+        const pageBounds = pageElement.getBoundingClientRect();
+        const viewportBounds = scroller.getBoundingClientRect();
+        const targetTop = scroller.scrollTop + pageBounds.top - viewportBounds.top + firstRect.top;
+        const targetLeft = scroller.scrollLeft + pageBounds.left - viewportBounds.left + firstRect.left;
+        const targetBottom = targetTop + firstRect.height;
+        const targetRight = targetLeft + firstRect.width;
+        const margin = 48;
+        const verticallyVisible = (
+            targetTop >= scroller.scrollTop + margin
+            && targetBottom <= scroller.scrollTop + scroller.clientHeight - margin
+        );
+        const horizontallyVisible = (
+            targetLeft >= scroller.scrollLeft + margin
+            && targetRight <= scroller.scrollLeft + scroller.clientWidth - margin
+        );
+        if (verticallyVisible && horizontallyVisible) return;
+
+        const nextTop = clampNumber(
+            targetTop - scroller.clientHeight * 0.35,
+            0,
+            Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        );
+        const nextLeft = clampNumber(
+            targetLeft - scroller.clientWidth * 0.35,
+            0,
+            Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+        );
+        if (typeof scroller.scrollTo === 'function') {
+            scroller.scrollTo({ top: nextTop, left: nextLeft, behavior: 'smooth' });
+        } else {
+            scroller.scrollTop = nextTop;
+            scroller.scrollLeft = nextLeft;
+        }
+    }, []);
+
     useEffect(() => {
         let isMounted = true;
         let retryTimer = null;
         let retryCount = 0;
         const MAX_RETRIES = 15; // 最多重试 15 次（约 1.5 秒）
 
-        if (!highlightInfo || !highlightInfo.text) {
+        const citationAnchor = highlightInfo?.citationAnchor || {};
+        const hasCitationAnchor = Boolean(
+            citationAnchor.blockId
+            || normalizeCitationBBox(citationAnchor.bbox)
+            || (Array.isArray(citationAnchor.rects) && citationAnchor.rects.length > 0)
+        );
+        if (!highlightInfo || (!highlightInfo.text && !hasCitationAnchor)) {
             setHighlightRect(null);
             setHighlightRects([]);
             return;
@@ -600,6 +685,74 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             setHighlightRects([]);
             return;
         }
+
+        // pageNumber 更新时 pageRef 仍可能指向旧页。只在当前渲染代际完成后消费引用定位，
+        // onRenderSuccess 会更新 renderedPageEpoch 并触发本 effect 重试。
+        if (renderedPageEpoch !== pageRenderEpoch) {
+            setHighlightRect(null);
+            setHighlightRects([]);
+            return;
+        }
+
+        const geometryCurrent = isCitationGeometryCurrent(highlightInfo, blockIndex);
+        const anchorBBox = geometryCurrent
+            ? normalizeCitationBBox(citationAnchor.bbox)
+            : null;
+        const blockMatch = findBestCitationBlock({
+            blocks: currentBlocks,
+            text: highlightInfo.text,
+            startPhrase: highlightInfo.startPhrase,
+            endPhrase: highlightInfo.endPhrase,
+            blockId: citationAnchor.blockId,
+            allowBlockId: geometryCurrent,
+        });
+        const spatialBBox = anchorBBox || normalizeCitationBBox(blockMatch?.block?.bbox);
+        const initialPageElement = pageRef.current;
+        const renderedBounds = initialPageElement?.getBoundingClientRect?.();
+        const renderedPageSize = renderedBounds && debouncedScale > 0
+            ? {
+                width: renderedBounds.width / debouncedScale,
+                height: renderedBounds.height / debouncedScale,
+            }
+            : null;
+        const renderOptions = {
+            pageData: currentBlockPage,
+            renderedPageSize,
+            scale: debouncedScale,
+        };
+        const explicitRects = geometryCurrent
+            ? citationRectsToRendered({
+                rects: citationAnchor.rects,
+                coordinateSpace: citationAnchor.coordinateSpace,
+                pageSize: citationAnchor.pageSize,
+                ...renderOptions,
+            })
+            : [];
+        if (explicitRects.length > 0) {
+            setHighlightRect(explicitRects[0]);
+            setHighlightRects(explicitRects);
+            scrollHighlightIntoView(explicitRects);
+            return;
+        }
+
+        const spatialFallbackRects = spatialBBox
+            ? citationRectsToRendered({
+                bbox: spatialBBox,
+                coordinateSpace: anchorBBox
+                    ? citationAnchor.coordinateSpace
+                    : 'pdf_top_left_points',
+                pageSize: anchorBBox
+                    ? citationAnchor.pageSize
+                    : [currentBlockPage?.width_pts, currentBlockPage?.height_pts],
+                ...renderOptions,
+            })
+            : [];
+        setHighlightRect(spatialFallbackRects[0] || null);
+        setHighlightRects(spatialFallbackRects);
+        if (spatialFallbackRects.length > 0) {
+            scrollHighlightIntoView(spatialFallbackRects);
+        }
+        if (!highlightInfo.text) return;
 
         const findHighlight = () => {
             if (!isMounted) return;
@@ -624,290 +777,61 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             }
 
             try {
-                const spans = Array.from(textLayer.querySelectorAll('span'));
-                let fullText = '';
+                const allSpans = Array.from(textLayer.querySelectorAll('span'));
+                const pageRect = pageElement.getBoundingClientRect();
+                let spans = allSpans;
 
-                // 构建完整文本
-                spans.forEach(span => {
-                    fullText += span.textContent;
+                if (spatialFallbackRects.length > 0) {
+                    const constraint = spatialFallbackRects[0];
+                    const left = pageRect.left + constraint.left;
+                    const top = pageRect.top + constraint.top;
+                    const right = left + constraint.width;
+                    const bottom = top + constraint.height;
+                    const constrainedSpans = allSpans.filter((span) => {
+                        const rect = span.getBoundingClientRect();
+                        const overlapX = Math.min(rect.right, right) - Math.max(rect.left, left);
+                        const overlapY = Math.min(rect.bottom, bottom) - Math.max(rect.top, top);
+                        return overlapX > 1 && overlapY > 1;
+                    });
+                    if (constrainedSpans.length > 0) spans = constrainedSpans;
+                }
+
+                const buildText = (items) => items.map((span) => span.textContent || '').join('');
+                let fullText = buildText(spans);
+                let matchedRange = findCitationTextRange({
+                    fullText,
+                    text: highlightInfo.text,
+                    startPhrase: highlightInfo.startPhrase,
+                    endPhrase: highlightInfo.endPhrase,
                 });
 
-                if (!fullText) {
-                    return;
+                // 块内定位失败时才回退到全页，避免双栏和重复短语优先命中错误区域。
+                if (!matchedRange && spans.length !== allSpans.length) {
+                    spans = allSpans;
+                    fullText = buildText(spans);
+                    matchedRange = findCitationTextRange({
+                        fullText,
+                        text: highlightInfo.text,
+                        startPhrase: highlightInfo.startPhrase,
+                        endPhrase: highlightInfo.endPhrase,
+                    });
                 }
+                if (!matchedRange) return;
+                const { startIndex, endIndex } = matchedRange;
 
-                // 去除空白后的标准化字符串用于比较
-                const normalize = (value) => String(value || '').replace(/\s+/g, '').toLowerCase();
-                const searchStr = normalize(highlightInfo.text);
-                const startPhrase = normalize(highlightInfo.startPhrase);
-                const endPhrase = normalize(highlightInfo.endPhrase);
-                const pageStr = normalize(fullText);
-
-                const collectMatches = (needle, limit = 8) => {
-                    if (!needle) return [];
-                    const result = [];
-                    let from = 0;
-                    while (from < pageStr.length && result.length < limit) {
-                        const idx = pageStr.indexOf(needle, from);
-                        if (idx === -1) break;
-                        result.push(idx);
-                        from = idx + Math.max(1, Math.floor(needle.length / 2));
-                    }
-                    return result;
-                };
-
-                const resolveAnchorSpan = () => {
-                    const startMatches = collectMatches(startPhrase);
-                    const endMatches = collectMatches(endPhrase);
-                    const targetLen = Math.min(Math.max(searchStr.length || startPhrase.length || endPhrase.length, 40), 140);
-
-                    let best = null;
-                    for (const s of startMatches.length ? startMatches : [-1]) {
-                        for (const e of endMatches.length ? endMatches : [-1]) {
-                            let start = s;
-                            let end = e;
-                            if (start === -1 && end === -1) continue;
-                            if (start === -1) {
-                                end = end + endPhrase.length;
-                                start = Math.max(0, end - targetLen);
-                            } else if (end === -1) {
-                                end = Math.min(pageStr.length, start + targetLen);
-                            } else {
-                                end = end + endPhrase.length;
-                                if (end <= start) continue;
-                                if (end - start > 220) continue;
-                            }
-                            const spanLen = end - start;
-                            const score = (startPhrase ? 20 : 0) + (endPhrase ? 20 : 0) - spanLen * 0.08;
-                            if (!best || score > best.score || (score === best.score && spanLen < best.spanLen)) {
-                                best = { start, end, score, spanLen };
-                            }
-                        }
-                    }
-                    return best ? { startIndex: best.start, endIndex: best.end } : null;
-                };
-
-                // 策略 0: 优先使用 start/end phrase 锚点，避免大范围误框
-                const anchored = (startPhrase || endPhrase) ? resolveAnchorSpan() : null;
-                let startIndex = anchored ? anchored.startIndex : pageStr.indexOf(searchStr);
-                let endIndex = -1;
-
-                if (anchored) {
-                    endIndex = anchored.endIndex;
-                }
-
-                if (!anchored && startIndex !== -1) {
-                    endIndex = startIndex + searchStr.length;
-                } else if (!anchored) {
-                    const candidateMaxLen = Math.min(120, searchStr.length);
-                    const candidateTexts = [];
-                    if (candidateMaxLen >= 24) {
-                        const midStart = Math.max(0, Math.floor((searchStr.length - candidateMaxLen) / 2));
-                        candidateTexts.push(searchStr.substring(midStart, midStart + candidateMaxLen));
-                        candidateTexts.push(searchStr.substring(0, candidateMaxLen));
-                        candidateTexts.push(searchStr.substring(searchStr.length - candidateMaxLen));
-                    }
-                    for (const candidate of candidateTexts) {
-                        const idx = pageStr.indexOf(candidate);
-                        if (idx !== -1) {
-                            startIndex = idx;
-                            endIndex = idx + candidate.length;
-                            break;
-                        }
-                    }
-                }
-
-                if (!anchored && endIndex === -1) {
-                    // 策略 2: 多锚点匹配（灵活大小）
-                    const anchorSize = Math.min(12, Math.floor(searchStr.length * 0.15));
-                    if (anchorSize < 4) {
-                        return;
-                    }
-                    const startAnchor = searchStr.substring(0, anchorSize);
-                    const endAnchor = searchStr.substring(searchStr.length - anchorSize);
-
-                    const startAnchorIndex = pageStr.indexOf(startAnchor);
-
-                    if (startAnchorIndex !== -1) {
-                        // 尝试找到结尾锚点
-                        const endAnchorIndex = pageStr.indexOf(endAnchor, startAnchorIndex + anchorSize);
-
-                        if (endAnchorIndex !== -1 && endAnchorIndex > startAnchorIndex) {
-                            // 两个锚点都找到了
-                            startIndex = startAnchorIndex;
-                            endIndex = endAnchorIndex + endAnchor.length;
-                        } else {
-                            // 尝试中间锚点作为后备
-                            const midPoint = Math.floor(searchStr.length / 2);
-                            const midAnchor = searchStr.substring(midPoint, midPoint + anchorSize);
-                            const midAnchorIndex = pageStr.indexOf(midAnchor, startAnchorIndex);
-
-                            if (midAnchorIndex !== -1) {
-                                startIndex = startAnchorIndex;
-                                endIndex = Math.min(startIndex + Math.floor(searchStr.length * 1.3), pageStr.length);
-                            } else {
-                                // 最后手段：从起始锚点逐字符匹配
-                                startIndex = startAnchorIndex;
-                                let matchLen = anchorSize;
-                                while (matchLen < searchStr.length && startIndex + matchLen < pageStr.length) {
-                                    if (pageStr[startIndex + matchLen] === searchStr[matchLen]) {
-                                        matchLen++;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                endIndex = startIndex + matchLen;
-                            }
-                        }
-                    } else {
-                        // 策略 3: 滑动窗口子串匹配 — 取搜索文本中间一段尝试匹配
-                        const windowSize = Math.min(20, Math.floor(searchStr.length * 0.3));
-                        if (windowSize >= 6) {
-                            const midStart = Math.floor((searchStr.length - windowSize) / 2);
-                            const midSlice = searchStr.substring(midStart, midStart + windowSize);
-                            const midSliceIndex = pageStr.indexOf(midSlice);
-                            if (midSliceIndex !== -1) {
-                                // 从中间片段向两侧扩展
-                                startIndex = Math.max(0, midSliceIndex - midStart);
-                                endIndex = Math.min(startIndex + searchStr.length, pageStr.length);
-                            }
-                        }
-                    }
-                }
-
-                if (startIndex === -1 || endIndex === -1) return;
-
-                // 将字符串索引映射到 DOM 节点
-                let startNode = null;
-                let startOffset = 0;
-                let endNode = null;
-                let endOffset = 0;
-
-                let currentCharCount = 0;
-                let foundStart = false;
-                let foundEnd = false;
-
-                for (const span of spans) {
-                    const text = span.textContent;
-                    const cleanText = text.replace(/\s+/g, '');
-                    const spanLength = cleanText.length;
-
-                    if (!foundStart) {
-                        if (currentCharCount + spanLength > startIndex) {
-                            foundStart = true;
-                            // Find exact offset in this span
-                            let localCount = 0;
-                            for (let i = 0; i < text.length; i++) {
-                                if (!/\s/.test(text[i])) {
-                                    if (currentCharCount + localCount === startIndex) {
-                                        startNode = span.firstChild;
-                                        startOffset = i;
-                                        break;
-                                    }
-                                    localCount++;
-                                }
-                            }
-                        }
-                    }
-
-                    if (foundStart && !foundEnd) {
-                        if (currentCharCount + spanLength >= endIndex) {
-                            foundEnd = true;
-                            // Find exact end offset
-                            let localCount = 0;
-                            for (let i = 0; i < text.length; i++) {
-                                if (!/\s/.test(text[i])) {
-                                    localCount++;
-                                    if (currentCharCount + localCount === endIndex) {
-                                        endNode = span.firstChild;
-                                        endOffset = i + 1;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    currentCharCount += spanLength;
-                    if (foundEnd) break;
-                }
-
-                if (startNode && endNode) {
-                    const range = document.createRange();
-                    range.setStart(startNode, startOffset);
-                    range.setEnd(endNode, endOffset);
-                    const rects = Array.from(range.getClientRects());
-
-                    if (rects.length > 0) {
-                        const pageRect = pageElement.getBoundingClientRect();
-                        const padding = 4;
-
-                        // 过滤掉零尺寸的矩形
-                        const validRects = rects.filter(r => r.width > 1 && r.height > 1);
-                        if (validRects.length === 0) return;
-
-                        // 按行分组：将垂直位置接近的矩形归为同一行
-                        const lineGroups = [];
-                        for (const rect of validRects) {
-                            let added = false;
-                            for (const group of lineGroups) {
-                                // 如果矩形的垂直中心与组内矩形接近（差距小于行高的一半），归为同一行
-                                const groupMidY = (group[0].top + group[0].bottom) / 2;
-                                const rectMidY = (rect.top + rect.bottom) / 2;
-                                const lineHeight = group[0].bottom - group[0].top;
-                                if (Math.abs(rectMidY - groupMidY) < lineHeight * 0.6) {
-                                    group.push(rect);
-                                    added = true;
-                                    break;
-                                }
-                            }
-                            if (!added) {
-                                lineGroups.push([rect]);
-                            }
-                        }
-
-                        // 按垂直位置排序行组
-                        lineGroups.sort((a, b) => a[0].top - b[0].top);
-
-                        // 将连续的行组合并为紧凑的高亮块（行间距超过 1.5 倍行高则分割）
-                        const highlightBlocks = [];
-                        let currentBlock = [lineGroups[0]];
-
-                        for (let i = 1; i < lineGroups.length; i++) {
-                            const prevGroup = currentBlock[currentBlock.length - 1];
-                            const currGroup = lineGroups[i];
-                            const prevBottom = Math.max(...prevGroup.map(r => r.bottom));
-                            const currTop = Math.min(...currGroup.map(r => r.top));
-                            const avgLineHeight = prevGroup[0].bottom - prevGroup[0].top;
-                            const gap = currTop - prevBottom;
-
-                            if (gap > avgLineHeight * 1.5) {
-                                // 间距过大，开始新的高亮块
-                                highlightBlocks.push(currentBlock);
-                                currentBlock = [currGroup];
-                            } else {
-                                currentBlock.push(currGroup);
-                            }
-                        }
-                        highlightBlocks.push(currentBlock);
-
-                        // 为每个高亮块计算边界矩形
-                        const resultRects = highlightBlocks.map(block => {
-                            const allRects = block.flat();
-                            return {
-                                top: Math.min(...allRects.map(r => r.top)) - pageRect.top - padding,
-                                left: Math.min(...allRects.map(r => r.left)) - pageRect.left - padding,
-                                width: (Math.max(...allRects.map(r => r.right)) - Math.min(...allRects.map(r => r.left))) + padding * 2,
-                                height: (Math.max(...allRects.map(r => r.bottom)) - Math.min(...allRects.map(r => r.top))) + padding * 2
-                            };
-                        });
-
-                        if (isMounted) {
-                            // 兼容旧的单矩形模式（取第一个块）
-                            setHighlightRect(resultRects[0] || null);
-                            setHighlightRects(resultRects);
-                        }
-                    }
+                const clientRects = collectTextRangeClientRects(
+                    spans,
+                    { startIndex, endIndex }
+                );
+                const resultRects = mergeClientRectsByLine(
+                    clientRects,
+                    pageElement.getBoundingClientRect(),
+                    3
+                );
+                if (resultRects.length > 0 && isMounted) {
+                    setHighlightRect(resultRects[0]);
+                    setHighlightRects(resultRects);
+                    scrollHighlightIntoView(resultRects);
                 }
             } catch (e) {
                 console.error('Error calculating highlight:', e);
@@ -923,7 +847,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             if (retryTimer) clearTimeout(retryTimer);
         };
 
-    }, [highlightInfo, pageNumber, scale, numPages]);
+    }, [blockIndex, currentBlockPage, currentBlocks, debouncedScale, highlightInfo, numPages, pageNumber, pageRenderEpoch, renderedPageEpoch, scrollHighlightIntoView]);
 
     const activeOverlayBlockId = hoveredBlockId || activeBlockId;
     const focusedBlockSet = useMemo(() => new Set(focusedBlockIds || []), [focusedBlockIds]);
@@ -1294,12 +1218,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 onScroll={updateThumbs}
             >
                 {!pdfFile ? (
-                    <div className="flex items-center justify-center h-full">
-                        <div className="text-center">
-                            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
-                            <div className="text-gray-500">加载PDF中...</div>
-                        </div>
-                    </div>
+                    <PDFLoadingState darkMode={darkMode} />
                 ) : error ? (
                     <div className="flex flex-col items-center justify-center h-full text-center p-8">
                         <div className="text-red-500 text-6xl mb-4">⚠️</div>
@@ -1314,14 +1233,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         file={pdfFile}
                         onLoadSuccess={onDocumentLoadSuccess}
                         onLoadError={onDocumentLoadError}
-                        loading={
-                            <div className="flex items-center justify-center h-full">
-                                <div className="text-center">
-                                    <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mb-4"></div>
-                                    <div className="text-gray-500">加载PDF中...</div>
-                                </div>
-                            </div>
-                        }
+                        loading={<PDFLoadingState darkMode={darkMode} />}
                     >
                         <div ref={ref} className={`relative shadow-[0_2px_15px_rgba(0,0,0,0.06)] bg-white rounded-sm ${darkMode ? 'shadow-none !bg-transparent' : ''}`} style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
                             {/* 缩放过渡期间使用 CSS transform 即时缩放缓存画面，避免白屏 */}
@@ -1365,9 +1277,13 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 if (!bbox) return null;
                                 const isFocused = focusedBlockSet.has(block.block_id);
                                 const isVisited = !isFocused && visitedBlockSet.has(block.block_id);
-                                const isActive = !isFocused && !isVisited && block.block_id === activeOverlayBlockId;
+                                const isFocusedHover = isFocused && block.block_id === hoveredBlockId;
+                                const isActive = !isVisited
+                                    && block.block_id === activeOverlayBlockId
+                                    && (!isFocused || isFocusedHover);
+                                const showFocusPulse = isFocused && focusPulseToken > 0;
                                 const tone = isFocused
-                                    ? 'border-slate-500 bg-slate-300/10 shadow-[0_0_0_2px_rgba(15,23,42,0.14)]'
+                                    ? 'border-transparent bg-transparent'
                                     : isVisited
                                         ? 'border-slate-300 bg-slate-200/8 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]'
                                         : isActive
@@ -1382,9 +1298,17 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                             top: bbox[1] * debouncedScale,
                                             width: (bbox[2] - bbox[0]) * debouncedScale,
                                             height: (bbox[3] - bbox[1]) * debouncedScale,
-                                            opacity: isFocused || isVisited || isActive ? 1 : 0,
+                                            opacity: showFocusPulse || isVisited || isActive ? 1 : 0,
                                         }}
                                     >
+                                        {showFocusPulse && (
+                                            <span
+                                                key={`${block.block_id}-${focusPulseToken}`}
+                                                className={`pdf-reading-jump-pulse ${darkMode ? 'pdf-reading-jump-pulse--dark' : ''}`}
+                                                data-reading-jump-pulse={focusPulseToken}
+                                                aria-hidden="true"
+                                            />
+                                        )}
                                     </div>
                                 );
                             })}

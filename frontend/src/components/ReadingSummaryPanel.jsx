@@ -1,5 +1,6 @@
 import React, { memo, useMemo } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react';
+import { AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
+import BreatheLoader from './BreatheLoader';
 
 const AtomIcon = ({ className = '' }) => (
   <svg
@@ -46,9 +47,13 @@ function ReadingSummaryPanel({
 
   if (loading) {
     return (
-      <div className={`h-full flex items-center justify-center text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-        生成总结中
+      <div
+        className={`flex h-full flex-col items-center justify-center gap-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        role="status"
+        aria-live="polite"
+      >
+        <BreatheLoader className={darkMode ? 'text-[#FFA07A]' : 'text-[#D97A5D]'} />
+        <span>生成总结中</span>
       </div>
     );
   }

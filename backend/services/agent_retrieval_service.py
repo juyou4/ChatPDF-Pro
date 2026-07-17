@@ -38,6 +38,7 @@ class AgentRetrievalDependencies:
     generate_page_level_citations: Callable[..., list[dict]]
     build_agent_detail_citations: Callable[..., list[dict]]
     build_visual_evidence_analyzer: Callable[..., Any] | None = None
+    perform_web_search: Callable[..., Any] | None = None
 
 
 def _build_context_from_citation_candidates(citations: list[dict], fallback_context: str = "") -> str:
@@ -263,6 +264,25 @@ async def run_agent_retrieval_for_context(
             logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")
             sub_questions = []
 
+    web_search_executor = None
+    if bool(getattr(request, "enable_web_search", False)) and deps.perform_web_search is not None:
+        # Freeze the network query before the planner sees any untrusted PDF
+        # evidence. Later planner rounds may decide whether to use the one-shot
+        # tool, but document text can never become an outbound query.
+        frozen_web_query = str(search_query or request.question or "").strip()
+
+        async def _agent_web_search():
+            return await deps.perform_web_search(
+                request,
+                query_override=frozen_web_query,
+                doc_title=doc.get("filename", ""),
+                selected_text=request.selected_text or "",
+                doc_id=request.doc_id,
+                vector_store_dir=vector_store_dir,
+            )
+
+        web_search_executor = _agent_web_search
+
     agent_doc_ctx = deps.build_agent_doc_context(
         request.doc_id,
         doc,
@@ -273,6 +293,7 @@ async def run_agent_retrieval_for_context(
         rerank_provider=request.rerank_provider or "",
         rerank_api_key=request.rerank_api_key or "",
         rerank_endpoint=request.rerank_endpoint or "",
+        web_search_executor=web_search_executor,
     )
     visual_analyzer = None
     if deps.build_visual_evidence_analyzer is not None:
@@ -377,6 +398,8 @@ async def run_agent_retrieval_for_context(
             "task_status": {},
             "diagnostics": partial_agent_diag,
             "retrieval_diagnostics": partial_retrieval_diag,
+            "web_search_sources": list((agent._partial_state.get("web_search_sources") if hasattr(agent, "_partial_state") else None) or []),
+            "web_search_context": "\n\n".join((agent._partial_state.get("web_search_context_parts") if hasattr(agent, "_partial_state") else None) or []),
         }
     except Exception as exc:
         logger.warning(f"[Agent] 多轮检索失败，降级为全文编号上下文: {exc}")
@@ -388,6 +411,12 @@ async def run_agent_retrieval_for_context(
     if isinstance(agent_result, dict):
         if agent_result.get("search_history"):
             retrieval_meta["agent_search_history"] = agent_result.get("search_history")
+        web_sources = agent_result.get("web_search_sources")
+        if isinstance(web_sources, list):
+            retrieval_meta["web_search_sources"] = [dict(item) for item in web_sources if isinstance(item, dict)]
+        web_context = str(agent_result.get("web_search_context") or "").strip()
+        if web_context:
+            retrieval_meta["web_search_context"] = web_context
         if agent_result.get("task_status"):
             retrieval_meta["task_status"] = agent_result.get("task_status")
         agent_retrieval_diagnostics = agent_result.get("retrieval_diagnostics")
@@ -403,6 +432,9 @@ async def run_agent_retrieval_for_context(
                 {"diagnostics": merged_agent_diagnostics},
             )
         if isinstance(agent_diagnostics, dict):
+            evidence_state = agent_diagnostics.get("evidence_state")
+            if isinstance(evidence_state, dict):
+                retrieval_meta["agent_evidence_state"] = dict(evidence_state)
             if agent_diagnostics.get("last_error"):
                 retrieval_meta["agent_error"] = agent_diagnostics.get("last_error")
             if agent_diagnostics.get("fallback_reason"):

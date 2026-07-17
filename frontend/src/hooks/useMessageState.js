@@ -85,12 +85,14 @@ export const getNumericTableVisualVerification = (retrievalMeta) =>
   );
 
 const STREAM_RENDER_PROFILES = {
-  // flushChars 故意保持较小，确保“仅在 done 才拿到大块内容”时，
-  // 仍能明显看到逐步展开，而不是一帧内几乎全部冲完。
+  // 这些值控制小队列的基础节奏；大队列由 useSmoothStream 自适应提速，
+  // 不再让打字机动画落后于模型实际输出。
   fast: { minDelay: 16, frameChars: 4, flushChars: 10 },
   normal: { minDelay: 28, frameChars: 2, flushChars: 4 },
   slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
+
+export const STREAM_FINAL_FLUSH_GRACE_MS = 320;
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
@@ -449,6 +451,7 @@ export const createInitialAgentTrace = () => ({
   error: '',
   fallbackReason: '',
   diagnostics: null,
+  evidenceState: null,
 });
 
 // 后端 retrieval_agent 会发出的 phase
@@ -592,6 +595,12 @@ export const mergeAgentMetaIntoTrace = (trace, meta) => {
   }
   if (meta.diagnostics?.agent && typeof meta.diagnostics.agent === 'object') {
     trace.diagnostics = meta.diagnostics.agent;
+  }
+  if (meta.agent_evidence_state && typeof meta.agent_evidence_state === 'object') {
+    trace.evidenceState = meta.agent_evidence_state;
+  } else if (meta.diagnostics?.agent?.evidence_state && typeof meta.diagnostics.agent.evidence_state === 'object') {
+    // Compatibility with older responses that only nest this state under diagnostics.
+    trace.evidenceState = meta.diagnostics.agent.evidence_state;
   }
   if (Array.isArray(meta.agent_search_history)) {
     trace.searchHistory = meta.agent_search_history;
@@ -1288,25 +1297,28 @@ export function useMessageState({
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
         clearFirstEventTimer();
 
-        // 流结束，标记 streamDone 触发 smoothFlush 渐进渲染
+        // 流结束，标记 streamDone 触发短暂的自适应冲刷。
         setContentStreamDone(true);
         setThinkingStreamDone(true);
-        // 等待 smoothFlush 动画将队列排空后再同步最终状态（最多等 5 秒）
+        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
+        // 只给动画一个很短的收尾窗口；超过后立即同步最终文本，避免模型已完成
+        // 但界面仍卡在思考态或半截回答数秒。
         {
           const flushStart = Date.now();
           while (
             (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete()) &&
-            Date.now() - flushStart < 5000
+            Date.now() - flushStart < STREAM_FINAL_FLUSH_GRACE_MS
           ) {
             await new Promise(r => requestAnimationFrame(r));
           }
         }
+        contentStream.flushNow?.(streamedContent);
+        thinkingStream.flushNow?.(currentThinking);
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
           thinkingLastUpdateTime,
           contentStartTime,
         });
-        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
         const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
           streamedContent,
           streamCitationsRef.current

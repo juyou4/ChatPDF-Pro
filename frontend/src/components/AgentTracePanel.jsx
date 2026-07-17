@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
   ChevronDown,
   ChevronRight,
-  Bot,
+  Globe,
   ScanSearch,
   Search,
   Hash,
@@ -17,20 +18,25 @@ import {
 
 // 工具到 icon / 中文标签的映射，与后端 retrieval_agent / retrieval_tools 保持一致
 const TOOL_META = {
-  vector_search: { label: '向量搜索', icon: Sparkles, iconClass: 'text-violet-500' },
-  keyword_search: { label: 'BM25 关键词', icon: Hash, iconClass: 'text-amber-500' },
-  grep: { label: 'GREP 字面', icon: Search, iconClass: 'text-sky-500' },
-  regex_search: { label: '正则匹配', icon: Search, iconClass: 'text-cyan-500' },
-  boolean_search: { label: '布尔逻辑', icon: Wrench, iconClass: 'text-indigo-500' },
-  fetch: { label: '获取意群', icon: Layers, iconClass: 'text-emerald-500' },
-  map: { label: '文档地图', icon: Map, iconClass: 'text-rose-500' },
+  search_document: { label: '统一检索', icon: ScanSearch },
+  web_search: { label: '联网检索', icon: Globe },
+  read_blocks: { label: '读取原文块', icon: Layers },
+  visual_search: { label: '定位视觉证据', icon: ScanSearch },
+  analyze_visual_evidence: { label: '分析图表证据', icon: Sparkles },
+  complete: { label: '结束检索', icon: Check },
+  vector_search: { label: '向量搜索', icon: Sparkles },
+  keyword_search: { label: 'BM25 关键词', icon: Hash },
+  grep: { label: 'GREP 字面', icon: Search },
+  regex_search: { label: '正则匹配', icon: Search },
+  boolean_search: { label: '布尔逻辑', icon: Wrench },
+  fetch: { label: '获取意群', icon: Layers },
+  map: { label: '文档地图', icon: Map },
 };
 
 const getToolMeta = (tool) =>
   TOOL_META[tool] || {
     label: tool || '工具',
     icon: Wrench,
-    iconClass: 'text-gray-500',
   };
 
 const formatDuration = (startedAt, endedAt) => {
@@ -57,6 +63,13 @@ const AGENT_GATE_REASON_LABELS = {
   stream_only: '非流式未执行',
 };
 
+const EVIDENCE_STATUS_LABELS = {
+  answered: '证据已就绪',
+  insufficient_evidence: '证据不足',
+  budget_exhausted: '工具预算已用尽',
+  gathering: '正在收集证据',
+};
+
 /**
  * 检索代理执行轨迹面板。
  * embedded=true 时作为思考面板内的子区域显示，避免完成后跳到回答下方。
@@ -74,10 +87,9 @@ const BouncingDots = ({ className = 'bg-[#D97A5D]' }) => (
 );
 
 export default function AgentTracePanel({ trace, embedded = false }) {
-  const [collapsed, setCollapsed] = useState(() => Boolean(trace?.endedAt));
-  const [expandedRounds, setExpandedRounds] = useState(() => new Set(trace?.endedAt ? [] : [1]));
-
   const isRunning = Boolean(trace && trace.enabled && trace.startedAt && !trace.endedAt);
+  const [collapsed, setCollapsed] = useState(() => !isRunning);
+  const [expandedRounds, setExpandedRounds] = useState(() => new Set(isRunning ? [1] : []));
   const wasRunningRef = useRef(isRunning);
 
   // 运行中每 500ms 触发一次重绘，让头部计时器实时走动
@@ -88,12 +100,13 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     return () => clearInterval(id);
   }, [isRunning]);
 
-  // 新一轮开始时自动展开，让执行过程始终可见
+  // 新一轮开始时展示最新进展；用户仍可在当前轮手动收起。
   const roundsLength = Array.isArray(trace?.rounds) ? trace.rounds.length : 0;
   useEffect(() => {
     if (!isRunning || !roundsLength) return;
     const latest = trace.rounds[roundsLength - 1]?.round;
     if (latest == null) return;
+    setCollapsed(false);
     setExpandedRounds((prev) => {
       if (prev.has(latest)) return prev;
       const next = new Set(prev);
@@ -102,9 +115,12 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     });
   }, [isRunning, roundsLength]);
 
-  // 运行结束后保留轨迹摘要，但收起各轮细节，避免完成消息长期占满对话区。
+  // 检索开始自动展开，结束后压缩成一行摘要，避免历史过程长期占满对话区。
   useEffect(() => {
-    if (wasRunningRef.current && !isRunning) {
+    if (!wasRunningRef.current && isRunning) {
+      setCollapsed(false);
+    } else if (wasRunningRef.current && !isRunning) {
+      setCollapsed(true);
       setExpandedRounds(new Set());
     }
     wasRunningRef.current = isRunning;
@@ -130,6 +146,7 @@ export default function AgentTracePanel({ trace, embedded = false }) {
   const taskStatus = trace.taskStatus || { completed: [], current: '', pending: [] };
   const gate = trace.agentGate || null;
   const diagnostics = trace.diagnostics || null;
+  const evidenceState = trace.evidenceState || diagnostics?.evidence_state || null;
   const contextBudget = diagnostics?.context_budget || null;
   const subQuestions = trace.subQuestions || trace.diagnostics?.sub_questions || [];
   const coverage = trace.taskStatus?.sub_question_coverage || [];
@@ -170,12 +187,26 @@ export default function AgentTracePanel({ trace, embedded = false }) {
         }`
       );
     }
+    if (evidenceState && typeof evidenceState === 'object') {
+      const status = String(evidenceState.status || 'gathering');
+      const pieces = [EVIDENCE_STATUS_LABELS[status] || status];
+      const toolCalls = Number(evidenceState.tool_call_count);
+      const independentEvidence = Number(evidenceState.independent_evidence_count);
+      const selectedBlocks = Number(evidenceState.selected_block_count);
+      if (Number.isFinite(toolCalls) && toolCalls > 0) pieces.push(`${toolCalls} 次工具`);
+      if (Number.isFinite(independentEvidence) && independentEvidence > 0) {
+        pieces.push(`${independentEvidence} 路证据`);
+      } else if (Number.isFinite(selectedBlocks) && selectedBlocks > 0) {
+        pieces.push(`${selectedBlocks} 个原文块`);
+      }
+      items.push(`证据: ${pieces.join(' · ')}`);
+    }
     if (trace.fallbackReason) items.push(`降级原因: ${trace.fallbackReason}`);
     if (trace.error) items.push(`错误: ${trace.error}`);
     if (items.length === 0) return null;
 
     return (
-      <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-[8px] bg-[#faf7f4] px-2.5 py-2 text-[11px] text-gray-600 dark:bg-white/[0.04] dark:text-gray-300">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 border-l border-[#ddd8d4] py-1 pl-2.5 text-[11px] text-gray-500 dark:border-white/10 dark:text-gray-400">
         {items.map((item, index) => (
           <span key={index} className={item.startsWith('错误') ? 'text-rose-600 dark:text-rose-400' : ''}>
             {item}
@@ -185,38 +216,101 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     );
   };
 
-  const renderTaskStatus = () => (
-    <div className="rounded-[8px] bg-[#faf7f4] p-2.5 text-xs dark:bg-white/[0.04]">
-      <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
-        <Bot className="h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
-        <span>任务状态</span>
+  // 任务清单：参考纵向步骤轴，当前步骤直接承载检索轮次，形成一条连续流程。
+  const renderTaskStatus = (renderCurrentRounds) => {
+    const completedTasks = Array.isArray(taskStatus.completed) ? taskStatus.completed : [];
+    const pendingTasks = Array.isArray(taskStatus.pending) ? taskStatus.pending : [];
+    const doneCount = completedTasks.length;
+    const totalCount = doneCount + (taskStatus.current ? 1 : 0) + pendingTasks.length;
+    const pct = totalCount > 0 ? (doneCount / totalCount) * 100 : 0;
+    const steps = [
+      ...completedTasks.map((label, index) => ({ key: `done-${index}`, label, status: 'done' })),
+      ...(taskStatus.current
+        ? [{ key: 'current', label: taskStatus.current, status: 'active' }]
+        : []),
+      ...pendingTasks.map((label, index) => ({ key: `pending-${index}`, label, status: 'pending' })),
+    ];
+
+    return (
+      <div className="rounded-[12px] bg-[#f8f7f5] px-4 pb-3.5 pt-3.5 text-xs dark:bg-white/[0.035]">
+        <div className="mb-2 flex items-center text-[11px] text-gray-500 dark:text-gray-400">
+          <span>检索进度 · 已完成 {doneCount} / {totalCount}</span>
+        </div>
+        <div
+          className="h-[3px] w-full overflow-hidden rounded-full bg-[#e8e6e3] dark:bg-white/10"
+          role="progressbar"
+          aria-label="检索进度"
+          aria-valuemin={0}
+          aria-valuemax={totalCount}
+          aria-valuenow={doneCount}
+        >
+          <div
+            className="h-full rounded-full bg-[#242629] transition-[width] duration-500 ease-out dark:bg-gray-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <div className="mt-4">
+          {steps.map((step, index) => {
+            const isLast = index === steps.length - 1;
+            const isActive = step.status === 'active';
+            return (
+              <div
+                key={step.key}
+                className={`agent-op-enter relative flex gap-3 ${isLast ? '' : 'min-h-[44px] pb-3'}`}
+              >
+                {!isLast && (
+                  <span
+                    className="absolute bottom-[-1px] left-[9.5px] top-5 w-px bg-[#dedbd8] dark:bg-white/10"
+                    aria-hidden="true"
+                  />
+                )}
+                {step.status === 'done' ? (
+                  <span className="relative z-[1] flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#242629] text-white shadow-[0_2px_5px_rgba(0,0,0,0.16)] dark:bg-gray-200 dark:text-gray-900">
+                    <Check className="h-3 w-3" strokeWidth={3} aria-hidden="true" />
+                  </span>
+                ) : isActive ? (
+                  <span className="relative z-[1] flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[#d8d5d2] bg-white dark:border-white/15 dark:bg-[#292c32]">
+                    {isRunning ? (
+                      <Loader2
+                        className="h-4 w-4 animate-spin text-[#242629] motion-reduce:animate-none dark:text-gray-200"
+                        strokeWidth={2.2}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <span className="h-1.5 w-1.5 rounded-full bg-gray-500 dark:bg-gray-400" aria-hidden="true" />
+                    )}
+                  </span>
+                ) : (
+                  <span
+                    className="relative z-[1] h-5 w-5 flex-shrink-0 rounded-full border border-[#dedbd8] bg-[#f8f7f5] dark:border-white/15 dark:bg-[#30333a]"
+                    aria-hidden="true"
+                  />
+                )}
+                <div className="min-w-0 flex-1 pt-px">
+                  <div
+                    className={`line-clamp-2 leading-[19px] ${
+                      step.status === 'done'
+                        ? 'text-gray-500 dark:text-gray-400'
+                        : isActive
+                          ? 'font-medium text-gray-800 dark:text-gray-100'
+                          : 'text-gray-400 dark:text-gray-500'
+                    }`}
+                  >
+                    {step.label}
+                  </div>
+                  {isActive && renderCurrentRounds && (
+                    <div className="mt-2.5 overflow-hidden border-t border-[#e6e3e0] pt-1 dark:border-white/[0.08]">
+                      {renderCurrentRounds()}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
-      <div className="flex flex-col gap-1.5">
-        {taskStatus.completed?.map((task, index) => (
-          <div key={`done-${index}`} className="flex items-start gap-1.5 text-emerald-700 dark:text-emerald-400">
-            <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0" />
-            <span className="line-clamp-2">{task}</span>
-          </div>
-        ))}
-        {taskStatus.current && (
-          <div className="agent-op-enter flex items-start gap-1.5 text-[#B85F47] dark:text-[#FFA07A]">
-            {isRunning ? (
-              <Loader2 className="mt-0.5 h-3 w-3 flex-shrink-0 animate-spin" />
-            ) : (
-              <Circle className="mt-0.5 h-3 w-3 flex-shrink-0" />
-            )}
-            <span className="line-clamp-2">{taskStatus.current}</span>
-          </div>
-        )}
-        {taskStatus.pending?.map((task, index) => (
-          <div key={`pending-${index}`} className="flex items-start gap-1.5 text-gray-500 dark:text-gray-400">
-            <Circle className="mt-0.5 h-3 w-3 flex-shrink-0" />
-            <span className="line-clamp-2">{task}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderOperation = (op, index) => {
     const meta = getToolMeta(op.tool);
@@ -228,18 +322,10 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     return (
       <div
         key={index}
-        className={`agent-op-enter flex items-start gap-2 border-t px-2.5 py-2 text-[11px] transition-colors duration-300 first:border-t-0 ${
-          isExecuting
-            ? 'agent-op-running border-[#FFDCCF] dark:border-[#FFA07A]/30'
-            : 'border-[#eee9e5] bg-transparent dark:border-white/[0.08]'
-        }`}
+        className="agent-op-enter flex items-start gap-2 border-t border-[#ece9e6] bg-transparent px-0.5 py-2.5 text-[11px] first:border-t-0 dark:border-white/[0.08]"
       >
-        <span
-          className={`mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md ${
-            isExecuting ? 'animate-pulse bg-[#FFF4EF] dark:bg-[#FFA07A]/10' : 'bg-[#f5f2ef] dark:bg-white/[0.05]'
-          }`}
-        >
-          <Icon className={`h-3.5 w-3.5 ${meta.iconClass}`} />
+        <span className="mt-[3px] flex h-4 w-4 flex-shrink-0 items-center justify-center" aria-hidden="true">
+          <Icon className={`h-3.5 w-3.5 ${isExecuting ? 'text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}`} />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
@@ -249,8 +335,8 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             )}
             {elapsed && <span className="text-gray-400 dark:text-gray-500">· {elapsed}</span>}
             {isExecuting && (
-              <span className="inline-flex items-center gap-1 text-[#B85F47] dark:text-[#FFA07A]">
-                <Loader2 className="h-3 w-3 animate-spin" />
+              <span className="inline-flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-500 motion-reduce:animate-none dark:bg-gray-400" aria-hidden="true" />
                 执行中
               </span>
             )}
@@ -274,37 +360,32 @@ export default function AgentTracePanel({ trace, embedded = false }) {
     const invocationMode = trace.diagnostics?.planner_invocation_mode?.[roundIndex];
     const isCurrentRound = isRunning && roundIndex === rounds.length - 1;
 
+    const isRoundDone = !isCurrentRound;
+
     return (
       <div
         key={round}
-        className={`agent-op-enter overflow-hidden rounded-[10px] border transition-colors duration-300 ${
-          isCurrentRound
-            ? 'border-[#f0c7b8] bg-[#fff9f6] dark:border-[#FFA07A]/30 dark:bg-[#FFA07A]/[0.05]'
-            : 'border-transparent bg-[#faf7f4] dark:border-white/[0.06] dark:bg-white/[0.025]'
-        }`}
+        className="agent-op-enter overflow-hidden border-b border-[#eeeae7] bg-transparent transition-colors duration-200 last:border-b-0 hover:bg-[#faf9f7] dark:border-white/[0.07] dark:hover:bg-white/[0.025]"
       >
         <button
           type="button"
           onClick={() => toggleRound(round)}
-          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs transition-colors hover:bg-[#f8f3f0] dark:hover:bg-white/[0.04]"
+          className="flex w-full items-center gap-2 px-1 py-2.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-gray-400/35"
         >
-          {isExpanded ? (
-            <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
+          {isCurrentRound ? (
+            <span className="flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center" aria-hidden="true">
+              <span className="h-1.5 w-1.5 rounded-full bg-gray-500 dark:bg-gray-400" />
+            </span>
           ) : (
-            <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
+            <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-gray-400 dark:text-gray-500">
+              {isRoundDone ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : round}
+            </span>
           )}
-          <span
-            className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-[#FFF0E9] text-[10px] font-bold text-[#B85F47] dark:bg-[#FFA07A]/15 dark:text-[#FFA07A] ${
-              isCurrentRound ? 'animate-pulse ring-2 ring-[#FFDCCF]/80 dark:ring-[#FFA07A]/30' : ''
-            }`}
-          >
-            {round}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200">
+          <span className={`min-w-0 flex-1 truncate ${isCurrentRound ? 'font-medium text-gray-800 dark:text-gray-100' : 'text-gray-700 dark:text-gray-200'}`}>
             第 {round} 轮 · {opCount} 个工具{successCount > 0 ? ` · ${successCount} 命中` : ''}
           </span>
           {invocationMode === 'native_tools' && (
-            <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+            <span className="rounded-[5px] border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:border-white/10 dark:text-gray-400">
               原生工具
             </span>
           )}
@@ -314,143 +395,166 @@ export default function AgentTracePanel({ trace, embedded = false }) {
             </span>
           )}
           {roundData.planningMessage && !operations.length && (
-            <span className="inline-flex items-center text-[10px] text-[#B85F47] dark:text-[#FFA07A]">
+            <span className="inline-flex items-center text-[10px] text-gray-500 dark:text-gray-400">
               规划中
-              {isCurrentRound && <BouncingDots />}
+              {isCurrentRound && <BouncingDots className="bg-gray-500 dark:bg-gray-400" />}
             </span>
           )}
+          <ChevronDown
+            className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform duration-300 ${
+              isExpanded ? 'rotate-0' : '-rotate-90'
+            }`}
+          />
         </button>
-        {isExpanded && (
-          <div className="px-3 pb-2.5 pt-0.5">
-            {roundData.planningMessage && (
-              <div className="px-0.5 text-[11px] italic text-gray-500 dark:text-gray-400">
-                {roundData.planningMessage}
-              </div>
-            )}
-            {operations.length === 0 ? (
-              <div className="px-0.5 text-[11px] italic text-gray-400">该轮未执行任何工具</div>
-            ) : (
-              operations.map((op, opIndex) => renderOperation(op, opIndex))
-            )}
+        {/* 轮次明细：与外层收合同款的 grid-rows 展开动画，消灭瞬时跳变 */}
+        <div
+          className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none ${
+            isExpanded ? 'grid-rows-[1fr] opacity-100' : 'pointer-events-none grid-rows-[0fr] opacity-0'
+          }`}
+          aria-hidden={!isExpanded}
+        >
+          <div className="min-h-0 overflow-hidden">
+            <div className="pb-2.5 pl-7 pr-1 pt-0.5">
+              {roundData.planningMessage && (
+                <div className="px-0.5 text-[11px] italic text-gray-500 dark:text-gray-400">
+                  {roundData.planningMessage}
+                </div>
+              )}
+              {operations.length === 0 ? (
+                <div className="px-0.5 text-[11px] italic text-gray-400">该轮未执行任何工具</div>
+              ) : (
+                operations.map((op, opIndex) => renderOperation(op, opIndex))
+              )}
+            </div>
           </div>
-        )}
+        </div>
       </div>
     );
   };
 
   const rootClass = embedded
-    ? 'mt-2 rounded-[14px] border border-[#eadfd8] bg-white px-3.5 py-3 shadow-[0_12px_30px_-20px_rgba(78,64,56,0.38),0_2px_7px_-4px_rgba(78,64,56,0.14),inset_0_1px_0_rgba(255,255,255,0.96)] dark:border-white/[0.09] dark:bg-[#25282f] dark:shadow-[0_14px_32px_-20px_rgba(0,0,0,0.68),inset_0_1px_0_rgba(255,255,255,0.04)]'
-    : 'mt-2 ml-2 max-w-2xl';
+    ? 'mt-3 border-t border-[#eee5e0] pt-2 dark:border-white/[0.07]'
+    : 'mt-2 ml-2 max-w-2xl rounded-[16px] border border-[#eadfd8] bg-white p-2 shadow-[0_14px_30px_-23px_rgba(91,65,52,0.5)] dark:border-white/[0.09] dark:bg-[#25282f]';
 
   return (
     <div className={rootClass}>
       <button
         type="button"
         onClick={() => setCollapsed((prev) => !prev)}
-        className={`flex w-full items-center gap-1.5 text-left text-xs text-gray-600 transition-colors hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100 ${collapsed ? '' : 'mb-2'}`}
+        className="group flex w-full items-center gap-2 rounded-[8px] px-1.5 py-2 text-left text-xs text-gray-600 transition-colors duration-200 hover:bg-[#faf9f7] hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400/35 dark:text-gray-300 dark:hover:bg-white/[0.03] dark:hover:text-gray-100"
+        aria-expanded={!collapsed}
       >
-        {collapsed ? (
-          <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" />
-        ) : (
-          <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" />
-        )}
-        <span className="relative flex h-3.5 w-3.5 flex-shrink-0" aria-hidden="true">
-          {isRunning && (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#D97A5D] opacity-50" />
-          )}
-          <ScanSearch className="relative h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
+        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-gray-500 dark:text-gray-400" aria-hidden="true">
+          <ScanSearch className="h-4 w-4" strokeWidth={1.8} />
         </span>
-        <span className="font-medium">检索轨迹</span>
+        <span className="flex-shrink-0 font-medium">{isRunning ? '检索轨迹' : '检索完成'}</span>
         {isRunning && (
-          <span className="inline-flex items-center gap-1 rounded-full border border-[#FFDCCF] bg-[#FFF4EF] px-1.5 py-0.5 text-[10px] font-medium text-[#B85F47] dark:border-[#FFA07A]/30 dark:bg-[#FFA07A]/10 dark:text-[#FFA07A]">
-            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          <span className="inline-flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium tabular-nums text-gray-500 dark:text-gray-400">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-600 motion-reduce:animate-none dark:bg-gray-300" aria-hidden="true" />
             检索中{liveDuration ? ` ${liveDuration}` : ''}
           </span>
         )}
         {stats && (
-          <span className="truncate text-gray-400 dark:text-gray-500">
+          <span className="min-w-0 truncate text-gray-400 dark:text-gray-500">
             {stats.roundCount} 轮 · {stats.opCount} 次工具
             {stats.totalResults > 0 ? ` · ${stats.totalResults} 个结果` : ''}
             {!isRunning && duration ? ` · ${duration}` : ''}
           </span>
         )}
         {trace.fallback && (
-          <span className="ml-auto rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+          <span className="ml-auto flex-shrink-0 rounded-[5px] border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
             已降级
           </span>
         )}
+        <ChevronDown
+          className={`ml-auto h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform duration-300 ${
+            collapsed ? '-rotate-90' : 'rotate-0'
+          }`}
+        />
       </button>
 
-      {isRunning && !collapsed && (
-        <div className="agent-progress-track mb-2 h-[3px] w-full rounded-full bg-[#FFE8DE] dark:bg-[#FFA07A]/10" aria-hidden="true">
-          <span className="agent-progress-sweep" />
+      <div
+        className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
+          collapsed ? 'invisible grid-rows-[0fr] opacity-0' : 'visible grid-rows-[1fr] opacity-100'
+        }`}
+        aria-hidden={collapsed}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="flex flex-col gap-1.5 px-1.5 pb-1 pt-1">
+            {isRunning && !hasTaskStatus && (
+              <div className="agent-progress-track h-[2px] w-full rounded-full bg-[#e8e5e2] dark:bg-white/10" aria-hidden="true">
+                <span className="agent-progress-sweep" />
+              </div>
+            )}
+
+            {renderMetaSummary()}
+
+            {hasTaskStatus &&
+              renderTaskStatus(
+                rounds.length > 0
+                  ? () => rounds.map((roundData, index) => renderRound(roundData, index))
+                  : null
+              )}
+
+            {subQuestions.length > 0 && (
+              <div className="border-t border-[#eee8e4] px-1 py-2 text-xs dark:border-white/[0.07]">
+                <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
+                  <Search className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
+                  <span>子问题分解</span>
+                  <span className="text-gray-400">({subQuestions.length})</span>
+                </div>
+                <div className="space-y-1.5">
+                  {subQuestions.map((question, index) => (
+                    <div key={index} className="flex items-start gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                      {coverage[index] ? (
+                        <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-500" />
+                      ) : (
+                        <Circle className="mt-0.5 h-3 w-3 flex-shrink-0 text-gray-400" />
+                      )}
+                      <span className="line-clamp-2 flex-1">{question}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {rounds.length > 0 && !taskStatus.current && (
+              <div className="overflow-hidden border-y border-[#eee8e4] dark:border-white/[0.07]">
+                {rounds.map((roundData, index) => renderRound(roundData, index))}
+              </div>
+            )}
+
+            {trace.finalMessage && (
+              <div className="agent-op-enter border-l border-[#ddd8d4] py-1 pl-2.5 text-[11px] italic text-gray-500 dark:border-white/10 dark:text-gray-400">
+                {trace.finalMessage}
+              </div>
+            )}
+
+            {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
+              <details className="border-t border-[#eee8e4] px-1 py-2 text-[11px] text-gray-500 dark:border-white/[0.07] dark:text-gray-400">
+                <summary className="cursor-pointer select-none font-medium text-gray-600 dark:text-gray-300">
+                  已纳入意群 <span className="font-normal text-gray-400">({trace.agentDetail.length})</span>
+                </summary>
+                <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
+                  {trace.agentDetail.map((detail, index) => (
+                    <span
+                      key={index}
+                      className="inline-flex items-center gap-1 rounded-[6px] bg-[#f4f1ee] px-1.5 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
+                    >
+                      <Layers className="h-3 w-3 text-gray-400" />
+                      {detail.group_id}
+                      {detail.granularity && <span className="text-gray-400">· {detail.granularity}</span>}
+                      {Number.isFinite(detail.char_count) && (
+                        <span className="text-gray-400">· {detail.char_count}字</span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
         </div>
-      )}
-
-      {!collapsed && (
-        <div className="flex flex-col gap-2">
-          {renderMetaSummary()}
-
-          {hasTaskStatus && renderTaskStatus()}
-
-          {subQuestions.length > 0 && (
-            <div className="rounded-[8px] bg-[#faf7f4] p-2.5 text-xs dark:bg-white/[0.04]">
-              <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
-                <Search className="h-3.5 w-3.5 text-[#B85F47] dark:text-[#FFA07A]" />
-                <span>子问题分解</span>
-                <span className="text-gray-400">({subQuestions.length})</span>
-              </div>
-              <div className="space-y-1.5">
-                {subQuestions.map((question, index) => (
-                  <div key={index} className="flex items-start gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
-                    {coverage[index] ? (
-                      <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-500" />
-                    ) : (
-                      <Circle className="mt-0.5 h-3 w-3 flex-shrink-0 text-gray-400" />
-                    )}
-                    <span className="line-clamp-2 flex-1">{question}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {rounds.length > 0 && (
-            <div className="flex flex-col gap-2">
-              {rounds.map((roundData, index) => renderRound(roundData, index))}
-            </div>
-          )}
-
-          {trace.finalMessage && (
-            <div className="agent-op-enter rounded-[8px] bg-[#fff4ef] px-2.5 py-1.5 text-[11px] italic text-gray-500 dark:bg-[#FFA07A]/[0.07] dark:text-gray-400">
-              {trace.finalMessage}
-            </div>
-          )}
-
-          {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
-            <details className="rounded-[8px] bg-[#faf7f4] px-2.5 py-2 text-[11px] text-gray-500 dark:bg-white/[0.04] dark:text-gray-400">
-              <summary className="cursor-pointer select-none font-medium text-gray-600 dark:text-gray-300">
-                已纳入意群 <span className="font-normal text-gray-400">({trace.agentDetail.length})</span>
-              </summary>
-              <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
-                {trace.agentDetail.map((detail, index) => (
-                  <span
-                    key={index}
-                    className="inline-flex items-center gap-1 rounded-[6px] bg-[#f4f1ee] px-1.5 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
-                  >
-                    <Layers className="h-3 w-3 text-emerald-500" />
-                    {detail.group_id}
-                    {detail.granularity && <span className="text-gray-400">· {detail.granularity}</span>}
-                    {Number.isFinite(detail.char_count) && (
-                      <span className="text-gray-400">· {detail.char_count}字</span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import React, { memo, useMemo } from 'react';
-import { BookOpen, CheckCircle2, Loader2 } from 'lucide-react';
+import { BookOpen, CheckCircle2 } from 'lucide-react';
+import BreatheLoader from './BreatheLoader';
 
 const getOutlineSourceMeta = (source) => {
   if (source === 'ai') return { label: 'AI 章节树', tone: 'ai' };
@@ -49,9 +50,13 @@ function DocumentOutline({
 
   if (loading) {
     return (
-      <div className={`h-full flex items-center justify-center text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-        生成大纲中
+      <div
+        className={`flex h-full flex-col items-center justify-center gap-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        role="status"
+        aria-live="polite"
+      >
+        <BreatheLoader className={darkMode ? 'text-[#FFA07A]' : 'text-[#D97A5D]'} />
+        <span>生成大纲中</span>
       </div>
     );
   }
