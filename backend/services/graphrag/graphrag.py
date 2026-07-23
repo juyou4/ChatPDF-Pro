@@ -16,7 +16,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Type, cast, List, Union, Optional
+from typing import Any, Type, cast, List, Union, Optional
 
 from ._op import (
     chunking_by_token_size,
@@ -47,6 +47,12 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+_GRAPHRAG_EMBEDDING_IDENTITY_VERSION = 1
+# GraphRAG originally accepted a flattened document string only.  Version 2
+# makes the graph keep block-index provenance on every generated text unit.
+# It is part of the persisted config hash so legacy full-text graphs rebuild
+# instead of silently surviving a structured-input upgrade.
+GRAPHRAG_EVIDENCE_INPUT_VERSION = 2
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["TOKENIZERS_PARALLELISM"] = "TRUE"
@@ -82,6 +88,7 @@ class BuildProgress:
     # embedding provider 与 endpoint（不含密钥）
     embedding_provider: str = ""
     embedding_endpoint: str = ""
+    embedding_identity_version: int = 0
     # embedding 维度
     embedding_dim: int = 0
     # 配置哈希（用于检测配置变更后是否需要重建）
@@ -94,6 +101,9 @@ class BuildProgress:
     num_docs: int = 0
     # 块数
     num_chunks: int = 0
+    # 输入合同：用于诊断图谱是否保留了 block-index 证据身份。
+    evidence_input_version: int = 0
+    input_source: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -112,6 +122,8 @@ def _compute_config_hash(config: GraphRAGConfig, chunk_token_size: int, max_glea
         "embedding_model": config.embedding_model,
         "embedding_provider": config.embedding_provider,
         "embedding_endpoint": config.embedding_endpoint,
+        "embedding_identity_version": _GRAPHRAG_EMBEDDING_IDENTITY_VERSION,
+        "evidence_input_version": GRAPHRAG_EVIDENCE_INPUT_VERSION,
         "embedding_dim": config.embedding_dim,
         "chunk_token_size": chunk_token_size,
         "max_gleaning": max_gleaning,
@@ -147,7 +159,10 @@ class GraphRAGConfig:
     embedding_model: str = ""
     embedding_provider: str = ""
     embedding_endpoint: str = ""
-    embedding_dim: int = 1536
+    # Callers must bind the dimension resolved for the selected embedding
+    # identity. A zero default deliberately fails in ``GraphRAG.__post_init__``
+    # instead of guessing a historical OpenAI-sized vector.
+    embedding_dim: int = 0
 
     def safe_hash_dict(self) -> dict:
         """返回不含 api_key 的配置字典，用于哈希和展示"""
@@ -157,6 +172,46 @@ class GraphRAGConfig:
             "embedding_model": self.embedding_model,
             "embedding_dim": self.embedding_dim,
         }
+
+
+def _compose_provider_scoped_embedding_model(model: str, provider: str) -> str:
+    raw_model = str(model or "").strip()
+    raw_provider = str(provider or "").strip()
+    if not raw_model or not raw_provider or ":" in raw_model:
+        return raw_model
+    return f"{raw_provider}:{raw_model}"
+
+
+def _require_positive_embedding_dim(value: object, *, context: str) -> int:
+    """Reject missing or malformed dimensions before any vector storage is created."""
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{context} 必须是正整数")
+    try:
+        dimension = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{context} 必须是正整数") from exc
+    if dimension <= 0 or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(f"{context} 必须是正整数")
+    return dimension
+
+
+def _has_complete_embedding_identity(progress: BuildProgress | None) -> bool:
+    if not isinstance(progress, BuildProgress):
+        return False
+    if int(getattr(progress, "embedding_identity_version", 0) or 0) != _GRAPHRAG_EMBEDDING_IDENTITY_VERSION:
+        return False
+    provider = str(getattr(progress, "embedding_provider", "") or "").strip().lower()
+    model = str(getattr(progress, "embedding_model", "") or "").strip()
+    endpoint = str(getattr(progress, "embedding_endpoint", "") or "").strip()
+    try:
+        embedding_dim = int(getattr(progress, "embedding_dim", 0) or 0)
+    except (TypeError, ValueError):
+        embedding_dim = 0
+    if not provider or not model:
+        return False
+    if provider != "local" and not endpoint:
+        return False
+    return embedding_dim > 0
 
 
 async def _chatpdf_llm_complete(
@@ -228,50 +283,33 @@ async def _chatpdf_embedding_func(
     model: str = "",
     provider: str = "",
     endpoint: str = "",
-    expected_dim: int = 1536,
+    expected_dim: int | None = None,
 ) -> "np.ndarray":
-    """通过 OpenAI 兼容 API 获取 embedding"""
+    """通过统一 embedding 适配器获取 embedding。"""
     import numpy as np
-    import httpx
-    from models.api_key_selector import select_api_key
+    from services.embedding_service import get_embedding_function
 
-    sanitized_key = select_api_key(api_key) or (api_key.strip() if api_key else "")
-    expected_dim = int(expected_dim or 1536)
-
-    if not endpoint:
-        logger.error("[GraphRAG] Embedding endpoint 未配置")
-        raise ValueError("GraphRAG Embedding endpoint 未配置")
-
-    # 确保 endpoint 以 /embeddings 结尾
-    embed_url = endpoint.rstrip("/")
-    if not embed_url.endswith("/embeddings"):
-        embed_url = embed_url + "/embeddings"
-
-    headers = {
-        "Authorization": f"Bearer {sanitized_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "input": texts,
-        "encoding_format": "float",
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(embed_url, headers=headers, json=body)
-        if resp.status_code != 200:
-            logger.error(f"[GraphRAG] Embedding API 错误: {resp.status_code} {resp.text[:200]}")
-            raise ValueError(f"GraphRAG Embedding API 错误: {resp.status_code} {resp.text[:200]}")
-        result = resp.json()
-        embeddings = np.array([dp["embedding"] for dp in result["data"]], dtype=np.float32)
-        if embeddings.ndim != 2:
-            raise ValueError(f"GraphRAG Embedding 返回格式异常，ndim={embeddings.ndim}")
-        actual_dim = int(embeddings.shape[1]) if embeddings.shape[0] else expected_dim
-        if actual_dim != expected_dim:
-            raise ValueError(
-                f"GraphRAG Embedding 维度不匹配：模型 {model} 预期 {expected_dim}，接口返回 {actual_dim}"
-            )
-        return embeddings
+    expected_dim = _require_positive_embedding_dim(
+        expected_dim,
+        context="GraphRAG Embedding expected_dim",
+    )
+    scoped_model = _compose_provider_scoped_embedding_model(model, provider)
+    embed_fn = get_embedding_function(
+        scoped_model or model,
+        api_key=api_key or None,
+        base_url=endpoint or None,
+        allow_model_fallback=False,
+    )
+    embeddings = await asyncio.to_thread(embed_fn, texts)
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    if embeddings.ndim != 2:
+        raise ValueError(f"GraphRAG Embedding 返回格式异常，ndim={embeddings.ndim}")
+    actual_dim = int(embeddings.shape[1]) if embeddings.shape[0] else expected_dim
+    if actual_dim != expected_dim:
+        raise ValueError(
+            f"GraphRAG Embedding 维度不匹配：模型 {model} 预期 {expected_dim}，接口返回 {actual_dim}"
+        )
+    return embeddings
 
 
 @dataclass
@@ -344,16 +382,35 @@ class GraphRAG:
 
         # 构建 embedding 函数
         cfg = self.config
+        if not str(cfg.embedding_model or "").strip():
+            raise ValueError("GraphRAG Embedding model 未配置")
+        if not str(cfg.embedding_provider or "").strip():
+            raise ValueError("GraphRAG Embedding provider 未配置")
+        if str(cfg.embedding_provider or "").strip().lower() != "local" and not str(cfg.embedding_endpoint or "").strip():
+            raise ValueError("GraphRAG 远程 Embedding endpoint 未配置")
+        if (
+            str(cfg.embedding_provider or "").strip().lower()
+            not in {"local", "ollama"}
+            and not str(cfg.embedding_api_key or "").strip()
+        ):
+            raise ValueError("GraphRAG 远程 Embedding API Key 未配置")
+        embedding_dim = _require_positive_embedding_dim(
+            cfg.embedding_dim,
+            context="GraphRAG Embedding dimension",
+        )
         embedding_func = wrap_embedding_func_with_attrs(
-            embedding_dim=cfg.embedding_dim,
+            embedding_dim=embedding_dim,
             max_token_size=8192,
         )(partial(
             _chatpdf_embedding_func,
-            api_key=cfg.embedding_api_key or cfg.api_key,
+            # Callers must explicitly bind an embedding key to its endpoint.
+            # Falling back to the LLM key here would bypass that boundary when
+            # persisted GraphRAG metadata points at another service.
+            api_key=cfg.embedding_api_key,
             model=cfg.embedding_model,
-            provider=cfg.embedding_provider or cfg.provider,
-            endpoint=cfg.embedding_endpoint or cfg.endpoint,
-            expected_dim=cfg.embedding_dim,
+            provider=cfg.embedding_provider,
+            endpoint=cfg.embedding_endpoint,
+            expected_dim=embedding_dim,
         ))
 
         # 构建 LLM 函数
@@ -418,7 +475,9 @@ class GraphRAG:
         self._build_progress.embedding_model = self.config.embedding_model
         self._build_progress.embedding_provider = self.config.embedding_provider
         self._build_progress.embedding_endpoint = self.config.embedding_endpoint
-        self._build_progress.embedding_dim = self.config.embedding_dim
+        self._build_progress.embedding_identity_version = _GRAPHRAG_EMBEDDING_IDENTITY_VERSION
+        self._build_progress.embedding_dim = embedding_dim
+        self._build_progress.evidence_input_version = GRAPHRAG_EVIDENCE_INPUT_VERSION
 
         # 应用并发限流
         self.embedding_func = limit_async_func_call(self.embedding_func_max_async)(
@@ -515,15 +574,21 @@ class GraphRAG:
         # aquery already calls _query_done; avoid double call
         return context
 
-    async def ainsert(self, string_or_strings: Union[str, List[str]]):
+    async def ainsert(self, string_or_strings: Union[str, dict, List[Union[str, dict]]]):
         """异步插入文档（带进度追踪）"""
         self._build_progress.status = "building"
         self._build_progress.build_start = datetime.now().isoformat()
         self._build_progress.last_error = ""
+        self._build_progress.evidence_input_version = GRAPHRAG_EVIDENCE_INPUT_VERSION
+        raw_items = [string_or_strings] if isinstance(string_or_strings, (str, dict)) else list(string_or_strings or [])
+        self._build_progress.input_source = (
+            "block_index_evidence"
+            if any(isinstance(item, dict) for item in raw_items)
+            else "document_full_text"
+        )
         self._save_metadata()
         try:
-            if isinstance(string_or_strings, str):
-                string_or_strings = [string_or_strings]
+            string_or_strings = raw_items
             # 去重检测
             self._build_progress.stage = "chunking"
             self._build_progress.progress = 10
@@ -576,11 +641,71 @@ class GraphRAG:
         finally:
             await self._insert_done()
 
-    async def _prepare_new_docs(self, string_or_strings):
-        new_docs = {
-            compute_mdhash_id(c.strip(), prefix="doc-"): {"content": c.strip()}
-            for c in string_or_strings
+    @staticmethod
+    def _normalize_insert_item(item: Any, ordinal: int) -> tuple[str, dict, str]:
+        """Normalize a legacy string or a block-index evidence document.
+
+        Evidence metadata is intentionally whitelisted.  GraphRAG persists
+        text chunks to JSON, so allowing arbitrary caller fields here would
+        make its storage format a second, uncontrolled API surface.
+        """
+        if not isinstance(item, dict):
+            return str(item or "").strip(), {}, ""
+
+        content = str(item.get("content") or item.get("text") or "").strip()
+        raw_metadata = item.get("metadata")
+        metadata_source = raw_metadata if isinstance(raw_metadata, dict) else {}
+        allowed_metadata = (
+            "evidence_schema_version",
+            "evidence_source",
+            "evidence_id",
+            "block_id",
+            "block_ids",
+            "section_id",
+            "section_path",
+            "page",
+            "page_range",
+            "bbox",
+            "rects",
+            "block_type",
+            "chunk_type",
+            "reading_order",
+            "parse_generation",
+            "document_source_hash",
+            "parser_route",
+            "source",
+            "page_size",
+            "coordinate_space",
+        )
+        metadata = {
+            key: metadata_source[key]
+            for key in allowed_metadata
+            if metadata_source.get(key) not in (None, "", [], {})
         }
+        source_id = str(
+            item.get("source_id")
+            or metadata.get("evidence_id")
+            or metadata.get("block_id")
+            or f"structured:{ordinal}"
+        ).strip()
+        return content, metadata, source_id
+
+    async def _prepare_new_docs(self, string_or_strings):
+        new_docs = {}
+        for ordinal, item in enumerate(string_or_strings or []):
+            content, metadata, source_id = self._normalize_insert_item(item, ordinal)
+            if not content:
+                continue
+            # Preserve legacy text-hash keys for string callers.  Structured
+            # sources need their block identity in the key so repeated text on
+            # different pages cannot collapse into one evidence document.
+            key_material = f"{source_id}\n{content}" if source_id else content
+            doc_key = compute_mdhash_id(key_material, prefix="doc-")
+            new_docs[doc_key] = {
+                "content": content,
+                "metadata": metadata,
+                "source_id": source_id,
+            }
         _add_doc_keys = await self.full_docs.filter_keys(list(new_docs.keys()))
         new_docs = {k: v for k, v in new_docs.items() if k in _add_doc_keys}
         if not new_docs:
@@ -590,18 +715,33 @@ class GraphRAG:
     async def _prepare_inserting_chunks(self, new_docs):
         inserting_chunks = {}
         for doc_key, doc in new_docs.items():
-            chunks = {
-                compute_mdhash_id(dp["content"], prefix="chunk-"): {
+            source_id = str(doc.get("source_id") or "").strip()
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            split_chunks = chunking_by_token_size(
+                doc["content"],
+                overlap_token_size=self.chunk_overlap_token_size,
+                max_token_size=self.chunk_token_size,
+                tiktoken_model=self.tiktoken_model_name,
+            )
+            chunks = {}
+            for fragment_index, dp in enumerate(split_chunks):
+                chunk_content = str(dp.get("content") or "").strip()
+                if not chunk_content:
+                    continue
+                key_material = chunk_content
+                if source_id:
+                    key_material = f"{doc_key}\n{fragment_index}\n{chunk_content}"
+                chunk_key = compute_mdhash_id(key_material, prefix="chunk-")
+                record = {
                     **dp,
                     "full_doc_id": doc_key,
+                    **metadata,
                 }
-                for dp in chunking_by_token_size(
-                    doc["content"],
-                    overlap_token_size=self.chunk_overlap_token_size,
-                    max_token_size=self.chunk_token_size,
-                    tiktoken_model=self.tiktoken_model_name,
-                )
-            }
+                if source_id:
+                    record["graphrag_source_id"] = source_id
+                    record["graphrag_fragment_index"] = fragment_index
+                    record["graphrag_fragment_count"] = len(split_chunks)
+                chunks[chunk_key] = record
             inserting_chunks.update(chunks)
         _add_chunk_keys = await self.text_chunks.filter_keys(list(inserting_chunks.keys()))
         inserting_chunks = {k: v for k, v in inserting_chunks.items() if k in _add_chunk_keys}
@@ -730,11 +870,13 @@ class GraphRAG:
                              chunk_token_size: int = 2000,
                              entity_extract_max_gleaning: int = 1,
                              best_model_max_async: int = 16,
-                             cheap_model_max_async: int = 16) -> Optional["GraphRAG"]:
+                             cheap_model_max_async: int = 16,
+                             strict_config_hash: bool = False) -> Optional["GraphRAG"]:
         """从磁盘加载已持久化的 GraphRAG 实例（不重新构建）
 
         如果 working_dir 不存在或索引不完整，返回 None。
-        如果 config_hash 与磁盘不一致，打印警告但仍加载（调用方决定是否重建）。
+        非严格模式下，config_hash 不一致只告警；严格模式要求
+        config_hash 与当前 schema/配置完全一致，并且 embedding 身份元数据完整。
         """
         if not GraphRAG.has_persisted_index(working_dir):
             return None
@@ -742,7 +884,24 @@ class GraphRAG:
         # 检查配置哈希
         disk_meta = GraphRAG.load_metadata(working_dir)
         current_hash = _compute_config_hash(config, chunk_token_size, entity_extract_max_gleaning)
-        if disk_meta and disk_meta.config_hash and disk_meta.config_hash != current_hash:
+        if strict_config_hash:
+            if disk_meta is None:
+                logger.warning("[GraphRAG] 缺少构建元数据，拒绝严格加载")
+                return None
+            if not str(disk_meta.config_hash or "").strip():
+                logger.warning("[GraphRAG] 缺少 config_hash，拒绝严格加载")
+                return None
+            if disk_meta.config_hash != current_hash:
+                logger.warning(
+                    "[GraphRAG] 配置哈希不匹配，拒绝严格加载: 磁盘=%s 当前=%s",
+                    disk_meta.config_hash,
+                    current_hash,
+                )
+                return None
+            if not _has_complete_embedding_identity(disk_meta):
+                logger.warning("[GraphRAG] 缺少完整 embedding 身份元数据，拒绝严格加载")
+                return None
+        elif disk_meta and disk_meta.config_hash and disk_meta.config_hash != current_hash:
             logger.warning(
                 f"[GraphRAG] 配置哈希不匹配: 磁盘={disk_meta.config_hash}, 当前={current_hash}，"
                 f"可能需要重建索引"

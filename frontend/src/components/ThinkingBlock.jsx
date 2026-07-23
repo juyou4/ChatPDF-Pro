@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { Copy, Check, ChevronDown } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
 import { useChatParams } from '../contexts/ChatParamsContext'
@@ -60,6 +60,14 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
   const { thoughtAutoCollapse } = useChatParams()
   const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
   const hasThinkingContent = Boolean(content && content.trim())
+  const activeStageText = useMemo(() => {
+    if (!isStreaming || answerStarted) return ''
+    const lines = String(content || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    return lines[lines.length - 1] || '正在等待模型响应...'
+  }, [answerStarted, content, isStreaming])
 
   // 思考阶段是否已结束：流式中以「正文首 token 到达」为准（answerStarted），
   // 兜底用整条消息结束（!isStreaming），不必等回答全部生成完
@@ -129,12 +137,24 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
   if (answerStarted && !hasThinkingContent && !hasAgentTrace) return null
 
   return (
-    <div className={`my-2 w-full ${darkMode ? 'dark' : ''}`}>
+    <div className={`group/thinking relative isolate mb-5 mt-2 w-full ${darkMode ? 'dark' : ''}`}>
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-10 -bottom-1 h-5 rounded-[50%] blur-[14px] transition-[opacity,transform] duration-300 ease-out group-hover/thinking:translate-y-0.5 group-hover/thinking:scale-x-[1.03] motion-reduce:transition-none ${
+          darkMode ? 'bg-black/35 opacity-65' : 'bg-[#574840]/[0.11] opacity-60'
+        }`}
+      />
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-16 bottom-0 h-2 rounded-[50%] blur-[5px] transition-[opacity,transform] duration-300 ease-out group-hover/thinking:translate-y-0.5 group-hover/thinking:scale-x-[1.02] motion-reduce:transition-none ${
+          darkMode ? 'bg-black/40 opacity-60' : 'bg-[#302722]/[0.12] opacity-45'
+        }`}
+      />
       <section
-        className={`w-full overflow-hidden rounded-[18px] border text-[13px] transition-[transform,box-shadow,border-color] duration-300 ease-out hover:-translate-y-px motion-reduce:transform-none motion-reduce:transition-none ${
+        className={`relative z-[1] w-full -translate-y-px overflow-hidden rounded-[18px] ring-1 ring-inset text-[13px] transition-[transform,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-[2px] motion-reduce:transform-none motion-reduce:transition-none ${
           darkMode
-            ? 'border-white/[0.09] bg-[#25282f] text-gray-300 shadow-[0_16px_34px_-24px_rgba(0,0,0,0.82),inset_0_1px_0_rgba(255,255,255,0.04)] hover:border-white/[0.13] hover:shadow-[0_20px_38px_-24px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.05)]'
-            : 'border-[#eadfd8] bg-white text-gray-600 shadow-[0_14px_30px_-23px_rgba(91,65,52,0.52),0_3px_8px_-6px_rgba(91,65,52,0.18),inset_0_1px_0_rgba(255,255,255,0.96)] hover:border-[#e3d4cc] hover:shadow-[0_20px_38px_-24px_rgba(91,65,52,0.58),0_6px_14px_-10px_rgba(91,65,52,0.22),inset_0_1px_0_rgba(255,255,255,0.98)]'
+            ? 'bg-[#25282f] text-gray-300 ring-white/[0.055] shadow-[inset_0_1px_0_rgba(255,255,255,0.045)] hover:bg-[#272a31] hover:ring-white/[0.075]'
+            : 'bg-[#fffefd] text-gray-600 ring-[#66574f]/[0.075] shadow-[inset_0_1px_0_rgba(255,255,255,0.95)] hover:bg-white hover:ring-[#66574f]/[0.1]'
         }`}
       >
         <button
@@ -142,14 +162,14 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
           className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset ${
             darkMode
               ? 'hover:bg-white/[0.035] focus-visible:ring-[#FFA07A]/45'
-              : 'hover:bg-[#fcfaf8] focus-visible:ring-[#D99178]/45'
+              : 'hover:bg-black/[0.012] focus-visible:ring-[#D99178]/45'
           }`}
           onClick={() => setExpanded((prev) => !prev)}
           aria-expanded={expanded}
         >
           <span
             className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px] ${
-              darkMode ? 'bg-[#FFA07A]/10 text-[#FFA07A]' : 'bg-[#FFF0E9] text-[#B85F47]'
+              darkMode ? 'bg-[#FFA07A]/10 text-[#FFA07A]' : 'bg-[#f8f3f0] text-[#a65d49]'
             }`}
           >
             <CellsLoader active={isThinkingPhase} />
@@ -157,11 +177,19 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
           <span className={`text-[11px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-700'} ${isThinkingPhase ? 'thinking-text-pulse' : ''}`}>
             Deep Thinking
           </span>
-          <span className={`h-3 w-px ${darkMode ? 'bg-white/10' : 'bg-[#e9dfda]'}`} aria-hidden="true" />
+          <span className={`h-3 w-px ${darkMode ? 'bg-white/10' : 'bg-[#e5e7eb]'}`} aria-hidden="true" />
+          <span
+            className={`min-w-0 flex-1 truncate text-[11px] ${
+              darkMode ? 'text-gray-400' : 'text-gray-500'
+            }`}
+            title={activeStageText || undefined}
+          >
+            {activeStageText}
+          </span>
           <ThinkingTimer isThinking={isThinkingPhase} thinkingMs={thinkingMs || 0} />
           <ChevronDown
             size={15}
-            className={`ml-auto flex-shrink-0 transition-transform duration-300 ${
+            className={`flex-shrink-0 transition-transform duration-300 ${
               darkMode ? 'text-gray-500' : 'text-gray-400'
             } ${expanded ? 'rotate-180' : ''}`}
           />
@@ -177,13 +205,13 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
           inert={expanded ? undefined : ''}
         >
           <div className="min-h-0 overflow-hidden">
-            <div className={`relative border-t px-4 pb-4 pt-3 ${darkMode ? 'border-white/[0.07]' : 'border-[#f0e8e3]'}`}>
+            <div className={`relative border-t px-4 pb-4 pt-3 ${darkMode ? 'border-white/[0.06]' : 'border-[#eceef1]'}`}>
               {!isStreaming && content && (
                 <button
                   className={`absolute right-2.5 top-2.5 z-[1] rounded-[8px] p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 ${
                     darkMode
                       ? 'text-gray-500 hover:bg-white/[0.06] hover:text-gray-200 focus-visible:ring-[#FFA07A]/45'
-                      : 'text-gray-400 hover:bg-[#f6f1ee] hover:text-gray-700 focus-visible:ring-[#D99178]/45'
+                      : 'text-gray-400 hover:bg-[#f2f3f5] hover:text-gray-700 focus-visible:ring-[#D99178]/45'
                   }`}
                   onClick={handleCopy}
                   title="复制思考内容"
@@ -194,7 +222,7 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
               )}
 
               {shouldShowTimeline && (
-                <div className={`ml-1.5 border-l py-0.5 pl-3 pr-7 ${darkMode ? 'border-[#FFA07A]/20' : 'border-[#eaded8]'}`}>
+                <div className={`ml-1.5 border-l py-0.5 pl-3 pr-7 ${darkMode ? 'border-white/[0.1]' : 'border-[#e3e6ea]'}`}>
                   <div className="relative">
                     {/* 活动进度点：随检索/思考阶段行数下移，避免一直停在第一行。 */}
                     <span

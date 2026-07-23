@@ -6,8 +6,84 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 
 const FontSettingsContext = createContext();
 
-// 预设字体列表
+const CJK_SANS_FALLBACK = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif';
+const CJK_SERIF_FALLBACK = '"Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", serif';
+const CJK_KAI_FALLBACK = '"KaiTi", "STKaiti", "Kaiti SC", serif';
+
+// 预设字体列表。除 Google Fonts 外，中文字体优先使用设备已安装的字体；未安装时回退到系统中文字体。
 export const PRESET_FONTS = [
+    {
+        id: 'source-han-sans',
+        name: '思源黑体',
+        value: `"ChatPDF Source Han Sans", "Source Han Sans SC", "Noto Sans SC", ${CJK_SANS_FALLBACK}`,
+        description: '已内置 · 中文界面与长文阅读',
+    },
+    {
+        id: 'alibaba-puhuiti',
+        name: '阿里巴巴普惠体',
+        value: `"Alibaba PuHuiTi 3.0", "Alibaba PuHuiTi 2.0", "Alibaba PuHuiTi", ${CJK_SANS_FALLBACK}`,
+        description: '系统字体 · 本机安装时使用',
+    },
+    {
+        id: 'oppo-sans',
+        name: 'OPPO Sans',
+        value: `"ChatPDF OPPO Sans", "OPPO Sans 4.0", "OPPO Sans", ${CJK_SANS_FALLBACK}`,
+        description: '官方 Webfont · 在线时自动加载',
+    },
+    {
+        id: 'hanyi-wenhei',
+        name: '汉仪文黑',
+        value: `"HYWenHei", "HYWenHei 85W", "汉仪文黑", ${CJK_SANS_FALLBACK}`,
+        description: '系统字体 · 商用前请确认授权',
+    },
+    {
+        id: 'gwm-sans',
+        name: '长城共享体',
+        value: `"GWM Sans", "长城共享体", ${CJK_SANS_FALLBACK}`,
+        description: '系统字体 · 本机安装时使用',
+    },
+    {
+        id: 'lxgw-neo-xihei',
+        name: '霞鹜新晰黑',
+        value: `"ChatPDF LXGW Neo XiHei", "LXGW Neo XiHei", "霞鹜新晰黑", ${CJK_SANS_FALLBACK}`,
+        description: '已内置 · 中文正文干净规整',
+    },
+    {
+        id: 'sarasa-gothic',
+        name: '更纱黑体',
+        value: `"ChatPDF Sarasa UI SC", "Sarasa UI SC", "Sarasa Gothic SC", "更纱黑体 SC", ${CJK_SANS_FALLBACK}`,
+        description: '已内置 · 中文与代码混排稳定',
+    },
+    {
+        id: 'lxgw-wenkai',
+        name: '霞鹜文楷',
+        value: `"ChatPDF LXGW WenKai", "LXGW WenKai", "霞鹜文楷", ${CJK_KAI_FALLBACK}`,
+        description: '已内置 · 长文与笔记的文楷风格',
+    },
+    {
+        id: 'source-han-serif',
+        name: '思源宋体',
+        value: `"ChatPDF Source Han Serif", "Source Han Serif SC", "Noto Serif CJK SC", ${CJK_SERIF_FALLBACK}`,
+        description: '已内置 · 长文与电子书衬线阅读',
+    },
+    {
+        id: 'screen-zhensong',
+        name: '屏显臻宋',
+        value: `"ChatPDF Clear Han Serif", "Clear Han Serif", "Screen ZhenSong", "屏显臻宋", ${CJK_SERIF_FALLBACK}`,
+        description: '已内置 · 电子书与屏显长文宋体',
+    },
+    {
+        id: 'canger-wenkai',
+        name: '仓耳文楷 04W04',
+        value: `"CangEr WenKai 04W04", "仓耳文楷 04W04", "LXGW WenKai", ${CJK_KAI_FALLBACK}`,
+        description: '系统字体 · 商用前请确认授权',
+    },
+    {
+        id: '975-yuanti',
+        name: '975 圆体',
+        value: `"ChatPDF 975 Yuan", "LXGW 975 Yuan SC", "975MaruSC", "975圆体", "975 圆体", ${CJK_SANS_FALLBACK}`,
+        description: '已内置 · 中文界面与阅读圆润柔和',
+    },
     { id: 'inter', name: 'Inter', value: 'Inter, sans-serif', googleFont: 'Inter:wght@300;400;500;600;700' },
     {
         id: 'outfit-plus',
@@ -38,7 +114,6 @@ export const PRESET_FONTS = [
     },
     { id: 'roboto', name: 'Roboto', value: 'Roboto, sans-serif', googleFont: 'Roboto:wght@300;400;500;700' },
     { id: 'noto-sans-sc', name: 'Noto Sans SC', value: '"Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700' },
-    { id: 'source-han-sans', name: 'Source Han Sans', value: '"Source Han Sans SC", "Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700' },
     { id: 'poppins', name: 'Poppins', value: 'Poppins, sans-serif', googleFont: 'Poppins:wght@300;400;500;600;700' },
     { id: 'open-sans', name: 'Open Sans', value: '"Open Sans", sans-serif', googleFont: 'Open+Sans:wght@300;400;500;600;700' },
     { id: 'lato', name: 'Lato', value: 'Lato, sans-serif', googleFont: 'Lato:wght@300;400;700' },
@@ -47,7 +122,7 @@ export const PRESET_FONTS = [
 
 // 字体相关默认设置
 export const FONT_DEFAULT_SETTINGS = {
-    fontFamily: 'inter',
+    fontFamily: 'source-han-sans',
     customFont: '',
     globalScale: 1.0,
     // 向后兼容旧版 globalSettings/fontSettings 中的 messageFont 字段
@@ -59,8 +134,12 @@ export const FONT_DEFAULT_SETTINGS = {
  * @param {string} fontSpec - 字体规格，如 'Inter:wght@300;400;500' 或纯字体名称
  */
 const loadGoogleFont = (fontSpec) => {
-    // 检查是否已经加载
     const existingLink = document.getElementById('google-fonts-global');
+
+    if (!fontSpec) {
+        existingLink?.remove();
+        return;
+    }
 
     // 构建 Google Fonts URL
     let fontUrl;
@@ -180,7 +259,7 @@ export const FontSettingsProvider = ({ children }) => {
                 headingFontValue = preset.headingValue || bodyFontValue;
                 loadGoogleFont(preset.googleFont);
             } else {
-                bodyFontValue = PRESET_FONTS[0].value; // 默认 Inter
+                bodyFontValue = PRESET_FONTS.find((font) => font.id === FONT_DEFAULT_SETTINGS.fontFamily)?.value || PRESET_FONTS[0].value;
                 headingFontValue = bodyFontValue;
             }
         }
@@ -216,7 +295,7 @@ export const FontSettingsProvider = ({ children }) => {
             return customFont || '自定义字体';
         }
         const preset = PRESET_FONTS.find(f => f.id === fontFamily);
-        return preset ? preset.name : 'Inter';
+        return preset ? preset.name : PRESET_FONTS.find((font) => font.id === FONT_DEFAULT_SETTINGS.fontFamily)?.name || '思源黑体';
     }, [fontFamily, customFont]);
 
     // 重置字体设置

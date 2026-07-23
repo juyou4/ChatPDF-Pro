@@ -23,9 +23,35 @@ from services.document_geometry import (
 
 MINERU_RAG_INDEX_SOURCE = "mineru"
 MINERU_RAG_NORMALIZER_VERSION = "mineru-rag-v2"
+# MinerU is the selected primary parser for a full document. Publishing an
+# otherwise healthy-looking index with one missing page makes every downstream
+# capability silently incomplete, so this is intentionally a full-coverage
+# contract rather than a best-effort OCR threshold.
+MINERU_MIN_PAGE_COVERAGE = 1.0
 
-_INCLUDE_TEXT_TYPES = {"text", "list", "code"}
+_INCLUDE_TEXT_TYPES = {
+    "text",
+    "plain_text",
+    "paragraph",
+    "para",
+    "body_text",
+    "list",
+    "list_item",
+    "code",
+    "code_body",
+    "ref_text",
+    "reference",
+    "references",
+    "title",
+    "heading",
+    "caption",
+    "image_caption",
+    "table_caption",
+    "chart_caption",
+}
 _CAPTION_ONLY_TYPES = {"image", "chart"}
+_TABLE_TYPES = {"table", "table_body"}
+_FORMULA_TYPES = {"equation", "interline_equation", "inline_equation", "formula"}
 _EXCLUDE_TYPES = {
     "header",
     "page_number",
@@ -95,12 +121,109 @@ class _TableHTMLParser(HTMLParser):
             self._cell_parts.append(data)
 
 
+def build_mineru_page_ledger(
+    mineru_payload: dict[str, Any],
+    *,
+    expected_page_count: int = 0,
+    block_pages: set[int] | list[int] | tuple[int, ...] | None = None,
+    text_pages: set[int] | list[int] | tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """Build a page-level parse ledger without inventing successful pages.
+
+    ``expected_page_count`` must come from the source PDF. When it is unknown,
+    the ledger reports the pages present in MinerU output but deliberately does
+    not infer missing leading pages from a sparse page number.
+    """
+    payload = mineru_payload if isinstance(mineru_payload, dict) else {}
+    try:
+        expected_count = max(0, int(expected_page_count or 0))
+    except (TypeError, ValueError):
+        expected_count = 0
+
+    observed_pages = _payload_page_numbers(payload)
+    reported_failed_pages = _reported_failed_page_numbers(payload)
+    block_page_numbers = _positive_page_numbers(block_pages)
+    text_page_numbers = _positive_page_numbers(text_pages)
+    consumable_pages = block_page_numbers | text_page_numbers
+
+    if expected_count > 0:
+        expected_pages = set(range(1, expected_count + 1))
+        missing_pages = expected_pages - observed_pages - consumable_pages
+        empty_pages = (observed_pages & expected_pages) - consumable_pages - reported_failed_pages
+        failed_pages = missing_pages | empty_pages | (reported_failed_pages & expected_pages)
+        successful_pages = (expected_pages & consumable_pages) - reported_failed_pages
+        coverage = len(successful_pages) / expected_count
+        ledger_pages = sorted(expected_pages | observed_pages | reported_failed_pages | consumable_pages)
+    else:
+        expected_pages = observed_pages | reported_failed_pages | consumable_pages
+        empty_pages = observed_pages - consumable_pages - reported_failed_pages
+        failed_pages = set(reported_failed_pages) | empty_pages
+        successful_pages = consumable_pages - reported_failed_pages
+        coverage = (len(successful_pages) / len(expected_pages)) if expected_pages else 0.0
+        ledger_pages = sorted(expected_pages)
+
+    page_ledger: list[dict[str, Any]] = []
+    for page_num in ledger_pages:
+        provider_failed = page_num in reported_failed_pages
+        missing = (
+            expected_count > 0
+            and page_num in expected_pages
+            and page_num not in observed_pages
+            and page_num not in consumable_pages
+        )
+        empty_result = page_num in observed_pages and page_num not in consumable_pages
+        if provider_failed:
+            status = "failed"
+            reason = "provider_reported_failure"
+        elif missing:
+            status = "failed"
+            reason = "missing_from_result"
+        elif empty_result:
+            status = "failed"
+            reason = "empty_page_result"
+        elif page_num in consumable_pages:
+            status = "success"
+            reason = ""
+        else:
+            status = "unknown"
+            reason = "not_observed"
+        page_ledger.append({
+            "page": page_num,
+            "status": status,
+            "reason": reason,
+            "raw_present": page_num in observed_pages,
+            "has_blocks": page_num in block_page_numbers,
+            "has_text": page_num in text_page_numbers,
+        })
+
+    unexpected_pages = sorted(
+        page for page in observed_pages
+        if expected_count > 0 and page > expected_count
+    )
+    if not consumable_pages or coverage < MINERU_MIN_PAGE_COVERAGE or failed_pages:
+        quality_status = "failed"
+    else:
+        quality_status = "success"
+
+    return {
+        "quality_status": quality_status,
+        "expected_page_count": expected_count,
+        "observed_page_count": len(observed_pages & expected_pages) if expected_count else len(observed_pages),
+        "covered_page_count": len(successful_pages),
+        "coverage": round(float(coverage), 4),
+        "failed_pages": sorted(failed_pages),
+        "unexpected_pages": unexpected_pages,
+        "page_ledger": page_ledger,
+    }
+
+
 def normalize_mineru_for_rag(
     mineru_payload: dict[str, Any],
     *,
     source_hash: str | None = None,
     normalizer_version: str | None = None,
     page_sizes: dict[int, list[float] | tuple[float, float]] | None = None,
+    expected_page_count: int = 0,
 ) -> dict[str, Any]:
     """Convert MinerU payload into RAG-native pages/full_text/table bundles."""
     payload = mineru_payload if isinstance(mineru_payload, dict) else {}
@@ -108,6 +231,10 @@ def normalize_mineru_for_rag(
     source_hash = source_hash or _payload_hash(payload)
 
     items = _extract_content_items(payload)
+    page_quality = build_mineru_page_ledger(
+        payload,
+        expected_page_count=expected_page_count,
+    )
     middle_geometry_warnings: list[str] = []
     if items:
         items, middle_geometry_warnings = _enrich_content_table_geometry(
@@ -121,8 +248,9 @@ def normalize_mineru_for_rag(
             table_count=0,
             evidence_unit_count=0,
             malformed_table_count=0,
-            warnings=["missing_content_list_json"],
-            failure_reasons=["MinerU 结果中没有 content_list_json"],
+            warnings=["missing_mineru_structural_items"],
+            failure_reasons=["MinerU 结果中没有可消费的结构化块"],
+            page_quality=page_quality,
         )
         return {
             "full_text": "",
@@ -132,13 +260,16 @@ def normalize_mineru_for_rag(
             "source_hash": source_hash,
             "index_source": MINERU_RAG_INDEX_SOURCE,
             "normalizer_version": version,
+            **page_quality,
         }
 
     pages_parts: dict[int, list[str]] = {}
     structured_table_bundles: list[dict[str, Any]] = []
+    raw_type_counts: dict[str, int] = {}
     kept_counts: dict[str, int] = {}
     filtered_counts: dict[str, int] = {}
     warnings: list[str] = list(middle_geometry_warnings)
+    unknown_types: set[str] = set()
     malformed_table_count = 0
     evidence_unit_count = 0
 
@@ -146,6 +277,8 @@ def normalize_mineru_for_rag(
         if not isinstance(item, dict):
             continue
         raw_type = _normalize_type(item.get("type") or item.get("block_type") or item.get("category"))
+        normalized_raw_type = raw_type or "unknown"
+        _inc(raw_type_counts, normalized_raw_type)
         page_num = _page_num(item)
 
         if raw_type in _EXCLUDE_TYPES:
@@ -154,7 +287,7 @@ def normalize_mineru_for_rag(
 
         text = ""
         if raw_type in _INCLUDE_TEXT_TYPES:
-            text = _clean_text(_extract_text(item, ("text", "content")))
+            text = _clean_text(_extract_text(item, ("text", "content", "blocks", "lines", "spans")))
         elif raw_type in _CAPTION_ONLY_TYPES:
             text = _clean_text(_extract_text(item, (
                 "image_caption",
@@ -165,9 +298,9 @@ def normalize_mineru_for_rag(
                 "chart_footnote",
                 "footnote",
             )))
-        elif raw_type in {"equation", "interline_equation", "inline_equation", "formula"}:
+        elif raw_type in _FORMULA_TYPES:
             text = _format_equation(_extract_text(item, ("latex", "text", "content")))
-        elif raw_type == "table":
+        elif raw_type in _TABLE_TYPES:
             bundle, table_text, table_warnings = _build_table_bundle(
                 item,
                 page_num,
@@ -182,8 +315,18 @@ def normalize_mineru_for_rag(
                 malformed_table_count += 1
             text = table_text
         else:
-            _inc(filtered_counts, raw_type or "unknown")
-            continue
+            # MinerU evolves its paragraph taxonomy frequently. A text-bearing
+            # unknown block is still evidence, so retain it as generic text and
+            # make the schema drift visible in the quality report.
+            text = _clean_text(_extract_text(item, ("text", "content", "html", "latex", "blocks", "lines", "spans")))
+            if text:
+                unknown_types.add(normalized_raw_type)
+                warnings.append(f"unknown_text_type_downgraded:{normalized_raw_type}:p{page_num}:i{item_index}")
+            else:
+                unknown_types.add(normalized_raw_type)
+                _inc(filtered_counts, f"{normalized_raw_type}:unsupported")
+                warnings.append(f"unknown_type_dropped:{normalized_raw_type}:p{page_num}:i{item_index}")
+                continue
 
         if not text:
             _inc(filtered_counts, f"{raw_type}:empty")
@@ -206,14 +349,22 @@ def normalize_mineru_for_rag(
         if "\n\n".join(parts).strip()
     ]
     full_text = "\n\n".join(page["content"] for page in pages).strip()
+    page_quality = build_mineru_page_ledger(
+        payload,
+        expected_page_count=expected_page_count,
+        text_pages={int(page["page"]) for page in pages},
+    )
     quality = _quality_report(
         kept_counts=kept_counts,
+        raw_type_counts=raw_type_counts,
         filtered_counts=filtered_counts,
         table_count=len(structured_table_bundles),
         evidence_unit_count=evidence_unit_count,
         malformed_table_count=malformed_table_count,
         warnings=warnings,
         failure_reasons=[],
+        page_quality=page_quality,
+        unknown_types=unknown_types,
     )
 
     return {
@@ -224,6 +375,7 @@ def normalize_mineru_for_rag(
         "source_hash": source_hash,
         "index_source": MINERU_RAG_INDEX_SOURCE,
         "normalizer_version": version,
+        **page_quality,
     }
 
 
@@ -232,17 +384,38 @@ def validate_mineru_rag_data(
     *,
     original_full_text: str = "",
     min_text_ratio: float = 0.6,
+    min_page_coverage: float = MINERU_MIN_PAGE_COVERAGE,
 ) -> tuple[bool, list[str]]:
     """Quality gate before replacing an existing RAG index."""
     failures: list[str] = []
     pages = normalized.get("pages") if isinstance(normalized, dict) else None
     full_text = str((normalized or {}).get("full_text") or "")
     bundles = normalized.get("structured_table_bundles") or []
+    try:
+        expected_page_count = max(0, int((normalized or {}).get("expected_page_count") or 0))
+    except (TypeError, ValueError):
+        expected_page_count = 0
+    try:
+        coverage = float((normalized or {}).get("coverage") or 0.0)
+    except (TypeError, ValueError):
+        coverage = 0.0
+    quality_status = str((normalized or {}).get("quality_status") or "failed").strip().lower()
+    failed_pages = [
+        page
+        for page in ((normalized or {}).get("failed_pages") or [])
+        if isinstance(page, (int, float, str)) and str(page).strip()
+    ]
 
     if not isinstance(pages, list) or not pages:
         failures.append("pages_empty")
     if not full_text.strip():
         failures.append("full_text_empty")
+    if expected_page_count > 0 and coverage < float(min_page_coverage):
+        failures.append("page_coverage_incomplete")
+    if failed_pages:
+        failures.append("page_parse_failed")
+    if quality_status != "success":
+        failures.append("parse_quality_not_complete")
     original_len = len(str(original_full_text or "").strip())
     if original_len >= 200 and len(full_text.strip()) < int(original_len * min_text_ratio):
         failures.append("full_text_too_short")
@@ -271,14 +444,67 @@ def validate_mineru_rag_data(
 
 def _extract_content_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     content = payload.get("content_list_json")
-    if isinstance(content, list):
-        return [item for item in content if isinstance(item, dict)]
-    # Some adapters may save the flat list as middle_json when only content_list
-    # exists. Do not depend on middle_json for v1, only accept flat lists.
+    content_items = [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
     middle = payload.get("middle_json")
     if isinstance(middle, list):
-        return [item for item in middle if isinstance(item, dict)]
-    return []
+        middle_items = [item for item in middle if isinstance(item, dict)]
+    elif isinstance(middle, dict):
+        middle_items = _middle_json_content_items(middle)
+    else:
+        middle_items = []
+    return _merge_content_items(content_items, middle_items)
+
+
+def _middle_json_content_items(middle_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose middle JSON blocks to the RAG normalizer as a lossless fallback."""
+    pdf_info = middle_json.get("pdf_info")
+    if not isinstance(pdf_info, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for page_info in pdf_info:
+        if not isinstance(page_info, dict):
+            continue
+        page_num = _page_num(page_info)
+        for block in _middle_json_page_blocks(page_info):
+            item = dict(block)
+            item.setdefault("page_idx", page_num - 1)
+            if page_info.get("page_size") and not item.get("page_size"):
+                item["page_size"] = page_info["page_size"]
+            items.append(item)
+    return items
+
+
+def _merge_content_items(
+    primary_items: list[dict[str, Any]],
+    fallback_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep content-list ordering but append only middle-JSON blocks it lacks."""
+    merged = [dict(item) for item in primary_items]
+    for item in fallback_items:
+        if not any(_content_items_overlap(existing, item) for existing in merged):
+            merged.append(dict(item))
+    return merged
+
+
+def _content_items_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if _page_num(left) != _page_num(right):
+        return False
+    left_type = _normalize_type(left.get("type") or left.get("block_type") or left.get("category"))
+    right_type = _normalize_type(right.get("type") or right.get("block_type") or right.get("category"))
+    left_text = _content_item_text_fingerprint(left)
+    right_text = _content_item_text_fingerprint(right)
+    if left_text and left_text == right_text and len(left_text) >= 12:
+        return True
+    if left_type != right_type:
+        return False
+    left_bbox = _normalize_bbox(left.get("bbox") or left.get("layout_bbox") or left.get("block_bbox"))
+    right_bbox = _normalize_bbox(right.get("bbox") or right.get("layout_bbox") or right.get("block_bbox"))
+    return bool(left_bbox and left_bbox == right_bbox and (left_text == right_text or not left_text or not right_text))
+
+
+def _content_item_text_fingerprint(item: dict[str, Any]) -> str:
+    value = _extract_text(item, ("text", "content", "html", "latex", "table_body", "blocks", "lines", "spans"))
+    return re.sub(r"\s+", " ", _clean_text(value)).strip().lower()
 
 
 def _enrich_content_table_geometry(
@@ -906,22 +1132,85 @@ def _merge_normalized_bboxes(bboxes: list[list[float]]) -> list[float]:
 def _quality_report(
     *,
     kept_counts: dict[str, int],
+    raw_type_counts: dict[str, int] | None = None,
     filtered_counts: dict[str, int],
     table_count: int,
     evidence_unit_count: int,
     malformed_table_count: int,
     warnings: list[str],
     failure_reasons: list[str],
+    page_quality: dict[str, Any] | None = None,
+    unknown_types: set[str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "kept_type_counts": dict(sorted(kept_counts.items())),
+    raw_counts = dict(sorted((raw_type_counts or {}).items()))
+    emitted_counts = dict(sorted(kept_counts.items()))
+    report = {
+        "kept_type_counts": emitted_counts,
+        "raw_type_counts": raw_counts,
+        "emitted_type_counts": emitted_counts,
         "filtered_type_counts": dict(sorted(filtered_counts.items())),
+        "unknown_types": sorted(str(value) for value in (unknown_types or set()) if value),
         "table_count": table_count,
         "evidence_unit_count": evidence_unit_count,
         "malformed_table_count": malformed_table_count,
         "warnings": warnings,
         "failure_reasons": failure_reasons,
     }
+    if isinstance(page_quality, dict):
+        report.update({
+            "quality_status": page_quality.get("quality_status", "failed"),
+            "expected_page_count": page_quality.get("expected_page_count", 0),
+            "observed_page_count": page_quality.get("observed_page_count", 0),
+            "covered_page_count": page_quality.get("covered_page_count", 0),
+            "coverage": page_quality.get("coverage", 0.0),
+            "failed_pages": list(page_quality.get("failed_pages") or []),
+            "unexpected_pages": list(page_quality.get("unexpected_pages") or []),
+            "page_ledger": list(page_quality.get("page_ledger") or []),
+        })
+    return report
+
+
+def _payload_page_numbers(payload: dict[str, Any]) -> set[int]:
+    pages: set[int] = set()
+    content = payload.get("content_list_json")
+    if isinstance(content, list):
+        pages.update(_page_num(item) for item in content if isinstance(item, dict))
+
+    middle = payload.get("middle_json")
+    if isinstance(middle, list):
+        pages.update(_page_num(item) for item in middle if isinstance(item, dict))
+    elif isinstance(middle, dict):
+        pdf_info = middle.get("pdf_info")
+        if isinstance(pdf_info, list):
+            pages.update(_page_num(item) for item in pdf_info if isinstance(item, dict))
+    return {page for page in pages if page > 0}
+
+
+def _reported_failed_page_numbers(payload: dict[str, Any]) -> set[int]:
+    values: list[Any] = []
+    for key in ("failed_pages", "fail_pages", "failed_page_numbers"):
+        value = payload.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(value)
+    return _positive_page_numbers(values)
+
+
+def _positive_page_numbers(values: Any) -> set[int]:
+    result: set[int] = set()
+    if values is None:
+        return result
+    try:
+        iterator = iter(values)
+    except TypeError:
+        iterator = iter((values,))
+    for value in iterator:
+        try:
+            page = int(value)
+        except (TypeError, ValueError):
+            continue
+        if page > 0:
+            result.add(page)
+    return result
 
 
 def _inc(counter: dict[str, int], key: str) -> None:
@@ -940,7 +1229,10 @@ def _extract_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
                 if isinstance(child, str) and child.strip():
                     parts.append(child.strip())
                 elif isinstance(child, dict):
-                    nested = _extract_text(child, ("text", "content", "latex"))
+                    nested = _extract_text(
+                        child,
+                        ("text", "content", "html", "latex", "table_body", "blocks", "lines", "spans"),
+                    )
                     if nested:
                         parts.append(nested)
     return "\n".join(_dedupe(parts)).strip()

@@ -14,12 +14,17 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from services.keyword_extractor import KeywordExtractor
 from services.memory_index import MemoryIndex
+from services.memory_quality import (
+    is_unusable_automatic_answer,
+    sanitize_automatic_memory_content,
+)
 from services.memory_retriever import MemoryRetriever
 from services.memory_store import MemoryEntry, MemoryStore
 
@@ -59,6 +64,12 @@ class MemoryService:
             use_sqlite: 是否使用 SQLite 存储（可选增强）
         """
         self.data_dir = data_dir
+        # Automatic memory work may outlive the originating chat request. A
+        # full clear advances this generation so delayed work cannot recreate
+        # sessions, daily Markdown, event records, or vector entries.
+        self._write_generation_lock = threading.RLock()
+        self._store_mutation_lock = threading.RLock()
+        self._write_generation = 0
         
         # 根据配置选择存储后端
         if use_sqlite:
@@ -113,6 +124,18 @@ class MemoryService:
 
         # 预加载活跃记忆池
         self._safe_execute("ActivePool.preload", self._preload_active_pool)
+
+    def capture_write_generation(self) -> int:
+        """Capture the generation an asynchronous memory write may publish to."""
+        with self._write_generation_lock:
+            return self._write_generation
+
+    def is_write_generation_current(self, expected_generation: int | None) -> bool:
+        """Return whether a delayed writer still belongs to the active store."""
+        if expected_generation is None:
+            return True
+        with self._write_generation_lock:
+            return int(expected_generation) == self._write_generation
 
     # ==================== 安全执行与预加载 ====================
 
@@ -306,12 +329,36 @@ class MemoryService:
     ) -> list[dict]:
         """Drop stale automatic hits returned by a shared memory index."""
         identity = cls._normalize_parse_identity(parse_identity)
-        if identity is None or not doc_id:
-            return list(memories or [])
 
         filtered: list[dict] = []
         for memory in memories or []:
             entry = entry_map.get(memory.get("entry_id", "")) if isinstance(memory, dict) else None
+            source_type = str(
+                entry.source_type
+                if entry is not None
+                else (memory.get("source_type") if isinstance(memory, dict) else "")
+                or ""
+            )
+            content = str(
+                entry.content
+                if entry is not None
+                else (
+                    memory.get("text") or memory.get("content") or ""
+                    if isinstance(memory, dict)
+                    else ""
+                )
+            )
+            if source_type in _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES:
+                content = sanitize_automatic_memory_content(content, source_type)
+                if not content:
+                    continue
+                if isinstance(memory, dict):
+                    memory = dict(memory)
+                    memory["text"] = content
+                    memory["content"] = content
+            if identity is None or not doc_id:
+                filtered.append(memory)
+                continue
             if entry is not None:
                 if cls._entry_matches_parse_identity(
                     entry,
@@ -353,6 +400,8 @@ class MemoryService:
         for round_idx, (user_msg, assistant_msg) in enumerate(rounds[-2:]):
             question = (user_msg or {}).get("content", "").strip()
             answer = (assistant_msg or {}).get("content", "").strip()
+            if not question or is_unusable_automatic_answer(answer):
+                continue
             content = f"Q: {question}\nA: {answer}".strip()
             if not content:
                 continue
@@ -768,7 +817,8 @@ class MemoryService:
         model: str = None,
         api_provider: str = None,
         parse_identity: dict | None = None,
-    ) -> None:
+        expected_generation: int | None = None,
+    ) -> bool:
         """从对话历史中提取最后 N 轮 QA 摘要并保存
 
         优先使用 LLM 提炼持久性事实（借鉴 OpenClaw），
@@ -784,19 +834,19 @@ class MemoryService:
             parse_identity: 生成该对话答案时的文档解析身份
         """
         if not chat_history or not doc_id:
-            return
+            return False
+
+        if expected_generation is None:
+            expected_generation = self.capture_write_generation()
 
         # 提取 QA 对：从对话历史中配对 user/assistant 消息
         qa_pairs = self._extract_qa_pairs(chat_history)
         if not qa_pairs:
-            return
+            return False
 
         # 取最后 N 轮
         recent_pairs = qa_pairs[-n:]
 
-        # 加载当前 session
-        session = self.store.load_session(doc_id)
-        created_entries: list[MemoryEntry] = []
         identity = self._normalize_parse_identity(parse_identity)
         source_ref = dict(identity or {})
 
@@ -807,121 +857,147 @@ class MemoryService:
                 recent_pairs, api_key, model, api_provider
             )
 
-        if distilled_facts:
-            # LLM 提炼成功：每条事实作为一个高质量摘要
-            for fact in distilled_facts:
-                entry_id = str(uuid.uuid4())
-                summary = {
-                    "id": entry_id,
-                    "question": fact,
-                    "answer": "",
-                    "source_type": "llm_distilled",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "importance": 0.7,
-                    "memory_kind": "doc_fact",
-                    "memory_scope": "document",
-                    "status": "active",
-                    "title": "文档事实",
-                    "summary": self._truncate_text(fact),
-                    "source_ref": dict(source_ref),
-                    "trace": {
-                        "kind": "distilled_fact",
-                        "source": "qa_history",
-                    },
-                }
-                session["qa_summaries"].append(summary)
-                created_entries.append(MemoryEntry(
-                    id=entry_id,
-                    content=fact,
-                    source_type="llm_distilled",
-                    created_at=summary["created_at"],
-                    doc_id=doc_id,
-                    importance=0.7,
-                    memory_kind="doc_fact",
-                    memory_scope="document",
-                    title="文档事实",
-                    summary=summary["summary"],
-                    source_ref=dict(source_ref),
-                    trace=dict(summary["trace"]),
-                ))
-            logger.info(f"LLM 记忆提炼: {len(distilled_facts)} 条事实")
-        else:
-            # 降级：截断摘要
-            for question, answer in recent_pairs:
-                truncated_q = question[:QUESTION_MAX_LEN]
-                truncated_a = answer[:ANSWER_MAX_LEN]
-                entry_id = str(uuid.uuid4())
+        # Keep snapshot/session/event writes in one short critical section. The
+        # expensive LLM and embedding calls stay outside it, but their final
+        # publication is fenced below.
+        with self._write_generation_lock, self._store_mutation_lock:
+            if expected_generation != self._write_generation:
+                logger.info("[Memory] clear 后拒绝过期 QA 摘要写入: doc_id=%s", doc_id)
+                return False
 
-                summary = {
-                    "id": entry_id,
-                    "question": truncated_q,
-                    "answer": truncated_a,
-                    "source_type": "auto_qa",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "importance": 0.5,
-                    "memory_kind": "episodic",
-                    "memory_scope": "document",
-                    "status": "active",
-                    "title": truncated_q[:60] or "对话摘要",
-                    "summary": self._truncate_text(f"Q: {truncated_q}\nA: {truncated_a}"),
-                    "source_ref": dict(source_ref),
-                    "trace": {
-                        "kind": "qa_summary",
-                        "source": "chat_history",
-                    },
-                }
-                session["qa_summaries"].append(summary)
-                created_entries.append(MemoryEntry(
-                    id=entry_id,
-                    content=f"Q: {truncated_q}\nA: {truncated_a}",
-                    source_type="auto_qa",
-                    created_at=summary["created_at"],
-                    doc_id=doc_id,
-                    importance=0.5,
-                    memory_kind="episodic",
-                    memory_scope="document",
-                    title=summary["title"],
-                    summary=summary["summary"],
-                    source_ref=dict(source_ref),
-                    trace=dict(summary["trace"]),
-                ))
+            session = self.store.load_session(doc_id)
+            created_entries: list[MemoryEntry] = []
+            existing_auto_qa = {
+                (
+                    str(item.get("question") or "").strip(),
+                    str(item.get("answer") or "").strip(),
+                )
+                for item in session.get("qa_summaries", [])
+                if item.get("source_type", "auto_qa") == "auto_qa"
+            }
+            existing_distilled = {
+                str(item.get("question") or "").strip()
+                for item in session.get("qa_summaries", [])
+                if item.get("source_type") == "llm_distilled"
+            }
 
-        # 摘要数量上限控制
-        self._enforce_summary_limit(session)
-        retained_ids = {item.get("id") for item in session.get("qa_summaries", [])}
-        created_entries = [entry for entry in created_entries if entry.id in retained_ids]
+            if distilled_facts:
+                for fact in distilled_facts:
+                    fact = str(fact or "").strip()
+                    if not fact or fact in existing_distilled:
+                        continue
+                    existing_distilled.add(fact)
+                    entry_id = str(uuid.uuid4())
+                    summary = {
+                        "id": entry_id,
+                        "question": fact,
+                        "answer": "",
+                        "source_type": "llm_distilled",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "importance": 0.7,
+                        "memory_kind": "doc_fact",
+                        "memory_scope": "document",
+                        "status": "active",
+                        "title": "文档事实",
+                        "summary": self._truncate_text(fact),
+                        "source_ref": dict(source_ref),
+                        "trace": {"kind": "distilled_fact", "source": "qa_history"},
+                    }
+                    session["qa_summaries"].append(summary)
+                    created_entries.append(MemoryEntry(
+                        id=entry_id,
+                        content=fact,
+                        source_type="llm_distilled",
+                        created_at=summary["created_at"],
+                        doc_id=doc_id,
+                        importance=0.7,
+                        memory_kind="doc_fact",
+                        memory_scope="document",
+                        title="文档事实",
+                        summary=summary["summary"],
+                        source_ref=dict(source_ref),
+                        trace=dict(summary["trace"]),
+                    ))
+                logger.info(f"LLM 记忆提炼: {len(distilled_facts)} 条事实")
+            else:
+                for question, answer in recent_pairs:
+                    truncated_q = question[:QUESTION_MAX_LEN]
+                    truncated_a = answer[:ANSWER_MAX_LEN]
+                    qa_key = (truncated_q.strip(), truncated_a.strip())
+                    if not all(qa_key) or qa_key in existing_auto_qa:
+                        continue
+                    existing_auto_qa.add(qa_key)
+                    entry_id = str(uuid.uuid4())
+                    summary = {
+                        "id": entry_id,
+                        "question": truncated_q,
+                        "answer": truncated_a,
+                        "source_type": "auto_qa",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "importance": 0.5,
+                        "memory_kind": "episodic",
+                        "memory_scope": "document",
+                        "status": "active",
+                        "title": truncated_q[:60] or "对话摘要",
+                        "summary": self._truncate_text(f"Q: {truncated_q}\nA: {truncated_a}"),
+                        "source_ref": dict(source_ref),
+                        "trace": {"kind": "qa_summary", "source": "chat_history"},
+                    }
+                    session["qa_summaries"].append(summary)
+                    created_entries.append(MemoryEntry(
+                        id=entry_id,
+                        content=f"Q: {truncated_q}\nA: {truncated_a}",
+                        source_type="auto_qa",
+                        created_at=summary["created_at"],
+                        doc_id=doc_id,
+                        importance=0.5,
+                        memory_kind="episodic",
+                        memory_scope="document",
+                        title=summary["title"],
+                        summary=summary["summary"],
+                        source_ref=dict(source_ref),
+                        trace=dict(summary["trace"]),
+                    ))
 
-        # 更新最后访问时间并保存
-        session["last_accessed"] = datetime.now(timezone.utc).isoformat()
-        self.store.save_session(doc_id, session)
-        
-        # 同步写入 Markdown 源文件（每日日志）
-        try:
-            for entry in created_entries:
-                self.store._write_memory_markdown(entry, is_long_term=False)
-                self.store._append_event("add", {"entry": entry.to_dict(), "scope": "qa_summary"})
-        except Exception as e:
-            logger.warning(f"同步写入 Markdown 失败: {e}")
+            self._enforce_summary_limit(session)
+            retained_ids = {item.get("id") for item in session.get("qa_summaries", [])}
+            created_entries = [entry for entry in created_entries if entry.id in retained_ids]
+            session["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            self.store.save_session(doc_id, session)
+            try:
+                for entry in created_entries:
+                    self.store._write_memory_markdown(entry, is_long_term=False)
+                    self.store._append_event("add", {"entry": entry.to_dict(), "scope": "qa_summary"})
+            except Exception as exc:
+                logger.warning(f"同步写入 Markdown 失败: {exc}")
 
         for entry in created_entries:
             try:
-                self.index.add_entry(entry.id, entry.content)
-            except Exception as e:
-                logger.error(f"添加 QA 摘要到向量索引失败: {e}")
+                self.index.add_entry(
+                    entry.id,
+                    entry.content,
+                    should_commit=lambda: self.is_write_generation_current(expected_generation),
+                )
+            except Exception as exc:
+                logger.error(f"添加 QA 摘要到向量索引失败: {exc}")
 
         # 保存完成后检查是否需要压缩（安全执行）
-        self._safe_execute(
-            "MemoryCompressor.check",
-            self._check_and_compress,
-            doc_id,
-            api_key,
-            model,
-            api_provider,
-            identity,
-        )
+        if self.is_write_generation_current(expected_generation):
+            self._safe_execute(
+                "MemoryCompressor.check",
+                self._check_and_compress,
+                doc_id,
+                api_key,
+                model,
+                api_provider,
+                identity,
+                expected_generation,
+            )
         # QA 摘要直接更新 session，不会经过 MemoryStore.add_entry。
         # 在压缩收敛后才失效缓存，避免压缩阶段读取到半更新会话。
-        self.store.cache.invalidate()
+        if self.is_write_generation_current(expected_generation):
+            self.store.cache.invalidate()
+        return True
 
     def _check_and_compress(
         self,
@@ -930,6 +1006,7 @@ class MemoryService:
         model: str = None,
         api_provider: str = None,
         parse_identity: dict | None = None,
+        expected_generation: int | None = None,
     ) -> None:
         """检查并执行记忆压缩
 
@@ -942,6 +1019,8 @@ class MemoryService:
             api_provider: LLM 提供商
         """
         if not self.compressor or not doc_id:
+            return
+        if not self.is_write_generation_current(expected_generation):
             return
         all_entries = self.store.get_all_entries()
         doc_entries = [
@@ -959,7 +1038,13 @@ class MemoryService:
         if not self.compressor.should_compress(doc_id, doc_entries):
             return
         compressed = self.compressor.compress(doc_entries, api_key=api_key, model=model, api_provider=api_provider)
-        if compressed:
+        if not compressed:
+            return
+
+        with self._write_generation_lock, self._store_mutation_lock:
+            if expected_generation is not None and expected_generation != self._write_generation:
+                logger.info("[Memory] clear 后拒绝过期压缩结果: doc_id=%s", doc_id)
+                return
             identity = self._normalize_parse_identity(parse_identity)
             if identity:
                 for entry in compressed:
@@ -982,13 +1067,19 @@ class MemoryService:
                 except Exception as exc:
                     logger.debug(f"[MemoryCompressor] 移除原始记忆索引失败 {e.id}: {exc}")
             self.store.batch_add_entries(compressed)
-            for c in compressed:
-                try:
-                    self.index.add_entry(c.id, c.content)
-                except Exception as exc:
-                    logger.debug(f"[MemoryCompressor] 添加压缩记忆索引失败 {c.id}: {exc}")
-                self._page_in_active_pool(c)
-            logger.info(f"[MemoryCompressor] 文档 {doc_id} 压缩完成: {len(doc_entries)} -> {len(compressed)}")
+
+        for entry in compressed:
+            try:
+                committed = self.index.add_entry(
+                    entry.id,
+                    entry.content,
+                    should_commit=lambda: self.is_write_generation_current(expected_generation),
+                )
+                if committed:
+                    self._page_in_active_pool(entry)
+            except Exception as exc:
+                logger.debug(f"[MemoryCompressor] 添加压缩记忆索引失败 {entry.id}: {exc}")
+        logger.info(f"[MemoryCompressor] 文档 {doc_id} 压缩完成: {len(doc_entries)} -> {len(compressed)}")
 
     def _distill_facts(
         self,
@@ -1119,9 +1210,10 @@ class MemoryService:
                 current.get("role") == "user"
                 and next_msg.get("role") == "assistant"
             ):
-                question = current.get("content", "")
-                answer = next_msg.get("content", "")
-                pairs.append((question, answer))
+                question = str(current.get("content", "") or "").strip()
+                answer = str(next_msg.get("content", "") or "").strip()
+                if question and not is_unusable_automatic_answer(answer):
+                    pairs.append((question, answer))
                 i += 2  # 跳过已配对的两条消息
             else:
                 i += 1
@@ -1215,7 +1307,7 @@ class MemoryService:
 
         return entry
 
-    def update_keywords(self, query: str) -> None:
+    def update_keywords(self, query: str, *, expected_generation: int | None = None) -> bool:
         """从查询中提取关键词并更新用户画像
 
         提取关键词 → 更新频率统计 → 更新关注领域列表。
@@ -1224,22 +1316,27 @@ class MemoryService:
             query: 用户查询文本
         """
         if not query or not query.strip():
-            return
+            return False
 
         keywords = self.keyword_extractor.extract_keywords(query)
         if not keywords:
-            return
+            return False
 
-        profile = self.store.load_profile()
-        profile = self.keyword_extractor.update_frequency(profile, keywords)
+        with self._write_generation_lock, self._store_mutation_lock:
+            if expected_generation is not None and expected_generation != self._write_generation:
+                logger.info("[Memory] clear 后拒绝过期关键词写入")
+                return False
+            profile = self.store.load_profile()
+            profile = self.keyword_extractor.update_frequency(profile, keywords)
 
-        # 更新关注领域列表
-        profile["focus_areas"] = self.keyword_extractor.get_focus_areas(
-            profile, threshold=self.keyword_threshold
-        )
+            # 更新关注领域列表
+            profile["focus_areas"] = self.keyword_extractor.get_focus_areas(
+                profile, threshold=self.keyword_threshold
+            )
 
-        self.store.save_profile(profile)
-        self.store.record_profile_state(profile, reason="keyword_update")
+            self.store.save_profile(profile)
+            self.store.record_profile_state(profile, reason="keyword_update")
+        return True
 
     # ==================== CRUD 操作 ====================
 
@@ -1256,8 +1353,13 @@ class MemoryService:
             "entries": [self._serialize_entry(entry) for entry in profile_entries],
         }
 
+    def validate_doc_id(self, doc_id: str) -> str:
+        """Validate external document IDs before they reach persistent storage."""
+        return self.store.validate_session_doc_id(doc_id)
+
     def get_session(self, doc_id: str) -> dict:
         """获取指定文档的会话记忆"""
+        doc_id = self.validate_doc_id(doc_id)
         session = self.store.load_session(doc_id)
         entries = sorted(
             [e for e in self.store.get_all_entries() if e.doc_id == doc_id],
@@ -1277,6 +1379,8 @@ class MemoryService:
         include_content: bool = True,
     ) -> list[dict[str, Any]]:
         """列出记忆条目，支持按层级/作用域/状态筛选。"""
+        if doc_id is not None:
+            doc_id = self.validate_doc_id(doc_id)
         entries = self.store.get_all_entries()
         filtered = []
         for entry in entries:
@@ -1324,6 +1428,8 @@ class MemoryService:
         parse_identity: dict | None = None,
     ) -> dict[str, Any]:
         """基于文档事实/压缩记忆生成轻量图谱摘要。"""
+        if doc_id is not None:
+            doc_id = self.validate_doc_id(doc_id)
         entries = [
             entry for entry in self.store.get_all_entries()
             if entry.doc_id == doc_id and entry.memory_kind in {"doc_fact", "consolidated", "graph"}
@@ -1391,6 +1497,8 @@ class MemoryService:
         Returns:
             创建的 MemoryEntry 对象
         """
+        if doc_id is not None:
+            doc_id = self.validate_doc_id(doc_id)
         importance = 1.0 if source_type in ("manual", "liked") else 0.5
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
@@ -1470,9 +1578,22 @@ class MemoryService:
 
         同时清空 store 和 index。
         """
-        self.store.clear_all()
+        with self._write_generation_lock:
+            self._write_generation += 1
+        with self._store_mutation_lock:
+            self.store.clear_all()
+            if self.active_pool:
+                try:
+                    self.active_pool.clear()
+                except Exception as exc:
+                    logger.warning("清空活跃记忆池失败: %s", exc)
         try:
+            # Do not hold the service generation lock while acquiring the
+            # index lock: an embedding worker checks the generation from
+            # inside that index lock. The generation was already advanced
+            # above, so late workers cannot publish during this gap.
             self.index.rebuild([])
+            self.index.flush_sync(reason="manual")
         except Exception as e:
             logger.error(f"清空向量索引失败: {e}")
 

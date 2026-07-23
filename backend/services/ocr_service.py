@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import zipfile
@@ -17,7 +18,9 @@ from typing import Any, Callable, List, Optional, Tuple, Dict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from runtime_mode import runtime
 from services.document_parse_adapter import DocumentParseAdapter, MinerUDocumentParseAdapter
+from services.mineru_progress import extract_remote_mineru_progress
 
 
 # ============================================================
@@ -81,8 +84,43 @@ def apply_ocr_result_to_pages(
         for page_ocr in ocr_result.pages
         if page_ocr.success
     }
+    page_lookup = {}
+    for index, page in enumerate(pages):
+        if not isinstance(page, dict):
+            continue
+        try:
+            display_page = int(page.get("page") or (index + 1))
+        except (TypeError, ValueError):
+            display_page = index + 1
+        page_lookup[display_page] = page
+
+    def _record_page_attempt(
+        display_page: int,
+        *,
+        success: bool,
+        applied: bool = False,
+        error: Optional[str] = None,
+    ) -> None:
+        page = page_lookup.get(display_page)
+        if page is None:
+            return
+        attempts = page.setdefault("ocr_attempts", [])
+        attempt = {
+            "backend": ocr_result.backend,
+            "success": bool(success),
+            "applied": bool(applied),
+        }
+        if success and not applied:
+            attempt["not_applied_reason"] = "below_replacement_threshold"
+        if error:
+            attempt["error"] = str(error)
+            page["ocr_last_error"] = str(error)
+        attempts.append(attempt)
 
     merged_text_parts = []
+    used_before = bool(result.get("ocr_used"))
+    used_this_attempt = False
+    applied_pages: List[int] = []
     for index, page in enumerate(pages):
         if index in ocr_page_map:
             ocr_content = ocr_page_map[index]
@@ -93,20 +131,99 @@ def apply_ocr_result_to_pages(
                 page["source"] = "ocr"
                 page["ocr_backend"] = ocr_result.backend
                 result["ocr_used"] = True
+                used_this_attempt = True
+                applied_pages.append(index + 1)
 
         merged_text_parts.append(page.get("content", ""))
 
     if result.get("ocr_used"):
         result["full_text"] = "\n\n".join(merged_text_parts)
-        result["ocr_backend"] = ocr_result.backend
-        result["ocr_pages"] = ocr_target_pages
+        if used_this_attempt and not result.get("ocr_backend"):
+            result["ocr_backend"] = ocr_result.backend
+        if used_this_attempt:
+            backends = list(result.get("ocr_backends") or [])
+            if ocr_result.backend and ocr_result.backend not in backends:
+                backends.append(ocr_result.backend)
+            result["ocr_backends"] = backends
+            previous_pages = {
+                int(page)
+                for page in (result.get("ocr_pages") or [])
+                if isinstance(page, int) or str(page).isdigit()
+            }
+            previous_pages.update(applied_pages)
+            result["ocr_pages"] = sorted(previous_pages)
 
-    failed_pages = list(ocr_result.failed_pages or [])
+    failed_pages = sorted({
+        int(page)
+        for page in (ocr_result.failed_pages or [])
+        if isinstance(page, int) or str(page).isdigit()
+    })
+    result["ocr_failed_pages"] = failed_pages
+    previous_targets = {
+        int(page)
+        for page in (result.get("ocr_target_pages") or [])
+        if isinstance(page, int) or str(page).isdigit()
+    }
+    previous_targets.update(
+        int(page) + 1
+        for page in (ocr_target_pages or [])
+        if (isinstance(page, int) or str(page).isdigit()) and int(page) >= 0
+    )
+    result["ocr_target_pages"] = sorted(previous_targets)
+
+    recorded_pages = set()
+    execution_successful_pages = {
+        int(page)
+        for page in (result.get("ocr_execution_successful_pages") or [])
+        if isinstance(page, int) or str(page).isdigit()
+    }
+    applied_page_set = {
+        int(page)
+        for page in (
+            result.get("ocr_applied_pages")
+            or result.get("ocr_pages")
+            or result.get("ocr_successful_pages")
+            or []
+        )
+        if isinstance(page, int) or str(page).isdigit()
+    }
+    applied_page_set.update(applied_pages)
+    applied_this_attempt = set(applied_pages)
+    for page_ocr in ocr_result.pages or []:
+        try:
+            display_page = int(page_ocr.page_number)
+        except (TypeError, ValueError):
+            continue
+        recorded_pages.add(display_page)
+        if page_ocr.success:
+            execution_successful_pages.add(display_page)
+        _record_page_attempt(
+            display_page,
+            success=bool(page_ocr.success),
+            applied=display_page in applied_this_attempt,
+            error=getattr(page_ocr, "error", None),
+        )
+    result["ocr_execution_successful_pages"] = sorted(execution_successful_pages)
+    result["ocr_applied_pages"] = sorted(applied_page_set)
+    # Compatibility field: "successful" means the OCR text became the
+    # document's consumable text, not merely that the provider returned 200.
+    result["ocr_successful_pages"] = sorted(applied_page_set)
+    result["ocr_unapplied_pages"] = sorted(execution_successful_pages - applied_page_set)
+    for display_page in failed_pages:
+        if display_page in recorded_pages:
+            continue
+        _record_page_attempt(
+            int(display_page),
+            success=False,
+            applied=False,
+            error=(ocr_result.errors or {}).get(int(display_page)),
+        )
+
     if failed_pages:
         failed_info = ", ".join(str(page) for page in failed_pages)
         result["ocr_warning"] = f"部分页面 OCR 失败（页码: {failed_info}）"
 
-    if ocr_target_pages and len(failed_pages) == len(ocr_target_pages):
+    if ocr_target_pages and len(failed_pages) == len(ocr_target_pages) and not used_before and not used_this_attempt:
         result["ocr_warning"] = "所有需要 OCR 的页面均处理失败，已保留原始提取文本"
         result["ocr_used"] = False
 
@@ -122,6 +239,29 @@ def apply_ocr_result_to_pages(
 def _allow_private_ocr_urls() -> bool:
     value = os.environ.get("CHATPDF_ALLOW_PRIVATE_OCR_URLS", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_external_ocr_host(host: str, port: int | None, *, service_name: str) -> None:
+    """Resolve a hostname before connecting and reject non-public addresses."""
+    try:
+        records = socket.getaddrinfo(
+            host,
+            port or 443,
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as exc:
+        raise ValueError(f"{service_name} URL 主机名无法解析") from exc
+
+    resolved_ips: set[Any] = set()
+    for _family, _socktype, _proto, _canonname, sockaddr in records:
+        try:
+            resolved_ips.add(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            continue
+    if not resolved_ips:
+        raise ValueError(f"{service_name} URL 主机名未解析到有效 IP 地址")
+    if any(not address.is_global for address in resolved_ips):
+        raise ValueError(f"{service_name} URL 不允许解析到私网、保留或本机地址")
 
 
 def validate_external_ocr_service_url(
@@ -142,6 +282,8 @@ def validate_external_ocr_service_url(
     parsed = urlparse(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"{service_name} URL 格式无效")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{service_name} URL 不允许包含用户名或密码")
 
     private_allowed = _allow_private_ocr_urls() if allow_private is None else allow_private
     if not private_allowed and parsed.scheme != "https":
@@ -150,6 +292,10 @@ def validate_external_ocr_service_url(
     host = (parsed.hostname or "").strip().lower().rstrip(".")
     if not host:
         raise ValueError(f"{service_name} URL 缺少主机名")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{service_name} URL 端口无效") from exc
 
     local_hosts = {"localhost", "localhost.localdomain"}
     if not private_allowed and (host in local_hosts or host.endswith(".local")):
@@ -161,17 +307,127 @@ def validate_external_ocr_service_url(
         ip = None
 
     if ip is not None and not private_allowed:
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
+        if not ip.is_global:
             raise ValueError(f"{service_name} URL 不允许指向私网、保留或本机地址")
+    elif not private_allowed:
+        try:
+            _resolve_external_ocr_host(host, port, service_name=service_name)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"{service_name} URL 主机名校验失败") from exc
 
     return cleaned
+
+
+def _read_positive_env_limit(name: str, default: int, *, maximum: int) -> int:
+    try:
+        return max(1, min(int(os.environ.get(name, str(default))), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _same_ocr_service_origin(left: str, right: str) -> bool:
+    try:
+        left_parsed = urlparse(left)
+        right_parsed = urlparse(right)
+        left_port = left_parsed.port
+        right_port = right_parsed.port
+        if (left_parsed.scheme, left_port) in {("https", 443), ("http", 80)}:
+            left_port = None
+        if (right_parsed.scheme, right_port) in {("https", 443), ("http", 80)}:
+            right_port = None
+        return (
+            left_parsed.scheme.lower(),
+            (left_parsed.hostname or "").lower().rstrip("."),
+            left_port,
+        ) == (
+            right_parsed.scheme.lower(),
+            (right_parsed.hostname or "").lower().rstrip("."),
+            right_port,
+        )
+    except ValueError:
+        return False
+
+
+_MAX_MINERU_ZIP_BYTES = _read_positive_env_limit(
+    "CHATPDF_MAX_MINERU_ZIP_BYTES", 100 * 1024 * 1024, maximum=512 * 1024 * 1024
+)
+_MAX_MINERU_ZIP_ENTRIES = _read_positive_env_limit(
+    "CHATPDF_MAX_MINERU_ZIP_ENTRIES", 1024, maximum=10_000
+)
+_MAX_MINERU_ZIP_ENTRY_BYTES = _read_positive_env_limit(
+    "CHATPDF_MAX_MINERU_ZIP_ENTRY_BYTES", 64 * 1024 * 1024, maximum=256 * 1024 * 1024
+)
+_MAX_MINERU_ZIP_EXPANDED_BYTES = _read_positive_env_limit(
+    "CHATPDF_MAX_MINERU_ZIP_EXPANDED_BYTES", 256 * 1024 * 1024, maximum=1024 * 1024 * 1024
+)
+_MINERU_DIRECT_ZIP_DOWNLOAD_ATTEMPTS = _read_positive_env_limit(
+    "CHATPDF_MINERU_ZIP_DOWNLOAD_ATTEMPTS", 5, maximum=8
+)
+
+
+def create_mineru_direct_http_client(
+    *,
+    timeout_seconds: float = 300.0,
+    connect_timeout_seconds: float = 30.0,
+    disable_keepalive: bool = False,
+):
+    """Create an official MinerU client that never inherits system proxies."""
+    import httpx
+
+    options: dict[str, Any] = {
+        "timeout": httpx.Timeout(timeout_seconds, connect=connect_timeout_seconds),
+        "trust_env": False,
+    }
+    if disable_keepalive:
+        options["limits"] = httpx.Limits(
+            max_connections=1,
+            max_keepalive_connections=0,
+        )
+    return httpx.Client(**options)
+
+
+def _download_limited_zip(client, zip_url: str, *, headers: Optional[dict] = None, service_name: str) -> bytes:
+    """Download a verified OCR archive without buffering an unbounded response."""
+    try:
+        safe_url = validate_external_ocr_service_url(zip_url, service_name=service_name)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    with client.stream("GET", safe_url, headers=headers or {}, follow_redirects=False) as response:
+        if not response.is_success:
+            raise RuntimeError(f"{service_name} 下载失败 (HTTP {response.status_code})")
+        content_length = response.headers.get("content-length")
+        try:
+            if content_length and int(content_length) > _MAX_MINERU_ZIP_BYTES:
+                raise RuntimeError(f"{service_name} ZIP 超过大小上限")
+        except ValueError:
+            pass
+
+        chunks: list[bytes] = []
+        total_bytes = 0
+        for chunk in response.iter_bytes():
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_MINERU_ZIP_BYTES:
+                raise RuntimeError(f"{service_name} ZIP 超过大小上限")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_mineru_zip(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    """Reject archive bombs before reading any member payload."""
+    infos = zf.infolist()
+    if len(infos) > _MAX_MINERU_ZIP_ENTRIES:
+        raise RuntimeError("MinerU ZIP 条目数量超过上限")
+    expanded_bytes = 0
+    for info in infos:
+        if info.file_size > _MAX_MINERU_ZIP_ENTRY_BYTES:
+            raise RuntimeError(f"MinerU ZIP 条目过大: {info.filename}")
+        expanded_bytes += info.file_size
+        if expanded_bytes > _MAX_MINERU_ZIP_EXPANDED_BYTES:
+            raise RuntimeError("MinerU ZIP 解压后总大小超过上限")
+    return infos
 
 
 class BaseOCRAdapter(ABC):
@@ -230,10 +486,72 @@ logger = logging.getLogger(__name__)
 # 在线 OCR 配置管理函数
 # ============================================================
 
-# 配置文件路径：相对于 Chatpdf 项目根目录
-_ONLINE_OCR_CONFIG_PATH = Path(__file__).resolve().parents[2] / "data" / "online_ocr_config.json"
+# Server mode retains the historical project ``data`` directory. Packaged
+# desktop mode must keep credentials in the per-user application data folder
+# instead of beside a project checkout or installation.
+_LEGACY_ONLINE_OCR_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "online_ocr_config.json"
+)
+_ONLINE_OCR_CONFIG_PATH = Path(runtime.data_dir) / "online_ocr_config.json"
 _OCR_PROVIDER_USAGE_PATH = _ONLINE_OCR_CONFIG_PATH.parent / "ocr_provider_usage.json"
 _OCR_PROVIDER_USAGE_THREAD_LOCK = threading.RLock()
+_ONLINE_OCR_CONFIG_THREAD_LOCK = threading.RLock()
+
+
+def _restrict_online_ocr_config_permissions(path: Path) -> None:
+    """Apply the strongest portable file-mode restriction available.
+
+    Windows user-data directories inherit the owning user's ACL from Electron.
+    On POSIX, explicitly remove group/world access because a freshly created
+    file can otherwise inherit a permissive process umask.
+    """
+    if os.name == "nt":
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        logger.warning("无法收紧在线 OCR 配置文件权限")
+
+
+def _migrate_legacy_online_ocr_config_if_needed() -> None:
+    """Move a pre-user-data desktop OCR config once without leaving a copy."""
+    target = _ONLINE_OCR_CONFIG_PATH
+    legacy = _LEGACY_ONLINE_OCR_CONFIG_PATH
+    if (
+        not runtime.is_desktop
+        or target == legacy
+        or target.exists()
+        or not legacy.exists()
+    ):
+        return
+
+    temp_path: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        temp_path.write_bytes(legacy.read_bytes())
+        _restrict_online_ocr_config_permissions(temp_path)
+        os.replace(temp_path, target)
+        _restrict_online_ocr_config_permissions(target)
+        legacy.unlink()
+        logger.info("已将在线 OCR 配置迁移到桌面用户数据目录")
+    except OSError as exc:
+        logger.warning("在线 OCR 配置迁移失败，将继续使用现有配置: %s", type(exc).__name__)
+        if temp_path:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _online_ocr_config_read_path() -> Path:
+    """Return the active config, retaining a legacy fallback during migration."""
+    _migrate_legacy_online_ocr_config_if_needed()
+    if _ONLINE_OCR_CONFIG_PATH.exists():
+        return _ONLINE_OCR_CONFIG_PATH
+    if runtime.is_desktop and _LEGACY_ONLINE_OCR_CONFIG_PATH.exists():
+        return _LEGACY_ONLINE_OCR_CONFIG_PATH
+    return _ONLINE_OCR_CONFIG_PATH
 
 
 @contextmanager
@@ -462,23 +780,25 @@ def _load_online_ocr_config(provider: str) -> dict:
     env_map = _ENV_VAR_MAP.get(provider, {})
 
     # 第二优先级：从配置文件加载
-    try:
-        if _ONLINE_OCR_CONFIG_PATH.exists():
-            with open(_ONLINE_OCR_CONFIG_PATH, "r", encoding="utf-8") as f:
-                all_config = json.load(f)
-            if provider in all_config and isinstance(all_config[provider], dict):
-                provider_config = all_config[provider]
-                for key in result:
-                    if key in provider_config:
-                        value = provider_config[key]
-                        # 对于字符串类型字段，仅覆盖非空值
-                        # 对于布尔类型字段，直接覆盖
-                        if isinstance(value, bool):
-                            result[key] = value
-                        elif value:
-                            result[key] = value
-    except (json.JSONDecodeError, IOError, OSError) as e:
-        logger.error(f"读取在线 OCR 配置文件失败: {e}")
+    with _ONLINE_OCR_CONFIG_THREAD_LOCK:
+        config_path = _online_ocr_config_read_path()
+        try:
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    all_config = json.load(f)
+                if provider in all_config and isinstance(all_config[provider], dict):
+                    provider_config = all_config[provider]
+                    for key in result:
+                        if key in provider_config:
+                            value = provider_config[key]
+                            # 对于字符串类型字段，仅覆盖非空值
+                            # 对于布尔类型字段，直接覆盖
+                            if isinstance(value, bool):
+                                result[key] = value
+                            elif value:
+                                result[key] = value
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(f"读取在线 OCR 配置文件失败: {e}")
 
     # 第一优先级：从环境变量加载（仅覆盖 _ENV_VAR_MAP 中定义的字段）
     for field_name, env_var_name in env_map.items():
@@ -508,28 +828,47 @@ def _save_online_ocr_config(provider: str, config: dict) -> None:
             config["model_version"] = normalize_mineru_model_version(
                 config.get("model_version")
             )
-        # 确保目录存在
-        _ONLINE_OCR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _ONLINE_OCR_CONFIG_THREAD_LOCK:
+            config_read_path = _online_ocr_config_read_path()
+            # 确保目录存在
+            _ONLINE_OCR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        # 读取现有配置（如果存在）
-        all_config: dict = {}
-        if _ONLINE_OCR_CONFIG_PATH.exists():
+            # 读取现有配置（如果存在）
+            all_config: dict = {}
+            if config_read_path.exists():
+                try:
+                    with open(config_read_path, "r", encoding="utf-8") as f:
+                        all_config = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    # 配置文件损坏，使用空字典重新开始
+                    logger.warning("在线 OCR 配置文件损坏，将重新创建")
+                    all_config = {}
+
+            # 更新指定提供商的配置
+            if provider not in all_config:
+                all_config[provider] = {}
+            all_config[provider].update(config)
+
+            # Persist credentials atomically. A crash during a direct write can
+            # otherwise leave a partial JSON file that loses an unrelated
+            # provider's key on the next save.
+            temp_path = _ONLINE_OCR_CONFIG_PATH.with_name(
+                f".{_ONLINE_OCR_CONFIG_PATH.name}.{uuid.uuid4().hex}.tmp"
+            )
             try:
-                with open(_ONLINE_OCR_CONFIG_PATH, "r", encoding="utf-8") as f:
-                    all_config = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                # 配置文件损坏，使用空字典重新开始
-                logger.warning("在线 OCR 配置文件损坏，将重新创建")
-                all_config = {}
-
-        # 更新指定提供商的配置
-        if provider not in all_config:
-            all_config[provider] = {}
-        all_config[provider].update(config)
-
-        # 写入配置文件
-        with open(_ONLINE_OCR_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(all_config, f, ensure_ascii=False, indent=2)
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(all_config, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                _restrict_online_ocr_config_permissions(temp_path)
+                os.replace(temp_path, _ONLINE_OCR_CONFIG_PATH)
+                _restrict_online_ocr_config_permissions(_ONLINE_OCR_CONFIG_PATH)
+            except Exception:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
         logger.info(f"在线 OCR 配置已保存: provider={provider}")
     except (IOError, OSError) as e:
@@ -1371,14 +1710,16 @@ class MinerUAdapter(WorkerOCRAdapter):
 
             # 继续等待
             if progress_callback:
-                progress_callback({
+                progress = {
                     "stage": "polling",
                     "message": f"等待 MinerU 处理（{attempt + 1}/{max_attempts}）",
                     "batch_id": batch_id,
                     "poll_attempt": attempt + 1,
                     "poll_total": max_attempts,
                     "remote_state": state,
-                })
+                }
+                progress.update(extract_remote_mineru_progress(data))
+                progress_callback(progress)
             logger.debug(
                 f"MinerU OCR: 轮询中 ({attempt + 1}/{max_attempts})，"
                 f"当前状态: {state}"
@@ -1406,17 +1747,25 @@ class MinerUAdapter(WorkerOCRAdapter):
 
     def _download_and_extract_payload(self, client, zip_url: str) -> Dict[str, Any]:
         """下载 ZIP 并保留 MinerU 的完整 JSON 结果，供深度解析适配器使用。"""
-        headers = self._build_headers()
-        response = client.get(zip_url, headers=headers)
-        self._check_worker_response(response, "下载 ZIP")
+        # Worker may return a pre-signed storage URL. Credentials are only sent
+        # when it remains on the configured Worker origin, never to an URL
+        # supplied by the remote response on another origin.
+        headers = self._build_headers() if _same_ocr_service_origin(zip_url, self._worker_url) else {}
+        zip_bytes = _download_limited_zip(
+            client,
+            zip_url,
+            headers=headers,
+            service_name="MinerU ZIP",
+        )
 
         try:
-            zip_data = io.BytesIO(response.content)
+            zip_data = io.BytesIO(zip_bytes)
             with zipfile.ZipFile(zip_data, "r") as zf:
+                infos = _validate_mineru_zip(zf)
                 full_md_path = None
                 middle_json_path = None
                 content_list_path = None
-                for name in zf.namelist():
+                for name in (info.filename for info in infos):
                     if name.endswith("full.md"):
                         full_md_path = name
                     elif name.endswith("middle.json"):
@@ -1427,7 +1776,7 @@ class MinerUAdapter(WorkerOCRAdapter):
                 if full_md_path is None:
                     raise RuntimeError(
                         "MinerU ZIP 中未找到 full.md 文件，"
-                        f"ZIP 包含: {zf.namelist()}"
+                        f"ZIP 包含: {[info.filename for info in infos]}"
                     )
 
                 full_md = zf.read(full_md_path).decode("utf-8")
@@ -1452,7 +1801,7 @@ class MinerUAdapter(WorkerOCRAdapter):
                 else:
                     logger.info(
                         f"MinerU ZIP 中未找到 middle.json 或 content_list.json，"
-                        f"跳过版面分析。ZIP 包含: {zf.namelist()}"
+                        f"跳过版面分析。ZIP 包含: {[info.filename for info in infos]}"
                     )
 
                 return {
@@ -1460,7 +1809,7 @@ class MinerUAdapter(WorkerOCRAdapter):
                     "middle_json": middle_json,
                     "content_list_json": content_list_json,
                     "layout_figures": layout_figures,
-                    "zip_entries": zf.namelist(),
+                    "zip_entries": [info.filename for info in infos],
                     "paths": {
                         "full_md": full_md_path,
                         "middle_json": middle_json_path,
@@ -1640,12 +1989,10 @@ class MinerUDirectAdapter(MinerUAdapter):
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """Request an official upload URL, upload the PDF, and return its batch."""
-        import httpx
-
         if not self.is_available():
             raise RuntimeError("MinerU 直连模式未配置 Token 或 Base URL")
 
-        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+        with create_mineru_direct_http_client() as client:
             if progress_callback:
                 progress_callback({"stage": "requesting_upload", "message": "申请 MinerU 上传链接"})
             logger.info("MinerU Direct: 开始申请上传链接...")
@@ -1687,13 +2034,11 @@ class MinerUDirectAdapter(MinerUAdapter):
         data_id: str = "",
     ) -> Dict[str, Any]:
         """Resume polling a submitted official MinerU batch after restart."""
-        import httpx
-
         if not self.is_available():
             raise RuntimeError("MinerU 直连模式未配置 Token 或 Base URL")
         if not batch_id:
             raise RuntimeError("恢复 MinerU 任务缺少 batch_id")
-        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+        with create_mineru_direct_http_client() as client:
             if progress_callback:
                 progress_callback({"stage": "resuming", "message": "恢复 MinerU 远端任务", "batch_id": batch_id, "data_id": data_id})
             full_zip_url = self._poll_direct_result(
@@ -1703,7 +2048,19 @@ class MinerUDirectAdapter(MinerUAdapter):
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
             )
-            payload = self._download_direct_zip(client, full_zip_url)
+            payload = self._download_direct_zip(
+                client,
+                full_zip_url,
+                refresh_zip_url=lambda: self._poll_direct_result(
+                    client,
+                    batch_id,
+                    data_id=data_id,
+                    cancel_event=cancel_event,
+                    max_attempts=1,
+                    poll_interval=0,
+                ),
+                progress_callback=progress_callback,
+            )
             payload.update({
                 "batch_id": batch_id,
                 "data_id": data_id,
@@ -1714,12 +2071,13 @@ class MinerUDirectAdapter(MinerUAdapter):
 
     def cancel_batch(self, batch_id: str, *, data_id: str = "") -> dict:
         """Best-effort cancellation against the official batch endpoint."""
-        import httpx
-
         if not batch_id:
             return {"attempted": False, "state": "not_requested", "reason": "missing_batch_id"}
         try:
-            with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            with create_mineru_direct_http_client(
+                timeout_seconds=30.0,
+                connect_timeout_seconds=10.0,
+            ) as client:
                 response = client.delete(
                     f"{self._base_url}/extract-results/batch/{batch_id}",
                     headers=self._auth_headers(),
@@ -1771,9 +2129,11 @@ class MinerUDirectAdapter(MinerUAdapter):
         data_id: str = "",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancel_event: Any = None,
+        max_attempts: int = 300,
+        poll_interval: float = 3,
     ) -> str:
-        max_attempts = 300
-        poll_interval = 3
+        max_attempts = max(1, int(max_attempts or 1))
+        poll_interval = max(0.0, float(poll_interval or 0.0))
         for attempt in range(max_attempts):
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("MinerU 深度解析已取消")
@@ -1796,7 +2156,7 @@ class MinerUDirectAdapter(MinerUAdapter):
             if state == "failed":
                 raise RuntimeError(f"MinerU 处理失败: {result.get('err_msg') or result.get('error') or '未知错误'}")
             if progress_callback:
-                progress_callback({
+                progress = {
                     "stage": "polling",
                     "message": f"等待 MinerU 处理（{attempt + 1}/{max_attempts}）",
                     "batch_id": batch_id,
@@ -1804,7 +2164,9 @@ class MinerUDirectAdapter(MinerUAdapter):
                     "poll_attempt": attempt + 1,
                     "poll_total": max_attempts,
                     "remote_state": state,
-                })
+                }
+                progress.update(extract_remote_mineru_progress(result))
+                progress_callback(progress)
             logger.debug("MinerU Direct: 轮询中 (%s/%s)，当前状态: %s", attempt + 1, max_attempts, state)
             time.sleep(poll_interval)
         raise RuntimeError(f"MinerU 处理超时: 已轮询 {max_attempts} 次（共 {max_attempts * poll_interval} 秒）")
@@ -1829,28 +2191,96 @@ class MinerUDirectAdapter(MinerUAdapter):
 
         return payload
 
-    def _download_direct_zip(self, client, zip_url: str) -> Dict[str, Any]:
+    def _download_direct_zip(
+        self,
+        client,
+        zip_url: str,
+        *,
+        refresh_zip_url: Optional[Callable[[], str]] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Download a direct-result archive with independent TLS attempts.
+
+        MinerU returns a pre-signed object-storage URL.  A transient EOF on
+        that host is unrelated to the completed parsing batch, so retries must
+        not reuse a potentially bad pooled connection or force a PDF reupload.
+        Refreshing the result URL between attempts also covers short-lived
+        storage signatures.
+        """
+        del client  # API polling is performed by the refresh callback below.
         last_error: Exception | None = None
-        response = None
-        for attempt in range(3):
+        current_zip_url = str(zip_url or "")
+        total_attempts = _MINERU_DIRECT_ZIP_DOWNLOAD_ATTEMPTS
+
+        for attempt in range(total_attempts):
+            attempt_number = attempt + 1
+            if progress_callback:
+                progress_callback({
+                    "stage": "downloading",
+                    "message": f"下载 MinerU 解析结果（{attempt_number}/{total_attempts}）",
+                    "download_attempt": attempt_number,
+                    "download_total": total_attempts,
+                })
             try:
-                response = client.get(zip_url)
-                if response.is_success:
-                    break
-                last_error = RuntimeError(f"MinerU ZIP 下载失败 (HTTP {response.status_code}): {response.text[:300]}")
+                # Result archives are commonly hosted on a different CDN than
+                # the MinerU API. A fresh client and Connection: close make a
+                # transient TLS EOF isolated to this one attempt.
+                with create_mineru_direct_http_client(
+                    disable_keepalive=True,
+                ) as download_client:
+                    zip_bytes = _download_limited_zip(
+                        download_client,
+                        current_zip_url,
+                        headers={"Connection": "close"},
+                        service_name="MinerU ZIP",
+                    )
+                try:
+                    return self._extract_direct_zip_payload(zip_bytes)
+                except zipfile.BadZipFile as exc:
+                    # A connection can terminate after HTTP framing succeeds,
+                    # leaving an incomplete archive. Treat that as transport
+                    # retryable rather than a terminal parse failure.
+                    last_error = exc
             except Exception as exc:
                 last_error = exc
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-        if response is None or not response.is_success:
-            raise RuntimeError(f"MinerU ZIP 下载失败: {last_error}")
+
+            if attempt >= total_attempts - 1:
+                break
+
+            if progress_callback:
+                progress_callback({
+                    "stage": "retrying_download",
+                    "message": "结果下载连接中断，正在刷新 MinerU 下载地址后重试",
+                    "download_attempt": attempt_number,
+                    "download_total": total_attempts,
+                })
+            if refresh_zip_url:
+                try:
+                    refreshed_url = str(refresh_zip_url() or "").strip()
+                    if refreshed_url:
+                        current_zip_url = refreshed_url
+                except Exception as refresh_error:
+                    logger.warning(
+                        "MinerU Direct: refresh result URL failed after download attempt %s: %s",
+                        attempt_number,
+                        refresh_error,
+                    )
+            time.sleep(min(2 ** attempt_number, 8))
+
+        raise RuntimeError(
+            f"MinerU ZIP 下载失败（已使用新连接重试 {total_attempts} 次）: {last_error}"
+        )
+
+    def _extract_direct_zip_payload(self, zip_bytes: bytes) -> Dict[str, Any]:
+        """Validate and normalize a downloaded official MinerU archive."""
         try:
-            zip_data = io.BytesIO(response.content)
+            zip_data = io.BytesIO(zip_bytes)
             with zipfile.ZipFile(zip_data, "r") as zf:
+                infos = _validate_mineru_zip(zf)
                 full_md_path = None
                 middle_json_path = None
                 content_list_path = None
-                for name in zf.namelist():
+                for name in (info.filename for info in infos):
                     if name.endswith("full.md"):
                         full_md_path = name
                     elif name.endswith("middle.json"):
@@ -1861,7 +2291,7 @@ class MinerUDirectAdapter(MinerUAdapter):
                 if full_md_path is None:
                     raise RuntimeError(
                         "MinerU ZIP 中未找到 full.md 文件，"
-                        f"ZIP 包含: {zf.namelist()}"
+                        f"ZIP 包含: {[info.filename for info in infos]}"
                     )
 
                 full_md = zf.read(full_md_path).decode("utf-8")
@@ -1881,15 +2311,15 @@ class MinerUDirectAdapter(MinerUAdapter):
                     "middle_json": middle_json,
                     "content_list_json": content_list_json,
                     "layout_figures": layout_figures,
-                    "zip_entries": zf.namelist(),
+                    "zip_entries": [info.filename for info in infos],
                     "paths": {
                         "full_md": full_md_path,
                         "middle_json": middle_json_path,
                         "content_list_json": content_list_path,
                     },
                 }
-        except zipfile.BadZipFile as exc:
-            raise RuntimeError(f"MinerU ZIP 文件解压失败: {exc}")
+        except zipfile.BadZipFile:
+            raise
 
 
 # ============================================================
@@ -2193,9 +2623,6 @@ class MistralAdapter(BaseOCRAdapter):
                 # 步骤 4：解析结果，提取指定页码文本
                 result = self._parse_ocr_response(ocr_data, page_numbers)
 
-                # 步骤 5：清理远程文件（失败不影响结果）
-                self._delete_file(client, headers, file_id)
-
                 return result
 
         except httpx.TimeoutException as e:
@@ -2205,6 +2632,15 @@ class MistralAdapter(BaseOCRAdapter):
             # httpx 的其他网络错误（非 HTTP 状态码错误）
             logger.error(f"Mistral OCR: 网络错误: {e}")
             raise RuntimeError(f"Mistral OCR 网络错误: {e}") from e
+        finally:
+            # 上传成功后的任意后续阶段都可能失败；必须尝试清理远端临时文件，
+            # 不能只在 OCR 成功路径删除。
+            if file_id:
+                try:
+                    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as cleanup_client:
+                        self._delete_file(cleanup_client, headers, file_id)
+                except Exception as exc:
+                    logger.warning("Mistral OCR: 初始化远程文件清理客户端失败: %s", exc)
 
     def _check_http_error(self, response, step: str) -> None:
         """

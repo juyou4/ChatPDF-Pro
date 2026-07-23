@@ -832,9 +832,20 @@ async def _build_local_query_context(
         communities_section_list.append([i, c["report_string"]])
     communities_context = list_of_list_to_csv(communities_section_list)
 
-    text_units_section_list = [["id", "content"]]
+    text_units_section_list = [["id", "page", "section", "block_id", "content"]]
     for i, t in enumerate(use_text_units):
-        text_units_section_list.append([i, t["content"]])
+        page = t.get("page") or ""
+        if not page:
+            page_range = t.get("page_range")
+            if isinstance(page_range, (list, tuple)) and page_range:
+                page = page_range[0]
+        text_units_section_list.append([
+            i,
+            page,
+            t.get("section_path") or t.get("section_id") or "",
+            t.get("block_id") or t.get("graphrag_source_id") or "",
+            t["content"],
+        ])
     text_units_context = list_of_list_to_csv(text_units_section_list)
     return f"""
 -----Reports-----

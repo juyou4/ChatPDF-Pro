@@ -215,9 +215,10 @@ def build_parse_manifest(
     """Build a versioned primary-route manifest.
 
     ``route`` is the user choice captured before upload.  A non-auto route is
-    resolved immediately to itself.  ``auto`` stays unresolved until a quality
-    decision selects one parser, preventing partial local output from being
-    mistaken for a ready MinerU document.
+    resolved immediately to itself.  ``auto`` stays unresolved until the upload
+    handler applies its product policy (MinerU first when configured, otherwise
+    local), preventing a provisional output from being mistaken for a ready
+    document on another route.
     """
     requested_route = normalize_parse_route(route, strict=True)
     normalized_status = normalize_parse_status(status, strict=True)

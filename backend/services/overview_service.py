@@ -31,7 +31,14 @@ from services.figure_render import render_figure
 from services.figure_validation import validate_and_fallback
 from schemas.figure_schema import LogicalFigureSchema, OverviewFigureItem
 from services.document_parse_state import derive_source_hash, is_parse_prepared, read_parse_manifest
-from services.chat_service import call_ai_api
+from services.ai_cache_state import load_ai_cache_generation
+from services.chat_service import call_ai_api, extract_reasoning_content
+from services.document_block_roles import classify_front_matter_text
+from services.structured_json import (
+    StructuredJSONError,
+    parse_json_object,
+    structured_json_request_params,
+)
 from services.visual_model_service import (
     VisualEnrichmentPolicy,
     VisualModelConfig,
@@ -122,17 +129,17 @@ class OverviewTask(BaseModel):
     task_id: str
     doc_id: str
     depth: str
-    api_key: str = ""
+    api_key: str = Field(default="", exclude=True, repr=False)
     model: str = "gpt-4o"
     provider: str = "openai"
     endpoint: str = ""
-    visual_api_key: str = ""
+    visual_api_key: str = Field(default="", exclude=True, repr=False)
     visual_model: str = ""
     visual_provider: str = ""
     visual_endpoint: str = ""
     visual_enabled: bool = True
-    visual_policy_params: dict = Field(default_factory=dict)
-    status: str  # pending, processing, completed, failed
+    visual_policy_params: dict = Field(default_factory=dict, exclude=True, repr=False)
+    status: str  # pending, processing, completed, partial, fallback, failed, invalidated, superseded
     result: Optional[OverviewData] = None
     error: Optional[str] = None
     created_at: float
@@ -153,12 +160,125 @@ try:
 except Exception:
     pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v17"
+OVERVIEW_CACHE_VERSION = "v21"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
 overview_cache: Dict[str, OverviewData] = {}
 overview_inflight: Dict[str, asyncio.Task] = {}
+overview_task_runners: Dict[str, asyncio.Task] = {}
+overview_work_epochs: Dict[str, int] = {}
+
+
+def _read_task_limit(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+# Task records contain transient credentials while a request is running. Keep a
+# bounded, short-lived status registry instead of an accidental in-memory
+# credential cache for every overview ever generated in the desktop session.
+OVERVIEW_TASK_TTL_SECONDS = _read_task_limit(
+    "CHATPDF_OVERVIEW_TASK_TTL_SECONDS", 15 * 60, minimum=60, maximum=24 * 60 * 60
+)
+OVERVIEW_TASK_MAX_RECORDS = _read_task_limit(
+    "CHATPDF_OVERVIEW_TASK_MAX_RECORDS", 128, minimum=16, maximum=2_048
+)
+OVERVIEW_MAX_ACTIVE_TASKS = _read_task_limit(
+    "CHATPDF_OVERVIEW_MAX_ACTIVE_TASKS", 8, minimum=1, maximum=64
+)
+OVERVIEW_MAX_ACTIVE_TASKS_PER_DOCUMENT = _read_task_limit(
+    "CHATPDF_OVERVIEW_MAX_ACTIVE_TASKS_PER_DOCUMENT", 1, minimum=1, maximum=8
+)
+_OVERVIEW_TERMINAL_TASK_STATUSES = {
+    "completed", "partial", "fallback", "failed", "cancelled", "invalidated", "superseded",
+}
+
+OVERVIEW_STATUS_COMPLETED = "completed"
+OVERVIEW_STATUS_PARTIAL = "partial"
+OVERVIEW_STATUS_FALLBACK = "fallback"
+OVERVIEW_STATUS_INVALID = "invalid"
+CACHEABLE_OVERVIEW_STATUSES = {OVERVIEW_STATUS_COMPLETED}
+
+
+class OverviewTaskCapacityExceeded(RuntimeError):
+    """The bounded overview task registry cannot accept another active job."""
+
+
+def _scrub_overview_task_credentials(task: OverviewTask) -> None:
+    """Remove all request-only secrets once the task no longer needs them."""
+    task.api_key = ""
+    task.visual_api_key = ""
+    params = dict(task.visual_policy_params or {})
+    for key in list(params):
+        normalized = str(key).lower()
+        if any(token in normalized for token in ("api_key", "token", "secret", "auth_key", "password")):
+            params.pop(key, None)
+    task.visual_policy_params = params
+
+
+def _overview_task_is_active(task: OverviewTask) -> bool:
+    return task.status not in _OVERVIEW_TERMINAL_TASK_STATUSES
+
+
+def _prune_overview_tasks(now: float | None = None) -> None:
+    """Retain only recent terminal task status and never evict a live runner."""
+    current_time = time.time() if now is None else float(now)
+    for task_id, task in list(overview_tasks.items()):
+        runner = overview_task_runners.get(task_id)
+        if _overview_task_is_active(task) or (runner and not runner.done()):
+            continue
+        _scrub_overview_task_credentials(task)
+        if current_time - float(task.updated_at or task.created_at or current_time) > OVERVIEW_TASK_TTL_SECONDS:
+            overview_tasks.pop(task_id, None)
+            overview_task_runners.pop(task_id, None)
+
+    if len(overview_tasks) <= OVERVIEW_TASK_MAX_RECORDS:
+        return
+    terminal = sorted(
+        (
+            (task_id, task)
+            for task_id, task in overview_tasks.items()
+            if not _overview_task_is_active(task)
+            and not (overview_task_runners.get(task_id) and not overview_task_runners[task_id].done())
+        ),
+        key=lambda item: float(item[1].updated_at or item[1].created_at or 0),
+    )
+    for task_id, task in terminal:
+        if len(overview_tasks) <= OVERVIEW_TASK_MAX_RECORDS:
+            break
+        _scrub_overview_task_credentials(task)
+        overview_tasks.pop(task_id, None)
+        overview_task_runners.pop(task_id, None)
+
+
+class OverviewGenerationSuperseded(RuntimeError):
+    """The document parse identity changed before overview publication."""
+
+
+class OverviewWorkInvalidated(RuntimeError):
+    """An explicit cache clear superseded an in-flight overview."""
+
+
+def _current_overview_work_epoch(doc_id: str) -> int:
+    return int(overview_work_epochs.get(doc_id, 0))
+
+
+def _advance_overview_work_epoch(doc_id: str) -> int:
+    next_epoch = _current_overview_work_epoch(doc_id) + 1
+    overview_work_epochs[doc_id] = next_epoch
+    return next_epoch
+
+
+def _require_current_overview_work_epoch(doc_id: str, expected_epoch: int) -> None:
+    current_epoch = _current_overview_work_epoch(doc_id)
+    if int(expected_epoch) != current_epoch:
+        raise OverviewWorkInvalidated(
+            f"速览缓存已失效: expected={expected_epoch} current={current_epoch}"
+        )
 
 VALID_FIGURE_RENDER_MODES = {"raw", "yolo"}
 
@@ -194,6 +314,8 @@ OVERVIEW_TEXT_CHAR_LIMITS = {
     OverviewDepth.STANDARD: 5600,
     OverviewDepth.DETAILED: 7600,
 }
+OVERVIEW_STRUCTURED_SOURCE_VERSION = "section-map-reduce-v2"
+OVERVIEW_MAX_SECTION_PACKETS = 18
 
 OVERVIEW_OUTPUT_MAX_TOKENS = {
     OverviewDepth.BRIEF: 900,
@@ -278,7 +400,7 @@ def _summarize_visual_risk(items: list[dict]) -> dict:
     for item in items:
         if not isinstance(item, dict):
             continue
-        if item.get("should_enrich"):
+        if item.get("enrichment_triggered", item.get("should_enrich")):
             triggered += 1
         for reason in item.get("reasons") or []:
             key = str(reason or "").strip()
@@ -290,6 +412,300 @@ def _summarize_visual_risk(items: list[dict]) -> dict:
         "reused_text_structure": max(0, len(items) - triggered),
         "reason_counts": reason_counts,
         "items": items[:8],
+    }
+
+
+def _overview_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _overview_is_reference_or_artifact(title: str) -> bool:
+    return bool(re.match(
+        r"^(?:\d+(?:\.\d+)*\s+)?(?:references?|bibliography|acknowledg(?:e)?ments?|"
+        r"neurips\s+paper\s+checklist|paper\s+checklist|参考文献|致谢)\b",
+        _overview_text(title),
+        re.IGNORECASE,
+    ))
+
+
+def _overview_substantive_block_text(block: dict[str, Any]) -> str:
+    block_type = str(block.get("type") or block.get("block_type") or "").strip().lower()
+    if block_type in {"artifact", "figure", "image"}:
+        return ""
+    if block.get("repeated_artifact") or block.get("exclude_from_reading"):
+        return ""
+    role = str(block.get("content_role") or "").strip().lower()
+    if role in {"reference", "author", "affiliation", "contact", "publication_header"}:
+        return ""
+    text = _overview_text(block.get("text") or block.get("content") or block.get("caption"))
+    if not text:
+        return ""
+    if block_type == "table":
+        return text[:900]
+    return text
+
+
+def _balanced_section_excerpt(text: str, limit: int) -> str:
+    """Keep each long section's beginning, middle and end before reduction."""
+    value = _overview_text(text)
+    if len(value) <= limit:
+        return value
+    if limit < 180:
+        return value[:limit]
+    head_len = int(limit * 0.46)
+    middle_len = int(limit * 0.24)
+    tail_len = max(1, limit - head_len - middle_len)
+    middle_start = max(0, len(value) // 2 - middle_len // 2)
+    return " … ".join((
+        value[:head_len].rstrip(),
+        value[middle_start:middle_start + middle_len].strip(),
+        value[-tail_len:].lstrip(),
+    ))
+
+
+def _balanced_section_block_excerpt(
+    blocks: list[dict[str, Any]],
+    limit: int,
+) -> tuple[str, list[int]]:
+    """Sample a section while retaining the pages that actually contributed text.
+
+    ``covered_pages`` used to describe every page in a section interval, even
+    when the head/middle/tail excerpt only contained a few of them.  Keep the
+    existing balanced sampling policy, but derive page provenance from the
+    exact character ranges sent to the model.
+    """
+    parts: list[tuple[str, int]] = []
+    for block in blocks:
+        text = _overview_substantive_block_text(block)
+        if not text:
+            continue
+        try:
+            page = max(0, int(block.get("page") or 0))
+        except (TypeError, ValueError):
+            page = 0
+        parts.append((text, page))
+    if not parts:
+        return "", []
+
+    joined = " ".join(text for text, _page in parts)
+    if len(joined) <= limit:
+        return joined, sorted({page for _text, page in parts if page > 0})
+    if limit < 180:
+        excerpt = joined[:limit].rstrip()
+        return excerpt, sorted({parts[0][1]} - {0})
+
+    head_len = int(limit * 0.46)
+    middle_len = int(limit * 0.24)
+    tail_len = max(1, limit - head_len - middle_len)
+    middle_start = max(0, len(joined) // 2 - middle_len // 2)
+    ranges = (
+        (0, head_len),
+        (middle_start, middle_start + middle_len),
+        (max(0, len(joined) - tail_len), len(joined)),
+    )
+
+    block_ranges: list[tuple[int, int, int]] = []
+    cursor = 0
+    for index, (text, page) in enumerate(parts):
+        if index:
+            cursor += 1  # separator inserted by ``join``
+        start = cursor
+        cursor += len(text)
+        block_ranges.append((start, cursor, page))
+
+    sampled_pages: set[int] = set()
+    excerpts: list[str] = []
+    for start, end in ranges:
+        excerpt = joined[start:end].strip()
+        if excerpt:
+            excerpts.append(excerpt)
+        for block_start, block_end, page in block_ranges:
+            if page > 0 and block_start < end and block_end > start:
+                sampled_pages.add(page)
+    return " … ".join(excerpts), sorted(sampled_pages)
+
+
+def _overview_is_abstract_heading(value: Any) -> bool:
+    return bool(re.fullmatch(r"(?:abstract|摘要)\s*[:：]?", _overview_text(value), re.IGNORECASE))
+
+
+def _evenly_spaced_overview_items(items: list[dict], limit: int) -> list[dict]:
+    if len(items) <= limit:
+        return list(items)
+    selected: list[dict] = []
+    for index in range(limit):
+        item_index = round(index * (len(items) - 1) / max(1, limit - 1))
+        item = items[item_index]
+        if item not in selected:
+            selected.append(item)
+    return selected
+
+
+def _build_mineru_section_source_packet(doc_id: str, depth: str) -> dict[str, Any] | None:
+    """Create a chapter-balanced input packet from the current MinerU blocks.
+
+    This is the map stage of the overview pipeline: each structural section
+    receives its own bounded evidence excerpt.  The existing structured
+    overview request is the reduce stage, so quality improves without turning
+    a normal overview into N independent LLM calls.
+    """
+    try:
+        from routes.document_routes import DATA_DIR, documents_store
+        from services.block_index_service import load_block_index
+        from services.section_outline_service import get_structural_outline_items
+
+        document = documents_store.get(doc_id)
+        if not isinstance(document, dict):
+            return None
+        manifest = read_parse_manifest(document, doc_id=doc_id)
+    except Exception as exc:
+        logger.debug("[Overview] Parse source unavailable doc=%s: %s", doc_id, exc)
+        return None
+
+    if str(manifest.get("resolved_route") or "").strip().lower() != "mineru":
+        return None
+    try:
+        block_index = load_block_index(DATA_DIR, doc_id)
+    except Exception as exc:
+        raise RuntimeError("MinerU 阅读块索引不可用，无法以不完整文本生成速览") from exc
+
+    if not isinstance(block_index, dict) or str(block_index.get("source") or "").strip().lower() != "mineru_vlm":
+        raise RuntimeError("MinerU 阅读块索引尚未就绪，无法以扁平文本替代结构化速览")
+    if (
+        str(block_index.get("parse_generation") or "").strip()
+        != str(manifest.get("generation") or "").strip()
+        or str(block_index.get("document_source_hash") or "").strip()
+        != str(manifest.get("source_hash") or "").strip()
+    ):
+        raise RuntimeError("MinerU 阅读块索引不属于当前解析代际，拒绝生成可能串用的速览")
+
+    ordered_blocks: list[dict[str, Any]] = []
+    for page_index, page in enumerate(block_index.get("pages") or []):
+        if not isinstance(page, dict):
+            continue
+        try:
+            page_number = max(1, int(page.get("page") or page_index + 1))
+        except (TypeError, ValueError):
+            page_number = page_index + 1
+        for block_order, block in enumerate(page.get("blocks") or []):
+            if not isinstance(block, dict):
+                continue
+            item = dict(block)
+            item["page"] = page_number
+            item["_overview_order"] = len(ordered_blocks)
+            item.setdefault("reading_order", block_order)
+            ordered_blocks.append(item)
+    if not ordered_blocks:
+        raise RuntimeError("MinerU 阅读块索引为空，无法生成结构化速览")
+
+    position_by_id = {
+        str(block.get("block_id") or ""): int(block.get("_overview_order") or 0)
+        for block in ordered_blocks
+        if str(block.get("block_id") or "").strip()
+    }
+    candidates: list[dict[str, Any]] = []
+    for raw_index, raw in enumerate(get_structural_outline_items(block_index)):
+        if not isinstance(raw, dict):
+            continue
+        title = _overview_text(raw.get("title"))
+        first_block = str(raw.get("first_block") or "").strip()
+        if not title or _overview_is_reference_or_artifact(title) or first_block not in position_by_id:
+            continue
+        try:
+            level = max(1, min(6, int(raw.get("level") or 1)))
+        except (TypeError, ValueError):
+            level = 1
+        candidates.append({
+            "title": title,
+            "level": level,
+            "first_block": first_block,
+            "start": position_by_id[first_block],
+            "order": raw_index,
+        })
+    if not candidates:
+        raise RuntimeError("MinerU 阅读块索引缺少章节锚点，无法生成可信速览")
+    candidates.sort(key=lambda item: (item["start"], item["order"]))
+
+    # Use all outline nodes as potential packets.  Sampling only root chapters
+    # makes a long parent section swallow method/experiment children before
+    # head-middle-tail reduction has a chance to represent them.
+    primary = _evenly_spaced_overview_items(candidates, OVERVIEW_MAX_SECTION_PACKETS)
+    source_limit = OVERVIEW_TEXT_CHAR_LIMITS.get(depth, OVERVIEW_TEXT_CHAR_LIMITS[OverviewDepth.STANDARD])
+    per_section_limit = max(260, min(1200, max(1, source_limit - 180) // max(1, len(primary))))
+    packets: list[str] = []
+    sampled_pages: set[int] = set()
+
+    # A paper's abstract frequently lives before the first numbered heading and
+    # is not always emitted as an outline node by MinerU.  Add it as a bounded
+    # preface packet instead of silently losing the paper's stated objective.
+    first_anchor = int(candidates[0]["start"])
+    prefix_blocks = ordered_blocks[:first_anchor]
+    abstract_start = next(
+        (
+            index for index, block in enumerate(prefix_blocks)
+            if _overview_is_abstract_heading(block.get("text") or block.get("content"))
+        ),
+        None,
+    )
+    if abstract_start is not None:
+        abstract_excerpt, abstract_pages = _balanced_section_block_excerpt(
+            prefix_blocks[abstract_start:],
+            per_section_limit,
+        )
+        if abstract_excerpt:
+            page_label = ",".join(str(page) for page in abstract_pages[:6]) or "?"
+            packets.append(f"【前置摘要｜采样页 {page_label}】\n{abstract_excerpt}")
+            sampled_pages.update(abstract_pages)
+
+    for section_index, section in enumerate(primary):
+        start = int(section["start"])
+        # Use the next *complete* structural anchor rather than the next
+        # selected sample.  This keeps each packet local to its own section.
+        end = next(
+            (
+                int(candidate["start"])
+                for candidate in candidates
+                if int(candidate["start"]) > start
+            ),
+            len(ordered_blocks),
+        )
+        source_blocks = ordered_blocks[start:end]
+        content, section_pages = _balanced_section_block_excerpt(source_blocks, per_section_limit)
+        if not content:
+            continue
+        sampled_pages.update(section_pages)
+        page_label = ",".join(str(page) for page in section_pages[:6]) or "?"
+        packets.append(
+            f"【章节 {section_index + 1}/{len(primary)}｜{section['title']}｜采样页 {page_label}】\n"
+            f"{content}"
+        )
+
+    if not packets:
+        raise RuntimeError("MinerU 章节没有可用正文，无法生成结构化速览")
+    return {
+        "text": "\n\n".join(packets),
+        "strategy": "section_map_reduce",
+        "source_version": OVERVIEW_STRUCTURED_SOURCE_VERSION,
+        "total_sections": len(candidates),
+        "covered_sections": sum(1 for packet in packets if packet.startswith("【章节")),
+        "sampled_pages": sorted(sampled_pages),
+        # Compatibility for old consumers.  Values now represent sampled pages
+        # rather than the complete span of each selected section.
+        "covered_pages": sorted(sampled_pages),
+    }
+
+
+def _build_overview_source_packet(doc_id: str, document_text: str, depth: str) -> dict[str, Any]:
+    structured = _build_mineru_section_source_packet(doc_id, depth)
+    if structured:
+        return structured
+    return {
+        "text": _build_document_excerpt(document_text, depth),
+        "strategy": "flat_excerpt_fallback",
+        "source_version": "flat-v1",
+        "total_sections": 0,
+        "covered_sections": 0,
+        "covered_pages": [],
     }
 
 
@@ -316,6 +732,50 @@ def _build_document_excerpt(document_text: str, depth: str) -> str:
     ]
     return "\n\n".join(segment for segment in segments if segment.strip())
 
+
+
+_ABSTRACT_HEADING_RE = re.compile(r"(?im)^\s*(?:abstract|摘要)\s*[:：]?\s*$")
+_ABSTRACT_END_RE = re.compile(
+    r"(?im)^\s*(?:keywords?|index\s+terms?|关键词|关键字)\s*[:：]?|"
+    r"^\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:introduction|引言|绪论)\s*$"
+)
+_FALLBACK_NOISE_RE = re.compile(
+    r"^(?:https?://|www\.)|^(?:figure|fig\.|table)\s*\d*\b|"
+    r"^\(?[a-z]\)?\s+(?:demonstration|illustration|comparison)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_fallback_source_text(document_text: str) -> str:
+    """Prefer the abstract and remove obvious front matter from fallback text."""
+    raw_text = str(document_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw_text.strip():
+        return ""
+
+    abstract_match = _ABSTRACT_HEADING_RE.search(raw_text)
+    if abstract_match:
+        abstract_tail = raw_text[abstract_match.end():]
+        end_match = _ABSTRACT_END_RE.search(abstract_tail)
+        abstract_text = abstract_tail[:end_match.start()] if end_match else abstract_tail
+        cleaned_abstract = " ".join(abstract_text.split())
+        if len(cleaned_abstract) >= 80:
+            return cleaned_abstract
+
+    useful_parts: list[str] = []
+    for part in re.split(r"\n\s*\n+", raw_text):
+        cleaned = " ".join(re.sub(r"<[^>]+>", " ", part).split())
+        if not cleaned or _FALLBACK_NOISE_RE.search(cleaned):
+            continue
+        role = classify_front_matter_text(cleaned)
+        if role and role.get("role") in {
+            "author", "affiliation", "contact", "publication_header",
+            "keywords", "reference",
+        }:
+            continue
+        useful_parts.append(cleaned)
+        if sum(len(item) for item in useful_parts) >= 900:
+            break
+    return " ".join(useful_parts).strip()
 
 # ============ Prompt 模板 ============
 
@@ -1558,13 +2018,144 @@ async def _generate_figure_analysis_via_pipeline(
 
 def _extract_content_from_response(response: dict) -> str:
     """从 call_ai_api 返回的原始响应中提取文本 content。"""
-    if response.get("content"):
-        return response.get("content", "")
+    if not isinstance(response, dict):
+        return ""
+
+    def _content_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or item.get("output_text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
+    direct_content = _content_text(response.get("content") or response.get("output_text"))
+    if direct_content:
+        return direct_content
     choices = response.get("choices", [])
-    if choices:
+    if choices and isinstance(choices[0], dict):
         msg = choices[0].get("message", {}) or {}
-        return msg.get("content", "") or ""
+        if isinstance(msg, dict):
+            parsed = msg.get("parsed")
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, ensure_ascii=False)
+            message_content = _content_text(msg.get("content"))
+            if message_content:
+                return message_content
+        choice_text = choices[0].get("text")
+        return choice_text if isinstance(choice_text, str) else ""
     return ""
+
+
+def _overview_response_diagnostic(response: Any, content: str, max_tokens: int) -> dict[str, Any]:
+    response_dict = response if isinstance(response, dict) else {}
+    choices = response_dict.get("choices") or []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    usage = response_dict.get("usage") if isinstance(response_dict.get("usage"), dict) else {}
+    completion_details = (
+        usage.get("completion_tokens_details")
+        if isinstance(usage.get("completion_tokens_details"), dict)
+        else {}
+    )
+    return {
+        "content_chars": len(str(content or "").strip()),
+        "reasoning_chars": len(extract_reasoning_content(message)),
+        "finish_reason": str(choice.get("finish_reason") or ""),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": completion_details.get("reasoning_tokens"),
+        "max_tokens": max_tokens,
+        "has_choices": bool(choice),
+    }
+
+
+def _parse_overview_payload(content: Any) -> dict[str, Any]:
+    """解析 JSON，并强制校验速览最低可用字段。"""
+    payload = parse_json_object(content)
+    if not str(payload.get("full_text_summary") or "").strip():
+        raise StructuredJSONError("模型返回的速览核心字段为空")
+    return payload
+
+
+async def _call_structured_overview_model(
+    *,
+    messages: list[dict[str, str]],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Generate one JSON overview with a single bounded repair attempt."""
+    custom_params = structured_json_request_params(provider, model)
+    response = await call_ai_api(
+        messages=messages,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+        max_tokens=max_tokens,
+        temperature=0.1,
+        custom_params=custom_params,
+        purpose="overview",
+    )
+    if isinstance(response, dict) and response.get("error"):
+        raise RuntimeError(response.get("error"))
+    content = _extract_content_from_response(response)
+    try:
+        return _parse_overview_payload(content)
+    except StructuredJSONError:
+        initial_diagnostic = _overview_response_diagnostic(response, content, max_tokens)
+        logger.warning(
+            "[Overview] invalid structured response provider=%s model=%s diagnostic=%s",
+            provider,
+            model,
+            json.dumps(initial_diagnostic, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    repair_messages = list(messages)
+    if content.strip():
+        repair_messages.append({"role": "assistant", "content": content})
+    repair_messages.append({
+        "role": "user",
+        "content": "上一次未返回完整合法的速览 JSON。请重新生成，只输出符合既定字段结构的完整 JSON 对象。",
+    })
+    retry_max_tokens = max(max_tokens, 4096)
+    retry = await call_ai_api(
+        messages=repair_messages,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+        max_tokens=retry_max_tokens,
+        temperature=0,
+        custom_params=custom_params,
+        purpose="overview",
+    )
+    if isinstance(retry, dict) and retry.get("error"):
+        raise RuntimeError(retry.get("error"))
+    retry_content = _extract_content_from_response(retry)
+    try:
+        return _parse_overview_payload(retry_content)
+    except StructuredJSONError as retry_error:
+        retry_diagnostic = _overview_response_diagnostic(retry, retry_content, retry_max_tokens)
+        logger.warning(
+            "[Overview] structured retry failed provider=%s model=%s diagnostic=%s",
+            provider,
+            model,
+            json.dumps(retry_diagnostic, ensure_ascii=False, separators=(",", ":")),
+        )
+        if not content.strip() and not retry_content.strip():
+            raise RuntimeError("模型两次返回为空，请稍后重试或切换模型") from retry_error
+        raise RuntimeError("模型两次返回的速览格式均不完整，请稍后重试或切换模型") from retry_error
 
 
 async def _generate_single_figure_analysis(
@@ -1719,8 +2310,8 @@ def _fallback_parse_cache_identity(doc_id: str) -> tuple[str, str]:
     return f"legacy-{source_hash[:24]}", source_hash
 
 
-async def _get_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
-    """读取拥有当前速览缓存的主解析 generation。"""
+def _read_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
+    """同步读取当前主解析身份，供缓存提交临界区复核。"""
     try:
         from routes.document_routes import documents_store
 
@@ -1737,6 +2328,34 @@ async def _get_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
         logger.warning("读取速览解析身份失败 doc=%s error=%s", doc_id, exc)
 
     return _fallback_parse_cache_identity(doc_id)
+
+
+async def _get_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
+    """读取拥有当前速览缓存的主解析 generation。"""
+    return _read_document_parse_cache_identity(doc_id)
+
+
+async def _require_current_parse_cache_identity(
+    doc_id: str,
+    parse_generation: str,
+    document_source_hash: str,
+) -> None:
+    expected = (
+        str(parse_generation or "").strip(),
+        str(document_source_hash or "").strip(),
+    )
+    if not all(expected):
+        raise OverviewGenerationSuperseded(
+            "速览结果缺少完整解析身份"
+        )
+    current = await _get_document_parse_cache_identity(doc_id)
+    if current == expected:
+        return
+    if current == _fallback_parse_cache_identity(doc_id):
+        return
+    raise OverviewGenerationSuperseded(
+        f"速览解析身份已变化: expected={expected[0]} current={current[0]}"
+    )
 
 
 async def _resolve_parse_cache_identity(
@@ -1769,6 +2388,11 @@ def _parse_cache_identity_token(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _overview_ai_cache_token(doc_id: str) -> str:
+    generation = load_ai_cache_generation(CACHE_DIR.parent, doc_id)
+    return hashlib.sha256(generation.encode("utf-8")).hexdigest()[:16]
+
+
 def _overview_text_model_identity(
     provider: str = "",
     model: str = "",
@@ -1799,15 +2423,16 @@ def _get_cache_key(
     visual_model_identity: str = "",
     text_model_identity: str = "",
 ) -> str:
-    """Generate a cache key bound to parser, text-model, and VLM identities."""
+    """Generate a cache key bound to parser, cache, text-model, and VLM identities."""
     render_mode = _normalize_figure_render_mode(figure_render_mode)
     identity_token = _parse_cache_identity_token(parse_generation, document_source_hash)
+    ai_cache_token = _overview_ai_cache_token(doc_id)
     visual_token = _identity_cache_token(visual_model_identity, "none")
     text_token = _identity_cache_token(text_model_identity, "none")
     prompt_token = hashlib.sha256(
         VISUAL_SUPPLEMENT_PROMPT_SUITE_IDENTITY.encode("utf-8")
     ).hexdigest()[:12]
-    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{identity_token}_{visual_token}_{text_token}_{prompt_token}"
+    return f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{identity_token}_{ai_cache_token}_{visual_token}_{text_token}_{prompt_token}"
 
 
 def _get_cache_path(
@@ -1852,6 +2477,57 @@ def _get_legacy_cache_path(
         text_model_identity,
     )
     return LEGACY_CACHE_DIR / f"{key}.json"
+
+
+def _overview_core_fields(overview: OverviewData) -> dict[str, str]:
+    speed_read = overview.speed_read
+    paper_summary = overview.paper_summary
+    return {
+        "full_text_summary": str(overview.full_text_summary or "").strip(),
+        "speed_read.method": str(speed_read.method or "").strip(),
+        "speed_read.experiment_design": str(speed_read.experiment_design or "").strip(),
+        "speed_read.problems_solved": str(speed_read.problems_solved or "").strip(),
+        "paper_summary.strengths": str(paper_summary.strengths or "").strip(),
+        "paper_summary.innovations": str(paper_summary.innovations or "").strip(),
+        "paper_summary.future_work": str(paper_summary.future_work or "").strip(),
+    }
+
+
+def overview_generation_status(overview: OverviewData) -> str:
+    """Classify overview output independently from HTTP/task completion."""
+    ai_meta = overview.ai_meta or {}
+    if bool(ai_meta.get("fallback")):
+        return OVERVIEW_STATUS_FALLBACK
+    fields = _overview_core_fields(overview)
+    populated = [name for name, value in fields.items() if value]
+    if not populated:
+        return OVERVIEW_STATUS_INVALID
+    # The main text summary is the minimum usable overview contract. Optional
+    # structured sections may legitimately be empty for short or non-academic
+    # documents; requiring every field would trigger endless regeneration.
+    if not fields["full_text_summary"]:
+        return OVERVIEW_STATUS_PARTIAL
+    if not any(value for name, value in fields.items() if name.startswith("speed_read.")):
+        return OVERVIEW_STATUS_PARTIAL
+    if not any(value for name, value in fields.items() if name.startswith("paper_summary.")):
+        return OVERVIEW_STATUS_PARTIAL
+    return OVERVIEW_STATUS_COMPLETED
+
+
+def _annotate_overview_quality(overview: OverviewData) -> str:
+    status = overview_generation_status(overview)
+    fields = _overview_core_fields(overview)
+    overview.ai_meta = dict(overview.ai_meta or {})
+    overview.ai_meta["generation_status"] = status
+    overview.ai_meta["retryable"] = status != OVERVIEW_STATUS_COMPLETED
+    overview.ai_meta["missing_core_fields"] = [
+        name for name, value in fields.items() if not value
+    ]
+    return status
+
+
+def _overview_is_cacheable(overview: OverviewData) -> bool:
+    return overview_generation_status(overview) in CACHEABLE_OVERVIEW_STATUSES
 
 
 def _overview_matches_parse_identity(
@@ -1967,6 +2643,75 @@ def _cached_visual_supplement_is_active(
         return cache_without_revision_is_valid
 
 
+def _cancel_asyncio_task(task: asyncio.Task) -> None:
+    if task.done():
+        return
+    try:
+        loop = task.get_loop()
+        running_loop = asyncio.get_running_loop()
+        if running_loop is loop:
+            task.cancel()
+        else:
+            loop.call_soon_threadsafe(task.cancel)
+    except RuntimeError:
+        try:
+            task.get_loop().call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
+
+
+async def _await_overview_inflight(
+    task: asyncio.Task,
+    *,
+    doc_id: str,
+    expected_epoch: int,
+) -> OverviewData:
+    """Translate an invalidated inner task without swallowing caller cancellation."""
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        current_task = asyncio.current_task()
+        cancelling = getattr(current_task, "cancelling", None)
+        if callable(cancelling) and cancelling() > 0:
+            raise
+        if task.cancelled() or _current_overview_work_epoch(doc_id) != int(expected_epoch):
+            raise OverviewWorkInvalidated("速览生成已被新的任务或缓存清理作废") from exc
+        raise
+
+
+def invalidate_overview_work(
+    doc_id: str,
+    *,
+    status: str = "invalidated",
+    reason: str = "速览缓存已清理，请重新生成",
+) -> int:
+    """Cancel active generation and retire every task result for a document."""
+    _advance_overview_work_epoch(doc_id)
+    cancelled = 0
+    cache_prefix = f"{OVERVIEW_CACHE_VERSION}_{doc_id}_"
+    for cache_key, inflight in list(overview_inflight.items()):
+        if not cache_key.startswith(cache_prefix):
+            continue
+        overview_inflight.pop(cache_key, None)
+        if not inflight.done():
+            _cancel_asyncio_task(inflight)
+            cancelled += 1
+
+    now = time.time()
+    for task_id, overview_task in list(overview_tasks.items()):
+        if overview_task.doc_id != doc_id:
+            continue
+        overview_task.status = status
+        overview_task.result = None
+        overview_task.error = reason
+        overview_task.updated_at = now
+        runner = overview_task_runners.get(task_id)
+        if runner and not runner.done():
+            _cancel_asyncio_task(runner)
+            cancelled += 1
+    return cancelled
+
+
 async def clear_overview_cache(
     doc_id: str,
     depth: str,
@@ -1987,6 +2732,7 @@ async def clear_overview_cache(
         parse_generation,
         document_source_hash,
     )
+    invalidate_overview_work(doc_id)
     if visual_model_identity is None:
         render_mode = _normalize_figure_render_mode(figure_render_mode)
         parse_token = _parse_cache_identity_token(parse_generation, document_source_hash)
@@ -2004,8 +2750,9 @@ async def clear_overview_cache(
     if text_model_identity is None:
         render_mode = _normalize_figure_render_mode(figure_render_mode)
         parse_token = _parse_cache_identity_token(parse_generation, document_source_hash)
+        ai_cache_token = _overview_ai_cache_token(doc_id)
         visual_token = _identity_cache_token(visual_model_identity, "none")
-        prefix = f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{parse_token}_{visual_token}_"
+        prefix = f"{OVERVIEW_CACHE_VERSION}_{doc_id}_{depth}_{render_mode}_{parse_token}_{ai_cache_token}_{visual_token}_"
         for cache_key in [key for key in overview_cache if key.startswith(prefix)]:
             overview_cache.pop(cache_key, None)
         for directory in (CACHE_DIR, LEGACY_CACHE_DIR):
@@ -2070,7 +2817,7 @@ async def get_cached_overview(
     # 内存缓存
     cached = overview_cache.get(cache_key)
     if cached:
-        if _overview_matches_parse_identity(
+        if _overview_is_cacheable(cached) and _overview_matches_parse_identity(
             cached,
             parse_generation,
             document_source_hash,
@@ -2112,6 +2859,15 @@ async def get_cached_overview(
             with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             overview = OverviewData(**data)
+            if not _overview_is_cacheable(overview):
+                logger.info(
+                    "忽略非完整速览缓存 doc=%s depth=%s status=%s",
+                    doc_id,
+                    depth,
+                    overview_generation_status(overview),
+                )
+                source_path.unlink(missing_ok=True)
+                return None
             if not _overview_matches_parse_identity(
                 overview,
                 parse_generation,
@@ -2151,7 +2907,7 @@ async def save_overview_cache(
     *,
     parse_generation: str = "",
     document_source_hash: str = "",
-) -> None:
+) -> bool:
     """保存已绑定 primary parser generation 的速览缓存。"""
     parse_generation = str(parse_generation or overview.parse_generation or "").strip()
     document_source_hash = str(
@@ -2161,10 +2917,29 @@ async def save_overview_cache(
         # 缺少该元数据的缓存可能是上一路线遗留的本地结果，不能提升为当前
         # MinerU 路线的结果。
         logger.warning("跳过未绑定解析身份的速览缓存 doc=%s", overview.doc_id)
-        return
+        return False
 
     overview.parse_generation = parse_generation
     overview.document_source_hash = document_source_hash
+    status = _annotate_overview_quality(overview)
+    if status not in CACHEABLE_OVERVIEW_STATUSES:
+        logger.info(
+            "跳过非完整速览缓存 doc=%s status=%s",
+            overview.doc_id,
+            status,
+        )
+        return False
+    work_epoch = (overview.ai_meta or {}).get("work_epoch")
+    if work_epoch is None:
+        work_epoch = _current_overview_work_epoch(overview.doc_id)
+        overview.ai_meta = dict(overview.ai_meta or {})
+        overview.ai_meta["work_epoch"] = work_epoch
+    _require_current_overview_work_epoch(overview.doc_id, int(work_epoch))
+    await _require_current_parse_cache_identity(
+        overview.doc_id,
+        parse_generation,
+        document_source_hash,
+    )
     figure_render_mode = (overview.figure_meta or {}).get("render_mode", "raw")
     cache_key = _get_cache_key(
         overview.doc_id,
@@ -2201,10 +2976,25 @@ async def save_overview_cache(
             json.dump(overview.model_dump(), f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp_path, cache_path)
-        overview_cache[cache_key] = overview
+        from routes.document_routes import _get_document_publication_lock
+
+        with _get_document_publication_lock(overview.doc_id):
+            _require_current_overview_work_epoch(overview.doc_id, int(work_epoch))
+            await _require_current_parse_cache_identity(
+                overview.doc_id,
+                parse_generation,
+                document_source_hash,
+            )
+            os.replace(temp_path, cache_path)
+            temp_path = None
+            overview_cache[cache_key] = overview
+        return True
+    except (OverviewGenerationSuperseded, OverviewWorkInvalidated):
+        raise
     except Exception as e:
         logger.warning(f"保存速览缓存失败: {e}")
+        return False
+    finally:
         if temp_path:
             try:
                 Path(temp_path).unlink(missing_ok=True)
@@ -2289,6 +3079,7 @@ async def generate_overview_content(
     figure_render_mode: str = "raw",
     parse_generation: str = "",
     document_source_hash: str = "",
+    overview_work_epoch: Optional[int] = None,
 ) -> OverviewData:
     """生成速览内容（调用 LLM）"""
     figure_render_mode = _normalize_figure_render_mode(figure_render_mode)
@@ -2311,6 +3102,9 @@ async def generate_overview_content(
         parse_generation,
         document_source_hash,
     )
+    if overview_work_epoch is None:
+        overview_work_epoch = _current_overview_work_epoch(doc_id)
+    _require_current_overview_work_epoch(doc_id, overview_work_epoch)
     logger.info(
         "[AI-Audit] purpose=overview doc=%s provider=%s model=%s depth=%s render_mode=%s visual=%s",
         doc_id,
@@ -2327,8 +3121,16 @@ async def generate_overview_content(
     
     # 构建 prompt
     prompt = _build_overview_prompt(depth)
-    document_excerpt = _build_document_excerpt(document_text, depth)
-    full_prompt = f"{prompt}\n\n{document_excerpt}"
+    overview_source = _build_overview_source_packet(doc_id, document_text, depth)
+    document_excerpt = str(overview_source.get("text") or "")
+    source_instruction = (
+        "以下内容已按章节分别压缩。请综合全部章节标记中的证据，"
+        "尤其不要因正文较长而遗漏实验设计、结果分析或结论；"
+        "没有证据时明确保守表达，不要补造细节。"
+        if overview_source.get("strategy") == "section_map_reduce"
+        else "以下为文档节选，请仅依据其中证据生成速览。"
+    )
+    full_prompt = f"{prompt}\n\n{source_instruction}\n\n{document_excerpt}"
     
     messages = [
         {"role": "system", "content": "你是一个专业的学术论文导读助手，擅长总结论文核心内容并用简洁易懂的语言解释。"},
@@ -2337,7 +3139,7 @@ async def generate_overview_content(
     
     # 调用 LLM
     try:
-        response = await call_ai_api(
+        data = await _call_structured_overview_model(
             messages=messages,
             api_key=api_key,
             model=model,
@@ -2347,41 +3149,38 @@ async def generate_overview_content(
                 depth,
                 OVERVIEW_OUTPUT_MAX_TOKENS[OverviewDepth.STANDARD],
             ),
-            purpose="overview",
         )
-        
-        if isinstance(response, dict) and response.get("error"):
-            raise RuntimeError(response.get("error"))
-        
-        content = _extract_content_from_response(response)
-        if not content or not content.strip():
-            raise RuntimeError("模型返回为空，请稍后重试或切换模型")
-        
-        # 解析 JSON
-        # 尝试提取 JSON 部分
-        json_start = content.find("{")
-        json_end = content.rfind("}") + 1
-        
-        try:
-            if json_start >= 0 and json_end > json_start:
-                json_str = content[json_start:json_end]
-                data = json.loads(json_str)
-            else:
-                data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            preview = content[:240].replace("\n", " ")
-            raise RuntimeError(f"模型返回的速览格式不是有效 JSON: {exc}; preview={preview}") from exc
-        
+
+        if not isinstance(data, dict):
+            raise RuntimeError("模型返回的速览结构不是 JSON 对象")
+        speed_read_data = data.get("speed_read")
+        if not isinstance(speed_read_data, dict):
+            speed_read_data = {}
+        paper_summary_data = data.get("paper_summary")
+        if not isinstance(paper_summary_data, dict):
+            paper_summary_data = {}
+        terminology_data = data.get("terminology")
+        if not isinstance(terminology_data, list):
+            terminology_data = []
+
         # 构建返回数据（先不含图表）
         overview = OverviewData(
             doc_id=doc_id,
             title=title,
             depth=depth,
-            full_text_summary=data.get("full_text_summary", ""),
-            terminology=[TermItem(**t) for t in data.get("terminology", [])],
-            speed_read=SpeedReadContent(**data.get("speed_read", {})),
+            full_text_summary=str(data.get("full_text_summary") or ""),
+            terminology=[TermItem(**t) for t in terminology_data if isinstance(t, dict)],
+            speed_read=SpeedReadContent(
+                method=str(speed_read_data.get("method") or ""),
+                experiment_design=str(speed_read_data.get("experiment_design") or ""),
+                problems_solved=str(speed_read_data.get("problems_solved") or ""),
+            ),
             key_figures=[],
-            paper_summary=PaperSummary(**data.get("paper_summary", {})),
+            paper_summary=PaperSummary(
+                strengths=str(paper_summary_data.get("strengths") or ""),
+                innovations=str(paper_summary_data.get("innovations") or ""),
+                future_work=str(paper_summary_data.get("future_work") or ""),
+            ),
             created_at=time.time(),
             ai_meta={
                 "purpose": "overview",
@@ -2392,17 +3191,27 @@ async def generate_overview_content(
                 "render_mode": figure_render_mode,
                 "visual_model": visual_config.public_metadata(),
                 "visual_policy": visual_policy.public_metadata(),
+                "work_epoch": overview_work_epoch,
+                "source_strategy": overview_source.get("strategy"),
+                "source_version": overview_source.get("source_version"),
+                "source_total_sections": overview_source.get("total_sections", 0),
+                "source_covered_sections": overview_source.get("covered_sections", 0),
+                "source_sampled_pages": overview_source.get("sampled_pages") or overview_source.get("covered_pages") or [],
             },
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
             text_model_identity=text_model_identity,
             visual_model_identity=visual_policy.identity,
         )
+        quality_status = _annotate_overview_quality(overview)
+        if quality_status == OVERVIEW_STATUS_INVALID:
+            raise RuntimeError("模型返回的速览核心字段全部为空")
         logger.info(
-            "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=success depth=%s",
+            "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=%s depth=%s",
             doc_id,
             provider,
             model,
+            quality_status,
             depth,
         )
         
@@ -2469,19 +3278,15 @@ async def generate_overview_content(
                             assessment_data = {
                                 "figure_id": str(figure.figure_id or ""),
                                 **assessment.to_dict(),
+                                "enrichment_trigger": "overview_selection",
+                                "enrichment_triggered": selected_visual_config.can_call,
                                 "selected_model": selected_visual_config.public_metadata(),
                             }
                             visual_risk_assessments.append(assessment_data)
                             fig_data["visual_risk"] = assessment_data
-                            if not assessment.should_enrich:
-                                fallback_item = _build_key_figure_from_rendered(
-                                    fig_data,
-                                    idx,
-                                    reason="risk_not_triggered",
-                                )
-                                if fallback_item:
-                                    figure_items_by_index[idx] = fallback_item
-                                continue
+                            # 风险分数负责选择本地/强视觉模型；进入“关键图表解读”的
+                            # 图已经是用户明确请求的受限任务（最多 2/3/5 张），不能再
+                            # 因文字证据充足而把图注冒充成图表解读。
                             if not selected_visual_config.can_call:
                                 fallback_item = _build_key_figure_from_rendered(fig_data, idx)
                                 if fallback_item:
@@ -2587,10 +3392,12 @@ async def generate_overview_content(
                     visual_risk_assessments.append({
                         "figure_id": str(fig.get("figure_id") or ""),
                         **assessment.to_dict(),
+                        "enrichment_trigger": "overview_selection",
+                        "enrichment_triggered": selected_visual_config.can_call,
                         "selected_model": selected_visual_config.public_metadata(),
                     })
                     item = None
-                    if assessment.should_enrich and selected_visual_config.can_call:
+                    if selected_visual_config.can_call:
                         item = await _generate_single_figure_analysis(
                             figure_id=fig["figure_id"],
                             figure_index=i,
@@ -2624,11 +3431,7 @@ async def generate_overview_content(
                             fig,
                             i,
                             display_image_data,
-                            reason=(
-                                "analysis_unavailable"
-                                if assessment.should_enrich
-                                else "risk_not_triggered"
-                            ),
+                            reason="analysis_unavailable",
                         )
                         if fallback_item:
                             key_figures_list.append(fallback_item)
@@ -2655,6 +3458,12 @@ async def generate_overview_content(
                 try:
                     from routes.document_routes import publish_visual_supplements
 
+                    _require_current_overview_work_epoch(doc_id, int(overview_work_epoch))
+                    await _require_current_parse_cache_identity(
+                        doc_id,
+                        parse_generation,
+                        document_source_hash,
+                    )
                     publication = publish_visual_supplements(
                         doc_id,
                         parse_generation=parse_generation,
@@ -2711,18 +3520,16 @@ async def build_fallback_overview_content(
         parse_generation,
         document_source_hash,
     )
+    work_epoch = _current_overview_work_epoch(doc_id)
+    _require_current_overview_work_epoch(doc_id, work_epoch)
     doc_info = await get_document_info(doc_id)
     title = doc_info.get("filename", "未知文档") if doc_info else "未知文档"
-    text = " ".join(str(document_text or "").split())
+    text = _clean_fallback_source_text(document_text)
     if not text:
         text = "文档文本暂不可用。"
     summary = text[:520].rstrip()
     if len(text) > len(summary):
         summary += "..."
-
-    sentences = [item.strip() for item in re.split(r"(?<=[。.!?])\s+|\n+", text) if item.strip()]
-    first = sentences[0] if sentences else summary
-    second = sentences[1] if len(sentences) > 1 else summary
 
     overview = OverviewData(
         doc_id=doc_id,
@@ -2731,15 +3538,15 @@ async def build_fallback_overview_content(
         full_text_summary=summary,
         terminology=[],
         speed_read=SpeedReadContent(
-            method=first[:220],
-            experiment_design="模型暂未生成实验设计速览；请检查模型连接后点击重新生成。",
-            problems_solved=second[:220],
+            method="",
+            experiment_design="",
+            problems_solved="",
         ),
         key_figures=[],
         paper_summary=PaperSummary(
-            strengths="当前展示基础速览，尚未完成 AI 深度总结。",
-            innovations="模型连接恢复后可重新生成完整创新点分析。",
-            future_work="建议稍后重试，或切换更稳定的模型服务商。",
+            strengths="",
+            innovations="",
+            future_work="",
         ),
         created_at=time.time(),
         figure_meta={
@@ -2756,19 +3563,24 @@ async def build_fallback_overview_content(
             "depth": depth,
             "render_mode": _normalize_figure_render_mode(figure_render_mode),
             "fallback": True,
+            "generation_status": OVERVIEW_STATUS_FALLBACK,
+            "retryable": True,
             "generation_error": error,
             "visual_model_identity": visual_model_identity,
+            "work_epoch": work_epoch,
         },
         parse_generation=parse_generation,
         document_source_hash=document_source_hash,
         text_model_identity=text_model_identity,
         visual_model_identity=visual_model_identity,
     )
-    await save_overview_cache(
-        overview,
-        parse_generation=parse_generation,
-        document_source_hash=document_source_hash,
+    _annotate_overview_quality(overview)
+    await _require_current_parse_cache_identity(
+        doc_id,
+        parse_generation,
+        document_source_hash,
     )
+    _require_current_overview_work_epoch(doc_id, work_epoch)
     return overview
 
 
@@ -2789,6 +3601,13 @@ async def create_overview_task(
     figure_render_mode: str = "raw",
 ) -> OverviewTask:
     """创建异步任务"""
+    _prune_overview_tasks()
+    active_tasks = [task for task in overview_tasks.values() if _overview_task_is_active(task)]
+    if len(active_tasks) >= OVERVIEW_MAX_ACTIVE_TASKS:
+        raise OverviewTaskCapacityExceeded("速览任务繁忙，请等待当前任务完成后再试")
+    if sum(1 for task in active_tasks if task.doc_id == doc_id) >= OVERVIEW_MAX_ACTIVE_TASKS_PER_DOCUMENT:
+        raise OverviewTaskCapacityExceeded("该文档已有速览任务正在生成")
+
     task_id = str(uuid.uuid4())
     parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
     
@@ -2818,7 +3637,14 @@ async def create_overview_task(
     overview_tasks[task_id] = task
     
     # 启动异步生成
-    asyncio.create_task(_process_overview_task(task_id))
+    runner = asyncio.create_task(_process_overview_task(task_id))
+    overview_task_runners[task_id] = runner
+
+    def _drop_runner(done: asyncio.Task) -> None:
+        if overview_task_runners.get(task_id) is done:
+            overview_task_runners.pop(task_id, None)
+
+    runner.add_done_callback(_drop_runner)
     
     return task
 
@@ -2829,11 +3655,15 @@ async def _process_overview_task(task_id: str):
         return
     
     task = overview_tasks[task_id]
+    work_epoch = _current_overview_work_epoch(task.doc_id)
     
     try:
+        if task.status in {"invalidated", "superseded"}:
+            return
         # 更新状态
         task.status = "processing"
         task.updated_at = time.time()
+        _require_current_overview_work_epoch(task.doc_id, work_epoch)
         
         # 检查缓存
         _use_mineru = getattr(task, 'use_mineru_figures', False)
@@ -2876,8 +3706,20 @@ async def _process_overview_task(task_id: str):
             if _use_mineru and (cached.figure_meta or {}).get("source") != "mineru":
                 logger.info(f"[Overview] task: 缓存非 MinerU，跳过")
             else:
+                _require_current_overview_work_epoch(task.doc_id, work_epoch)
+                await _require_current_parse_cache_identity(
+                    task.doc_id,
+                    parse_generation,
+                    document_source_hash,
+                )
+                if task.status in {"invalidated", "superseded"}:
+                    raise OverviewWorkInvalidated(task.error or "速览任务已作废")
                 task.result = cached
-                task.status = "completed"
+                task.status = overview_generation_status(cached)
+                # An invalidation can race between the pre-commit check and the
+                # two assignments above.  Recheck after publication so the
+                # exception path clears any result that briefly became visible.
+                _require_current_overview_work_epoch(task.doc_id, work_epoch)
                 task.updated_at = time.time()
                 return
         
@@ -2899,20 +3741,48 @@ async def _process_overview_task(task_id: str):
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
         )
-        
+        await _require_current_parse_cache_identity(
+            task.doc_id,
+            parse_generation,
+            document_source_hash,
+        )
+        _require_current_overview_work_epoch(task.doc_id, work_epoch)
+        if task.status in {"invalidated", "superseded"}:
+            return
         task.result = result
-        task.status = "completed"
-        
-    except Exception as e:
-        task.status = "failed"
+        task.status = overview_generation_status(result)
+        _require_current_overview_work_epoch(task.doc_id, work_epoch)
+        task.error = str((result.ai_meta or {}).get("generation_error") or "") or None
+    except (OverviewGenerationSuperseded, OverviewWorkInvalidated) as e:
+        if task.status not in {"invalidated", "superseded"}:
+            task.status = (
+                "superseded"
+                if isinstance(e, OverviewGenerationSuperseded)
+                else "invalidated"
+            )
+        task.result = None
         task.error = str(e)
-        logger.error(f"速览任务 {task_id} 失败: {e}")
-    
-    task.updated_at = time.time()
+    except asyncio.CancelledError:
+        if task.status not in {"invalidated", "superseded"}:
+            task.status = "cancelled"
+            task.result = None
+            task.error = "速览生成已取消"
+    except Exception as e:
+        if task.status not in {"invalidated", "superseded"}:
+            task.status = "failed"
+            task.result = None
+            task.error = str(e)
+            logger.error(f"速览任务 {task_id} 失败: {e}")
+    finally:
+        task.updated_at = time.time()
+        if not _overview_task_is_active(task):
+            _scrub_overview_task_credentials(task)
+        _prune_overview_tasks(task.updated_at)
 
 
 async def get_task_status(task_id: str) -> Optional[OverviewTask]:
     """获取任务状态"""
+    _prune_overview_tasks()
     return overview_tasks.get(task_id)
 
 
@@ -2966,6 +3836,10 @@ async def _generate_or_wait_overview(
         visual_policy.identity,
         text_model_identity,
     )
+    if force:
+        work_epoch = _advance_overview_work_epoch(doc_id)
+    else:
+        work_epoch = _current_overview_work_epoch(doc_id)
 
     cached = await get_cached_overview(
         doc_id,
@@ -2980,13 +3854,32 @@ async def _generate_or_wait_overview(
         if use_mineru_figures and (cached.figure_meta or {}).get("source") != "mineru":
             logger.info(f"[Overview] _generate_or_wait: 缓存非 MinerU，跳过")
         else:
+            _require_current_overview_work_epoch(doc_id, work_epoch)
+            await _require_current_parse_cache_identity(
+                doc_id,
+                parse_generation,
+                document_source_hash,
+            )
             return cached
 
     inflight = overview_inflight.get(cache_key)
-    if inflight and not force:
-        return await asyncio.shield(inflight)
+    if inflight:
+        if not force:
+            return await _await_overview_inflight(
+                inflight,
+                doc_id=doc_id,
+                expected_epoch=work_epoch,
+            )
+        overview_inflight.pop(cache_key, None)
+        _cancel_asyncio_task(inflight)
 
     async def _runner() -> OverviewData:
+        _require_current_overview_work_epoch(doc_id, work_epoch)
+        await _require_current_parse_cache_identity(
+            doc_id,
+            parse_generation,
+            document_source_hash,
+        )
         document_text = await get_document_text(doc_id)
         page_recovery_revision = ""
         page_recovery_diagnostics: dict[str, Any] = {}
@@ -3019,6 +3912,12 @@ async def _generate_or_wait_overview(
                 )
                 recovery_is_published = not recovery_items
                 if recovery_items:
+                    _require_current_overview_work_epoch(doc_id, work_epoch)
+                    await _require_current_parse_cache_identity(
+                        doc_id,
+                        recovery_generation,
+                        recovery_source_hash,
+                    )
                     publication = publish_visual_supplements(
                         doc_id,
                         parse_generation=recovery_generation,
@@ -3074,6 +3973,7 @@ async def _generate_or_wait_overview(
             figure_render_mode=render_mode,
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
+            overview_work_epoch=work_epoch,
         )
         if page_recovery_diagnostics:
             result.ai_meta = dict(result.ai_meta or {})
@@ -3088,14 +3988,33 @@ async def _generate_or_wait_overview(
                 parse_generation=parse_generation,
                 document_source_hash=document_source_hash,
             )
+        _require_current_overview_work_epoch(doc_id, work_epoch)
+        await _require_current_parse_cache_identity(
+            doc_id,
+            parse_generation,
+            document_source_hash,
+        )
         return result
 
     task = asyncio.create_task(_runner())
     overview_inflight[cache_key] = task
+
+    def _drop_inflight(done: asyncio.Task) -> None:
+        if overview_inflight.get(cache_key) is done:
+            overview_inflight.pop(cache_key, None)
+
+    task.add_done_callback(_drop_inflight)
     try:
-        return await asyncio.shield(task)
+        return await _await_overview_inflight(
+            task,
+            doc_id=doc_id,
+            expected_epoch=work_epoch,
+        )
     finally:
-        if overview_inflight.get(cache_key) is task:
+        # asyncio.shield keeps the inner task alive when only the request is
+        # cancelled.  Keep it registered so later callers can coalesce with it
+        # and explicit invalidation can still cancel it.
+        if task.done() and overview_inflight.get(cache_key) is task:
             overview_inflight.pop(cache_key, None)
 
 
@@ -3132,6 +4051,7 @@ async def get_or_create_overview(
     )
     text_model_identity = _overview_text_model_identity(provider, model, endpoint, api_key)
     parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
+    cache_lookup_epoch = _current_overview_work_epoch(doc_id)
     cached = await get_cached_overview(
         doc_id,
         depth,
@@ -3142,6 +4062,12 @@ async def get_or_create_overview(
         text_model_identity,
     )
     if cached and not force:
+        _require_current_overview_work_epoch(doc_id, cache_lookup_epoch)
+        await _require_current_parse_cache_identity(
+            doc_id,
+            parse_generation,
+            document_source_hash,
+        )
         logger.info(
             "[AI-Audit] purpose=overview doc=%s provider=%s model=%s status=cache_hit depth=%s",
             doc_id,

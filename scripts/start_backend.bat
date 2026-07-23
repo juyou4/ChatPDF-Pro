@@ -21,10 +21,17 @@ REM 激活虚拟环境
 echo 🔧 激活虚拟环境...
 call venv\Scripts\activate.bat
 
-REM 安装依赖
-echo 📥 安装依赖...
-pip install -r requirements.txt
-
+REM 仅安装基础运行时；本地解析组件由应用内的按需安装器准备。
+echo 📥 检查基础运行时...
+python -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >nul 2>&1
+if errorlevel 1 (
+    pip install -r requirements-core.txt
+    if errorlevel 1 (
+        echo ❌ 基础运行时安装失败
+        exit /b 1
+    )
+)
+echo ✓ 基础运行时已就绪；本地解析组件按需安装
 REM 启动服务
 echo ✨ 启动服务...
 echo 🌐 API地址: http://localhost:8000

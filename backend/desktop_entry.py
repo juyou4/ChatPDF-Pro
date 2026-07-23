@@ -87,6 +87,7 @@ def ensure_data_dirs():
 
 
 def main():
+    runtime.validate_startup_security()
     logger = setup_logging()
     ensure_data_dirs()
 

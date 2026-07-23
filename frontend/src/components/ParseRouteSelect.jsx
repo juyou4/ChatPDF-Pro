@@ -6,7 +6,7 @@ import { PARSE_ROUTE_OPTIONS } from '../utils/parseRouteUtils';
 const ROUTE_VISUALS = {
   auto: {
     icon: Sparkles,
-    hint: '按文档质量自动选择，优先使用本地解析',
+    hint: '兼容历史文档的自动路线',
   },
   local: {
     icon: Laptop,
@@ -138,7 +138,7 @@ export default function ParseRouteSelect({
               : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
         }`}
       >
-        <span className="truncate">{selectedOption.label}</span>
+        <span className="truncate">{selectedOption.shortLabel || selectedOption.label}</span>
         <motion.span
           aria-hidden="true"
           animate={{ rotate: isOpen ? 180 : 0 }}

@@ -1,4 +1,86 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+/*
+ * 中文字体优先使用随应用分发的开源 Webfont；许可与来源见 public/fonts/NOTICE.md。
+ * 仅 OPPO Sans 由 OPPO 官方 Webfont 按需加载，离线时会回退到系统中文字体。
+ */
+@font-face {
+    font-family: "ChatPDF Source Han Sans";
+    src: url("./assets/fonts/source-han-sans-sc-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF Source Han Serif";
+    src: url("./assets/fonts/source-han-serif-sc-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF LXGW WenKai";
+    src: url("./assets/fonts/lxgw-wenkai-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF LXGW Neo XiHei";
+    src: url("./assets/fonts/lxgw-neo-xihei.ttf") format("truetype");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF Sarasa UI SC";
+    src: url("./assets/fonts/sarasa-ui-sc-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF Clear Han Serif";
+    src: url("./assets/fonts/clear-han-serif-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF 975 Yuan";
+    src: url("./assets/fonts/975-yuan-regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF OPPO Sans";
+    src: url("https://www.oppo.com/content/dam/statics/fonts/cn/OPPOSans3.0cn-Regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF OPPO Sans";
+    src: url("https://www.oppo.com/content/dam/statics/fonts/cn/OPPOSans3.0cn-Medium.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "ChatPDF OPPO Sans";
+    src: url("https://www.oppo.com/content/dam/statics/fonts/cn/OPPOSans3.0cn-Bold.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+}
 
 @tailwind base;
 @tailwind components;
@@ -84,7 +166,7 @@
 
 :root {
     /* --- Global Typography --- */
-    --global-font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --global-font-family: "ChatPDF Source Han Sans", "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
     --body-font: var(--global-font-family);
     --heading-font: var(--global-font-family);
     --global-scale: 1;
@@ -270,6 +352,34 @@ body,
 }
 
 /* 页面缩放由 JS 控制 document.body.style.zoom，此处不设置 */
+
+/* 设置勾选框动效：选中时盒子压扁回弹（squash & pop），对勾弹性放大。
+   类每次被添加时动画重放，取消勾选时类移除即复位。 */
+.settings-check-pop {
+    animation: settingsCheckPop 0.35s ease;
+}
+
+@keyframes settingsCheckPop {
+    0% { transform: scale(1); }
+    40% { transform: scale(0.82); }
+    100% { transform: scale(1); }
+}
+
+.settings-check-mark {
+    animation: settingsCheckMarkIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes settingsCheckMarkIn {
+    from { transform: scale(0) rotate(-12deg); }
+    to { transform: scale(1) rotate(0deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-check-pop,
+    .settings-check-mark {
+        animation: none;
+    }
+}
 
 /* 细滚动条：类名早已在多处引用，但样式一直缺失（表现为原生宽滚动条） */
 .custom-scrollbar {
@@ -514,49 +624,183 @@ body,
     transition: background-color 220ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* 设置数值滑块：独立圆角填充层包裹横向胶囊拖柄。 */
+.settings-range {
+    --settings-range-accent: #ed8c68;
+    --settings-range-track: #ebe9e8;
+    position: relative;
+    width: 100%;
+    height: 28px;
+    border-radius: 999px;
+    background: var(--settings-range-track);
+    box-shadow: inset 0 1px 2px rgba(78, 64, 56, 0.08);
+    contain: layout;
+}
+
+.settings-range-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    max-width: 100%;
+    border-radius: inherit;
+    background: var(--settings-range-accent);
+    pointer-events: none;
+    will-change: width;
+}
+
+.settings-range-input {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 28px;
+    margin: 0;
+    padding: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    cursor: pointer;
+    outline: none;
+}
+
+.settings-range-input::-webkit-slider-runnable-track {
+    height: 28px;
+    border-radius: 999px;
+    background: transparent;
+}
+
+.settings-range-input::-webkit-slider-thumb {
+    box-sizing: border-box;
+    width: 34px;
+    height: 24px;
+    margin-top: 2px;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 2px solid var(--settings-range-accent);
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow:
+        0 1px 4px rgba(78, 64, 56, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease;
+}
+
+.settings-range-input::-moz-range-track {
+    height: 28px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+}
+
+.settings-range-input::-moz-range-thumb {
+    box-sizing: border-box;
+    width: 34px;
+    height: 24px;
+    border: 2px solid var(--settings-range-accent);
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(78, 64, 56, 0.14);
+    transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease;
+}
+
+.settings-range-input:not(:disabled):hover::-webkit-slider-thumb {
+    transform: scale(1.04);
+    box-shadow: 0 3px 10px rgba(184, 95, 71, 0.22);
+}
+
+.settings-range-input:not(:disabled):active::-webkit-slider-thumb {
+    transform: scale(0.96);
+}
+
+.settings-range-input:not(:disabled):hover::-moz-range-thumb {
+    transform: scale(1.04);
+    box-shadow: 0 3px 10px rgba(184, 95, 71, 0.22);
+}
+
+.settings-range-input:not(:disabled):active::-moz-range-thumb {
+    transform: scale(0.96);
+}
+
+.settings-range-input:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 4px rgba(237, 140, 104, 0.2), 0 2px 7px rgba(78, 64, 56, 0.18);
+}
+
+.settings-range-input:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 4px rgba(237, 140, 104, 0.2), 0 2px 7px rgba(78, 64, 56, 0.18);
+}
+
+.settings-range-disabled {
+    --settings-range-accent: #c8c9cc;
+    --settings-range-track: #ececef;
+    opacity: 0.58;
+}
+
+.settings-range-input:disabled {
+    cursor: not-allowed;
+}
+
+.dark .settings-range {
+    --settings-range-track: #353941;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+
+.dark .settings-range-input::-webkit-slider-thumb,
+.dark .settings-range-input::-moz-range-thumb {
+    background: #f4f2f0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-range-input::-webkit-slider-thumb,
+    .settings-range-input::-moz-range-thumb {
+        transition: none;
+    }
+}
+
 .settings-entry-arrow {
     display: flex;
-    width: 30px;
-    height: 30px;
-    flex: 0 0 30px;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
     align-items: center;
     justify-content: center;
-    color: #ffffff;
-    background: #17191e;
-    border: 1px solid rgba(0, 0, 0, 0.9);
-    border-radius: 50%;
-    box-shadow:
-        0 3px 0 #050607,
-        0 9px 16px -9px rgba(15, 23, 42, 0.72),
-        inset 0 1px 0 rgba(255, 255, 255, 0.24);
+    color: #9297a1;
+    background: rgba(243, 244, 246, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 8px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
     transform: translate3d(0, 0, 0);
     transition:
         transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
-        box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
-        background-color 180ms ease;
+        color 180ms ease,
+        background-color 180ms ease,
+        border-color 180ms ease;
     will-change: transform;
 }
 
-.settings-entry-row:hover .settings-entry-arrow {
-    background: #0d0f13;
-    box-shadow:
-        0 4px 0 #030405,
-        0 12px 20px -10px rgba(15, 23, 42, 0.82),
-        inset 0 1px 0 rgba(255, 255, 255, 0.28);
-    transform: translate3d(2px, -1px, 0);
+.settings-entry-row:hover .settings-entry-arrow,
+.settings-entry-row:focus-visible .settings-entry-arrow {
+    color: #b85f47;
+    background: #fff2ec;
+    border-color: rgba(217, 122, 93, 0.22);
+    transform: translate3d(2px, 0, 0);
 }
 
 .settings-entry-row:active .settings-entry-arrow {
-    box-shadow:
-        0 1px 0 #030405,
-        0 5px 10px -7px rgba(15, 23, 42, 0.72),
-        inset 0 1px 0 rgba(255, 255, 255, 0.18);
-    transform: translate3d(1px, 2px, 0);
+    transform: translate3d(1px, 0, 0) scale(0.92);
 }
 
 .dark .settings-entry-arrow {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: #090a0d;
+    color: #8d939f;
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.055);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.dark .settings-entry-row:hover .settings-entry-arrow,
+.dark .settings-entry-row:focus-visible .settings-entry-arrow {
+    color: #ffa07a;
+    border-color: rgba(255, 160, 122, 0.18);
+    background: rgba(255, 160, 122, 0.1);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -641,21 +885,39 @@ body,
 }
 
 .message-bubble-user {
-    background: var(--color-primary-light);
-    color: var(--color-primary-strong);
+    background: #FFF8F4;
+    color: #A85640;
     box-shadow:
-        0 7px 16px -12px rgba(184, 95, 71, 0.32),
-        inset 0 1px 0 rgba(255, 255, 255, 0.72);
-    border: 1px solid rgba(255, 160, 122, 0.18);
-    border-radius: 20px 20px 2px 20px;
+        0 1px 2px rgba(91, 65, 52, 0.025),
+        0 7px 18px -16px rgba(91, 65, 52, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.86);
+    border: 1px solid rgba(184, 95, 71, 0.13);
+    border-radius: 18px 18px 6px 18px;
     text-shadow: none;
 }
 
 .chatpdf-shell--dark .message-bubble-user {
-    background: rgba(255, 160, 122, 0.16);
-    color: #FFDCCF;
-    border-color: rgba(255, 160, 122, 0.24);
-    box-shadow: 0 7px 18px -12px rgba(0, 0, 0, 0.6);
+    background: rgba(255, 160, 122, 0.12);
+    color: #FFD8C9;
+    border-color: rgba(255, 160, 122, 0.18);
+    box-shadow:
+        0 7px 18px -16px rgba(0, 0, 0, 0.72),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.message-bubble-user .message-content,
+.message-bubble-ai .message-content {
+    font-size: inherit;
+}
+
+.message-bubble-user .message-content > :first-child,
+.message-bubble-ai .message-content > :first-child {
+    margin-top: 0;
+}
+
+.message-bubble-user .message-content > :last-child,
+.message-bubble-ai .message-content > :last-child {
+    margin-bottom: 0;
 }
 
 /* 统一浅鲑鱼交互面：主按钮、选中项和开关不再使用大块实色橙。 */
@@ -722,11 +984,23 @@ body,
 }
 
 .message-bubble-ai {
-    background-color: var(--color-bg-surface);
-    border: 1px solid rgba(229, 231, 235, 1);
+    background-color: rgba(249, 250, 251, 0.82);
+    border: 1px solid rgba(222, 225, 229, 0.72);
     color: var(--color-text-main);
-    box-shadow: var(--shadow-sm);
-    border-radius: 18px 18px 18px 4px;
+    box-shadow:
+        0 1px 2px rgba(15, 23, 42, 0.025),
+        0 8px 22px -19px rgba(15, 23, 42, 0.24),
+        inset 0 1px 0 rgba(255, 255, 255, 0.88);
+    border-radius: 20px 20px 20px 7px;
+}
+
+.chatpdf-shell--dark .message-bubble-ai {
+    background-color: rgba(37, 40, 47, 0.72);
+    border-color: rgba(255, 255, 255, 0.07);
+    color: #F3F4F6;
+    box-shadow:
+        0 8px 22px -18px rgba(0, 0, 0, 0.62),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 .soft-button {
@@ -1716,6 +1990,41 @@ body,
    PDF 区滚动条美化
    ============================================================ */
 
+/* PDF.js 默认使用系统强调色，Windows 下会显示成高饱和蓝条。
+   保留透明文本层，让底层 PDF 字形透出，只把选区处理成轻量荧光笔。 */
+.pdf-scroll .textLayer span::-moz-selection {
+    color: transparent;
+    background: rgba(226, 116, 82, 0.30);
+    text-shadow: none;
+}
+
+.pdf-scroll .textLayer span::selection {
+    color: transparent;
+    background: rgba(226, 116, 82, 0.30);
+    text-shadow: none;
+}
+
+.pdf-scroll .textLayer br::-moz-selection,
+.pdf-scroll .textLayer br::selection {
+    background: transparent;
+}
+
+/* PDF 夜间模式通过反色滤镜实现，预先使用黑色半透明层，反色后得到柔和浅灰高亮。 */
+.chatpdf-shell--dark .pdf-scroll .textLayer span::-moz-selection {
+    background: rgba(0, 0, 0, 0.34);
+}
+
+.chatpdf-shell--dark .pdf-scroll .textLayer span::selection {
+    background: rgba(0, 0, 0, 0.34);
+}
+
+@media (forced-colors: active) {
+    .pdf-scroll .textLayer span::-moz-selection,
+    .pdf-scroll .textLayer span::selection {
+        background: Highlight;
+    }
+}
+
 /* Firefox */
 .pdf-scroll {
     scrollbar-width: thin;
@@ -1781,6 +2090,41 @@ body,
 }
 
 /* ==================== PDF 阅读区跳转定位 ==================== */
+@keyframes pdfNoteJumpReveal {
+    0% {
+        opacity: 0;
+        transform: scaleX(0.94);
+    }
+    16% {
+        opacity: 1;
+        transform: scaleX(1);
+    }
+    76% {
+        opacity: 0.94;
+        transform: scaleX(1);
+    }
+    100% {
+        opacity: 0.62;
+        transform: scaleX(1);
+    }
+}
+
+.pdf-note-jump-highlight {
+    border-radius: 2px;
+    background: rgba(226, 116, 82, 0.28);
+    box-shadow: inset 0 -1px 0 rgba(184, 95, 71, 0.13);
+    mix-blend-mode: multiply;
+    transform-origin: left center;
+    will-change: transform, opacity;
+    animation: pdfNoteJumpReveal 2.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pdf-note-jump-highlight--dark {
+    background: rgba(0, 0, 0, 0.3);
+    box-shadow: none;
+    mix-blend-mode: normal;
+}
+
 @keyframes pdfReadingJumpFrame {
     0% {
         opacity: 0;
@@ -1871,6 +2215,11 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
+    .pdf-note-jump-highlight {
+        animation-duration: 420ms;
+        animation-timing-function: ease-out;
+    }
+
     .pdf-reading-jump-pulse {
         animation-duration: 420ms;
         animation-timing-function: ease-out;
@@ -1909,4 +2258,43 @@ body,
     border-radius: 9999px;
     background: linear-gradient(90deg, transparent, rgba(65, 68, 73, 0.58), transparent);
     animation: agentShimmerSweep 1.4s ease-in-out infinite;
+}
+
+/* ==================== MinerU 解析扫描动画 ==================== */
+.mineru-scan-loader {
+    --mineru-scan-size: 40px;
+    position: relative;
+    display: inline-block;
+    width: var(--mineru-scan-size);
+    height: var(--mineru-scan-size);
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 2px solid currentColor;
+    border-color: color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: 5px;
+    color: currentColor;
+    flex: 0 0 auto;
+}
+
+.mineru-scan-loader::after {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    content: '';
+    background: currentColor;
+    will-change: transform;
+    animation: mineruScanLine 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes mineruScanLine {
+    to { transform: translateY(calc(var(--mineru-scan-size) - 7px)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mineru-scan-loader::after {
+        animation: none;
+        transform: translateY(calc((var(--mineru-scan-size) - 7px) / 2));
+    }
 }

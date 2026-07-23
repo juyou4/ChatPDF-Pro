@@ -1,0 +1,231 @@
+"""Canonical block-index evidence for retrieval and downstream citations.
+
+The reading block index is the authoritative representation of the selected
+parse route.  This module keeps retrieval from flattening that representation
+into anonymous page text before it reaches the vector index.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+EVIDENCE_SCHEMA_VERSION = 1
+
+_EXCLUDED_BLOCK_TYPES = frozenset({
+    "artifact",
+    "image",
+    "table",
+    "table_row",
+    "table_cell",
+})
+_EVIDENCE_BLOCK_TYPES = frozenset({"paragraph", "caption", "formula", "code", "figure"})
+
+
+def _text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _bbox(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        bbox = [float(item) for item in value[:4]]
+    except (TypeError, ValueError):
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox
+
+
+def _line_rects(block: dict[str, Any]) -> list[list[float]]:
+    rects: list[list[float]] = []
+    for anchor in block.get("line_anchors") or []:
+        if not isinstance(anchor, dict):
+            continue
+        bbox = _bbox(anchor.get("bbox"))
+        if bbox:
+            rects.append(bbox)
+    return rects[:64]
+
+
+def _section_paths(block_index: dict[str, Any]) -> dict[str, str]:
+    """Turn the flat, level-aware outline into stable readable paths."""
+    paths: dict[str, str] = {}
+    stack: list[str] = []
+    for item in block_index.get("outline") or []:
+        if not isinstance(item, dict):
+            continue
+        section_id = str(item.get("section_id") or "").strip()
+        title = _text(item.get("title"))
+        if not section_id or not title:
+            continue
+        try:
+            level = max(1, min(6, int(item.get("level") or 1)))
+        except (TypeError, ValueError):
+            level = 1
+        stack = stack[: level - 1]
+        stack.append(title)
+        paths[section_id] = " > ".join(stack)
+    return paths
+
+
+def _is_retrievable_block(block: dict[str, Any], block_type: str) -> bool:
+    if block_type in _EXCLUDED_BLOCK_TYPES:
+        return False
+    if block.get("repeated_artifact"):
+        return False
+    if block.get("visual_enhancement"):
+        # Visual supplements only reach a public block index after the
+        # document-level publish marker is written.  Require its revision here
+        # as a second guard so staged VLM output cannot become retrievable.
+        if block_type != "caption" or not str(block.get("visual_supplement_revision") or "").strip():
+            return False
+    if block.get("exclude_from_reading"):
+        return False
+    # References and front-matter are allowed in page text for faithful source
+    # display, but should not become primary semantic evidence.
+    role = str(block.get("content_role") or "").strip().lower()
+    if role in {"reference", "author", "affiliation", "contact", "publication_header"}:
+        return False
+    text = _text(block.get("text") or block.get("content") or block.get("caption"))
+    # Bare labels such as "Figure 1" are navigation noise.  A figure only
+    # becomes retrievable when MinerU supplied a substantive caption/description.
+    if block_type == "figure":
+        return len(text) >= 24
+    return bool(text)
+
+
+def build_rag_source_from_block_index(
+    block_index: dict[str, Any] | None,
+    *,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> dict[str, Any]:
+    """Build page text plus identity-preserving evidence inputs from blocks.
+
+    ``evidence_chunks`` deliberately remains pre-split.  The embedding service
+    owns model-aware chunk sizes and can split a very long block without losing
+    its source identity.
+    """
+    if not isinstance(block_index, dict):
+        return {
+            "full_text": "",
+            "pages": [],
+            "evidence_chunks": [],
+            "block_count": 0,
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        }
+
+    section_paths = _section_paths(block_index)
+    active_generation = str(parse_generation or block_index.get("parse_generation") or "").strip()
+    active_source_hash = str(
+        document_source_hash or block_index.get("document_source_hash") or ""
+    ).strip()
+    parser_route = str(block_index.get("parser_route") or "").strip()
+    pages: list[dict[str, Any]] = []
+    evidence_chunks: list[dict[str, Any]] = []
+    block_count = 0
+
+    for page_index, page in enumerate(block_index.get("pages") or []):
+        if not isinstance(page, dict):
+            continue
+        try:
+            page_number = max(1, int(page.get("page") or page_index + 1))
+        except (TypeError, ValueError):
+            page_number = page_index + 1
+        try:
+            page_width = float(page.get("width_pts") or 612.0)
+            page_height = float(page.get("height_pts") or 792.0)
+        except (TypeError, ValueError):
+            page_width, page_height = 612.0, 792.0
+
+        page_parts: list[str] = []
+        seen_page_text: set[str] = set()
+        for block_order, block in enumerate(page.get("blocks") or []):
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or block.get("block_type") or "paragraph").strip().lower()
+            if not _is_retrievable_block(block, block_type):
+                continue
+            text = _text(block.get("text") or block.get("content") or block.get("caption"))
+            text_key = re.sub(r"\s+", " ", text).casefold()
+            if text_key not in seen_page_text:
+                seen_page_text.add(text_key)
+                page_parts.append(text)
+            block_count += 1
+
+            # Headings serve as section context; body/caption/formula blocks
+            # are the retrievable evidence.  Table evidence still travels via
+            # the dedicated structured-table path in embedding_service.
+            if block_type not in _EVIDENCE_BLOCK_TYPES:
+                continue
+            block_id = str(block.get("block_id") or f"p{page_number}_b{block_order}").strip()
+            if not block_id:
+                continue
+            section_id = str(block.get("section_id") or "").strip()
+            section_path = section_paths.get(section_id, "")
+            bbox = _bbox(block.get("bbox"))
+            metadata: dict[str, Any] = {
+                "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+                "evidence_source": "block_index",
+                "evidence_id": f"block:{block_id}",
+                "block_id": block_id,
+                "block_ids": [block_id],
+                "section_id": section_id,
+                "section_path": section_path,
+                "page": page_number,
+                "page_range": [page_number, page_number],
+                "block_type": block_type,
+                "chunk_type": block_type,
+                "reading_order": int(block.get("reading_order") or block_order),
+                "parse_generation": active_generation,
+                "document_source_hash": active_source_hash,
+                "parser_route": parser_route,
+                "source": str(block.get("source") or "block_index"),
+                "page_size": [page_width, page_height],
+                "coordinate_space": "pdf_top_left_points",
+            }
+            for key in (
+                "figure_id",
+                "purpose",
+                "visual_source",
+                "visual_supplement_revision",
+                "prompt_version",
+                "confidence",
+            ):
+                value = block.get(key)
+                if value not in (None, ""):
+                    metadata[key] = value
+            if block.get("visual_enhancement"):
+                metadata["visual_enhancement"] = True
+            if bbox:
+                metadata["bbox"] = bbox
+            rects = _line_rects(block)
+            if rects:
+                metadata["rects"] = rects
+            evidence_chunks.append({
+                "text": text,
+                "heading": section_path,
+                "page": page_number,
+                "block_type": block_type,
+                "metadata": metadata,
+            })
+
+        page_content = "\n\n".join(page_parts).strip()
+        if page_content:
+            pages.append({
+                "page": page_number,
+                "page_index": page_number - 1,
+                "content": page_content,
+                "text": page_content,
+                "source": "block_index",
+            })
+
+    return {
+        "full_text": "\n\n".join(page["content"] for page in pages).strip(),
+        "pages": pages,
+        "evidence_chunks": evidence_chunks,
+        "block_count": block_count,
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+    }

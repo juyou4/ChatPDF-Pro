@@ -71,6 +71,7 @@ class GranularitySelector:
         query: str,
         groups: List[SemanticGroup],
         max_tokens: int = 8000,
+        intent_decision: dict | None = None,
     ) -> GranularitySelection:
         """根据查询类型选择基础粒度
 
@@ -92,14 +93,24 @@ class GranularitySelector:
             GranularitySelection 粒度选择结果
         """
         # 使用现有查询分析器分类查询类型
-        query_type: QueryType = analyze_query_type(query)
+        query_type: QueryType = (
+            str((intent_decision or {}).get("query_type") or "")
+            if isinstance(intent_decision, dict)
+            else ""
+        ) or analyze_query_type(query)  # type: ignore[assignment]
 
         # 根据映射规则获取粒度和最大意群数
         granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
 
         # 获取选择理由
         reasoning = QUERY_TYPE_REASONING[query_type]
-        if query_type == "analytical" and is_section_explanation_query(query):
+        evidence_need = set((intent_decision or {}).get("evidence_need") or []) if isinstance(intent_decision, dict) else set()
+        section_explanation = (
+            "section_explanation" in evidence_need
+            if isinstance(intent_decision, dict)
+            else is_section_explanation_query(query)
+        )
+        if query_type == "analytical" and section_explanation:
             max_groups = max(max_groups, 7)
             reasoning = "章节深讲查询：扩大方法相关意群覆盖，兼顾细节与范围"
 
@@ -120,6 +131,7 @@ class GranularitySelector:
         query: str,
         ranked_groups: List[SemanticGroup],
         max_tokens: int = 8000,
+        intent_decision: dict | None = None,
     ) -> List[dict]:
         """为排序后的意群列表分配混合粒度
 
@@ -142,7 +154,12 @@ class GranularitySelector:
             return []
 
         result: List[dict] = []
-        prefer_section_detail = is_section_explanation_query(query)
+        evidence_need = set((intent_decision or {}).get("evidence_need") or []) if isinstance(intent_decision, dict) else set()
+        prefer_section_detail = (
+            "section_explanation" in evidence_need
+            if isinstance(intent_decision, dict)
+            else is_section_explanation_query(query)
+        )
 
         for rank, group in enumerate(ranked_groups):
             # 根据排名位置分配粒度
@@ -184,6 +201,7 @@ class GranularitySelector:
         ranked_groups: List[SemanticGroup],
         scores: List[float] = None,
         max_tokens: int = 8000,
+        intent_decision: dict | None = None,
     ) -> List[dict]:
         """动态粒度选择（参考 paper-burner-x 的 selectMixedGranularity）
 
@@ -210,7 +228,11 @@ class GranularitySelector:
         from services.token_budget import TokenBudgetManager
 
         # 分析查询类型
-        query_type: QueryType = analyze_query_type(query)
+        query_type: QueryType = (
+            str((intent_decision or {}).get("query_type") or "")
+            if isinstance(intent_decision, dict)
+            else ""
+        ) or analyze_query_type(query)  # type: ignore[assignment]
         base_granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
         if query_type == "analytical" and is_section_explanation_query(query):
             max_groups = max(max_groups, 7)

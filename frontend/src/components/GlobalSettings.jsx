@@ -8,6 +8,7 @@ import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext
 import { useReadingSettings } from '../contexts/ReadingSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import SettingsSegmentedControl from './SettingsSegmentedControl';
+import SettingsRange from './SettingsRange';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
     const {
@@ -30,8 +31,8 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const [showBlacklist, setShowBlacklist] = useState(false);
 
     const {
-        enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
-        setEnableWebSearch, setWebSearchProvider, setWebSearchApiKey, setWebSearchBlacklist,
+        webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist, webSearchIncludeDocumentContext,
+        setWebSearchMode, setWebSearchProvider, setWebSearchApiKey, setWebSearchBlacklist, setWebSearchIncludeDocumentContext,
         resetWebSearch,
     } = useWebSearch();
     const currentSearchProvider = WEB_SEARCH_PROVIDERS.find(p => p.id === webSearchProvider) || WEB_SEARCH_PROVIDERS[0];
@@ -229,10 +230,10 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 </div>
                                 <div className="space-y-4">
                                     <div className="px-1 py-1">
-                                        <input
-                                            type="range" min="0.5" max="2.0" step="0.05" value={globalScale} onChange={(e) => setGlobalScale(parseFloat(e.target.value))}
-                                            className="w-full h-[6px] rounded-full appearance-none bg-gray-100 cursor-pointer"
-                                            style={{ background: `linear-gradient(to right, #ed8c68 0%, #ed8c68 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 ${((globalScale - 0.5) / 1.5) * 100}%, #F3F4F6 100%)` }}
+                                        <SettingsRange
+                                            ariaLabel="界面缩放倍率"
+                                            min="0.5" max="2.0" step="0.05" value={globalScale}
+                                            onChange={setGlobalScale}
                                         />
                                     </div>
                                     <SettingsSegmentedControl
@@ -252,7 +253,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             <>
                             {/* Memory Settings */}
                             <div className="settings-card bg-white p-5 border border-gray-200/90">
-                                <div className="flex items-center justify-between">
+                                <div className="flex items-center justify-between gap-4">
                                     <div className="flex items-center gap-3">
                                         <div className="w-8 h-8 rounded-full bg-blue-50 text-blue-500 flex items-center justify-center">
                                             <Brain className="w-4 h-4" />
@@ -280,11 +281,25 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         </div>
                                         <div>
                                             <h3 className="text-[14px] font-bold text-gray-900">联网搜索</h3>
-                                            <p className="text-[12px] text-gray-500">对话时自动搜索网络补充信息</p>
+                                            <p className="text-[12px] text-gray-500">
+                                                {webSearchMode === 'force' ? '每次提问都搜索网络' : webSearchMode === 'auto' ? '仅在需要时自动搜索网络' : '仅使用文档与对话上下文'}
+                                            </p>
                                         </div>
                                     </div>
-                                    <ToggleSwitch checked={enableWebSearch} onChange={setEnableWebSearch} color="#10b981" />
                                 </div>
+
+                                <SettingsSegmentedControl
+                                    ariaLabel="联网搜索模式"
+                                    value={webSearchMode}
+                                    onChange={setWebSearchMode}
+                                    options={[
+                                        { value: 'off', label: '关闭' },
+                                        { value: 'auto', label: '自动' },
+                                        { value: 'force', label: '强制' },
+                                    ]}
+                                    buttonClassName="py-1.5 text-[12px] font-semibold text-center rounded-[12px]"
+                                    indicatorClassName="rounded-[12px]"
+                                />
 
                                 {enableWebSearch && (
                                     <div className="pt-3 border-t border-gray-100/50 space-y-4">
@@ -327,6 +342,18 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                                 </div>
                                             </div>
                                         )}
+
+                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 flex items-center justify-between gap-3">
+                                            <div className="min-w-0 px-1">
+                                                <div className="text-[12px] font-bold text-gray-700">附加文档上下文</div>
+                                                <div className="text-[11px] text-gray-500 mt-0.5">向搜索服务发送文件名和相关选中文本</div>
+                                            </div>
+                                            <ToggleSwitch
+                                                checked={webSearchIncludeDocumentContext}
+                                                onChange={setWebSearchIncludeDocumentContext}
+                                                color="#10b981"
+                                            />
+                                        </div>
 
                                         <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
                                             <button onClick={() => setShowBlacklist(!showBlacklist)} className="w-full flex items-center justify-between text-left">

@@ -5,6 +5,7 @@ import BreatheLoader from './BreatheLoader';
 const getOutlineSourceMeta = (source) => {
   if (source === 'ai') return { label: 'AI 章节树', tone: 'ai' };
   if (source === 'toc') return { label: 'PDF 书签', tone: 'toc' };
+  if (source === 'mineru') return { label: 'MinerU 章节结构', tone: 'toc' };
   if (source === 'heuristic') return { label: '启发式大纲', tone: 'fallback' };
   return { label: '基础大纲', tone: 'muted' };
 };

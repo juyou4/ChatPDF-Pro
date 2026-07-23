@@ -54,7 +54,7 @@ _VISUAL_QUERY_PATTERN = re.compile(
     r"(?:图片|图像|图表|插图|曲线图|柱状图|折线图|散点图|流程图|示意图|截图|"
     r"表格|公式|方程|坐标轴|图例|布局|排版|视觉|左上角|右上角|左下角|右下角|"
     r"\b(?:figure|fig|image|picture|chart|plot|diagram|table|formula|equation|layout|"
-    r"screenshot|visual|axis|legend)\b)",
+    r"screenshot|visual|axis|legend)s?\b)",
     re.IGNORECASE,
 )
 _FIGURE_QUERY_PATTERN = re.compile(
@@ -263,6 +263,41 @@ def looks_like_visual_query(query: str) -> bool:
         _extract_pages(normalized)
         and re.search(r"(?:位置|区域|上方|下方|左侧|右侧|角落|看起来|显示|标注|where|position|region)", normalized, re.IGNORECASE)
     )
+
+
+def detect_query_modalities(query: str) -> list[str]:
+    """返回稳定、有序的查询模态，不执行任何视觉模型调用。"""
+    normalized = _clean_text(query, 2400)
+    if not normalized:
+        return ["text"]
+
+    references = _extract_references(normalized)
+    modalities: list[str] = []
+    if (
+        any(item.startswith("figure:") for item in references)
+        or _FIGURE_QUERY_PATTERN.search(normalized)
+    ):
+        modalities.append("figure")
+    if (
+        any(item.startswith("table:") for item in references)
+        or re.search(r"(?:表格|\btable?s?\b)", normalized, re.IGNORECASE)
+    ):
+        modalities.append("table")
+    if (
+        any(item.startswith("formula:") for item in references)
+        or re.search(r"(?:公式|方程|\b(?:formula|equation)s?\b)", normalized, re.IGNORECASE)
+    ):
+        modalities.append("formula")
+    if re.search(
+        r"(?:布局|排版|位置|区域|上方|下方|左侧|右侧|角落|"
+        r"\b(?:layout|position|region|top|bottom|left|right)\b)",
+        normalized,
+        re.IGNORECASE,
+    ):
+        modalities.append("layout")
+    if not modalities:
+        return ["text"]
+    return modalities
 
 
 def _empty_index(identity: dict[str, str]) -> dict[str, Any]:

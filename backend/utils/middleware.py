@@ -73,12 +73,25 @@ class DegradeOnErrorMiddleware(BaseMiddleware):
     async def after_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         # 如果 response 里有 error 字段，可包装降级内容
         if isinstance(response, dict) and response.get("error"):
-            return {
+            degraded = {
                 "choices": [{
                     "message": {"content": self.fallback_content}
                 }],
-                "degraded": True
+                "degraded": True,
+                "answer_status": "degraded",
+                "degrade_reason": "upstream_error",
             }
+            # 保留调用身份和用量，供上层准确区分合成兜底文案与正常模型回答。
+            for key in (
+                "_used_provider",
+                "_used_model",
+                "_fallback_used",
+                "usage",
+                "_usage_meta",
+            ):
+                if key in response:
+                    degraded[key] = response.get(key)
+            return degraded
         return response
 
 

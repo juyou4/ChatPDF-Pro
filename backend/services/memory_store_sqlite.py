@@ -197,6 +197,20 @@ class MemoryStoreSQLite(MemoryStore):
             logger.error(f"JSON → SQLite 迁移失败: {e}")
             self._db.rollback()
             return 0
+
+    def clear_all(self) -> None:
+        """Purge SQLite/FTS copies before removing JSON/event representations."""
+        if self.use_sqlite and self._db:
+            try:
+                if self._has_fts5():
+                    self._db.execute("DELETE FROM memory_fts")
+                self._db.execute("DELETE FROM memory_entries")
+                self._db.commit()
+                self._db.execute("VACUUM")
+            except Exception as exc:
+                self._db.rollback()
+                logger.warning("清空 SQLite 记忆失败: %s", exc)
+        super().clear_all()
     
     def _has_fts5(self) -> bool:
         """检查 FTS5 是否可用"""

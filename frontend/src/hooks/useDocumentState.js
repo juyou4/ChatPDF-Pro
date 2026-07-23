@@ -78,6 +78,101 @@ const getOverviewParseIdentity = (documentInfo) => {
   return `g=${encodeURIComponent(generation || 'legacy')}:s=${encodeURIComponent(sourceHash || 'legacy')}`;
 };
 
+const CHAT_RELIABLE_TERMINAL_STATES = new Set([
+  'completed',
+  'recovered_retry',
+  'evidence_fallback',
+  'degraded',
+  'failed',
+  'interrupted',
+]);
+
+const normalizeParseIdentity = (value) => {
+  const nested = value?.parse_identity && typeof value.parse_identity === 'object'
+    ? value.parse_identity
+    : {};
+  return {
+    generation: String(
+      value?.parse_generation
+      || value?.parseGeneration
+      || value?.generation
+      || nested.parse_generation
+      || nested.generation
+      || ''
+    ).trim(),
+    sourceHash: String(
+      value?.document_source_hash
+      || value?.documentSourceHash
+      || value?.source_hash
+      || nested.document_source_hash
+      || nested.source_hash
+      || ''
+    ).trim(),
+  };
+};
+
+const getDocumentParseIdentity = (documentInfo) => normalizeParseIdentity(
+  documentInfo?.parse_manifest || {}
+);
+
+const hasCompleteParseIdentity = (identity) => Boolean(
+  identity?.generation && identity?.sourceHash
+);
+
+const parseIdentitiesMatch = (left, right) => (
+  hasCompleteParseIdentity(left)
+  && hasCompleteParseIdentity(right)
+  && left.generation === right.generation
+  && left.sourceHash === right.sourceHash
+);
+
+const getMessageTurnStatus = (message) => String(
+  message?.turnStatus
+  || message?.turn_status
+  || message?.answerStatus
+  || message?.answer_status
+  || ''
+).trim().toLowerCase();
+
+const normalizeRestoredSessionMessages = (session, documentInfo) => {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const currentIdentity = getDocumentParseIdentity(documentInfo);
+  const sessionIdentity = normalizeParseIdentity(session || {});
+  const sessionMatchesCurrent = parseIdentitiesMatch(sessionIdentity, currentIdentity);
+
+  return messages.map((message) => {
+    if (!message || typeof message !== 'object') return message;
+    const messageIdentity = normalizeParseIdentity(message);
+    const hasMessageIdentity = hasCompleteParseIdentity(messageIdentity);
+    const messageMatchesCurrent = parseIdentitiesMatch(messageIdentity, currentIdentity)
+      || (!hasMessageIdentity && sessionMatchesCurrent);
+    const staleIdentity = hasCompleteParseIdentity(currentIdentity) && !messageMatchesCurrent;
+    const next = {
+      ...message,
+      ...(messageMatchesCurrent
+        ? {
+          parse_generation: currentIdentity.generation,
+          document_source_hash: currentIdentity.sourceHash,
+        }
+        : {}),
+      ...(staleIdentity ? { parseIdentityStale: true } : {}),
+    };
+
+    if (message.type !== 'assistant') return next;
+
+    const turnStatus = getMessageTurnStatus(message);
+    const interrupted = staleIdentity
+      || message.isStreaming === true
+      || ['streaming', 'cancelled', 'aborted'].includes(turnStatus)
+      || !CHAT_RELIABLE_TERMINAL_STATES.has(turnStatus);
+    return {
+      ...next,
+      isStreaming: false,
+      turnStatus: interrupted ? 'interrupted' : turnStatus,
+    };
+  });
+};
+
 const isKeylessLocalProvider = (provider) => ['local', 'ollama'].includes(String(provider || '').trim().toLowerCase());
 
 const getOverviewTextIdentity = (credentials) => {
@@ -345,7 +440,10 @@ export function useDocumentState({
     }
 
     formData.append('embedding_model', embeddingConfig.compositeKey);
-    if (embeddingConfig.providerId !== 'local') {
+    formData.append('embedding_provider', embeddingConfig.providerId || '');
+    const embeddingProviderId = String(embeddingConfig.providerId || '').trim();
+    const embeddingApiHost = String(embeddingConfig.provider?.apiHost || '').trim();
+    if (!isKeylessLocalProvider(embeddingProviderId)) {
       if (!embeddingConfig.provider?.apiKey) {
         alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 API Key`);
         setIsUploading(false);
@@ -354,7 +452,9 @@ export function useDocumentState({
         return;
       }
       formData.append('embedding_api_key', embeddingConfig.provider.apiKey);
-      formData.append('embedding_api_host', embeddingConfig.provider.apiHost);
+    }
+    if (embeddingApiHost) {
+      formData.append('embedding_api_host', embeddingApiHost);
     }
 
     // OCR 设置
@@ -366,16 +466,14 @@ export function useDocumentState({
       : ocrSettings.parseRoute || 'auto';
     formData.append('parse_route', requestedParseRoute);
 
-    // 桌面模式显式注入后端地址和 token，避免 XHR 拦截初始化时序导致 401
+    // 桌面模式显式使用后端地址；鉴权 header 由 Electron 主进程注入。
     let uploadUrl = `${API_BASE_URL}/upload`;
-    let backendToken = '';
     const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
     if (isDesktop) {
       try {
         const desktopBase = await window.chatpdfDesktop.getApiBaseUrl();
         const normalizedBase = desktopBase ? desktopBase.replace(/\/$/, '') : '';
         uploadUrl = normalizedBase ? `${normalizedBase}/upload` : '/upload';
-        backendToken = (await window.chatpdfDesktop.getBackendToken()) || '';
       } catch (e) {
         console.warn('[Upload] 获取桌面后端配置失败，回退默认请求路径', e);
       }
@@ -411,9 +509,6 @@ export function useDocumentState({
           reject(new Error('Network error'));
         });
         xhr.open('POST', uploadUrl);
-        if (backendToken) {
-          xhr.setRequestHeader('X-ChatPDF-Token', backendToken);
-        }
         xhr.send(formData);
       });
 
@@ -442,6 +537,16 @@ export function useDocumentState({
       }
       if (data.ocr_used) {
         uploadMsg += `\n🔍 已使用 OCR（${data.ocr_backend || '自动'}）处理部分页面。`;
+      }
+      const ocrStatus = String(data.ocr_status || '').trim().toLowerCase();
+      if (data.ocr_warning || ['partial_success', 'failed', 'unavailable'].includes(ocrStatus)) {
+        const failedPageCount = Array.isArray(data.ocr_failed_pages)
+          ? data.ocr_failed_pages.length
+          : 0;
+        const fallbackWarning = ocrStatus === 'partial_success'
+          ? `OCR 部分完成${failedPageCount > 0 ? `，${failedPageCount} 页未识别` : ''}`
+          : 'OCR 未完成，已保留原始提取文本';
+        uploadMsg += `\n⚠️ ${data.ocr_warning || fallbackWarning}`;
       }
       if (data.indexing_status && data.indexing_status !== 'ready') {
         uploadMsg += '\n⏳ 检索索引正在后台准备中，PDF 阅读可先使用；首次问答可能需要稍等。';
@@ -504,10 +609,9 @@ export function useDocumentState({
         }
         setDocId(s.docId);
         setDocInfo(data);
-        // 恢复历史消息：确保不存在"永久流式中"的脏消息（页面关闭时可能残留 isStreaming:true）
-        const restoredMessages = (s.messages || []).map((m) =>
-          m.isStreaming ? { ...m, isStreaming: false } : m
-        );
+        // 旧版没有可靠终态的助手消息一律按中断恢复；解析身份不匹配的
+        // 历史仍可展示，但会被标记为 stale，不能进入新代际的上下文。
+        const restoredMessages = normalizeRestoredSessionMessages(s, data);
         setMessages?.(restoredMessages);
         setCurrentPage?.(1);
       }
@@ -543,11 +647,22 @@ export function useDocumentState({
     if (!docId || !docInfo) return;
     const h = JSON.parse(localStorage.getItem('chatHistory') || '[]');
     const idx = h.findIndex(x => x.id === docId);
+    const parseIdentity = getDocumentParseIdentity(docInfo);
     const data = {
       id: docId,
       docId,
       filename: docInfo.filename,
       messages,
+      ...(hasCompleteParseIdentity(parseIdentity)
+        ? {
+          parse_generation: parseIdentity.generation,
+          document_source_hash: parseIdentity.sourceHash,
+          parse_identity: {
+            parse_generation: parseIdentity.generation,
+            document_source_hash: parseIdentity.sourceHash,
+          },
+        }
+        : {}),
       updatedAt: Date.now(),
       createdAt: idx >= 0 ? h[idx].createdAt : Date.now(),
     };
@@ -693,8 +808,16 @@ export function useDocumentState({
 
       const data = await res.json();
       if (isCurrentOverviewRequest()) {
-        overviewCacheRef.current.set(overviewKey, data);
-        currentOverviewKeyRef.current = overviewKey;
+        const generationStatus = data?.ai_meta?.generation_status
+          || (data?.ai_meta?.fallback ? 'fallback' : 'completed');
+        const cacheable = generationStatus === 'completed' && !data?.ai_meta?.fallback;
+        if (cacheable) {
+          overviewCacheRef.current.set(overviewKey, data);
+          currentOverviewKeyRef.current = overviewKey;
+        } else {
+          overviewCacheRef.current.delete(overviewKey);
+          currentOverviewKeyRef.current = '';
+        }
         setOverview(data);
       }
       return data;
@@ -739,6 +862,7 @@ export function useDocumentState({
     const nextContext = {
       docId: docId || '',
       parseIdentity: overviewParseIdentity,
+      textIdentity: overviewTextIdentity,
       visualIdentity: overviewVisualIdentity,
     };
     const previousContext = overviewObservedContextRef.current;
@@ -753,14 +877,26 @@ export function useDocumentState({
     const changedVisualModel = (
       previousContext.docId === nextContext.docId
       && previousContext.parseIdentity === nextContext.parseIdentity
+      && previousContext.textIdentity === nextContext.textIdentity
       && previousContext.visualIdentity !== nextContext.visualIdentity
     );
-    if (!changedDocument && !changedParseGeneration && !changedVisualModel) return;
+    const changedTextModel = (
+      previousContext.docId === nextContext.docId
+      && previousContext.parseIdentity === nextContext.parseIdentity
+      && previousContext.textIdentity !== nextContext.textIdentity
+    );
+    if (!changedDocument && !changedParseGeneration && !changedTextModel && !changedVisualModel) return;
 
     invalidateOverviewEpoch(previousContext.docId || nextContext.docId, {
       clearDocumentCache: changedParseGeneration,
     });
-  }, [docId, invalidateOverviewEpoch, overviewParseIdentity, overviewVisualIdentity]);
+  }, [
+    docId,
+    invalidateOverviewEpoch,
+    overviewParseIdentity,
+    overviewTextIdentity,
+    overviewVisualIdentity,
+  ]);
 
   // 初始化时加载历史
   useEffect(() => {

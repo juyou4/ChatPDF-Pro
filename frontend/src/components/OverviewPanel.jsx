@@ -43,6 +43,11 @@ const FIGURE_SOURCE_META = {
 
 const getFigureSourceMeta = (meta) => FIGURE_SOURCE_META[meta?.source] || null;
 
+const getOverviewGenerationStatus = (overview) => {
+  if (overview?.ai_meta?.fallback) return 'fallback';
+  return overview?.ai_meta?.generation_status || 'completed';
+};
+
 /**
  * 速览（Overview）面板组件
  * 展示结构化的学术导读五卡片
@@ -62,6 +67,11 @@ const OverviewPanel = ({
   onAvailabilityAction,
 }) => {
   const figureSourceMeta = getFigureSourceMeta(overview?.figure_meta);
+  const generationStatus = getOverviewGenerationStatus(overview);
+  const degradedOverview = generationStatus === 'fallback' || generationStatus === 'partial';
+  const generationError = String(
+    overview?.ai_meta?.generation_error || overview?.figure_meta?.generation_error || '',
+  ).trim();
   const activeDepth = depth || 'standard';
   const [regenerating, setRegenerating] = useState(false);
   const busy = loading || regenerating;
@@ -254,17 +264,51 @@ const OverviewPanel = ({
     <div className="flex h-full flex-col">
       {toolbar}
       <div className="space-y-6 pb-4 overflow-y-auto custom-scrollbar px-2">
+        {degradedOverview && (
+          <motion.div
+            role="status"
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mx-1 flex items-start gap-3 rounded-[16px] border border-[#efd9c6] bg-[#fff8f1] px-4 py-3 text-[#8b5b3f]"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#d17a4f]" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-bold">
+                {generationStatus === 'fallback' ? '当前展示基础速览' : '本次速览不完整'}
+              </p>
+              <p className="mt-0.5 text-[11px] leading-5 text-[#9b735d]">
+                {generationStatus === 'fallback'
+                  ? 'AI 深度总结未完成，这份内容不会作为正式速览缓存。'
+                  : '部分核心内容缺失，这份结果不会作为正式速览缓存。'}
+                {generationError ? ` 原因：${generationError.slice(0, 160)}` : ' 可稍后重新生成。'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRegenerate}
+              disabled={busy || !onFetch}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[10px] bg-white px-3 text-[11px] font-semibold text-[#a65d40] shadow-[0_4px_12px_rgba(139,91,63,0.1)] transition-colors hover:bg-[#fff1e7] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              重试
+            </button>
+          </motion.div>
+        )}
         {/* 全文概述卡片 */}
         <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-3">
           <FileText className="w-5 h-5 text-gray-700" strokeWidth={2} />
-          <h3 className="text-lg font-semibold text-gray-900">全文概述</h3>
+          <h3 className="text-lg font-semibold text-gray-900">
+            {generationStatus === 'fallback' ? '文档内容摘录' : '全文概述'}
+          </h3>
         </div>
         <p className="text-gray-600 leading-relaxed text-[15px]">
           {overview.full_text_summary}
         </p>
       </div>
 
+      {generationStatus !== 'fallback' && (
+      <>
       {/* 术语解释卡片 */}
       <div className="bg-white rounded-3xl p-6 shadow-[0_6px_28px_-4px_rgba(0,0,0,0.13),0_2px_8px_rgba(0,0,0,0.07)] border border-gray-100/80 transition-shadow duration-300 hover:shadow-[0_8px_32px_-4px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]">
         <div className="flex items-center gap-2 mb-5">
@@ -334,14 +378,14 @@ const OverviewPanel = ({
         {overview.key_figures && overview.key_figures.length > 0 ? (
           <div className="space-y-6">
             {overview.key_figures.map((figure, idx) => (
-              <div key={idx}>
+              <div key={figure.figure_id || idx}>
                 <p className="text-center font-medium text-gray-800 mb-3">{figure.caption}</p>
-                <div className="rounded-lg overflow-hidden border border-gray-200 bg-gray-100 mb-3">
+                <div className="mb-3 flex min-h-[180px] max-h-[560px] items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-gray-50 p-3">
                   {figure.image_base64 && (
                     <img
                       src={figure.image_base64}
                       alt={figure.caption}
-                      className="w-full h-auto opacity-90"
+                      className="block h-auto max-h-[536px] w-auto max-w-full object-contain opacity-95"
                     />
                   )}
                 </div>
@@ -391,6 +435,8 @@ const OverviewPanel = ({
           </div>
         )}
       </div>
+      </>
+      )}
       </div>
     </div>
   );

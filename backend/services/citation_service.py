@@ -37,12 +37,19 @@ class InlineEvidence:
 # 1. 结构化引文 Prompt 构建
 # ═══════════════════════════════════════════════════
 
-def build_structured_citation_prompt(citations: list[dict], compact: bool = False) -> str:
+def build_structured_citation_prompt(
+    citations: list[dict],
+    compact: bool = False,
+    *,
+    include_source_details: bool = True,
+) -> str:
     """构建要求 LLM 输出 CITATION LIST + FINAL ANSWER 的结构化提示词
 
     Args:
         citations: context_builder 生成的引文列表
             [{"ref": 1, "group_id": "...", "page_range": [1,2], ...}, ...]
+        include_source_details: 是否在提示中携带动态来源标识。最终回答路径
+            只需要安全的编号列表，证据内容由单独消息提供。
 
     Returns:
         插入 system_prompt 的引文指示字符串
@@ -51,13 +58,21 @@ def build_structured_citation_prompt(citations: list[dict], compact: bool = Fals
         return ""
 
     ref_descriptions = []
-    for c in citations:
-        ref = c.get("ref", len(ref_descriptions) + 1)
-        group_id = c.get("group_id") or c.get("source") or c.get("context_id") or "unknown"
-        page_text = _format_citation_page_range(c.get("page_range") or c.get("page"))
-        ref_descriptions.append(
-            f"[{ref}] 来源: {group_id}，页码: {page_text}"
-        )
+    for index, c in enumerate(citations, start=1):
+        try:
+            ref = int(c.get("ref", index))
+        except (TypeError, ValueError):
+            ref = index
+        if ref <= 0:
+            ref = index
+        if include_source_details:
+            group_id = c.get("group_id") or c.get("source") or c.get("context_id") or "unknown"
+            page_text = _format_citation_page_range(c.get("page_range") or c.get("page"))
+            ref_descriptions.append(
+                f"[{ref}] 来源: {group_id}，页码: {page_text}"
+            )
+        else:
+            ref_descriptions.append(f"[{ref}]")
     refs_text = "\n".join(ref_descriptions)
 
     if compact:

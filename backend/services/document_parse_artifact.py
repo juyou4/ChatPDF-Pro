@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-DOCUMENT_PARSE_ARTIFACT_VERSION = 1
+DOCUMENT_PARSE_ARTIFACT_VERSION = 2
 
 
 def derive_table_geometry_capabilities(tables: list[dict] | None) -> dict[str, bool]:
@@ -61,11 +61,15 @@ def build_document_parse_artifact(
     safe_pages = [dict(page) for page in pages or [] if isinstance(page, dict)]
     safe_tables = [dict(table) for table in tables or [] if isinstance(table, dict)]
     safe_figures = [dict(figure) for figure in figures or [] if isinstance(figure, dict)]
+    safe_capabilities = dict(capabilities or {})
+    if "figures" in safe_capabilities:
+        safe_capabilities["figures"] = bool(safe_figures)
     artifact_source_hash = source_hash or _artifact_source_hash(
         provider=provider,
         provider_version=provider_version,
         pages=safe_pages,
         tables=safe_tables,
+        figures=safe_figures,
     )
     return {
         "schema_version": DOCUMENT_PARSE_ARTIFACT_VERSION,
@@ -74,7 +78,7 @@ def build_document_parse_artifact(
         "provider": str(provider or "unknown"),
         "provider_version": str(provider_version or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "capabilities": dict(capabilities or {}),
+        "capabilities": safe_capabilities,
         "pages": safe_pages,
         "tables": safe_tables,
         "figures": safe_figures,
@@ -104,12 +108,20 @@ def artifact_reference(data_dir: Path | str, path: Path | str) -> str:
         return str(path)
 
 
-def _artifact_source_hash(*, provider: str, provider_version: str, pages: list[dict], tables: list[dict]) -> str:
+def _artifact_source_hash(
+    *,
+    provider: str,
+    provider_version: str,
+    pages: list[dict],
+    tables: list[dict],
+    figures: list[dict],
+) -> str:
     payload = {
         "provider": provider,
         "provider_version": provider_version,
         "pages": pages,
         "tables": tables,
+        "figures": figures,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

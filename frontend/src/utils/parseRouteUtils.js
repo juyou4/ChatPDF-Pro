@@ -1,27 +1,26 @@
 export const VALID_PARSE_ROUTES = ['auto', 'local', 'mineru'];
+export const DEFAULT_PARSE_ROUTE = 'mineru';
 
 export const PARSE_ROUTE_OPTIONS = [
   {
-    value: 'auto',
-    label: '自动选择',
-    shortLabel: '自动',
-    description: '本地优先；质量较差且已配置 MinerU 时，切换为 MinerU 全程解析',
+    value: 'mineru',
+    label: 'MinerU 深度解析',
+    shortLabel: 'MinerU',
+    description: '默认路线，统一生成正文、阅读结构、问答索引、大纲、总结、翻译与速览',
   },
   {
     value: 'local',
     label: '本地解析',
     shortLabel: '本地',
-    description: '使用 PDF 文本层与本地 OCR，适合可复制文本的常规 PDF',
-  },
-  {
-    value: 'mineru',
-    label: 'MinerU 全程',
-    shortLabel: 'MinerU',
-    description: '统一生成正文、阅读结构、问答索引、大纲、总结、翻译与速览',
+    description: '在本机处理 PDF，首次使用时下载本地解析组件',
   },
 ];
 
-const ROUTE_LABELS = Object.fromEntries(PARSE_ROUTE_OPTIONS.map((option) => [option.value, option.label]));
+const ROUTE_LABELS = {
+  auto: '自动选择',
+  local: '本地解析',
+  mineru: 'MinerU 深度解析',
+};
 
 const normalizeRoute = (route) => {
   const normalized = String(route || '').trim().toLowerCase();
@@ -41,16 +40,16 @@ export const getParseRouteLabel = (route, fallback = '自动选择') => (
 export const loadStoredParseRoute = (storage) => {
   try {
     const target = getStorage(storage);
-    if (!target) return 'auto';
+    if (!target) return DEFAULT_PARSE_ROUTE;
     const parsed = JSON.parse(target.getItem('ocrSettings') || '{}');
-    return normalizeRoute(parsed.parseRoute) || 'auto';
+    return normalizeRoute(parsed.parseRoute) === 'local' ? 'local' : DEFAULT_PARSE_ROUTE;
   } catch {
-    return 'auto';
+    return DEFAULT_PARSE_ROUTE;
   }
 };
 
 export const saveStoredParseRoute = (route, storage) => {
-  const normalized = normalizeRoute(route) || 'auto';
+  const normalized = normalizeRoute(route) === 'local' ? 'local' : DEFAULT_PARSE_ROUTE;
   try {
     const target = getStorage(storage);
     if (!target) return normalized;
@@ -60,6 +59,23 @@ export const saveStoredParseRoute = (route, storage) => {
     // localStorage 不可用时仍返回已校验的选择，当前上传可以继续使用。
   }
   return normalized;
+};
+
+export const shouldPollMinerUStatus = ({
+  status,
+  primaryMinerURoute = false,
+  routePending = false,
+  routeFailed = false,
+  routeCancelled = false,
+} = {}) => {
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  if (['queued', 'running'].includes(normalizedStatus)) return true;
+  return Boolean(
+    primaryMinerURoute
+    && routePending
+    && !routeFailed
+    && !routeCancelled
+  );
 };
 
 const STAGE_LABELS = {
@@ -79,7 +95,7 @@ const STAGE_LABELS = {
 };
 
 export const resolveDocumentParseState = ({ manifest, parseReady, deepParseStatus } = {}) => {
-  const requestedRoute = normalizeRoute(manifest?.requested_route || manifest?.route) || 'auto';
+  const requestedRoute = normalizeRoute(manifest?.requested_route || manifest?.route) || DEFAULT_PARSE_ROUTE;
   const resolvedRoute = normalizeRoute(manifest?.resolved_route) || (requestedRoute === 'auto' ? '' : requestedRoute);
   const manifestStatus = String(manifest?.status || '').trim().toLowerCase();
   const deepStatus = String(deepParseStatus?.status || '').trim().toLowerCase();

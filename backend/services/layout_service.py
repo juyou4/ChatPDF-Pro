@@ -9,6 +9,7 @@ Layout Service - 基于 DocLayout-YOLO 的文档布局检测
 - get_image_body_bboxes: 只返回 ImageBody 类别的 bbox
 """
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -41,6 +42,7 @@ _MODEL_FILENAME = "doclayout_yolo_docstructbench_imgsz1280.pt"
 _MODEL_REPO_ID = "opendatalab/PDF-Extract-Kit-1.0"
 _MODEL_REPO_FILENAME = "models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt"
 _MODEL_CONFIG_FILENAME = "layout_model.json"
+_MODEL_HASH_CONFIG_KEY = "model_sha256"
 
 # 全局单例
 _model_instance = None
@@ -94,7 +96,40 @@ def _normalize_user_path(value: str) -> Path:
         raise ValueError("路径不能为空")
     if "\x00" in cleaned:
         raise ValueError("路径包含非法字符")
+    if cleaned.startswith("\\\\") or cleaned.startswith("//"):
+        raise ValueError("不允许使用网络共享路径")
     return Path(cleaned).expanduser().resolve()
+
+
+def _is_within_directory(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_verified_managed_model(path: Path) -> bool:
+    """Only load weights produced by the managed official download flow."""
+    if not _is_within_directory(path, _default_model_dir()) or not path.is_file():
+        return False
+    config = _load_model_config()
+    configured_path = str(config.get("model_path") or "").strip()
+    expected_hash = str(config.get(_MODEL_HASH_CONFIG_KEY) or "").strip().lower()
+    if not configured_path or not expected_hash:
+        return False
+    try:
+        return Path(configured_path).expanduser().resolve() == path.resolve() and _sha256_file(path) == expected_hash
+    except OSError:
+        return False
 
 
 def _candidate_model_paths() -> List[tuple[Path, str]]:
@@ -120,6 +155,9 @@ def _candidate_model_paths() -> List[tuple[Path, str]]:
 def _resolve_model_path() -> tuple[Optional[Path], str]:
     for path, source in _candidate_model_paths():
         if path.exists() and path.is_file():
+            if source in {"custom", "default"} and not _is_verified_managed_model(path):
+                logger.warning("[LayoutService] 忽略未校验的受管 YOLO 权重: %s", path)
+                continue
             return path, source
     return None, "missing"
 
@@ -171,7 +209,7 @@ def get_yolo_model_status() -> Dict[str, Any]:
 
 
 def configure_yolo_model_path(model_path: str) -> Dict[str, Any]:
-    """保存用户手动指定的 YOLO 权重路径。"""
+    """选择已验证的受管 YOLO 权重，禁止任意 .pt 反序列化。"""
     global _last_error
 
     path = _normalize_user_path(model_path)
@@ -184,7 +222,17 @@ def configure_yolo_model_path(model_path: str) -> Dict[str, Any]:
         _last_error = "权重文件必须是 .pt 文件"
         raise ValueError(_last_error)
 
-    _save_model_config({"model_path": str(path)})
+    if not _is_within_directory(path, _default_model_dir()):
+        _last_error = "仅允许选择应用受管模型目录中的官方权重"
+        raise ValueError(_last_error)
+    if not _is_verified_managed_model(path):
+        _last_error = "权重未通过校验，请使用内置下载功能重新下载"
+        raise ValueError(_last_error)
+
+    _save_model_config({
+        "model_path": str(path),
+        _MODEL_HASH_CONFIG_KEY: _sha256_file(path),
+    })
     reset_model_cache()
     _last_error = ""
     return get_yolo_model_status()
@@ -194,7 +242,14 @@ def reset_yolo_model_config() -> Dict[str, Any]:
     """清除用户自定义 YOLO 权重路径，回到默认安装目录。"""
     global _last_error
     config_path = _model_config_path()
-    if config_path.exists():
+    config = _load_model_config()
+    default_path = _default_model_path()
+    if default_path.exists() and _is_verified_managed_model(default_path):
+        _save_model_config({
+            "model_path": str(default_path),
+            _MODEL_HASH_CONFIG_KEY: _sha256_file(default_path),
+        })
+    elif config_path.exists():
         config_path.unlink()
     reset_model_cache()
     _last_error = ""
@@ -215,6 +270,8 @@ def download_yolo_model(install_dir: Optional[str] = None, force: bool = False) 
         target_dir = _normalize_user_path(install_dir)
         if target_dir.suffix.lower() == ".pt":
             target_dir = target_dir.parent
+        if not _is_within_directory(target_dir, _default_model_dir()):
+            raise ValueError("YOLO 权重只能安装到应用受管模型目录")
     else:
         target_dir = _default_model_dir()
     target_path = target_dir / _MODEL_FILENAME
@@ -222,7 +279,12 @@ def download_yolo_model(install_dir: Optional[str] = None, force: bool = False) 
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
         if target_path.exists() and not force:
-            _save_model_config({"model_path": str(target_path)})
+            if not _is_verified_managed_model(target_path):
+                raise ValueError("现有 YOLO 权重未通过校验，请勾选强制下载以替换它")
+            _save_model_config({
+                "model_path": str(target_path),
+                _MODEL_HASH_CONFIG_KEY: _sha256_file(target_path),
+            })
             reset_model_cache()
             _last_error = ""
             status = get_yolo_model_status()
@@ -245,7 +307,10 @@ def download_yolo_model(install_dir: Optional[str] = None, force: bool = False) 
         # 清理 HuggingFace 临时缓存，避免在用户目录留下一份冗余权重副本
         shutil.rmtree(cache_dir, ignore_errors=True)
 
-        _save_model_config({"model_path": str(target_path)})
+        _save_model_config({
+            "model_path": str(target_path),
+            _MODEL_HASH_CONFIG_KEY: _sha256_file(target_path),
+        })
         reset_model_cache()
         _last_error = ""
         status = get_yolo_model_status()

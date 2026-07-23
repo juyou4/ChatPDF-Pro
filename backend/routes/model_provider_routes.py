@@ -1,9 +1,13 @@
 from datetime import datetime
-from typing import List, Optional
+import os
+import re
+import threading
+from typing import Any, List, Optional
+from urllib.parse import unquote, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from models.provider_registry import PROVIDER_CONFIG
 from models.rerank_registry import RERANK_PROVIDERS
@@ -15,9 +19,32 @@ from models.dynamic_store import (
 )
 from models.model_detector import infer_model_tags, is_embedding_model, is_rerank_model, NOT_SUPPORTED_REGEX
 from models.api_key_selector import select_api_key
+from runtime_mode import runtime
+from services.ocr_service import validate_external_ocr_service_url
 
 
 router = APIRouter()
+
+# ``load -> mutate -> save`` must be one critical section. Atomic files protect
+# readers from partial JSON, while this lock prevents two requests in this
+# process from silently dropping each other's settings change.
+_DYNAMIC_CONFIG_LOCK = threading.RLock()
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_ALLOWED_CUSTOM_PROVIDER_TYPES = {
+    "openai", "anthropic", "gemini", "ollama", "cohere", "jina", "custom",
+}
+_ALLOWED_CUSTOM_MODEL_TYPES = {"chat", "embedding", "rerank", "image", "vision"}
+_MODEL_METADATA_FIELDS = {
+    "base_url",
+    "model_name",
+    "embedding_endpoint",
+    "rerank_endpoint",
+    "max_tokens",
+    "context_window",
+    "dimension",
+    "description",
+    "price",
+}
 
 
 _LATEST_MODEL_IDS = {
@@ -48,10 +75,79 @@ def _pick_first(*values):
     return None
 
 
+def _allow_private_provider_urls() -> bool:
+    """Local desktop providers are a user-selected capability, not server SSRF.
+
+    A remote/server deployment rejects private targets unless its operator has
+    made the exceptional opt-in explicit. Desktop mode keeps Ollama/LM Studio
+    working without weakening a network-exposed backend.
+    """
+    value = os.environ.get("CHATPDF_ALLOW_PRIVATE_PROVIDER_URLS", "")
+    return runtime.is_desktop or value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_identifier(value: str, *, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not _IDENTIFIER_RE.fullmatch(normalized):
+        raise ValueError(f"{field_name} 只能包含字母、数字、点、下划线、连字符和冒号，且长度不超过 128")
+    return normalized
+
+
+def _validate_provider_url(value: str, *, field_name: str) -> str:
+    """Validate a provider origin before it can receive an API credential."""
+    try:
+        safe_url = validate_external_ocr_service_url(
+            str(value or "").strip(),
+            service_name=field_name,
+            allow_private=_allow_private_provider_urls(),
+        )
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    parsed = urlparse(safe_url)
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{field_name} 不允许包含查询参数或片段")
+    return safe_url.rstrip("/")
+
+
+def _validate_relative_endpoint(value: str | None, *, field_name: str) -> str:
+    """Allow API paths but never let a path switch the configured origin."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 512:
+        raise ValueError(f"{field_name} 过长")
+    parsed = urlparse(raw)
+    decoded_path = unquote(parsed.path or "")
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or raw.startswith("//")
+        or "\\" in decoded_path
+        or any(part in {"", ".", ".."} for part in decoded_path.split("/") if part in {".", ".."})
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field_name} 必须是站内相对路径")
+    return "/" + decoded_path.lstrip("/")
+
+
+def _validate_optional_model_url(value: Any, *, field_name: str, allow_relative: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if allow_relative and not parsed.scheme and not parsed.netloc:
+        return _validate_relative_endpoint(raw, field_name=field_name)
+    return _validate_provider_url(raw, field_name=field_name)
+
+
 def _normalize_model_metadata(metadata: dict | None) -> dict:
     """将前端 metadata 归一化为后端调用链使用的字段格式。"""
     raw = dict(metadata or {})
-    normalized = dict(raw)
+    # Dynamic metadata becomes executable endpoint configuration later in the
+    # embedding/rerank path. Persist only fields the backend actually consumes
+    # instead of keeping arbitrary opaque settings around indefinitely.
+    normalized = {}
     field_aliases = {
         "base_url": ["base_url", "baseUrl", "api_host", "apiHost"],
         "model_name": ["model_name", "modelName"],
@@ -67,7 +163,7 @@ def _normalize_model_metadata(metadata: dict | None) -> dict:
         picked = _pick_first(*(raw.get(alias) for alias in aliases))
         if picked is not None:
             normalized[target_field] = picked
-    return normalized
+    return {key: value for key, value in normalized.items() if key in _MODEL_METADATA_FIELDS}
 
 
 def _get_provider_type(provider_id: str) -> str:
@@ -275,10 +371,20 @@ async def get_rerank_providers():
 
 
 class ProviderTestRequest(BaseModel):
-    providerId: str
-    apiKey: str
-    apiHost: str
-    fetchModelsEndpoint: str | None = None
+    providerId: str = Field(min_length=1, max_length=128)
+    apiKey: str = Field(max_length=32_768)
+    apiHost: str = Field(max_length=2_048)
+    fetchModelsEndpoint: str | None = Field(default=None, max_length=512)
+
+    @field_validator("providerId")
+    @classmethod
+    def _validate_provider_id(cls, value: str) -> str:
+        return _validate_identifier(value, field_name="providerId")
+
+    @field_validator("fetchModelsEndpoint")
+    @classmethod
+    def _validate_models_endpoint(cls, value: str | None) -> str | None:
+        return _validate_relative_endpoint(value, field_name="fetchModelsEndpoint") or None
 
 
 def _build_endpoint(base: str, path: str | None) -> str:
@@ -318,8 +424,14 @@ def _normalize_api_host(provider_id: str, api_host: str | None) -> str:
     return host.rstrip("/")
 
 
+def _resolve_safe_provider_host(provider_id: str, api_host: str | None, *, field_name: str) -> str:
+    host = _normalize_api_host(provider_id, api_host)
+    return _validate_provider_url(host, field_name=field_name)
+
+
 
 async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: List[str]):
+    api_host = _validate_provider_url(api_host, field_name="模型服务 API 地址")
     # 从 API Key 池中随机选择一个有效 Key（支持逗号分隔的多 Key 轮换）
     actual_key = select_api_key(api_key) if api_key else None
     if not actual_key:
@@ -334,9 +446,10 @@ async def _fetch_models_with_fallback(api_host: str, api_key: str, endpoints: Li
     for ep in endpoints:
         if not ep:
             continue
-        url = _build_endpoint(api_host, ep)
+        path = _validate_relative_endpoint(ep, field_name="模型列表路径")
+        url = _build_endpoint(api_host, path)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
                 response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 return response.json(), url
@@ -376,8 +489,13 @@ async def test_provider_connection(request: ProviderTestRequest):
                 "latency": latency
             }
 
+        api_host = _resolve_safe_provider_host(
+            request.providerId,
+            request.apiHost,
+            field_name="模型服务 API 地址",
+        )
         endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
-        data, last_error = await _fetch_models_with_fallback(request.apiHost, request.apiKey, endpoints)
+        data, last_error = await _fetch_models_with_fallback(api_host, request.apiKey, endpoints)
 
         if data is not None:
             model_count = len(data.get('data', [])) if isinstance(data.get('data'), list) else 0
@@ -414,11 +532,21 @@ async def test_provider_connection(request: ProviderTestRequest):
 
 
 class ModelFetchRequest(BaseModel):
-    providerId: str
-    apiKey: str
-    apiHost: str
-    fetchModelsEndpoint: str | None = None
-    providerType: str | None = None  # "openai" | "anthropic" | "gemini" | ...
+    providerId: str = Field(min_length=1, max_length=128)
+    apiKey: str = Field(max_length=32_768)
+    apiHost: str = Field(max_length=2_048)
+    fetchModelsEndpoint: str | None = Field(default=None, max_length=512)
+    providerType: str | None = Field(default=None, max_length=64)  # "openai" | "anthropic" | "gemini" | ...
+
+    @field_validator("providerId")
+    @classmethod
+    def _validate_provider_id(cls, value: str) -> str:
+        return _validate_identifier(value, field_name="providerId")
+
+    @field_validator("fetchModelsEndpoint")
+    @classmethod
+    def _validate_models_endpoint(cls, value: str | None) -> str | None:
+        return _validate_relative_endpoint(value, field_name="fetchModelsEndpoint") or None
 
 
 @router.post("/api/models/fetch")
@@ -567,7 +695,11 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 "timestamp": int(datetime.now().timestamp())
             }
 
-        api_host = _normalize_api_host(request.providerId, request.apiHost)
+        api_host = _resolve_safe_provider_host(
+            request.providerId,
+            request.apiHost,
+            field_name="模型服务 API 地址",
+        )
         endpoints = [request.fetchModelsEndpoint or "/models", "/v1/models", "/models"]
         data, last_error = await _fetch_models_with_fallback(api_host, request.apiKey, endpoints)
 
@@ -623,13 +755,36 @@ async def fetch_provider_models(request: ModelFetchRequest):
 
 
 class ModelTestRequest(BaseModel):
-    providerId: str
-    modelId: str
-    apiKey: str
-    apiHost: str
-    modelType: str  # 'embedding' or 'rerank'
-    embeddingEndpoint: str | None = None
-    rerankEndpoint: str | None = None
+    providerId: str = Field(min_length=1, max_length=128)
+    modelId: str = Field(min_length=1, max_length=256)
+    apiKey: str = Field(max_length=32_768)
+    apiHost: str = Field(max_length=2_048)
+    modelType: str = Field(min_length=1, max_length=32)  # 'embedding' or 'rerank'
+    embeddingEndpoint: str | None = Field(default=None, max_length=512)
+    rerankEndpoint: str | None = Field(default=None, max_length=2_048)
+
+    @field_validator("providerId")
+    @classmethod
+    def _validate_provider_id(cls, value: str) -> str:
+        return _validate_identifier(value, field_name="providerId")
+
+    @field_validator("modelType")
+    @classmethod
+    def _validate_model_type(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"embedding", "rerank"}:
+            raise ValueError("modelType 仅支持 embedding 或 rerank")
+        return normalized
+
+    @field_validator("embeddingEndpoint")
+    @classmethod
+    def _validate_embedding_endpoint(cls, value: str | None) -> str | None:
+        return _validate_relative_endpoint(value, field_name="embeddingEndpoint") or None
+
+    @field_validator("rerankEndpoint")
+    @classmethod
+    def _validate_rerank_endpoint(cls, value: str | None) -> str | None:
+        return _validate_optional_model_url(value, field_name="rerankEndpoint") or None
 
 
 @router.post("/api/models/test")
@@ -670,8 +825,13 @@ async def test_model(request: ModelTestRequest):
                 "input": ["Hello world"],
                 "model": request.modelId
             }
-            url = _build_endpoint(request.apiHost, request.embeddingEndpoint or "/v1/embeddings")
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            api_host = _resolve_safe_provider_host(
+                request.providerId,
+                request.apiHost,
+                field_name="Embedding API 地址",
+            )
+            url = _build_endpoint(api_host, request.embeddingEndpoint or "/v1/embeddings")
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
                 resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail=f"Embedding接口返回错误: {resp.text}")
@@ -695,8 +855,11 @@ async def test_model(request: ModelTestRequest):
                 "query": "test",
                 "documents": ["a", "b"]
             }
-            url = request.rerankEndpoint or "https://api.cohere.com/v1/rerank"
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            url = _validate_provider_url(
+                request.rerankEndpoint or "https://api.cohere.com/v1/rerank",
+                field_name="Rerank API 地址",
+            )
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
                 resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail=f"Rerank接口返回错误: {resp.text}")
@@ -716,10 +879,31 @@ async def test_model(request: ModelTestRequest):
 
 
 class ProviderUpsertRequest(BaseModel):
-    providerId: str
-    name: str
-    endpoint: str
-    type: str = "openai"  # openai | anthropic | gemini | ollama
+    providerId: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=160)
+    endpoint: str = Field(min_length=1, max_length=2_048)
+    type: str = Field(default="openai", max_length=64)  # openai | anthropic | gemini | ollama
+
+    @field_validator("providerId")
+    @classmethod
+    def _validate_provider_id(cls, value: str) -> str:
+        return _validate_identifier(value, field_name="providerId")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("name 不能为空")
+        return normalized
+
+    @field_validator("type")
+    @classmethod
+    def _validate_provider_type(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in _ALLOWED_CUSTOM_PROVIDER_TYPES:
+            raise ValueError("不支持的自定义 provider 类型")
+        return normalized
 
 
 @router.get("/api/providers/custom")
@@ -730,35 +914,110 @@ async def list_custom_providers():
 
 @router.post("/api/providers/custom")
 async def upsert_custom_provider(req: ProviderUpsertRequest):
-    providers = load_dynamic_providers()
-    providers[req.providerId] = {
-        "name": req.name,
-        "endpoint": req.endpoint,
-        "type": req.type
-    }
-    save_dynamic_providers(providers)
+    if req.providerId in PROVIDER_CONFIG:
+        raise HTTPException(status_code=409, detail="内置 provider 不允许由自定义配置覆盖")
+    try:
+        endpoint = _validate_provider_url(req.endpoint, field_name="自定义 Provider API 地址")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _DYNAMIC_CONFIG_LOCK:
+        providers = load_dynamic_providers()
+        providers[req.providerId] = {
+            "name": req.name,
+            "endpoint": endpoint,
+            "type": req.type,
+        }
+        save_dynamic_providers(providers)
     return {"success": True, "providers": providers}
 
 
 @router.delete("/api/providers/custom/{provider_id}")
 async def delete_custom_provider(provider_id: str):
-    providers = load_dynamic_providers()
-    if provider_id in providers:
-        providers.pop(provider_id)
-        save_dynamic_providers(providers)
+    try:
+        provider_id = _validate_identifier(provider_id, field_name="provider_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _DYNAMIC_CONFIG_LOCK:
+        providers = load_dynamic_providers()
+        if provider_id in providers:
+            providers.pop(provider_id)
+            save_dynamic_providers(providers)
     return {"success": True, "providers": providers}
 
 
 # ===== 动态模型管理 =====
 
 class ModelUpsertRequest(BaseModel):
-    modelId: str
-    name: str
-    providerId: str
-    type: str = "embedding"  # embedding | rerank | chat
+    modelId: str = Field(min_length=1, max_length=256)
+    name: str = Field(min_length=1, max_length=256)
+    providerId: str = Field(min_length=1, max_length=128)
+    type: str = Field(default="embedding", max_length=32)  # embedding | rerank | chat
     metadata: dict | None = None
-    capabilities: list[dict] | None = None  # 模型能力声明列表，每个元素包含 type 和 isUserSelected 字段
-    tags: list[str] | None = None  # 模型标签列表（如 free、vision、reasoning 等）
+    capabilities: list[dict] | None = Field(default=None, max_length=16)  # 模型能力声明列表，每个元素包含 type 和 isUserSelected 字段
+    tags: list[str] | None = Field(default=None, max_length=24)  # 模型标签列表（如 free、vision、reasoning 等）
+
+    @field_validator("modelId", "providerId")
+    @classmethod
+    def _validate_ids(cls, value: str, info) -> str:
+        return _validate_identifier(value, field_name=info.field_name)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("name 不能为空")
+        return normalized
+
+    @field_validator("type")
+    @classmethod
+    def _validate_model_type(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in _ALLOWED_CUSTOM_MODEL_TYPES:
+            raise ValueError("不支持的自定义模型类型")
+        return normalized
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_shape(cls, value: dict | None) -> dict | None:
+        if value is None:
+            return None
+        if len(value) > 24:
+            raise ValueError("metadata 字段过多")
+        for key, item in value.items():
+            if len(str(key)) > 64 or len(str(item)) > 2_048:
+                raise ValueError("metadata 中存在过长字段")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        result = []
+        for tag in value:
+            normalized = str(tag or "").strip()
+            if not normalized or len(normalized) > 48:
+                raise ValueError("tags 包含无效值")
+            result.append(normalized)
+        return list(dict.fromkeys(result))
+
+
+def _validate_model_metadata_endpoints(metadata: dict) -> dict:
+    normalized = dict(metadata or {})
+    for field_name in ("base_url", "embedding_endpoint", "rerank_endpoint"):
+        value = normalized.get(field_name)
+        if value in (None, ""):
+            continue
+        try:
+            normalized[field_name] = _validate_optional_model_url(
+                value,
+                field_name=field_name,
+                allow_relative=field_name in {"embedding_endpoint", "rerank_endpoint"},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return normalized
 
 
 @router.get("/api/models/custom")
@@ -768,8 +1027,17 @@ async def list_custom_models():
 
 @router.post("/api/models/custom")
 async def upsert_custom_model(req: ModelUpsertRequest):
-    models = load_dynamic_models()
-    normalized_metadata = _normalize_model_metadata(req.metadata)
+    from models.model_registry import EMBEDDING_MODELS
+
+    if req.modelId in EMBEDDING_MODELS:
+        raise HTTPException(status_code=409, detail="内置模型不允许由自定义配置覆盖")
+    merged_providers = {**PROVIDER_CONFIG, **load_dynamic_providers()}
+    if req.providerId not in merged_providers:
+        raise HTTPException(status_code=400, detail="providerId 不存在，请先添加自定义 Provider")
+
+    normalized_metadata = _validate_model_metadata_endpoints(
+        _normalize_model_metadata(req.metadata)
+    )
     provider_type = _get_provider_type(req.providerId)
     model_data = {
         "name": req.name,
@@ -784,17 +1052,24 @@ async def upsert_custom_model(req: ModelUpsertRequest):
         model_data["capabilities"] = req.capabilities
     if req.tags is not None:
         model_data["tags"] = req.tags
-    models[req.modelId] = model_data
-    save_dynamic_models(models)
+    with _DYNAMIC_CONFIG_LOCK:
+        models = load_dynamic_models()
+        models[req.modelId] = model_data
+        save_dynamic_models(models)
     return {"success": True, "models": models}
 
 
 @router.delete("/api/models/custom/{model_id}")
 async def delete_custom_model(model_id: str):
-    models = load_dynamic_models()
-    if model_id in models:
-        models.pop(model_id)
-        save_dynamic_models(models)
+    try:
+        model_id = _validate_identifier(model_id, field_name="model_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _DYNAMIC_CONFIG_LOCK:
+        models = load_dynamic_models()
+        if model_id in models:
+            models.pop(model_id)
+            save_dynamic_models(models)
     return {"success": True, "models": models}
 
 

@@ -25,6 +25,7 @@ INSTANCES: dict = {}
 # 模块级文档构建锁：{doc_id: threading.Lock}
 # 防止同一文档并发构建（重复点击 / 多请求同时触发）
 BUILD_LOCKS: dict[str, threading.Lock] = {}
+_BUILD_LOCKS_GUARD = threading.Lock()
 
 # 模块级构建进度注册表：{doc_id: BuildProgress}
 # 由构建端点写入，stats/progress 端点读取
@@ -33,9 +34,8 @@ BUILD_PROGRESS: dict = {}
 
 def get_build_lock(doc_id: str) -> threading.Lock:
     """获取文档级构建锁（线程安全）"""
-    if doc_id not in BUILD_LOCKS:
-        BUILD_LOCKS[doc_id] = threading.Lock()
-    return BUILD_LOCKS[doc_id]
+    with _BUILD_LOCKS_GUARD:
+        return BUILD_LOCKS.setdefault(doc_id, threading.Lock())
 
 
 __all__ = [

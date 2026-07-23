@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import SettingsSegmentedControl from './SettingsSegmentedControl'
 import {
+  DEFAULT_PARSE_ROUTE,
   PARSE_ROUTE_OPTIONS as SHARED_PARSE_ROUTE_OPTIONS,
   VALID_PARSE_ROUTES,
 } from '../utils/parseRouteUtils'
@@ -143,7 +144,7 @@ const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'doc2x']
 const DEFAULT_OCR_SETTINGS = {
   mode: 'auto',
   backend: 'auto',
-  parseRoute: 'auto',
+  parseRoute: DEFAULT_PARSE_ROUTE,
   mineruFigureEnhance: true,
   figureRenderMode: 'raw',
 }
@@ -171,9 +172,10 @@ export function loadOCRSettings() {
       }
       // 旧版本曾把 MinerU/Doc2X 当作逐页 OCR；读取时统一迁回自动 OCR。
       const migratedLegacyPageOcr = LEGACY_PAGE_OCR_BACKENDS.includes(parsed.backend)
+      const migratedLegacyParseRoute = parsed.parseRoute === 'auto'
       // 校验上传主解析路线
       if (VALID_PARSE_ROUTES.includes(parsed.parseRoute)) {
-        result.parseRoute = parsed.parseRoute
+        result.parseRoute = parsed.parseRoute === 'local' ? 'local' : DEFAULT_PARSE_ROUTE
       }
       // 旧版图表字段继续透传，避免保存其他设置时破坏历史数据。
       if (typeof parsed.mineruFigureEnhance === 'boolean') {
@@ -182,7 +184,7 @@ export function loadOCRSettings() {
       if (VALID_FIGURE_RENDER_MODES.includes(parsed.figureRenderMode)) {
         result.figureRenderMode = parsed.figureRenderMode
       }
-      if (migratedLegacyPageOcr) {
+      if (migratedLegacyPageOcr || migratedLegacyParseRoute) {
         localStorage.setItem(
           OCR_SETTINGS_KEY,
           JSON.stringify({ ...parsed, backend: 'auto', parseRoute: result.parseRoute })
@@ -206,8 +208,8 @@ export function saveOCRSettings(settings) {
     if (LEGACY_PAGE_OCR_BACKENDS.includes(nextSettings.backend)) {
       nextSettings.backend = 'auto'
     }
-    if (!VALID_PARSE_ROUTES.includes(nextSettings.parseRoute)) {
-      nextSettings.parseRoute = 'auto'
+    if (!VALID_PARSE_ROUTES.includes(nextSettings.parseRoute) || nextSettings.parseRoute === 'auto') {
+      nextSettings.parseRoute = DEFAULT_PARSE_ROUTE
     }
     localStorage.setItem(OCR_SETTINGS_KEY, JSON.stringify(nextSettings))
   } catch (err) {
@@ -240,7 +242,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   // OCR 引擎后端选择状态
   const [backend, setBackend] = useState('auto')
   // 上传时固定的主解析路线
-  const [parseRoute, setParseRoute] = useState('auto')
+  const [parseRoute, setParseRoute] = useState(DEFAULT_PARSE_ROUTE)
   // 后端 OCR 状态数据
   const [ocrStatus, setOcrStatus] = useState(null)
   // 加载状态

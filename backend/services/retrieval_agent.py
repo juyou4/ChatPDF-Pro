@@ -708,9 +708,14 @@ _TABLE_VISUAL_INTENT_RE = re.compile(
 )
 
 
-def _is_numeric_table_hard_gate(question: str) -> bool:
+def _is_numeric_table_hard_gate(
+    question: str,
+    *,
+    evidence_need: Optional[List[str] | tuple[str, ...] | set[str]] = None,
+) -> bool:
     """Keep exact table questions out of generic Figure analysis."""
-    if "numeric_table" not in set(analyze_evidence_need(question)):
+    needs = set(evidence_need) if evidence_need is not None else set(analyze_evidence_need(question))
+    if "numeric_table" not in needs:
         return False
     has_figure_intent = bool(_FIGURE_VISUAL_INTENT_RE.search(str(question or "")))
     has_table_intent = bool(_TABLE_VISUAL_INTENT_RE.search(str(question or "")))
@@ -837,6 +842,8 @@ class RetrievalAgent:
         rerank_provider: str = "",
         rerank_api_key: str = "",
         rerank_endpoint: str = "",
+        web_search_mode: str = "auto",
+        intent_decision: Any = None,
     ):
         self.api_key = api_key
         self.model = model
@@ -859,6 +866,14 @@ class RetrievalAgent:
         self.rerank_provider = (rerank_provider or "").strip().lower().replace("siliconflow", "silicon")
         self.rerank_api_key = rerank_api_key or ""
         self.rerank_endpoint = rerank_endpoint or ""
+        normalized_web_mode = str(web_search_mode or "auto").strip().lower()
+        self.web_search_mode = normalized_web_mode if normalized_web_mode in {"off", "auto", "force"} else "auto"
+        self.intent_decision = intent_decision
+        self._has_frozen_root_intent = False
+        self._root_intent_question = ""
+        self._root_evidence_need: tuple[str, ...] = ()
+        self._root_modalities: tuple[str, ...] = ()
+        self._root_query_type = ""
         self.diagnostics: Dict[str, Any] = {}
         self._evidence_state: AgentEvidenceState | None = None
         # P1: partial state 引用，便于 agent_total_timeout 时由外层调 snapshot_partial_diagnostics()
@@ -904,6 +919,52 @@ class RetrievalAgent:
     def _should_apply_external_rerank(self) -> bool:
         return self._external_rerank_skip_reason() == ""
 
+    def _bind_frozen_intent(self, doc_ctx: DocContext, fallback_question: str) -> None:
+        """Bind route-owned intent once; planner text cannot replace this state."""
+        context_decision = getattr(doc_ctx, "intent_decision", None)
+        if context_decision is not None:
+            self.intent_decision = context_decision
+        elif self.intent_decision is not None:
+            setter = getattr(doc_ctx, "set_intent_decision", None)
+            if callable(setter):
+                setter(self.intent_decision)
+            else:
+                setattr(doc_ctx, "intent_decision", self.intent_decision)
+
+        has_frozen = getattr(doc_ctx, "has_frozen_intent", None)
+        self._has_frozen_root_intent = bool(has_frozen()) if callable(has_frozen) else bool(self.intent_decision)
+        intent_question = getattr(doc_ctx, "intent_question", None)
+        intent_evidence_need = getattr(doc_ctx, "intent_evidence_need", None)
+        intent_modalities = getattr(doc_ctx, "intent_modalities", None)
+        intent_query_type = getattr(doc_ctx, "intent_query_type", None)
+        self._root_intent_question = (
+            str(intent_question(fallback_question) or fallback_question).strip()
+            if callable(intent_question)
+            else str(fallback_question or "").strip()
+        )
+        self._root_evidence_need = (
+            tuple(intent_evidence_need() or ()) if callable(intent_evidence_need) else ()
+        )
+        self._root_modalities = (
+            tuple(intent_modalities() or ()) if callable(intent_modalities) else ()
+        )
+        self._root_query_type = (
+            str(intent_query_type("") or "").strip()
+            if callable(intent_query_type)
+            else ""
+        )
+
+    def _root_numeric_table_hard_gate(self, fallback_question: str) -> bool:
+        return _is_numeric_table_hard_gate(
+            self._root_intent_question or fallback_question,
+            evidence_need=self._root_evidence_need if self._has_frozen_root_intent else None,
+        )
+
+    def _root_visual_requested(self, fallback_question: str) -> bool:
+        if self._has_frozen_root_intent:
+            return bool(set(self._root_modalities) & {"figure", "table", "formula", "layout"})
+        return looks_like_visual_query(fallback_question)
+
     @staticmethod
     def _extract_tool_chunk_meta(chunk: str) -> Dict[str, Any]:
         if not isinstance(chunk, str):
@@ -943,6 +1004,14 @@ class RetrievalAgent:
                         parsed_bbox = []
                     if len(parsed_bbox) == 4 and parsed_bbox[2] > parsed_bbox[0] and parsed_bbox[3] > parsed_bbox[1]:
                         meta[key] = parsed_bbox
+                continue
+            if key in {"rects", "page_size"}:
+                try:
+                    geometry = json.loads(value)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    geometry = None
+                if isinstance(geometry, list):
+                    meta[key] = geometry
                 continue
             if key == "visual_model":
                 try:
@@ -1101,13 +1170,26 @@ class RetrievalAgent:
             进度事件: {"type": "retrieval_progress", "phase": str, "message": str}
             最终结果: {"type": "retrieval_complete", "context": str, "detail": list}
         """
+        self._bind_frozen_intent(doc_ctx, question)
         has_groups = bool(doc_ctx.semantic_groups)
         modal_index = doc_ctx.modal_asset_index if isinstance(doc_ctx.modal_asset_index, dict) else {}
         modal_assets = modal_index.get("assets") if isinstance(modal_index.get("assets"), list) else []
-        numeric_table_query = _is_numeric_table_hard_gate(question)
-        self._visual_search_enabled = bool(modal_assets) and not numeric_table_query
+        root_question = self._root_intent_question or question
+        numeric_table_query = self._root_numeric_table_hard_gate(question)
+        visual_allowed = (
+            not self._has_frozen_root_intent
+            or not callable(getattr(doc_ctx, "allows_visual_search", None))
+            or doc_ctx.allows_visual_search()
+        )
+        self._visual_search_enabled = bool(modal_assets) and visual_allowed and not numeric_table_query
+        visual_analysis_allowed = (
+            not self._has_frozen_root_intent
+            or not callable(getattr(doc_ctx, "allows_visual_analysis", None))
+            or doc_ctx.allows_visual_analysis()
+        )
         self._visual_analysis_enabled = bool(
             self._visual_search_enabled
+            and visual_analysis_allowed
             and callable(getattr(doc_ctx, "visual_analysis_available", None))
             and doc_ctx.visual_analysis_available()
         )
@@ -1118,8 +1200,8 @@ class RetrievalAgent:
         self._visual_analysis_failed_ids = set()
         self._visual_analysis_target_limit = (
             2
-            if re.search(r"(?:比较|对比|差异|区别|分别|compare|comparison|versus|\bvs\.?\b)", question, re.IGNORECASE)
-            or re.search(r"(?:\u4e0d\u540c|\u5f02\u540c|difference|differences|contrast)", question, re.IGNORECASE)
+            if re.search(r"(?:比较|对比|差异|区别|分别|compare|comparison|versus|\bvs\.?\b)", root_question, re.IGNORECASE)
+            or re.search(r"(?:\u4e0d\u540c|\u5f02\u540c|difference|differences|contrast)", root_question, re.IGNORECASE)
             else 1
         )
         active_tool_names = {"search_document", "complete"}
@@ -1133,7 +1215,7 @@ class RetrievalAgent:
             active_tool_names.add("visual_search")
         if self._visual_analysis_enabled:
             active_tool_names.add("analyze_visual_evidence")
-        active_tool_names.update(_advanced_planner_tools_for_question(question))
+        active_tool_names.update(_advanced_planner_tools_for_question(root_question))
 
         self._active_tool_schemas = [
             schema
@@ -1158,8 +1240,12 @@ class RetrievalAgent:
         self._doc_ctx = doc_ctx
         self._group_chunk_map = None
         try:
-            from services.embedding_service import _load_group_data
-            self._group_chunk_map = _load_group_data(doc_ctx.doc_id)
+            from services.embedding_service import _load_group_data, _semantic_groups_match_vector_index
+
+            if _semantic_groups_match_vector_index(doc_ctx.doc_id, doc_ctx.vector_store_dir):
+                self._group_chunk_map = _load_group_data(doc_ctx.doc_id)
+            else:
+                self.diagnostics["semantic_group_map_skipped"] = "stale_or_missing_generation"
         except Exception as exc:
             logger.debug(f"[RetrievalAgent] _load_group_data 失败，跳过 child→parent 扩展: {exc}")
             self._group_chunk_map = None
@@ -1187,6 +1273,7 @@ class RetrievalAgent:
         self.diagnostics = {
             "planner_rounds": [],
             "tool_timings": [],
+            "tool_errors": [],
             "context_budget": {},
             "errors": [],
             "fallback_reason": "",
@@ -1212,8 +1299,17 @@ class RetrievalAgent:
             "final_transition": {},
             "final_transition_reason": "",
             "active_tools": active_tool_names_in_order,
+            "intent": {
+                "frozen": self._has_frozen_root_intent,
+                "intent_id": str(getattr(self.intent_decision, "intent_id", "") or ""),
+                "intent_question": root_question,
+                "query_type": self._root_query_type,
+                "evidence_need": list(self._root_evidence_need),
+                "modalities": list(self._root_modalities),
+            },
             "web_search": {
                 "enabled": "web_search" in active_tool_names,
+                "mode": self.web_search_mode,
                 "source_count": 0,
                 "calls": 0,
             },
@@ -1223,7 +1319,7 @@ class RetrievalAgent:
                 "enabled": self._visual_search_enabled,
                 "skipped_reason": "numeric_table_structured_evidence_first"
                 if modal_assets and numeric_table_query
-                else "",
+                else ("root_intent_not_visual" if modal_assets and not visual_allowed else ""),
                 "asset_count": len(modal_assets),
                 "index_version": str(modal_index.get("version") or ""),
                 "route": str(modal_index.get("route") or modal_index.get("parser_route") or ""),
@@ -1260,8 +1356,23 @@ class RetrievalAgent:
         last_round_executed_calls: List[Dict[str, Any]] = []
         last_round_total_hits: int = 0
         last_round_duplicate_detected: bool = False
+        evidence_gap_retry_used = False
+        pending_evidence_gap_query = ""
 
         for round_idx in range(loop_limit):
+            evidence_gap_retry_key_in_round = ""
+            evidence_gap_retry_query_in_round = ""
+            previous_completion = self.diagnostics.pop("planner_completion", None)
+            if isinstance(previous_completion, dict):
+                self.diagnostics.setdefault("planner_completion_history", []).append(
+                    previous_completion
+                )
+            previous_fallback_reason = self.diagnostics.pop("fallback_reason", "")
+            if previous_fallback_reason:
+                self.diagnostics.setdefault("fallback_reason_history", []).append({
+                    "round": round_idx,
+                    "reason": previous_fallback_reason,
+                })
             self.diagnostics["iteration_count"] = round_idx + 1
             yield {
                 "type": "retrieval_progress",
@@ -1335,11 +1446,32 @@ class RetrievalAgent:
                 "message": "LLM 规划中...",
             }
 
-            plan = await self._call_planner(system_prompt, user_content, round_idx + 1)
+            raw_plan = await self._call_planner(system_prompt, user_content, round_idx + 1)
+            # Tests and alternate planner implementations can bypass
+            # ``_call_planner``'s parser. Reapply the same contract at the
+            # execution boundary so every plan has identical semantics.
+            plan = self._normalize_planner_plan(raw_plan)
+            if raw_plan is not None and plan is None:
+                self.diagnostics["last_error"] = "planner_plan_contract_invalid"
+                self.diagnostics["errors"].append({
+                    "type": "planner",
+                    "message": "planner_plan_contract_invalid",
+                })
             if plan is None:
                 planner_error = self.diagnostics.get("last_error") or "planner_failed"
                 logger.warning(f"[RetrievalAgent] 第 {round_idx + 1} 轮规划失败: {planner_error}")
-                if not search_results and not fetched_content:
+                if pending_evidence_gap_query:
+                    operations = []
+                    is_final = True
+                    self.diagnostics["planner_gap_retry_error"] = planner_error
+                    yield {
+                        "type": "retrieval_progress",
+                        "phase": "planner_error",
+                        "round": round_idx + 1,
+                        "message": "检索规划失败，继续执行证据缺口补搜...",
+                        "error": planner_error,
+                    }
+                elif not search_results and not fetched_content:
                     operations = self._build_default_operations(question)
                     if operations:
                         is_final = True
@@ -1409,11 +1541,12 @@ class RetrievalAgent:
                 # 更新任务追踪
                 new_status = plan.get("taskStatus")
                 if new_status and isinstance(new_status, dict):
-                    task_status = {
-                        "completed": new_status.get("completed", task_status["completed"]),
-                        "current": new_status.get("current", ""),
-                        "pending": new_status.get("pending", []),
-                    }
+                    # ``sub_question_coverage`` is system-owned state. Planner
+                    # status labels may update the display fields but cannot
+                    # reset coverage accumulated from executed tools.
+                    for field_name in ("completed", "current", "pending"):
+                        if field_name in new_status:
+                            task_status[field_name] = new_status[field_name]
 
                 if round_idx == 0:
                     operations = self._ensure_initial_search(operations, question)
@@ -1427,6 +1560,57 @@ class RetrievalAgent:
 
                 if round_idx > 0 and self._visual_analysis_enabled:
                     operations = self._prioritize_visual_analysis_operations(operations)
+
+            if pending_evidence_gap_query:
+                # 上一轮 evidence gate 未通过时，至少执行一次不同于历史查询的
+                # 确定性补搜，不能再次完全依赖 planner 的 final/complete 决定。
+                alternatives = [
+                    pending_evidence_gap_query,
+                    f"{question} problem formulation prior limitation motivation",
+                    f"{question} abstract introduction approach training objective",
+                ]
+                gap_operation = None
+                # search_history 的文档检索条目受 max_tool_calls 硬限制；多尝试
+                # 一个带序号的变体即可保证找到未执行过的 operation key。
+                for attempt in range(self.max_tool_calls + len(alternatives) + 1):
+                    candidate = (
+                        alternatives[attempt]
+                        if attempt < len(alternatives)
+                        else pending_evidence_gap_query
+                    )
+                    candidate_query = str(candidate or "").strip()
+                    if attempt >= len(alternatives):
+                        candidate_query = (
+                            f"{candidate_query} evidence gap retry {attempt - len(alternatives) + 1}"
+                        ).strip()
+                    candidate_operation = {
+                        "tool": "search_document",
+                        "args": {
+                            "query": candidate_query,
+                            "keywords": [],
+                            "exactQuery": "",
+                            "strategy": "semantic",
+                            "limit": 14,
+                        },
+                    }
+                    normalized_gap = self._normalize_operation(candidate_operation)
+                    if normalized_gap is None:
+                        continue
+                    gap_tool, _gap_args, gap_query_key = normalized_gap
+                    if not self._is_duplicate_search(search_history, gap_tool, gap_query_key):
+                        gap_operation = candidate_operation
+                        evidence_gap_retry_key_in_round = gap_query_key
+                        evidence_gap_retry_query_in_round = candidate_query
+                        break
+                if gap_operation is not None:
+                    operations.insert(0, gap_operation)
+                    self.diagnostics.setdefault("evidence_gap_retry_scheduled_queries", []).append(
+                        evidence_gap_retry_query_in_round
+                    )
+                pending_evidence_gap_query = ""
+                # 一次补搜是硬边界。本轮仍执行 planner 规划出的其他互补工具，
+                # 但无论证据是否补足都在本轮收口，不再进入第三次恢复循环。
+                is_final = True
 
             completion_ops = [
                 op for op in operations
@@ -1608,15 +1792,49 @@ class RetrievalAgent:
                         self.diagnostics["regular_tool_call_count"] = regular_tool_call_count
                     result = executed["result"]
                     result_count = result.get("result_count", len(result.get("results", [])))
+                    tool_issue = self._tool_issue_from_result(
+                        tool_name,
+                        query_key,
+                        result,
+                        result_count=result_count,
+                    )
                     if self._evidence_state is not None:
                         self._evidence_state.record_tool(tool_name, result)
                         self.diagnostics["evidence_state"] = self._evidence_state.snapshot()
                     self._record_candidate_pool_trace(round_idx + 1, tool_name, query_key, result, result_count)
-                    search_history.append({
+                    search_record = {
                         "tool": tool_name,
                         "query": query_key,
                         "resultCount": result_count,
-                    })
+                    }
+                    if tool_issue:
+                        if tool_issue.get("error_code"):
+                            search_record["errorCode"] = tool_issue["error_code"]
+                        if tool_issue.get("fatal"):
+                            search_record["fatal"] = True
+                        if tool_issue.get("degraded"):
+                            search_record["degraded"] = True
+                        if tool_issue.get("status_code") is not None:
+                            search_record["statusCode"] = tool_issue["status_code"]
+                        self.diagnostics.setdefault("tool_errors", []).append(tool_issue)
+                        if tool_issue.get("fatal"):
+                            self.diagnostics["last_error"] = (
+                                tool_issue.get("error_code")
+                                or tool_issue.get("error")
+                                or self.diagnostics.get("last_error")
+                                or ""
+                            )
+                            self.diagnostics.setdefault("fatal_tool_error", dict(tool_issue))
+                    search_history.append(search_record)
+                    if (
+                        tool_name == "search_document"
+                        and evidence_gap_retry_key_in_round
+                        and query_key == evidence_gap_retry_key_in_round
+                    ):
+                        self.diagnostics.setdefault("evidence_gap_retry_queries", []).append(
+                            evidence_gap_retry_query_in_round
+                        )
+                        self.diagnostics["evidence_gap_retry_executed"] = True
                     self.diagnostics["tool_timings"].append({
                         "round": round_idx + 1,
                         "tool": tool_name,
@@ -1624,6 +1842,10 @@ class RetrievalAgent:
                         "result_count": result_count,
                         "elapsed_ms": executed["elapsed_ms"],
                         "error": result.get("error", ""),
+                        "error_code": tool_issue.get("error_code", "") if tool_issue else "",
+                        "fatal": bool(tool_issue.get("fatal")) if tool_issue else False,
+                        "degraded": bool(tool_issue.get("degraded")) if tool_issue else False,
+                        "status_code": tool_issue.get("status_code") if tool_issue else None,
                     })
                     self._merge_tool_result(tool_name, tool_args, result, search_results, fetched_content)
                     if tool_name == "web_search":
@@ -1746,7 +1968,7 @@ class RetrievalAgent:
             # ----------------------------------------------------------------
             if settings.enable_parent_backfill and round_chunk_meta:
                 group_ids = self._collect_group_ids(round_chunk_meta)
-                backfill_count = self._apply_group_backfill(
+                backfill_count = await self._apply_group_backfill(
                     group_ids, fetched_content, doc_ctx, self.backfilled_groups
                 )
             else:
@@ -1768,37 +1990,95 @@ class RetrievalAgent:
                 )
                 break
 
-            # Phase 2.1：信息充足性 gate - LLM 认为还不够时也可能自动停止
-            if not is_final and round_idx > 0:
-                suf = self._assess_sufficiency(question, search_results, fetched_content, search_history)
-                self.diagnostics["sufficiency"] = suf
-                if self._evidence_state is not None:
-                    self._evidence_state.update_sufficiency(suf, len(fetched_content))
-                    self.diagnostics["evidence_state"] = self._evidence_state.snapshot()
-                sub_question_coverage = task_status.get("sub_question_coverage") or []
-                query_uncovered_sub_questions = [
-                    sq
-                    for idx, sq in enumerate(self.sub_questions or [])
-                    if idx >= len(sub_question_coverage) or not sub_question_coverage[idx]
+            # Phase 2.1：每轮都执行证据门控。planner 首轮即使 final=true，
+            # 弱证据且仍有预算时也必须再做一次有界的互补检索。
+            suf = self._assess_sufficiency(question, search_results, fetched_content, search_history)
+            self.diagnostics["sufficiency"] = suf
+            if self._evidence_state is not None:
+                self._evidence_state.update_sufficiency(suf, len(fetched_content))
+                self.diagnostics["evidence_state"] = self._evidence_state.snapshot()
+            sub_question_coverage = task_status.get("sub_question_coverage") or []
+            query_uncovered_sub_questions = [
+                sq
+                for idx, sq in enumerate(self.sub_questions or [])
+                if idx >= len(sub_question_coverage) or not sub_question_coverage[idx]
+            ]
+            evidence_uncovered_sub_questions = (
+                suf.get("sub_question_evidence_coverage", {}).get("uncovered", [])
+            )
+            uncovered_sub_questions = _merge_uncovered_sub_questions(
+                self.sub_questions,
+                query_uncovered_sub_questions,
+                evidence_uncovered_sub_questions,
+            )
+            self.diagnostics["latest_uncovered_sub_questions"] = list(uncovered_sub_questions)
+
+            current_completion = self.diagnostics.get("planner_completion")
+            current_completion = current_completion if isinstance(current_completion, dict) else {}
+            completion_is_current_round = int(current_completion.get("round") or 0) == round_idx + 1
+            requested_status = (
+                str(current_completion.get("status") or "")
+                if completion_is_current_round
+                else ""
+            )
+            resolved_status, gate_reason = _resolve_evidence_completion_status(
+                requested_status=requested_status,
+                sufficiency=suf,
+                has_evidence=bool(self._document_search_results(search_results) or fetched_content),
+                final_reason="",
+            )
+
+            if suf["level"] == "sufficient" and not is_final:
+                is_final = True
+                self.diagnostics["sufficiency_early_stop"] = True
+                yield {
+                    "type": "retrieval_progress",
+                    "phase": "sufficiency_gate",
+                    "round": round_idx + 1,
+                    "message": f"信息已充足（{suf['total_chars']}字/{suf['unique_sources']}源），提前停止检索。",
+                }
+            elif (
+                is_final
+                and resolved_status != "answered"
+                and requested_status not in {"insufficient_evidence", "budget_exhausted"}
+                and not evidence_gap_retry_used
+                and round_idx < loop_limit - 1
+                and regular_tool_call_count < self.max_tool_calls
+                and tool_call_count < effective_max_tool_calls
+            ):
+                anchor_missing = (
+                    suf.get("question_anchor_coverage", {}).get("missing", [])
+                )
+                gap_candidates = [
+                    *list(evidence_uncovered_sub_questions or []),
+                    *list(anchor_missing or []),
                 ]
-                evidence_uncovered_sub_questions = (
-                    suf.get("sub_question_evidence_coverage", {}).get("uncovered", [])
+                gap_focus = " ".join(
+                    str(item or "").strip()
+                    for item in gap_candidates[:4]
+                    if str(item or "").strip()
                 )
-                uncovered_sub_questions = _merge_uncovered_sub_questions(
-                    self.sub_questions,
-                    query_uncovered_sub_questions,
-                    evidence_uncovered_sub_questions,
+                pending_evidence_gap_query = (
+                    f"{gap_focus or question} abstract introduction approach method motivation"
+                ).strip()
+                evidence_gap_retry_used = True
+                is_final = False
+                self.diagnostics["evidence_gap_retry_reason"] = gate_reason
+                yield {
+                    "type": "retrieval_progress",
+                    "phase": "evidence_gap",
+                    "round": round_idx + 1,
+                    "message": "现有证据不足，正在补充检索摘要、引言与方法部分...",
+                }
+            elif (
+                is_final
+                and resolved_status != "answered"
+                and (
+                    regular_tool_call_count >= self.max_tool_calls
+                    or tool_call_count >= effective_max_tool_calls
                 )
-                self.diagnostics["latest_uncovered_sub_questions"] = list(uncovered_sub_questions)
-                if suf["level"] == "sufficient":
-                    is_final = True
-                    self.diagnostics["sufficiency_early_stop"] = True
-                    yield {
-                        "type": "retrieval_progress",
-                        "phase": "sufficiency_gate",
-                        "round": round_idx + 1,
-                        "message": f"信息已充足（{suf['total_chars']}字/{suf['unique_sources']}源），提前停止检索。",
-                    }
+            ):
+                self.diagnostics["fallback_reason"] = "max_tool_calls_reached"
 
             # 如果标记为最终，结束
             if is_final:
@@ -2105,7 +2385,7 @@ class RetrievalAgent:
         """从 LLM 输出中解析 JSON 检索计划"""
         # 尝试直接解析
         try:
-            return json.loads(content)
+            return self._normalize_planner_plan(json.loads(content))
         except json.JSONDecodeError:
             pass
 
@@ -2113,7 +2393,7 @@ class RetrievalAgent:
         json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
         if json_match:
             try:
-                return json.loads(json_match.group(1).strip())
+                return self._normalize_planner_plan(json.loads(json_match.group(1).strip()))
             except json.JSONDecodeError:
                 pass
 
@@ -2122,12 +2402,68 @@ class RetrievalAgent:
         last_brace = content.rfind("}")
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
             try:
-                return json.loads(content[first_brace:last_brace + 1])
+                return self._normalize_planner_plan(json.loads(content[first_brace:last_brace + 1]))
             except json.JSONDecodeError:
                 pass
 
         logger.warning(f"[RetrievalAgent] 无法解析 JSON: {content[:200]}")
         return None
+
+    @staticmethod
+    def _normalize_planner_status_text(value: Any, *, max_length: int = 240) -> str:
+        """Keep planner-visible task labels bounded and display-safe."""
+        if not isinstance(value, str):
+            return ""
+        return re.sub(r"\s+", " ", value).strip()[:max_length]
+
+    def _normalize_planner_plan(self, raw_plan: Any) -> Optional[dict]:
+        """Apply one strict, bounded contract to every planner output path.
+
+        The planner is an untrusted model boundary.  Tool arguments are validated
+        again immediately before execution, while this method protects control
+        fields and task labels consumed by the orchestration loop.
+        """
+        if not isinstance(raw_plan, dict):
+            return None
+
+        raw_operations = raw_plan.get("operations")
+        operations: list[dict] = []
+        if isinstance(raw_operations, list):
+            for operation in raw_operations[:self.max_tool_calls]:
+                if not isinstance(operation, dict):
+                    continue
+                # Preserve only the execution contract.  Extra planner fields
+                # must not be carried into logs or later orchestration stages.
+                operations.append({
+                    "tool": operation.get("tool"),
+                    "args": operation.get("args", {}),
+                })
+
+        raw_status = raw_plan.get("taskStatus")
+        task_status: dict[str, Any] = {}
+        if isinstance(raw_status, dict):
+            for field_name in ("completed", "pending"):
+                values = raw_status.get(field_name)
+                if not isinstance(values, list):
+                    continue
+                labels = []
+                for value in values[:8]:
+                    label = self._normalize_planner_status_text(value)
+                    if label:
+                        labels.append(label)
+                task_status[field_name] = labels
+            if "current" in raw_status:
+                task_status["current"] = self._normalize_planner_status_text(
+                    raw_status.get("current")
+                )
+
+        # Do not coerce strings such as "false": Python treats them as truthy,
+        # which previously let model text terminate retrieval early.
+        return {
+            "operations": operations,
+            "final": raw_plan.get("final") if isinstance(raw_plan.get("final"), bool) else False,
+            "taskStatus": task_status,
+        }
 
     @staticmethod
     def _provider_supports_tools(provider: str) -> bool:
@@ -2148,8 +2484,12 @@ class RetrievalAgent:
             与 _parse_plan_json 返回格式一致的 plan 字典
         """
         operations = []
-        for tc in tool_calls[:self.max_tool_calls]:
+        for tc in (tool_calls if isinstance(tool_calls, list) else [])[:self.max_tool_calls]:
+            if not isinstance(tc, dict):
+                continue
             fn = tc.get("function") or {}
+            if not isinstance(fn, dict):
+                continue
             name = fn.get("name") or ""
             try:
                 args = json.loads(fn.get("arguments") or "{}")
@@ -2159,7 +2499,11 @@ class RetrievalAgent:
             operations.append({"tool": name, "args": args, "rationale": ""})
         # 模型可在文本中给出 final 指示，简单启发式判断
         final = bool(operations) is False or "FINAL_ANSWER" in (text_content or "").upper()
-        return {"operations": operations, "final": final, "taskStatus": {}}
+        return self._normalize_planner_plan({
+            "operations": operations,
+            "final": final,
+            "taskStatus": {},
+        }) or {"operations": [], "final": False, "taskStatus": {}}
 
     def _remaining_visual_analysis_attempts(self) -> int:
         """Return the request-local count of new visual analyses still allowed."""
@@ -2423,10 +2767,16 @@ class RetrievalAgent:
         }
         visual_search_needed = (
             "visual_search" in active_tool_names
-            and not _is_numeric_table_hard_gate(q)
-            and looks_like_visual_query(q)
+            and not self._root_numeric_table_hard_gate(q)
+            and self._root_visual_requested(q)
         )
-        web_search_needed = "web_search" in active_tool_names and _should_seed_web_search(q)
+        web_search_needed = bool(
+            "web_search" in active_tool_names
+            and (
+                self.web_search_mode == "force"
+                or _should_seed_web_search(q)
+            )
+        )
         search_operation = {
             "tool": "search_document",
             "args": {
@@ -2440,8 +2790,14 @@ class RetrievalAgent:
         operations: list[dict] = []
         if "search_document" in active_tool_names:
             if web_search_needed:
-                operations.append(search_operation)
-                operations.append({"tool": "web_search", "args": {"query": q}})
+                if self.web_search_mode == "force":
+                    # 强制联网必须优先占用工具预算；即使 max_tool_calls=1，
+                    # 也不能先被文档检索耗尽后悄悄跳过联网。
+                    operations.append({"tool": "web_search", "args": {"query": q}})
+                    operations.append(search_operation)
+                else:
+                    operations.append(search_operation)
+                    operations.append({"tool": "web_search", "args": {"query": q}})
             else:
                 if visual_search_needed:
                     operations.append({
@@ -2499,14 +2855,33 @@ class RetrievalAgent:
         bundle = self._build_initial_search_bundle(question)
         if not bundle["operations"]:
             return operations
+        operations = list(operations or [])
+        injected = []
+        if self.web_search_mode == "force":
+            forced_web = next(
+                (
+                    op for op in bundle["operations"]
+                    if str(op.get("tool", "") or "").strip() == "web_search"
+                ),
+                None,
+            )
+            if forced_web is not None:
+                # Planner 可能把联网放在预算之后；force 必须去重并固定到首位。
+                operations = [
+                    op for op in operations
+                    if not isinstance(op, dict)
+                    or str(op.get("tool", "") or "").strip() != "web_search"
+                ]
+                injected.append(forced_web)
         existing = set()
         for op in operations:
             if isinstance(op, dict):
                 existing.add(str(op.get("tool", "")).strip())
-        injected = []
         self.diagnostics["initial_search_blueprint_tools"] = list(bundle.get("tool_names") or [])
         for op in bundle["operations"]:
             tool_name = str(op.get("tool", "") or "").strip()
+            if tool_name == "web_search" and self.web_search_mode == "force":
+                continue
             if tool_name and tool_name not in existing:
                 injected.append(op)
         if injected:
@@ -2660,7 +3035,7 @@ class RetrievalAgent:
                 ordered.append(gid)
         return ordered
 
-    def _apply_group_backfill(
+    async def _apply_group_backfill(
         self,
         new_group_ids: list,
         fetched_content: dict,
@@ -2703,7 +3078,14 @@ class RetrievalAgent:
                 backfilled_groups.add(gid)
                 continue
             try:
-                result = execute_tool("fetch", {"groupId": gid, "granularity": "digest"}, doc_ctx)
+                executed = await self._execute_tool_async(
+                    "fetch",
+                    {"groupId": gid, "granularity": "digest"},
+                    doc_ctx,
+                )
+                result = executed.get("result") or {}
+                if result.get("error"):
+                    raise RuntimeError(str(result.get("error")))
                 text = (result.get("results") or [""])[0]
                 if text:
                     fetched_content[gid] = {
@@ -2873,6 +3255,81 @@ class RetrievalAgent:
         if page > 0 and page not in pages:
             pages.append(page)
 
+    @staticmethod
+    def _normalize_tool_error_code(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if re.fullmatch(r"[a-z0-9_]{3,80}", text):
+            return text
+        return ""
+
+    @staticmethod
+    def _coerce_tool_status_code(value: Any) -> int | None:
+        try:
+            status_code = int(value)
+        except (TypeError, ValueError):
+            return None
+        return status_code if 100 <= status_code <= 599 else None
+
+    def _tool_issue_from_result(
+        self,
+        tool_name: str,
+        query_key: str,
+        result: dict,
+        *,
+        result_count: Any = None,
+    ) -> Dict[str, Any] | None:
+        result_dict = result if isinstance(result, dict) else {}
+        error = re.sub(r"\s+", " ", str(result_dict.get("error") or "")).strip()[:240]
+        error_code = self._normalize_tool_error_code(result_dict.get("error_code"))
+        status_code = self._coerce_tool_status_code(result_dict.get("status_code"))
+        fatal = bool(result_dict.get("fatal"))
+        degraded = bool(result_dict.get("degraded"))
+        if not any((error, error_code, status_code, fatal, degraded)):
+            return None
+
+        issue: Dict[str, Any] = {
+            "tool": tool_name,
+            "query": query_key,
+            "fatal": fatal,
+            "degraded": degraded,
+        }
+        if error:
+            issue["error"] = error
+        if error_code:
+            issue["error_code"] = error_code
+        if status_code is not None:
+            issue["status_code"] = status_code
+        if result_count is not None:
+            try:
+                issue["result_count"] = max(0, int(result_count or 0))
+            except (TypeError, ValueError):
+                issue["result_count"] = 0
+
+        raw_channel_errors = result_dict.get("channel_errors")
+        if isinstance(raw_channel_errors, list):
+            channel_errors: list[dict[str, Any]] = []
+            for item in raw_channel_errors[:6]:
+                if not isinstance(item, dict):
+                    continue
+                entry = {
+                    "channel": str(item.get("channel") or "").strip().lower(),
+                    "fatal": bool(item.get("fatal")),
+                    "degraded": bool(item.get("degraded")),
+                }
+                channel_error = re.sub(r"\s+", " ", str(item.get("error") or "")).strip()[:200]
+                channel_code = self._normalize_tool_error_code(item.get("error_code"))
+                channel_status = self._coerce_tool_status_code(item.get("status_code"))
+                if channel_error:
+                    entry["error"] = channel_error
+                if channel_code:
+                    entry["error_code"] = channel_code
+                if channel_status is not None:
+                    entry["status_code"] = channel_status
+                channel_errors.append(entry)
+            if channel_errors:
+                issue["channel_errors"] = channel_errors
+        return issue
+
     def _candidate_summary_from_result(
         self,
         tool_name: str,
@@ -2998,6 +3455,12 @@ class RetrievalAgent:
         result_dict = result if isinstance(result, dict) else {}
         summary = self._candidate_summary_from_result(tool_name, result_dict, use_candidate_meta=True)
         selected_summary = self._candidate_summary_from_result(tool_name, result_dict, use_candidate_meta=False)
+        tool_issue = self._tool_issue_from_result(
+            tool_name,
+            query_key,
+            result_dict,
+            result_count=result_count,
+        )
         trace = {
             "round": round_no,
             "tool": tool_name,
@@ -3014,6 +3477,17 @@ class RetrievalAgent:
             "selected_evidence_unit_ids": selected_summary.get("evidence_unit_ids") or [],
             **summary,
         }
+        if tool_issue:
+            if tool_issue.get("error"):
+                trace["error"] = tool_issue["error"]
+            if tool_issue.get("error_code"):
+                trace["error_code"] = tool_issue["error_code"]
+            if tool_issue.get("status_code") is not None:
+                trace["status_code"] = tool_issue["status_code"]
+            trace["fatal"] = bool(tool_issue.get("fatal"))
+            trace["degraded"] = bool(tool_issue.get("degraded"))
+            if tool_issue.get("channel_errors"):
+                trace["channel_errors"] = tool_issue["channel_errors"]
         self.diagnostics.setdefault("candidate_pool_trace", []).append(trace)
 
     def _build_candidate_pool_summary(self) -> Dict[str, Any]:
@@ -3148,6 +3622,11 @@ class RetrievalAgent:
         token_used = max(0, int((context_budget or {}).get("after_tokens") or 0))
         dedup_removed = max(0, int((context_budget or {}).get("dedup_removed") or 0))
         tool_result_dedup_removed = max(0, int(self.diagnostics.get("tool_result_dedup_removed") or 0))
+        tool_errors = [
+            dict(item)
+            for item in (self.diagnostics.get("tool_errors") or [])
+            if isinstance(item, dict)
+        ]
 
         retrieval_diag = {
             "source_mix": dict(source_counts),
@@ -3162,7 +3641,14 @@ class RetrievalAgent:
             "forced_initial_search_injected_tools": list(self.diagnostics.get("forced_initial_search_injected_tools") or []),
             "forced_initial_search_terms": dict(self.diagnostics.get("forced_initial_search_terms") or {}),
             "forced_initial_search_grep_query": self.diagnostics.get("forced_initial_search_grep_query") or "",
-            "default_initial_search_used": self.diagnostics.get("fallback_reason") == "empty_plan_default_search",
+            "default_initial_search_used": (
+                self.diagnostics.get("fallback_reason") == "empty_plan_default_search"
+                or any(
+                    isinstance(item, dict)
+                    and item.get("reason") == "empty_plan_default_search"
+                    for item in (self.diagnostics.get("fallback_reason_history") or [])
+                )
+            ),
             "default_initial_search_tools": list(self.diagnostics.get("default_initial_search_tools") or []),
             "default_initial_search_terms": dict(self.diagnostics.get("default_initial_search_terms") or {}),
             "default_initial_search_grep_query": self.diagnostics.get("default_initial_search_grep_query") or "",
@@ -3171,6 +3657,7 @@ class RetrievalAgent:
             "dedup_removed": dedup_removed,
             "tool_result_dedup_removed": tool_result_dedup_removed,
             "dedup_ratio": round(dedup_removed / max(len(search_results), 1), 4) if search_results else 0.0,
+            "tool_errors": tool_errors,
             "candidate_pool": self._build_candidate_pool_summary(),
         }
         context_diag = {
@@ -3189,6 +3676,7 @@ class RetrievalAgent:
             "truncated": bool((context_budget or {}).get("truncated")),
             "context_chars": len(context_text or ""),
             "detail_count": len(detail),
+            "fatal_tool_error_count": sum(1 for item in tool_errors if item.get("fatal")),
         }
         return {
             "retrieval": retrieval_diag,
@@ -3310,6 +3798,12 @@ class RetrievalAgent:
             "purpose",
             "prompt_version",
             "parse_generation",
+            "parser_route",
+            "section_id",
+            "section_path",
+            "rects",
+            "page_size",
+            "coordinate_space",
             "confidence",
         ):
             value = meta.get(key)
@@ -3665,7 +4159,11 @@ class RetrievalAgent:
         if len(anchors) < 2 or len(context_parts) < 2:
             return context_parts, context_details, {"applied": False, "anchor_count": len(anchors)}
         try:
-            numeric_table_query = "numeric_table" in (analyze_evidence_need(question) or [])
+            numeric_table_query = (
+                "numeric_table" in self._root_evidence_need
+                if self._has_frozen_root_intent
+                else "numeric_table" in (analyze_evidence_need(question) or [])
+            )
         except Exception:
             numeric_table_query = bool(re.search(r"\btable\s*\d+\b|表\s*\d+", question or "", re.I))
 

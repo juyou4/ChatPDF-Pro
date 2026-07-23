@@ -200,3 +200,7 @@ class ActivePool:
             池中条目数量
         """
         return len(self._pool)
+
+    def clear(self) -> None:
+        """Drop all in-memory copies after a user requests a full erase."""
+        self._pool.clear()

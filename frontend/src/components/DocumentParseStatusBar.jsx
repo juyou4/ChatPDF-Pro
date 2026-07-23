@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Route, Upload, X } from 'lucide-react';
 import { resolveDocumentParseState } from '../utils/parseRouteUtils';
+import { getMinerUProgressPresentation } from '../utils/mineruProgressUtils';
+import MinerUScanLoader from './MinerUScanLoader';
 
 const STATE_STYLES = {
   ready: {
@@ -146,9 +148,20 @@ const DocumentParseStatusBar = ({
   const style = STATE_STYLES[state.state] || STATE_STYLES.processing;
   const StateIcon = style.Icon;
   const canRetry = state.resolvedRoute === 'mineru' && state.state === 'failed' && onRetry;
+  const retryLabel = deepParseStatus?.resume_available && deepParseStatus?.resume_kind === 'result_download'
+    ? '重试结果下载'
+    : '重试 MinerU';
   const canInspect = state.resolvedRoute === 'mineru'
     && ['processing', 'awaiting_publish', 'publish_failed'].includes(state.state)
     && onOpenProcessing;
+  const minerUProgress = getMinerUProgressPresentation(deepParseStatus, {
+    status: deepParseStatus?.status || manifest?.status,
+    stage: deepParseStatus?.stage || manifest?.stage,
+  });
+  const showMinerUProgress = state.resolvedRoute === 'mineru'
+    && ['processing', 'awaiting_publish'].includes(state.state)
+    && Number.isFinite(minerUProgress?.percent);
+  const showMinerUScanLoader = state.resolvedRoute === 'mineru' && state.state === 'processing';
   const shouldOfferRouteChange = ['failed', 'cancelled'].includes(state.state) && onChooseRoute;
   const noticeKey = [
     documentId,
@@ -205,7 +218,11 @@ const DocumentParseStatusBar = ({
           >
             <div className="flex items-start gap-2.5">
               <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] ${style.icon}`}>
-                <StateIcon className={`h-4 w-4 ${style.iconClassName || ''}`} />
+                {showMinerUScanLoader ? (
+                  <MinerUScanLoader size={20} />
+                ) : (
+                  <StateIcon className={`h-4 w-4 ${style.iconClassName || ''}`} />
+                )}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2 text-[12px]">
@@ -217,6 +234,29 @@ const DocumentParseStatusBar = ({
                   <span className="truncate font-semibold">{state.statusLabel}</span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-[11px] leading-4 opacity-70">{state.detail}</p>
+                {showMinerUProgress && (
+                  <div className="mt-2.5">
+                    <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] font-semibold opacity-80">
+                      <span className="truncate">{minerUProgress.detail}</span>
+                      <span className="shrink-0 tabular-nums">{minerUProgress.label}</span>
+                    </div>
+                    <div
+                      role="progressbar"
+                      aria-label={`MinerU 解析：${minerUProgress.ariaLabel}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={minerUProgress.percent}
+                      className={`relative h-1.5 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-current/10'}`}
+                    >
+                      <motion.div
+                        initial={false}
+                        animate={{ scaleX: minerUProgress.percent / 100 }}
+                        transition={{ duration: 0.35, ease: 'easeOut' }}
+                        className="absolute inset-y-0 left-0 w-full origin-left rounded-full bg-current"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {(canInspect || canRetry || shouldOfferRouteChange) && (
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -236,7 +276,7 @@ const DocumentParseStatusBar = ({
                         className={`inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/45 ${darkMode ? 'bg-rose-300/10 hover:bg-rose-300/15' : 'bg-white/65 hover:bg-white'}`}
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
-                        重试 MinerU
+                        {retryLabel}
                       </button>
                     )}
                     {shouldOfferRouteChange && (

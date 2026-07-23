@@ -25,7 +25,10 @@ def _sanitize_api_key(api_key: Optional[str]) -> str:
     return select_api_key(api_key) or (api_key.strip() if api_key else "")
 
 
-_REASONING_MODEL_PATTERNS = ("seed", "-r1", "-r2", "o1", "o3", "o4", "thinking", "reasoning", "-think")
+_REASONING_MODEL_PATTERNS = (
+    "seed", "-r1", "-r2", "o1", "o3", "o4", "thinking", "reasoning",
+    "-think", "deepseek-v4",
+)
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -100,6 +103,82 @@ def extract_reasoning_content(chunk: dict | list | str | None) -> str:
         return "".join(parts)
 
     return ""
+
+
+def _stream_terminal_payload(
+    *,
+    provider: str,
+    model: str,
+    content_chars: int,
+    reasoning_chars: int = 0,
+    finish_reason: str = "",
+    invalid_event_count: int = 0,
+    fallback_used: bool = False,
+    degraded: bool = False,
+    qa_score: float | None = None,
+) -> dict:
+    """Build one provider-neutral terminal event.
+
+    A transport completion only means the provider stopped sending events.  It
+    is not a successful chat turn unless a non-whitespace answer was emitted.
+    Keeping that distinction here prevents individual provider adapters from
+    accidentally treating reasoning-only streams as successful answers.
+    """
+    if content_chars <= 0:
+        reason_suffix = f"（finish_reason={finish_reason}）" if finish_reason else ""
+        return {
+            "error": f"模型未返回正文{reason_suffix}",
+            "error_code": "llm_stream_empty_answer",
+            "finish_reason": finish_reason,
+            "reasoning_chars": reasoning_chars,
+            "invalid_event_count": invalid_event_count,
+            "done": True,
+            "used_provider": provider,
+            "used_model": model,
+            "fallback_used": fallback_used,
+            "degraded": degraded,
+        }
+
+    payload = {
+        "content": "",
+        "done": True,
+        "used_provider": provider,
+        "used_model": model,
+        "fallback_used": fallback_used,
+        "degraded": degraded,
+    }
+    if finish_reason:
+        payload["finish_reason"] = finish_reason
+    if qa_score is not None:
+        payload["qa_score"] = qa_score
+    return payload
+
+
+def _anthropic_stream_delta_parts(chunk: dict) -> tuple[str, str, str]:
+    """Return text, thinking and finish_reason from Anthropic SSE payloads."""
+    if not isinstance(chunk, dict):
+        return "", "", ""
+
+    delta = chunk.get("delta")
+    if not isinstance(delta, dict):
+        delta = {}
+    content_block = chunk.get("content_block")
+    if not isinstance(content_block, dict):
+        content_block = {}
+
+    content = delta.get("text") or content_block.get("text") or ""
+    reasoning = (
+        delta.get("thinking")
+        or delta.get("reasoning")
+        or content_block.get("thinking")
+        or ""
+    )
+    finish_reason = delta.get("stop_reason") or chunk.get("stop_reason") or ""
+    return (
+        str(content) if isinstance(content, str) else "",
+        str(reasoning) if isinstance(reasoning, str) else "",
+        str(finish_reason) if isinstance(finish_reason, str) else "",
+    )
 
 
 async def call_ai_api(
@@ -275,9 +354,15 @@ async def call_ai_api_stream(
                 # DeepSeek / 智谱 / 通用 OpenAI 兼容：使用 thinking 参数
                 # Moonshot/Kimi 和豆包 Seed 系列自动思考，无需额外参数
                 body["thinking"] = {"type": "enabled"}
-                # DeepSeek 思考模式要求显式设置 max_tokens，否则可能不返回思考内容
-                # 保底设为 8192，若用户已设置更大值则保留
-                if "max_tokens" not in body:
+                # DeepSeek 的 reasoning 与正文共享 completion 预算。标准回答默认的
+                # 1000/2024 tokens 可能被思考过程耗尽，最终只返回 reasoning 而没有正文。
+                if provider.lower() == "deepseek" or "deepseek" in str(model or "").lower():
+                    try:
+                        configured_max_tokens = int(body.get("max_tokens") or 0)
+                    except (TypeError, ValueError):
+                        configured_max_tokens = 0
+                    body["max_tokens"] = max(configured_max_tokens, 8192)
+                elif "max_tokens" not in body:
                     body["max_tokens"] = 8192
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
@@ -298,6 +383,8 @@ async def call_ai_api_stream(
         _reasoning_chars = 0
         _logprobs_sum = 0.0
         _logprobs_count = 0
+        _finish_reason = ""
+        _invalid_event_count = 0
 
         try:
             async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
@@ -325,15 +412,24 @@ async def call_ai_api_stream(
                             data = line.strip()
                         if data == "[DONE]":
                             logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                            _done_payload = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                            qa_score = None
                             if _logprobs_count > 0:
                                 import math
-                                _done_payload["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
-                            yield _done_payload
+                                qa_score = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                            yield _stream_terminal_payload(
+                                provider=provider,
+                                model=model,
+                                content_chars=_content_chars,
+                                reasoning_chars=_reasoning_chars,
+                                finish_reason=_finish_reason,
+                                invalid_event_count=_invalid_event_count,
+                                qa_score=qa_score,
+                            )
                             return
                         try:
                             chunk = _json.loads(data)
                         except Exception:
+                            _invalid_event_count += 1
                             continue
                         # Detect API-level errors embedded inside HTTP-200 SSE bodies
                         # (e.g. Doubao / volcengine returns {"error": {...}} with status 200)
@@ -362,6 +458,8 @@ async def call_ai_api_stream(
                         if not choices:
                             continue
                         choice = choices[0]
+                        if choice.get("finish_reason"):
+                            _finish_reason = str(choice.get("finish_reason"))
                         delta = choice.get("delta") or choice.get("message") or {}
                         content = delta.get("content") or ""
                         reasoning_content = extract_reasoning_content(delta)
@@ -381,7 +479,7 @@ async def call_ai_api_stream(
                         # 只要有内容或推理内容，就 yield。
                         if content or reasoning_content:
                             _chunk_count += 1
-                            _content_chars += len(content)
+                            _content_chars += len(content.strip())
                             _reasoning_chars += len(reasoning_content)
                             if reasoning_content and _reasoning_chars <= 500:
                                 import time as _time
@@ -404,11 +502,19 @@ async def call_ai_api_stream(
                                 "fallback_used": False
                             }
                     logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
-                    _done_payload2 = {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                    qa_score = None
                     if _logprobs_count > 0:
                         import math
-                        _done_payload2["qa_score"] = round(math.exp(_logprobs_sum / _logprobs_count), 4)
-                    yield _done_payload2
+                        qa_score = round(math.exp(_logprobs_sum / _logprobs_count), 4)
+                    yield _stream_terminal_payload(
+                        provider=provider,
+                        model=model,
+                        content_chars=_content_chars,
+                        reasoning_chars=_reasoning_chars,
+                        finish_reason=_finish_reason,
+                        invalid_event_count=_invalid_event_count,
+                        qa_score=qa_score,
+                    )
         except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as e:
             logger.warning(f"[Stream] connection interrupted: {type(e).__name__}: {e}")
             yield {"error": f"LLM API connection interrupted: {type(e).__name__}", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
@@ -444,31 +550,109 @@ async def call_ai_api_stream(
         # 深度思考模式：Anthropic extended thinking
         if enable_thinking:
             body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
-        async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
-            async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
-                if resp.status_code != 200:
-                    err_text = await resp.aread()
-                    err_body = err_text.decode("utf-8", errors="ignore")
-                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
-                    return
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    data = line[6:].strip() if line.startswith("data: ") else line.strip()
-                    if data == "[DONE]":
-                        yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+            # Anthropic requires the total output cap to exceed the thinking
+            # budget.  A normal 1k chat cap would otherwise fail before any
+            # visible answer is generated.
+            try:
+                configured_max_tokens = int(body.get("max_tokens") or 0)
+            except (TypeError, ValueError):
+                configured_max_tokens = 0
+            body["max_tokens"] = max(configured_max_tokens, 9216)
+        else:
+            body.setdefault("max_tokens", 8192)
+        _content_chars = 0
+        _reasoning_chars = 0
+        _finish_reason = ""
+        _invalid_event_count = 0
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
+                async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
+                    if resp.status_code != 200:
+                        err_text = await resp.aread()
+                        err_body = err_text.decode("utf-8", errors="ignore")
+                        yield {
+                            "error": _extract_api_error_message(err_body, resp.status_code),
+                            "done": True,
+                            "used_provider": provider,
+                            "used_model": model,
+                            "fallback_used": False,
+                        }
                         return
-                    try:
-                        chunk = httpx.Response(200, content=data).json()
-                    except Exception:
-                        continue
-                    # Anthropic streaming fields: delta -> text
-                    delta_list = chunk.get("delta") or []
-                    for delta in delta_list:
-                        content = delta.get("text", "")
-                        if content:
-                            yield {"content": content, "done": False, "used_provider": provider, "used_model": model, "fallback_used": False}
-                yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        data = line[6:].strip() if line.startswith("data: ") else line.strip()
+                        if data == "[DONE]":
+                            yield _stream_terminal_payload(
+                                provider=provider,
+                                model=model,
+                                content_chars=_content_chars,
+                                reasoning_chars=_reasoning_chars,
+                                finish_reason=_finish_reason,
+                                invalid_event_count=_invalid_event_count,
+                            )
+                            return
+                        try:
+                            chunk = _json.loads(data)
+                        except Exception:
+                            _invalid_event_count += 1
+                            continue
+                        api_error = chunk.get("error") if isinstance(chunk, dict) else None
+                        if api_error:
+                            error_message = (
+                                api_error.get("message")
+                                if isinstance(api_error, dict)
+                                else str(api_error)
+                            )
+                            yield {
+                                "error": error_message or "Anthropic stream error",
+                                "done": True,
+                                "used_provider": provider,
+                                "used_model": model,
+                                "fallback_used": False,
+                            }
+                            return
+                        content, reasoning_content, finish_reason = _anthropic_stream_delta_parts(chunk)
+                        if finish_reason:
+                            _finish_reason = finish_reason
+                        if not content and not reasoning_content:
+                            continue
+                        _content_chars += len(content.strip())
+                        _reasoning_chars += len(reasoning_content)
+                        yield {
+                            "content": content,
+                            "reasoning_content": reasoning_content,
+                            "done": False,
+                            "used_provider": provider,
+                            "used_model": model,
+                            "fallback_used": False,
+                        }
+                    yield _stream_terminal_payload(
+                        provider=provider,
+                        model=model,
+                        content_chars=_content_chars,
+                        reasoning_chars=_reasoning_chars,
+                        finish_reason=_finish_reason,
+                        invalid_event_count=_invalid_event_count,
+                    )
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as exc:
+            logger.warning("[AnthropicStream] connection interrupted: %s", exc)
+            yield {
+                "error": f"LLM API connection interrupted: {type(exc).__name__}",
+                "done": True,
+                "used_provider": provider,
+                "used_model": model,
+                "fallback_used": False,
+            }
+        except Exception as exc:
+            logger.warning("[AnthropicStream] failed: %s", exc)
+            yield {
+                "error": f"LLM API call failed: {type(exc).__name__}",
+                "done": True,
+                "used_provider": provider,
+                "used_model": model,
+                "fallback_used": False,
+            }
         return
 
     # Gemini 流式（简单版，若失败则回退）
@@ -512,33 +696,116 @@ async def call_ai_api_stream(
                 payload["generationConfig"] = {}
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 8192}
 
-        async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
-            async with client.stream("POST", endpoint, json=payload) as resp:
-                if resp.status_code != 200:
-                    err_text = await resp.aread()
-                    err_body = err_text.decode("utf-8", errors="ignore")
-                    yield {"error": _extract_api_error_message(err_body, resp.status_code), "done": True}
-                    return
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    data = line[6:].strip() if line.startswith("data: ") else line.strip()
-                    if data == "[DONE]":
-                        yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+        _content_chars = 0
+        _reasoning_chars = 0
+        _finish_reason = ""
+        _invalid_event_count = 0
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
+                async with client.stream("POST", endpoint, json=payload) as resp:
+                    if resp.status_code != 200:
+                        err_text = await resp.aread()
+                        err_body = err_text.decode("utf-8", errors="ignore")
+                        yield {
+                            "error": _extract_api_error_message(err_body, resp.status_code),
+                            "done": True,
+                            "used_provider": provider,
+                            "used_model": model,
+                            "fallback_used": False,
+                        }
                         return
-                    try:
-                        chunk = _json.loads(data)
-                    except Exception:
-                        continue
-                    # Gemini streaming uses candidates[].content.parts[].text
-                    candidates = chunk.get("candidates", [])
-                    for cand in candidates:
-                        parts = cand.get("content", {}).get("parts", [])
-                        for part in parts:
-                            text = part.get("text") or ""
-                            if text:
-                                yield {"content": text, "done": False, "used_provider": provider, "used_model": model, "fallback_used": False}
-                yield {"content": "", "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        data = line[6:].strip() if line.startswith("data: ") else line.strip()
+                        if data == "[DONE]":
+                            yield _stream_terminal_payload(
+                                provider=provider,
+                                model=model,
+                                content_chars=_content_chars,
+                                reasoning_chars=_reasoning_chars,
+                                finish_reason=_finish_reason,
+                                invalid_event_count=_invalid_event_count,
+                            )
+                            return
+                        try:
+                            chunk = _json.loads(data)
+                        except Exception:
+                            _invalid_event_count += 1
+                            continue
+                        api_error = chunk.get("error") if isinstance(chunk, dict) else None
+                        if api_error:
+                            error_message = (
+                                api_error.get("message")
+                                if isinstance(api_error, dict)
+                                else str(api_error)
+                            )
+                            yield {
+                                "error": error_message or "Gemini stream error",
+                                "done": True,
+                                "used_provider": provider,
+                                "used_model": model,
+                                "fallback_used": False,
+                            }
+                            return
+                        candidates = chunk.get("candidates", []) if isinstance(chunk, dict) else []
+                        for candidate in candidates:
+                            if not isinstance(candidate, dict):
+                                continue
+                            if candidate.get("finishReason"):
+                                _finish_reason = str(candidate.get("finishReason"))
+                            parts = (candidate.get("content") or {}).get("parts", [])
+                            for part in parts if isinstance(parts, list) else []:
+                                if not isinstance(part, dict):
+                                    continue
+                                text = str(part.get("text") or "")
+                                if not text:
+                                    continue
+                                if part.get("thought") is True:
+                                    _reasoning_chars += len(text)
+                                    yield {
+                                        "content": "",
+                                        "reasoning_content": text,
+                                        "done": False,
+                                        "used_provider": provider,
+                                        "used_model": model,
+                                        "fallback_used": False,
+                                    }
+                                else:
+                                    _content_chars += len(text.strip())
+                                    yield {
+                                        "content": text,
+                                        "done": False,
+                                        "used_provider": provider,
+                                        "used_model": model,
+                                        "fallback_used": False,
+                                    }
+                    yield _stream_terminal_payload(
+                        provider=provider,
+                        model=model,
+                        content_chars=_content_chars,
+                        reasoning_chars=_reasoning_chars,
+                        finish_reason=_finish_reason,
+                        invalid_event_count=_invalid_event_count,
+                    )
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as exc:
+            logger.warning("[GeminiStream] connection interrupted: %s", exc)
+            yield {
+                "error": f"LLM API connection interrupted: {type(exc).__name__}",
+                "done": True,
+                "used_provider": provider,
+                "used_model": model,
+                "fallback_used": False,
+            }
+        except Exception as exc:
+            logger.warning("[GeminiStream] failed: %s", exc)
+            yield {
+                "error": f"LLM API call failed: {type(exc).__name__}",
+                "done": True,
+                "used_provider": provider,
+                "used_model": model,
+                "fallback_used": False,
+            }
         return
 
     # 其他 provider 回退为一次性响应
@@ -547,19 +814,43 @@ async def call_ai_api_stream(
                                 max_tokens=max_tokens, temperature=temperature, top_p=top_p,
                                 custom_params=custom_params, reasoning_effort=reasoning_effort,
                                 purpose=purpose)
+        if isinstance(resp, dict) and resp.get("error"):
+            raise RuntimeError(str(resp.get("error")))
         message = resp.get("choices", [{}])[0].get("message", {}) or {}
-        answer = message.get("content", "")
+        answer = str(message.get("content") or "")
         reasoning_text = extract_reasoning_content(message)
+        used_provider = resp.get("_used_provider", provider)
+        used_model = resp.get("_used_model", model)
+        fallback_used = resp.get("_fallback_used", False)
+        degraded = bool(resp.get("degraded") or resp.get("answer_status") == "degraded")
+        if reasoning_text:
+            yield {
+                "content": "",
+                "reasoning_content": reasoning_text,
+                "done": False,
+                "used_provider": used_provider,
+                "used_model": used_model,
+                "fallback_used": fallback_used,
+                "degraded": degraded,
+            }
         for idx, word in enumerate(answer.split(" ")):
             chunk = word if idx == 0 else f" {word}"
-            yield {"content": chunk, "done": False, "used_provider": resp.get("_used_provider", provider), "used_model": resp.get("_used_model", model), "fallback_used": resp.get("_fallback_used", False)}
-        yield {
-            "content": "",
-            "reasoning_content": reasoning_text,
-            "done": True,
-            "used_provider": resp.get("_used_provider", provider),
-            "used_model": resp.get("_used_model", model),
-            "fallback_used": resp.get("_fallback_used", False)
-        }
+            if chunk:
+                yield {
+                    "content": chunk,
+                    "done": False,
+                    "used_provider": used_provider,
+                    "used_model": used_model,
+                    "fallback_used": fallback_used,
+                    "degraded": degraded,
+                }
+        yield _stream_terminal_payload(
+            provider=used_provider,
+            model=used_model,
+            content_chars=len(answer.strip()),
+            reasoning_chars=len(reasoning_text),
+            fallback_used=fallback_used,
+            degraded=degraded,
+        )
     except Exception as e:
         yield {"error": str(e), "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}

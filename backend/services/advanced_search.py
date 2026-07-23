@@ -13,6 +13,24 @@ import re
 from typing import List
 
 
+_MAX_REGEX_PATTERN_CHARS = 256
+_MAX_REGEX_SEARCH_TEXT_CHARS = 5 * 1024 * 1024
+_MAX_REGEX_RESULTS = 100
+_MAX_REGEX_CONTEXT_CHARS = 2_000
+_UNSAFE_REGEX_TOKENS = re.compile(r"\\[1-9]|\(\?[^:]|\(\?P[=<]")
+_NESTED_REGEX_QUANTIFIER = re.compile(
+    r"(?:\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)|\[[^\]]+\][+*]|\.[+*])\s*(?:[+*]|\{\d+(?:,\d*)?\})"
+)
+
+
+def _validate_safe_regex_pattern(pattern: str) -> None:
+    """Reject regex features with unbounded backtracking risk in Python's re engine."""
+    if len(pattern) > _MAX_REGEX_PATTERN_CHARS:
+        raise ValueError(f"正则表达式过长（最多 {_MAX_REGEX_PATTERN_CHARS} 个字符）")
+    if _UNSAFE_REGEX_TOKENS.search(pattern) or _NESTED_REGEX_QUANTIFIER.search(pattern):
+        raise ValueError("正则表达式包含可能导致长时间回溯的结构")
+
+
 class AdvancedSearchService:
     """高级搜索服务，支持正则表达式搜索和布尔逻辑搜索"""
 
@@ -43,6 +61,12 @@ class AdvancedSearchService:
         """
         if not pattern or not text:
             return []
+
+        _validate_safe_regex_pattern(pattern)
+        if len(text) > _MAX_REGEX_SEARCH_TEXT_CHARS:
+            raise ValueError(f"搜索文本超过 {_MAX_REGEX_SEARCH_TEXT_CHARS // (1024 * 1024)} MB 限制")
+        limit = max(1, min(int(limit), _MAX_REGEX_RESULTS))
+        context_chars = max(0, min(int(context_chars), _MAX_REGEX_CONTEXT_CHARS))
 
         # 编译正则表达式，语法无效时抛出 ValueError
         try:

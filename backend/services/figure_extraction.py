@@ -23,8 +23,22 @@ from services.figure_builder import build_logical_figures, select_top_figures
 
 logger = logging.getLogger(__name__)
 
-# Schema 版本，用于缓存失效判断。1.2 起视觉检测只作为结构结果缺失时的兜底。
-SCHEMA_VERSION = "1.2"
+# Schema 版本，用于缓存失效判断。1.4 起缓存完整 Logical Figure 集，
+# 不再把 brief/standard/detailed 的 Top-N 结果作为文档级缓存。
+SCHEMA_VERSION = "1.4"
+MINERU_PANEL_LABEL_BOTTOM_PADDING = 18.0
+
+
+def _cache_matches_parse_identity(meta: dict, manifest: dict) -> bool:
+    """A figure cache belongs to one parser generation, not just one doc id."""
+    expected_generation = str((manifest or {}).get("generation") or "").strip()
+    expected_source_hash = str((manifest or {}).get("source_hash") or "").strip()
+    if not expected_generation and not expected_source_hash:
+        return True
+    return (
+        str((meta or {}).get("parse_generation") or "").strip() == expected_generation
+        and str((meta or {}).get("document_source_hash") or "").strip() == expected_source_hash
+    )
 
 
 def build_logical_figures_for_overview(
@@ -86,7 +100,8 @@ def build_logical_figures_for_overview(
                 if is_mineru_route
                 else (not cached_is_mineru or allow_legacy_mineru)
             )
-            if meta.get("schema_version") == SCHEMA_VERSION and cache_matches_route:
+            cache_matches_identity = _cache_matches_parse_identity(meta, parse_manifest)
+            if meta.get("schema_version") == SCHEMA_VERSION and cache_matches_route and cache_matches_identity:
                 cached = doc_data.get("logical_figures", [])
                 if cached:
                     cached_figures = [LogicalFigureSchema(**fig) for fig in cached]
@@ -100,9 +115,9 @@ def build_logical_figures_for_overview(
                     else:
                         logger.info(
                             f"[FigureExtraction] Cache hit for doc {doc_id}: "
-                            f"{len(cached)} figures"
+                            f"{len(cached)} complete figures"
                         )
-                        return cached_figures
+                        return select_top_figures(cached_figures, depth)
 
     # ========== 2. 获取文档信息 ==========
     pdf_url = doc_record.get("pdf_url")
@@ -283,8 +298,9 @@ def build_logical_figures_for_overview(
         # 保留结果，但不认为是高质量
 
     # ========== 7. 写回缓存 ==========
-    # 转换 为 dict 列表用于存储
-    figures_dict = [fig.model_dump() for fig in selected]
+    # 缓存完整集合；brief/standard/detailed 只影响本次返回的 Top-N。
+    # 否则先生成 brief 会永久把 detailed 锁成两张图。
+    figures_dict = [fig.model_dump() for fig in logical_figures]
 
     doc_data["logical_figures"] = figures_dict
     doc_data["logical_figures_meta"] = {
@@ -292,7 +308,11 @@ def build_logical_figures_for_overview(
         "built_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
         "fallback_used": fallback_used,
-        "count": len(selected),
+        "count": len(figures_dict),
+        "selection_version": "dynamic-depth-v1",
+        "parse_generation": str(parse_manifest.get("generation") or ""),
+        "document_source_hash": str(parse_manifest.get("source_hash") or ""),
+        "parser_route": resolved_route,
     }
     doc_data["logical_figures_status"] = {
         "state": "done",
@@ -309,7 +329,7 @@ def build_logical_figures_for_overview(
         logger.warning(f"[FigureExtraction] Failed to update documents_store: {e}")
 
     logger.info(
-        f"[FigureExtraction] Built {len(selected)} figures for doc {doc_id}, "
+        f"[FigureExtraction] Built {len(figures_dict)} complete figures for doc {doc_id}, "
         f"source={source}, fallback={fallback_used}"
     )
 
@@ -391,6 +411,7 @@ def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
             if b.get("type") == "caption" and _normalize_bbox(b.get("bbox"))
         ]
 
+        page_figure_blocks: List[FigureBlock] = []
         for idx, body in enumerate(body_blocks):
             body_bbox = _normalize_bbox(body.get("bbox"))
             if not body_bbox:
@@ -410,7 +431,7 @@ def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
                     caption_text = body_text
             full_bbox = _merge_bboxes([body_bbox, caption_bbox]) if caption_bbox else body_bbox
 
-            blocks.append(FigureBlock(
+            figure_block = FigureBlock(
                 figure_id=body.get("block_id") or f"mineru_deep_{kind}_p{page_num}_{idx}",
                 page_idx=page_num - 1,
                 figure_index=_caption_display_label(caption_text),
@@ -425,9 +446,136 @@ def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
                     "block_id": body.get("block_id"),
                     "mineru_type": body.get("mineru_type"),
                 },
-            ))
+            )
+            if kind == "figure":
+                page_figure_blocks.append(figure_block)
+            else:
+                blocks.append(figure_block)
+
+        blocks.extend(_group_mineru_panel_figures(page_figure_blocks))
 
     return blocks
+
+
+_PANEL_ONLY_RE = re.compile(r"^\s*\(?\s*([a-z])\s*\)?[.)]?\s*$", re.IGNORECASE)
+_PANEL_FIGURE_CAPTION_RE = re.compile(
+    r"^\s*\(?\s*[a-z]\s*\)?[.)]?\s*((?:fig(?:ure)?\.?|图)\s*\d+[a-z]?(?:\s*[:：.])?.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_FIGURE_CAPTION_RE = re.compile(
+    r"(?:^|\s)((?:fig(?:ure)?\.?|图)\s*\d+[a-z]?(?:\s*[:：.])?.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _panel_only_caption(text: str) -> bool:
+    return bool(_PANEL_ONLY_RE.fullmatch(" ".join(str(text or "").split())))
+
+
+def _canonical_figure_caption(text: str) -> str:
+    value = " ".join(str(text or "").split())
+    match = _PANEL_FIGURE_CAPTION_RE.match(value) or _FIGURE_CAPTION_RE.search(value)
+    return match.group(1).strip() if match else ""
+
+
+def _bbox_overlap_ratio(first: list[float], second: list[float], axis: int) -> float:
+    start = max(first[axis], second[axis])
+    end = min(first[axis + 2], second[axis + 2])
+    first_size = first[axis + 2] - first[axis]
+    second_size = second[axis + 2] - second[axis]
+    return max(0.0, end - start) / max(1.0, min(first_size, second_size))
+
+
+def _panel_bboxes_are_neighbors(first: list[float], second: list[float]) -> bool:
+    horizontal_gap = max(0.0, max(first[0], second[0]) - min(first[2], second[2]))
+    vertical_gap = max(0.0, max(first[1], second[1]) - min(first[3], second[3]))
+    distance = (horizontal_gap ** 2 + vertical_gap ** 2) ** 0.5
+    aligned = (
+        _bbox_overlap_ratio(first, second, 0) >= 0.20
+        or _bbox_overlap_ratio(first, second, 1) >= 0.20
+    )
+    return aligned and distance <= 60.0
+
+
+def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]:
+    """把 MinerU 分拆的同页子图归组，完整 caption 所在块作为组锚点。"""
+    if len(figures) < 2:
+        return figures
+
+    remaining = set(range(len(figures)))
+    grouped: List[FigureBlock] = []
+    for anchor_index, anchor in enumerate(figures):
+        if anchor_index not in remaining:
+            continue
+        canonical_caption = _canonical_figure_caption(anchor.caption_text)
+        if not canonical_caption or not anchor.body_bbox_page_pts:
+            continue
+
+        member_indexes = {anchor_index}
+        changed = True
+        while changed:
+            changed = False
+            for candidate_index in list(remaining - member_indexes):
+                candidate = figures[candidate_index]
+                if (
+                    not candidate.body_bbox_page_pts
+                    or not _panel_only_caption(candidate.caption_text)
+                ):
+                    continue
+                if any(
+                    _panel_bboxes_are_neighbors(
+                        figures[member_index].body_bbox_page_pts,
+                        candidate.body_bbox_page_pts,
+                    )
+                    for member_index in member_indexes
+                    if figures[member_index].body_bbox_page_pts
+                ):
+                    member_indexes.add(candidate_index)
+                    changed = True
+
+        if len(member_indexes) < 2:
+            continue
+        members = [figures[index] for index in sorted(member_indexes)]
+        panel_bboxes = [
+            list(member.body_bbox_page_pts)
+            for member in members
+            if member.body_bbox_page_pts
+        ]
+        grouped_body_bbox = _merge_bboxes(panel_bboxes)
+        grouped_body_bbox[3] += MINERU_PANEL_LABEL_BOTTOM_PADDING
+        full_bboxes = [
+            member.full_bbox_page_pts or member.body_bbox_page_pts
+            for member in members
+            if member.full_bbox_page_pts or member.body_bbox_page_pts
+        ]
+        grouped.append(FigureBlock(
+            figure_id=anchor.figure_id,
+            page_idx=anchor.page_idx,
+            figure_index=_caption_display_label(canonical_caption),
+            caption_text=canonical_caption,
+            raw_bboxes=panel_bboxes,
+            body_bbox_page_pts=grouped_body_bbox,
+            full_bbox_page_pts=_merge_bboxes([*full_bboxes, grouped_body_bbox]),
+            panel_bboxes_page_pts=panel_bboxes,
+            source=anchor.source,
+            confidence=max(member.confidence for member in members),
+            source_metadata={
+                **anchor.source_metadata,
+                "panel_group": True,
+                "panel_label_bottom_padding": MINERU_PANEL_LABEL_BOTTOM_PADDING,
+                "merged_from": [member.figure_id for member in members],
+                "merge_count": len(members),
+            },
+        ))
+        remaining.difference_update(member_indexes)
+
+    grouped.extend(figures[index] for index in sorted(remaining))
+    grouped.sort(key=lambda item: (
+        item.page_idx,
+        (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
+        (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
+    ))
+    return grouped
 
 
 def _build_figures_from_yolo_layout(pdf_doc, figures: list) -> List[FigureBlock]:

@@ -5,18 +5,26 @@ available, with a text-only fallback for imported non-PDF documents.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import io
 import tempfile
+import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any
 
+from services.document_block_roles import (
+    annotate_block_role,
+    is_post_reference_template_artifact,
+    is_reference_heading,
+    looks_like_affiliation_or_author_line,
+)
 from services.visual_supplement_service import (
     active_visual_supplements,
     visual_supplement_revision,
@@ -26,6 +34,9 @@ from services.visual_supplement_service import (
 logger = logging.getLogger(__name__)
 
 BLOCK_INDEX_VERSION = 12
+BLOCK_INDEX_REVISION_VERSION = 1
+_BLOCK_INDEX_SAVE_LOCKS: dict[str, threading.RLock] = {}
+_BLOCK_INDEX_SAVE_LOCKS_LOCK = threading.Lock()
 _GENERIC_TOC_TITLES = {
     "全文",
     "全文书签",
@@ -64,13 +75,6 @@ _RE_ALGORITHM_LINE = re.compile(
     r"|while\s+|if\s+|else\b|end\b|stage\s*\d+)\b",
     re.IGNORECASE,
 )
-_RE_EMAIL_OR_URL = re.compile(r"(@|https?://|www\.)", re.IGNORECASE)
-_RE_AFFILIATION_CUE = re.compile(
-    r"\b(dept\.?|department|institute|university|college|school|academy|laborator(?:y|ies)|lab|"
-    r"research|center|centre|faculty|campus|microsoft|google|meta|amazon|tencent|alibaba|"
-    r"tsinghua|stanford|mit|berkeley|hong\s+kong|shenzhen|beijing|redmond)\b",
-    re.IGNORECASE,
-)
 _RE_REFERENCE_ENTRY = re.compile(
     r"^\s*(?:\[\d+\]|\d+[\.)])\s+"
     r"(?:[A-Z][A-Za-z'\-]+,\s+(?:[A-Z]\.|[A-Z][A-Za-z'\-]+)|"
@@ -94,6 +98,46 @@ def get_block_index_path(data_dir: Path | str, doc_id: str) -> Path:
     return get_block_index_dir(data_dir) / f"{doc_id}.json"
 
 
+def stamp_block_index_revision(index: dict[str, Any]) -> dict[str, Any]:
+    """Attach a stable content revision without making timestamps part of identity.
+
+    Parse generation identifies the selected parser run, but an adapter repair can
+    legitimately rebuild the block tree within that same generation. Downstream
+    caches must therefore also bind to the actual published structure.
+    """
+    if not isinstance(index, dict):
+        return index
+    payload = {
+        "revision_version": BLOCK_INDEX_REVISION_VERSION,
+        "version": index.get("version"),
+        "source": index.get("source"),
+        "parser_route": index.get("parser_route"),
+        "parse_generation": index.get("parse_generation"),
+        "document_source_hash": index.get("document_source_hash"),
+        "visual_supplement_revision": index.get("visual_supplement_revision"),
+        "pages": index.get("pages") or [],
+        "outline": index.get("outline") or [],
+        "mineru_structure_version": (
+            (index.get("mineru_meta") or {}).get("structure_version")
+            if isinstance(index.get("mineru_meta"), dict)
+            else None
+        ),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    revision = hashlib.sha256(encoded).hexdigest()[:24]
+    index["block_index_revision_version"] = BLOCK_INDEX_REVISION_VERSION
+    index["block_index_revision"] = revision
+    # Keep the legacy-friendly name explicit for API clients and cache keys.
+    index["block_index_hash"] = revision
+    return index
+
+
+def _get_block_index_save_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _BLOCK_INDEX_SAVE_LOCKS_LOCK:
+        return _BLOCK_INDEX_SAVE_LOCKS.setdefault(key, threading.RLock())
+
+
 def load_block_index(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:
     path = get_block_index_path(data_dir, doc_id)
     if not path.exists():
@@ -109,7 +153,15 @@ def load_block_index(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None
         return None
 
 
-def save_block_index(data_dir: Path | str, doc_id: str, index: dict[str, Any]) -> bool:
+def save_block_index(
+    data_dir: Path | str,
+    doc_id: str,
+    index: dict[str, Any],
+    *,
+    preserve_active_source: bool = True,
+    current_doc: dict[str, Any] | None = None,
+    include_uncommitted_visual_supplements: bool = False,
+) -> bool:
     """Durably publish a block index and report a failed write to callers.
 
     The index is consumed by reading, outlines, translations, and the visual
@@ -117,30 +169,67 @@ def save_block_index(data_dir: Path | str, doc_id: str, index: dict[str, Any]) -
     be treated as a successful parser publication.
     """
     path = get_block_index_path(data_dir, doc_id)
-    temp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as f:
-            temp_path = f.name
-            json.dump(index, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, path)
-        return True
-    except Exception as exc:
-        logger.warning("[BlockIndex] Failed to save %s: %s", path, exc)
-        if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-        return False
+    with _get_block_index_save_lock(path):
+        stamp_block_index_revision(index)
+        # Building a local index can take long enough for a MinerU publication
+        # to replace the document's parse identity. Re-read that identity at
+        # the publication point instead of trusting the one captured before
+        # the build started, otherwise a stale builder can destroy the current
+        # route's otherwise valid index.
+        if isinstance(current_doc, dict):
+            current_identity = _document_parse_identity(
+                current_doc,
+                include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+            )
+            if current_identity.get("invalid_manifest") or not _block_index_matches_parse_identity(
+                index,
+                current_identity,
+            ):
+                logger.info("[BlockIndex] discard stale publication for %s", doc_id)
+                return False
+        active = load_block_index(data_dir, doc_id)
+        if (
+            preserve_active_source
+            and isinstance(active, dict)
+            and str(active.get("source") or "").strip().lower() == "mineru_vlm"
+            and str(index.get("source") or "").strip().lower() != "mineru_vlm"
+            and not _block_index_matches_parse_identity(
+                active,
+                {
+                    "parser_route": str(index.get("parser_route") or ""),
+                    "parse_generation": str(index.get("parse_generation") or ""),
+                    "document_source_hash": str(index.get("document_source_hash") or ""),
+                    "full_route": bool(index.get("full_route")),
+                },
+            )
+        ):
+            logger.info("[BlockIndex] discard stale local publication for %s", doc_id)
+            return False
+
+        temp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                temp_path = f.name
+                json.dump(index, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, path)
+            return True
+        except Exception as exc:
+            logger.warning("[BlockIndex] Failed to save %s: %s", path, exc)
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return False
 
 
 def ensure_block_index(
@@ -171,6 +260,17 @@ def ensure_block_index(
         raise RuntimeError("MinerU 全程解析的阅读块尚未发布")
     if cached:
         cached_matches_parse = _block_index_matches_parse_identity(cached, parse_identity)
+        cached = _maybe_upgrade_mineru_structure_cache(
+            cached=cached,
+            cached_matches_parse=cached_matches_parse,
+            parse_identity=parse_identity,
+            doc_id=doc_id,
+            doc=doc,
+            data_dir=data_dir,
+            pdf_path=pdf_path,
+            preserve_active_source=preserve_active_source,
+            include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+        )
         # A publisher may have written a staged visual block index immediately
         # before it durably records the matching commit marker. Do not expose
         # those blocks, but also do not overwrite the staged file with a base
@@ -214,9 +314,102 @@ def ensure_block_index(
         pdf_path=pdf_path,
         include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
     )
-    if not save_block_index(data_dir, doc_id, index):
-        raise RuntimeError("阅读块索引写入失败")
+    if not save_block_index(
+        data_dir,
+        doc_id,
+        index,
+        preserve_active_source=preserve_active_source,
+        current_doc=doc,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    ):
+        raise RuntimeError("阅读块索引写入失败或已被新解析路线替代")
     return index
+
+
+def _maybe_upgrade_mineru_structure_cache(
+    *,
+    cached: dict[str, Any],
+    cached_matches_parse: bool,
+    parse_identity: dict[str, Any],
+    doc_id: str,
+    doc: dict[str, Any],
+    data_dir: Path | str,
+    pdf_path: Path | str | None,
+    preserve_active_source: bool,
+    include_uncommitted_visual_supplements: bool,
+) -> dict[str, Any]:
+    """Rebuild old MinerU structure metadata from the matching raw result."""
+    if (
+        not cached_matches_parse
+        or str(cached.get("source") or "").strip().lower() != "mineru_vlm"
+    ):
+        return cached
+
+    try:
+        from services.mineru_block_index_service import (
+            MINERU_STRUCTURE_VERSION,
+            build_block_index_from_mineru_payload,
+            load_mineru_result,
+        )
+    except Exception as exc:
+        logger.warning("[BlockIndex] MinerU structure upgrader unavailable for %s: %s", doc_id, exc)
+        return cached
+
+    mineru_meta = cached.get("mineru_meta")
+    cached_structure_version = (
+        mineru_meta.get("structure_version")
+        if isinstance(mineru_meta, dict)
+        else None
+    )
+    if cached_structure_version == MINERU_STRUCTURE_VERSION:
+        return cached
+
+    has_parse_identity = bool(
+        parse_identity.get("parse_generation")
+        and parse_identity.get("document_source_hash")
+    )
+    payload = load_mineru_result(
+        data_dir,
+        doc_id,
+        parse_generation=parse_identity.get("parse_generation") if has_parse_identity else None,
+        document_source_hash=parse_identity.get("document_source_hash") if has_parse_identity else None,
+        require_identity=has_parse_identity,
+    )
+    if payload is None:
+        logger.warning(
+            "[BlockIndex] matching raw MinerU result unavailable; retaining old structure cache for %s",
+            doc_id,
+        )
+        return cached
+
+    try:
+        rebuilt = build_block_index_from_mineru_payload(
+            doc_id=doc_id,
+            doc=doc,
+            payload=payload,
+            pdf_path=pdf_path,
+        )
+    except Exception as exc:
+        logger.warning("[BlockIndex] MinerU structure cache rebuild failed for %s: %s", doc_id, exc)
+        return cached
+
+    if not save_block_index(
+        data_dir,
+        doc_id,
+        rebuilt,
+        preserve_active_source=preserve_active_source,
+        current_doc=doc,
+        include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+    ):
+        logger.warning("[BlockIndex] MinerU structure cache publication failed for %s", doc_id)
+        return cached
+
+    logger.info(
+        "[BlockIndex] upgraded MinerU structure cache for %s to version %s",
+        doc_id,
+        MINERU_STRUCTURE_VERSION,
+    )
+    return rebuilt
 
 
 def _has_uncommitted_visual_staging(doc: dict[str, Any], parse_identity: dict[str, Any]) -> bool:
@@ -291,8 +484,10 @@ def build_block_index(
     )
     outline = _build_outline(toc_items, pages)
     _assign_sections(pages, outline)
+    _annotate_block_roles(pages, outline)
+    _exclude_post_reference_template_blocks(pages)
 
-    return {
+    return stamp_block_index_revision({
         "version": BLOCK_INDEX_VERSION,
         "doc_id": doc_id,
         "source": source,
@@ -302,7 +497,7 @@ def build_block_index(
         "outline": outline,
         "visual_supplement_revision": str(parse_identity.get("visual_supplement_revision") or ""),
         **parse_identity,
-    }
+    })
 
 
 def _document_parse_identity(
@@ -853,6 +1048,7 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
 
     body_heading_seen = False
     references_seen = False
+    mineru_appendix_mode = ""
     for page in pages:
         page_num = int(page.get("page", 1))
         page_width = float(page.get("width_pts") or 612.0)
@@ -863,11 +1059,50 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
             title = _normalize_outline_title(block.get("text"))
             if not title or len(title) > 180:
                 continue
+            is_mineru_heading = str(block.get("source") or "").strip().lower() == "mineru_vlm"
+            has_mineru_structure_signal = is_mineru_heading and str(
+                block.get("heading_source") or ""
+            ).strip().lower() in {
+                "mineru_text_level",
+                "mineru_type",
+                "mineru_run_in_numbered",
+            }
             if references_seen and _looks_like_post_references_noise(title):
                 block["type"] = "artifact"
+                if str(block.get("source") or "").strip().lower() == "mineru_vlm":
+                    block["structure_exclusion_reason"] = "post_references_artifact"
                 block.pop("level", None)
                 continue
-            if _looks_like_non_section_noise(title):
+            explicit_appendix_level = _mineru_appendix_heading_level(title)
+            bare_appendix_level = _mineru_appendix_heading_level(title, allow_bare_letter=True)
+            is_bare_appendix_heading = (
+                bare_appendix_level is not None
+                and explicit_appendix_level is None
+            )
+            if references_seen and is_mineru_heading:
+                if not mineru_appendix_mode:
+                    if explicit_appendix_level is not None:
+                        mineru_appendix_mode = "explicit"
+                    elif is_bare_appendix_heading:
+                        mineru_appendix_mode = "bare"
+                    else:
+                        block["type"] = "artifact"
+                        block["structure_exclusion_reason"] = "post_references_artifact"
+                        block.pop("level", None)
+                        continue
+                elif mineru_appendix_mode == "bare" and not is_bare_appendix_heading:
+                    block["type"] = "artifact"
+                    block["structure_exclusion_reason"] = "post_references_artifact"
+                    block.pop("level", None)
+                    continue
+                if explicit_appendix_level is not None or bare_appendix_level is not None:
+                    block["level"] = explicit_appendix_level or bare_appendix_level
+            # The native PDF route must remain conservative because a line
+            # starting with a large number is often a citation or footer.
+            # MinerU's explicit text_level/type signal is stronger structural
+            # evidence, though: a textbook can legitimately contain chapter
+            # 51+ and those anchors must not disappear from the unified index.
+            if _looks_like_non_section_noise(title) and not has_mineru_structure_signal:
                 continue
             if _looks_like_run_in_paragraph_heading(title):
                 continue
@@ -876,7 +1111,7 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
             if block.get("source") != "mineru_vlm" and _looks_like_layout_noise(title, _normalize_bbox(block.get("bbox")), page_width, page_height):
                 continue
             body_heading_seen = True
-            if re.match(r"^\s*(references|bibliography)\s*$", title, re.IGNORECASE):
+            if is_reference_heading(title):
                 references_seen = True
             outline.append({
                 "section_id": f"s{len(outline) + 1}",
@@ -888,7 +1123,10 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
             })
 
     if outline:
-        return _merge_bare_outline_labels(outline)[:80]
+        # Do not silently truncate a long paper or textbook. Every heading is
+        # a section anchor; truncating here assigns all later blocks to the
+        # last retained section and poisons every downstream consumer.
+        return _merge_bare_outline_labels(outline)
 
     first_page = pages[0].get("page", 1) if pages else 1
     return [{
@@ -899,6 +1137,23 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
         "first_block": _first_block_id_on_page(pages, first_page),
         "source": "fallback",
     }]
+
+
+def _mineru_appendix_heading_level(
+    title: str,
+    *,
+    allow_bare_letter: bool = False,
+) -> int | None:
+    normalized = " ".join(str(title or "").split())
+    if re.match(r"^(?:appendix|appendices|supplementary\s+material)\b", normalized, re.IGNORECASE):
+        match = re.match(r"^(?:appendix\s+)?[A-Z](?:\.(\d+(?:\.\d+)*))?(?:[.)]?\s+|$)", normalized)
+        return 1 + len(match.group(1).split(".")) if match and match.group(1) else 1
+    if not allow_bare_letter:
+        return None
+    match = re.match(r"^[A-Z](?:\.(\d+(?:\.\d+)*))?(?:[.)]?\s+|$)", normalized)
+    if not match:
+        return None
+    return 1 + len(match.group(1).split(".")) if match.group(1) else 1
 
 
 def _toc_outline_quality_ok(outline: list[dict[str, Any]]) -> bool:
@@ -987,6 +1242,57 @@ def _assign_sections(pages: list[dict[str, Any]], outline: list[dict[str, Any]])
                 anchor_pos += 1
                 current = anchors[anchor_pos][2]
             block["section_id"] = current
+
+
+def _annotate_block_roles(pages: list[dict[str, Any]], outline: list[dict[str, Any]]) -> None:
+    """Persist semantic roles once section anchors are available.
+
+    The retrieval layer deliberately trusts persisted roles so it does not
+    have to re-infer bibliography and front-matter semantics on each query.
+    """
+    section_titles = {
+        str(item.get("section_id") or ""): str(item.get("title") or "")
+        for item in outline
+        if isinstance(item, dict) and str(item.get("section_id") or "")
+    }
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            section_title = section_titles.get(str(block.get("section_id") or ""), "")
+            block.update(annotate_block_role(block, section_title=section_title))
+
+
+def _exclude_post_reference_template_blocks(pages: list[dict[str, Any]]) -> None:
+    """Fence terminal submission templates off from the preceding appendix.
+
+    A checklist heading is not enough on its own: its following instruction
+    paragraphs otherwise inherit the last valid appendix section id and get
+    summarized as source material.
+    """
+    references_seen = False
+    template_started = False
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text") or "")
+            if str(block.get("type") or "").lower() == "heading" and is_reference_heading(text):
+                references_seen = True
+            if references_seen and is_post_reference_template_artifact(text):
+                template_started = True
+            if not template_started:
+                continue
+            block["exclude_from_reading"] = True
+            block["post_reference_template_artifact"] = True
+            block["content_role"] = "artifact"
+            block["role_confidence"] = 1.0
+            block["role_reason"] = "post_reference_template"
+            block["block_role_version"] = 1
 
 
 def _first_block_id_on_page(pages: list[dict[str, Any]], page_num: int) -> str | None:
@@ -1716,31 +2022,15 @@ def _looks_like_post_references_noise(text: str) -> bool:
     stripped = " ".join(str(text or "").split())
     if not stripped:
         return True
+    if re.match(r"^\s*(?:[a-z0-9-]+\s+)?(?:paper\s+)?checklist\b", stripped, re.IGNORECASE):
+        return True
     if _RE_CANONICAL_HEADING.match(stripped):
         return False
     return bool(_looks_like_reference_entry(stripped) or re.match(r"^\s*(?:\[\d+\]|\d+[\.)])\s+", stripped))
 
 
 def _looks_like_affiliation_or_author_line(text: str) -> bool:
-    stripped = " ".join(str(text or "").split())
-    if _RE_EMAIL_OR_URL.search(stripped):
-        return True
-    words = stripped.split()
-    if not words:
-        return False
-    if _RE_AFFILIATION_CUE.search(stripped):
-        return True
-    comma_count = stripped.count(",")
-    # Author byline: many comma-separated names, often with superscript digits or *.
-    if comma_count >= 2 and re.search(r"[A-Za-z][\w'\-]*\s*\d*(?:\*|†)?\s*,", stripped):
-        return True
-    # Affiliation footnote line: "1 Dept. of ..." / "4 The Chinese University ..."
-    if re.match(r"^\s*\d+\s+[A-Z]", stripped) and len(words) <= 18:
-        institution_words = {"dept", "department", "institute", "university", "college", "school", "academy", "research", "center", "centre", "laboratory", "lab"}
-        normalized = re.sub(r"[^a-z\s]", " ", stripped.lower())
-        if any(word in normalized.split() for word in institution_words):
-            return True
-    return False
+    return looks_like_affiliation_or_author_line(text)
 
 
 def _looks_like_numeric_measurement_line(text: str) -> bool:

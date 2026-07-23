@@ -77,6 +77,15 @@ def _get_service():
     return memory_service
 
 
+def _validate_doc_id(svc, doc_id: str | None) -> str | None:
+    if doc_id is None:
+        return None
+    try:
+        return svc.validate_doc_id(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # ==================== API 路由 ====================
 
 @router.get("/profile")
@@ -90,7 +99,7 @@ async def get_profile():
 async def get_session(doc_id: str):
     """获取指定文档的会话记忆"""
     svc = _get_service()
-    return svc.get_session(doc_id)
+    return svc.get_session(_validate_doc_id(svc, doc_id))
 
 
 @router.get("/entries")
@@ -102,6 +111,7 @@ async def list_entries(
 ):
     """按条件列出记忆条目。"""
     svc = _get_service()
+    doc_id = _validate_doc_id(svc, doc_id)
     return {
         "entries": svc.list_entries(
             doc_id=doc_id,
@@ -126,7 +136,7 @@ async def get_entry_trace(entry_id: str):
 async def get_graph_summary(doc_id: str):
     """返回指定文档的轻量图谱摘要。"""
     svc = _get_service()
-    return svc.get_graph_summary(doc_id)
+    return svc.get_graph_summary(_validate_doc_id(svc, doc_id))
 
 
 @router.get("/status", response_model=MemoryStatusResponse)
@@ -140,10 +150,11 @@ async def get_status():
 async def add_entry(body: MemoryEntryCreate):
     """添加记忆条目"""
     svc = _get_service()
+    doc_id = _validate_doc_id(svc, body.doc_id)
     entry = svc.add_entry(
         content=body.content,
         source_type=body.source_type,
-        doc_id=body.doc_id,
+        doc_id=doc_id,
     )
     return MemoryEntryResponse(
         id=entry.id,

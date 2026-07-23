@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import re
 import time
@@ -15,11 +16,65 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from fastapi import HTTPException
 from config import settings
 from services.decompose_service import decompose_question, should_decompose
 from services.retrieval_agent import RetrievalAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_web_search_mode(request) -> str:
+    explicit = str(getattr(request, "web_search_mode", "") or "").strip().lower()
+    if explicit in {"off", "auto", "force"}:
+        return explicit
+    return "auto" if bool(getattr(request, "enable_web_search", False)) else "off"
+
+
+def _intent_field(intent_decision: Any, field: str, default: Any = None) -> Any:
+    """Read a frozen IntentDecision, serialized form, or turn context safely."""
+    missing = object()
+    decision = intent_decision
+    nested = None
+    if isinstance(decision, dict):
+        value = decision.get(field, missing)
+        nested = decision.get("intent")
+    elif decision is not None:
+        value = getattr(decision, field, missing)
+        nested = getattr(decision, "intent", None)
+    else:
+        value = missing
+    if value is missing and nested is not None:
+        value = (
+            nested.get(field, missing)
+            if isinstance(nested, dict)
+            else getattr(nested, field, missing)
+        )
+    return default if value is missing or value is None else value
+
+
+def _frozen_intent_question(
+    intent_decision: Any,
+    intent_question: str,
+    fallback: str,
+) -> str:
+    return str(
+        _intent_field(intent_decision, "intent_question", "")
+        or intent_question
+        or fallback
+        or ""
+    ).strip()
+
+
+def _callable_accepts_keyword(target: Any, keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(target).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == keyword or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 @dataclass(frozen=True)
@@ -39,6 +94,7 @@ class AgentRetrievalDependencies:
     build_agent_detail_citations: Callable[..., list[dict]]
     build_visual_evidence_analyzer: Callable[..., Any] | None = None
     perform_web_search: Callable[..., Any] | None = None
+    primary_key_for_target: Callable[[Any, str, str], str] | None = None
 
 
 def _build_context_from_citation_candidates(citations: list[dict], fallback_context: str = "") -> str:
@@ -181,6 +237,147 @@ def _preview_for_log(text: str | None, limit: int = 80) -> str:
     return compact[:limit].rstrip() + "..."
 
 
+_FATAL_VECTOR_ERROR_MESSAGES = {
+    "vector_embedding_identity_conflict": "当前 Embedding 配置与文档索引不一致，请切换原配置或重建索引",
+    "vector_index_schema_conflict": "当前文档问答索引格式已升级，请按当前解析结果重建",
+    "vector_index_identity_conflict": "当前文档问答索引与请求身份不一致，请重建索引后重试",
+    "vector_search_http_401": "当前 Embedding 凭证无效或已过期，请检查后重试",
+    "vector_search_http_403": "当前 Embedding 服务拒绝访问，请检查权限配置后重试",
+    "vector_index_unavailable": "当前文档向量索引不可用，请重新上传 PDF 或等待索引构建完成",
+}
+
+
+def _is_fatal_vector_error_code(error_code: str) -> bool:
+    normalized = _normalize_agent_error_code(error_code)
+    return bool(
+        normalized
+        and (
+            normalized in _FATAL_VECTOR_ERROR_MESSAGES
+            or normalized.startswith("vector_search_http_")
+        )
+    )
+
+
+def _normalize_agent_error_code(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if re.fullmatch(r"[a-z0-9_]{3,80}", text):
+        return text
+    return ""
+
+
+def _coerce_http_status_code(value: Any) -> int | None:
+    try:
+        status_code = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status_code if 100 <= status_code <= 599 else None
+
+
+def _safe_issue_message(value: Any, limit: int = 240) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _iter_agent_tool_issue_candidates(agent_result: dict):
+    if not isinstance(agent_result, dict):
+        return
+
+    diagnostics = agent_result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        for key in ("tool_errors", "tool_timings", "candidate_pool_trace"):
+            items = diagnostics.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        yield item
+
+    retrieval_diagnostics = agent_result.get("retrieval_diagnostics")
+    if isinstance(retrieval_diagnostics, dict):
+        retrieval_diag = retrieval_diagnostics.get("retrieval")
+        if isinstance(retrieval_diag, dict):
+            tool_errors = retrieval_diag.get("tool_errors")
+            if isinstance(tool_errors, list):
+                for item in tool_errors:
+                    if isinstance(item, dict):
+                        yield item
+            candidate_pool = retrieval_diag.get("candidate_pool")
+            if isinstance(candidate_pool, dict):
+                by_tool = candidate_pool.get("by_tool")
+                if isinstance(by_tool, list):
+                    for item in by_tool:
+                        if isinstance(item, dict):
+                            yield item
+
+    search_history = agent_result.get("search_history")
+    if isinstance(search_history, list):
+        for item in search_history:
+            if isinstance(item, dict):
+                yield item
+
+
+def _match_fatal_vector_issue(
+    item: dict,
+    *,
+    default_tool: str = "",
+) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+
+    owner = str(item.get("channel") or item.get("tool") or default_tool or "").strip().lower()
+    channel_errors = item.get("channel_errors")
+    if isinstance(channel_errors, list):
+        for child in channel_errors:
+            if not isinstance(child, dict):
+                continue
+            matched = _match_fatal_vector_issue(child, default_tool=owner)
+            if matched is not None:
+                return matched
+
+    error_code = _normalize_agent_error_code(
+        item.get("error_code") or item.get("errorCode")
+    )
+    status_code = _coerce_http_status_code(
+        item.get("status_code") or item.get("statusCode")
+    )
+    fatal = bool(item.get("fatal"))
+    if (
+        not fatal
+        or status_code is None
+        or not _is_fatal_vector_error_code(error_code)
+    ):
+        return None
+
+    if owner and owner not in {"vector", "vector_search", "search_document"}:
+        return None
+
+    return {
+        "tool": owner or default_tool or "search_document",
+        "error_code": error_code,
+        "status_code": status_code,
+        "error": _safe_issue_message(item.get("error")),
+    }
+
+
+def _find_fatal_vector_identity_issue(agent_result: dict) -> dict | None:
+    if not isinstance(agent_result, dict):
+        return None
+    for item in _iter_agent_tool_issue_candidates(agent_result):
+        matched = _match_fatal_vector_issue(item)
+        if matched is not None:
+            return matched
+    return None
+
+
+def _fatal_vector_identity_detail(issue: dict | None) -> str:
+    issue = issue if isinstance(issue, dict) else {}
+    error_code = _normalize_agent_error_code(issue.get("error_code"))
+    fallback = _safe_issue_message(issue.get("error"))
+    if error_code in _FATAL_VECTOR_ERROR_MESSAGES:
+        return _FATAL_VECTOR_ERROR_MESSAGES[error_code]
+    if error_code.startswith("vector_search_http_"):
+        return "向量检索请求失败，请稍后重试"
+    return fallback or "向量检索请求失败，请稍后重试"
+
+
 async def _emit_progress(emit_progress: Callable[[dict], Any] | None, event: dict) -> None:
     if emit_progress is None:
         return
@@ -217,6 +414,8 @@ async def run_agent_retrieval_for_context(
     search_query: str,
     query_type: str,
     agent_gate: dict,
+    intent_decision: Any | None = None,
+    intent_question: str = "",
     retrieval_meta: dict | None = None,
     emit_progress: Callable[[dict], Any] | None = None,
     trace: Callable[..., None] | None = None,
@@ -236,6 +435,13 @@ async def run_agent_retrieval_for_context(
 
     retrieval_meta = dict(retrieval_meta or {})
     use_agent = True
+    citation_query = _frozen_intent_question(
+        intent_decision,
+        intent_question,
+        str(search_query or getattr(request, "question", "") or ""),
+    )
+    frozen_query_type = str(_intent_field(intent_decision, "query_type", "") or "").strip()
+    effective_query_type = frozen_query_type or str(query_type or "").strip()
 
     await _emit_progress(emit_progress, {
         "type": "retrieval_progress",
@@ -243,16 +449,28 @@ async def run_agent_retrieval_for_context(
         "message": "正在启动多轮检索代理...",
     })
 
-    agent_api_key = request.api_key or ""
     agent_model, agent_provider, agent_endpoint = deps.get_cheap_model_params(request)
+    # Planner/decomposition requests are an auxiliary provider boundary. The
+    # route resolver permits the chat credential only for the same provider
+    # and endpoint origin.
+    credential_resolver = deps.primary_key_for_target
+    agent_api_key = (
+        credential_resolver(request, agent_provider, agent_endpoint)
+        if callable(credential_resolver)
+        else ""
+    )
 
+    # The route-frozen intent question is the root task. ``search_query`` may
+    # remain useful as retrieval provenance, but must not make the planner
+    # reclassify a rewritten template as a different user intent.
+    decomposition_question = citation_query or str(search_query or request.question or "").strip()
     sub_questions: list = []
-    if should_decompose(request.question or ""):
+    if should_decompose(decomposition_question):
         try:
             sub_questions = await asyncio.wait_for(
                 decompose_question(
-                    question=request.question,
-                    api_key=request.api_key,
+                    question=decomposition_question,
+                    api_key=agent_api_key,
                     model=agent_model,
                     provider=agent_provider,
                     endpoint=agent_endpoint or "",
@@ -264,12 +482,13 @@ async def run_agent_retrieval_for_context(
             logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")
             sub_questions = []
 
+    web_search_mode = _resolve_web_search_mode(request)
     web_search_executor = None
-    if bool(getattr(request, "enable_web_search", False)) and deps.perform_web_search is not None:
+    if web_search_mode != "off" and deps.perform_web_search is not None:
         # Freeze the network query before the planner sees any untrusted PDF
         # evidence. Later planner rounds may decide whether to use the one-shot
         # tool, but document text can never become an outbound query.
-        frozen_web_query = str(search_query or request.question or "").strip()
+        frozen_web_query = citation_query or str(search_query or request.question or "").strip()
 
         async def _agent_web_search():
             return await deps.perform_web_search(
@@ -283,18 +502,37 @@ async def run_agent_retrieval_for_context(
 
         web_search_executor = _agent_web_search
 
+    context_kwargs = {
+        # Embedding calls are an independent provider boundary. Never fall
+        # back to the primary chat credential here: the selected embedding
+        # endpoint may belong to a different provider.
+        "api_key": request.embedding_api_key or "",
+        "use_rerank": bool(request.use_rerank),
+        "reranker_model": request.reranker_model or "",
+        "rerank_provider": request.rerank_provider or "",
+        "rerank_api_key": request.rerank_api_key or "",
+        "rerank_endpoint": request.rerank_endpoint or "",
+        "web_search_executor": web_search_executor,
+        "embedding_model": getattr(request, "embedding_model", None) or "",
+        "embedding_provider": getattr(request, "embedding_provider", None) or "",
+        "embedding_api_host": getattr(request, "embedding_api_host", None) or "",
+    }
+    if _callable_accepts_keyword(deps.build_agent_doc_context, "intent_decision"):
+        context_kwargs["intent_decision"] = intent_decision
     agent_doc_ctx = deps.build_agent_doc_context(
         request.doc_id,
         doc,
         vector_store_dir,
-        api_key=request.embedding_api_key or request.api_key or "",
-        use_rerank=bool(request.use_rerank),
-        reranker_model=request.reranker_model or "",
-        rerank_provider=request.rerank_provider or "",
-        rerank_api_key=request.rerank_api_key or "",
-        rerank_endpoint=request.rerank_endpoint or "",
-        web_search_executor=web_search_executor,
+        **context_kwargs,
     )
+    # Keep custom/test builders compatible while making the route-owned
+    # decision available before any planner tool can run.
+    if intent_decision is not None:
+        set_intent_decision = getattr(agent_doc_ctx, "set_intent_decision", None)
+        if callable(set_intent_decision):
+            set_intent_decision(intent_decision)
+        else:
+            setattr(agent_doc_ctx, "intent_decision", intent_decision)
     visual_analyzer = None
     if deps.build_visual_evidence_analyzer is not None:
         try:
@@ -309,7 +547,7 @@ async def run_agent_retrieval_for_context(
     if callable(configure_visual_analyzer):
         configure_visual_analyzer(
             visual_analyzer,
-            active_question=search_query or request.question or "",
+            active_question=citation_query,
         )
     visual_analysis_available = bool(
         callable(getattr(agent_doc_ctx, "visual_analysis_available", None))
@@ -334,6 +572,8 @@ async def run_agent_retrieval_for_context(
         rerank_provider=request.rerank_provider or "",
         rerank_api_key=request.rerank_api_key or "",
         rerank_endpoint=request.rerank_endpoint or "",
+        web_search_mode=web_search_mode,
+        intent_decision=intent_decision,
     )
 
     agent_result: dict = {}
@@ -344,7 +584,7 @@ async def run_agent_retrieval_for_context(
         agent_timeout = max(agent_timeout, 105.0)
     try:
         agent_events = agent.run(
-            question=search_query or request.question or "",
+            question=citation_query or search_query or request.question or "",
             doc_ctx=agent_doc_ctx,
             doc_name=doc.get("filename", ""),
         )
@@ -440,6 +680,17 @@ async def run_agent_retrieval_for_context(
             if agent_diagnostics.get("fallback_reason"):
                 retrieval_meta["agent_fallback_reason"] = agent_diagnostics.get("fallback_reason")
 
+    fatal_vector_issue = _find_fatal_vector_identity_issue(agent_result)
+    if fatal_vector_issue is not None:
+        detail = _fatal_vector_identity_detail(fatal_vector_issue)
+        status_code = _coerce_http_status_code(fatal_vector_issue.get("status_code")) or 409
+        _trace(
+            "retrieval_agent_fatal_vector_conflict",
+            error_code=fatal_vector_issue.get("error_code", ""),
+            status_code=status_code,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
+
     retrieval_meta["agent_detail"] = agent_detail
     retrieval_meta["agent_mode"] = True
     retrieval_meta["agent_gate"] = deps.annotate_agent_gate(
@@ -448,14 +699,22 @@ async def run_agent_retrieval_for_context(
         agent_mode=True,
         search_query_passthrough=True,
     )
-    retrieval_meta["query_type"] = query_type
+    retrieval_meta["query_type"] = effective_query_type
+    if citation_query:
+        retrieval_meta.setdefault("intent_question", citation_query)
+    frozen_intent_id = str(_intent_field(intent_decision, "intent_id", "") or "").strip()
+    frozen_intent_version = str(_intent_field(intent_decision, "version", "") or "").strip()
+    if frozen_intent_id:
+        retrieval_meta.setdefault("intent_id", frozen_intent_id)
+    if frozen_intent_version:
+        retrieval_meta.setdefault("intent_version", frozen_intent_version)
 
     pages = doc.get("data", {}).get("pages", [])
     if agent_context:
         agent_citation_limit = deps.resolve_citation_candidate_limit(agent_mode=True)
         detail_cits = deps.build_agent_detail_citations(
             agent_detail,
-            query=search_query or request.question or "",
+            query=citation_query,
             sub_questions=sub_questions or None,
             start_ref=1,
             max_citations=agent_citation_limit,
@@ -465,7 +724,7 @@ async def run_agent_retrieval_for_context(
             numbered_ctx, fb_cits = deps.build_numbered_context_and_citations(
                 pages,
                 agent_context,
-                query=search_query or request.question or "",
+                query=citation_query,
                 max_citations=fallback_limit,
             )
         else:
@@ -494,7 +753,7 @@ async def run_agent_retrieval_for_context(
         agent_citations = fb_cits or deps.generate_page_level_citations(
             pages,
             agent_context,
-            query=search_query or request.question or "",
+            query=citation_query,
             max_citations=agent_citation_limit,
         )
         retrieval_meta["citations"] = agent_citations
@@ -517,7 +776,7 @@ async def run_agent_retrieval_for_context(
         agent_citation_limit = deps.resolve_citation_candidate_limit(agent_mode=True)
         detail_cits = deps.build_agent_detail_citations(
             agent_detail,
-            query=search_query or request.question or "",
+            query=citation_query,
             sub_questions=sub_questions or None,
             start_ref=1,
             max_citations=agent_citation_limit,
@@ -548,7 +807,7 @@ async def run_agent_retrieval_for_context(
     numbered_ctx, fb_cits = deps.build_numbered_context_and_citations(
         pages,
         fallback_text,
-        query=search_query or request.question or "",
+        query=citation_query,
     )
     context = numbered_ctx or fallback_text
     retrieval_meta["citations"] = fb_cits

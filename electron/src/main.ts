@@ -9,8 +9,9 @@
  * - 优雅关闭
  */
 
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session } from 'electron';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { ProcessManager, BackendInfo } from './process-manager';
 
 // ---- 单例模式 ----
@@ -22,7 +23,75 @@ if (!gotTheLock) {
 
 let mainWindow: BrowserWindow | null = null;
 let backendInfo: BackendInfo | null = null;
+let pendingStartupErrorUrl = '';
 const processManager = new ProcessManager();
+
+function isSafeExternalUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedRendererUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    if (app.isPackaged) {
+      if (parsed.protocol !== 'file:') return false;
+      const rendererRoot = path.resolve(process.resourcesPath, 'renderer');
+      const filePath = path.resolve(fileURLToPath(parsed));
+      return filePath === rendererRoot || filePath.startsWith(`${rendererRoot}${path.sep}`);
+    }
+    return parsed.origin === 'http://localhost:3000' || parsed.origin === 'http://127.0.0.1:3000';
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedNavigation(value: string): boolean {
+  return isTrustedRendererUrl(value) || Boolean(pendingStartupErrorUrl && value === pendingStartupErrorUrl);
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function requireTrustedRenderer(event: { senderFrame: { url: string } }): void {
+  if (!isTrustedRendererUrl(event.senderFrame.url)) {
+    throw new Error('Untrusted renderer IPC request');
+  }
+}
+
+async function openExternalSafely(value: string): Promise<void> {
+  const safeUrl = isSafeExternalUrl(value);
+  if (!safeUrl) throw new Error('Only http/https URLs are allowed');
+  await shell.openExternal(safeUrl);
+}
+
+function configureSessionSecurity(): void {
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
+}
+
+function installBackendRequestAuthentication(info: BackendInfo): void {
+  const backendOrigin = new URL(info.baseUrl).origin;
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${backendOrigin}/*`] },
+    (details, callback) => {
+      callback({
+        cancel: false,
+        requestHeaders: { ...details.requestHeaders, 'X-ChatPDF-Token': info.token },
+      });
+    }
+  );
+}
 
 // ---- 单例：第二个实例启动时唤醒第一个 ----
 app.on('second-instance', (_event, argv) => {
@@ -49,6 +118,8 @@ function createWindow(): void {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
+      webviewTag: false,
       preload: path.join(__dirname, 'preload.js'),
     },
     show: false, // 等后端就绪后再显示
@@ -58,11 +129,23 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedNavigation(url)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) void openExternalSafely(url);
+  });
+
+  mainWindow.webContents.on('will-redirect', (event, url) => {
+    if (isAllowedNavigation(url)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) void openExternalSafely(url);
+  });
+
+  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+
   // 拦截外部链接，在系统浏览器中打开
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      shell.openExternal(url);
-    }
+    if (isSafeExternalUrl(url)) void openExternalSafely(url);
     return { action: 'deny' };
   });
 }
@@ -93,6 +176,7 @@ function showStartupError(error: Error): void {
     <html>
     <head>
       <meta charset="utf-8">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
       <title>ChatPDF - Startup Error</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 40px; background: #f8f9fa; color: #333; }
@@ -105,13 +189,9 @@ function showStartupError(error: Error): void {
     </head>
     <body>
       <h1>Backend startup failed</h1>
-      <p>${error.message}</p>
+      <p>${escapeHtml(error.message)}</p>
       <h3>Diagnostics</h3>
-      <pre id="diag">${diagnostics}</pre>
-      <button class="btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('diag').textContent)">
-        Copy diagnostics
-      </button>
-      <button class="btn-secondary" onclick="window.close()">Close</button>
+      <pre>${escapeHtml(diagnostics)}</pre>
       <h3>Possible solutions</h3>
       <ul>
         <li>Check if antivirus is blocking the application</li>
@@ -122,29 +202,38 @@ function showStartupError(error: Error): void {
     </html>
   `;
 
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
+  pendingStartupErrorUrl = `data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`;
+  mainWindow.webContents.once('did-finish-load', () => {
+    pendingStartupErrorUrl = '';
+  });
+  mainWindow.loadURL(pendingStartupErrorUrl);
   mainWindow.show();
 }
 
 // ---- IPC 处理 ----
 function setupIPC(): void {
-  ipcMain.handle('get-api-base-url', () => {
+  ipcMain.handle('get-api-base-url', (event) => {
+    requireTrustedRenderer(event);
     return backendInfo?.baseUrl || 'http://127.0.0.1:8000';
   });
 
-  ipcMain.handle('get-backend-token', () => {
-    return backendInfo?.token || '';
+  ipcMain.handle('open-external', async (event, url: string) => {
+    requireTrustedRenderer(event);
+    await openExternalSafely(url);
   });
 
-  ipcMain.handle('get-version', () => {
+  ipcMain.handle('get-version', (event) => {
+    requireTrustedRenderer(event);
     return app.getVersion();
   });
 
-  ipcMain.handle('open-data-dir', () => {
+  ipcMain.handle('open-data-dir', (event) => {
+    requireTrustedRenderer(event);
     shell.openPath(app.getPath('userData'));
   });
 
-  ipcMain.handle('select-file', async (_event, options?: { filters?: Array<{ name: string; extensions: string[] }> }) => {
+  ipcMain.handle('select-file', async (event, options?: { filters?: Array<{ name: string; extensions: string[] }> }) => {
+    requireTrustedRenderer(event);
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile'],
@@ -154,7 +243,8 @@ function setupIPC(): void {
     return result.filePaths[0];
   });
 
-  ipcMain.handle('select-directory', async () => {
+  ipcMain.handle('select-directory', async (event) => {
+    requireTrustedRenderer(event);
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory', 'createDirectory'],
@@ -166,12 +256,14 @@ function setupIPC(): void {
 
 // ---- 应用生命周期 ----
 app.whenReady().then(async () => {
+  configureSessionSecurity();
   setupIPC();
   createWindow();
 
   try {
     // 启动 Python 后端
     backendInfo = await processManager.start();
+    installBackendRequestAuthentication(backendInfo);
     console.log(`[Main] Backend ready at ${backendInfo.baseUrl}`);
 
     // 加载前端

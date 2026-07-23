@@ -2,8 +2,9 @@
  * 桌面模式适配层
  *
  * 在 Electron 桌面模式下：
- * - 拦截 fetch 请求，自动添加后端 base URL 和安全 token
+ * - 拦截 fetch 请求，自动添加后端 base URL
  * - 拦截 XMLHttpRequest，同理处理（用于文件上传等场景）
+ * - 后端 token 仅保留在 Electron 主进程，由网络层自动注入
  * - 提供 capabilities 查询接口
  *
  * 在 Web 模式下（Vite 代理）：
@@ -16,7 +17,6 @@
 const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
 
 let _apiBaseUrl = '';
-let _backendToken = '';
 let _initialized = false;
 
 /**
@@ -27,7 +27,6 @@ async function initDesktopMode() {
 
   try {
     _apiBaseUrl = await window.chatpdfDesktop.getApiBaseUrl();
-    _backendToken = await window.chatpdfDesktop.getBackendToken();
     _initialized = true;
   } catch (err) {
     console.error('[Desktop] Failed to initialize:', err);
@@ -35,7 +34,7 @@ async function initDesktopMode() {
 }
 
 /**
- * 拦截 fetch —— 为相对路径请求添加 base URL 和 token header
+ * 拦截 fetch —— 为相对路径请求添加 base URL
  */
 if (isDesktop) {
   const originalFetch = window.fetch;
@@ -52,14 +51,7 @@ if (isDesktop) {
     if (url.startsWith('/') || (!url.startsWith('http://') && !url.startsWith('https://'))) {
       url = `${_apiBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
 
-      // 构建新的 init，注入 token header
-      const newInit = { ...init };
-      newInit.headers = new Headers(newInit.headers || {});
-      if (_backendToken) {
-        newInit.headers.set('X-ChatPDF-Token', _backendToken);
-      }
-
-      return originalFetch.call(window, url, newInit);
+      return originalFetch.call(window, url, init);
     }
 
     // 外部请求（如 CDN 资源）不修改
@@ -71,13 +63,11 @@ if (isDesktop) {
    */
   const OriginalXHR = window.XMLHttpRequest;
   const originalOpen = OriginalXHR.prototype.open;
-  const originalSetRequestHeader = OriginalXHR.prototype.setRequestHeader;
   const originalSend = OriginalXHR.prototype.send;
 
   OriginalXHR.prototype.open = function (method, url, ...args) {
-    // 保存原始 URL 以便在 send 时判断
+    // 保存原始 URL，便于调试和兼容现有上传逻辑。
     this._chatpdfUrl = url;
-    this._chatpdfHasTokenHeader = false;
 
     if (typeof url === 'string' && (url.startsWith('/') || (!url.startsWith('http://') && !url.startsWith('https://')))) {
       const fullUrl = `${_apiBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
@@ -87,20 +77,7 @@ if (isDesktop) {
     return originalOpen.call(this, method, url, ...args);
   };
 
-  OriginalXHR.prototype.setRequestHeader = function (name, value) {
-    if (typeof name === 'string' && name.toLowerCase() === 'x-chatpdf-token') {
-      this._chatpdfHasTokenHeader = true;
-    }
-    return originalSetRequestHeader.call(this, name, value);
-  };
-
   OriginalXHR.prototype.send = function (...args) {
-    // 为后端请求注入 token；若业务代码已手动设置则不重复注入，避免 "token, token" 导致鉴权失败
-    if (_backendToken && this._chatpdfUrl &&
-        !this._chatpdfHasTokenHeader &&
-        (this._chatpdfUrl.startsWith('/') || this._chatpdfUrl.startsWith(_apiBaseUrl))) {
-      this.setRequestHeader('X-ChatPDF-Token', _backendToken);
-    }
     return originalSend.call(this, ...args);
   };
 }

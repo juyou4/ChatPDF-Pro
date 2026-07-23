@@ -115,7 +115,7 @@ class QueryRewriter:
                 rewritten = self._resolve_pronouns(rewritten, selected_text)
 
             # 第二步：应用口语化模式替换
-            rewritten = self._replace_colloquial(rewritten)
+            rewritten = self.rewrite_for_intent(rewritten)
 
             # 第三步（新增）：如果有 selected_text 且查询未被代词解析改变，
             # 追加 selected_text 关键内容以增强检索
@@ -155,6 +155,17 @@ class QueryRewriter:
                 # 只应用第一个匹配的模式，避免多次替换导致语义混乱
                 break
         return result
+
+    def rewrite_for_intent(self, query: str) -> str:
+        """只做不增义的口语规范化，不注入选中文本或检索模板。"""
+        if not query or not query.strip():
+            return query
+        sample = query.strip()
+        trailing_match = re.search(r"([。！？!?.,，]+)$", sample)
+        trailing = trailing_match.group(1) if trailing_match else ""
+        core = sample[:-len(trailing)] if trailing else sample
+        rewritten = self._replace_colloquial(core)
+        return f"{rewritten}{trailing}" if trailing else rewritten
 
     def _resolve_pronouns(self, query: str, selected_text: str) -> str:
         """解析指示代词，用选中文本的关键内容替换
@@ -653,6 +664,7 @@ class QueryRewriter:
         provider: str = "",
         endpoint: str = "",
         evidence_need: Optional[list[str]] = None,
+        intent_only: bool = False,
     ) -> str:
         """用 LLM 改写查询，支持多轮对话指代消解
 
@@ -672,10 +684,14 @@ class QueryRewriter:
             改写后的查询，失败时返回 regex 改写结果
         """
         # 第一步：先跑 regex 改写
-        rewritten = self.rewrite(
-            query,
-            selected_text=selected_text,
-            evidence_need=evidence_need,
+        rewritten = (
+            self.rewrite_for_intent(query)
+            if intent_only
+            else self.rewrite(
+                query,
+                selected_text=selected_text,
+                evidence_need=evidence_need,
+            )
         )
 
         if not api_key:
@@ -693,7 +709,7 @@ class QueryRewriter:
             history_text = "\n".join(history_lines)
 
         selected_hint = ""
-        if selected_text and selected_text.strip():
+        if not intent_only and selected_text and selected_text.strip():
             selected_hint = f"\n用户选中的文本：{selected_text[:200]}"
 
         prompt = f"""请将以下用户查询改写为一个独立的、适合检索文档的查询语句。

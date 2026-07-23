@@ -9,6 +9,8 @@ Figure Render - 图像裁剪与渲染服务
 """
 import base64
 import logging
+import threading
+from collections import OrderedDict
 from typing import Tuple, Optional, List
 import fitz  # PyMuPDF
 
@@ -16,9 +18,11 @@ from schemas.figure_schema import LogicalFigureSchema, RenderResult, FigureImage
 
 logger = logging.getLogger(__name__)
 
-# 页级 YOLO 缓存: key=page_number → List[fitz.Rect] (ImageBody bboxes in page pts)
-# 避免同页多 figure 重复跑 YOLO（CPU ~2-5s/次）
-_yolo_page_cache: dict = {}
+# YOLO cache is scoped to an open PDF instance plus page number. Page numbers
+# alone caused document B page 1 to reuse document A's detected figure boxes.
+_yolo_page_cache: OrderedDict[tuple[int, int], List[fitz.Rect]] = OrderedDict()
+_yolo_page_cache_lock = threading.RLock()
+_YOLO_PAGE_CACHE_LIMIT = 64
 
 
 # 渲染配置
@@ -299,11 +303,13 @@ def _get_page_body_rects(page) -> Optional[List]:
 
     首次调用渲染页面 + YOLO 推理，后续同页直接返回缓存。
     """
-    global _yolo_page_cache
-
-    page_num = page.number
-    if page_num in _yolo_page_cache:
-        return _yolo_page_cache[page_num]
+    document = getattr(page, "parent", None)
+    cache_key = (id(document), int(page.number))
+    with _yolo_page_cache_lock:
+        cached = _yolo_page_cache.get(cache_key)
+        if cached is not None:
+            _yolo_page_cache.move_to_end(cache_key)
+            return cached
 
     try:
         from services.layout_service import is_available, get_image_body_bboxes, pixel_bbox_to_page_pts
@@ -326,7 +332,11 @@ def _get_page_body_rects(page) -> Optional[List]:
 
         body_bboxes_px = get_image_body_bboxes(page_image, conf=0.15)
         if not body_bboxes_px:
-            _yolo_page_cache[page_num] = []
+            with _yolo_page_cache_lock:
+                _yolo_page_cache[cache_key] = []
+                _yolo_page_cache.move_to_end(cache_key)
+                while len(_yolo_page_cache) > _YOLO_PAGE_CACHE_LIMIT:
+                    _yolo_page_cache.popitem(last=False)
             return []
 
         rects = []
@@ -336,10 +346,11 @@ def _get_page_body_rects(page) -> Optional[List]:
             )
             rects.append(fitz.Rect(bbox_pts))
 
-        # 缓存上限
-        if len(_yolo_page_cache) >= 30:
-            _yolo_page_cache.clear()
-        _yolo_page_cache[page_num] = rects
+        with _yolo_page_cache_lock:
+            _yolo_page_cache[cache_key] = rects
+            _yolo_page_cache.move_to_end(cache_key)
+            while len(_yolo_page_cache) > _YOLO_PAGE_CACHE_LIMIT:
+                _yolo_page_cache.popitem(last=False)
         return rects
 
     except Exception as e:

@@ -11,6 +11,7 @@
 3. 兜底 server（源码运行默认 server）
 """
 
+import ipaddress
 import os
 import sys
 import logging
@@ -30,6 +31,13 @@ class RuntimeConfig(BaseSettings):
 
     # 后端安全 token（桌面模式下由 Electron 生成并传入）
     CHATPDF_BACKEND_TOKEN: str = ""
+
+    # Server 模式默认只绑定回环地址。需要局域网/公网部署时必须显式设置，
+    # 并同时配置 CHATPDF_BACKEND_TOKEN 与 CHATPDF_CORS_ORIGINS。
+    CHATPDF_HOST: str = ""
+
+    # 逗号分隔的跨域白名单。留空时仅允许本地开发前端。
+    CHATPDF_CORS_ORIGINS: str = ""
 
     # 监听端口（桌面模式下由 Electron 分配）
     CHATPDF_PORT: int = 8000
@@ -85,15 +93,69 @@ class RuntimeConfig(BaseSettings):
 
     @property
     def host(self) -> str:
-        """监听地址：桌面模式强制 127.0.0.1"""
+        """监听地址：默认仅限本机，远程部署必须显式指定。"""
         if self.is_desktop:
             return "127.0.0.1"
-        return "0.0.0.0"
+        return (self.CHATPDF_HOST or "127.0.0.1").strip()
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        """判断监听地址是否只暴露给本机。"""
+        normalized = (host or "").strip().strip("[]").lower()
+        if normalized in {"localhost", "localhost.localdomain"}:
+            return True
+        try:
+            return ipaddress.ip_address(normalized).is_loopback
+        except ValueError:
+            return False
+
+    @property
+    def is_remote_host(self) -> bool:
+        """是否显式监听在非回环地址。"""
+        return not self._is_loopback_host(self.host)
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """返回明确的 CORS 白名单，绝不使用通配符。"""
+        configured = [
+            origin.strip().rstrip("/")
+            for origin in self.CHATPDF_CORS_ORIGINS.split(",")
+            if origin.strip()
+        ]
+        if configured:
+            if "*" in configured:
+                raise ValueError("CHATPDF_CORS_ORIGINS 不支持 '*'，请配置明确的受信任来源")
+            return list(dict.fromkeys(configured))
+
+        local_origins = [
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+        # 打包后的 Electron renderer 使用 file://，其 Origin 为 null。桌面
+        # 后端始终要求随机 token，因此允许该 Origin 不会降低网络边界。
+        if self.is_desktop:
+            return [*local_origins, "null"]
+        # 远程部署必须由管理员显式配置允许源；默认不发送 CORS 响应头。
+        return [] if self.is_remote_host else local_origins
+
+    def validate_startup_security(self) -> None:
+        """在真正监听端口前验证运行模式的最低安全条件。"""
+        if self.is_desktop and not self.CHATPDF_BACKEND_TOKEN:
+            raise RuntimeError("桌面模式必须配置 CHATPDF_BACKEND_TOKEN")
+        if self.is_remote_host and not self.CHATPDF_BACKEND_TOKEN:
+            raise RuntimeError(
+                "非回环地址监听必须配置 CHATPDF_BACKEND_TOKEN；"
+                "如需远程前端访问，还必须配置 CHATPDF_CORS_ORIGINS"
+            )
+        if self.is_remote_host and not self.cors_origins:
+            logger.warning("[RuntimeMode] 远程监听未配置 CHATPDF_CORS_ORIGINS，将拒绝所有跨域浏览器请求")
 
     @property
     def requires_token(self) -> bool:
-        """是否需要 token 校验"""
-        return self.is_desktop and bool(self.CHATPDF_BACKEND_TOKEN)
+        """是否需要 token 校验。桌面模式在配置缺失时也必须 fail closed。"""
+        return self.is_desktop or bool(self.CHATPDF_BACKEND_TOKEN)
 
 
 # 全局单例

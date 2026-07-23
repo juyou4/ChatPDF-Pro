@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -11,9 +12,10 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import faiss
@@ -22,15 +24,13 @@ import numpy as np
 from fastapi import HTTPException
 from config import settings as _settings
 from services import bm25_service as _bm25_service, chunk_expander as _chunk_expander, hybrid_search as _hybrid_search
-try:
-    from sentence_transformers import SentenceTransformer
-    _HAS_SENTENCE_TRANSFORMERS = True
-except (ImportError, OSError):
-    _HAS_SENTENCE_TRANSFORMERS = False
+SentenceTransformer = None
+_HAS_SENTENCE_TRANSFORMERS = importlib.util.find_spec("sentence_transformers") is not None
+_SENTENCE_TRANSFORMER_IMPORT_LOCK = threading.Lock()
 
 from models.api_key_selector import select_api_key
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
-from models.model_id_resolver import resolve_model_id, get_available_model_ids
+from models.model_id_resolver import PROVIDER_BASE_URL_HINTS, resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
 from runtime_mode import runtime
 from services.formula_text import build_formula_alias_text, formula_term_matches, looks_formula_like
@@ -50,6 +50,482 @@ from services.table_visual_metadata import build_table_visual_metadata
 logger = logging.getLogger(__name__)
 
 
+def _get_sentence_transformer_class():
+    """延迟导入本地模型运行时，避免远程模型用户为 PyTorch 启动成本买单。"""
+    global SentenceTransformer, _HAS_SENTENCE_TRANSFORMERS
+    if not _HAS_SENTENCE_TRANSFORMERS:
+        raise ImportError("sentence-transformers 未安装")
+    if SentenceTransformer is None:
+        with _SENTENCE_TRANSFORMER_IMPORT_LOCK:
+            if SentenceTransformer is None:
+                try:
+                    from sentence_transformers import SentenceTransformer as sentence_transformer_class
+                except (ImportError, OSError):
+                    _HAS_SENTENCE_TRANSFORMERS = False
+                    raise
+                SentenceTransformer = sentence_transformer_class
+    return SentenceTransformer
+
+# 只要分块来源、候选隔离或 semantic-group 构建规则发生变化就必须递增。
+# 该版本用于阻止旧的污染型 semantic groups 继续参与新检索链路。
+RAG_INDEX_VERSION = 3
+EMBEDDING_IDENTITY_VERSION = 1
+EMBEDDING_IDENTITY_MISMATCH_DETAIL = "当前 Embedding 配置与文档索引不一致，请切换原配置或重建索引"
+KEYLESS_EMBEDDING_PROVIDERS = frozenset({"local", "ollama"})
+_PROVIDER_DEFAULT_BASE_URLS = {
+    "silicon": "https://api.siliconflow.cn/v1",
+    "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "minimax": "https://api.minimax.chat/v1",
+    "openai": "https://api.openai.com/v1",
+}
+_EMBEDDING_PROVIDER_SYNONYMS = {
+    "openai": "openai",
+    "local": "local",
+    "silicon": "silicon",
+    "siliconflow": "silicon",
+    "aliyun": "aliyun",
+    "dashscope": "aliyun",
+    "moonshot": "moonshot",
+    "kimi": "moonshot",
+    "deepseek": "deepseek",
+    "gemini": "gemini",
+    "google": "gemini",
+    "zhipu": "zhipu",
+    "bigmodel": "zhipu",
+    "glm": "zhipu",
+    "minimax": "minimax",
+    "xiaomi": "xiaomi",
+    "mimo": "xiaomi",
+}
+
+
+def _embedding_identity_conflict(reason: str = "") -> HTTPException:
+    detail = EMBEDDING_IDENTITY_MISMATCH_DETAIL
+    if reason:
+        detail = f"{detail}（{reason}）"
+    return HTTPException(status_code=409, detail=detail)
+
+
+def _normalize_embedding_provider(provider: Optional[str]) -> str:
+    raw = str(provider or "").strip()
+    if not raw:
+        return ""
+    return _EMBEDDING_PROVIDER_SYNONYMS.get(raw.casefold(), raw.casefold())
+
+
+def _infer_embedding_provider_from_base_url(base_url: Optional[str]) -> str:
+    raw = str(base_url or "").strip()
+    if not raw:
+        return ""
+    normalized = _normalize_remote_embedding_base_url(raw)
+    host = (urlparse(normalized).hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return ""
+    for provider, hint in PROVIDER_BASE_URL_HINTS.items():
+        if hint and hint in host:
+            return _normalize_embedding_provider(provider)
+    return ""
+
+
+def _pick_canonical_embedding_provider(*candidates: Optional[str]) -> str:
+    for candidate in candidates:
+        normalized = _normalize_embedding_provider(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _registered_embedding_provider(config: Optional[dict]) -> str:
+    """Resolve the credential owner recorded by a model registry entry."""
+    resolved = config if isinstance(config, dict) else {}
+    provider_id = _normalize_embedding_provider(resolved.get("provider_id"))
+    if provider_id:
+        return provider_id
+
+    protocol_provider = _normalize_embedding_provider(resolved.get("provider"))
+    if protocol_provider == "local":
+        return "local"
+
+    endpoint_provider = _infer_embedding_provider_from_base_url(
+        resolved.get("base_url")
+    )
+    if endpoint_provider:
+        return endpoint_provider
+
+    # ``provider=openai`` commonly means an OpenAI-compatible protocol. It is
+    # only the credential owner when no more specific registry/host signal is
+    # available.
+    return protocol_provider
+
+
+def _normalize_remote_embedding_base_url(api_base: Optional[str]) -> str:
+    """归一化并校验 OpenAI 兼容 embedding base_url。"""
+    raw = (api_base or "").strip()
+    if not raw:
+        return _PROVIDER_DEFAULT_BASE_URLS["openai"]
+
+    parsed = urlparse(raw.rstrip("/"))
+    scheme = str(parsed.scheme or "").strip().lower()
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Embedding API 地址格式无效")
+    if parsed.username or parsed.password:
+        raise ValueError("Embedding API 地址不允许包含用户名或密码")
+
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ValueError("Embedding API 地址缺少主机名")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Embedding API 地址端口无效") from exc
+
+    if (scheme, port) in {("https", 443), ("http", 80)}:
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/embeddings"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+            break
+    if not path:
+        path = "/v1"
+
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _canonicalize_embedding_identity(
+    embedding_model_id: Optional[str],
+    *,
+    embedding_provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> dict:
+    raw_model = str(embedding_model_id or "").strip()
+    if not raw_model:
+        raise ValueError("Embedding 模型不能为空")
+
+    registry_key, config = resolve_model_id(raw_model)
+    explicit_provider = _normalize_embedding_provider(embedding_provider)
+    raw_provider_prefix = ""
+    if ":" in raw_model:
+        provider_part, _model_part = raw_model.split(":", 1)
+        raw_provider_prefix = _normalize_embedding_provider(provider_part)
+    if (
+        explicit_provider
+        and raw_provider_prefix
+        and explicit_provider != raw_provider_prefix
+    ):
+        raise ValueError("Embedding 模型前缀与 embedding_provider 不一致")
+
+    requested_provider = explicit_provider or raw_provider_prefix
+    if registry_key is not None:
+        canonical_model = registry_key
+        resolved_config = config or {}
+        registered_provider = _registered_embedding_provider(resolved_config)
+        if (
+            requested_provider
+            and registered_provider
+            and requested_provider != registered_provider
+        ):
+            raise ValueError("Embedding 模型与 embedding_provider 不一致")
+        provider = _pick_canonical_embedding_provider(
+            requested_provider,
+            registered_provider,
+            _infer_embedding_provider_from_base_url(base_url),
+            get_model_provider(canonical_model),
+        )
+        base_candidate = base_url or resolved_config.get("base_url") or ""
+    else:
+        canonical_model = raw_model
+        provider_from_model = ""
+        if not provider_from_model:
+            provider_from_model = _normalize_embedding_provider(get_model_provider(raw_model))
+        provider = _pick_canonical_embedding_provider(
+            requested_provider,
+            _infer_embedding_provider_from_base_url(base_url),
+            provider_from_model,
+            "openai",
+        )
+        base_candidate = base_url or _PROVIDER_DEFAULT_BASE_URLS.get(provider, "")
+
+    if provider == "local":
+        if str(base_candidate or "").strip():
+            raise ValueError("本地 Embedding 模型不应配置 embedding_api_host")
+        canonical_api_host = ""
+    else:
+        if not str(base_candidate or "").strip():
+            raise ValueError("远程 Embedding 模型需要显式 embedding_api_host")
+        canonical_api_host = _normalize_remote_embedding_base_url(
+            base_candidate
+        )
+        endpoint_provider = _infer_embedding_provider_from_base_url(
+            canonical_api_host
+        )
+        if endpoint_provider and endpoint_provider != provider:
+            raise ValueError("embedding_api_host 与 embedding_provider 不一致")
+
+    return {
+        "model": canonical_model,
+        "provider": provider or "openai",
+        "api_host": canonical_api_host,
+        "is_local": provider == "local",
+    }
+
+
+def _embedding_identity_matches(left: dict, right: dict) -> bool:
+    return (
+        str(left.get("model") or "") == str(right.get("model") or "")
+        and str(left.get("provider") or "") == str(right.get("provider") or "")
+        and str(left.get("api_host") or "") == str(right.get("api_host") or "")
+    )
+
+
+def _resolve_index_embedding_identity(data: dict) -> dict:
+    try:
+        identity_version = int(data.get("embedding_identity_version") or 0)
+    except (TypeError, ValueError):
+        identity_version = 0
+    if not _is_supported_embedding_identity_version(identity_version):
+        raise ValueError("索引使用了当前服务不支持的 embedding_identity_version")
+
+    identity = _canonicalize_embedding_identity(
+        data.get("embedding_model"),
+        embedding_provider=data.get("embedding_provider"),
+        base_url=data.get("embedding_api_host"),
+    )
+    identity["version"] = identity_version
+    return identity
+
+
+def _resolve_requested_embedding_identity(
+    *,
+    embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_api_host: Optional[str] = None,
+) -> tuple[Optional[dict], dict]:
+    presence = {
+        "model": bool(str(embedding_model or "").strip()),
+        "provider": bool(str(embedding_provider or "").strip()),
+        "api_host": bool(str(embedding_api_host or "").strip()),
+    }
+    if not any(presence.values()):
+        return None, presence
+    if not presence["model"]:
+        raise _embedding_identity_conflict("缺少查询 Embedding 模型标识")
+
+    try:
+        identity = _canonicalize_embedding_identity(
+            embedding_model,
+            embedding_provider=embedding_provider,
+            base_url=embedding_api_host,
+        )
+    except ValueError as exc:
+        raise _embedding_identity_conflict(str(exc)) from exc
+    return identity, presence
+
+
+def _resolve_verified_query_embedding_identity(
+    data: dict,
+    *,
+    api_key: Optional[str],
+    embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_api_host: Optional[str] = None,
+) -> dict:
+    try:
+        index_identity = _resolve_index_embedding_identity(data)
+    except ValueError as exc:
+        raise _embedding_identity_conflict(str(exc)) from exc
+
+    requested_identity, requested_presence = _resolve_requested_embedding_identity(
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_api_host=embedding_api_host,
+    )
+    index_is_local = bool(index_identity.get("is_local"))
+    if not _is_supported_embedding_identity_version(index_identity.get("version")):
+        raise _embedding_identity_conflict("文档索引的 Embedding 身份版本不受当前服务支持，请重建索引")
+    index_is_new = _is_current_embedding_identity_version(index_identity.get("version"))
+
+    if requested_identity and not _embedding_identity_matches(index_identity, requested_identity):
+        raise _embedding_identity_conflict()
+
+    if index_is_local:
+        return {
+            "model": index_identity["model"],
+            "provider": index_identity["provider"],
+            "api_host": "",
+            "api_key": None,
+        }
+
+    if not all(requested_presence.values()):
+        if index_is_new or requested_identity is None:
+            raise _embedding_identity_conflict(
+                "远程索引查询必须显式提供 embedding_model/provider/api_host"
+            )
+        raise _embedding_identity_conflict(
+            "旧远程索引查询必须显式提供 embedding_model/provider/api_host"
+        )
+
+    if requested_identity is None or not _embedding_identity_matches(index_identity, requested_identity):
+        raise _embedding_identity_conflict()
+
+    if (
+        index_identity["provider"] not in KEYLESS_EMBEDDING_PROVIDERS
+        and not str(api_key or "").strip()
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail=_QUERY_EMBEDDING_AUTH_ERROR_DETAIL,
+        )
+
+    return {
+        "model": index_identity["model"],
+        "provider": index_identity["provider"],
+        "api_host": index_identity["api_host"],
+        "api_key": api_key if str(api_key or "").strip() else None,
+    }
+
+
+def _normalize_semantic_generation_identity(raw: Optional[dict]) -> dict:
+    data = raw if isinstance(raw, dict) else {}
+    provider = str(data.get("embedding_provider") or "").strip()
+    try:
+        identity_version = int(data.get("embedding_identity_version") or 0)
+    except (TypeError, ValueError):
+        identity_version = 0
+    try:
+        vector_dimension = int(data.get("vector_dimension") or 0)
+    except (TypeError, ValueError):
+        vector_dimension = 0
+    return {
+        "parse_generation": str(data.get("parse_generation") or data.get("transaction_id") or "").strip(),
+        "document_source_hash": str(data.get("document_source_hash") or data.get("source_hash") or "").strip(),
+        "vector_build_id": str(data.get("vector_build_id") or "").strip(),
+        "embedding_identity_version": identity_version,
+        "embedding_model": str(data.get("embedding_model") or "").strip(),
+        "embedding_provider": provider,
+        "embedding_api_host": "" if provider == "local" else str(data.get("embedding_api_host") or "").strip(),
+        "vector_dimension": vector_dimension,
+    }
+
+
+def _semantic_generation_identity_complete(identity: Optional[dict]) -> bool:
+    normalized = _normalize_semantic_generation_identity(identity)
+    return bool(
+        normalized.get("parse_generation")
+        and normalized.get("document_source_hash")
+        and normalized.get("vector_build_id")
+        and _is_current_embedding_identity_version(normalized.get("embedding_identity_version"))
+        and normalized.get("embedding_model")
+        and normalized.get("embedding_provider")
+        and (
+            normalized.get("embedding_provider") == "local"
+            or normalized.get("embedding_api_host")
+        )
+        and int(normalized.get("vector_dimension") or 0) > 0
+    )
+
+
+def _semantic_generation_identity_matches(left: Optional[dict], right: Optional[dict]) -> bool:
+    normalized_left = _normalize_semantic_generation_identity(left)
+    normalized_right = _normalize_semantic_generation_identity(right)
+    return all(
+        str(normalized_left.get(key) or "") == str(normalized_right.get(key) or "")
+        for key in (
+            "parse_generation",
+            "document_source_hash",
+            "vector_build_id",
+            "embedding_identity_version",
+            "embedding_model",
+            "embedding_provider",
+            "embedding_api_host",
+            "vector_dimension",
+        )
+    )
+
+
+def _extract_vector_semantic_identity(data: Optional[dict]) -> dict:
+    payload = data if isinstance(data, dict) else {}
+    index_meta = payload.get("index_meta") if isinstance(payload.get("index_meta"), dict) else {}
+    try:
+        embedding_identity = _resolve_index_embedding_identity(payload)
+    except ValueError:
+        embedding_identity = {
+            "version": int(payload.get("embedding_identity_version") or 0),
+            "model": str(payload.get("embedding_model") or "").strip(),
+            "provider": str(payload.get("embedding_provider") or "").strip(),
+            "api_host": str(payload.get("embedding_api_host") or "").strip(),
+        }
+    return _normalize_semantic_generation_identity(
+        {
+            "parse_generation": index_meta.get("parse_generation"),
+            "document_source_hash": index_meta.get("document_source_hash"),
+            "vector_build_id": payload.get("vector_build_id"),
+            "embedding_identity_version": embedding_identity.get("version"),
+            "embedding_model": embedding_identity.get("model"),
+            "embedding_provider": embedding_identity.get("provider"),
+            "embedding_api_host": embedding_identity.get("api_host"),
+            "vector_dimension": payload.get("vector_dimension"),
+        }
+    )
+
+
+def _embedding_cache_scope(
+    embedding_model_id: str,
+    embedding_provider: str,
+    embedding_api_host: str,
+) -> str:
+    raw = json.dumps(
+        {
+            "model": str(embedding_model_id or ""),
+            "provider": str(embedding_provider or ""),
+            "api_host": str(embedding_api_host or ""),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "embed-scope:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _ensure_query_vector_matches_index(vec, index) -> np.ndarray:
+    query_vector = np.asarray(vec, dtype="float32")
+    if query_vector.ndim == 1:
+        query_vector = query_vector.reshape(1, -1)
+    if query_vector.ndim != 2 or query_vector.shape[0] != 1:
+        raise _embedding_identity_conflict("查询 embedding 维度无效")
+    if int(query_vector.shape[1]) != int(index.d):
+        raise _embedding_identity_conflict(
+            f"查询向量维度 {int(query_vector.shape[1])} 与索引维度 {int(index.d)} 不一致"
+        )
+    return query_vector
+
+
+def _require_current_vector_index_schema(data: object, doc_id: str) -> dict:
+    """Reject persisted RAG artifacts that predate the active retrieval contract."""
+    if not isinstance(data, dict):
+        _index_cache.invalidate(doc_id)
+        raise HTTPException(
+            status_code=409,
+            detail="问答索引格式已过期，需要按当前解析结果重建",
+        )
+    try:
+        index_version = int(data.get("index_version") or 0)
+    except (TypeError, ValueError):
+        index_version = 0
+    if index_version != RAG_INDEX_VERSION:
+        _index_cache.invalidate(doc_id)
+        raise HTTPException(
+            status_code=409,
+            detail="问答索引格式已升级，需要按当前解析结果重建",
+        )
+    return data
+
+
 def _get_runtime_data_dir() -> str:
     """获取与 app.py/document_routes.py 一致的数据目录。"""
     if runtime.is_desktop:
@@ -66,6 +542,21 @@ local_embedding_models = {}
 _VISUAL_EVIDENCE_VECTOR_CACHE: OrderedDict[str, np.ndarray] = OrderedDict()
 _VISUAL_EVIDENCE_VECTOR_CACHE_LOCK = threading.Lock()
 _VISUAL_EVIDENCE_VECTOR_CACHE_MAX_SIZE = 32
+
+
+def _is_current_embedding_identity_version(version: Any) -> bool:
+    try:
+        return int(version or 0) == EMBEDDING_IDENTITY_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_supported_embedding_identity_version(version: Any) -> bool:
+    try:
+        normalized = int(version or 0)
+    except (TypeError, ValueError):
+        return False
+    return normalized in {0, EMBEDDING_IDENTITY_VERSION}
 
 # ---- OpenAI Client 连接池 ----
 _openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash) -> OpenAI
@@ -120,66 +611,96 @@ class _IndexCache:
     def __init__(self, max_size: int = 20):
         self._store: OrderedDict[str, dict] = OrderedDict()
         self._max_size = max_size
+        self._lock = threading.RLock()
 
     def get_index(self, doc_id: str, index_path: str, chunks_path: str):
         """获取缓存的 FAISS index 和 chunks data，未命中返回 None"""
-        if doc_id in self._store:
-            entry = self._store[doc_id]
-            try:
-                cur_mtime = os.path.getmtime(index_path)
-                if cur_mtime == entry.get("index_mtime"):
-                    self._store.move_to_end(doc_id)
-                    return entry["index"], entry["data"]
-            except OSError:
-                pass
-            # mtime changed or error, invalidate
-            self._store.pop(doc_id, None)
-        return None
+        with self._lock:
+            if doc_id in self._store:
+                entry = self._store[doc_id]
+                try:
+                    index_stat = os.stat(index_path)
+                    chunks_stat = os.stat(chunks_path)
+                    signature = (
+                        index_stat.st_mtime_ns,
+                        index_stat.st_size,
+                        chunks_stat.st_mtime_ns,
+                        chunks_stat.st_size,
+                    )
+                    if signature == entry.get("artifact_signature"):
+                        self._store.move_to_end(doc_id)
+                        return entry["index"], entry["data"]
+                except OSError:
+                    pass
+                # mtime changed or error, invalidate
+                self._store.pop(doc_id, None)
+            return None
 
-    def put_index(self, doc_id: str, index, data, index_path: str):
+    def put_index(self, doc_id: str, index, data, index_path: str, chunks_path: str):
         """缓存 FAISS index 和 chunks data"""
         try:
-            mtime = os.path.getmtime(index_path)
+            index_stat = os.stat(index_path)
+            chunks_stat = os.stat(chunks_path)
+            signature = (
+                index_stat.st_mtime_ns,
+                index_stat.st_size,
+                chunks_stat.st_mtime_ns,
+                chunks_stat.st_size,
+            )
         except OSError:
-            mtime = 0
-        if doc_id in self._store:
-            self._store[doc_id].update({"index": index, "data": data, "index_mtime": mtime})
-            self._store.move_to_end(doc_id)
-        else:
-            self._store[doc_id] = {"index": index, "data": data, "index_mtime": mtime}
-        if len(self._store) > self._max_size:
-            self._store.popitem(last=False)
+            signature = ()
+        with self._lock:
+            if doc_id in self._store:
+                self._store[doc_id].update({
+                    "index": index,
+                    "data": data,
+                    "artifact_signature": signature,
+                })
+                self._store.move_to_end(doc_id)
+            else:
+                self._store[doc_id] = {
+                    "index": index,
+                    "data": data,
+                    "artifact_signature": signature,
+                }
+            if len(self._store) > self._max_size:
+                self._store.popitem(last=False)
 
     def get_group_index(self, doc_id: str):
         """获取缓存的意群索引数据"""
-        entry = self._store.get(doc_id)
-        if entry:
-            return entry.get("group_index_data")
-        return None
+        with self._lock:
+            entry = self._store.get(doc_id)
+            if entry:
+                return entry.get("group_index_data")
+            return None
 
     def put_group_index(self, doc_id: str, group_index_data):
         """缓存意群索引数据"""
-        if doc_id in self._store:
-            self._store[doc_id]["group_index_data"] = group_index_data
+        with self._lock:
+            if doc_id in self._store:
+                self._store[doc_id]["group_index_data"] = group_index_data
 
     def get_group_data(self, doc_id: str):
         """获取缓存的意群 JSON 数据"""
-        entry = self._store.get(doc_id)
-        if entry:
-            return entry.get("group_chunk_map")
-        return None
+        with self._lock:
+            entry = self._store.get(doc_id)
+            if entry:
+                return entry.get("group_chunk_map")
+            return None
 
     def put_group_data(self, doc_id: str, group_chunk_map):
         """缓存意群 JSON 数据"""
-        if doc_id in self._store:
-            self._store[doc_id]["group_chunk_map"] = group_chunk_map
+        with self._lock:
+            if doc_id in self._store:
+                self._store[doc_id]["group_chunk_map"] = group_chunk_map
 
     def invalidate(self, doc_id: str = ""):
         """使缓存失效"""
-        if doc_id:
-            self._store.pop(doc_id, None)
-        else:
-            self._store.clear()
+        with self._lock:
+            if doc_id:
+                self._store.pop(doc_id, None)
+            else:
+                self._store.clear()
 
 
 _index_cache = _IndexCache(max_size=20)
@@ -200,6 +721,7 @@ class QueryVectorCache:
         self._persist_path = persist_path
         self._dirty_count = 0  # 自上次持久化以来的写入次数
         self._persist_interval = 20  # 每 N 次写入持久化一次
+        self._lock = threading.RLock()
         if persist_path:
             self._load_from_disk()
 
@@ -216,10 +738,11 @@ class QueryVectorCache:
             缓存的查询向量，未命中时返回 None
         """
         key = (model_id, query)
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
 
     def put(self, model_id: str, query: str, vector: np.ndarray) -> None:
         """存入查询向量
@@ -232,15 +755,16 @@ class QueryVectorCache:
             vector: 查询向量
         """
         key = (model_id, query)
-        self._cache[key] = vector
-        self._cache.move_to_end(key)
-        if len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
-        # 定期持久化
-        self._dirty_count += 1
-        if self._persist_path and self._dirty_count >= self._persist_interval:
-            self._save_to_disk()
-            self._dirty_count = 0
+        with self._lock:
+            self._cache[key] = vector
+            self._cache.move_to_end(key)
+            if len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+            # 定期持久化。该调用持有 RLock，保存的是一致性快照。
+            self._dirty_count += 1
+            if self._persist_path and self._dirty_count >= self._persist_interval:
+                if self._save_to_disk():
+                    self._dirty_count = 0
 
     def _load_from_disk(self):
         """从磁盘加载缓存"""
@@ -250,29 +774,52 @@ class QueryVectorCache:
             with open(self._persist_path, "rb") as f:
                 data = pickle.load(f)
             if isinstance(data, OrderedDict):
-                self._cache = data
+                # 不信任异常大的本地缓存；保留最新的 max_size 条即可。
+                with self._lock:
+                    self._cache = OrderedDict(list(data.items())[-self._max_size:])
                 logger.info(f"[QueryVectorCache] 从磁盘加载 {len(self._cache)} 条缓存")
         except Exception as e:
             logger.warning(f"[QueryVectorCache] 磁盘缓存加载失败: {e}")
 
-    def _save_to_disk(self):
-        """持久化缓存到磁盘"""
+    def _save_to_disk(self) -> bool:
+        """持久化一致性快照，避免并发截断同一个 pickle 文件。"""
         if not self._persist_path:
-            return
+            return False
+        temp_path = ""
         try:
             cache_dir = os.path.dirname(self._persist_path)
             if cache_dir:
                 os.makedirs(cache_dir, exist_ok=True)
-            with open(self._persist_path, "wb") as f:
-                pickle.dump(self._cache, f)
+            with self._lock:
+                snapshot = OrderedDict(self._cache)
+            fd, temp_path = tempfile.mkstemp(
+                prefix=".query_vector_cache-",
+                suffix=".tmp",
+                # Must share a filesystem with the destination for os.replace().
+                dir=cache_dir or ".",
+            )
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self._persist_path)
+            return True
         except Exception as e:
             logger.warning(f"[QueryVectorCache] 磁盘缓存保存失败: {e}")
+            return False
+        finally:
+            if temp_path:
+                try:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                except OSError:
+                    pass
 
     def flush(self):
         """立即持久化到磁盘"""
-        if self._persist_path and self._dirty_count > 0:
-            self._save_to_disk()
-            self._dirty_count = 0
+        with self._lock:
+            if self._persist_path and self._dirty_count > 0 and self._save_to_disk():
+                self._dirty_count = 0
 
 
 # 全局查询向量缓存实例（默认容量 256，启用磁盘持久化）
@@ -281,14 +828,44 @@ _cache_persist_path = os.path.join(
 )
 _query_vector_cache = QueryVectorCache(persist_path=_cache_persist_path)
 
+# Vector/document swaps and semantic-group publication must share the same
+# document-scoped lock. Keeping it in this dependency layer lets route code and
+# background semantic workers serialize compare-and-publish without a circular
+# import.
+_document_publication_locks_guard = threading.Lock()
+_document_publication_locks: dict[str, threading.RLock] = {}
+
+
+def get_document_publication_lock(doc_id: str) -> threading.RLock:
+    normalized_doc_id = str(doc_id or "").strip()
+    if not normalized_doc_id:
+        raise ValueError("doc_id 不能为空")
+    with _document_publication_locks_guard:
+        return _document_publication_locks.setdefault(
+            normalized_doc_id,
+            threading.RLock(),
+        )
+
 # 记录正在生成意群的文档 ID，防止重复提交（需求 6.1）
 _group_generation_in_progress: set[str] = set()
+_group_generation_lock = threading.RLock()
+try:
+    _SEMANTIC_GROUP_BACKGROUND_MAX_PENDING = max(
+        1,
+        min(8, int(os.getenv("CHATPDF_SEMANTIC_GROUP_BACKGROUND_MAX_PENDING", "2"))),
+    )
+except ValueError:
+    _SEMANTIC_GROUP_BACKGROUND_MAX_PENDING = 2
+_semantic_group_background_admission = threading.BoundedSemaphore(
+    _SEMANTIC_GROUP_BACKGROUND_MAX_PENDING
+)
 
 # ---- 模块级单例：避免热路径中重复实例化和重复 import ----
 from services.query_rewriter import QueryRewriter as _QueryRewriter
 from services.query_analyzer import (
     analyze_evidence_need as _analyze_evidence_need,
     analyze_query_type as _analyze_query_type,
+    get_retrieval_strategy as _get_retrieval_strategy,
 )
 from services.rag_config import RAGConfig as _RAGConfig
 from services.context_builder import ContextBuilder as _ContextBuilder
@@ -298,6 +875,31 @@ _query_rewriter_singleton = _QueryRewriter()
 _rag_config_singleton = _RAGConfig()
 _context_builder_singleton = _ContextBuilder()
 _retrieval_logger_singleton = _RetrievalLogger()
+
+
+def _resolve_intent_decision(query: str, intent_decision: Optional[dict] = None) -> dict:
+    """优先使用路由层冻结的判定，缺失时保持旧调用兼容。"""
+    if isinstance(intent_decision, dict):
+        query_type = str(intent_decision.get("query_type") or "").strip()
+        evidence_need = intent_decision.get("evidence_need")
+        if query_type in {"overview", "extraction", "analytical", "specific"} and isinstance(evidence_need, (list, tuple, set)):
+            resolved = dict(intent_decision)
+            resolved["query_type"] = query_type
+            resolved["evidence_need"] = [
+                str(item).strip() for item in evidence_need if str(item).strip()
+            ]
+            resolved.setdefault("top_k", 10)
+            return resolved
+    return _get_retrieval_strategy(query)
+
+
+def _resolve_evidence_need(
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+) -> set[str]:
+    if evidence_need is not None:
+        return {str(item).strip() for item in evidence_need if str(item).strip()}
+    return set(_analyze_evidence_need(query) or [])
 
 # ---- 意群数据目录（只计算一次）----
 _SEMANTIC_GROUPS_DIR: str = os.path.join(
@@ -557,6 +1159,353 @@ def _is_model_not_found_error(exc: Exception) -> bool:
     return any(h in msg for h in hints)
 
 
+_NON_DEGRADABLE_EMBEDDING_AUTH_CODES = {
+    "access_denied",
+    "api_key_not_found",
+    "authentication_error",
+    "forbidden",
+    "incorrect_api_key",
+    "insufficient_permission",
+    "insufficient_permissions",
+    "invalid_api_key",
+    "invalid_authentication",
+    "key_not_found",
+    "permission_denied",
+    "unauthorized",
+}
+_NON_DEGRADABLE_EMBEDDING_MODEL_CODES = {
+    "20012",
+    "deployment_not_found",
+    "model_decommissioned",
+    "model_disabled",
+    "model_not_available",
+    "model_not_exist",
+    "model_not_found",
+    "no_such_model",
+    "unsupported_model",
+}
+_QUERY_EMBEDDING_AUTH_ERROR_DETAIL = "Embedding API 凭证无效或无权访问，请检查 API Key 与模型授权配置"
+_QUERY_EMBEDDING_MODEL_ERROR_DETAIL = "当前 Embedding 模型不存在、未开通或不可用，请切换可用模型后重试"
+_EMBEDDING_MODEL_NOT_FOUND_PATTERNS = (
+    re.compile(
+        r"\bmodel\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+(?:was\s+)?not\s+found\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bmodel\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+does\s+not\s+exist\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bmodel\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+is\s+unavailable\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bdeployment\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+(?:was\s+)?not\s+found\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bdeployment\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+does\s+not\s+exist\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bdeployment\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+is\s+unavailable\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _coerce_embedding_error_status(value: object) -> Optional[int]:
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if 100 <= status <= 599 else None
+
+
+def _normalize_embedding_error_code(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", raw)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", camel_split)
+    return re.sub(r"[^a-z0-9]+", "_", camel_split.casefold()).strip("_")
+
+
+def _coerce_embedding_error_payload(value: object) -> Optional[dict]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+    return None
+
+
+def _iter_embedding_exception_chain(exc: Exception, max_depth: int = 5):
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    depth = 0
+    while isinstance(current, BaseException) and depth < max_depth:
+        node_id = id(current)
+        if node_id in seen:
+            break
+        seen.add(node_id)
+        yield current
+        next_exc = getattr(current, "__cause__", None)
+        if not isinstance(next_exc, BaseException):
+            next_exc = getattr(current, "__context__", None)
+        current = next_exc if isinstance(next_exc, BaseException) else None
+        depth += 1
+
+
+def _iter_embedding_error_nodes(payload: dict):
+    stack = [payload]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        yield node
+        nested = node.get("error")
+        if isinstance(nested, dict):
+            stack.append(nested)
+
+
+def _extract_embedding_error_payloads(exc: Exception) -> list[dict]:
+    payloads: list[dict] = []
+    seen_signatures: set[str] = set()
+
+    def _append_payload(candidate: object):
+        payload = _coerce_embedding_error_payload(candidate)
+        if payload is None:
+            return
+        try:
+            signature = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            signature = repr(payload)
+        if signature in seen_signatures:
+            return
+        seen_signatures.add(signature)
+        payloads.append(payload)
+
+    for error_node in _iter_embedding_exception_chain(exc):
+        _append_payload(getattr(error_node, "body", None))
+        for arg in getattr(error_node, "args", ()) or ():
+            _append_payload(arg)
+
+        response = getattr(error_node, "response", None)
+        if response is None:
+            continue
+        for candidate in (
+            getattr(response, "_json", None),
+            getattr(response, "json", None),
+            getattr(response, "text", None),
+            getattr(response, "content", None),
+        ):
+            payload = None
+            if callable(candidate):
+                try:
+                    payload = candidate()
+                except Exception:
+                    payload = None
+            else:
+                payload = candidate
+            _append_payload(payload)
+
+    return payloads
+
+
+def _collect_embedding_error_codes(exc: Exception) -> list[str]:
+    seen: set[str] = set()
+    codes: list[str] = []
+    for error_node in _iter_embedding_exception_chain(exc):
+        for value in (
+            getattr(error_node, "code", None),
+            getattr(error_node, "type", None),
+            getattr(error_node, "error_code", None),
+        ):
+            code = _normalize_embedding_error_code(value)
+            if code and code not in seen:
+                seen.add(code)
+                codes.append(code)
+
+    for payload in _extract_embedding_error_payloads(exc):
+        for node in _iter_embedding_error_nodes(payload):
+            for field in ("code", "type", "error_code", "error_type"):
+                code = _normalize_embedding_error_code(node.get(field))
+                if code and code not in seen:
+                    seen.add(code)
+                    codes.append(code)
+
+    return codes
+
+
+def _collect_embedding_error_messages(exc: Exception) -> list[str]:
+    seen: set[str] = set()
+    messages: list[str] = []
+    for error_node in _iter_embedding_exception_chain(exc):
+        for field in ("message", "detail", "msg"):
+            value = getattr(error_node, field, None)
+            if isinstance(value, str):
+                text = value.strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    messages.append(text)
+
+    for payload in _extract_embedding_error_payloads(exc):
+        for node in _iter_embedding_error_nodes(payload):
+            for field in ("message", "detail", "msg"):
+                value = node.get(field)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if text and text not in seen:
+                        seen.add(text)
+                        messages.append(text)
+
+    for error_node in _iter_embedding_exception_chain(exc):
+        text = str(error_node).strip()
+        if text and text not in seen:
+            seen.add(text)
+            messages.append(text)
+    return messages
+
+
+def _collect_embedding_error_statuses(exc: Exception) -> list[int]:
+    seen: set[int] = set()
+    statuses: list[int] = []
+    for error_node in _iter_embedding_exception_chain(exc):
+        for value in (
+            getattr(error_node, "status_code", None),
+            getattr(getattr(error_node, "response", None), "status_code", None),
+        ):
+            status = _coerce_embedding_error_status(value)
+            if status is not None and status not in seen:
+                seen.add(status)
+                statuses.append(status)
+
+    for payload in _extract_embedding_error_payloads(exc):
+        for node in _iter_embedding_error_nodes(payload):
+            for field in ("status", "status_code", "statusCode"):
+                status = _coerce_embedding_error_status(node.get(field))
+                if status is not None and status not in seen:
+                    seen.add(status)
+                    statuses.append(status)
+    return statuses
+
+
+def _looks_like_auth_error_message(message: str) -> bool:
+    if not isinstance(message, str):
+        return False
+    raw = message.strip()
+    if not raw:
+        return False
+    lower = raw.casefold()
+
+    direct_hints = (
+        "invalid api key",
+        "incorrect api key",
+        "invalid_api_key",
+        "permission_denied",
+        "permission denied",
+        "authentication error",
+        "authentication_error",
+        "unauthorized",
+        "forbidden",
+    )
+    if any(hint in lower for hint in direct_hints):
+        return True
+
+    if "api key" in lower and any(hint in lower for hint in ("invalid", "incorrect", "missing", "required")):
+        return True
+
+    if any(token in raw for token in ("认证失败", "鉴权失败", "未授权", "禁止访问")):
+        return True
+
+    if (
+        any(token in lower for token in ("api key", "apikey", "token", "credential"))
+        or any(token in raw for token in ("API Key", "密钥", "凭证"))
+    ) and any(token in raw for token in ("无效", "错误", "缺失", "未提供", "不存在")):
+        return True
+
+    return False
+
+
+def _looks_like_model_access_error_message(message: str) -> bool:
+    if not isinstance(message, str):
+        return False
+    raw = message.strip()
+    if not raw:
+        return False
+    lower = raw.casefold()
+
+    direct_hints = (
+        "model_not_found",
+        "model does not exist",
+        "model not exist",
+        "no such model",
+        "deployment not found",
+        "unsupported model",
+        "model is not available",
+        "model_not_available",
+    )
+    if "model" in lower and any(hint in lower for hint in direct_hints):
+        return True
+
+    if "model" in lower and "access" in lower and any(hint in lower for hint in ("denied", "forbidden", "permission")):
+        return True
+
+    if any(pattern.search(raw) for pattern in _EMBEDDING_MODEL_NOT_FOUND_PATTERNS):
+        return True
+
+    if "模型" in raw and any(token in raw for token in ("不存在", "未开通", "不可用", "无权限", "无权调用", "未授权调用", "未发布")):
+        return True
+
+    return False
+
+
+def _build_non_degradable_query_embedding_http_error(exc: Exception) -> Optional[HTTPException]:
+    codes = _collect_embedding_error_codes(exc)
+    statuses = _collect_embedding_error_statuses(exc)
+    messages = _collect_embedding_error_messages(exc)
+
+    if any(code in _NON_DEGRADABLE_EMBEDDING_MODEL_CODES for code in codes):
+        return HTTPException(status_code=409, detail=_QUERY_EMBEDDING_MODEL_ERROR_DETAIL)
+    if any(code in _NON_DEGRADABLE_EMBEDDING_AUTH_CODES for code in codes):
+        return HTTPException(status_code=401, detail=_QUERY_EMBEDDING_AUTH_ERROR_DETAIL)
+
+    if any(status in {401, 403} for status in statuses):
+        if any(_looks_like_model_access_error_message(message) for message in messages):
+            return HTTPException(status_code=409, detail=_QUERY_EMBEDDING_MODEL_ERROR_DETAIL)
+        return HTTPException(status_code=401, detail=_QUERY_EMBEDDING_AUTH_ERROR_DETAIL)
+
+    if any(_looks_like_auth_error_message(message) for message in messages):
+        return HTTPException(status_code=401, detail=_QUERY_EMBEDDING_AUTH_ERROR_DETAIL)
+    if any(_looks_like_model_access_error_message(message) for message in messages):
+        return HTTPException(status_code=409, detail=_QUERY_EMBEDDING_MODEL_ERROR_DETAIL)
+
+    return None
+
+
+def _summarize_embedding_error(exc: Exception) -> str:
+    parts = [exc.__class__.__name__]
+    statuses = _collect_embedding_error_statuses(exc)
+    codes = _collect_embedding_error_codes(exc)
+    if statuses:
+        parts.append("status=" + ",".join(str(status) for status in statuses))
+    if codes:
+        parts.append("code=" + ",".join(codes[:4]))
+    return " ".join(parts)
+
+
 def _fetch_available_model_ids(api_base: str, api_key: str) -> list[str]:
     """从提供商拉取可用模型列表（最佳努力，不抛异常）。"""
     if not api_base or not api_key:
@@ -726,40 +1675,12 @@ def _embed_batch_with_auto_shrink(
         )
 
 
-def _normalize_remote_embedding_base_url(api_base: Optional[str]) -> str:
-    """归一化 OpenAI 兼容 embedding base_url。
-
-    规则：
-    - 去掉误传入的具体接口路径（如 /chat/completions、/embeddings）
-    - 仅当路径为空时补 /v1
-    - 已带有效路径前缀（如 /compatible-mode/v1、/api/paas/v4）时保持不变
-    """
-    raw = (api_base or "").strip()
-    if not raw:
-        return "https://api.openai.com/v1"
-
-    trimmed = raw.rstrip("/")
-    known_suffixes = (
-        "/v1/chat/completions",
-        "/chat/completions",
-        "/completions",
-        "/v1/embeddings",
-        "/embeddings",
-    )
-    for suffix in known_suffixes:
-        if trimmed.endswith(suffix):
-            trimmed = trimmed[: -len(suffix)]
-            break
-
-    parsed = urlparse(trimmed)
-    path = parsed.path.rstrip("/")
-    if not path:
-        path = "/v1"
-
-    return urlunparse(parsed._replace(path=path, params="", query="", fragment=""))
-
-
-def get_embedding_function(embedding_model_id: str, api_key: str = None, base_url: str = None):
+def get_embedding_function(
+    embedding_model_id: str,
+    api_key: str = None,
+    base_url: str = None,
+    allow_model_fallback: bool = False,
+):
     """获取指定模型的 embedding 函数
 
     优先使用 Model_ID_Resolver 解析模型 ID 并获取完整配置；
@@ -770,6 +1691,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
         embedding_model_id: 模型 ID，支持 composite key（provider:modelId）或 plain key
         api_key: API 密钥（非本地模型必需）
         base_url: 自定义 API 基础 URL（可选，优先于注册表中的 base_url）
+        allow_model_fallback: 是否允许 model-not-found 时自动切换模型
 
     Returns:
         embedding 函数，接受文本列表并返回向量数组
@@ -798,26 +1720,18 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
         if ":" in embedding_model_id:
             # composite key 格式：provider:modelId
             provider_part, model_part = embedding_model_id.split(":", 1)
+            provider_part = provider_part.casefold()
             embedding_model_id = model_part  # 实际调用 API 时用 modelId 部分
             model_name = model_part
 
             # 根据 provider 推断 base_url
-            from models.model_id_resolver import PROVIDER_ALIAS_MAP, PROVIDER_BASE_URL_HINTS
-            provider_aliases = PROVIDER_ALIAS_MAP.get(provider_part, [provider_part])
-            provider = provider_aliases[0] if provider_aliases else "openai"
+            provider = _normalize_embedding_provider(provider_part) or "openai"
 
             # 使用 provider 对应的默认 base_url
-            PROVIDER_DEFAULT_BASE_URLS = {
-                "silicon": "https://api.siliconflow.cn/v1",
-                "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "moonshot": "https://api.moonshot.cn/v1",
-                "deepseek": "https://api.deepseek.com/v1",
-                "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-                "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-                "minimax": "https://api.minimax.chat/v1",
-                "openai": "https://api.openai.com/v1",
-            }
-            api_base = base_url or PROVIDER_DEFAULT_BASE_URLS.get(provider_part, "https://api.openai.com/v1")
+            api_base = base_url or _PROVIDER_DEFAULT_BASE_URLS.get(
+                provider_part,
+                _PROVIDER_DEFAULT_BASE_URLS["openai"],
+            )
             logger.info(
                 f"从 composite key 推断: provider={provider_part}, "
                 f"model={model_part}, base_url={api_base}"
@@ -826,7 +1740,9 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
             # plain key，使用 model_detector 推断
             provider = get_model_provider(embedding_model_id)
             model_name = embedding_model_id
-            api_base = _normalize_remote_embedding_base_url(base_url or "https://api.openai.com/v1")
+            api_base = _normalize_remote_embedding_base_url(
+                base_url or _PROVIDER_DEFAULT_BASE_URLS["openai"]
+            )
 
     # 验证模型类型
     if not is_embedding_model(embedding_model_id):
@@ -845,14 +1761,18 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
             )
         if model_name not in local_embedding_models:
             logger.info(f"加载本地 embedding 模型: {model_name}")
-            local_embedding_models[model_name] = SentenceTransformer(model_name)
+            sentence_transformer_class = _get_sentence_transformer_class()
+            local_embedding_models[model_name] = sentence_transformer_class(model_name)
         model = local_embedding_models[model_name]
         return lambda texts: model.encode(texts)
 
     # 远程模型：从 Key 池中随机选择一个有效 Key
     actual_key = select_api_key(api_key) if api_key else None
     if not actual_key:
-        raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
+        if provider == "ollama":
+            actual_key = "ollama"
+        else:
+            raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
     api_base = _normalize_remote_embedding_base_url(api_base)
 
@@ -867,7 +1787,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
     single_text_token_budget = max(256, min(request_token_budget, int(max_tokens * 0.25), 2048))
     # 优先使用 model_name 作为真实请求模型 ID（动态模型场景下 key != model_id）
     model_for_request = model_name or embedding_model_id
-    fallback_checked = False
+    fallback_checked = not allow_model_fallback
 
     def embed_texts(texts):
         nonlocal model_for_request, fallback_checked
@@ -904,7 +1824,7 @@ def get_embedding_function(embedding_model_id: str, api_key: str = None, base_ur
                 )
             except Exception as exc:
                 # 模型不存在时，自动探测可用 embedding 模型并回退一次
-                if not fallback_checked and _is_model_not_found_error(exc):
+                if allow_model_fallback and not fallback_checked and _is_model_not_found_error(exc):
                     fallback_checked = True
                     available_models = _fetch_available_model_ids(api_base, actual_key)
                     fallback_model = _select_fallback_embedding_model(
@@ -1060,7 +1980,7 @@ def _build_page_index(pages: List[dict]) -> dict:
     """
     if not pages:
         return {}
-    _annotate_pages_with_provenance(pages)
+    pages = _annotate_pages_with_provenance(pages)
     index = {}
     for page in pages:
         content = page.get("content", "")
@@ -1100,10 +2020,12 @@ def _build_page_uid(page_num: int) -> str:
     return f"page:{int(page_num)}"
 
 
-def _annotate_pages_with_provenance(pages: Optional[List[dict]]) -> None:
+def _annotate_pages_with_provenance(pages: Optional[List[dict]]) -> List[dict]:
+    """Return annotated page copies without mutating canonical document data."""
     if not isinstance(pages, list):
-        return
-    for idx, page in enumerate(pages):
+        return []
+    annotated_pages = [dict(page) if isinstance(page, dict) else page for page in pages]
+    for idx, page in enumerate(annotated_pages):
         if not isinstance(page, dict):
             continue
         page_num = (
@@ -1116,6 +2038,7 @@ def _annotate_pages_with_provenance(pages: Optional[List[dict]]) -> None:
             page["page_index"] = page_num - 1
         if not str(page.get("page_uid") or "").strip():
             page["page_uid"] = _build_page_uid(page_num)
+    return annotated_pages
 
 
 def _extract_page_candidates_from_metadata(metadata: Optional[dict]) -> List[int]:
@@ -6794,7 +7717,7 @@ def _augment_with_table_chunks(
     if not results or (not chunks and not pages):
         return results
 
-    _annotate_pages_with_provenance(pages)
+    pages = _annotate_pages_with_provenance(pages)
     hit_pages: set[int] = set()
     for item in results:
         if not isinstance(item, dict):
@@ -9189,6 +10112,116 @@ def _extract_page_text_table_bundles(pages: Optional[List[dict]]) -> List[dict]:
     return bundles
 
 
+def _split_evidence_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+    """Split one source block without discarding its evidence identity."""
+    value = preprocess_text(text)
+    if not value:
+        return []
+    if len(value) <= chunk_size:
+        return [value]
+    try:
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+        )
+        pieces = splitter.split_text(value)
+    except Exception:
+        step = max(1, chunk_size - max(0, min(chunk_overlap, chunk_size - 1)))
+        pieces = [value[index:index + chunk_size] for index in range(0, len(value), step)]
+    return [piece for piece in pieces if str(piece or "").strip()]
+
+
+def _build_structured_evidence_chunks(
+    evidence_chunks: Optional[List[dict]],
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[List[str], List[str], List[int], List[str], List[dict]]:
+    """Normalize block-index evidence into aligned vector-index inputs.
+
+    The vector index may split a long source block, but every resulting
+    fragment keeps the original ``block_id``/bbox/section identity so citations
+    never need a post-retrieval fuzzy match for current structured documents.
+    """
+    chunks: List[str] = []
+    headings: List[str] = []
+    pages: List[int] = []
+    chunk_types: List[str] = []
+    metadata_items: List[dict] = []
+
+    for evidence_index, item in enumerate(evidence_chunks or []):
+        if not isinstance(item, dict):
+            continue
+        raw_text = str(item.get("text") or item.get("content") or "").strip()
+        pieces = _split_evidence_text(raw_text, chunk_size, chunk_overlap)
+        if not pieces:
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = dict(metadata)
+        heading = str(item.get("heading") or metadata.get("section_path") or "").strip()
+        try:
+            page = int(item.get("page") or metadata.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page <= 0:
+            page = 1
+        chunk_type = str(
+            item.get("block_type")
+            or metadata.get("block_type")
+            or metadata.get("chunk_type")
+            or "text"
+        ).strip().lower() or "text"
+        block_id = str(metadata.get("block_id") or "").strip()
+        if block_id and not metadata.get("block_ids"):
+            metadata["block_ids"] = [block_id]
+        metadata.setdefault("block_type", chunk_type)
+        metadata.setdefault("chunk_type", chunk_type)
+        metadata.setdefault("page", page)
+        metadata.setdefault("page_range", [page, page])
+        if heading:
+            metadata.setdefault("section_path", heading)
+        if not metadata.get("evidence_id"):
+            metadata["evidence_id"] = f"evidence:{evidence_index}"
+
+        for fragment_index, piece in enumerate(pieces):
+            fragment_metadata = dict(metadata)
+            if len(pieces) > 1:
+                fragment_metadata["evidence_fragment_index"] = fragment_index
+                fragment_metadata["evidence_fragment_count"] = len(pieces)
+                fragment_metadata["evidence_id"] = (
+                    f"{metadata['evidence_id']}:f{fragment_index + 1}"
+                )
+            chunks.append(piece)
+            headings.append(heading)
+            pages.append(page)
+            chunk_types.append(chunk_type)
+            metadata_items.append(fragment_metadata)
+
+    return chunks, headings, pages, chunk_types, metadata_items
+
+
+def _bind_chunk_parse_identity(chunk_metadata: List[dict], index_meta: Optional[dict]) -> None:
+    """Persist the active parse identity on every evidence-bearing chunk."""
+    meta = index_meta if isinstance(index_meta, dict) else {}
+    parse_generation = str(meta.get("parse_generation") or "").strip()
+    document_source_hash = str(
+        meta.get("document_source_hash") or meta.get("source_hash") or ""
+    ).strip()
+    parser_route = str(meta.get("parser_route") or "").strip()
+    for item in chunk_metadata:
+        if not isinstance(item, dict):
+            continue
+        if parse_generation:
+            item.setdefault("parse_generation", parse_generation)
+        if document_source_hash:
+            item.setdefault("document_source_hash", document_source_hash)
+        if parser_route:
+            item.setdefault("parser_route", parser_route)
+
+
 def build_vector_index(
     doc_id: str,
     text: str,
@@ -9197,6 +10230,7 @@ def build_vector_index(
     api_key: str = None,
     api_host: str = None,
     pages: List[dict] = None,
+    evidence_chunks: Optional[List[dict]] = None,
     structured_table_bundles: Optional[List[dict]] = None,
     summary_api_key: str = None,
     summary_model: str = "gpt-4o-mini",
@@ -9205,6 +10239,7 @@ def build_vector_index(
     index_source: str = "pdf_native",
     index_meta: Optional[dict] = None,
     build_semantic_groups: bool = True,
+    embedding_provider: Optional[str] = None,
 ):
     try:
         logger.info(f"[{doc_id}] Building vector index...")
@@ -9218,44 +10253,70 @@ def build_vector_index(
                 f"Embedding 模型 '{embedding_model_id}' 未配置或不受支持，"
                 f"可用模型列表: {available_models}"
             )
+        embedding_identity = _canonicalize_embedding_identity(
+            embedding_model_id,
+            embedding_provider=embedding_provider,
+            base_url=api_host,
+        )
+        embedding_model_id = embedding_identity["model"]
+        embedding_provider = embedding_identity["provider"]
+        verified_api_host = embedding_identity["api_host"]
 
         # 分块策略：按模型最大上下文自适应，默认 1200 / 200（约 15-20% 重叠），限制在 1000-2500
         chunk_size, chunk_overlap = get_chunk_params(embedding_model_id, base_chunk_size=1200, base_overlap=200)
-        preprocessed_text = preprocess_text(text)
+        effective_index_meta = dict(index_meta or {})
+        effective_index_source = str(
+            index_source or effective_index_meta.get("index_source") or "pdf_native"
+        ).strip() or "pdf_native"
+        pages = _annotate_pages_with_provenance(pages)
+        chunk_page_index = _build_page_index(pages or [])
 
-        # 优先使用结构感知分块，保护表格和公式完整性（需求 4.1, 4.2, 4.3, 4.4）
+        chunks, chunk_headings, chunk_pages, chunk_types, chunk_metadata = _build_structured_evidence_chunks(
+            evidence_chunks,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        if chunks:
+            logger.info(
+                "[%s] 使用 block-index evidence 分块，生成 %s 个带来源身份的分块",
+                doc_id,
+                len(chunks),
+            )
+        else:
+            preprocessed_text = preprocess_text(text)
+            # 优先使用结构感知分块，保护表格和公式完整性（需求 4.1, 4.2, 4.3, 4.4）
+            try:
+                chunks_with_ctx = structure_aware_split_with_context(
+                    preprocessed_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+                )
+                if chunks_with_ctx:
+                    chunks = [c for c, _ in chunks_with_ctx]
+                    chunk_headings = [h for _, h in chunks_with_ctx]
+                    logger.info(f"[{doc_id}] 使用结构感知分块，生成 {len(chunks)} 个分块")
+                else:
+                    raise ValueError("结构感知分块返回空结果")
+            except Exception as e:
+                # 回退到 RecursiveCharacterTextSplitter（需求 4.4 安全降级）
+                logger.warning(f"结构感知分块失败，回退到 RecursiveCharacterTextSplitter: {e}")
+                from langchain.text_splitter import RecursiveCharacterTextSplitter
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    length_function=len,
+                )
+                chunks = text_splitter.split_text(preprocessed_text)
+                chunk_headings = [""] * len(chunks)
+            chunk_pages = [
+                _find_page_for_chunk(chunk_text, pages or [], page_index=chunk_page_index) if pages else 1
+                for chunk_text in chunks
+            ]
+            chunk_types = [_guess_chunk_type(chunk_text) for chunk_text in chunks]
+            chunk_metadata = [{} for _ in chunks]
+
+        # Contextual chunking uses the same section paths regardless of whether
+        # the chunks came from raw page text or the structured block index.
         from services.rag_config import RAGConfig as _BuildRAGConfig
         _build_rag_config = _BuildRAGConfig()
-
-        try:
-            chunks_with_ctx = structure_aware_split_with_context(
-                preprocessed_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
-            )
-            if chunks_with_ctx:
-                chunks = [c for c, _ in chunks_with_ctx]
-                chunk_headings = [h for _, h in chunks_with_ctx]
-                logger.info(f"[{doc_id}] 使用结构感知分块，生成 {len(chunks)} 个分块")
-            else:
-                raise ValueError("结构感知分块返回空结果")
-        except Exception as e:
-            # 回退到 RecursiveCharacterTextSplitter（需求 4.4 安全降级）
-            logger.warning(f"结构感知分块失败，回退到 RecursiveCharacterTextSplitter: {e}")
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                length_function=len,
-            )
-            chunks = text_splitter.split_text(preprocessed_text)
-            chunk_headings = [""] * len(chunks)
-        _annotate_pages_with_provenance(pages)
-        chunk_page_index = _build_page_index(pages or [])
-        chunk_pages = [
-            _find_page_for_chunk(chunk_text, pages or [], page_index=chunk_page_index) if pages else 1
-            for chunk_text in chunks
-        ]
-        chunk_types = [_guess_chunk_type(chunk_text) for chunk_text in chunks]
-        chunk_metadata = [{} for _ in chunks]
         effective_table_bundles = structured_table_bundles or _extract_page_text_table_bundles(pages)
 
         _append_structured_table_bundle_chunks(
@@ -9267,12 +10328,43 @@ def build_vector_index(
             chunk_metadata,
             effective_table_bundles,
         )
+        _bind_chunk_parse_identity(chunk_metadata, effective_index_meta)
 
         logger.info(f"[{doc_id}] Split into {len(chunks)} chunks")
         if not chunks:
-            return
+            raise ValueError("向量索引构建失败：文档没有生成任何可索引分块")
+        invalid_chunk_indices = [
+            index
+            for index, chunk in enumerate(chunks)
+            if not isinstance(chunk, str) or not chunk.strip()
+        ]
+        if invalid_chunk_indices:
+            preview = ", ".join(str(index) for index in invalid_chunk_indices[:8])
+            raise ValueError(f"向量索引构建失败：存在空白分块（chunk={preview}）")
 
-        embed_fn = get_embedding_function(embedding_model_id, api_key, api_host)
+        aligned_fields = {
+            "chunk_headings": chunk_headings,
+            "chunk_pages": chunk_pages,
+            "chunk_types": chunk_types,
+            "chunk_metadata": chunk_metadata,
+        }
+        misaligned_fields = [
+            name for name, values in aligned_fields.items()
+            if len(values) != len(chunks)
+        ]
+        if misaligned_fields:
+            raise ValueError(
+                "向量索引构建失败：分块元数据长度不一致（"
+                + ", ".join(misaligned_fields)
+                + "）"
+            )
+
+        embed_fn = get_embedding_function(
+            embedding_model_id,
+            api_key,
+            verified_api_host,
+            False,
+        )
 
         # Contextual Chunking：用带章节前缀的文本做 embedding，提升语义区分度
         if _build_rag_config.enable_contextual_chunking:
@@ -9290,9 +10382,33 @@ def build_vector_index(
         else:
             embeddings = embed_fn(chunks)
 
-        embeddings_f32 = np.array(embeddings).astype('float32')
+        try:
+            embeddings_f32 = np.asarray(embeddings, dtype="float32")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"向量索引构建失败：嵌入结果无法转换为数值矩阵: {exc}") from exc
+        if embeddings_f32.ndim != 2:
+            raise ValueError(
+                "向量索引构建失败：嵌入结果必须是二维矩阵，"
+                f"实际 ndim={embeddings_f32.ndim}"
+            )
+        if embeddings_f32.shape[0] != len(chunks):
+            raise ValueError(
+                "向量索引构建失败：嵌入向量数量与分块数量不一致，"
+                f"vectors={embeddings_f32.shape[0]}, chunks={len(chunks)}"
+            )
+        if embeddings_f32.shape[1] <= 0:
+            raise ValueError("向量索引构建失败：嵌入向量维度为空")
+        if not np.all(np.isfinite(embeddings_f32)):
+            raise ValueError("向量索引构建失败：嵌入结果包含 NaN 或 Infinity")
+        vector_norms = np.linalg.norm(embeddings_f32, axis=1)
+        if not np.all(np.isfinite(vector_norms)) or np.any(vector_norms <= 0):
+            raise ValueError("向量索引构建失败：嵌入结果包含零向量或无效向量")
+
+        embeddings_f32 = np.ascontiguousarray(embeddings_f32, dtype="float32")
         # 归一化向量，使 Inner Product = 余弦相似度
         faiss.normalize_L2(embeddings_f32)
+        if not np.all(np.isfinite(embeddings_f32)):
+            raise ValueError("向量索引构建失败：归一化后的嵌入结果包含非有限值")
 
         dimension = embeddings_f32.shape[1]
         n_vectors = embeddings_f32.shape[0]
@@ -9309,12 +10425,30 @@ def build_vector_index(
             index = faiss.IndexFlatIP(dimension)
 
         index.add(embeddings_f32)
+        if int(index.ntotal) != len(chunks) or int(index.ntotal) <= 0:
+            raise RuntimeError(
+                "向量索引构建失败：FAISS 向量数量异常，"
+                f"vectors={int(index.ntotal)}, chunks={len(chunks)}"
+            )
 
         os.makedirs(vector_store_dir, exist_ok=True)
         index_path = os.path.join(vector_store_dir, f"{doc_id}.index")
         chunks_path = os.path.join(vector_store_dir, f"{doc_id}.pkl")
 
         faiss.write_index(index, index_path)
+        persisted_index = faiss.read_index(index_path)
+        persisted_vector_count = int(persisted_index.ntotal)
+        persisted_dimension = int(persisted_index.d)
+        if persisted_vector_count != len(chunks) or persisted_vector_count <= 0:
+            raise RuntimeError(
+                "向量索引落盘校验失败：向量数量异常，"
+                f"vectors={persisted_vector_count}, chunks={len(chunks)}"
+            )
+        if persisted_dimension != dimension or persisted_dimension <= 0:
+            raise RuntimeError(
+                "向量索引落盘校验失败：向量维度异常，"
+                f"dimension={persisted_dimension}, expected={dimension}"
+            )
 
         # Parent-Child 分块：生成 parent chunks 并保存映射
         parent_chunks = []
@@ -9339,11 +10473,15 @@ def build_vector_index(
                 i += 1
             parent_chunks.append("\n\n".join(parent_parts))
 
-        effective_index_meta = dict(index_meta or {})
-        effective_index_source = str(index_source or effective_index_meta.get("index_source") or "pdf_native").strip() or "pdf_native"
+        vector_build_id = uuid.uuid4().hex
         save_data = {
+            "index_version": RAG_INDEX_VERSION,
+            "embedding_identity_version": EMBEDDING_IDENTITY_VERSION,
+            "vector_build_id": vector_build_id,
             "chunks": chunks,
             "embedding_model": embedding_model_id,
+            "embedding_provider": embedding_provider,
+            "embedding_api_host": verified_api_host,
             "chunk_headings": chunk_headings,
             "chunk_pages": chunk_pages,
             "chunk_types": chunk_types,
@@ -9356,9 +10494,19 @@ def build_vector_index(
             "previous_index_source": effective_index_meta.get("previous_index_source", ""),
             "normalizer_version": effective_index_meta.get("normalizer_version", ""),
             "index_meta": effective_index_meta,
+            "vector_count": persisted_vector_count,
+            "vector_dimension": persisted_dimension,
+            "build_validation": {
+                "valid": True,
+                "chunk_count": len(chunks),
+                "vector_count": persisted_vector_count,
+                "vector_dimension": persisted_dimension,
+            },
         }
         with open(chunks_path, "wb") as f:
             pickle.dump(save_data, f)
+
+        semantic_identity = _extract_vector_semantic_identity(save_data)
 
         logger.info(f"[{doc_id}] Vector index saved to {index_path}")
 
@@ -9368,8 +10516,11 @@ def build_vector_index(
                 doc_id=doc_id,
                 chunks=chunks,
                 pages=pages,
+                chunk_pages=chunk_pages,
+                chunk_types=chunk_types,
+                chunk_metadata=chunk_metadata,
                 embed_fn=embed_fn,
-                api_key=summary_api_key or api_key,
+                api_key=summary_api_key,
                 model=summary_model,
                 provider=summary_provider,
                 endpoint=summary_api_host,
@@ -9380,7 +10531,22 @@ def build_vector_index(
                 ),
                 transaction_id=str(effective_index_meta.get("parse_generation") or ""),
                 vector_store_dir=vector_store_dir,
+                semantic_identity=semantic_identity,
             )
+
+        return {
+            "status": "ready",
+            "doc_id": doc_id,
+            "chunk_count": len(chunks),
+            "vector_count": persisted_vector_count,
+            "vector_dimension": persisted_dimension,
+            "index_path": index_path,
+            "chunks_path": chunks_path,
+            "index_source": effective_index_source,
+            "parse_generation": str(effective_index_meta.get("parse_generation") or ""),
+            "document_source_hash": str(effective_index_meta.get("document_source_hash") or ""),
+            "vector_build_id": vector_build_id,
+        }
 
     except Exception as e:
         logger.error(f"[{doc_id}] Error building vector index: {e}")
@@ -9393,6 +10559,9 @@ def _build_semantic_group_index_async(
     pages: list[dict],
     embed_fn,
     api_key: str = None,
+    chunk_pages: Optional[List[int]] = None,
+    chunk_types: Optional[List[str]] = None,
+    chunk_metadata: Optional[List[dict]] = None,
     model: str = "gpt-4o-mini",
     provider: str = "openai",
     endpoint: str = "",
@@ -9401,12 +10570,13 @@ def _build_semantic_group_index_async(
     source_hash: str = "",
     transaction_id: str = "",
     vector_store_dir: str = "",
+    semantic_identity: Optional[dict] = None,
 ):
     """异步启动意群生成任务（需求 6.1, 6.4）
 
-    使用 threading.Thread 在后台执行意群生成，不阻塞文档上传流程。
-    通过 _group_generation_in_progress 集合防止同一文档重复提交。
-    任务失败时自动从集合中移除 doc_id，并在日志中记录失败原因。
+    使用受限后台任务执行意群生成，不阻塞文档上传流程。
+    同一解析代际只允许一个任务，全局额度满时跳过可选构建，避免上传高峰
+    创建无限线程。主向量索引和问答不会受影响，后续可重新触发意群构建。
 
     Args:
         doc_id: 文档唯一标识
@@ -9415,12 +10585,21 @@ def _build_semantic_group_index_async(
         embed_fn: 嵌入函数
         api_key: LLM API 密钥（用于意群摘要生成）
     """
-    task_key = f"{doc_id}:{transaction_id or 'legacy'}"
-    if task_key in _group_generation_in_progress:
-        logger.info(f"[{doc_id}] 意群生成任务已在进行中，跳过")
-        return {"status": "disabled", "group_count": 0, "paths": []}
-
-    _group_generation_in_progress.add(task_key)
+    normalized_semantic_identity = _normalize_semantic_generation_identity(semantic_identity)
+    task_key = f"{doc_id}:{normalized_semantic_identity.get('vector_build_id') or transaction_id or 'legacy'}"
+    with _group_generation_lock:
+        if task_key in _group_generation_in_progress:
+            logger.info(f"[{doc_id}] 意群生成任务已在进行中，跳过")
+            return {"status": "disabled", "group_count": 0, "paths": []}
+        if not _semantic_group_background_admission.acquire(blocking=False):
+            logger.warning(f"[{doc_id}] 意群生成任务队列已满，跳过本次可选构建")
+            return {
+                "status": "deferred",
+                "reason": "queue_full",
+                "group_count": 0,
+                "paths": [],
+            }
+        _group_generation_in_progress.add(task_key)
 
     def _task():
         try:
@@ -9429,7 +10608,10 @@ def _build_semantic_group_index_async(
                 chunks,
                 pages,
                 embed_fn,
-                api_key,
+                chunk_pages=chunk_pages,
+                chunk_types=chunk_types,
+                chunk_metadata=chunk_metadata,
+                api_key=api_key,
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
@@ -9438,16 +10620,29 @@ def _build_semantic_group_index_async(
                 source_hash=source_hash,
                 transaction_id=transaction_id,
                 vector_store_dir=vector_store_dir,
+                semantic_identity=normalized_semantic_identity,
             )
         except Exception as e:
             # 任务失败时记录日志（需求 6.4），不影响主流程
             logger.error(f"[{doc_id}] 意群生成后台任务失败: {e}", exc_info=True)
         finally:
-            _group_generation_in_progress.discard(task_key)
+            with _group_generation_lock:
+                _group_generation_in_progress.discard(task_key)
+            _semantic_group_background_admission.release()
 
-    thread = threading.Thread(target=_task, daemon=True)
-    thread.start()
+    try:
+        threading.Thread(
+            target=_task,
+            name=f"chatpdf-semantic-group-{doc_id[:12]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _group_generation_lock:
+            _group_generation_in_progress.discard(task_key)
+        _semantic_group_background_admission.release()
+        raise
     logger.info(f"[{doc_id}] 意群生成后台任务已启动")
+    return {"status": "queued", "group_count": 0, "paths": []}
 
 
 def _build_semantic_group_index(
@@ -9456,6 +10651,9 @@ def _build_semantic_group_index(
     pages: List[dict],
     embed_fn,
     api_key: str = None,
+    chunk_pages: Optional[List[int]] = None,
+    chunk_types: Optional[List[str]] = None,
+    chunk_metadata: Optional[List[dict]] = None,
     model: str = "gpt-4o-mini",
     provider: str = "openai",
     endpoint: str = "",
@@ -9464,6 +10662,7 @@ def _build_semantic_group_index(
     source_hash: str = "",
     transaction_id: str = "",
     vector_store_dir: str = "",
+    semantic_identity: Optional[dict] = None,
 ):
     """在分块索引构建完成后，生成语义意群并构建意群级别向量索引
 
@@ -9492,11 +10691,20 @@ def _build_semantic_group_index(
         return {"status": "disabled", "group_count": 0, "paths": []}
 
     staged_dir = ""
+    normalized_semantic_identity = _normalize_semantic_generation_identity(semantic_identity)
     try:
         logger.info(f"[{doc_id}] 开始生成语义意群...")
 
-        # 从 pages 数据推导每个分块对应的页码
-        chunk_pages = _derive_chunk_pages(chunks, pages)
+        narrative_chunks, narrative_pages, original_indices = _prepare_narrative_semantic_inputs(
+            chunks,
+            pages,
+            chunk_pages=chunk_pages,
+            chunk_types=chunk_types,
+            chunk_metadata=chunk_metadata,
+        )
+        if not narrative_chunks:
+            logger.warning(f"[{doc_id}] 没有可用于语义意群的正文分块，跳过意群索引构建")
+            return {"status": "empty", "group_count": 0, "paths": []}
 
         # 创建 SemanticGroupService 实例
         group_service = SemanticGroupService(
@@ -9508,8 +10716,8 @@ def _build_semantic_group_index(
 
         # 调用 generate_groups 生成语义意群（异步方法需要在同步上下文中运行）
         groups = _run_async(group_service.generate_groups(
-            chunks=chunks,
-            chunk_pages=chunk_pages,
+            chunks=narrative_chunks,
+            chunk_pages=narrative_pages,
             target_chars=config.target_group_chars,
             min_chars=config.min_group_chars,
             max_chars=config.max_group_chars,
@@ -9518,6 +10726,15 @@ def _build_semantic_group_index(
         if not groups:
             logger.warning(f"[{doc_id}] 语义意群生成结果为空，跳过意群索引构建")
             return {"status": "empty", "group_count": 0, "paths": []}
+
+        # SemanticGroupService 对过滤后的正文数组编号。检索侧仍用完整向量
+        # chunk 数组反查，因此发布前必须恢复为原始 chunk id。
+        for group in groups:
+            group.chunk_indices = [
+                original_indices[index]
+                for index in group.chunk_indices
+                if isinstance(index, int) and 0 <= index < len(original_indices)
+            ]
 
         logger.info(f"[{doc_id}] 生成了 {len(groups)} 个语义意群")
 
@@ -9537,6 +10754,27 @@ def _build_semantic_group_index(
         # 保存意群数据为 JSON
         group_service.save_groups(doc_id, groups, groups_store_dir)
         logger.info(f"[{doc_id}] 意群数据已保存到 {groups_store_dir}")
+
+        groups_json_path = os.path.join(groups_store_dir, f"{doc_id}.json")
+        if normalized_semantic_identity:
+            try:
+                with open(groups_json_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    payload.update({
+                        "parse_generation": normalized_semantic_identity.get("parse_generation") or "",
+                        "document_source_hash": normalized_semantic_identity.get("document_source_hash") or "",
+                        "vector_build_id": normalized_semantic_identity.get("vector_build_id") or "",
+                        "embedding_identity_version": int(normalized_semantic_identity.get("embedding_identity_version") or 0),
+                        "embedding_model": normalized_semantic_identity.get("embedding_model") or "",
+                        "embedding_provider": normalized_semantic_identity.get("embedding_provider") or "",
+                        "embedding_api_host": normalized_semantic_identity.get("embedding_api_host") or "",
+                        "vector_dimension": int(normalized_semantic_identity.get("vector_dimension") or 0),
+                    })
+                    with open(groups_json_path, "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                raise RuntimeError(f"写入 semantic groups 身份元数据失败: {exc}") from exc
 
         # 为意群的 digest 文本构建 FAISS 向量索引
         digest_texts = [g.digest for g in groups]
@@ -9559,6 +10797,14 @@ def _build_semantic_group_index(
                 pickle.dump({
                     "digest_texts": digest_texts,
                     "group_ids": group_ids,
+                    "parse_generation": normalized_semantic_identity.get("parse_generation") or "",
+                    "document_source_hash": normalized_semantic_identity.get("document_source_hash") or "",
+                    "vector_build_id": normalized_semantic_identity.get("vector_build_id") or "",
+                    "embedding_identity_version": int(normalized_semantic_identity.get("embedding_identity_version") or 0),
+                    "embedding_model": normalized_semantic_identity.get("embedding_model") or "",
+                    "embedding_provider": normalized_semantic_identity.get("embedding_provider") or "",
+                    "embedding_api_host": normalized_semantic_identity.get("embedding_api_host") or "",
+                    "vector_dimension": int(normalized_semantic_identity.get("vector_dimension") or dimension),
                 }, f)
 
             paths.extend([group_index_path, group_meta_path])
@@ -9568,29 +10814,42 @@ def _build_semantic_group_index(
                 f"共 {len(groups)} 个意群"
             )
         if publish_active_generation:
+            if not _semantic_generation_identity_complete(normalized_semantic_identity):
+                raise RuntimeError("semantic groups 发布必须绑定完整向量身份")
             artifact_paths = {
                 "json": Path(groups_store_dir) / f"{doc_id}.json",
                 "index": Path(groups_store_dir) / f"{doc_id}_groups.index",
                 "pkl": Path(groups_store_dir) / f"{doc_id}_groups.pkl",
             }
-            validation = validate_semantic_group_artifacts(artifact_paths, doc_id)
+            validation = validate_semantic_group_artifacts(
+                artifact_paths,
+                doc_id,
+                expected_identity=normalized_semantic_identity,
+                expected_vector_dimension=int(normalized_semantic_identity.get("vector_dimension") or 0),
+            )
             if not validation["valid"]:
                 raise RuntimeError("semantic groups validation failed: " + ", ".join(validation["errors"]))
-            if transaction_id and not _semantic_generation_matches_vector_index(
-                doc_id,
-                vector_store_dir,
-                parse_generation=transaction_id,
-                document_source_hash=source_hash,
-            ):
-                logger.info("[%s] 丢弃已过期的语义意群后台结果: generation=%s", doc_id, transaction_id)
-                return {"status": "stale", "group_count": 0, "paths": []}
-            published = publish_generation(
-                semantic_root,
-                doc_id,
-                groups_store_dir,
-                source_hash=source_hash,
-                transaction_id=transaction_id,
-            )
+            with get_document_publication_lock(doc_id):
+                if not _semantic_generation_matches_vector_index(
+                    doc_id,
+                    vector_store_dir,
+                    semantic_identity=normalized_semantic_identity,
+                ):
+                    logger.info(
+                        "[%s] 丢弃已过期的语义意群后台结果: generation=%s build=%s",
+                        doc_id,
+                        normalized_semantic_identity.get("parse_generation") or transaction_id,
+                        normalized_semantic_identity.get("vector_build_id") or "",
+                    )
+                    return {"status": "stale", "group_count": 0, "paths": []}
+                published = publish_generation(
+                    semantic_root,
+                    doc_id,
+                    groups_store_dir,
+                    source_hash=source_hash,
+                    transaction_id=transaction_id,
+                    semantic_identity=normalized_semantic_identity,
+                )
             _index_cache.invalidate(doc_id)
             paths = list(published["paths"].values())
             staged_dir = ""
@@ -9625,6 +10884,52 @@ def _derive_chunk_pages(chunks: List[str], pages: List[dict]) -> List[int]:
         return [1] * len(chunks)
 
     return [_find_page_for_chunk(chunk, pages) for chunk in chunks]
+
+
+def _prepare_narrative_semantic_inputs(
+    chunks: List[str],
+    pages: Optional[List[dict]],
+    *,
+    chunk_pages: Optional[List[int]] = None,
+    chunk_types: Optional[List[str]] = None,
+    chunk_metadata: Optional[List[dict]] = None,
+) -> tuple[List[str], List[int], List[int]]:
+    """只让正文进入 narrative semantic groups，并保留原始 chunk id。"""
+    derived_pages = _derive_chunk_pages(chunks, pages or [])
+    aligned_pages = list(chunk_pages or [])
+    aligned_types = list(chunk_types or [])
+    aligned_metadata = list(chunk_metadata or [])
+    narrative_chunks: List[str] = []
+    narrative_pages: List[int] = []
+    original_indices: List[int] = []
+
+    for index, chunk in enumerate(chunks):
+        text = str(chunk or "").strip()
+        if not text:
+            continue
+        metadata = aligned_metadata[index] if index < len(aligned_metadata) and isinstance(aligned_metadata[index], dict) else {}
+        chunk_type = str(
+            aligned_types[index] if index < len(aligned_types) else ""
+        ).strip().lower() or _guess_chunk_type(text)
+        table_metadata = bool(
+            metadata.get("structured_table_bundle")
+            or metadata.get("table_row_evidence")
+            or metadata.get("table_row_shard")
+            or metadata.get("table_bundle_id")
+        )
+        if chunk_type in {"table", "table_row", "table_cell"} or table_metadata:
+            continue
+        if _is_table_fragment(text):
+            continue
+
+        page = aligned_pages[index] if index < len(aligned_pages) else 0
+        if not isinstance(page, int) or page <= 0:
+            page = derived_pages[index] if index < len(derived_pages) else 1
+        narrative_chunks.append(text)
+        narrative_pages.append(page)
+        original_indices.append(index)
+
+    return narrative_chunks, narrative_pages, original_indices
 
 
 def _run_async(coro):
@@ -9996,7 +11301,13 @@ def _is_reference_like_text(text: str) -> bool:
     sample = text[:1200]
     sample_lower = sample.lower()
 
-    if "references" in sample_lower or "bibliography" in sample_lower or "参考文献" in sample:
+    lines = [ln.strip() for ln in sample.splitlines() if ln.strip()]
+    first_line = lines[0].lower() if lines else ""
+    if re.match(
+        r"^(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references|bibliography|参考文献)\b",
+        first_line,
+        re.IGNORECASE,
+    ):
         return True
 
     citation_markers = len(re.findall(r"\[[0-9]{1,3}\]", sample))
@@ -10005,8 +11316,39 @@ def _is_reference_like_text(text: str) -> bool:
     doi_hits = len(re.findall(r"\b(?:doi|arxiv)\b", sample_lower))
     author_hits = len(re.findall(r"\b[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)", sample))
 
-    lines = [ln.strip() for ln in sample.splitlines() if ln.strip()]
     numbered_lines = sum(1 for ln in lines if re.match(r"^\[?\d{1,3}\]?[.)]?\s", ln))
+    if (
+        re.match(r"^\[\d{1,3}\]", sample)
+        and citation_markers >= 2
+        and year_hits >= 2
+    ):
+        return True
+    reference_entry_lines = sum(
+        1
+        for line in lines
+        if re.search(r"\b(?:19|20)\d{2}\b", line)
+        and (
+            re.match(r"^\[?\d{1,3}\]?[.)]?\s", line)
+            or re.search(r"\bet\s+al\.?\b|\bdoi\b|\barxiv\b", line, re.IGNORECASE)
+            or re.search(r"\b[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)", line)
+        )
+    )
+    if reference_entry_lines >= 2:
+        return True
+
+    # 双栏 PDF 的旧 full_text 可能把整页参考文献压成单行。此时不能要求
+    # 换行结构，但高密度的年份 + 书目信号仍足以区分文献页和方法正文。
+    venue_hits = len(re.findall(
+        r"\b(?:proceedings|conference|journal|transactions|advances|springer|ieee|acm)\b|\bpp\.\s*\d+",
+        sample_lower,
+    ))
+    if year_hits >= 5 and (
+        doi_hits >= 2
+        or author_hits >= 3
+        or venue_hits >= 3
+        or (et_al_hits >= 3 and venue_hits >= 2)
+    ):
+        return True
 
     signal = 0
     if citation_markers >= 2:
@@ -10020,7 +11362,9 @@ def _is_reference_like_text(text: str) -> bool:
     if lines and (numbered_lines / len(lines)) >= 0.35 and year_hits >= 1:
         signal += 1
 
-    return signal >= 2
+    # 正文的 related-work 句子经常同时包含多个年份和 ``et al.``。只有
+    # 三种以上信号，并且文本还呈现多行/多编号条目结构时，才当成文献列表。
+    return signal >= 3 and (len(lines) >= 2 or citation_markers >= 3)
 
 
 def filter_reference_trap_results(
@@ -10046,7 +11390,15 @@ def filter_reference_trap_results(
         normalized_item = dict(item)
         _normalize_structural_metadata(normalized_item)
         chunk_text = normalized_item.get("raw_chunk_text") or normalized_item.get("chunk", "")
-        if chunk_text and _is_reference_like_text(chunk_text):
+        structural_path = " ".join(
+            str(normalized_item.get(key) or "")
+            for key in ("chunk_heading", "section_path", "section_title")
+        ).strip()
+        reference_section = bool(
+            structural_path
+            and re.search(r"(?:^|\b)(?:references|bibliography|参考文献)(?:\b|$)", structural_path, re.I)
+        )
+        if chunk_text and (reference_section or _is_reference_like_text(chunk_text)):
             chunk_type = normalized_item.get("chunk_type") or normalized_item.get("block_type") or ""
             if numeric_table_query and _looks_like_numeric_table_support(chunk_text, chunk_type):
                 filtered_results.append(normalized_item)
@@ -10060,7 +11412,9 @@ def filter_reference_trap_results(
         if removed > 0:
             logger.info(f"[检索净化] 过滤参考文献型结果 {removed} 条")
         return filtered_results
-    return results
+    if removed > 0:
+        logger.info("[检索净化] 候选全部为参考文献型结果，返回空结果触发正文降级")
+    return []
 
 
 def filter_reference_trap_texts(
@@ -10275,10 +11629,14 @@ def _extract_numeric_table_dataset_mentions(text: str) -> set[str]:
     return mentions
 
 
-def _apply_numeric_table_boost(results: List[dict], query: str) -> List[dict]:
+def _apply_numeric_table_boost(
+    results: List[dict],
+    query: str,
+    evidence_need: Optional[List[str]] = None,
+) -> List[dict]:
     if not results or not query:
         return results
-    if "numeric_table" not in (_analyze_evidence_need(query) or []):
+    if "numeric_table" not in _resolve_evidence_need(query, evidence_need):
         return results
 
     hints = _query_rewriter_singleton.extract_numeric_table_hints(query)
@@ -11062,6 +12420,17 @@ _STRUCTURAL_SECTION_BLACKLIST = (
 )
 
 
+_EXPLICIT_TABLE_STRUCTURE_QUERY_RE = re.compile(
+    r"(?:表\s*\d+|表格|表中|表里|该表|这张表|table\s*\d*|table\s+of|columns?|rows?|headers?)",
+    re.IGNORECASE,
+)
+
+
+def _is_explicit_table_structure_query(query: str) -> bool:
+    """Keep table rows for structural questions even when no metric is named."""
+    return bool(_EXPLICIT_TABLE_STRUCTURE_QUERY_RE.search(str(query or "")))
+
+
 def _is_structural_noise(text: str) -> bool:
     """检测 chunk 是否为结构性噪声章节（附录/参考/声明/致谢等）。
     仅看前 600 字符的第一行，避免误伤正文中提到这些词的段落。
@@ -11076,7 +12445,12 @@ def _is_structural_noise(text: str) -> bool:
     return False
 
 
-def _unified_post_clean(results: List[dict], query: str, top_k: int) -> List[dict]:
+def _unified_post_clean(
+    results: List[dict],
+    query: str,
+    top_k: int,
+    evidence_need: Optional[List[str]] = None,
+) -> List[dict]:
     """统一末端清洗器（参考 openclaw candidateMultiplier + minScore 策略）
 
     在检索管线最末端执行，保证最终上下文干净：
@@ -11092,10 +12466,13 @@ def _unified_post_clean(results: List[dict], query: str, top_k: int) -> List[dic
     min_score = _rc.post_clean_min_score
     min_keep = min(max(_rc.post_clean_min_keep, 1), max(top_k, 1))
     cost_query = _is_numeric_table_cost_query(query)
+    numeric_table_query = "numeric_table" in _resolve_evidence_need(query, evidence_need)
+    table_query = numeric_table_query or _is_explicit_table_structure_query(query)
 
     scored = []
     for item in results:
         chunk_text = item.get("chunk", "")
+        chunk_type = str(item.get("chunk_type") or item.get("block_type") or "").strip().lower()
         sim = item.get("similarity", 0.0)
         penalty = 1.0
         keep_cost_anchor = bool(cost_query and chunk_text and _has_numeric_table_cost_anchor(chunk_text))
@@ -11104,6 +12481,11 @@ def _unified_post_clean(results: List[dict], query: str, top_k: int) -> List[dic
             penalty *= 0.15
         if chunk_text and len(chunk_text.strip()) < 80 and not keep_cost_anchor:
             penalty *= 0.5
+        if not table_query and not keep_cost_anchor:
+            if chunk_type in {"table_row", "table_cell"}:
+                penalty *= 0.15
+            elif chunk_type == "table" or (chunk_text and _is_table_fragment(chunk_text)):
+                penalty *= 0.30
 
         scored.append((item, sim * penalty if penalty < 1.0 else sim, keep_cost_anchor))
 
@@ -11135,7 +12517,11 @@ _NUMERIC_QUERY_TOKENS = frozenset({
 })
 
 
-def _sanitize_by_chunk_type(results: List[dict], query: str) -> List[dict]:
+def _sanitize_by_chunk_type(
+    results: List[dict],
+    query: str,
+    intent_decision: Optional[dict] = None,
+) -> List[dict]:
     """对特定 chunk_type 做得分折扣（不完全排除，避免误伤）
 
     折扣策略（考虑题目意图）：
@@ -11147,22 +12533,62 @@ def _sanitize_by_chunk_type(results: List[dict], query: str) -> List[dict]:
         return results
 
     query_lower = (query or "").lower()
-    is_formula_query = any(t in query_lower for t in _FORMULA_QUERY_TOKENS)
+    modalities = {
+        str(item).strip().lower()
+        for item in ((intent_decision or {}).get("modalities") or [])
+        if str(item).strip()
+    } if isinstance(intent_decision, dict) else set()
+    frozen_evidence_need = (
+        list((intent_decision or {}).get("evidence_need") or [])
+        if isinstance(intent_decision, dict)
+        else None
+    )
+    is_formula_query = "formula" in modalities or any(t in query_lower for t in _FORMULA_QUERY_TOKENS)
     is_numeric_query = any(t in query_lower for t in _NUMERIC_QUERY_TOKENS)
+    is_numeric_table_query = "numeric_table" in _resolve_evidence_need(
+        query,
+        frozen_evidence_need,
+    )
+    is_table_query = (
+        "table" in modalities
+        or is_numeric_table_query
+        or _is_explicit_table_structure_query(query)
+    )
+    is_visual_query = bool(
+        modalities & {"figure", "layout", "image"}
+    ) or bool(re.search(
+        r"\b(?:figure|fig\.?|chart|diagram|image)\b|图\s*\d*|图表|插图|示意图",
+        query or "",
+        re.IGNORECASE,
+    ))
 
     adjusted = []
     penalized = 0
+    excluded = 0
     for item in results:
-        chunk_type = (item.get("chunk_type") or "").strip()
+        chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
         sim = item.get("similarity", 0.0)
         penalty = 1.0
+        chunk_text = (item.get("chunk") or "").strip()
+
+        if not is_table_query:
+            if chunk_type in {"table_row", "table_cell"}:
+                excluded += 1
+                continue
+            if _is_table_fragment(chunk_text) and not is_visual_query:
+                excluded += 1
+                continue
 
         if chunk_type == "formula" and not is_formula_query:
             penalty *= 0.25
         elif chunk_type == "caption":
-            penalty *= 0.50 if not is_numeric_query else 0.80
+            if not is_table_query and not is_visual_query:
+                penalty *= 0.50
+            elif not is_table_query and not is_numeric_query:
+                penalty *= 0.80
+        elif chunk_type == "table" and not is_table_query:
+            penalty *= 0.70 if is_visual_query else 0.35
 
-        chunk_text = (item.get("chunk") or "").strip()
         if len(chunk_text) < 40 and chunk_type not in ("table",) and not any(ch.isdigit() for ch in chunk_text):
             penalty *= 0.40
 
@@ -11176,6 +12602,8 @@ def _sanitize_by_chunk_type(results: List[dict], query: str) -> List[dict]:
 
     if penalized:
         logger.debug(f"[TypeSanitizer] 对 {penalized}/{len(results)} 个候选应用类型折扣")
+    if excluded:
+        logger.info(f"[TypeSanitizer] 非表格问题隔离表格行/数字碎片 {excluded} 条")
 
     adjusted.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
     return adjusted
@@ -11396,9 +12824,16 @@ def _normalize_runtime_visual_evidence(visual_evidence: Optional[List[dict]], li
     return normalized
 
 
-def _visual_overlay_cache_key(embedding_model_id: str, evidence: List[dict]) -> str:
+def _visual_overlay_cache_key(
+    embedding_model_id: str,
+    embedding_provider: str,
+    embedding_api_host: str,
+    evidence: List[dict],
+) -> str:
     payload = {
         "embedding_model": str(embedding_model_id or ""),
+        "embedding_provider": str(embedding_provider or ""),
+        "embedding_api_host": str(embedding_api_host or ""),
         "items": [
             {
                 "id": item["id"],
@@ -11417,10 +12852,17 @@ def _get_visual_overlay_vectors(
     evidence: List[dict],
     *,
     embedding_model_id: str,
+    embedding_provider: str,
+    embedding_api_host: str,
     embed_fn: Callable,
     is_ip_index: bool,
 ) -> np.ndarray:
-    cache_key = _visual_overlay_cache_key(embedding_model_id, evidence)
+    cache_key = _visual_overlay_cache_key(
+        embedding_model_id,
+        embedding_provider,
+        embedding_api_host,
+        evidence,
+    )
     with _VISUAL_EVIDENCE_VECTOR_CACHE_LOCK:
         cached = _VISUAL_EVIDENCE_VECTOR_CACHE.get(cache_key)
         if cached is not None:
@@ -11502,6 +12944,8 @@ def _build_runtime_visual_overlay_results(
     query: str,
     query_vector: np.ndarray,
     embedding_model_id: str,
+    embedding_provider: str,
+    embedding_api_host: str,
     embed_fn: Callable,
     is_ip_index: bool,
 ) -> List[dict]:
@@ -11526,6 +12970,8 @@ def _build_runtime_visual_overlay_results(
     vectors = _get_visual_overlay_vectors(
         evidence,
         embedding_model_id=embedding_model_id,
+        embedding_provider=embedding_provider,
+        embedding_api_host=embedding_api_host,
         embed_fn=embed_fn,
         is_ip_index=is_ip_index,
     )
@@ -12047,6 +13493,11 @@ def search_document_chunks(
     query_expansion_provider: str = "",
     query_expansion_endpoint: str = "",
     visual_evidence: Optional[List[dict]] = None,
+    intent_decision: Optional[dict] = None,
+    query_is_canonical: bool = False,
+    embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_api_host: Optional[str] = None,
 ) -> Tuple[List[dict], dict]:
     """检索文档 chunk，返回检索结果和各阶段耗时。
 
@@ -12058,29 +13509,41 @@ def search_document_chunks(
     """
     original_query = query
 
-    # 查询改写（需求 1.1, 1.5）—— 使用模块级单例避免重复实例化
-    try:
-        pre_rewrite_evidence_need = _analyze_evidence_need(original_query)
-        rewritten_query = _query_rewriter_singleton.rewrite(
-            original_query,
-            selected_text=selected_text,
-            evidence_need=pre_rewrite_evidence_need,
+    decision = _resolve_intent_decision(original_query, intent_decision)
+    query_is_canonical = bool(
+        query_is_canonical
+        or (
+            isinstance(intent_decision, dict)
+            and str(intent_decision.get("intent_id") or "").strip()
         )
-        if rewritten_query != original_query:
-            logger.info(f"[{doc_id}] 查询改写: '{original_query}' → '{rewritten_query}'")
-            query = rewritten_query
-            _emit_retrieval_progress(
-                progress_callback,
-                "query_rewrite",
-                "检索问题已改写，正在继续检索...",
-                query=query,
+    )
+
+    # Query rewriting is a legacy convenience for direct callers. Route-level
+    # intent orchestration passes a frozen retrieval query and must not let the
+    # lower layer mutate it a second time.
+    pre_rewrite_evidence_need = list(decision.get("evidence_need") or [])
+    try:
+        if not query_is_canonical:
+            rewritten_query = _query_rewriter_singleton.rewrite(
+                original_query,
+                selected_text=selected_text,
+                evidence_need=pre_rewrite_evidence_need,
             )
+            if rewritten_query != original_query:
+                logger.info(f"[{doc_id}] 查询改写: '{original_query}' → '{rewritten_query}'")
+                query = rewritten_query
+                _emit_retrieval_progress(
+                    progress_callback,
+                    "query_rewrite",
+                    "检索问题已改写，正在继续检索...",
+                    query=query,
+                )
     except Exception as e:
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
 
     # 查询类型分析 + 动态 candidate_k（提升召回率）
-    query_type = _analyze_query_type(original_query)
-    evidence_need = pre_rewrite_evidence_need if 'pre_rewrite_evidence_need' in locals() else _analyze_evidence_need(original_query)
+    query_type = str(decision.get("query_type") or "specific")
+    evidence_need = pre_rewrite_evidence_need
     analysis_query = original_query
     _rc_ref = _rag_config_singleton
     _candidate_k_map = {
@@ -12131,28 +13594,35 @@ def search_document_chunks(
         index = faiss.read_index(index_path)
         with open(chunks_path, "rb") as f:
             data = pickle.load(f)
-        _index_cache.put_index(doc_id, index, data, index_path)
+        _index_cache.put_index(doc_id, index, data, index_path, chunks_path)
 
-    _annotate_pages_with_provenance(pages)
+    data = _require_current_vector_index_schema(data, doc_id)
+    verified_embedding = _resolve_verified_query_embedding_identity(
+        data,
+        api_key=api_key,
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_api_host=embedding_api_host,
+    )
 
-    if isinstance(data, dict):
-        chunks = data["chunks"]
-        embedding_model_id = data.get("embedding_model", "local-minilm")
-        parent_chunks = data.get("parent_chunks", [])
-        child_to_parent = data.get("child_to_parent", {})
-        chunk_headings = data.get("chunk_headings") or [""] * len(chunks)
-        chunk_pages = data.get("chunk_pages") or [0] * len(chunks)
-        chunk_types = data.get("chunk_types") or [_guess_chunk_type(c) for c in chunks]
-        chunk_metadata = _normalize_chunk_metadata_list(data.get("chunk_metadata"), len(chunks))
-    else:
-        chunks = data
-        embedding_model_id = "local-minilm"
-        parent_chunks = []
-        child_to_parent = {}
-        chunk_headings = [""] * len(chunks)
-        chunk_pages = [0] * len(chunks)
-        chunk_types = [_guess_chunk_type(c) for c in chunks]
-        chunk_metadata = [{} for _ in chunks]
+    pages = _annotate_pages_with_provenance(pages)
+
+    chunks = data["chunks"]
+    embedding_model_id = verified_embedding["model"]
+    verified_embedding_provider = verified_embedding["provider"]
+    verified_embedding_api_host = verified_embedding["api_host"]
+    verified_embedding_api_key = verified_embedding["api_key"]
+    embedding_cache_scope = _embedding_cache_scope(
+        embedding_model_id,
+        verified_embedding_provider,
+        verified_embedding_api_host,
+    )
+    parent_chunks = data.get("parent_chunks", [])
+    child_to_parent = data.get("child_to_parent", {})
+    chunk_headings = data.get("chunk_headings") or [""] * len(chunks)
+    chunk_pages = data.get("chunk_pages") or [0] * len(chunks)
+    chunk_types = data.get("chunk_types") or [_guess_chunk_type(c) for c in chunks]
+    chunk_metadata = _normalize_chunk_metadata_list(data.get("chunk_metadata"), len(chunks))
 
     if len(chunk_headings) != len(chunks):
         chunk_headings = (chunk_headings[:len(chunks)] + [""] * len(chunks))[:len(chunks)]
@@ -12194,7 +13664,12 @@ def search_document_chunks(
     semantic_groups_current = _semantic_groups_match_vector_index(doc_id, vector_store_dir)
     group_chunk_map = _load_group_data(doc_id) or {} if semantic_groups_current else {}
 
-    embed_fn = get_embedding_function(embedding_model_id, api_key)
+    embed_fn = get_embedding_function(
+        embedding_model_id,
+        verified_embedding_api_key,
+        verified_embedding_api_host,
+        False,
+    )
 
     # 预构建页面前缀索引，加速 chunk → 页码映射
     _page_index = _build_page_index(pages)
@@ -12225,16 +13700,24 @@ def search_document_chunks(
         if enable_query_expansion_override is False
         else _should_enable_hyde(query_type, evidence_need, _search_rag_config)
     )
-    if hyde_enabled and api_key:
+    if hyde_enabled and query_expansion_api_key:
         try:
             _emit_retrieval_progress(progress_callback, "hyde_start", "正在生成语义扩展（HyDE）...")
             from services.query_expander import generate_hyde_passage
-            hyde_passage = _run_async(generate_hyde_passage(query, api_key))
+            hyde_passage = _run_async(generate_hyde_passage(
+                query,
+                query_expansion_api_key,
+                model=query_expansion_model,
+                provider=query_expansion_provider,
+                endpoint=query_expansion_endpoint,
+            ))
             if hyde_passage:
                 logger.info(f"[{doc_id}] HyDE 启用，假设文档 {len(hyde_passage)} 字符")
                 _emit_retrieval_progress(progress_callback, "hyde_done", "HyDE 扩展完成，正在召回相关内容...")
         except Exception as e:
             logger.warning(f"[{doc_id}] HyDE 生成失败，降级为原始查询: {e}")
+    elif hyde_enabled:
+        logger.info(f"[{doc_id}] 跳过 HyDE：未提供与辅助模型匹配的专用 API Key")
 
     search_k = max(candidate_k, top_k)
 
@@ -12248,37 +13731,51 @@ def search_document_chunks(
     try:
         # 查询向量 LRU 缓存（需求 5.1, 5.2, 5.3）
         # HyDE 模式下：同时缓存原始查询向量和 HyDE 向量
-        cached_vector = _query_vector_cache.get(embedding_model_id, query)
+        cached_vector = _query_vector_cache.get(embedding_cache_scope, query)
         if cached_vector is not None:
-            query_vector = cached_vector
+            query_vector = _ensure_query_vector_matches_index(cached_vector, index)
             logger.info(f"[{doc_id}] 查询向量缓存命中: model={embedding_model_id}")
             _emit_retrieval_progress(progress_callback, "embedding_query", "查询向量缓存命中，正在进行召回...")
         else:
             _emit_retrieval_progress(progress_callback, "embedding_query", "正在计算查询向量...")
-            query_vector = _normalize_query_vector(embed_fn([query]))
-            _query_vector_cache.put(embedding_model_id, query, query_vector)
+            query_vector = _ensure_query_vector_matches_index(
+                _normalize_query_vector(embed_fn([query])),
+                index,
+            )
+            _query_vector_cache.put(embedding_cache_scope, query, query_vector)
 
         # HyDE：额外生成假设文档的 embedding 用于检索
         if hyde_passage:
             hyde_cache_key = f"hyde:{query}"
-            cached_hyde = _query_vector_cache.get(embedding_model_id, hyde_cache_key)
+            cached_hyde = _query_vector_cache.get(embedding_cache_scope, hyde_cache_key)
             if cached_hyde is not None:
-                hyde_vector = cached_hyde
+                hyde_vector = _ensure_query_vector_matches_index(cached_hyde, index)
                 _emit_retrieval_progress(progress_callback, "hyde_cache_hit", "HyDE 向量缓存命中，正在继续召回...")
             else:
                 _emit_retrieval_progress(progress_callback, "hyde_embedding", "正在计算 HyDE 向量...")
-                hyde_vector = _normalize_query_vector(embed_fn([hyde_passage]))
-                _query_vector_cache.put(embedding_model_id, hyde_cache_key, hyde_vector)
+                hyde_vector = _ensure_query_vector_matches_index(
+                    _normalize_query_vector(embed_fn([hyde_passage])),
+                    index,
+                )
+                _query_vector_cache.put(embedding_cache_scope, hyde_cache_key, hyde_vector)
 
         # 主查询检索（使用 HyDE 向量或原始查询向量）
         primary_vector = hyde_vector if hyde_vector is not None else query_vector
         _emit_retrieval_progress(progress_callback, "vector_search", "正在进行向量召回...")
-        D, I = index.search(np.array(primary_vector).astype('float32'), search_k)
+        D, I = index.search(np.asarray(primary_vector, dtype="float32"), search_k)
 
         # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
         if hyde_vector is not None:
-            D_orig, I_orig = index.search(np.array(query_vector).astype('float32'), search_k)
+            D_orig, I_orig = index.search(np.asarray(query_vector, dtype="float32"), search_k)
+    except HTTPException:
+        raise
     except Exception as e:
+        non_degradable_error = _build_non_degradable_query_embedding_http_error(e)
+        if non_degradable_error is not None:
+            logger.warning(
+                f"[{doc_id}] 查询 embedding 不可降级失败: {_summarize_embedding_error(e)}"
+            )
+            raise non_degradable_error from e
         vector_error = e
         if not use_hybrid:
             raise
@@ -12476,6 +13973,8 @@ def search_document_chunks(
                 query=query,
                 query_vector=query_vector,
                 embedding_model_id=embedding_model_id,
+                embedding_provider=verified_embedding_provider,
+                embedding_api_host=verified_embedding_api_host,
                 embed_fn=embed_fn,
                 is_ip_index=is_ip_index,
             )
@@ -12533,7 +14032,7 @@ def search_document_chunks(
                 expansion_result_lists = [vector_results]
                 for eq in expanded_queries:
                     eq_vector = _normalize_query_vector(embed_fn([eq]))
-                    D_eq, I_eq = _search_faiss(index, eq_vector, search_k)
+                    D_eq, I_eq = index.search(np.array(eq_vector).astype('float32'), search_k)
                     expanded_results = filter_reference_trap_results(
                         _build_results_from_faiss(D_eq, I_eq),
                         query,
@@ -12626,7 +14125,7 @@ def search_document_chunks(
             vector_store_dir=vector_store_dir,
         )
         results = _apply_query_intent_boost(results, analysis_query)
-        results = _apply_numeric_table_boost(results, analysis_query)
+        results = _apply_numeric_table_boost(results, analysis_query, evidence_need)
         results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
     else:
         logger.info(f"[{doc_id}] 跳过意群级融合：查询向量不可用")
@@ -12663,7 +14162,7 @@ def search_document_chunks(
         evidence_need=evidence_need,
     )
     results = _apply_query_intent_boost(results, analysis_query)
-    results = _apply_numeric_table_boost(results, analysis_query)
+    results = _apply_numeric_table_boost(results, analysis_query, evidence_need)
     results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
     post_clean_top_k = pre_rerank_top_k
     if "numeric_table" in evidence_need:
@@ -12671,7 +14170,12 @@ def search_document_chunks(
             post_clean_top_k,
             min(len(results), max(top_k * 4, 24)),
         )
-    results = _unified_post_clean(results, analysis_query, post_clean_top_k)
+    results = _unified_post_clean(
+        results,
+        analysis_query,
+        post_clean_top_k,
+        evidence_need,
+    )
     results = _annotate_results_for_evidence_rerank(
         doc_id=doc_id,
         results=results,
@@ -12693,7 +14197,7 @@ def search_document_chunks(
     )
     results = _mark_numeric_table_support_chunks(results, analysis_query)
     results = _dedupe_numeric_table_evidence_units(results, analysis_query)
-    results = _sanitize_by_chunk_type(results, analysis_query)
+    results = _sanitize_by_chunk_type(results, analysis_query, decision)
     if use_rerank:
         results, pre_cap_stats = _apply_group_pre_cap(results)
         page_capped_results, page_pre_cap_stats = _apply_page_pre_cap(results)
@@ -12865,10 +14369,11 @@ def _semantic_generation_matches_vector_index(
     doc_id: str,
     vector_store_dir: str,
     *,
-    parse_generation: str,
-    document_source_hash: str,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+    semantic_identity: Optional[dict] = None,
 ) -> bool:
-    if not parse_generation or not document_source_hash or not vector_store_dir:
+    if not vector_store_dir:
         return False
     chunks_path = Path(vector_store_dir) / f"{doc_id}.pkl"
     try:
@@ -12878,10 +14383,15 @@ def _semantic_generation_matches_vector_index(
         return False
     if not isinstance(data, dict):
         return False
-    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
+    current_identity = _extract_vector_semantic_identity(data)
+    expected_identity = _normalize_semantic_generation_identity(semantic_identity)
+    if expected_identity:
+        if not _semantic_generation_identity_complete(expected_identity):
+            return False
+        return _semantic_generation_identity_matches(current_identity, expected_identity)
     return (
-        str(index_meta.get("parse_generation") or "") == str(parse_generation)
-        and str(index_meta.get("document_source_hash") or "") == str(document_source_hash)
+        str(current_identity.get("parse_generation") or "") == str(parse_generation)
+        and str(current_identity.get("document_source_hash") or "") == str(document_source_hash)
     )
 
 
@@ -12894,23 +14404,43 @@ def _semantic_groups_match_vector_index(doc_id: str, vector_store_dir: str) -> b
     except (OSError, pickle.PickleError, EOFError):
         return False
     if not isinstance(data, dict):
-        # 旧 list 结构没有代际信息，继续保持兼容。
-        return True
-    index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
-    parse_generation = str(index_meta.get("parse_generation") or "")
-    document_source_hash = str(index_meta.get("document_source_hash") or "")
-    if not parse_generation or not document_source_hash:
-        return True
+        return False
     try:
-        active = json.loads(
+        index_version = int(data.get("index_version") or 0)
+    except (TypeError, ValueError):
+        index_version = 0
+    if index_version != RAG_INDEX_VERSION:
+        # 旧 semantic groups 可能含有 table_row，不能与新正文检索链混用。
+        return False
+    vector_identity = _extract_vector_semantic_identity(data)
+    if not _semantic_generation_identity_complete(vector_identity):
+        # Legacy semantic groups cannot prove which parser generation or
+        # embedding build produced them. Keep chunk-level retrieval available,
+        # but require regeneration before group-level evidence can participate.
+        return False
+    try:
+        active = _normalize_semantic_generation_identity(json.loads(
             active_manifest_path(_SEMANTIC_GROUPS_DIR, doc_id).read_text(encoding="utf-8")
-        )
+        ))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
-    return (
-        str(active.get("transaction_id") or "") == parse_generation
-        and str(active.get("source_hash") or "") == document_source_hash
-    )
+    if not _semantic_generation_identity_complete(active):
+        return False
+    if not _semantic_generation_identity_matches(vector_identity, active):
+        return False
+    semantic_paths = semantic_group_paths(_SEMANTIC_GROUPS_DIR, doc_id)
+    meta_path = semantic_paths.get("pkl")
+    if meta_path is None or not meta_path.exists():
+        return False
+    try:
+        with open(meta_path, "rb") as handle:
+            group_meta = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return False
+    group_identity = _normalize_semantic_generation_identity(group_meta if isinstance(group_meta, dict) else {})
+    if not _semantic_generation_identity_complete(group_identity):
+        return False
+    return _semantic_generation_identity_matches(vector_identity, group_identity)
 
 
 def get_relevant_context(
@@ -12935,6 +14465,11 @@ def get_relevant_context(
     query_expansion_provider: str = "",
     query_expansion_endpoint: str = "",
     visual_evidence: Optional[List[dict]] = None,
+    intent_decision: Optional[dict] = None,
+    query_is_canonical: bool = False,
+    embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_api_host: Optional[str] = None,
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -12962,8 +14497,9 @@ def get_relevant_context(
         - retrieval_meta: 检索元数据字典，包含 query_type、granularities、
           token_used、fallback、citations 等信息
     """
-    query_type = _analyze_query_type(query)
-    evidence_need = _analyze_evidence_need(query)
+    decision = _resolve_intent_decision(query, intent_decision)
+    query_type = str(decision.get("query_type") or "specific")
+    evidence_need = list(decision.get("evidence_need") or [])
 
     # 延迟导入（仅首次触发模块加载，后续为字典查找）
     from services.semantic_group_service import SemanticGroupService
@@ -12991,6 +14527,11 @@ def get_relevant_context(
         query_expansion_provider=query_expansion_provider,
         query_expansion_endpoint=query_expansion_endpoint,
         visual_evidence=visual_evidence,
+        intent_decision=decision,
+        query_is_canonical=query_is_canonical,
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_api_host=embedding_api_host,
     )
 
     config = _rag_config_singleton
@@ -13021,6 +14562,7 @@ def get_relevant_context(
                 config=config,
                 vector_store_dir=vector_store_dir,
                 timings=timings,
+                intent_decision=decision,
             )
             if context_str is not None:
                 context_str, retrieval_meta = _append_runtime_visual_overlay_group_context(
@@ -13499,6 +15041,7 @@ def _build_context_with_groups(
     config,
     vector_store_dir: str = None,
     timings: dict = None,
+    intent_decision: Optional[dict] = None,
 ) -> Tuple[Optional[str], dict]:
     """使用语义意群构建增强上下文
 
@@ -13574,7 +15117,12 @@ def _build_context_with_groups(
     selector = GranularitySelector()
 
     # 先获取查询类型对应的最大意群数限制
-    selection_info = selector.select(query=query, groups=groups, max_tokens=config.max_token_budget)
+    selection_info = selector.select(
+        query=query,
+        groups=groups,
+        max_tokens=config.max_token_budget,
+        intent_decision=intent_decision,
+    )
     # P0-A fix: extraction 严格遵守 max_groups 上限，不允许 len(results) 撑大;
     # 其他题型保留原有 max() 逻辑（允许 results 数量推高上限）
     if selection_info.query_type == "extraction":
@@ -13589,6 +15137,7 @@ def _build_context_with_groups(
         query=query,
         ranked_groups=ranked_groups_limited,
         max_tokens=config.max_token_budget,
+        intent_decision=intent_decision,
     )
 
     # 步骤 4：使用 TokenBudgetManager 调整 Token 预算
@@ -13665,7 +15214,9 @@ def _build_context_with_groups(
     # 步骤 7：使用 RetrievalLogger 记录检索追踪
     # 查询类型已在步骤 3 中获取（selection_info）
 
-    evidence_need = _analyze_evidence_need(query)
+    evidence_need = list((intent_decision or {}).get("evidence_need") or [])
+    if not isinstance(intent_decision, dict):
+        evidence_need = _analyze_evidence_need(query)
     retrieval_logger = RetrievalLogger()
     trace = RetrievalTrace(
         query=query,

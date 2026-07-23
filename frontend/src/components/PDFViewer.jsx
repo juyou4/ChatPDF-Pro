@@ -16,6 +16,7 @@ import {
     mergeClientRectsByLine,
     normalizeCitationBBox,
 } from '../utils/citationHighlightUtils';
+import { normalizeDocumentHighlightRect } from '../utils/documentHighlightUtils';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -63,6 +64,7 @@ const TRANSLATION_DOCK_DEFAULT_WIDTH = 344;
 const TRANSLATION_DOCK_MIN_WIDTH = 280;
 const TRANSLATION_DOCK_MAX_WIDTH = 520;
 const TRANSLATION_DOCK_GAP = 32;
+const EMPTY_SAVED_HIGHLIGHTS = Object.freeze([]);
 const BARE_MATH_ATOM = String.raw`(?:\\[A-Za-z]+(?:\{[^{}]*\})*|[A-Za-z][A-Za-z0-9]*(?:_\{[^{}]+\}|_[A-Za-z0-9+\-]+|\^\{[^{}]+\}|\^[A-Za-z0-9+\-]+)*(?:\([^，。；;\n]*?\))?|\d+(?:\.\d+)?|\([^，。；;\n]*?\)|\{[^{}，。；;\n]*\})`;
 const BARE_MATH_OPERATOR = String.raw`(?:=|\\approx|\\leq|\\geq|\\neq|\\times|\\cdot|[+\-*/×·<>≤≥])`;
 const BARE_MATH_EXPR_REGEX = new RegExp(`${BARE_MATH_ATOM}(?:\\s*${BARE_MATH_OPERATOR}\\s*${BARE_MATH_ATOM})+`, 'g');
@@ -150,7 +152,7 @@ const cancelIdleTask = (task) => {
     window.clearTimeout(task.id);
 };
 
-const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, savedHighlights = EMPTY_SAVED_HIGHLIGHTS, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -182,7 +184,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const backgroundGenerationRef = useRef(0);
     const isDesktop = typeof window !== 'undefined' && window.chatpdfDesktop?.isDesktop === true;
     const [desktopApiBaseUrl, setDesktopApiBaseUrl] = useState('');
-    const [desktopBackendToken, setDesktopBackendToken] = useState('');
 
     useEffect(() => {
         if (typeof page === 'number' && page > 0 && page !== pageNumber) {
@@ -209,7 +210,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         setError(null);
     }, [pdfUrl]);
 
-    // 桌面模式下通过 preload IPC 获取后端地址与鉴权 token
+    // 桌面模式下通过 preload IPC 获取后端地址；鉴权由主进程网络层处理。
     useEffect(() => {
         let cancelled = false;
 
@@ -217,13 +218,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
         (async () => {
             try {
-                const [apiBaseUrl, backendToken] = await Promise.all([
-                    window.chatpdfDesktop.getApiBaseUrl(),
-                    window.chatpdfDesktop.getBackendToken(),
-                ]);
+                const apiBaseUrl = await window.chatpdfDesktop.getApiBaseUrl();
                 if (cancelled) return;
                 setDesktopApiBaseUrl((apiBaseUrl || '').replace(/\/$/, ''));
-                setDesktopBackendToken(backendToken || '');
             } catch (e) {
                 console.warn('[PDFViewer] 获取桌面后端连接信息失败', e);
             }
@@ -254,22 +251,11 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         return Math.min(Math.max(window.devicePixelRatio || 1, 1), 1.5);
     }, []);
 
-    // react-pdf 支持通过 file 对象传递 httpHeaders，桌面端必须携带 token 访问 /uploads
+    // Electron 主进程会为本机后端请求注入 token，渲染进程不持有凭据。
     const pdfFile = useMemo(() => {
         if (!fullPdfUrl) return null;
-
-        if (isDesktop) {
-            if (!desktopBackendToken) return null;
-            return {
-                url: fullPdfUrl,
-                httpHeaders: {
-                    'X-ChatPDF-Token': desktopBackendToken,
-                },
-            };
-        }
-
         return fullPdfUrl;
-    }, [fullPdfUrl, isDesktop, desktopBackendToken]);
+    }, [fullPdfUrl]);
 
     function onDocumentLoadSuccess(pdfDocument) {
         const { numPages } = pdfDocument;
@@ -310,7 +296,37 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         if (text) {
             setSelectedText(text);
             if (onTextSelect) {
-                onTextSelect(text);
+                let anchor = null;
+                const pageElement = pageRef.current;
+                if (selection.rangeCount > 0 && pageElement && debouncedScale > 0) {
+                    const range = selection.getRangeAt(0);
+                    const ancestor = range.commonAncestorContainer;
+                    const ancestorElement = ancestor?.nodeType === 1 ? ancestor : ancestor?.parentElement;
+                    if (ancestorElement && pageElement.contains(ancestorElement)) {
+                        const pageBounds = pageElement.getBoundingClientRect();
+                        const clientRects = Array.from(range.getClientRects()).filter((rect) => (
+                            rect.width > 1
+                            && rect.height > 1
+                            && rect.right > pageBounds.left
+                            && rect.left < pageBounds.right
+                            && rect.bottom > pageBounds.top
+                            && rect.top < pageBounds.bottom
+                        ));
+                        const rects = mergeClientRectsByLine(clientRects, pageBounds, 1).map((rect) => ({
+                            left: rect.left / debouncedScale,
+                            top: rect.top / debouncedScale,
+                            width: rect.width / debouncedScale,
+                            height: rect.height / debouncedScale,
+                        }));
+                        anchor = {
+                            page: pageNumber,
+                            rects,
+                            coordinate_space: 'pdf_top_left_points',
+                            page_size: [pageBounds.width / debouncedScale, pageBounds.height / debouncedScale],
+                        };
+                    }
+                }
+                onTextSelect(text, anchor);
             }
         }
     };
@@ -330,6 +346,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     const [highlightRect, setHighlightRect] = useState(null);
     const [highlightRects, setHighlightRects] = useState([]);
+    const [savedHighlightRects, setSavedHighlightRects] = useState([]);
     const pageRef = useRef(null);
     const pageRenderEpoch = useMemo(() => ({
         documentKey: pdfCacheKey,
@@ -849,6 +866,69 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     }, [blockIndex, currentBlockPage, currentBlocks, debouncedScale, highlightInfo, numPages, pageNumber, pageRenderEpoch, renderedPageEpoch, scrollHighlightIntoView]);
 
+    useEffect(() => {
+        if (renderedPageEpoch !== pageRenderEpoch) {
+            setSavedHighlightRects([]);
+            return;
+        }
+
+        const pageElement = pageRef.current;
+        if (!pageElement) {
+            setSavedHighlightRects([]);
+            return;
+        }
+
+        const pageHighlights = (Array.isArray(savedHighlights) ? savedHighlights : [])
+            .filter((item) => Number(item?.page) === Number(pageNumber));
+        if (pageHighlights.length === 0) {
+            setSavedHighlightRects([]);
+            return;
+        }
+
+        const pageBounds = pageElement.getBoundingClientRect();
+        let allSpans = null;
+        let fullText = '';
+        const resolveLegacyTextRects = (highlight) => {
+            if (!highlight?.text) return [];
+            if (!allSpans) {
+                const textLayer = pageElement.querySelector('.react-pdf__Page__textContent');
+                allSpans = textLayer ? Array.from(textLayer.querySelectorAll('span')) : [];
+                fullText = allSpans.map((span) => span.textContent || '').join('');
+            }
+            if (allSpans.length === 0) return [];
+            const matchedRange = findCitationTextRange({ fullText, text: highlight.text });
+            if (!matchedRange) return [];
+            return mergeClientRectsByLine(
+                collectTextRangeClientRects(allSpans, matchedRange),
+                pageBounds,
+                1
+            );
+        };
+
+        const nextRects = [];
+        pageHighlights.forEach((highlight) => {
+            const storedRects = (Array.isArray(highlight?.rects) ? highlight.rects : [])
+                .map(normalizeDocumentHighlightRect)
+                .filter(Boolean);
+            const renderedRects = storedRects.length > 0
+                ? storedRects.map((rect) => ({
+                    left: rect.left * debouncedScale,
+                    top: rect.top * debouncedScale,
+                    width: rect.width * debouncedScale,
+                    height: rect.height * debouncedScale,
+                }))
+                : resolveLegacyTextRects(highlight);
+            renderedRects.forEach((rect, rectIndex) => {
+                nextRects.push({
+                    key: `${highlight.id || highlight.text}-${rectIndex}`,
+                    highlightId: String(highlight.id || ''),
+                    rect,
+                });
+            });
+        });
+        setSavedHighlightRects(nextRects);
+    }, [debouncedScale, pageNumber, pageRenderEpoch, renderedPageEpoch, savedHighlights]);
+
     const activeOverlayBlockId = hoveredBlockId || activeBlockId;
     const focusedBlockSet = useMemo(() => new Set(focusedBlockIds || []), [focusedBlockIds]);
     const visitedBlockSet = useMemo(() => new Set(visitedBlockIds || []), [visitedBlockIds]);
@@ -1160,6 +1240,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const translationDockReservedWidth = isTranslationDocked
         ? translationDockWidth + TRANSLATION_DOCK_GAP
         : 0;
+    const activeHighlightSource = String(highlightInfo?.source || 'search');
+    const activeHighlightIsCitation = activeHighlightSource === 'citation';
+    const activeHighlightIsNote = activeHighlightSource === 'note';
 
     return (
         <div className={`relative h-full flex flex-col overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#f3f1ee]'}`}>
@@ -1460,13 +1543,39 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     })}
                                 </div>
                             )}
+                            {savedHighlightRects.map(({ key, highlightId, rect }) => (
+                                <div
+                                    key={key}
+                                    data-saved-highlight-id={highlightId}
+                                    aria-hidden="true"
+                                    className="absolute z-[9] pointer-events-none rounded-[3px]"
+                                    style={{
+                                        left: rect.left,
+                                        top: rect.top,
+                                        width: rect.width,
+                                        height: rect.height,
+                                        background: darkMode
+                                            ? 'rgba(0, 0, 0, 0.34)'
+                                            : 'rgba(242, 193, 92, 0.34)',
+                                        boxShadow: darkMode
+                                            ? 'none'
+                                            : 'inset 0 -1px 0 rgba(184, 95, 71, 0.18)',
+                                        mixBlendMode: darkMode ? 'normal' : 'multiply',
+                                    }}
+                                />
+                            ))}
                             {/* 多矩形高亮，避免跨越空白区域的巨大单一框 */}
                             <AnimatePresence>
                                 {highlightRects.length > 0 && highlightRects.map((rect, idx) => (
                                     <motion.div
                                         key={`highlight-${idx}`}
-                                        initial={{ opacity: 0, scale: 0.9 }}
-                                        animate={{
+                                        initial={activeHighlightIsNote ? false : { opacity: 0, scale: 0.9 }}
+                                        animate={activeHighlightIsNote ? {
+                                            top: rect.top,
+                                            left: rect.left,
+                                            width: rect.width,
+                                            height: rect.height
+                                        } : {
                                             opacity: 1,
                                             scale: 1,
                                             top: rect.top,
@@ -1474,30 +1583,39 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                             width: rect.width,
                                             height: rect.height
                                         }}
-                                        exit={{ opacity: 0, scale: 0.9 }}
-                                        transition={{
+                                        exit={activeHighlightIsNote ? { opacity: 0 } : { opacity: 0, scale: 0.9 }}
+                                        transition={activeHighlightIsNote ? {
+                                            duration: 0.14,
+                                            ease: 'easeOut'
+                                        } : {
                                             type: "spring",
                                             stiffness: 300,
                                             damping: 30,
                                             mass: 1
                                         }}
-                                        className={`absolute border-2 rounded-lg pointer-events-none z-10 ${
-                                            highlightInfo?.source === 'citation'
-                                                ? 'border-amber-500 bg-amber-500/20'
-                                                : 'border-purple-500 bg-purple-500/20'
-                                        }`}
-                                        style={{
-                                            boxShadow: highlightInfo?.source === 'citation'
+                                        data-note-jump-highlight={activeHighlightIsNote ? 'true' : undefined}
+                                        className={activeHighlightIsNote
+                                            ? `pdf-note-jump-highlight absolute pointer-events-none z-10 ${darkMode ? 'pdf-note-jump-highlight--dark' : ''}`
+                                            : `absolute border-2 rounded-lg pointer-events-none z-10 ${
+                                                activeHighlightIsCitation
+                                                    ? 'border-amber-500 bg-amber-500/20'
+                                                    : 'border-purple-500 bg-purple-500/20'
+                                            }`
+                                        }
+                                        style={activeHighlightIsNote ? undefined : {
+                                            boxShadow: activeHighlightIsCitation
                                                 ? '0 0 0 2px rgba(245, 158, 11, 0.15), 0 4px 12px -1px rgba(245, 158, 11, 0.2)'
                                                 : '0 0 0 2px rgba(237, 140, 104, 0.1), 0 4px 6px -1px rgba(237, 140, 104, 0.1)'
                                         }}
                                     >
                                         {/* 只在第一个矩形上显示标签 */}
-                                        {idx === 0 && (
+                                        {idx === 0 && !activeHighlightIsNote && (
                                             <div className={`absolute -top-3 -right-3 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm ${
-                                                highlightInfo?.source === 'citation' ? 'bg-amber-500' : 'bg-purple-500'
+                                                activeHighlightIsCitation
+                                                    ? 'bg-amber-500'
+                                                    : 'bg-purple-500'
                                             }`}>
-                                                {highlightInfo?.source === 'citation' ? '📎 引用' : '匹配'}
+                                                {activeHighlightIsCitation ? '📎 引用' : '匹配'}
                                             </div>
                                         )}
                                     </motion.div>

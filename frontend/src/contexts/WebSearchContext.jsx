@@ -79,17 +79,26 @@ export const WEB_SEARCH_PROVIDERS = [
 
 // 默认设置
 export const WEB_SEARCH_DEFAULT_SETTINGS = {
+    webSearchMode: 'off',
     enableWebSearch: false,
     webSearchProvider: 'auto',
     webSearchApiKey: '',
     webSearchBlacklist: [],
+    webSearchIncludeDocumentContext: false,
 };
 
 export const WebSearchProvider = ({ children }) => {
-    const [enableWebSearch, setEnableWebSearch] = useState(WEB_SEARCH_DEFAULT_SETTINGS.enableWebSearch);
+    const [webSearchMode, setWebSearchMode] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchMode);
+    const enableWebSearch = webSearchMode !== 'off';
+    const setEnableWebSearch = useCallback((enabled) => {
+        setWebSearchMode(enabled ? 'auto' : 'off');
+    }, []);
     const [webSearchProvider, setWebSearchProvider] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchProvider);
     const [webSearchApiKey, setWebSearchApiKey] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchApiKey);
     const [webSearchBlacklist, setWebSearchBlacklist] = useState(WEB_SEARCH_DEFAULT_SETTINGS.webSearchBlacklist);
+    const [webSearchIncludeDocumentContext, setWebSearchIncludeDocumentContext] = useState(
+        WEB_SEARCH_DEFAULT_SETTINGS.webSearchIncludeDocumentContext
+    );
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
@@ -101,10 +110,16 @@ export const WebSearchProvider = ({ children }) => {
             const saved = localStorage.getItem('webSearchSettings');
             if (saved) {
                 const settings = JSON.parse(saved);
-                if (settings.enableWebSearch !== undefined) setEnableWebSearch(settings.enableWebSearch);
+                const savedMode = ['off', 'auto', 'force'].includes(settings.webSearchMode)
+                    ? settings.webSearchMode
+                    : (settings.enableWebSearch ? 'auto' : 'off');
+                setWebSearchMode(savedMode);
                 if (settings.webSearchProvider !== undefined) setWebSearchProvider(settings.webSearchProvider);
                 if (settings.webSearchApiKey !== undefined) setWebSearchApiKey(settings.webSearchApiKey);
                 if (settings.webSearchBlacklist !== undefined) setWebSearchBlacklist(settings.webSearchBlacklist);
+                if (typeof settings.webSearchIncludeDocumentContext === 'boolean') {
+                    setWebSearchIncludeDocumentContext(settings.webSearchIncludeDocumentContext);
+                }
             }
         } catch (error) {
             console.error('加载联网搜索设置失败:', error);
@@ -137,13 +152,23 @@ export const WebSearchProvider = ({ children }) => {
     // 监听设置变更，触发防抖保存
     useEffect(() => {
         const settings = {
+            webSearchMode,
             enableWebSearch,
             webSearchProvider,
             webSearchApiKey,
             webSearchBlacklist,
+            webSearchIncludeDocumentContext,
         };
         debouncedSave(settings);
-    }, [enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist, debouncedSave]);
+    }, [
+        webSearchMode,
+        enableWebSearch,
+        webSearchProvider,
+        webSearchApiKey,
+        webSearchBlacklist,
+        webSearchIncludeDocumentContext,
+        debouncedSave,
+    ]);
 
     // 组件卸载时 flush 未保存的数据 + beforeunload 保护
     useEffect(() => {
@@ -160,15 +185,16 @@ export const WebSearchProvider = ({ children }) => {
 
     // 切换联网搜索开关
     const toggleWebSearch = useCallback(() => {
-        setEnableWebSearch(prev => !prev);
+        setWebSearchMode(prev => prev === 'off' ? 'auto' : 'off');
     }, []);
 
     // 重置设置
     const resetWebSearch = useCallback(() => {
-        setEnableWebSearch(WEB_SEARCH_DEFAULT_SETTINGS.enableWebSearch);
+        setWebSearchMode(WEB_SEARCH_DEFAULT_SETTINGS.webSearchMode);
         setWebSearchProvider(WEB_SEARCH_DEFAULT_SETTINGS.webSearchProvider);
         setWebSearchApiKey(WEB_SEARCH_DEFAULT_SETTINGS.webSearchApiKey);
         setWebSearchBlacklist(WEB_SEARCH_DEFAULT_SETTINGS.webSearchBlacklist);
+        setWebSearchIncludeDocumentContext(WEB_SEARCH_DEFAULT_SETTINGS.webSearchIncludeDocumentContext);
     }, []);
 
     // 获取当前 provider 配置
@@ -178,16 +204,20 @@ export const WebSearchProvider = ({ children }) => {
 
     const value = {
         // 状态
+        webSearchMode,
         enableWebSearch,
         webSearchProvider,
         webSearchApiKey,
         webSearchBlacklist,
+        webSearchIncludeDocumentContext,
 
         // 设置方法
+        setWebSearchMode,
         setEnableWebSearch,
         setWebSearchProvider,
         setWebSearchApiKey,
         setWebSearchBlacklist,
+        setWebSearchIncludeDocumentContext,
 
         // 工具方法
         toggleWebSearch,

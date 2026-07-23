@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Globe, Check, ExternalLink, Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext';
 import { motion, AnimatePresence } from 'framer-motion';
+import SettingsSegmentedControl from './SettingsSegmentedControl';
 
 /**
  * 联网搜索设置面板
@@ -13,10 +14,10 @@ import { motion, AnimatePresence } from 'framer-motion';
  */
 const WebSearchSettings = ({ isOpen, onClose }) => {
     const {
-        enableWebSearch,
+        webSearchMode,
         webSearchProvider,
         webSearchApiKey,
-        setEnableWebSearch,
+        setWebSearchMode,
         setWebSearchProvider,
         setWebSearchApiKey,
         resetWebSearch,
@@ -64,17 +65,20 @@ const WebSearchSettings = ({ isOpen, onClose }) => {
 
                     <div className="p-6 space-y-6">
 
-                        {/* 联网搜索开关 */}
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm font-semibold text-gray-800">启用联网搜索</span>
-                            </div>
-                            <button
-                                onClick={() => setEnableWebSearch(!enableWebSearch)}
-                                className={`relative w-11 h-6 rounded-full transition-colors ${enableWebSearch ? 'bg-blue-500' : 'bg-gray-300'}`}
-                            >
-                                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${enableWebSearch ? 'translate-x-5' : ''}`} />
-                            </button>
+                        {/* 联网搜索模式 */}
+                        <div className="space-y-2.5">
+                            <span className="text-sm font-semibold text-gray-800">联网模式</span>
+                            <SettingsSegmentedControl
+                                ariaLabel="联网搜索模式"
+                                value={webSearchMode}
+                                onChange={setWebSearchMode}
+                                options={[
+                                    { value: 'off', label: '关闭' },
+                                    { value: 'auto', label: '自动' },
+                                    { value: 'force', label: '强制' },
+                                ]}
+                                className="w-full"
+                            />
                         </div>
 
                         <div className="border-t border-gray-100"></div>

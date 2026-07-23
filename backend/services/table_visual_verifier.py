@@ -21,8 +21,9 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from services.ai_cache_state import LEGACY_AI_CACHE_GENERATION, load_ai_cache_generation
 from services.chat_service import call_ai_api as _default_call_ai_api
-from services.document_parse_state import read_parse_manifest
+from services.document_parse_state import matches_parse_generation, read_parse_manifest
 from services.visual_enrichment_service import (
     VisualTaskBudgetExceeded,
     VisualTaskPolicy,
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 call_ai_api = _default_call_ai_api
 
 _VALID_MODES = {"off", "auto", "always"}
-_TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed"}
+_TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed", "stale"}
 _TASK_STATES = {"queued", "running", *_TERMINAL_STATES}
 _CACHE_SCHEMA_VERSION = 6
 _TASK_STORE_VERSION = 1
@@ -63,6 +64,16 @@ _DEFAULT_INDETERMINATE_TTL_S = 86400.0
 _VISUAL_CACHE: dict[str, dict] = {}
 _VISUAL_PENDING: set[str] = set()
 _TASK_WRITE_LOCK = threading.Lock()
+_AI_CACHE_IDENTITY_UNAVAILABLE = "ai_cache_identity_unavailable"
+
+
+class _TableVisualIdentityUnavailable(RuntimeError):
+    """Raised when a visual cache identity cannot be read safely."""
+
+    def __init__(self, doc_id: str, cause: Exception):
+        super().__init__("AI cache generation identity is unavailable")
+        self.doc_id = str(doc_id or "")
+        self.cause_type = type(cause).__name__
 
 
 async def _call_table_visual_model(
@@ -445,7 +456,20 @@ async def maybe_verify_numeric_table_visual(
         if visual_policy is not None
         else resolved_visual_config.identity
     )
-    cache_key = _cache_key(doc_id, query, target, provider, model, visual_cache_identity)
+    try:
+        current_ai_cache_generation = _load_table_visual_ai_cache_generation(doc_id)
+    except _TableVisualIdentityUnavailable as exc:
+        diagnostics.update(_identity_unavailable_diagnostics(diagnostics, exc))
+        return {}, diagnostics
+    cache_key = _cache_key(
+        doc_id,
+        query,
+        target,
+        provider,
+        model,
+        visual_cache_identity,
+        current_ai_cache_generation,
+    )
     task_id = _task_id(cache_key)
     existing = _load_task_record(cache_key)
     if _task_matches_request(
@@ -455,8 +479,29 @@ async def maybe_verify_numeric_table_visual(
         provider=provider,
         model=model,
         visual_model_identity=visual_cache_identity,
+        ai_cache_generation=current_ai_cache_generation,
     ):
         state = str(existing.get("state") or "")
+        current_manifest = read_parse_manifest(doc_data, doc_id=doc_id)
+        try:
+            identity_matches = _record_matches_parse_identity(
+                existing,
+                current_manifest,
+                current_ai_cache_generation=current_ai_cache_generation,
+            )
+        except _TableVisualIdentityUnavailable as exc:
+            diagnostics.update(_identity_unavailable_diagnostics(diagnostics, exc))
+            return {}, diagnostics
+        if not identity_matches:
+            existing = _mark_task_stale(
+                cache_key,
+                existing,
+                current_manifest=current_manifest,
+                current_ai_cache_generation=current_ai_cache_generation,
+                diagnostics=diagnostics,
+            )
+            diagnostics.update(_task_diagnostics(existing, cache_hit=True))
+            return {}, diagnostics
         if state in {"queued", "running"}:
             if _task_is_stale(existing):
                 _VISUAL_PENDING.discard(cache_key)
@@ -485,6 +530,7 @@ async def maybe_verify_numeric_table_visual(
         provider,
         model,
         visual_cache_identity,
+        current_ai_cache_generation,
     )
     if background and mode == "auto":
         record = _create_or_update_task(cache_key, request_info, state="queued", diagnostics=diagnostics)
@@ -503,6 +549,7 @@ async def maybe_verify_numeric_table_visual(
             custom_params=dict(custom_params or {}),
             diagnostics=dict(diagnostics),
             request_info=request_info,
+            current_document_data=doc_data,
             visual_config=resolved_visual_config,
             visual_policy=visual_policy,
         )
@@ -521,6 +568,7 @@ async def maybe_verify_numeric_table_visual(
         custom_params=custom_params,
         diagnostics=diagnostics,
         request_info=request_info,
+        current_document_data=doc_data,
         visual_config=resolved_visual_config,
         visual_policy=visual_policy,
     )
@@ -802,12 +850,16 @@ def _request_info(
     provider: str,
     model: str,
     visual_model_identity: str = "",
+    ai_cache_generation: str = "",
 ) -> dict:
     return {
         "doc_id": doc_id,
         "document_source_hash": target.get("document_source_hash") or "",
         "parse_route": target.get("parse_route") or "",
         "parse_generation": target.get("parse_generation") or "",
+        "ai_cache_generation": str(
+            ai_cache_generation or _load_table_visual_ai_cache_generation(doc_id)
+        ),
         "page": target.get("page") or 0,
         "bbox_hash": _target_bbox_hash(target),
         "purpose": _VISUAL_PURPOSE,
@@ -831,12 +883,21 @@ def _cache_key(
     provider: str,
     model: str,
     visual_model_identity: str = "",
+    ai_cache_generation: str = "",
 ) -> str:
     _ensure_target_metadata(target)
     raw = json.dumps(
         {
             "schema_version": _CACHE_SCHEMA_VERSION,
-            **_request_info(doc_id, query, target, provider, model, visual_model_identity),
+            **_request_info(
+                doc_id,
+                query,
+                target,
+                provider,
+                model,
+                visual_model_identity,
+                ai_cache_generation,
+            ),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -867,6 +928,64 @@ def _visual_cache_dir() -> Path:
     except Exception:
         pass
     return Path(__file__).resolve().parents[2] / "data" / "table_visual_cache"
+
+
+def _table_visual_data_dir() -> Path:
+    """Return the application's canonical data root, independent of cache placement."""
+    from runtime_mode import runtime
+    return Path(runtime.data_dir)
+
+
+def _load_table_visual_ai_cache_generation(doc_id: str) -> str:
+    safe_doc_id = str(doc_id or "").strip()
+    if not safe_doc_id:
+        return LEGACY_AI_CACHE_GENERATION
+    try:
+        return str(load_ai_cache_generation(_table_visual_data_dir(), safe_doc_id) or LEGACY_AI_CACHE_GENERATION)
+    except Exception as exc:
+        logger.debug("[TableVisual] ai cache generation unavailable for %s: %s", safe_doc_id, exc)
+        raise _TableVisualIdentityUnavailable(safe_doc_id, exc) from exc
+
+
+def _identity_unavailable_diagnostics(
+    diagnostics: Optional[dict],
+    error: _TableVisualIdentityUnavailable,
+) -> dict:
+    """Describe a fail-closed identity read without mutating a cached task."""
+    return {
+        **_safe_diagnostics(diagnostics or {}),
+        "state": "failed",
+        "verdict": "indeterminate",
+        "pending": False,
+        "stale": False,
+        "skipped_reason": _AI_CACHE_IDENTITY_UNAVAILABLE,
+        "error": _AI_CACHE_IDENTITY_UNAVAILABLE,
+        "error_code": _AI_CACHE_IDENTITY_UNAVAILABLE,
+        "error_message": "AI cache identity is unavailable; cached visual results were not used.",
+        "retryable": True,
+        "identity_available": False,
+        "identity_error_type": error.cause_type,
+    }
+
+
+def _identity_unavailable_record(
+    cache_key: str,
+    record: dict,
+    error: _TableVisualIdentityUnavailable,
+    diagnostics: Optional[dict] = None,
+) -> dict:
+    """Build a transient fail-closed record; never persist it over the cached task."""
+    saved = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
+    return {
+        **dict(record or {}),
+        "task_id": str((record or {}).get("task_id") or _task_id(cache_key)),
+        "state": "failed",
+        "segment": {},
+        "diagnostics": _identity_unavailable_diagnostics(
+            {**_safe_diagnostics(saved), **_safe_diagnostics(diagnostics or {})},
+            error,
+        ),
+    }
 
 
 def _visual_cache_path(cache_key: str) -> Path:
@@ -912,6 +1031,51 @@ def _persist_task_record(cache_key: str, record: dict) -> dict:
     return dict(safe_record)
 
 
+def clear_table_visual_verification_cache(doc_id: str) -> dict[str, int | str]:
+    safe_doc_id = str(doc_id or "").strip()
+    if not safe_doc_id:
+        return {
+            "doc_id": "",
+            "memory_records_removed": 0,
+            "disk_records_removed": 0,
+        }
+
+    with _TASK_WRITE_LOCK:
+        memory_keys = [
+            key for key, record in list(_VISUAL_CACHE.items())
+            if isinstance(record, dict) and str(record.get("doc_id") or "") == safe_doc_id
+        ]
+        for key in memory_keys:
+            _VISUAL_CACHE.pop(key, None)
+            _VISUAL_PENDING.discard(key)
+
+        disk_removed = 0
+        cache_dir = _visual_cache_dir()
+        if cache_dir.exists():
+            for path in cache_dir.glob("*.json"):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(record, dict) or str(record.get("doc_id") or "") != safe_doc_id:
+                    continue
+                cache_key = _cache_key_from_task_id(record.get("task_id") or "") or path.stem.lower()
+                _VISUAL_PENDING.discard(cache_key)
+                try:
+                    path.unlink()
+                    disk_removed += 1
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    logger.debug("[TableVisual] cache file delete failed for %s: %s", path, exc)
+
+    return {
+        "doc_id": safe_doc_id,
+        "memory_records_removed": len(memory_keys),
+        "disk_records_removed": disk_removed,
+    }
+
+
 def _create_or_update_task(cache_key: str, request_info: dict, *, state: str, diagnostics: Optional[dict] = None) -> dict:
     previous = _load_task_record(cache_key)
     now = time.time()
@@ -954,6 +1118,170 @@ def _complete_task(
     return _persist_task_record(cache_key, record)
 
 
+def _record_matches_parse_identity(
+    record: dict,
+    current_manifest: dict,
+    *,
+    current_ai_cache_generation: Optional[str] = None,
+) -> bool:
+    generation = str((record or {}).get("parse_generation") or "")
+    source_hash = str((record or {}).get("document_source_hash") or "")
+    if not generation or not source_hash:
+        return False
+    if not matches_parse_generation(
+        current_manifest,
+        generation=generation,
+        source_hash=source_hash,
+    ):
+        return False
+    expected_ai_cache_generation = str(
+        (record or {}).get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION
+    )
+    if current_ai_cache_generation is None:
+        current_ai_cache_generation = _load_table_visual_ai_cache_generation(
+            str((record or {}).get("doc_id") or "")
+        )
+    return bool(
+        current_ai_cache_generation
+        and expected_ai_cache_generation == current_ai_cache_generation
+    )
+
+
+def _stale_task_diagnostics(
+    record: dict,
+    current_manifest: dict,
+    diagnostics: Optional[dict] = None,
+    current_ai_cache_generation: Optional[str] = None,
+) -> dict:
+    saved = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
+    expected_identity = {
+        "parse_generation": str(record.get("parse_generation") or ""),
+        "document_source_hash": str(record.get("document_source_hash") or ""),
+        "parse_route": str(record.get("parse_route") or ""),
+        "ai_cache_generation": str(record.get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION),
+    }
+    identity_error: _TableVisualIdentityUnavailable | None = None
+    if current_ai_cache_generation is None:
+        try:
+            current_ai_cache_generation = _load_table_visual_ai_cache_generation(
+                str(record.get("doc_id") or "")
+            )
+        except _TableVisualIdentityUnavailable as exc:
+            identity_error = exc
+    current_identity = {
+        "parse_generation": str(current_manifest.get("generation") or ""),
+        "document_source_hash": str(current_manifest.get("source_hash") or ""),
+        "parse_route": str(current_manifest.get("resolved_route") or ""),
+        "ai_cache_generation": str(current_ai_cache_generation or ""),
+    }
+    if identity_error is not None:
+        current_identity.update({
+            "ai_cache_generation_status": "unavailable",
+            "ai_cache_generation_error_type": identity_error.cause_type,
+        })
+    return {
+        **_safe_diagnostics(saved),
+        **_safe_diagnostics(diagnostics or {}),
+        "state": "stale",
+        "verdict": "indeterminate",
+        "pending": False,
+        "stale": True,
+        "stale_reason": "parse_identity_mismatch",
+        "error": "parse_identity_stale",
+        "error_code": "parse_identity_stale",
+        "error_message": "The document parse or AI cache generation changed; this visual result is no longer valid.",
+        "retryable": True,
+        "expected_parse_identity": expected_identity,
+        "current_parse_identity": current_identity,
+    }
+
+
+def _mark_task_stale(
+    cache_key: str,
+    record: dict,
+    *,
+    current_manifest: dict,
+    diagnostics: Optional[dict] = None,
+    current_ai_cache_generation: Optional[str] = None,
+) -> dict:
+    now = time.time()
+    stale_record = {
+        **dict(record or {}),
+        "state": "stale",
+        "segment": {},
+        "diagnostics": _stale_task_diagnostics(
+            record,
+            current_manifest,
+            diagnostics,
+            current_ai_cache_generation,
+        ),
+        "completed_at": now,
+        "stale_at": now,
+    }
+    stale_record.pop("retry_after", None)
+    return _persist_task_record(cache_key, stale_record)
+
+
+def _complete_task_for_current_parse(
+    cache_key: str,
+    request_info: dict,
+    *,
+    current_document_data: dict,
+    state: str,
+    diagnostics: dict,
+    segment: Optional[dict] = None,
+) -> dict:
+    doc_id = str(request_info.get("doc_id") or "")
+    current_manifest = read_parse_manifest(
+        current_document_data if isinstance(current_document_data, dict) else {},
+        doc_id=doc_id,
+    )
+    try:
+        identity_matches = _record_matches_parse_identity(request_info, current_manifest)
+    except _TableVisualIdentityUnavailable as exc:
+        return _identity_unavailable_record(
+            cache_key,
+            request_info,
+            exc,
+            diagnostics,
+        )
+    if not identity_matches:
+        return _mark_task_stale(
+            cache_key,
+            request_info,
+            current_manifest=current_manifest,
+            diagnostics=diagnostics,
+        )
+    record = _complete_task(
+        cache_key,
+        request_info,
+        state=state,
+        diagnostics=diagnostics,
+        segment=segment,
+    )
+    latest_manifest = read_parse_manifest(
+        current_document_data if isinstance(current_document_data, dict) else {},
+        doc_id=doc_id,
+    )
+    try:
+        identity_matches = _record_matches_parse_identity(record, latest_manifest)
+    except _TableVisualIdentityUnavailable as exc:
+        return _identity_unavailable_record(
+            cache_key,
+            record,
+            exc,
+            diagnostics,
+        )
+    if not identity_matches:
+        return _mark_task_stale(
+            cache_key,
+            record,
+            current_manifest=latest_manifest,
+            diagnostics=diagnostics,
+        )
+    return record
+
+
 def _task_matches_request(
     record: dict,
     *,
@@ -962,14 +1290,19 @@ def _task_matches_request(
     provider: str,
     model: str,
     visual_model_identity: str = "",
+    ai_cache_generation: str = "",
 ) -> bool:
     if not record:
         return False
+    expected_ai_cache_generation = str(
+        ai_cache_generation or _load_table_visual_ai_cache_generation(doc_id)
+    )
     return (
         record.get("doc_id") == doc_id
         and record.get("document_source_hash") == target.get("document_source_hash")
         and record.get("parse_route") == target.get("parse_route")
         and record.get("parse_generation") == target.get("parse_generation")
+        and str(record.get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION) == expected_ai_cache_generation
         and record.get("page") == (target.get("page") or 0)
         and record.get("bbox_hash") == _target_bbox_hash(target)
         and record.get("purpose") == _VISUAL_PURPOSE
@@ -1027,26 +1360,76 @@ def _task_diagnostics(record: dict, *, cache_hit: bool = False) -> dict:
     return result
 
 
-def get_table_visual_verification_status(doc_id: str, task_id: str) -> dict:
-    """Return a public, document-scoped status record for frontend polling."""
+def get_table_visual_verification_status(
+    doc_id: str,
+    task_id: str,
+    *,
+    current_parse_manifest: Optional[dict] = None,
+) -> dict:
+    """Return a public status record, fencing obsolete parse generations."""
     cache_key = _cache_key_from_task_id(task_id)
     if not cache_key:
         return {}
     record = _load_task_record(cache_key)
     if not record or record.get("doc_id") != doc_id:
         return {}
+
+    identity_current = True
+    try:
+        current_ai_cache_generation = _load_table_visual_ai_cache_generation(doc_id)
+    except _TableVisualIdentityUnavailable as exc:
+        record = _identity_unavailable_record(cache_key, record, exc)
+        identity_current = False
+    else:
+        ai_cache_current = (
+            str(record.get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION)
+            == current_ai_cache_generation
+        )
+        parse_current = (
+            True
+            if not isinstance(current_parse_manifest, dict)
+            else _record_matches_parse_identity(
+                record,
+                current_parse_manifest,
+                current_ai_cache_generation=current_ai_cache_generation,
+            )
+        )
+        if not (ai_cache_current and parse_current):
+            record = _mark_task_stale(
+                cache_key,
+                record,
+                current_manifest=current_parse_manifest or {},
+                current_ai_cache_generation=current_ai_cache_generation,
+            )
+            identity_current = False
+
     diagnostics = _task_diagnostics(record, cache_hit=True)
+    state = str(record.get("state") or "indeterminate")
+    error_code = str(diagnostics.get("error_code") or "")
+    error = None
+    if error_code:
+        error = {
+            "code": error_code,
+            "message": str(diagnostics.get("error_message") or diagnostics.get("error") or ""),
+            "retryable": bool(diagnostics.get("retryable")),
+        }
     return {
         "task_id": record.get("task_id") or task_id,
         "doc_id": doc_id,
         "table_instance_id": record.get("table_instance_id") or "",
-        "state": record.get("state") or "indeterminate",
+        "state": state,
         "verdict": diagnostics.get("verdict", "indeterminate"),
+        "consumable": bool(identity_current and state == "confirmed"),
+        "stale": state == "stale",
+        "parse_generation": record.get("parse_generation") or "",
+        "ai_cache_generation": record.get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION,
+        "document_source_hash": record.get("document_source_hash") or "",
         "attempts": int(record.get("attempts") or 0),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "completed_at": record.get("completed_at"),
         "retry_after": record.get("retry_after"),
+        "error": error,
         "diagnostics": diagnostics,
     }
 
@@ -1065,6 +1448,7 @@ def _schedule_visual_background_task(
     custom_params: dict,
     diagnostics: dict,
     request_info: dict,
+    current_document_data: dict,
     visual_config: VisualModelConfig | None = None,
     visual_policy: VisualEnrichmentPolicy | None = None,
 ) -> None:
@@ -1090,6 +1474,7 @@ def _schedule_visual_background_task(
             custom_params={**dict(custom_params or {}), "_numeric_table_visual_background_task": True},
             diagnostics=diagnostics,
             request_info=request_info,
+            current_document_data=current_document_data,
             visual_config=visual_config,
             visual_policy=visual_policy,
         )
@@ -1104,8 +1489,24 @@ async def _run_visual_verification_background(**kwargs) -> None:
             logger.debug("[TableVisual] background task finished: %s", diagnostics.get("state"))
     except Exception as exc:
         request_info = kwargs.get("request_info") if isinstance(kwargs.get("request_info"), dict) else {}
-        diagnostics = {"enabled": True, "triggered": True, "state": "failed", "verdict": "indeterminate", "error": f"{type(exc).__name__}: {exc}"}
-        _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        error_message = f"{type(exc).__name__}: {exc}"
+        diagnostics = {
+            "enabled": True,
+            "triggered": True,
+            "state": "failed",
+            "verdict": "indeterminate",
+            "error": error_message,
+            "error_code": str(getattr(exc, "code", "") or "visual_task_failed"),
+            "error_message": error_message,
+            "retryable": True,
+        }
+        _complete_task_for_current_parse(
+            cache_key,
+            request_info,
+            current_document_data=kwargs.get("current_document_data") or {},
+            state="failed",
+            diagnostics=diagnostics,
+        )
         logger.debug("[TableVisual] background verification failed: %s", exc)
     finally:
         _VISUAL_PENDING.discard(cache_key)
@@ -1125,6 +1526,7 @@ async def _run_visual_verification(
     custom_params: Optional[dict],
     diagnostics: dict,
     request_info: dict,
+    current_document_data: dict,
     visual_config: VisualModelConfig | None = None,
     visual_policy: VisualEnrichmentPolicy | None = None,
 ) -> tuple[dict, dict]:
@@ -1143,20 +1545,54 @@ async def _run_visual_verification(
     })
     _create_or_update_task(cache_key, request_info, state="running", diagnostics=diagnostics)
 
+    def _finish(
+        state: str,
+        *,
+        segment: Optional[dict] = None,
+    ) -> dict:
+        return _complete_task_for_current_parse(
+            cache_key,
+            request_info,
+            current_document_data=current_document_data,
+            state=state,
+            diagnostics=diagnostics,
+            segment=segment,
+        )
+
+    current_manifest = read_parse_manifest(current_document_data, doc_id=str(request_info.get("doc_id") or ""))
+    try:
+        identity_matches = _record_matches_parse_identity(request_info, current_manifest)
+    except _TableVisualIdentityUnavailable as exc:
+        record = _identity_unavailable_record(
+            cache_key,
+            request_info,
+            exc,
+            diagnostics,
+        )
+        return {}, _task_diagnostics(record)
+    if not identity_matches:
+        record = _mark_task_stale(
+            cache_key,
+            request_info,
+            current_manifest=current_manifest,
+            diagnostics=diagnostics,
+        )
+        return {}, _task_diagnostics(record)
+
     if _unsafe_cross_page_target(target):
         diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "rejected_reason": "cross_page_table_ambiguous"})
-        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        record = _finish("indeterminate")
         return {}, _task_diagnostics(record)
     try:
         crops = render_table_crops_base64(pdf_path, target)
     except Exception as exc:
         diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "skipped_reason": f"render_failed:{type(exc).__name__}"})
-        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        record = _finish("indeterminate")
         logger.debug("[TableVisual] render failed: %s", exc)
         return {}, _task_diagnostics(record)
     if not crops:
         diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "skipped_reason": "no_rendered_crop"})
-        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        record = _finish("indeterminate")
         return {}, _task_diagnostics(record)
 
     crop_meta = [{key: value for key, value in crop.items() if key != "image_b64"} for crop in crops]
@@ -1221,26 +1657,55 @@ async def _run_visual_verification(
             },
         )
     except VisualTaskTimeoutError:
-        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"visual_timeout:{timeout_s:.0f}s", "rejected_reason": "timeout"})
-        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        error_message = f"visual task timed out after {timeout_s:.0f}s"
+        diagnostics.update({
+            "state": "failed",
+            "verdict": "indeterminate",
+            "error": error_message,
+            "error_code": "visual_timeout",
+            "error_message": error_message,
+            "retryable": True,
+            "rejected_reason": "timeout",
+        })
+        record = _finish("failed")
         return {}, _task_diagnostics(record)
     except VisualTaskBudgetExceeded as exc:
+        error_message = str(exc)
         diagnostics.update({
             "state": "indeterminate",
             "verdict": "indeterminate",
-            "error": str(exc),
+            "error": error_message,
+            "error_code": "visual_budget_exhausted",
+            "error_message": error_message,
+            "retryable": True,
             "rejected_reason": "document_visual_budget_exhausted",
             "skipped_reason": "document_visual_budget_exhausted",
         })
-        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        record = _finish("indeterminate")
         return {}, _task_diagnostics(record)
     except Exception as exc:
-        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": f"{type(exc).__name__}: {exc}"})
-        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        error_message = f"{type(exc).__name__}: {exc}"
+        diagnostics.update({
+            "state": "failed",
+            "verdict": "indeterminate",
+            "error": error_message,
+            "error_code": str(getattr(exc, "code", "") or "visual_task_failed"),
+            "error_message": error_message,
+            "retryable": True,
+        })
+        record = _finish("failed")
         return {}, _task_diagnostics(record)
     if isinstance(response, dict) and response.get("error"):
-        diagnostics.update({"state": "failed", "verdict": "indeterminate", "error": str(response.get("error"))})
-        record = _complete_task(cache_key, request_info, state="failed", diagnostics=diagnostics)
+        error_message = str(response.get("error"))
+        diagnostics.update({
+            "state": "failed",
+            "verdict": "indeterminate",
+            "error": error_message,
+            "error_code": "visual_upstream_error",
+            "error_message": error_message,
+            "retryable": True,
+        })
+        record = _finish("failed")
         return {}, _task_diagnostics(record)
 
     content = _extract_response_content(response)
@@ -1248,8 +1713,16 @@ async def _run_visual_verification(
     diagnostics["used_provider"] = response.get("_used_provider") if isinstance(response, dict) else ""
     diagnostics["used_model"] = response.get("_used_model") if isinstance(response, dict) else ""
     if parsed is None:
-        diagnostics.update({"state": "indeterminate", "verdict": "indeterminate", "error": "invalid_schema", "raw_preview": content[:300]})
-        record = _complete_task(cache_key, request_info, state="indeterminate", diagnostics=diagnostics)
+        diagnostics.update({
+            "state": "indeterminate",
+            "verdict": "indeterminate",
+            "error": "invalid_schema",
+            "error_code": "invalid_visual_schema",
+            "error_message": "visual response did not match the table verification schema",
+            "retryable": True,
+            "raw_preview": content[:300],
+        })
+        record = _finish("indeterminate")
         return {}, _task_diagnostics(record)
 
     verdict, verdict_details = _evaluate_visual_result(
@@ -1266,7 +1739,7 @@ async def _run_visual_verification(
     })
     if verdict != "confirmed":
         diagnostics["rejected_reason"] = verdict_details.get("reason") or verdict
-        record = _complete_task(cache_key, request_info, state=verdict, diagnostics=diagnostics)
+        record = _finish(verdict)
         return {}, _task_diagnostics(record)
 
     segment = _build_visual_segment(
@@ -1277,8 +1750,11 @@ async def _run_visual_verification(
         response=response if isinstance(response, dict) else {},
         verified_cells=verdict_details.get("verified_cells") or [],
     )
-    record = _complete_task(cache_key, request_info, state="confirmed", diagnostics=diagnostics, segment=segment)
-    return segment, _task_diagnostics(record)
+    record = _finish("confirmed", segment=segment)
+    task_diagnostics = _task_diagnostics(record)
+    if str(record.get("state") or "") != "confirmed":
+        return {}, task_diagnostics
+    return segment, task_diagnostics
 
 
 def _resolve_visual_timeout_seconds(custom_params: Optional[dict]) -> float:

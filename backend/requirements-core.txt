@@ -1,0 +1,34 @@
+# ==================== 基础运行时 ====================
+# MinerU 默认路线与所有通用阅读/检索能力需要的依赖。
+# 本地 OCR、版面模型和 ODL 由 requirements-local-parser.txt 按需安装。
+
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+pydantic==2.10.3
+pydantic-settings==2.6.1
+httpx==0.28.1
+ddgs>=9.0.0
+python-dotenv==1.0.1
+
+# PDF 预览、原生文本回退和文档身份计算仍需要这些轻量依赖。
+PyPDF2==3.0.1
+pdfplumber==0.11.4
+PyMuPDF==1.24.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+langchain==0.3.13
+langchain-community==0.3.13
+langchain-core==0.3.28
+faiss-cpu==1.9.0.post1
+sentence-transformers==3.3.1
+
+openai==1.57.2
+anthropic==0.40.0
+google-generativeai==0.8.3
+watchdog>=3.0.0
+jieba>=0.42.1
+
+# 开发和属性测试兼容现有 requirements.txt 行为。
+hypothesis>=6.100

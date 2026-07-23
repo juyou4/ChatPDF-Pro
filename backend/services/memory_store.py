@@ -12,14 +12,20 @@
 import json
 import logging
 import os
+import re
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from services.memory_cache import MemoryCache
+from services.memory_quality import sanitize_automatic_memory_content
 
 logger = logging.getLogger(__name__)
+
+_SESSION_DOC_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 @dataclass
@@ -155,13 +161,32 @@ class MemoryStore:
         os.makedirs(self.snapshot_sessions_dir, exist_ok=True)
         os.makedirs(os.path.join(self.data_dir, "memory_index"), exist_ok=True)
 
+    @staticmethod
+    def validate_session_doc_id(doc_id: str) -> str:
+        """Validate document IDs before using them in session file paths."""
+        if not isinstance(doc_id, str) or not _SESSION_DOC_ID_PATTERN.fullmatch(doc_id):
+            raise ValueError("文档 ID 只能包含字母、数字、下划线和连字符")
+        return doc_id
+
+    def _safe_session_file_path(self, directory: str, doc_id: str, suffix: str) -> str:
+        safe_doc_id = self.validate_session_doc_id(doc_id)
+        root = Path(directory).resolve()
+        candidate = (root / f"{safe_doc_id}{suffix}").resolve()
+        if candidate.parent != root:
+            raise ValueError("文档 ID 生成了越界路径")
+        return str(candidate)
+
     def _snapshot_profile_path(self) -> str:
         """获取用户画像快照文件路径。"""
         return os.path.join(self.snapshots_dir, "user_profile.snapshot.json")
 
     def _snapshot_session_path(self, doc_id: str) -> str:
         """获取文档会话快照文件路径。"""
-        return os.path.join(self.snapshot_sessions_dir, f"{doc_id}_session.snapshot.json")
+        return self._safe_session_file_path(
+            self.snapshot_sessions_dir,
+            doc_id,
+            "_session.snapshot.json",
+        )
 
     def _has_event_records(self) -> bool:
         """是否存在可回放的事件日志。"""
@@ -215,12 +240,20 @@ class MemoryStore:
         if os.path.exists(self.snapshot_sessions_dir):
             for filename in os.listdir(self.snapshot_sessions_dir):
                 if filename.endswith("_session.snapshot.json"):
-                    doc_ids.add(filename[: -len("_session.snapshot.json")])
+                    doc_id = filename[: -len("_session.snapshot.json")]
+                    try:
+                        doc_ids.add(self.validate_session_doc_id(doc_id))
+                    except ValueError:
+                        logger.warning("忽略非法的 session 快照文件名: %s", filename)
 
         if not doc_ids and os.path.exists(self.sessions_dir):
             for filename in os.listdir(self.sessions_dir):
                 if filename.endswith("_session.json"):
-                    doc_ids.add(filename[: -len("_session.json")])
+                    doc_id = filename[: -len("_session.json")]
+                    try:
+                        doc_ids.add(self.validate_session_doc_id(doc_id))
+                    except ValueError:
+                        logger.warning("忽略非法的 session 文件名: %s", filename)
 
         if not doc_ids and self._has_event_records():
             state = self.replay_events()
@@ -736,7 +769,7 @@ class MemoryStore:
 
     def _session_path(self, doc_id: str) -> str:
         """获取文档会话记忆文件路径"""
-        return os.path.join(self.sessions_dir, f"{doc_id}_session.json")
+        return self._safe_session_file_path(self.sessions_dir, doc_id, "_session.json")
 
     def load_session(self, doc_id: str) -> dict:
         """加载文档会话记忆，优先读取事件快照，失败时再回放事件或回退旧 JSON。"""
@@ -783,10 +816,15 @@ class MemoryStore:
             # 从 qa_summaries 中收集（转换为 MemoryEntry）
             for item in data.get("qa_summaries", []):
                 source_type = item.get("source_type", "auto_qa")
-                if source_type == "llm_distilled" and not item.get("answer"):
+                if source_type in {"llm_distilled", "compressed"} and not item.get("answer"):
                     content = item.get("question", "")
                 else:
                     content = f"Q: {item.get('question', '')}\nA: {item.get('answer', '')}"
+                if source_type in {"auto_qa", "llm_distilled", "compressed"}:
+                    content = sanitize_automatic_memory_content(content, source_type)
+                    if not content:
+                        # 保留原始快照以便审计，但不让故障响应进入检索或提示词。
+                        continue
                 entry = MemoryEntry(
                     id=item.get("id", str(uuid.uuid4())),
                     content=content,
@@ -811,10 +849,15 @@ class MemoryStore:
                 entries.append(entry)
             # 从 important_memories 中收集
             for item in data.get("important_memories", []):
-                entries.append(MemoryEntry.from_dict({
+                entry = MemoryEntry.from_dict({
                     **item,
                     "doc_id": data.get("doc_id"),
-                }))
+                })
+                if entry.source_type in {"auto_qa", "llm_distilled", "compressed"}:
+                    entry.content = sanitize_automatic_memory_content(entry.content, entry.source_type)
+                    if not entry.content:
+                        continue
+                entries.append(entry)
 
         # 将结果写入缓存
         self.cache.set_all_entries(entries)
@@ -1069,7 +1112,7 @@ class MemoryStore:
         self._append_to_markdown(filepath, content)
     
     def clear_all(self) -> None:
-        """清空所有记忆数据"""
+        """彻底删除所有记忆及其可回放、Markdown 和索引副本。"""
         # 重置 profile
         self.save_profile(self._default_profile())
         # 清空后使缓存失效
@@ -1089,16 +1132,22 @@ class MemoryStore:
                 except OSError as e:
                     logger.warning(f"删除索引文件失败 {filepath}: {e}")
         
-        # 清空 Markdown 文件（可选，保留历史记录）
-        # 这里只清空 MEMORY.md，保留每日日志
-        memory_file = self._get_memory_file_path()
-        if os.path.exists(memory_file):
+        # Events and daily Markdown were previously retained, so a "clear"
+        # action left complete memory text on disk. These directories are
+        # owned by MemoryStore; remove their contents rather than appending a
+        # new event that preserves the old audit trail indefinitely.
+        for directory in (self.events_dir, self.memory_dir):
             try:
-                with open(memory_file, "w", encoding="utf-8") as f:
-                    f.write("# 长期记忆\n\n")
-            except Exception as e:
-                logger.warning(f"清空 Markdown 文件失败 {memory_file}: {e}")
-        self._append_event("clear_all", {"scope": "all"})
+                if os.path.exists(directory):
+                    shutil.rmtree(directory)
+            except OSError as exc:
+                logger.warning("删除记忆派生目录失败 %s: %s", directory, exc)
+        try:
+            if os.path.exists(self.legacy_migration_state_path):
+                os.remove(self.legacy_migration_state_path)
+        except OSError as exc:
+            logger.warning("删除记忆迁移状态失败: %s", exc)
+        self._ensure_dirs()
 
     def get_storage_status(self) -> dict[str, Any]:
         """返回存储层状态，用于前端展示当前快照/事件回放能力。"""

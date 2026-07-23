@@ -9,11 +9,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.vector_service import vector_search
-from services.query_analyzer import get_retrieval_strategy
+from services.chat_intent_service import prepare_chat_intent
 from services.advanced_search import AdvancedSearchService
 from services.grep_service import grep_search
 from services.semantic_group_service import SemanticGroupService
-from services.embedding_service import _get_semantic_groups_dir
+from services.embedding_service import (
+    RAG_INDEX_VERSION,
+    _extract_vector_semantic_identity,
+    _get_semantic_groups_dir,
+    _semantic_generation_identity_complete,
+)
 from services.document_parse_state import is_parse_prepared, read_parse_manifest
 from services.visual_supplement_service import committed_visual_evidence_for_document
 from services.semantic_group_store import active_manifest_path
@@ -25,10 +30,12 @@ from utils.middleware import (
     FallbackMiddleware,
 )
 from config import settings
+from runtime_mode import runtime
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_VECTOR_STORE_DIR = Path(runtime.data_dir) / "vector_stores"
 
 # 高级搜索服务实例
 _advanced_search_service = AdvancedSearchService()
@@ -51,18 +58,12 @@ def _require_document_parse_ready(doc_id: str, doc: dict) -> dict:
     raise HTTPException(status_code=409, detail=detail)
 
 
-def _is_legacy_parse_manifest(manifest: dict) -> bool:
-    return bool((manifest.get("metadata") or {}).get("legacy_inferred"))
-
-
 def _vector_index_matches_parse_manifest(
     doc_id: str,
     vector_store_dir: str,
     manifest: dict,
 ) -> bool:
-    """Reject an old vector generation after a same-document reparse."""
-    if _is_legacy_parse_manifest(manifest):
-        return True
+    """Reject stale parse generations and obsolete index schemas."""
     index_path = Path(vector_store_dir or "") / f"{doc_id}.pkl"
     # Fresh local uploads can fall back to their current pages before a vector
     # artifact exists. Only an existing artifact can belong to an old parse.
@@ -71,28 +72,43 @@ def _vector_index_matches_parse_manifest(
     try:
         with open(index_path, "rb") as handle:
             data = pickle.load(handle)
-    except (OSError, pickle.PickleError, EOFError):
+    except Exception as exc:
+        logger.warning("[%s] 无法读取向量索引身份: %s", doc_id, exc)
         return False
     if not isinstance(data, dict):
         return False
+    try:
+        index_version = int(data.get("index_version") or 0)
+    except (TypeError, ValueError):
+        index_version = 0
+    if index_version != RAG_INDEX_VERSION:
+        return False
     index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
-    return (
-        str(index_meta.get("parse_generation") or "") == str(manifest.get("generation") or "")
-        and str(index_meta.get("document_source_hash") or "") == str(manifest.get("source_hash") or "")
-    )
+    expected_generation = str(manifest.get("generation") or "").strip()
+    expected_source_hash = str(manifest.get("source_hash") or "").strip()
+    if not expected_generation or not expected_source_hash:
+        return False
+    if (
+        str(index_meta.get("parse_generation") or "").strip() == expected_generation
+        and str(index_meta.get("document_source_hash") or "").strip() == expected_source_hash
+    ):
+        return _semantic_generation_identity_complete(_extract_vector_semantic_identity(data))
+    return False
 
 
 def _semantic_groups_match_parse_manifest(doc_id: str, groups_dir: str, manifest: dict) -> bool:
     """Only expose semantic groups published for the current parse generation."""
-    if _is_legacy_parse_manifest(manifest):
-        return True
+    expected_generation = str(manifest.get("generation") or "").strip()
+    expected_source_hash = str(manifest.get("source_hash") or "").strip()
+    if not expected_generation or not expected_source_hash:
+        return False
     try:
         active_manifest = json.loads(active_manifest_path(groups_dir, doc_id).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
     return (
-        str(active_manifest.get("transaction_id") or "") == str(manifest.get("generation") or "")
-        and str(active_manifest.get("source_hash") or "") == str(manifest.get("source_hash") or "")
+        str(active_manifest.get("transaction_id") or "").strip() == expected_generation
+        and str(active_manifest.get("source_hash") or "").strip() == expected_source_hash
     )
 
 
@@ -124,7 +140,7 @@ class BooleanSearchRequest(BaseModel):
 class SearchRequest(BaseModel):
     doc_id: str
     query: str
-    api_key: Optional[str] = None
+    embedding_api_key: Optional[str] = None
     top_k: int = 10  # 增加到10，获取更多上下文
     candidate_k: int = 20
     use_rerank: bool = False
@@ -132,7 +148,12 @@ class SearchRequest(BaseModel):
     rerank_provider: Optional[str] = None
     rerank_api_key: Optional[str] = None
     rerank_endpoint: Optional[str] = None
+    parse_generation: Optional[str] = None
+    document_source_hash: Optional[str] = None
     doc_store_key: Optional[str] = None  # injected
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
+    embedding_api_host: Optional[str] = None
 
     def validate_rerank(self):
         provider = (self.rerank_provider or "").lower()
@@ -140,6 +161,62 @@ class SearchRequest(BaseModel):
         cloud_providers = {"cohere", "jina", "silicon", "aliyun", "openai", "moonshot", "deepseek", "zhipu", "minimax"}
         if self.use_rerank and provider in cloud_providers and not self.rerank_api_key:
             raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
+
+
+def _parse_identity(manifest: dict) -> tuple[str, str]:
+    """Return the immutable identity of one published parse snapshot."""
+    return (
+        str((manifest or {}).get("generation") or "").strip(),
+        str((manifest or {}).get("source_hash") or "").strip(),
+    )
+
+
+def _resolve_document_store(doc_store_key: Optional[str] = None) -> dict:
+    if not hasattr(router, "documents_store"):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
+    root_store = router.documents_store
+    if not doc_store_key:
+        return root_store
+    nested_store = root_store.get(doc_store_key, {}) if isinstance(root_store, dict) else {}
+    return nested_store if isinstance(nested_store, dict) else {}
+
+
+def _require_requested_parse_identity(
+    request: SearchRequest,
+    active_identity: tuple[str, str],
+) -> None:
+    """Fence requests issued from an already stale document view."""
+    requested_generation = str(request.parse_generation or "").strip()
+    requested_source_hash = str(request.document_source_hash or "").strip()
+    if bool(requested_generation) != bool(requested_source_hash):
+        raise HTTPException(
+            status_code=400,
+            detail="parse_generation 与 document_source_hash 必须成对提供",
+        )
+    if requested_generation and (requested_generation, requested_source_hash) != active_identity:
+        raise HTTPException(status_code=409, detail="文档解析代际已变化，请基于当前文档重新搜索")
+
+
+def _require_search_snapshot_current(
+    request: SearchRequest,
+    expected_identity: tuple[str, str],
+) -> dict:
+    """Reject results produced while the document switched parse generations."""
+    current_store = _resolve_document_store(request.doc_store_key)
+    current_doc = current_store.get(request.doc_id)
+    if not isinstance(current_doc, dict):
+        raise HTTPException(status_code=409, detail="搜索期间文档已被移除或替换，请重新搜索")
+
+    current_manifest = _require_document_parse_ready(request.doc_id, current_doc)
+    if _parse_identity(current_manifest) != expected_identity:
+        raise HTTPException(status_code=409, detail="搜索期间文档解析代际已变化，请重新搜索")
+    if not _vector_index_matches_parse_manifest(
+        request.doc_id,
+        str(getattr(router, "vector_store_dir", "") or ""),
+        current_manifest,
+    ):
+        raise HTTPException(status_code=409, detail="搜索期间问答索引已更新，请重新搜索")
+    return current_manifest
 
 
 def build_search_middlewares():
@@ -161,15 +238,16 @@ async def search_in_pdf(request: SearchRequest):
     request.validate_rerank()
     try:
         # pages/doc store 将由 app 注入，避免全局重复
-        if not hasattr(router, "documents_store"):
-            raise HTTPException(status_code=500, detail="文档存储未初始化")
-
-        store = router.documents_store if not request.doc_store_key else router.documents_store.get(request.doc_store_key, {})
+        store = _resolve_document_store(request.doc_store_key)
         if request.doc_id not in store:
             raise HTTPException(status_code=404, detail="文档未找到")
 
         doc = store[request.doc_id]
         parse_manifest = _require_document_parse_ready(request.doc_id, doc)
+        parse_identity = _parse_identity(parse_manifest)
+        if not all(parse_identity):
+            raise HTTPException(status_code=409, detail="当前文档缺少完整解析身份，请重新上传或重新解析")
+        _require_requested_parse_identity(request, parse_identity)
         if not _vector_index_matches_parse_manifest(
             request.doc_id,
             str(getattr(router, "vector_store_dir", "") or ""),
@@ -178,25 +256,33 @@ async def search_in_pdf(request: SearchRequest):
             raise HTTPException(status_code=409, detail="当前文档的问答索引尚未发布，请稍后重试")
         pages = doc.get("data", {}).get("pages", [])
 
-        # 智能分析查询类型，动态调整top_k
-        strategy = get_retrieval_strategy(request.query)
-        dynamic_top_k = strategy['top_k']
+        # Independent search has the same immutable question contract as chat.
+        # Its explicit syntax endpoints (grep/regex/boolean) deliberately stay
+        # outside this semantic route.
+        intent = prepare_chat_intent(
+            original_question=request.query,
+            intent_question=request.query,
+            interaction_mode="default",
+        )
+        intent_decision = intent.to_dict()
+        retrieval_query = intent.intent_question
+        dynamic_top_k = intent.top_k
 
         logger.debug(
             "[Search] query_type=%s dynamic_top_k=%s reason=%s",
-            strategy["query_type"],
+            intent.query_type,
             dynamic_top_k,
-            strategy["reasoning"],
+            intent.reasoning,
         )
 
         middlewares = build_search_middlewares()
 
-        results = await vector_search(
+        search_status = await vector_search(
             request.doc_id,
-            request.query,
+            retrieval_query,
             vector_store_dir=router.vector_store_dir,
             pages=pages,
-            api_key=request.api_key,
+            api_key=request.embedding_api_key,
             top_k=dynamic_top_k,  # 使用动态计算的top_k
             candidate_k=max(request.candidate_k, dynamic_top_k),
             use_rerank=request.use_rerank,
@@ -205,18 +291,82 @@ async def search_in_pdf(request: SearchRequest):
             rerank_api_key=request.rerank_api_key,
             rerank_endpoint=request.rerank_endpoint,
             visual_evidence=committed_visual_evidence_for_document(doc),
-            middlewares=middlewares
+            middlewares=middlewares,
+            return_status=True,
+            intent_decision=intent_decision,
+            query_is_canonical=True,
+            embedding_model=request.embedding_model or "",
+            embedding_provider=request.embedding_provider or "",
+            embedding_api_host=request.embedding_api_host or "",
         )
+
+        # 兼容仍返回历史列表形态的中间件和测试替身。
+        if isinstance(search_status, dict):
+            results = search_status.get("results")
+            if not isinstance(results, list):
+                results = []
+                search_status = {
+                    **search_status,
+                    "error": search_status.get("error") or "检索服务返回了无效结果",
+                    "error_code": search_status.get("error_code") or "invalid_search_response",
+                    "degraded": True,
+                    "fallback_reason": search_status.get("fallback_reason") or "invalid_search_response",
+                }
+        elif isinstance(search_status, list):
+            results = search_status
+            search_status = {
+                "results": results,
+                "error": None,
+                "error_code": None,
+                "degraded": False,
+                "fallback_reason": None,
+                "fallback_used": False,
+                "timings": {},
+            }
+        else:
+            results = []
+            search_status = {
+                "results": [],
+                "error": "检索服务返回了无效响应",
+                "error_code": "invalid_search_response",
+                "degraded": True,
+                "fallback_reason": "invalid_search_response",
+                "fallback_used": False,
+                "timings": {},
+            }
+
+        current_manifest = _require_search_snapshot_current(request, parse_identity)
+        current_generation, current_source_hash = _parse_identity(current_manifest)
+        degraded = bool(search_status.get("degraded") or search_status.get("error"))
 
         return {
             "results": results,
-            "query_type": strategy['query_type'],
+            "query_type": intent.query_type,
             "dynamic_top_k": dynamic_top_k,
             "rerank_enabled": request.use_rerank and len(results) > 0,
             "candidate_k": max(request.candidate_k, dynamic_top_k),
             "used_provider": request.rerank_provider or "local",
             "used_model": request.reranker_model or ("BAAI/bge-reranker-base" if request.use_rerank else None),
-            "fallback_used": False
+            "fallback_used": bool(search_status.get("fallback_used")),
+            "fallback_reason": search_status.get("fallback_reason"),
+            "degraded": degraded,
+            "retrieval_degraded": degraded,
+            "retrieval_status": "degraded" if degraded else "ok",
+            "error": search_status.get("error"),
+            "error_code": search_status.get("error_code"),
+            "retrieval_timings": search_status.get("timings") or {},
+            "parse_generation": current_generation,
+            "document_source_hash": current_source_hash,
+            "parse_identity": {
+                "generation": current_generation,
+                "source_hash": current_source_hash,
+            },
+            "original_question": intent.original_question,
+            "intent_question": intent.intent_question,
+            "retrieval_query": retrieval_query,
+            "intent_id": intent.intent_id,
+            "intent_version": intent.version,
+            "intent": intent_decision,
         }
 
     except HTTPException as e:
@@ -362,10 +512,15 @@ async def document_map(request: DocumentMapRequest):
             raise HTTPException(status_code=404, detail="文档未找到")
         parse_manifest = _require_document_parse_ready(request.doc_id, router.documents_store[request.doc_id])
 
-        # ``active`` manifest lives at the semantic-group root, while the
-        # published JSON itself may live in its active generation directory.
-        groups_root = _get_semantic_groups_dir()
-        if not _semantic_groups_match_parse_manifest(request.doc_id, groups_root, parse_manifest):
+        # The semantic map is a published parse-generation artifact.  It can
+        # remain useful while the optional chunk vector index is rebuilding,
+        # but it must never fall back to a prior parser generation.
+        semantic_root = _get_semantic_groups_dir()
+        if not _semantic_groups_match_parse_manifest(
+            request.doc_id,
+            semantic_root,
+            parse_manifest,
+        ):
             return {
                 "map": [],
                 "total": 0,

@@ -53,195 +53,31 @@ echo   [✓] 环境检查通过
 :: ==================== 清理旧进程 ====================
 echo   [▶] 清理旧进程...
 
-:: 清理 Web 开发后端和桌面后端常用端口
-for %%p in (8000 8001 8002 8003 8004 8005) do (
+:: 清理 Web 前端、开发后端和桌面后端常用端口
+for %%p in (3000 8000 8001 8002 8003 8004 8005) do (
     for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
         taskkill /F /PID %%a >nul 2>&1
     )
 )
 
-:: 清理 Python 缓存
-for /d /r backend %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" 2>nul
+:: 保留 Python 字节码缓存，避免每次启动重新编译全部后端模块。
 
 echo   [✓] 清理完成
 
-:: ==================== 安装依赖 ====================
-echo   [▶] 检查依赖...
+:: ==================== 基础运行时 ====================
+echo   [▶] 检查基础运行时...
 
-:: 后端依赖
-python -m pip install -q -r backend/requirements.txt >nul 2>&1
+:: MinerU 是默认解析路线。只确保通用后端、预览和检索依赖；
+:: 本地 OCR / ODL / YOLO 由用户选择“本地解析”后按需安装。
+python -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo   [!] 后端依赖安装出现警告，尝试继续...
+    echo   [▶] 首次安装基础运行时...
+    python -m pip install -q -r backend\requirements-core.txt >nul 2>&1
+    if errorlevel 1 goto PIPFAIL
 )
 
-:: ==================== 安装 OCR 依赖 ====================
-echo   [▶] 检查 OCR 依赖...
-
-:: 检查 pdf2image 是否已安装
-python -c "import pdf2image" >nul 2>&1
-if errorlevel 1 (
-    echo   [▶] 安装 OCR Python 库...
-    python -m pip install -q pdf2image pytesseract pillow >nul 2>&1
-)
-
-:: OCR 工具目录
-set "OCR_DIR=%BASE_DIR%ocr_tools"
-
-:: 检查 Tesseract 是否可用（系统PATH或本地目录）
-set "TESSERACT_FOUND=0"
-where tesseract >nul 2>&1 && set "TESSERACT_FOUND=1"
-if exist "%OCR_DIR%\tesseract\tesseract.exe" set "TESSERACT_FOUND=1"
-
-if "%TESSERACT_FOUND%"=="0" (
-    echo   [!] Tesseract-OCR 未安装，扫描版PDF将无法识别
-    echo   [!] 如需OCR功能，请手动安装: https://github.com/UB-Mannheim/tesseract/wiki
-) else (
-    if exist "%OCR_DIR%\tesseract\tesseract.exe" (
-        set "PATH=%OCR_DIR%\tesseract;%PATH%"
-    )
-    echo   [✓] Tesseract 已安装
-)
-
-:: 检查 Poppler 是否可用
-set "POPPLER_FOUND=0"
-
-:: 先检查系统PATH中是否有 pdftoppm
-where pdftoppm >nul 2>&1
-if !errorlevel! equ 0 (
-    set "POPPLER_FOUND=1"
-    echo   [✓] Poppler 已安装 ^(系统PATH^)
-    goto POPPLER_DONE
-)
-
-:: 检查本地安装目录
-if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
-    set "POPPLER_FOUND=1"
-    set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
-    echo   [✓] Poppler 已安装 ^(本地目录^)
-    goto POPPLER_DONE
-)
-
-:: 如果都没找到，开始下载和安装
-echo   [▶] Poppler 未找到，开始安装...
-if not exist "%OCR_DIR%" mkdir "%OCR_DIR%"
-
-:: 检查是否已有下载的zip文件
-if not exist "%OCR_DIR%\poppler.zip" (
-    echo   [▶] 下载 Poppler...
-    powershell -Command "& {$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri 'https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip' -OutFile '%OCR_DIR%\poppler.zip' -TimeoutSec 30 } catch { Write-Host 'Download failed' }}" >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo   [!] Poppler 下载失败，OCR功能可能受限
-        goto POPPLER_DONE
-    )
-)
-
-:: 解压 Poppler（使用 Python 自动适配 zip 内部目录名）
-if exist "%OCR_DIR%\poppler.zip" (
-    echo   [▶] 解压 Poppler...
-    python -c "import zipfile,shutil,os; z=zipfile.ZipFile(r'%OCR_DIR%\poppler.zip'); z.extractall(r'%OCR_DIR%\poppler_temp'); z.close(); dirs=[d for d in os.listdir(r'%OCR_DIR%\poppler_temp') if os.path.isdir(os.path.join(r'%OCR_DIR%\poppler_temp',d))]; src=dirs[0] if dirs else ''; shutil.copytree(os.path.join(r'%OCR_DIR%\poppler_temp',src), r'%OCR_DIR%\poppler', dirs_exist_ok=True) if src else None; shutil.rmtree(r'%OCR_DIR%\poppler_temp')" >nul 2>&1
-    
-    if exist "%OCR_DIR%\poppler\Library\bin\pdftoppm.exe" (
-        set "PATH=%OCR_DIR%\poppler\Library\bin;%PATH%"
-        set "POPPLER_FOUND=1"
-        echo   [✓] Poppler 安装成功
-    ) else (
-        echo   [!] Poppler 解压失败
-    )
-) else (
-    echo   [!] Poppler zip 文件不存在
-)
-
-:POPPLER_DONE
-
-echo   [✓] OCR 依赖检查完成
-
-:: ==================== DocLayout-YOLO 模型 ====================
-echo   [▶] 检查图表检测模型...
-
-set "MODEL_DIR=%BASE_DIR%backend\models"
-set "MODEL_FILE=%MODEL_DIR%\doclayout_yolo_docstructbench_imgsz1280.pt"
-
-if not exist "%MODEL_DIR%" mkdir "%MODEL_DIR%"
-
-if exist "%MODEL_FILE%" (
-    echo   [✓] DocLayout-YOLO 模型已存在
-) else (
-    echo   [▶] 下载 DocLayout-YOLO 模型 ^(~30MB^)...
-    :: 优先尝试 HF 镜像（国内加速）
-    set "HF_ENDPOINT=https://hf-mirror.com"
-    python -c "from huggingface_hub import hf_hub_download; import shutil; p=hf_hub_download(repo_id='opendatalab/PDF-Extract-Kit-1.0', filename='models/Layout/YOLO/doclayout_yolo_docstructbench_imgsz1280_2501.pt'); shutil.copy2(p, r'%MODEL_FILE%')" >nul 2>&1
-    if exist "%MODEL_FILE%" (
-        echo   [✓] DocLayout-YOLO 模型下载成功
-    ) else (
-        echo.
-        echo   [!] 模型自动下载失败（可能是网络问题）
-        echo.
-        echo   ┌─ 手动下载方法 ──────────────────────────────────┐
-        echo   │                                                   │
-        echo   │  1. 打开 ModelScope ^(国内推荐^):                  │
-        echo   │     https://modelscope.cn/models/                 │
-        echo   │     opendatalab/PDF-Extract-Kit                   │
-        echo   │                                                   │
-        echo   │  2. 下载文件:                                     │
-        echo   │     models/Layout/YOLO/                           │
-        echo   │     doclayout_yolo_docstructbench_imgsz1280_2501.pt│
-        echo   │                                                   │
-        echo   │  3. 将文件重命名并放到:                           │
-        echo   │     backend\models\                               │
-        echo   │     doclayout_yolo_docstructbench_imgsz1280.pt    │
-        echo   │                                                   │
-        echo   │  不影响正常使用，图表解读将退化为基础模式         │
-        echo   └───────────────────────────────────────────────────┘
-        echo.
-    )
-)
-
-:: ==================== ODL 去脏解析器 ====================
-echo   [▶] 检查 OpenDataLoader PDF 解析器...
-
-:: 检查 opendataloader_pdf Python 包
-python -c "import opendataloader_pdf" >nul 2>&1
-if errorlevel 1 (
-    echo   [▶] 安装 opendataloader-pdf...
-    python -m pip install -q opendataloader-pdf >nul 2>&1
-    python -c "import opendataloader_pdf" >nul 2>&1
-    if errorlevel 1 (
-        echo   [!] opendataloader-pdf 安装失败，将使用 pdfplumber 解析
-    ) else (
-        echo   [✓] opendataloader-pdf 安装成功
-    )
-) else (
-    echo   [✓] opendataloader-pdf 已安装
-)
-
-:: 检查 Java（ODL 运行所需）
-where java >nul 2>&1
-if errorlevel 1 (
-    echo   [!] Java 未安装，ODL 去脏功能将自动降级为 pdfplumber
-    echo   [!] 如需完整去脏功能，请安装 Java 11+:
-    echo   [!]   https://adoptium.net
-) else (
-    echo   [✓] Java 已安装，ODL 去脏功能已启用
-)
-
-:: ==================== GraphRAG 依赖 (知识图谱) ====================
-echo   [▶] 检查 GraphRAG 依赖...
-
-python -c "import graspologic, networkx, tiktoken" >nul 2>&1
-if errorlevel 1 (
-    echo   [▶] 安装 GraphRAG 依赖 ^(graspologic/networkx/tiktoken，首次约 3-5 分钟^)...
-    python -m pip install -q "graspologic>=3.3.0" "networkx>=3.0" "tiktoken>=0.5.0" >nul 2>&1
-    python -c "import graspologic, networkx, tiktoken" >nul 2>&1
-    if errorlevel 1 (
-        echo   [!] GraphRAG 依赖安装失败，GraphRAG 知识图谱功能将不可用
-        echo   [!] 如需启用，请手动运行: pip install graspologic^>=3.3.0
-    ) else (
-        echo   [✓] GraphRAG 依赖安装成功
-    )
-) else (
-    echo   [✓] GraphRAG 依赖已安装
-)
-
+echo   [✓] 基础运行时已就绪
+echo   [i] 本地解析组件将在选择本地路线时按需准备
 :: 前端依赖
 if not exist "frontend\node_modules" (
     echo   [▶] 首次运行，安装前端依赖 ^(需要1-2分钟^)...
@@ -251,10 +87,13 @@ if not exist "frontend\node_modules" (
     if errorlevel 1 goto NPMFAIL
 )
 
-:: 确保 rehype-raw 已安装（Blur Reveal 效果依赖）
-pushd frontend
-call npm list rehype-raw >nul 2>&1 || call npm install rehype-raw --silent >nul 2>&1
-popd
+:: 只检查目录，避免每次启动运行一次完整 npm 依赖树解析。
+if not exist "frontend\node_modules\rehype-raw" (
+    pushd frontend
+    call npm install rehype-raw --silent >nul 2>&1
+    popd
+    if errorlevel 1 goto NPMFAIL
+)
 
 echo   [✓] 依赖检查完成
 
@@ -263,21 +102,26 @@ echo   [▶] 启动后端服务...
 
 :: 启动后端（后台运行，先切到 backend 目录确保模块导入正确）
 pushd backend
+if exist "backend_startup.log" del /q "backend_startup.log" >nul 2>&1
 start "" /B python app.py >backend_startup.log 2>&1
 popd
 
-:: 等待后端启动（最多90秒）
+:: 等待后端启动（最多60秒）；发现明确异常时立即退出，不再空等。
 set "wait_ok=0"
 set "wait_count=0"
 :WAIT_BACKEND
 curl -fsS --max-time 2 http://127.0.0.1:8000/health >nul 2>&1
 if not errorlevel 1 goto BACK_HEALTHY
 
-netstat -ano | findstr :8000 | findstr LISTENING >nul 2>&1
-if not errorlevel 1 goto BACK_HEALTHY
+if exist "backend\backend_startup.log" (
+    findstr /C:"Traceback (most recent call last)" /C:"Application startup failed" /C:"error while attempting to bind" "backend\backend_startup.log" >nul 2>&1
+    if not errorlevel 1 goto BACK_OK
+)
 
 set /a wait_count+=1
-if !wait_count! geq 90 goto BACK_OK
+if !wait_count! equ 10 echo   [i] 后端正在加载检索与文档服务...
+if !wait_count! equ 30 echo   [i] 后端仍在初始化，请稍候...
+if !wait_count! geq 60 goto BACK_OK
 timeout /t 1 /nobreak >nul
 goto WAIT_BACKEND
 
@@ -315,8 +159,8 @@ npm run dev
 echo.
 echo   [▶] 正在停止服务...
 
-:: 清理 Web 开发后端和桌面后端常用端口
-for %%p in (8000 8001 8002 8003 8004 8005) do (
+:: 清理 Web 前端、开发后端和桌面后端常用端口
+for %%p in (3000 8000 8001 8002 8003 8004 8005) do (
     for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
         taskkill /F /PID %%a >nul 2>&1
     )
@@ -339,6 +183,12 @@ echo.
 pause
 exit /b 1
 
+:PIPFAIL
+echo   [✗] 基础运行时安装失败，请检查 Python、网络或 requirements-core.txt
+echo.
+pause
+exit /b 1
+
 :NPMFAIL
 echo   [✗] 前端依赖安装失败
 echo.
@@ -346,7 +196,7 @@ pause
 exit /b 1
 
 :BACKFAIL
-for %%p in (8000 8001 8002 8003 8004 8005) do (
+for %%p in (3000 8000 8001 8002 8003 8004 8005) do (
     for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%%p ^| findstr LISTENING 2^>nul') do (
         taskkill /F /PID %%a >nul 2>&1
     )

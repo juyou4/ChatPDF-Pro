@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { CheckCircle2, Circle, FileText, Languages, Loader2, RefreshCw } from 'lucide-react';
+import { CheckCircle2, Circle, FileText, Languages, Loader2, RefreshCw, StickyNote, Trash2 } from 'lucide-react';
 
 const TYPE_LABEL = {
   heading: '标题',
@@ -21,6 +21,7 @@ function ReadingAnalysisPanel({
   currentPage = 1,
   activeBlockId = null,
   notes = [],
+  userNotes = [],
   activeNodeId = null,
   visitedNodeIds = [],
   onTranslate,
@@ -28,6 +29,8 @@ function ReadingAnalysisPanel({
   onBlockHover,
   onBlockClick,
   onNoteClick,
+  onUserNoteClick,
+  onDeleteUserNote,
   darkMode = false,
 }) {
   const translatableCount = blocks.filter((block) => block?.block_id && block?.text).length;
@@ -44,7 +47,7 @@ function ReadingAnalysisPanel({
           <div className="min-w-0">
             <div className="text-[15px] font-bold tracking-tight">第 {currentPage} 页解析</div>
             <div className={`mt-0.5 text-[11px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-              {notes.length} 条 AI 笔记 · {translatableCount} 个文本块
+              {userNotes.length} 条划词笔记 · {notes.length} 条 AI 要点 · {translatableCount} 个文本块
             </div>
           </div>
           <button
@@ -106,6 +109,57 @@ function ReadingAnalysisPanel({
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
+        {userNotes.length > 0 && (
+          <section className="space-y-2.5">
+            <div className={`text-[11px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+              我的划词笔记
+            </div>
+            {userNotes.map((note, index) => (
+              <div
+                key={note.id}
+                className={`group relative overflow-hidden rounded-[10px] border transition-colors ${
+                  darkMode
+                    ? 'border-amber-300/15 bg-amber-200/[0.06] hover:bg-amber-200/[0.09]'
+                    : 'border-amber-200/70 bg-[#fffaf0] hover:border-amber-300 hover:bg-[#fff7e6]'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => onUserNoteClick?.(note)}
+                  className="w-full px-3 py-3 pr-10 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-300/60"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <StickyNote className={`mt-0.5 h-4 w-4 shrink-0 ${darkMode ? 'text-amber-300/70' : 'text-amber-600'}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className={`text-[12px] font-semibold leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>
+                        {note.note}
+                      </div>
+                      <div className={`mt-1.5 line-clamp-2 border-l-2 pl-2 text-[11px] leading-relaxed ${
+                        darkMode ? 'border-white/10 text-gray-500' : 'border-amber-200 text-gray-500'
+                      }`}>
+                        {note.text}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDeleteUserNote?.(note.id)}
+                  className={`absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-[8px] opacity-0 transition-all group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 ${
+                    darkMode
+                      ? 'text-gray-500 hover:bg-rose-400/10 hover:text-rose-300 focus-visible:ring-white/15'
+                      : 'text-gray-400 hover:bg-rose-50 hover:text-rose-600 focus-visible:ring-rose-200'
+                  }`}
+                  aria-label={`删除第 ${index + 1} 条划词笔记`}
+                  title="删除笔记"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </section>
+        )}
+
         {notes.length > 0 && (
           <section className="space-y-2.5">
             <div className={`text-[11px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -155,7 +209,7 @@ function ReadingAnalysisPanel({
         )}
 
         {blocks.length === 0 ? (
-          notes.length === 0 ? (
+          notes.length === 0 && userNotes.length === 0 ? (
           <div className={`h-full flex flex-col items-center justify-center text-center ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
             <FileText className="w-8 h-8 mb-3 opacity-60" />
             <div className="text-sm font-medium">暂无可解析段落</div>

@@ -5,8 +5,130 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
+from services.mineru_text_normalizer import MINERU_MIN_PAGE_COVERAGE
+
 
 ProgressCallback = Optional[Callable[[dict[str, Any]], None]]
+
+
+class MinerUQualityError(RuntimeError):
+    """Structured quality-gate failure for MinerU publication."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        quality_status: str = "failed",
+        expected_page_count: int = 0,
+        covered_page_count: int = 0,
+        coverage: float = 0.0,
+        failed_pages: list[int] | None = None,
+        page_ledger: list[dict[str, Any]] | None = None,
+        block_count: int = 0,
+        body_text_chars: int = 0,
+        structure_degraded: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.quality_status = str(quality_status or "failed")
+        self.expected_page_count = max(0, int(expected_page_count or 0))
+        self.covered_page_count = max(0, int(covered_page_count or 0))
+        self.coverage = float(coverage or 0.0)
+        self.failed_pages = [
+            int(page)
+            for page in (failed_pages or [])
+            if isinstance(page, (int, float, str)) and str(page).strip()
+        ]
+        self.page_ledger = [
+            dict(item)
+            for item in (page_ledger or [])
+            if isinstance(item, Mapping)
+        ]
+        self.block_count = max(0, int(block_count or 0))
+        self.body_text_chars = max(0, int(body_text_chars or 0))
+        self.structure_degraded = bool(structure_degraded)
+
+    def as_status_dict(self) -> dict[str, Any]:
+        return {
+            "quality_status": self.quality_status,
+            "expected_page_count": self.expected_page_count,
+            "covered_page_count": self.covered_page_count,
+            "coverage": self.coverage,
+            "failed_pages": list(self.failed_pages),
+            "page_ledger": list(self.page_ledger),
+            "block_count": self.block_count,
+            "body_text_chars": self.body_text_chars,
+            "structure_degraded": self.structure_degraded,
+        }
+
+
+def _coerce_quality_details(normalized: Any) -> dict[str, Any]:
+    meta = {}
+    if isinstance(normalized, Mapping):
+        raw_meta = normalized.get("mineru_meta")
+        if isinstance(raw_meta, Mapping):
+            meta = dict(raw_meta)
+
+    def _to_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "quality_status": str(meta.get("quality_status") or "failed"),
+        "expected_page_count": _to_int(meta.get("expected_page_count")),
+        "covered_page_count": _to_int(meta.get("covered_page_count")),
+        "coverage": _to_float(meta.get("coverage")),
+        "failed_pages": [
+            _to_int(page)
+            for page in (meta.get("failed_pages") or [])
+            if _to_int(page) > 0
+        ],
+        "page_ledger": [
+            dict(item)
+            for item in (meta.get("page_ledger") or [])
+            if isinstance(item, Mapping)
+        ],
+        "block_count": _to_int(meta.get("block_count")),
+        "body_text_chars": _to_int(meta.get("body_text_chars")),
+        "structure_degraded": bool(meta.get("structure_degraded")),
+    }
+
+
+def validate_mineru_block_index_quality(normalized: Any) -> None:
+    """Fail closed before an empty or materially incomplete MinerU block index can publish."""
+    quality = _coerce_quality_details(normalized)
+    failed_quality = {**quality, "quality_status": "failed"}
+    if not isinstance(normalized, Mapping):
+        raise MinerUQualityError("MinerU 结果标准化格式无效", **failed_quality)
+    pages = normalized.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise MinerUQualityError("MinerU 结果没有可发布的页面", **failed_quality)
+
+    block_count = quality["block_count"]
+    if block_count <= 0:
+        raise MinerUQualityError("MinerU 结果没有可发布的版面块", **failed_quality)
+
+    body_text_chars = quality["body_text_chars"]
+    if body_text_chars <= 0:
+        raise MinerUQualityError("MinerU 结果没有可发布的正文", **failed_quality)
+
+    expected_page_count = quality["expected_page_count"]
+    coverage = quality["coverage"]
+    if expected_page_count > 0 and coverage < MINERU_MIN_PAGE_COVERAGE:
+        raise MinerUQualityError("MinerU 页面覆盖不完整，拒绝发布", **failed_quality)
+    if quality["failed_pages"]:
+        raise MinerUQualityError("MinerU 存在失败页面，拒绝发布", **failed_quality)
+    if quality["quality_status"] != "success":
+        raise MinerUQualityError("MinerU 解析质量未达到完整发布标准", **failed_quality)
+    if quality["structure_degraded"]:
+        raise MinerUQualityError("MinerU 文档结构不完整，拒绝发布", **failed_quality)
 
 
 @dataclass(frozen=True)
@@ -158,6 +280,7 @@ class MinerUDocumentParseAdapter(DocumentParseAdapter):
         normalized = normalizer(raw_payload)
         if normalized is None:
             raise RuntimeError("MinerU 结果标准化失败")
+        self._validate_normalized(normalized)
         return DocumentParseArtifact(
             provider=self.name,
             submission=submission,
@@ -204,3 +327,7 @@ class MinerUDocumentParseAdapter(DocumentParseAdapter):
             },
             inline_payload=inline_payload,
         )
+
+    @staticmethod
+    def _validate_normalized(normalized: Any) -> None:
+        validate_mineru_block_index_quality(normalized)

@@ -372,7 +372,17 @@ def build_body_bbox(block: FigureBlock) -> Optional[List[float]]:
     - 否则使用 body_bbox_page_pts
     """
     if block.panel_bboxes_page_pts:
-        return merge_bboxes(block.panel_bboxes_page_pts)
+        bbox = merge_bboxes(block.panel_bboxes_page_pts)
+        try:
+            bottom_padding = max(
+                0.0,
+                float(block.source_metadata.get("panel_label_bottom_padding") or 0.0),
+            )
+        except (TypeError, ValueError):
+            bottom_padding = 0.0
+        if bottom_padding:
+            bbox[3] += bottom_padding
+        return bbox
     
     return block.body_bbox_page_pts
 

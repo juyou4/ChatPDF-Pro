@@ -147,7 +147,11 @@ class MemoryRetriever:
 
             results.append({
                 "entry_id": entry_id,
-                "text": item.get("chunk", ""),
+                # The vector index may predate a non-destructive quality
+                # cleanup. Ranking can still use that index, but callers must
+                # never receive its stale raw text instead of the canonical
+                # Store entry that has already been sanitized.
+                "text": entry.content,
                 "source_type": entry.source_type,
                 "doc_id": entry.doc_id,
                 "rrf_score": dynamic_score,

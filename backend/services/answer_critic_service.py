@@ -17,6 +17,77 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+class _CriticResponseError(ValueError):
+    """带稳定错误码的自审响应错误，便于日志聚合和问题定位。"""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def _stringify_upstream_error(error: object) -> str:
+    if isinstance(error, str):
+        return error.strip()
+    if isinstance(error, dict):
+        for key in ("message", "detail"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            return json.dumps(error, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+    return str(error or "").strip()
+
+
+def _extract_response_text(response: object) -> str:
+    """从 OpenAI 兼容响应中提取非空正文，并兼容历史字符串 mock。"""
+    if isinstance(response, str):
+        text = response.strip()
+        if not text:
+            raise _CriticResponseError("empty_content", "AI 返回正文为空")
+        return text
+
+    if not isinstance(response, dict):
+        raise _CriticResponseError("invalid_response", "AI 返回不是对象")
+
+    upstream_error = _stringify_upstream_error(response.get("error"))
+    if upstream_error:
+        raise _CriticResponseError("upstream_error", upstream_error)
+
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise _CriticResponseError("missing_choices", "AI 返回缺少 choices")
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise _CriticResponseError("invalid_choice", "AI 返回 choices[0] 不是对象")
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise _CriticResponseError("missing_message", "AI 返回缺少 message")
+
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_text = part.get("text")
+            if isinstance(part_text, str) and part_text.strip():
+                text_parts.append(part_text.strip())
+        text = "\n".join(text_parts).strip()
+    else:
+        text = ""
+
+    if not text:
+        raise _CriticResponseError("empty_content", "AI 返回 message.content 为空")
+    return text
+
+
 async def critique_answer(
     question: str,
     answer: str,
@@ -94,11 +165,7 @@ async def critique_answer(
             timeout=timeout,
         )
 
-        if not result:
-            return None
-
-        # 解析 JSON
-        text = result.strip()
+        text = _extract_response_text(result)
         # 提取 JSON 对象
         import re
         json_match = re.search(r'\{[\s\S]*\}', text)
@@ -106,6 +173,11 @@ async def critique_answer(
             parsed = json.loads(json_match.group())
         else:
             parsed = json.loads(text)
+
+        if not isinstance(parsed, dict):
+            raise _CriticResponseError(
+                "invalid_payload", "自审 JSON 根节点不是对象"
+            )
 
         # 验证必需字段
         score = int(parsed.get("score", 5))
@@ -126,11 +198,43 @@ async def critique_answer(
         return critique
 
     except asyncio.TimeoutError:
-        logger.warning(f"[Critic] 自审超时({timeout}s)")
+        logger.warning(
+            "[Critic] 自审超时(%ss)",
+            timeout,
+            extra={
+                "critic_error_code": "timeout",
+                "critic_error_detail": f"timeout={timeout}s",
+            },
+        )
+        return None
+    except _CriticResponseError as e:
+        logger.warning(
+            "[Critic] 自审响应无效: code=%s, detail=%s",
+            e.code,
+            e.detail,
+            extra={
+                "critic_error_code": e.code,
+                "critic_error_detail": e.detail,
+            },
+        )
         return None
     except json.JSONDecodeError as e:
-        logger.warning(f"[Critic] 自审结果解析失败: {e}")
+        logger.warning(
+            "[Critic] 自审结果解析失败: %s",
+            e,
+            extra={
+                "critic_error_code": "invalid_json",
+                "critic_error_detail": str(e),
+            },
+        )
         return None
     except Exception as e:
-        logger.warning(f"[Critic] 自审失败: {e}")
+        logger.warning(
+            "[Critic] 自审失败: %s",
+            e,
+            extra={
+                "critic_error_code": "request_failed",
+                "critic_error_detail": str(e),
+            },
+        )
         return None

@@ -5,14 +5,11 @@
  * 只暴露必要的 API 给 renderer 进程。
  */
 
-import { contextBridge, ipcRenderer, shell } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('chatpdfDesktop', {
   /** 后端 API base URL (http://127.0.0.1:<port>) */
   getApiBaseUrl: (): Promise<string> => ipcRenderer.invoke('get-api-base-url'),
-
-  /** 后端安全 token */
-  getBackendToken: (): Promise<string> => ipcRenderer.invoke('get-backend-token'),
 
   /** 应用版本 */
   getVersion: (): Promise<string> => ipcRenderer.invoke('get-version'),
@@ -24,13 +21,7 @@ contextBridge.exposeInMainWorld('chatpdfDesktop', {
   openDataDir: (): Promise<void> => ipcRenderer.invoke('open-data-dir'),
 
   /** 在外部浏览器打开链接 */
-  openExternal: (url: string): Promise<void> => {
-    // 安全检查：只允许 http/https 协议
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return shell.openExternal(url);
-    }
-    return Promise.reject(new Error('Only http/https URLs are allowed'));
-  },
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url),
 
   /** 选择文件对话框 */
   selectFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null> =>

@@ -12,7 +12,7 @@ import pickle
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import faiss
 import numpy as np
@@ -95,7 +95,11 @@ class MemoryIndex:
     def _get_embed_fn(self, api_key: str = None):
         """获取 embedding 函数"""
         from services.embedding_service import get_embedding_function
-        return get_embedding_function(self.embedding_model_id, api_key=api_key)
+        return get_embedding_function(
+            self.embedding_model_id,
+            api_key=api_key,
+            allow_model_fallback=False,
+        )
 
     def _get_cached_embedding(self, text: str) -> Optional[np.ndarray]:
         """获取缓存的 embedding
@@ -181,7 +185,14 @@ class MemoryIndex:
         
         return result
 
-    def add_entry(self, entry_id: str, text: str, api_key: str = None) -> None:
+    def add_entry(
+        self,
+        entry_id: str,
+        text: str,
+        api_key: str = None,
+        *,
+        should_commit: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         """为记忆条目生成向量并添加到 FAISS 索引
 
         如果 entry_id 已存在且内容未变化（hash 相同），跳过重复 embedding。
@@ -192,11 +203,13 @@ class MemoryIndex:
             api_key: API 密钥（远程模型需要）
         """
         # 变更检测：hash 相同则跳过
+        if should_commit is not None and not should_commit():
+            return False
         new_hash = self._hash_content(text)
         with self._state_lock:
             if entry_id in self._content_hashes and self._content_hashes[entry_id] == new_hash:
                 logger.debug(f"记忆条目内容未变化，跳过 embedding: {entry_id}")
-                return
+                return False
 
         try:
             # 使用缓存机制进行 embedding
@@ -206,10 +219,18 @@ class MemoryIndex:
             # 归一化向量，使 IP = 余弦相似度
             embeddings = _normalize_vectors(embeddings)
 
+            # A memory clear can happen while the embedding call is in
+            # progress. Check the caller's generation fence before any state
+            # becomes visible or durable again.
+            if should_commit is not None and not should_commit():
+                return False
+
             with self._state_lock:
+                if should_commit is not None and not should_commit():
+                    return False
                 # embedding 计算期间可能有另一个写入先完成，提交前再次检查。
                 if self._content_hashes.get(entry_id) == new_hash:
-                    return
+                    return False
                 # 首次添加时创建索引
                 if self.index is None:
                     self.index = faiss.IndexFlatIP(dimension)
@@ -226,6 +247,7 @@ class MemoryIndex:
             # 异步 dirty-sync 持久化
             self.schedule_sync(reason="add")
             logger.info(f"记忆条目已添加到向量索引: {entry_id}")
+            return True
         except Exception as e:
             logger.error(f"添加记忆条目到向量索引失败: {e}")
             raise

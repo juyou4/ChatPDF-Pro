@@ -251,12 +251,20 @@ def resolve_visual_enrichment_policy(
         visual_enabled=visual_enabled,
     )
     local_provider = _normalized(local_visual_provider).lower()
-    local_enabled = bool(local_provider in _KEYLESS_LOCAL_PROVIDERS and _normalized(local_visual_model))
+    local_endpoint = _normalized(local_visual_endpoint)
+    # Local and Ollama are a privacy tier, not aliases for arbitrary remote
+    # OpenAI-compatible servers. A non-loopback endpoint must be configured
+    # as the dedicated visual model with an explicit credential.
+    local_enabled = bool(
+        local_provider in _KEYLESS_LOCAL_PROVIDERS
+        and _normalized(local_visual_model)
+        and _is_loopback_endpoint(local_endpoint)
+    )
     local = VisualModelConfig(
         provider=local_provider if local_enabled else "",
         model=_normalized(local_visual_model) if local_enabled else "",
         api_key=_normalized(local_visual_api_key) if local_enabled else "",
-        endpoint=_normalized(local_visual_endpoint) if local_enabled else "",
+        endpoint=local_endpoint if local_enabled else "",
         source="local_tier" if local_enabled else "local_tier_unavailable",
         enabled=local_enabled,
     )

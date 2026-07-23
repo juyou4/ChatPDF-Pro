@@ -18,6 +18,7 @@
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import Optional
@@ -27,6 +28,31 @@ from urllib.parse import urlparse
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _query_log_fingerprint(query: str) -> tuple[int, str]:
+    """Return diagnostic metadata without retaining a user's search terms."""
+    normalized = str(query or "")
+    return len(normalized), hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_search_complete(provider: str, query: str, result_count: int) -> None:
+    query_length, query_hash = _query_log_fingerprint(query)
+    logger.info(
+        "%s 搜索完成: query_chars=%s query_hash=%s 结果数=%s",
+        provider,
+        query_length,
+        query_hash,
+        result_count,
+    )
+
+
+def _safe_search_error(exc: BaseException) -> str:
+    """Avoid serializing request URLs, query strings, or API keys into logs."""
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    suffix = f" status={status_code}" if isinstance(status_code, int) else ""
+    return f"{type(exc).__name__}{suffix}"
 
 
 class SearchManager:
@@ -109,13 +135,16 @@ class SearchManager:
             raw_results = await SearchManager._auto_search(query, max_results)
             return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
         except Exception as e:
-            logger.error(f"搜索失败 (provider={provider}): {e}")
+            logger.error("搜索失败 (provider=%s): %s", provider, _safe_search_error(e))
             if provider != "auto":
                 try:
                     raw_results = await SearchManager._auto_search(query, max_results)
                     return SearchManager._postprocess_results(query, raw_results, max_results, blacklist)
                 except Exception as fallback_error:
-                    logger.error(f"自动回退搜索失败: {fallback_error}")
+                    logger.error(
+                        "自动回退搜索失败: %s",
+                        _safe_search_error(fallback_error),
+                    )
             return []
 
     @staticmethod
@@ -129,7 +158,7 @@ class SearchManager:
             try:
                 results = await method(query, max_results=max_results)
             except Exception as e:
-                logger.warning(f"自动搜索 {name} 失败: {e}")
+                logger.warning("自动搜索 %s 失败: %s", name, _safe_search_error(e))
                 continue
             if results:
                 logger.info(f"自动搜索命中 provider={name}, 结果数={len(results)}")
@@ -313,7 +342,7 @@ class SearchManager:
                         "snippet": item.get("content", ""),
                     }
                 )
-            logger.info(f"Tavily 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Tavily", query, len(results))
             return results
 
     @staticmethod
@@ -344,7 +373,7 @@ class SearchManager:
                         "snippet": item.get("snippet", ""),
                     }
                 )
-            logger.info(f"Serper 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Serper", query, len(results))
             return results
 
     @staticmethod
@@ -377,7 +406,7 @@ class SearchManager:
                 return results
 
         results = await asyncio.to_thread(_sync_search)
-        logger.info(f"DuckDuckGo 搜索完成: query='{query}', 结果数={len(results)}")
+        _log_search_complete("DuckDuckGo", query, len(results))
         return results
 
     @staticmethod
@@ -408,7 +437,7 @@ class SearchManager:
         try:
             root = ET.fromstring(resp.text)
         except ET.ParseError as e:
-            logger.warning(f"Bing RSS 解析失败: {e}")
+            logger.warning("Bing RSS 解析失败: %s", _safe_search_error(e))
             return []
 
         results = []
@@ -428,7 +457,7 @@ class SearchManager:
             if len(results) >= max_results:
                 break
 
-        logger.info(f"Bing RSS 搜索完成: query='{query}', 结果数={len(results)}")
+        _log_search_complete("Bing RSS", query, len(results))
         return results
 
 
@@ -461,7 +490,7 @@ class SearchManager:
                         "snippet": item.get("description", ""),
                     }
                 )
-            logger.info(f"Brave 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Brave", query, len(results))
             return results
 
     @staticmethod
@@ -499,7 +528,7 @@ class SearchManager:
                         "snippet": snippet,
                     }
                 )
-            logger.info(f"Exa 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Exa", query, len(results))
             return results
 
     @staticmethod
@@ -531,7 +560,7 @@ class SearchManager:
                         "snippet": item.get("snippet", ""),
                     }
                 )
-            logger.info(f"SerpAPI 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("SerpAPI", query, len(results))
             return results
 
     @staticmethod
@@ -569,7 +598,7 @@ class SearchManager:
                         "snippet": item.get("snippet", ""),
                     }
                 )
-            logger.info(f"Google CSE 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Google CSE", query, len(results))
             return results
 
     @staticmethod
@@ -604,7 +633,7 @@ class SearchManager:
                         "snippet": snippet,
                     }
                 )
-            logger.info(f"Firecrawl 搜索完成: query='{query}', 结果数={len(results)}")
+            _log_search_complete("Firecrawl", query, len(results))
             return results
 
 

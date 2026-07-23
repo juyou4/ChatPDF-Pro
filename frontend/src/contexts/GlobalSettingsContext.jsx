@@ -17,6 +17,7 @@ export { PRESET_FONTS };
 const DEFAULT_SETTINGS = {
     ...FONT_DEFAULT_SETTINGS,
     ...CHAT_PARAMS_DEFAULT_SETTINGS,
+    ...WEB_SEARCH_DEFAULT_SETTINGS,
     ...READING_SETTINGS_DEFAULTS,
 };
 
@@ -56,7 +57,8 @@ const GlobalSettingsBridge = ({ children }) => {
         readingSettings.resetReadingSettings();
     }, [fontSettings.resetFontSettings, chatParams.resetChatParams, webSearch.resetWebSearch, readingSettings.resetReadingSettings]);
 
-    // 聚合导出：合并所有子 Context 的设置（含联网搜索）
+    // 聚合导出：只包含可安全迁移的偏好设置。密钥由用户在目标环境中
+    // 单独配置，避免一个普通设置备份变成长期凭据副本。
     const exportSettings = useCallback(() => {
         const settings = {
             // 字体设置
@@ -91,10 +93,11 @@ const GlobalSettingsBridge = ({ children }) => {
             visualStrategy: chatParams.visualStrategy,
             localVisualModelKey: chatParams.localVisualModelKey,
             // 联网搜索
+            webSearchMode: webSearch.webSearchMode,
             enableWebSearch: webSearch.enableWebSearch,
             webSearchProvider: webSearch.webSearchProvider,
-            webSearchApiKey: webSearch.webSearchApiKey,
             webSearchBlacklist: webSearch.webSearchBlacklist,
+            webSearchIncludeDocumentContext: webSearch.webSearchIncludeDocumentContext,
             // 智能阅读
             aiAutoProcess: readingSettings.aiAutoProcess,
             autoOutlineSummary: readingSettings.autoOutlineSummary,
@@ -116,7 +119,8 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.messageStyle, chatParams.messageFontSize,
         chatParams.numericTableVisualVerification, chatParams.visualModelKey,
         chatParams.visualStrategy, chatParams.localVisualModelKey,
-        webSearch.enableWebSearch, webSearch.webSearchProvider, webSearch.webSearchApiKey, webSearch.webSearchBlacklist,
+        webSearch.webSearchMode, webSearch.enableWebSearch, webSearch.webSearchProvider,
+        webSearch.webSearchBlacklist, webSearch.webSearchIncludeDocumentContext,
         readingSettings.aiAutoProcess, readingSettings.autoOutlineSummary, readingSettings.autoPretranslate,
         readingSettings.pretranslateConcurrency, readingSettings.overviewDefaultDepth,
     ]);
@@ -157,10 +161,17 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.visualStrategy !== undefined) chatParams.setVisualStrategy(settings.visualStrategy);
             if (settings.localVisualModelKey !== undefined) chatParams.setLocalVisualModelKey(settings.localVisualModelKey);
             // 联网搜索相关
-            if (settings.enableWebSearch !== undefined) webSearch.setEnableWebSearch(settings.enableWebSearch);
+            if (['off', 'auto', 'force'].includes(settings.webSearchMode)) {
+                webSearch.setWebSearchMode(settings.webSearchMode);
+            } else if (settings.enableWebSearch !== undefined) {
+                webSearch.setEnableWebSearch(settings.enableWebSearch);
+            }
             if (settings.webSearchProvider !== undefined) webSearch.setWebSearchProvider(settings.webSearchProvider);
             if (settings.webSearchApiKey !== undefined) webSearch.setWebSearchApiKey(settings.webSearchApiKey);
             if (settings.webSearchBlacklist !== undefined) webSearch.setWebSearchBlacklist(settings.webSearchBlacklist);
+            if (typeof settings.webSearchIncludeDocumentContext === 'boolean') {
+                webSearch.setWebSearchIncludeDocumentContext(settings.webSearchIncludeDocumentContext);
+            }
             // 智能阅读相关
             if (settings.aiAutoProcess !== undefined) readingSettings.setAiAutoProcess(settings.aiAutoProcess);
             if (settings.autoOutlineSummary !== undefined) readingSettings.setAutoOutlineSummary(settings.autoOutlineSummary);
@@ -184,7 +195,8 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.setMessageStyle, chatParams.setMessageFontSize,
         chatParams.setNumericTableVisualVerification, chatParams.setVisualModelKey,
         chatParams.setVisualStrategy, chatParams.setLocalVisualModelKey,
-        webSearch.setEnableWebSearch, webSearch.setWebSearchProvider, webSearch.setWebSearchApiKey, webSearch.setWebSearchBlacklist,
+        webSearch.setWebSearchMode, webSearch.setEnableWebSearch, webSearch.setWebSearchProvider, webSearch.setWebSearchApiKey,
+        webSearch.setWebSearchBlacklist, webSearch.setWebSearchIncludeDocumentContext,
         readingSettings.setAiAutoProcess, readingSettings.setAutoOutlineSummary, readingSettings.setAutoPretranslate,
         readingSettings.setPretranslateConcurrency, readingSettings.setOverviewDefaultDepth,
     ]);

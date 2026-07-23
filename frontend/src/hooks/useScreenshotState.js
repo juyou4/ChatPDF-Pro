@@ -16,14 +16,12 @@ import {
  * @param {React.RefObject} options.pdfContainerRef - PDF 页面容器的 ref 引用
  * @param {React.RefObject} options.textareaRef - 输入框的 ref 引用（用于截图后聚焦）
  * @param {boolean} options.isVisionCapable - 当前模型是否支持视觉能力
- * @param {(value: string) => void} options.setInputValue - 设置输入框内容的函数
  * @param {() => void} options.sendMessage - 发送消息的函数
  */
 export function useScreenshotState({
   pdfContainerRef,
   textareaRef,
   isVisionCapable,
-  setInputValue,
   sendMessage,
 } = {}) {
   // ========== 截图状态 ==========
@@ -124,10 +122,9 @@ export function useScreenshotState({
 
     // 自动发送预设提示词
     if (action.autoSend && action.prompt) {
-      setInputValue?.(action.prompt);
-      requestAnimationFrame(() => sendMessage?.());
+      await sendMessage?.({ input: action.prompt, interactionMode: 'image' });
     }
-  }, [screenshots, textareaRef, setInputValue, sendMessage]);
+  }, [screenshots, textareaRef, sendMessage]);
 
   // ========== 关闭/删除截图 ==========
 

@@ -25,6 +25,7 @@ import re
 import threading
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException
 from services.grep_service import grep_search
 from services.bm25_service import bm25_search
 from services.advanced_search import AdvancedSearchService
@@ -106,6 +107,10 @@ class DocContext:
         modal_asset_index: Optional[dict] = None,
         visual_retriever=None,
         web_search_executor=None,
+        intent_decision: Any = None,
+        embedding_model: str = "",
+        embedding_provider: str = "",
+        embedding_api_host: str = "",
     ):
         self.doc_id = doc_id
         self.full_text = full_text
@@ -119,6 +124,12 @@ class DocContext:
         self.rerank_provider = rerank_provider or ""
         self.rerank_api_key = rerank_api_key or ""
         self.rerank_endpoint = rerank_endpoint or ""
+        self.embedding_model = embedding_model or ""
+        self.embedding_provider = embedding_provider or ""
+        self.embedding_api_host = embedding_api_host or ""
+        # This is request-scoped immutable route state. Tool arguments must
+        # never be able to replace it after the chat route freezes intent.
+        self.intent_decision = intent_decision
         self.chunk_metadata = chunk_metadata or []
         self.block_index = (
             copy.deepcopy(block_index)
@@ -150,6 +161,84 @@ class DocContext:
         self._web_search_executor = web_search_executor if callable(web_search_executor) else None
         self._web_search_lock = threading.Lock()
         self._web_search_claimed = False
+
+    def set_intent_decision(self, intent_decision: Any) -> None:
+        """Attach the route-frozen decision for compatibility with older builders."""
+        self.intent_decision = intent_decision
+
+    def _intent_value(self, field: str, default: Any = None) -> Any:
+        """Read a field from IntentDecision, its serialized form, or ChatTurnContext."""
+        missing = object()
+        decision = self.intent_decision
+        nested = None
+        if isinstance(decision, dict):
+            value = decision.get(field, missing)
+            nested = decision.get("intent")
+        elif decision is not None:
+            value = getattr(decision, field, missing)
+            nested = getattr(decision, "intent", None)
+        else:
+            value = missing
+
+        if value is missing and nested is not None:
+            if isinstance(nested, dict):
+                value = nested.get(field, missing)
+            else:
+                value = getattr(nested, field, missing)
+        return default if value is missing or value is None else value
+
+    def has_frozen_intent(self) -> bool:
+        if self.intent_decision is None:
+            return False
+        return bool(
+            self._intent_value("intent_id", "")
+            or self._intent_value("version", "")
+            or self._intent_value("intent_question", "")
+            or self._intent_value("evidence_need", ())
+        )
+
+    def _intent_text_values(self, field: str) -> tuple[str, ...]:
+        raw = self._intent_value(field, ())
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            return ()
+        values: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            value = str(item or "").strip().lower()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+        return tuple(values)
+
+    def intent_question(self, fallback: str = "") -> str:
+        return str(self._intent_value("intent_question", fallback) or fallback).strip()
+
+    def intent_query_type(self, fallback: str = "") -> str:
+        return str(self._intent_value("query_type", fallback) or fallback).strip().lower()
+
+    def intent_evidence_need(self) -> tuple[str, ...]:
+        return self._intent_text_values("evidence_need")
+
+    def intent_modalities(self) -> tuple[str, ...]:
+        return self._intent_text_values("modalities")
+
+    def has_intent_evidence_need(self, evidence_need: str) -> bool:
+        return str(evidence_need or "").strip().lower() in set(self.intent_evidence_need())
+
+    def allows_visual_search(self) -> bool:
+        """Root intent controls whether the planner can enter the visual route."""
+        if not self.has_frozen_intent():
+            return True
+        if self.has_intent_evidence_need("numeric_table"):
+            return False
+        modalities = set(self.intent_modalities())
+        interaction_mode = str(self._intent_value("interaction_mode", "") or "").strip().lower()
+        return bool(modalities & {"figure", "table", "formula", "layout"}) or interaction_mode == "image"
+
+    def allows_visual_analysis(self) -> bool:
+        return self.allows_visual_search()
 
     def has_block_index(self) -> bool:
         """Return whether this request has stable blocks from the active parse."""
@@ -930,6 +1019,11 @@ async def execute_visual_analysis_tool(
             "视觉取证参数格式无效",
             skipped_reason="invalid_visual_arguments",
         )
+    if not ctx.allows_visual_analysis():
+        return _empty_visual_analysis_result(
+            "当前问题未启用视觉取证",
+            skipped_reason="root_intent_visual_analysis_disabled",
+        )
     unexpected = sorted(str(key)[:80] for key in args if key != "assetId")
     if unexpected:
         return _empty_visual_analysis_result(
@@ -1302,6 +1396,15 @@ def _legacy_exec_visual_search(args: dict, ctx: DocContext) -> dict:
 
 def _exec_visual_search(args: dict, ctx: DocContext) -> dict:
     """Search through the configured ID-only visual retriever."""
+    if not ctx.allows_visual_search():
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": "当前问题未启用视觉检索",
+            "skipped_reason": "root_intent_visual_search_disabled",
+        }
     if not ctx.modal_asset_index:
         return {"results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0, "summary": "\u89c6\u89c9\u8d44\u4ea7\u7d22\u5f15\u5c1a\u672a\u5efa\u7acb"}
     query = str(args.get("query") or "").strip()
@@ -1621,7 +1724,9 @@ def _extract_table_id_from_text(text: str) -> str:
     return match.group(0).strip() if match else ""
 
 
-def _looks_like_table_query(query: str) -> bool:
+def _looks_like_table_query(query: str, ctx: DocContext | None = None) -> bool:
+    if ctx is not None and ctx.has_frozen_intent() and ctx.has_intent_evidence_need("numeric_table"):
+        return True
     query_text = str(query or "")
     query_lower = query_text.lower()
     try:
@@ -1684,8 +1789,14 @@ def _has_table_row_evidence(item: dict) -> bool:
     return "[structured table row shard]" in text
 
 
-def _ensure_table_result_selected(query: str, selected: list[dict], candidates: list[dict], limit: int) -> list[dict]:
-    if not _looks_like_table_query(query) or not candidates:
+def _ensure_table_result_selected(
+    query: str,
+    selected: list[dict],
+    candidates: list[dict],
+    limit: int,
+    ctx: DocContext | None = None,
+) -> list[dict]:
+    if not _looks_like_table_query(query, ctx=ctx) or not candidates:
         return selected[:limit]
     selected_has_table = any(_has_table_evidence(item) for item in selected)
     selected_has_row = any(_has_table_row_evidence(item) for item in selected)
@@ -1780,6 +1891,12 @@ def _format_tool_chunk(
     figure_id: Any = None,
     visual_model: Any = None,
     runtime_visual_overlay: Any = None,
+    section_id: Any = None,
+    section_path: Any = None,
+    rects: Any = None,
+    page_size: Any = None,
+    coordinate_space: Any = None,
+    parser_route: Any = None,
 ) -> str:
     body = str(text or "").strip()
     if not body:
@@ -1801,10 +1918,26 @@ def _format_tool_chunk(
         visual_supplement_revision, 160
     )
     figure_id = _safe_visual_metadata_text(figure_id, 240)
+    section_id = _safe_visual_metadata_text(section_id, 240)
+    section_path = _safe_visual_metadata_text(section_path, 480)
+    coordinate_space = _safe_visual_metadata_text(coordinate_space, 80)
+    parser_route = _safe_visual_metadata_text(parser_route, 80)
     if isinstance(chunk_idx, str):
         chunk_idx = _safe_visual_metadata_text(chunk_idx, 240)
     visual_model = _safe_visual_model_metadata(visual_model)
     bbox = _validated_visual_bbox(bbox)
+    safe_rects = [
+        safe_rect for value in (rects or [])
+        if (safe_rect := _validated_visual_bbox(value))
+    ][:64] if isinstance(rects, (list, tuple)) else []
+    safe_page_size = []
+    if isinstance(page_size, (list, tuple)) and len(page_size) >= 2:
+        try:
+            width, height = float(page_size[0]), float(page_size[1])
+            if width > 0 and height > 0:
+                safe_page_size = [width, height]
+        except (TypeError, ValueError):
+            pass
 
     tags = []
     if source:
@@ -1843,6 +1976,18 @@ def _format_tool_chunk(
         tags.append(f"visual_supplement_revision:{visual_supplement_revision}")
     if figure_id:
         tags.append(f"figure_id:{figure_id}")
+    if section_id:
+        tags.append(f"section_id:{section_id}")
+    if section_path:
+        tags.append(f"section_path:{section_path}")
+    if parser_route:
+        tags.append(f"parser_route:{parser_route}")
+    if coordinate_space:
+        tags.append(f"coordinate_space:{coordinate_space}")
+    if safe_page_size:
+        tags.append(f"page_size:{json.dumps(safe_page_size, separators=(',', ':'))}")
+    if safe_rects:
+        tags.append(f"rects:{json.dumps(safe_rects, separators=(',', ':'))}")
     if isinstance(visual_model, dict) and visual_model:
         try:
             tags.append(f"visual_model:{json.dumps(visual_model, ensure_ascii=False, separators=(',', ':'))}")
@@ -1916,6 +2061,12 @@ def _build_tool_candidate_meta(
         "bbox",
         "figure_bbox",
         "visual_model",
+        "section_id",
+        "section_path",
+        "rects",
+        "page_size",
+        "coordinate_space",
+        "parser_route",
     ):
         value = item.get(key)
         if _has_value(value):
@@ -1933,6 +2084,10 @@ def _build_tool_candidate_meta(
                 "visual_evidence_id",
                 "visual_supplement_revision",
                 "figure_id",
+                "section_id",
+                "section_path",
+                "coordinate_space",
+                "parser_route",
             }:
                 safe_text = _safe_visual_metadata_text(value, 240)
                 if safe_text:
@@ -2187,6 +2342,137 @@ def _run_search_document_component(channel: str, args: dict, ctx: DocContext) ->
     return {"results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0}
 
 
+def _compatible_embedding_search_kwargs(target, ctx: DocContext) -> dict[str, Optional[str]]:
+    """Forward request-selected embedding transport only when the callee supports it."""
+    requested = {
+        "embedding_model": ctx.embedding_model or None,
+        "embedding_provider": ctx.embedding_provider or None,
+        "embedding_api_host": ctx.embedding_api_host or None,
+    }
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in parameters.values()
+    ):
+        return requested
+    return {
+        key: value
+        for key, value in requested.items()
+        if key in parameters
+    }
+
+
+def _normalize_tool_error_code(value: Any, fallback: str = "") -> str:
+    text = str(value or fallback or "").strip().lower()
+    if re.fullmatch(r"[a-z0-9_]{3,80}", text):
+        return text
+    return ""
+
+
+def _safe_http_status_code(value: Any) -> int | None:
+    try:
+        status_code = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status_code if 100 <= status_code <= 599 else None
+
+
+def _vector_http_error_payload(exc: HTTPException) -> dict:
+    status_code = _safe_http_status_code(getattr(exc, "status_code", None)) or 500
+    detail = re.sub(r"\s+", " ", str(getattr(exc, "detail", "") or "")).strip()
+    detail_lower = detail.casefold()
+
+    if status_code == 401:
+        error_code = "vector_search_http_401"
+        error = "当前 Embedding 凭证无效或已过期，请检查后重试"
+    elif status_code == 403:
+        error_code = "vector_search_http_403"
+        error = "当前 Embedding 服务拒绝访问，请检查权限配置后重试"
+    elif status_code == 404:
+        error_code = "vector_index_unavailable"
+        error = "当前文档向量索引不可用，请重新上传 PDF 或等待索引构建完成"
+    elif status_code == 409:
+        if any(
+            marker in detail_lower
+            for marker in (
+                "embedding",
+                "模型标识",
+                "api_host",
+                "api 地址",
+                "索引不一致",
+                "查询 embedding",
+                "远程索引查询",
+                "向量维度",
+                "索引维度",
+            )
+        ):
+            error_code = "vector_embedding_identity_conflict"
+            error = "当前 Embedding 配置与文档索引不一致，请切换原配置或重建索引"
+        elif any(
+            marker in detail_lower
+            for marker in ("索引格式", "schema", "已过期", "已升级", "重建")
+        ):
+            error_code = "vector_index_schema_conflict"
+            error = "当前文档问答索引格式已升级，请按当前解析结果重建"
+        else:
+            error_code = "vector_index_identity_conflict"
+            error = "当前文档问答索引与请求身份不一致，请重建索引后重试"
+    else:
+        error_code = f"vector_search_http_{status_code}"
+        error = "向量检索请求失败，请稍后重试"
+
+    return {
+        "results": [],
+        "chunk_meta": [],
+        "candidate_meta": [],
+        "result_count": 0,
+        "summary": f"向量搜索失败: {error}",
+        "error": error,
+        "error_code": error_code,
+        "fatal": True,
+        "status_code": status_code,
+    }
+
+
+def _search_document_component_failure(channel: str, exc: Exception) -> dict:
+    if channel == "vector" and isinstance(exc, HTTPException):
+        return _vector_http_error_payload(exc)
+
+    channel_label = {
+        "vector": "向量",
+        "bm25": "BM25",
+        "grep": "精确匹配",
+    }.get(channel, channel)
+    status_code = (
+        _safe_http_status_code(getattr(exc, "status_code", None))
+        if isinstance(exc, HTTPException)
+        else None
+    )
+    error_code = (
+        f"{channel}_search_http_{status_code}"
+        if status_code is not None
+        else f"{channel}_search_failed"
+    )
+    payload = {
+        "results": [],
+        "chunk_meta": [],
+        "candidate_meta": [],
+        "result_count": 0,
+        "summary": f"{channel_label}检索暂不可用",
+        "error": f"{channel_label}检索暂不可用，请稍后重试",
+        "error_code": _normalize_tool_error_code(error_code, f"{channel}_search_failed"),
+    }
+    if status_code is not None:
+        payload["status_code"] = status_code
+        payload["fatal"] = True
+    else:
+        payload["degraded"] = True
+    return payload
+
+
 def _search_document_item_key(item: Any, meta: dict | None = None) -> str:
     metadata = meta if isinstance(meta, dict) else {}
     for field in ("evidence_id", "block_id", "chunk_id", "child_chunk_id", "context_id"):
@@ -2219,12 +2505,33 @@ def _merge_search_document_components(
         raw_results = payload.get("results") if isinstance(payload.get("results"), list) else []
         raw_meta = payload.get("chunk_meta") if isinstance(payload.get("chunk_meta"), list) else []
         raw_candidates = payload.get("candidate_meta") if isinstance(payload.get("candidate_meta"), list) else []
+        error_code = _normalize_tool_error_code(payload.get("error_code"))
+        status_code = _safe_http_status_code(payload.get("status_code"))
         channel_stats[channel] = {
             "result_count": max(0, int(payload.get("result_count", len(raw_results)) or 0)),
             "error": str(payload.get("error") or "")[:240],
+            "error_code": error_code,
+            "degraded": bool(payload.get("degraded")),
+            "fatal": bool(payload.get("fatal")),
         }
-        if channel_stats[channel]["error"]:
-            errors.append({"channel": channel, "error": channel_stats[channel]["error"]})
+        if status_code is not None:
+            channel_stats[channel]["status_code"] = status_code
+        if (
+            channel_stats[channel]["error"]
+            or channel_stats[channel]["error_code"]
+            or channel_stats[channel]["degraded"]
+            or channel_stats[channel]["fatal"]
+        ):
+            issue = {
+                "channel": channel,
+                "error": channel_stats[channel]["error"],
+                "error_code": channel_stats[channel]["error_code"],
+                "degraded": channel_stats[channel]["degraded"],
+                "fatal": channel_stats[channel]["fatal"],
+            }
+            if status_code is not None:
+                issue["status_code"] = status_code
+            errors.append(issue)
         result_channels.append((channel, raw_results, raw_meta))
 
         for item in raw_candidates:
@@ -2278,10 +2585,29 @@ def _merge_search_document_components(
             f"返回 {len(results)} 个去重结果"
         ),
     }
-    if errors and not successful_channels:
+    if errors:
+        result["channel_errors"] = errors
+    if any(bool(item.get("degraded")) for item in errors):
+        result["degraded"] = True
+    fatal_issue = next((item for item in errors if item.get("fatal")), None)
+    if fatal_issue:
+        result["fatal"] = True
+        if fatal_issue.get("error"):
+            result["error"] = str(fatal_issue["error"])[:500]
+        if fatal_issue.get("error_code"):
+            result["error_code"] = fatal_issue["error_code"]
+        if fatal_issue.get("status_code") is not None:
+            result["status_code"] = fatal_issue["status_code"]
+    elif errors and not successful_channels:
         result["error"] = "; ".join(
             f"{item['channel']}:{item['error']}" for item in errors
         )[:500]
+        first_error_code = next(
+            (item.get("error_code") for item in errors if item.get("error_code")),
+            "",
+        )
+        if first_error_code:
+            result["error_code"] = first_error_code
     return result
 
 
@@ -2295,10 +2621,13 @@ def _exec_search_document(args: dict, ctx: DocContext) -> dict:
             "result_count": 0,
             "summary": "统一检索查询为空",
         }
-    component_results = [
-        (channel, _run_search_document_component(channel, component_args, ctx))
-        for channel, component_args in components
-    ]
+    component_results = []
+    for channel, component_args in components:
+        try:
+            payload = _run_search_document_component(channel, component_args, ctx)
+        except Exception as exc:
+            payload = _search_document_component_failure(channel, exc)
+        component_results.append((channel, payload))
     return _merge_search_document_components(
         component_results,
         limit=_bounded_search_limit(args.get("limit"), 14),
@@ -2319,13 +2648,7 @@ async def _exec_search_document_async(args: dict, ctx: DocContext) -> dict:
                 ctx,
             )
         except Exception as exc:
-            result = {
-                "results": [],
-                "chunk_meta": [],
-                "candidate_meta": [],
-                "result_count": 0,
-                "error": str(exc)[:500],
-            }
+            result = _search_document_component_failure(channel, exc)
         return channel, result
 
     component_results = await asyncio.gather(
@@ -2369,6 +2692,7 @@ def _exec_vector_search(args: dict, ctx: DocContext) -> dict:
             rerank_endpoint=rerank_endpoint or None,
             enable_query_expansion_override=False,
             visual_evidence=ctx.visual_evidence,
+            **_compatible_embedding_search_kwargs(search_document_chunks, ctx),
         )
         results = search_output[0] if isinstance(search_output, tuple) else search_output
         if not isinstance(results, list):
@@ -2403,7 +2727,13 @@ def _exec_vector_search(args: dict, ctx: DocContext) -> dict:
                 chunk_idx=r.get("chunk_id"),
             ))
         selected_results = _interleave_ranked_results(results, ranked_results, limit)
-        selected_results = _ensure_table_result_selected(query, selected_results, ranked_results, limit)
+        selected_results = _ensure_table_result_selected(
+            query,
+            selected_results,
+            ranked_results,
+            limit,
+            ctx=ctx,
+        )
         for r in selected_results:
             if not isinstance(r, dict):
                 continue
@@ -2435,6 +2765,12 @@ def _exec_vector_search(args: dict, ctx: DocContext) -> dict:
                     figure_id=r.get("figure_id"),
                     visual_model=r.get("visual_model"),
                     runtime_visual_overlay=r.get("runtime_visual_overlay"),
+                    section_id=r.get("section_id"),
+                    section_path=r.get("section_path"),
+                    rects=r.get("rects"),
+                    page_size=r.get("page_size"),
+                    coordinate_space=r.get("coordinate_space"),
+                    parser_route=r.get("parser_route"),
                 ))
                 chunk_meta.append(_build_tool_candidate_meta(
                     r,
@@ -2452,14 +2788,34 @@ def _exec_vector_search(args: dict, ctx: DocContext) -> dict:
             "summary": f"向量搜索 \"{query}\" 返回 {len(chunks_found)} 个结果",
             "candidate_k": max(retrieval_limit * 4, 80),
         }
+    except HTTPException as exc:
+        logger.warning(
+            "[RetrievalTools] vector_search HTTPException: status=%s detail=%s",
+            getattr(exc, "status_code", ""),
+            getattr(exc, "detail", ""),
+        )
+        return _vector_http_error_payload(exc)
     except Exception as e:
-        logger.warning(f"[RetrievalTools] vector_search 失败: {e}")
-        return {"results": [], "chunk_meta": [], "result_count": 0, "summary": f"向量搜索失败: {e}"}
+        logger.warning(f"[RetrievalTools] vector_search 失败: {e}", exc_info=True)
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": "向量搜索暂不可用",
+            "error": "向量检索暂不可用，请稍后重试",
+            "error_code": "vector_search_failed",
+            "degraded": True,
+        }
 
 
 def _exec_keyword_search(args: dict, ctx: DocContext) -> dict:
     """BM25 关键词搜索"""
-    from services.embedding_service import _build_chunk_idx_to_group_map, _load_group_data
+    from services.embedding_service import (
+        _build_chunk_idx_to_group_map,
+        _load_group_data,
+        _semantic_groups_match_vector_index,
+    )
 
     keywords = args.get("keywords", [])
     # P3: keyword_search default 8→12、cap 20→24，对齐 vector_search 的 limit_gap 修复
@@ -2480,10 +2836,13 @@ def _exec_keyword_search(args: dict, ctx: DocContext) -> dict:
     # bounded and exists only for this one tool invocation.
     visual_chunks: list[str] = []
     visual_metadata: dict[int, dict] = {}
-    try:
-        is_numeric_table_query = "numeric_table" in analyze_evidence_need(query)
-    except Exception:
-        is_numeric_table_query = False
+    if ctx.has_frozen_intent():
+        is_numeric_table_query = ctx.has_intent_evidence_need("numeric_table")
+    else:
+        try:
+            is_numeric_table_query = "numeric_table" in analyze_evidence_need(query)
+        except Exception:
+            is_numeric_table_query = False
     if ctx.visual_evidence and not is_numeric_table_query:
         visual_chunks, visual_metadata = _build_keyword_visual_overlay(ctx)
 
@@ -2495,7 +2854,11 @@ def _exec_keyword_search(args: dict, ctx: DocContext) -> dict:
     ]
 
     # 构建 chunk_idx -> group_id 映射
-    group_chunk_map = _load_group_data(ctx.doc_id)
+    group_chunk_map = (
+        _load_group_data(ctx.doc_id)
+        if _semantic_groups_match_vector_index(ctx.doc_id, ctx.vector_store_dir)
+        else {}
+    )
     chunk_idx_to_group = _build_chunk_idx_to_group_map(group_chunk_map)
 
     chunks_found = []
@@ -2551,6 +2914,12 @@ def _exec_keyword_search(args: dict, ctx: DocContext) -> dict:
                     figure_id=r.get("figure_id"),
                     visual_model=r.get("visual_model"),
                     runtime_visual_overlay=r.get("runtime_visual_overlay"),
+                    section_id=r.get("section_id"),
+                    section_path=r.get("section_path"),
+                    rects=r.get("rects"),
+                    page_size=r.get("page_size"),
+                    coordinate_space=r.get("coordinate_space"),
+                    parser_route=r.get("parser_route"),
                 ))
             chunk_meta.append(_build_tool_candidate_meta(
                 r,
@@ -2908,6 +3277,16 @@ def _exec_read_blocks(args: dict, ctx: DocContext) -> dict:
             "block_type": block_type,
             "bbox": bbox,
             "source": "block_index",
+            "section_id": block.get("section_id"),
+            "section_path": block.get("section_path"),
+            "rects": [
+                anchor.get("bbox")
+                for anchor in (block.get("line_anchors") or [])
+                if isinstance(anchor, dict) and anchor.get("bbox")
+            ],
+            "page_size": block.get("page_size"),
+            "coordinate_space": block.get("coordinate_space"),
+            "parser_route": block.get("parser_route"),
         }
         rendered = _format_tool_chunk(
             text,
@@ -2919,6 +3298,12 @@ def _exec_read_blocks(args: dict, ctx: DocContext) -> dict:
             chunk_idx=block_id,
             chunk_type=block_type,
             bbox=bbox,
+            section_id=item.get("section_id"),
+            section_path=item.get("section_path"),
+            rects=item.get("rects"),
+            page_size=item.get("page_size"),
+            coordinate_space=item.get("coordinate_space"),
+            parser_route=item.get("parser_route"),
         )
         if not rendered:
             continue

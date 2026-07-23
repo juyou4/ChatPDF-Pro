@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
 import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
-import { buildChatHistory } from '../utils/chatContextUsageUtils';
+import { buildChatHistory, isFailedChatHistoryAssistant } from '../utils/chatContextUsageUtils';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -19,7 +19,132 @@ const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
 const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
 
 const TABLE_VISUAL_PENDING_STATES = new Set(['queued', 'running', 'pending']);
-const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed']);
+const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed', 'stale']);
+const CHAT_TURN_STATUSES = new Set([
+  'completed',
+  'recovered_retry',
+  'evidence_fallback',
+  'degraded',
+  'failed',
+  'interrupted',
+]);
+const RETRY_CONTROL_INPUTS = new Set([
+  '继续', '重新回答', '重新生成', '重答', '再回答一次', '再答一次',
+  '请重新回答', '请重答', 'continue', 'retry', 'tryagain', 'regenerate',
+]);
+const CHAT_INTERACTION_MODES = new Set([
+  'default', 'selection', 'image', 'preset', 'retry_failed_turn',
+]);
+
+const normalizeRetryControlInput = (value) =>
+  String(value || '').replace(/[\s，。！？、,.!?;；:：]+/g, '').toLowerCase();
+
+const normalizeChatTurnStatus = (value, fallback = '') => {
+  const status = String(value || '').trim().toLowerCase();
+  return CHAT_TURN_STATUSES.has(status) ? status : fallback;
+};
+
+const normalizeChatParseIdentity = (value) => {
+  const nested = isPlainObject(value?.parse_identity) ? value.parse_identity : {};
+  return {
+    parseGeneration: String(
+      value?.parse_generation
+      || value?.parseGeneration
+      || nested.parse_generation
+      || nested.generation
+      || ''
+    ).trim(),
+    documentSourceHash: String(
+      value?.document_source_hash
+      || value?.documentSourceHash
+      || nested.document_source_hash
+      || nested.source_hash
+      || ''
+    ).trim(),
+  };
+};
+
+const hasCompleteChatParseIdentity = (identity) => Boolean(
+  identity?.parseGeneration && identity?.documentSourceHash
+);
+
+const chatParseIdentitiesMatch = (left, right) => (
+  hasCompleteChatParseIdentity(left)
+  && hasCompleteChatParseIdentity(right)
+  && left.parseGeneration === right.parseGeneration
+  && left.documentSourceHash === right.documentSourceHash
+);
+
+const getChatIdentityFields = (identity) => (
+  hasCompleteChatParseIdentity(identity)
+    ? {
+      parse_generation: identity.parseGeneration,
+      document_source_hash: identity.documentSourceHash,
+    }
+    : {}
+);
+
+const messageMatchesChatParseIdentity = (message, identity) => {
+  if (!hasCompleteChatParseIdentity(identity)) return message?.parseIdentityStale !== true;
+  if (message?.parseIdentityStale === true) return false;
+  return chatParseIdentitiesMatch(normalizeChatParseIdentity(message), identity);
+};
+
+const getResponseChatParseIdentity = (response, payload) => ({
+  parseGeneration: String(
+    payload?.parse_generation
+    || response?.headers?.get?.('X-Chat-Parse-Generation')
+    || ''
+  ).trim(),
+  documentSourceHash: String(
+    payload?.document_source_hash
+    || response?.headers?.get?.('X-Chat-Document-Source-Hash')
+    || ''
+  ).trim(),
+});
+
+const responseMatchesChatParseIdentity = (response, payload, expectedIdentity) => {
+  const responseIdentity = getResponseChatParseIdentity(response, payload);
+  if (!hasCompleteChatParseIdentity(expectedIdentity)) return true;
+  return chatParseIdentitiesMatch(responseIdentity, expectedIdentity);
+};
+
+const responseHasAnyChatParseIdentity = (response, payload) => {
+  const identity = getResponseChatParseIdentity(response, payload);
+  return Boolean(identity.parseGeneration || identity.documentSourceHash);
+};
+
+const isChatParseIdentityConflict = (response, payload, expectedIdentity, message = '') => {
+  if (!hasCompleteChatParseIdentity(expectedIdentity)) return false;
+  if (/文档解析结果已(?:在回答期间)?更新|chat_parse_identity_changed/i.test(String(message || ''))) {
+    return true;
+  }
+  const responseIdentity = getResponseChatParseIdentity(response, payload);
+  if (hasCompleteChatParseIdentity(responseIdentity)) {
+    return !chatParseIdentitiesMatch(responseIdentity, expectedIdentity);
+  }
+  return false;
+};
+
+const resolveRetryControlQuestion = (input, messages = []) => {
+  if (!RETRY_CONTROL_INPUTS.has(normalizeRetryControlInput(input))) return '';
+  let latestAssistant = null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.type === 'assistant' && latestAssistant === null) {
+      latestAssistant = message;
+      continue;
+    }
+    if (message?.type !== 'user') continue;
+    const candidate = String(message.content || '').trim();
+    if (candidate && !RETRY_CONTROL_INPUTS.has(normalizeRetryControlInput(candidate))) {
+      return latestAssistant === null || isFailedChatHistoryAssistant(latestAssistant)
+        ? candidate
+        : '';
+    }
+  }
+  return '';
+};
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -92,7 +217,9 @@ const STREAM_RENDER_PROFILES = {
   slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
 
-export const STREAM_FINAL_FLUSH_GRACE_MS = 320;
+// 终态包可能携带一整段正文。给平滑队列足够的时间完成可见渲染，
+// 只有浏览器没有继续调度动画帧时才退回一次性提交，避免“思考完后整段跳出”。
+export const STREAM_FINAL_FLUSH_GRACE_MS = 3000;
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
@@ -104,10 +231,13 @@ const formatThinkingStageEvent = (payload) => {
     const message = typeof payload.message === 'string' && payload.message.trim()
       ? payload.message.trim()
       : (payload.phase === 'complete' ? '检索完成，正在组织上下文...' : '正在检索文档...');
+    const stablePhaseKey = ['llm_waiting', 'llm_structuring_citations'].includes(payload.phase)
+      ? `retrieval:${payload.phase}`
+      : null;
     const keyParts = [payload.phase, payload.round, payload.step, message]
       .filter((part) => part !== undefined && part !== null && String(part).trim() !== '');
     return {
-      key: `retrieval:${keyParts.join(':')}`,
+      key: stablePhaseKey || `retrieval:${keyParts.join(':')}`,
       text: message,
     };
   }
@@ -467,11 +597,18 @@ const AGENT_PHASES = new Set([
 ]);
 
 // 在 trace 中找到指定轮次，没有就创建并 push
+const normalizeTraceRound = (value) => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
 const ensureTraceRound = (trace, round) => {
   let entry = trace.rounds.find((r) => r.round === round);
   if (!entry) {
     entry = { round, message: '', planningMessage: '', operations: [] };
     trace.rounds.push(entry);
+    trace.rounds.sort((left, right) => left.round - right.round);
   }
   return entry;
 };
@@ -481,8 +618,9 @@ export const applyAgentTraceEvent = (trace, payload) => {
   if (!trace || !payload) return trace;
   const phase = payload.phase;
   if (!phase) return trace;
+  const explicitRound = normalizeTraceRound(payload.round);
   // 只识别 agent 相关 phase 或显式带 round 字段的事件，避免吞掉普通 retrieval_progress
-  if (!AGENT_PHASES.has(phase) && !Number.isFinite(Number(payload.round))) return trace;
+  if (!AGENT_PHASES.has(phase) && explicitRound === null) return trace;
 
   if (phase === 'agent_start' || phase === 'agent_mode') {
     trace.enabled = true;
@@ -505,19 +643,11 @@ export const applyAgentTraceEvent = (trace, payload) => {
   const fallbackRound = trace.rounds.length > 0
     ? trace.rounds[trace.rounds.length - 1].round
     : 1;
-  const round = Number.isFinite(Number(payload.round))
-    ? Number(payload.round)
-    : fallbackRound;
+  const round = explicitRound ?? fallbackRound;
 
   if (phase === 'round_start') {
-    if (!trace.rounds.some((r) => r.round === round)) {
-      trace.rounds.push({
-        round,
-        message: payload.message || '',
-        planningMessage: '',
-        operations: [],
-      });
-    }
+    const entry = ensureTraceRound(trace, round);
+    if (!entry.message && payload.message) entry.message = payload.message;
     return trace;
   }
 
@@ -653,6 +783,8 @@ export const finalizeThinkingDurationMs = ({
  */
 export function useMessageState({
   docId = null,
+  parseGeneration = '',
+  documentSourceHash = '',
   screenshots = [],
   setScreenshots,
   selectedText = '',
@@ -663,6 +795,7 @@ export function useMessageState({
   streamSpeed = 'normal',
   enableVectorSearch = false,
   embeddingApiKey = '',
+  getEmbeddingConfig,
   enableGraphRAG = false,
   enableAgentRetrieval = false,
   forceAgentRetrieval = false,
@@ -691,6 +824,30 @@ export function useMessageState({
   // ========== Refs ==========
   const abortControllerRef = useRef(null);
   const streamingAbortRef = useRef({ cancelled: false });
+  const requestEpochRef = useRef(0);
+  const normalizedParseGeneration = String(parseGeneration || '').trim();
+  const normalizedDocumentSourceHash = String(documentSourceHash || '').trim();
+  const chatParseContextRef = useRef({
+    docId: docId || '',
+    parseGeneration: normalizedParseGeneration,
+    documentSourceHash: normalizedDocumentSourceHash,
+    epoch: 0,
+  });
+  if (
+    chatParseContextRef.current.docId !== (docId || '')
+    || chatParseContextRef.current.parseGeneration !== normalizedParseGeneration
+    || chatParseContextRef.current.documentSourceHash !== normalizedDocumentSourceHash
+  ) {
+    chatParseContextRef.current = {
+      docId: docId || '',
+      parseGeneration: normalizedParseGeneration,
+      documentSourceHash: normalizedDocumentSourceHash,
+      epoch: chatParseContextRef.current.epoch + 1,
+    };
+  }
+  const appliedParseContextKeyRef = useRef(
+    `${docId || ''}:${normalizedParseGeneration}:${normalizedDocumentSourceHash}`
+  );
   const streamCitationsRef = useRef(null);
   const streamMaxRelevanceRef = useRef(null);
   const streamFollowupRef = useRef(null);
@@ -707,10 +864,12 @@ export function useMessageState({
   const streamUsageRef = useRef(null);
   const streamCallInfoRef = useRef(null);
   const streamVisualVerificationRef = useRef(null);
+  const streamIntentDecisionRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const visualVerificationPollersRef = useRef(new Map());
+  const visualVerificationEpochRef = useRef(0);
 
   // ========== 从全局设置中解构对话参数 ==========
   const {
@@ -723,7 +882,14 @@ export function useMessageState({
     cheapModel, cheapModelProvider, cheapModelEndpoint,
   } = globalSettings;
 
-  const { enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist } = useWebSearch();
+  const {
+    webSearchMode,
+    enableWebSearch,
+    webSearchProvider,
+    webSearchApiKey,
+    webSearchBlacklist,
+    webSearchIncludeDocumentContext,
+  } = useWebSearch();
   const streamRenderProfile = useMemo(
     () => resolveStreamRenderProfile(streamSpeed),
     [streamSpeed]
@@ -754,7 +920,61 @@ export function useMessageState({
     smoothFlush: true,
   });
 
+  const interruptActiveRequest = useCallback(({ staleIdentity = false } = {}) => {
+    const targetMessageId = activeStreamMsgIdRef.current || streamingMessageId;
+    const renderedContent = String(
+      contentStream.contentRef?.current?.textContent
+      || contentStream.getFinalText?.()
+      || ''
+    );
+    const renderedThinking = String(
+      thinkingStream.contentRef?.current?.textContent
+      || thinkingStream.getFinalText?.()
+      || ''
+    );
+
+    requestEpochRef.current += 1;
+    streamingAbortRef.current.cancelled = true;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    activeStreamMsgIdRef.current = null;
+
+    if (targetMessageId) {
+      setMessages((previous) => previous.map((message) => (
+        message.id === targetMessageId
+          ? {
+            ...message,
+            ...(renderedContent.trim() ? { content: renderedContent } : {}),
+            ...(renderedThinking.trim() ? { thinking: renderedThinking } : {}),
+            isStreaming: false,
+            turnStatus: 'interrupted',
+            ...(staleIdentity ? { parseIdentityStale: true } : {}),
+          }
+          : message
+      )));
+    }
+
+    setIsLoading(false);
+    setStreamingMessageId(null);
+    contentStream.reset('');
+    thinkingStream.reset('');
+    setContentStreamDone(false);
+    setThinkingStreamDone(false);
+  }, [contentStream, streamingMessageId, thinkingStream]);
+
   // ========== 副作用 ==========
+
+  useEffect(() => {
+    const nextKey = `${docId || ''}:${normalizedParseGeneration}:${normalizedDocumentSourceHash}`;
+    if (appliedParseContextKeyRef.current === nextKey) return;
+    appliedParseContextKeyRef.current = nextKey;
+    interruptActiveRequest({ staleIdentity: true });
+  }, [
+    docId,
+    interruptActiveRequest,
+    normalizedDocumentSourceHash,
+    normalizedParseGeneration,
+  ]);
 
   // 视觉核验属于回答后的异步旁路任务；切换文档或卸载时必须取消轮询，
   // 以免旧文档结果写入新会话。
@@ -763,7 +983,7 @@ export function useMessageState({
       poller.cancel();
     }
     visualVerificationPollersRef.current.clear();
-  }, [docId]);
+  }, [docId, normalizedDocumentSourceHash, normalizedParseGeneration]);
 
   // 消息变化时自动滚动到底部
   useEffect(() => {
@@ -785,12 +1005,30 @@ export function useMessageState({
     setHasInput(!!(val && val.trim()));
   }, []);
 
-  const startVisualVerificationPolling = useCallback((messageId, initialVerification) => {
+  const startVisualVerificationPolling = useCallback((
+    messageId,
+    initialVerification,
+    verificationEpoch = visualVerificationEpochRef.current
+  ) => {
     const verification = normalizeNumericTableVisualVerification(initialVerification);
     const taskId = String(verification?.task_id || '').trim();
-    if (!docId || !taskId || !isVisualVerificationPending(verification)) return;
+    if (
+      !docId
+      || !taskId
+      || verificationEpoch !== visualVerificationEpochRef.current
+      || !isVisualVerificationPending(verification)
+    ) return;
 
-    const pollerKey = `${docId}:${messageId}:${taskId}`;
+    const pollContext = { ...chatParseContextRef.current };
+    const isPollContextCurrent = () => (
+      chatParseContextRef.current.docId === pollContext.docId
+      && chatParseContextRef.current.parseGeneration === pollContext.parseGeneration
+      && chatParseContextRef.current.documentSourceHash === pollContext.documentSourceHash
+      && chatParseContextRef.current.epoch === pollContext.epoch
+      && visualVerificationEpochRef.current === verificationEpoch
+    );
+
+    const pollerKey = `${docId}:${pollContext.parseGeneration}:${messageId}:${taskId}`;
     if (visualVerificationPollersRef.current.has(pollerKey)) return;
 
     const controller = new AbortController();
@@ -799,7 +1037,7 @@ export function useMessageState({
     let attempts = 0;
     let latestVerification = verification;
     const updateMessageVerification = (nextVerification) => {
-      if (cancelled) return;
+      if (cancelled || !isPollContextCurrent()) return;
       setMessages((previous) => previous.map((message) => (
         message.id === messageId
           ? { ...message, visualVerification: nextVerification }
@@ -815,7 +1053,10 @@ export function useMessageState({
     };
 
     const poll = async () => {
-      if (cancelled) return;
+      if (cancelled || !isPollContextCurrent()) {
+        stop();
+        return;
+      }
       attempts += 1;
       try {
         const response = await fetch(
@@ -867,13 +1108,43 @@ export function useMessageState({
     void poll();
   }, [docId]);
 
+  const invalidateVisualVerificationState = useCallback(() => {
+    visualVerificationEpochRef.current += 1;
+    streamVisualVerificationRef.current = null;
+    for (const poller of visualVerificationPollersRef.current.values()) {
+      poller.cancel();
+    }
+    visualVerificationPollersRef.current.clear();
+    setMessages((previous) => previous.map((message) => {
+      if (!Object.prototype.hasOwnProperty.call(message, 'visualVerification')) return message;
+      const nextMessage = { ...message };
+      delete nextMessage.visualVerification;
+      return nextMessage;
+    }));
+  }, []);
+
   /**
    * 发送消息
    * 处理用户输入、构建请求体、发起流式/非流式请求
    */
-  const sendMessage = useCallback(async () => {
-    const currentInput = textareaRef.current?.value ?? '';
+  const sendMessage = useCallback(async (overrides = {}) => {
+    const overrideInput = typeof overrides?.input === 'string' ? overrides.input : null;
+    const historyMessages = Array.isArray(overrides?.historyMessages)
+      ? overrides.historyMessages
+      : messages;
+    const currentInput = overrideInput ?? textareaRef.current?.value ?? '';
     if (!currentInput.trim() && screenshots.length === 0) return;
+    const retryControlQuestion = resolveRetryControlQuestion(currentInput, historyMessages);
+    const requestedInteractionMode = String(overrides?.interactionMode || '').trim();
+    const interactionMode = CHAT_INTERACTION_MODES.has(requestedInteractionMode)
+      ? requestedInteractionMode
+      : retryControlQuestion
+        ? 'retry_failed_turn'
+        : screenshots.length > 0
+          ? 'image'
+          : String(selectedText || '').trim()
+            ? 'selection'
+            : 'default';
 
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
     const visualCredentials = getVisualCredentials?.() || null;
@@ -883,8 +1154,39 @@ export function useMessageState({
       return;
     }
 
+    if (abortControllerRef.current || activeStreamMsgIdRef.current || streamingMessageId) {
+      interruptActiveRequest();
+    }
+
+    const requestParseContext = { ...chatParseContextRef.current };
+    const requestParseIdentity = {
+      parseGeneration: requestParseContext.parseGeneration,
+      documentSourceHash: requestParseContext.documentSourceHash,
+    };
+    const requestIdentityFields = getChatIdentityFields(requestParseIdentity);
+    const requestEpoch = ++requestEpochRef.current;
+    const requestVisualVerificationEpoch = visualVerificationEpochRef.current;
+    const requestController = new AbortController();
+    const requestAbortState = { cancelled: false };
+    abortControllerRef.current = requestController;
+    streamingAbortRef.current = requestAbortState;
+    const isRequestCurrent = () => (
+      requestEpochRef.current === requestEpoch
+      && chatParseContextRef.current.docId === requestParseContext.docId
+      && chatParseContextRef.current.parseGeneration === requestParseContext.parseGeneration
+      && chatParseContextRef.current.documentSourceHash === requestParseContext.documentSourceHash
+      && chatParseContextRef.current.epoch === requestParseContext.epoch
+    );
+
     // 构建用户消息
-    const userMsg = { type: 'user', content: currentInput, hasImage: screenshots.length > 0 };
+    const userMsg = {
+      type: 'user',
+      content: currentInput,
+      hasImage: screenshots.length > 0,
+      interactionMode,
+      ...requestIdentityFields,
+      ...(retryControlQuestion ? { contextContent: retryControlQuestion } : {}),
+    };
     setMessages(prev => [...prev, userMsg]);
 
     // 清空输入框
@@ -896,7 +1198,14 @@ export function useMessageState({
     setIsLoading(true);
 
     // 构建聊天历史
-    const chatHistory = buildChatHistory(messages, contextCount);
+    const identityBoundHistory = historyMessages.filter((message) => (
+      messageMatchesChatParseIdentity(message, requestParseIdentity)
+    ));
+    const chatHistory = buildChatHistory(identityBoundHistory, contextCount).map((message) => ({
+      ...message,
+      ...requestIdentityFields,
+    }));
+    const requestQuestion = retryControlQuestion || userMsg.content;
 
     // 获取 provider 完整信息
     const chatProviderFull = getProviderById?.(chatProvider);
@@ -928,10 +1237,23 @@ export function useMessageState({
         : {}),
     };
 
+    const activeEmbeddingConfig = getEmbeddingConfig?.();
+    const embeddingProviderId = activeEmbeddingConfig?.isValid
+      ? activeEmbeddingConfig.providerId || ''
+      : '';
+    const embeddingApiHost = activeEmbeddingConfig?.isValid
+      ? activeEmbeddingConfig.provider?.apiHost || ''
+      : '';
+    const embeddingModelId = activeEmbeddingConfig?.isValid
+      ? activeEmbeddingConfig.modelId || ''
+      : '';
+
     // 构建请求体
     const requestBody = {
       doc_id: docId,
-      question: userMsg.content,
+      parse_generation: requestParseIdentity.parseGeneration || null,
+      document_source_hash: requestParseIdentity.documentSourceHash || null,
+      question: requestQuestion,
       api_key: chatApiKey,
       model: chatModel,
       api_provider: chatProvider,
@@ -948,9 +1270,13 @@ export function useMessageState({
       stream_output: shouldUseStreaming,
       enable_vector_search: enableVectorSearch,
       embedding_api_key: embeddingApiKey || null,
+      embedding_model: embeddingModelId || null,
+      embedding_provider: embeddingProviderId || null,
+      embedding_api_host: embeddingApiHost || null,
       enable_graphrag: enableGraphRAG,
       enable_agent_retrieval: enableAgentRetrieval,
       force_agent_retrieval: forceAgentRetrieval,
+      interaction_mode: interactionMode,
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
       chat_history: chatHistory.length > 0 ? chatHistory : null,
@@ -963,9 +1289,11 @@ export function useMessageState({
       },
       enable_memory: enableMemory,
       enable_web_search: enableWebSearch,
+      web_search_mode: webSearchMode,
       web_search_provider: webSearchProvider,
       web_search_api_key: webSearchApiKey || null,
       web_search_blacklist: webSearchBlacklist && webSearchBlacklist.length > 0 ? webSearchBlacklist : null,
+      web_search_include_document_context: webSearchIncludeDocumentContext,
       // 检索增强调优 overrides（null 表示跟随后端默认）
       override_numeric_table: overrideNumericTable ?? null,
       override_answer_critic: overrideAnswerCritic ?? null,
@@ -977,10 +1305,6 @@ export function useMessageState({
       cheap_model_endpoint: cheapModelEndpoint ? cheapModelEndpoint : null,
     };
 
-    // 中止之前的请求
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    abortControllerRef.current = new AbortController();
-    streamingAbortRef.current.cancelled = false;
     streamCitationsRef.current = null;
     streamMaxRelevanceRef.current = null;
     streamFollowupRef.current = null;
@@ -997,13 +1321,16 @@ export function useMessageState({
     streamUsageRef.current = null;
     streamCallInfoRef.current = null;
     streamVisualVerificationRef.current = null;
+    streamIntentDecisionRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
     setStreamingMessageId(tempMsgId);
+    activeStreamMsgIdRef.current = tempMsgId;
     setMessages(prev => [...prev, {
       id: tempMsgId, type: 'assistant', content: '', model: chatModel,
-      isStreaming: true, thinking: '', thinkingMs: 0,
+      isStreaming: true, thinking: '', thinkingMs: 0, turnStatus: 'streaming',
+      ...requestIdentityFields,
     }]);
 
     // 每次发送前重置流式状态，确保 rAF 循环重启且无残留数据
@@ -1033,17 +1360,17 @@ export function useMessageState({
           }
         };
         firstEventTimer = setTimeout(() => {
-          if (firstEventReceived || streamingAbortRef.current.cancelled) return;
+          if (firstEventReceived || requestAbortState.cancelled || !isRequestCurrent()) return;
           firstEventTimeoutTriggered = true;
-          streamingAbortRef.current.cancelled = true;
-          abortControllerRef.current?.abort();
+          requestAbortState.cancelled = true;
+          requestController.abort();
         }, STREAM_FIRST_EVENT_TIMEOUT_MS);
 
         const response = await fetch(`${API_BASE_URL}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
-          signal: abortControllerRef.current.signal,
+          signal: requestController.signal,
         });
 
         if (!response.ok) {
@@ -1053,7 +1380,25 @@ export function useMessageState({
             ed = eb.detail || eb.error?.message || eb.message || JSON.stringify(eb);
           } catch (e) { /* ignore */ }
           clearFirstEventTimer();
+          if (
+            response.status === 409
+            && isChatParseIdentityConflict(response, null, requestParseIdentity, ed)
+          ) {
+            const identityError = new Error(ed || '文档解析结果已更新，本次回答已停止，请重新提问');
+            identityError.name = 'ChatParseIdentityError';
+            throw identityError;
+          }
           throw new Error(ed);
+        }
+        // 跨域浏览器会隐藏未显式暴露的响应头；两个身份头都不可读时，
+        // 延迟到携带同一不可变解析身份的 SSE 终止事件再做严格核验。
+        if (
+          responseHasAnyChatParseIdentity(response, null)
+          && !responseMatchesChatParseIdentity(response, null, requestParseIdentity)
+        ) {
+          const identityError = new Error('文档解析结果已更新，本次回答已停止，请重新提问');
+          identityError.name = 'ChatParseIdentityError';
+          throw identityError;
         }
 
         const reader = response.body.getReader();
@@ -1067,6 +1412,11 @@ export function useMessageState({
         let contentStartTime = null;
         let sseBuffer = '';
         let sseDone = false;
+        let streamTerminalFailed = false;
+        let streamTerminalReceived = false;
+        let streamServerTurnStatus = '';
+        let streamResponseIdentityMismatch = false;
+        let streamTerminalIdentityVerified = !hasCompleteChatParseIdentity(requestParseIdentity);
 
         const markThinkingActivity = () => {
           const now = Date.now();
@@ -1075,7 +1425,7 @@ export function useMessageState({
         };
 
         const appendThinkingStage = (text, key) => {
-          if (!text || hasRealThinking) return;
+          if (!text || hasRealThinking || !isRequestCurrent()) return;
           if (key && lastThinkingStageKey === key) return;
           const addition = currentThinking ? `\n${text}` : text;
           lastThinkingStageKey = key || null;
@@ -1100,7 +1450,8 @@ export function useMessageState({
         };
 
         const appendRealThinking = (text) => {
-          if (!text) return;
+          if (!text || !isRequestCurrent()) return;
+          if (!hasRealThinking && !text.trim()) return;
           beginRealThinking();
           markThinkingActivity();
           currentThinking += text;
@@ -1112,6 +1463,25 @@ export function useMessageState({
               ? { ...m, thinking: currentThinking }
               : m
           ));
+        };
+
+        const markAnswerStarted = () => {
+          if (contentStartTime) return;
+          contentStartTime = Date.now();
+          // 终态 final_content 也可能是本轮唯一的正文来源。它到达时必须
+          // 和普通 token 一样立即结束“仅思考”的展示状态。
+          setMessages(prev => prev.map(m => (
+            m.id === tempMsgId ? { ...m, answerStarted: true } : m
+          )));
+        };
+
+        const appendAnswerContent = (text) => {
+          if (!text || !isRequestCurrent()) return;
+          currentText += text;
+          contentStream.addChunk(text);
+          // 模型从 reasoning 切到正文时常先发换行。只有真正出现可见字符后
+          // 才结束思考状态，避免“已深度思考”与首字之间出现空白等待。
+          if (currentText.trim()) markAnswerStarted();
         };
 
         // SSE 分隔符查找
@@ -1126,6 +1496,7 @@ export function useMessageState({
 
         // SSE 事件处理
         const processSseEvent = (et) => {
+          if (!isRequestCurrent() || requestAbortState.cancelled) return;
           const lines = et.split(/\r?\n/);
           const dl = [];
           for (const ln of lines) {
@@ -1137,12 +1508,57 @@ export function useMessageState({
           if (data === '[DONE]') { sseDone = true; return; }
           try {
             const p = JSON.parse(data);
+            if (p.error_code === 'chat_parse_identity_changed') {
+              streamResponseIdentityMismatch = true;
+              requestAbortState.cancelled = true;
+              sseDone = true;
+              return;
+            }
+            const payloadIdentity = getResponseChatParseIdentity(null, p);
+            const payloadHasIdentity = Boolean(
+              payloadIdentity.parseGeneration || payloadIdentity.documentSourceHash
+            );
+            if (
+              payloadHasIdentity
+              && !responseMatchesChatParseIdentity(null, p, requestParseIdentity)
+            ) {
+              streamResponseIdentityMismatch = true;
+              requestAbortState.cancelled = true;
+              sseDone = true;
+              return;
+            }
+            const isTerminalPayload = Boolean(p.done || p.choices?.[0]?.finish_reason);
+            if (isTerminalPayload && hasCompleteChatParseIdentity(requestParseIdentity)) {
+              if (!chatParseIdentitiesMatch(payloadIdentity, requestParseIdentity)) {
+                streamResponseIdentityMismatch = true;
+                requestAbortState.cancelled = true;
+                sseDone = true;
+                return;
+              }
+              streamTerminalIdentityVerified = true;
+            }
+            const payloadTurnStatus = normalizeChatTurnStatus(
+              p.turn_status || p.answer_status
+            );
+            if (payloadTurnStatus) streamServerTurnStatus = payloadTurnStatus;
+            if (isTerminalPayload) streamTerminalReceived = true;
             const visualVerification = getNumericTableVisualVerification(p.retrieval_meta);
             if (visualVerification) streamVisualVerificationRef.current = visualVerification;
-            if (p.error && p.type !== 'retrieval_progress') {
+            const intentDecision = p.retrieval_meta?.intent_decision || p.intent_decision;
+            if (intentDecision && typeof intentDecision === 'object') {
+              streamIntentDecisionRef.current = intentDecision;
+            }
+            const recoveredFinalContent = typeof p.final_content === 'string'
+              ? p.final_content.trim()
+              : '';
+            if (p.error && p.type !== 'retrieval_progress' && !recoveredFinalContent) {
               const em = `❌ ${p.error}`;
               currentText = em;
-              contentStream.addChunk(em);
+              contentStream.replace(em);
+              markAnswerStarted();
+              streamTerminalFailed = true;
+              streamTerminalReceived = true;
+              streamServerTurnStatus = 'failed';
               sseDone = true;
               return;
             }
@@ -1201,21 +1617,21 @@ export function useMessageState({
               streamAnswerCriticRef.current = p.critic || null;
               return;
             }
+            if (recoveredFinalContent) {
+              streamFinalContentRef.current = p.final_content;
+            }
+            if (p.type === 'citation_enhanced') {
+              if (typeof p.enhanced_answer === 'string' && p.enhanced_answer.trim()) {
+                streamFinalContentRef.current = p.enhanced_answer;
+              }
+              return;
+            }
             const delta = p.choices?.[0]?.delta || {};
             const cc = delta.content || p.content || '';
             const ct = delta.reasoning_content || p.reasoning_content || '';
             if (!p.done && !p.choices?.[0]?.finish_reason) {
               if (cc) {
-                currentText += cc;
-                contentStream.addChunk(cc);
-                if (!contentStartTime) {
-                  contentStartTime = Date.now();
-                  // 思考阶段结束信号：正文首 token 到达，让 ThinkingBlock 立即自动折叠，
-                  // 不必等整条回答流完
-                  setMessages(prev => prev.map(m =>
-                    m.id === tempMsgId ? { ...m, answerStarted: true } : m
-                  ));
-                }
+                appendAnswerContent(cc);
               }
               if (ct) {
                 appendRealThinking(ct);
@@ -1224,20 +1640,16 @@ export function useMessageState({
               }
             } else {
               const finalContentFromEvent = typeof p.final_content === 'string' ? p.final_content : '';
-              if (finalContentFromEvent) {
+              if (finalContentFromEvent.trim()) {
                 streamFinalContentRef.current = finalContentFromEvent;
                 if (finalContentFromEvent.startsWith(currentText)) {
                   const finalDelta = finalContentFromEvent.slice(currentText.length);
                   if (finalDelta) {
-                    currentText += finalDelta;
-                    contentStream.addChunk(finalDelta);
-                    if (!contentStartTime) contentStartTime = Date.now();
+                    appendAnswerContent(finalDelta);
                   }
                 }
               } else if (cc) {
-                currentText += cc;
-                contentStream.addChunk(cc);
-                if (!contentStartTime) contentStartTime = Date.now();
+                appendAnswerContent(cc);
               }
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
@@ -1264,7 +1676,8 @@ export function useMessageState({
               if (ct) {
                 appendRealThinking(ct);
               }
-              sseDone = true;
+              // ``done`` 表示主答案已完成；后端还会继续发送追问、会话名、
+              // 答案自审等收尾事件。传输层只由 [DONE] 或 reader EOF 结束。
             }
           } catch (e) {
             console.error(e, data);
@@ -1275,7 +1688,7 @@ export function useMessageState({
         let reading = true;
         while (reading) {
           const { value, done } = await reader.read();
-          if (done || streamingAbortRef.current.cancelled) break;
+          if (done || requestAbortState.cancelled || !isRequestCurrent()) break;
           sseBuffer += decoder.decode(value, { stream: true });
           let parsing = true;
           while (parsing) {
@@ -1297,23 +1710,72 @@ export function useMessageState({
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
         clearFirstEventTimer();
 
+        if (!isRequestCurrent()) return;
+        if (streamResponseIdentityMismatch || !streamTerminalIdentityVerified) {
+          setMessages((previous) => previous.map((message) => (
+            message.id === tempMsgId
+              ? {
+                ...message,
+                content: '',
+                isStreaming: false,
+                turnStatus: 'interrupted',
+                parseIdentityStale: true,
+              }
+              : message
+          )));
+          activeStreamMsgIdRef.current = null;
+          setStreamingMessageId(null);
+          return;
+        }
+
         // 流结束，标记 streamDone 触发短暂的自适应冲刷。
         setContentStreamDone(true);
         setThinkingStreamDone(true);
-        const streamedContent = streamFinalContentRef.current || currentText || (currentThinking ? '' : '⚠️ AI未返回内容');
-        // 只给动画一个很短的收尾窗口；超过后立即同步最终文本，避免模型已完成
-        // 但界面仍卡在思考态或半截回答数秒。
+        const streamedContent = [streamFinalContentRef.current, currentText]
+          .find((value) => typeof value === 'string' && value.trim())
+          || '❌ AI未返回正文，请重新生成';
+        const streamTurnStatus = (
+          streamTerminalFailed
+          || streamServerTurnStatus === 'failed'
+          || streamedContent.startsWith('❌')
+            ? 'failed'
+            : (
+              requestAbortState.cancelled || (!streamTerminalReceived && !sseDone)
+                ? 'interrupted'
+                : normalizeChatTurnStatus(
+                  streamServerTurnStatus,
+                  hasCompleteChatParseIdentity(requestParseIdentity) ? 'interrupted' : 'completed'
+                )
+            )
+        );
+        const waitForNextPaint = () => new Promise((resolve) => {
+          const fallbackTimer = setTimeout(resolve, 64);
+          requestAnimationFrame(() => {
+            clearTimeout(fallbackTimer);
+            resolve();
+          });
+        });
+
+        // 在切换到最终 Markdown 渲染前，先让 ref 直写队列排空。这样模型若
+        // 仅在终态事件给出整段正文，仍会按用户选定的速度渐进显示，而不是被
+        // React 的最终状态一次性替换。计时器仅保护后台节流等无动画帧场景。
         {
           const flushStart = Date.now();
           while (
+            isRequestCurrent() &&
             (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete()) &&
             Date.now() - flushStart < STREAM_FINAL_FLUSH_GRACE_MS
           ) {
-            await new Promise(r => requestAnimationFrame(r));
+            await waitForNextPaint();
           }
         }
-        contentStream.flushNow?.(streamedContent);
-        thinkingStream.flushNow?.(currentThinking);
+        if (!isRequestCurrent()) return;
+        if (!contentStream.isFlushComplete()) {
+          contentStream.flushNow?.(streamedContent);
+        }
+        if (!thinkingStream.isFlushComplete()) {
+          thinkingStream.flushNow?.(currentThinking);
+        }
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
           thinkingLastUpdateTime,
@@ -1323,7 +1785,12 @@ export function useMessageState({
           streamedContent,
           streamCitationsRef.current
         );
-        const streamVisualVerification = streamVisualVerificationRef.current;
+        const streamVisualVerification = (
+          visualVerificationEpochRef.current === requestVisualVerificationEpoch
+            ? streamVisualVerificationRef.current
+            : null
+        );
+        const streamIntentDecision = streamIntentDecisionRef.current;
         if (streamCallInfoRef.current) {
           setLastCallInfo({
             ...streamCallInfoRef.current,
@@ -1332,10 +1799,14 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, visualVerification: streamVisualVerification }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
-        startVisualVerificationPolling(tempMsgId, streamVisualVerification);
+        startVisualVerificationPolling(
+          tempMsgId,
+          streamVisualVerification,
+          requestVisualVerificationEpoch
+        );
         activeStreamMsgIdRef.current = null;
         setStreamingMessageId(null);
       } else {
@@ -1344,7 +1815,7 @@ export function useMessageState({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
-          signal: abortControllerRef.current.signal,
+          signal: requestController.signal,
         });
 
         if (!response.ok) {
@@ -1353,15 +1824,46 @@ export function useMessageState({
             const eb = await response.json();
             ed = eb.detail || eb.error?.message || eb.message || JSON.stringify(eb);
           } catch (e) { /* ignore */ }
+          if (
+            response.status === 409
+            && isChatParseIdentityConflict(response, null, requestParseIdentity, ed)
+          ) {
+            const identityError = new Error(ed || '文档解析结果已更新，本次回答已停止，请重新提问');
+            identityError.name = 'ChatParseIdentityError';
+            throw identityError;
+          }
           throw new Error(ed);
         }
 
         const data = await response.json();
+        if (!isRequestCurrent()) return;
+        if (!responseMatchesChatParseIdentity(response, data, requestParseIdentity)) {
+          const identityError = new Error('文档解析结果已更新，本次回答已停止，请重新提问');
+          identityError.name = 'ChatParseIdentityError';
+          throw identityError;
+        }
+        const hasNonStreamAnswer = typeof data.answer === 'string' && data.answer.trim();
+        const nonStreamTurnStatus = hasNonStreamAnswer
+          ? normalizeChatTurnStatus(
+            data.turn_status
+            || data.answer_status
+            || response?.headers?.get?.('X-Chat-Turn-Status'),
+            hasCompleteChatParseIdentity(requestParseIdentity) ? 'interrupted' : 'completed'
+          )
+          : 'failed';
+        const nonStreamAnswer = hasNonStreamAnswer
+          ? data.answer
+          : '❌ AI未返回正文，请重新生成';
         const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
-          data.answer,
+          nonStreamAnswer,
           data.retrieval_meta?.citations
         );
-        const nonStreamVisualVerification = getNumericTableVisualVerification(data.retrieval_meta);
+        const nonStreamVisualVerification = (
+          visualVerificationEpochRef.current === requestVisualVerificationEpoch
+            ? getNumericTableVisualVerification(data.retrieval_meta)
+            : null
+        );
+        const nonStreamIntentDecision = data.retrieval_meta?.intent_decision || data.intent_decision || null;
         let nonStreamAgentTrace = null;
         if (data.retrieval_meta && (data.retrieval_meta.agent_mode || data.retrieval_meta.agent_gate)) {
           nonStreamAgentTrace = createInitialAgentTrace();
@@ -1375,14 +1877,43 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, visualVerification: nonStreamVisualVerification }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
             : m
         ));
-        startVisualVerificationPolling(tempMsgId, nonStreamVisualVerification);
+        startVisualVerificationPolling(
+          tempMsgId,
+          nonStreamVisualVerification,
+          requestVisualVerificationEpoch
+        );
+        activeStreamMsgIdRef.current = null;
         setStreamingMessageId(null);
       }
     } catch (error) {
-      if (error.name === 'AbortError' && !firstEventTimeoutTriggered) return;
+      if (!isRequestCurrent()) return;
+      if (error.name === 'ChatParseIdentityError') {
+        setMessages((previous) => previous.map((message) => (
+          message.id === tempMsgId
+            ? {
+              ...message,
+              content: `❌ ${error.message}`,
+              isStreaming: false,
+              turnStatus: 'interrupted',
+              parseIdentityStale: true,
+            }
+            : message
+        )));
+        activeStreamMsgIdRef.current = null;
+        setStreamingMessageId(null);
+        return;
+      }
+      if (error.name === 'AbortError' && !firstEventTimeoutTriggered) {
+        setMessages(prev => prev.map(m =>
+          m.id === tempMsgId ? { ...m, isStreaming: false, turnStatus: 'interrupted' } : m
+        ));
+        activeStreamMsgIdRef.current = null;
+        setStreamingMessageId(null);
+        return;
+      }
       const errorMessage = firstEventTimeoutTriggered
         ? `首包超时（${STREAM_FIRST_EVENT_TIMEOUT_MS}ms），请重试或切换模型`
         : error.message;
@@ -1391,49 +1922,38 @@ export function useMessageState({
       activeStreamMsgIdRef.current = null;
       setStreamingMessageId(null);
       setMessages(prev => prev.map(m =>
-        m.id === tempMsgId
-          ? { ...m, content: '❌ ' + errorMessage, isStreaming: false }
+          m.id === tempMsgId
+            ? { ...m, content: '❌ ' + errorMessage, isStreaming: false, turnStatus: 'failed' }
           : m
       ));
     } finally {
-      setIsLoading(false);
+      if (abortControllerRef.current === requestController) {
+        abortControllerRef.current = null;
+      }
+      if (isRequestCurrent()) setIsLoading(false);
     }
   }, [
     docId, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
-    enableAgentRetrieval,
+    enableGraphRAG, enableAgentRetrieval, forceAgentRetrieval,
+    enableJiebaBM25, numExpandContextChunk,
     getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
     reasoningEffort, answerDetailLevel, enableMemory,
-    enableWebSearch, webSearchProvider, webSearchApiKey, embeddingApiKey,
+    webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
+    webSearchIncludeDocumentContext, embeddingApiKey, getEmbeddingConfig,
     streamRenderProfile, shouldUseStreaming,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
-    cheapModel, cheapModelProvider, cheapModelEndpoint,
-    startVisualVerificationPolling,
+    numericTableVisualVerification, cheapModel, cheapModelProvider, cheapModelEndpoint,
+    interruptActiveRequest, startVisualVerificationPolling, streamingMessageId,
   ]);
 
   /**
    * 停止当前流式输出
    */
   const handleStop = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-      setIsLoading(false);
-    }
-    streamingAbortRef.current.cancelled = true;
-    contentStream.reset('');
-    thinkingStream.reset('');
-    setContentStreamDone(false);
-    setThinkingStreamDone(false);
-    activeStreamMsgIdRef.current = null;
-    if (streamingMessageId) {
-      setMessages(prev => prev.map(m =>
-        m.id === streamingMessageId ? { ...m, isStreaming: false } : m
-      ));
-    }
-    setStreamingMessageId(null);
-  }, [streamingMessageId, contentStream, thinkingStream]);
+    interruptActiveRequest();
+  }, [interruptActiveRequest]);
 
   /**
    * 重新生成指定位置的消息
@@ -1448,11 +1968,12 @@ export function useMessageState({
     }
     if (userMsgIndex === -1) return;
     const userMsg = messages[userMsgIndex];
-    // 截掉用户消息及之后的所有内容，sendMessage 会重新追加用户消息
-    setMessages(prev => prev.slice(0, userMsgIndex));
-    setInputValue(userMsg.content);
-    // 延迟发送，确保输入框已更新
-    setTimeout(() => sendMessage(), 100);
+    const historyMessages = messages.slice(0, userMsgIndex);
+    // 显式把原问题和截断后的历史交给 sendMessage，避免 React 状态更新前
+    // 的旧闭包再次携带被删除的空回答或后续消息。
+    setMessages(historyMessages);
+    setInputValue('');
+    await sendMessage({ input: userMsg.content, historyMessages });
   }, [docId, messages, setInputValue, sendMessage]);
 
   /**
@@ -1531,5 +2052,6 @@ export function useMessageState({
     copyMessage,
     saveToMemory,
     setInputValue,
+    invalidateVisualVerificationState,
   };
 }

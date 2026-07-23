@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 import rehypeKatex from 'rehype-katex';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 // rehype-mathjax/svg 使用 CJS 的 mathjax-full，不能静态 import
 // 改为懒加载，失败时 fallback 到 KaTeX
 let _rehypeMathjaxSvg = null;
@@ -24,6 +25,35 @@ import CitationLink from './CitationLink';
 import WebCitationLink from './WebCitationLink';
 import { processLatexBrackets } from '../utils/processLatexBrackets.js';
 import { useChatParams } from '../contexts/ChatParamsContext';
+
+// 模型回答、网页摘录和文档文本都属于不可信输入。保留现有的 cite/
+// wsource 引文标签和常规文本格式，但不允许其创建可执行、可嵌入或可追踪
+// 的节点。KaTeX/MathJax 在净化之后生成自己的受控输出。
+const UNSAFE_MARKDOWN_TAGS = new Set([
+  'audio', 'embed', 'form', 'iframe', 'img', 'input', 'link', 'object',
+  'picture', 'script', 'source', 'style', 'svg', 'video',
+]);
+
+const CHATPDF_MARKDOWN_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [...new Set([...(defaultSchema.tagNames || []), 'cite', 'wsource'])]
+    .filter((tag) => !UNSAFE_MARKDOWN_TAGS.has(tag)),
+  attributes: {
+    ...defaultSchema.attributes,
+    cite: [...(defaultSchema.attributes?.cite || []), 'dataRef', 'data-ref'],
+    wsource: [...(defaultSchema.attributes?.wsource || []), 'dataIdx', 'data-idx'],
+  },
+};
+
+const safeExternalHref = (href) => {
+  if (typeof href !== 'string' || !href.trim()) return null;
+  try {
+    const parsed = new URL(href, window.location.origin);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+};
 
 // mermaid 动态加载：仅在首次遇到 Mermaid 代码块时触发加载，
 // 使用单例 Promise 模式避免重复加载（需求 7.1）
@@ -325,22 +355,14 @@ const StreamingMarkdown = React.memo(
       return baseRemarkPlugins;
     }, [baseRemarkPlugins, enableBlurReveal, isStreaming, content?.length]);
 
-    const rehypePlugins = React.useMemo(() => {
-      const plugins = [];
+      const rehypePlugins = React.useMemo(() => {
+      const plugins = [rehypeRaw, [rehypeSanitize, CHATPDF_MARKDOWN_SCHEMA]];
       if (mathEngine === 'KaTeX') {
-        // 标准 rehype-katex 生成完整 HAST 节点，rehypeRaw 顺序无关
-        plugins.push(rehypeRaw);
-        plugins.push([rehypeKatex, { strict: false, trust: true, output: 'html' }]);
+        plugins.push([rehypeKatex, { strict: false, trust: false, output: 'html' }]);
       } else if (mathEngine === 'MathJax' && _rehypeMathjaxSvg) {
-        // MathJax 生成完整 HAST SVG 节点，rehypeRaw 需在其前处理 markdown 中的原始 HTML
-        plugins.push(rehypeRaw);
         plugins.push(_rehypeMathjaxSvg);
       } else if (mathEngine === 'MathJax' && !_rehypeMathjaxSvg) {
-        // MathJax 加载失败，fallback 到 KaTeX
-        plugins.push(rehypeRaw);
-        plugins.push([rehypeKatex, { strict: false, trust: true, output: 'html' }]);
-      } else {
-        plugins.push(rehypeRaw);
+        plugins.push([rehypeKatex, { strict: false, trust: false, output: 'html' }]);
       }
       plugins.push(rehypeHighlight);
       return plugins;
@@ -445,6 +467,15 @@ const StreamingMarkdown = React.memo(
           }
           return <span>{children}</span>;
         },
+        a({ node, href, children, ...props }) {
+          const safeHref = safeExternalHref(href);
+          if (!safeHref) return <span>{children}</span>;
+          return (
+            <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer">
+              {children}
+            </a>
+          );
+        },
         code({ node, inline, className, children, ...props }) {
           const match = /language-(\w+)/.exec(className || '');
           const language = match ? match[1] : '';
@@ -537,7 +568,6 @@ const StreamingMarkdown = React.memo(
           <ReactMarkdown
             remarkPlugins={remarkPlugins}
             rehypePlugins={rehypePlugins}
-            remarkRehypeOptions={{ allowDangerousHtml: true }}
             components={markdownComponents}
           >
             {processedContent}

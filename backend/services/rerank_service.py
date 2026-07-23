@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import logging
 import os
 import threading
@@ -6,15 +7,30 @@ import time
 from typing import List, Optional
 
 import httpx
-try:
-    from sentence_transformers import CrossEncoder
-    _HAS_CROSS_ENCODER = True
-except (ImportError, OSError):
-    _HAS_CROSS_ENCODER = False
+CrossEncoder = None
+_HAS_CROSS_ENCODER = importlib.util.find_spec("sentence_transformers") is not None
+_CROSS_ENCODER_IMPORT_LOCK = threading.Lock()
 from models.api_key_selector import select_api_key
 from services import rerank_api_service
 
 logger = logging.getLogger(__name__)
+
+
+def _get_cross_encoder_class():
+    """只在首次使用本地重排时加载 sentence-transformers/PyTorch。"""
+    global CrossEncoder, _HAS_CROSS_ENCODER
+    if not _HAS_CROSS_ENCODER:
+        raise ImportError("sentence-transformers 未安装")
+    if CrossEncoder is None:
+        with _CROSS_ENCODER_IMPORT_LOCK:
+            if CrossEncoder is None:
+                try:
+                    from sentence_transformers import CrossEncoder as cross_encoder_class
+                except (ImportError, OSError):
+                    _HAS_CROSS_ENCODER = False
+                    raise
+                CrossEncoder = cross_encoder_class
+    return CrossEncoder
 
 
 class LocalRerankModelUnavailable(RuntimeError):
@@ -159,7 +175,8 @@ class RerankService:
                 )
                 logger.info(f"[RerankService] 加载本地模型: {model_name}（{suffix}）")
                 try:
-                    self._cache[model_name] = CrossEncoder(
+                    cross_encoder_class = _get_cross_encoder_class()
+                    self._cache[model_name] = cross_encoder_class(
                         model_name,
                         local_files_only=local_files_only,
                     )

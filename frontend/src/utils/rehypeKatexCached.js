@@ -21,14 +21,14 @@ import katexCache from './katexCache.js';
  * 创建带缓存的 rehype-katex 插件
  * @param {Object} options - KaTeX 渲染选项
  * @param {boolean} [options.strict=false] - 严格模式
- * @param {boolean} [options.trust=true] - 信任输入
+ * @param {boolean} [options.trust=false] - 是否允许受信任宏
  * @param {string} [options.output='html'] - 输出格式
  * @returns {Function} rehype 插件函数
  */
 function rehypeKatexCached(options = {}) {
   const katexOptions = {
     strict: false,
-    trust: true,
+    trust: false,
     output: 'html',
     throwOnError: false,
     ...options,

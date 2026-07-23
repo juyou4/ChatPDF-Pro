@@ -10,8 +10,21 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import MinerUScanLoader from './MinerUScanLoader';
 
 const VISIBLE_TASK_STATES = new Set(['running', 'failed', 'recommended']);
+
+const getTaskProgress = (progress) => {
+  if (!progress || typeof progress !== 'object') return null;
+  const percent = Number(progress.percent);
+  if (!Number.isFinite(percent)) return null;
+  const normalizedPercent = Math.max(0, Math.min(100, Math.round(percent)));
+  return {
+    percent: normalizedPercent,
+    label: progress.label || `${normalizedPercent}%`,
+    ariaLabel: progress.ariaLabel || `进度 ${normalizedPercent}%`,
+  };
+};
 
 export const TASK_PILL_PANEL_MOTION = {
   initial: {
@@ -58,8 +71,12 @@ export const getBackgroundTaskSummary = (items) => {
   const failedCount = tasks.filter((item) => item.state === 'failed').length;
   const runningCount = tasks.filter((item) => item.state === 'running').length;
   const recommendedCount = tasks.filter((item) => item.state === 'recommended').length;
+  const minerUProgress = getTaskProgress(
+    tasks.find((item) => item?.id === 'deep_parse' && item?.state === 'running')?.progress
+  );
 
   if (failedCount > 0) return { state: 'failed', label: '任务异常', count: failedCount };
+  if (minerUProgress) return { state: 'running', label: `解析 ${minerUProgress.percent}%`, count: runningCount };
   if (runningCount > 0) return { state: 'running', label: `任务 ${runningCount}`, count: runningCount };
   if (recommendedCount > 0) return { state: 'recommended', label: `建议 ${recommendedCount}`, count: recommendedCount };
   return { state: 'idle', label: '任务', count: 0 };
@@ -208,15 +225,46 @@ const BackgroundTaskPanel = ({
           const taskStyle = TASK_STYLES[item.state] || TASK_STYLES.running;
           const TaskIcon = taskStyle.Icon;
           const showAction = item.actionLabel && (!item.busy || item.actionLabel === '取消');
+          const taskProgress = getTaskProgress(item.progress);
+          const showMinerUScanLoader = item.id === 'deep_parse' && item.state === 'running';
           return (
             <div key={item.id} className="flex items-start gap-3 py-3.5">
-              <TaskIcon className={`mt-0.5 h-4 w-4 shrink-0 ${darkMode ? taskStyle.darkIconClassName : taskStyle.lightIconClassName}`} />
+              {showMinerUScanLoader ? (
+                <MinerUScanLoader
+                  size={20}
+                  className={`mt-0.5 ${darkMode ? 'text-[#FFA07A]' : 'text-[#ed8c68]'}`}
+                />
+              ) : (
+                <TaskIcon className={`mt-0.5 h-4 w-4 shrink-0 ${darkMode ? taskStyle.darkIconClassName : taskStyle.lightIconClassName}`} />
+              )}
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-[12px] font-bold">{item.title}</span>
                   <span className={`shrink-0 text-[10px] font-semibold ${darkMode ? taskStyle.darkStatusClassName : taskStyle.lightStatusClassName}`}>{item.status}</span>
                 </div>
                 <div className={`mt-1 text-[10px] leading-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{item.desc}</div>
+                {taskProgress && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <div
+                      role="progressbar"
+                      aria-label={`${item.title}：${taskProgress.ariaLabel}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={taskProgress.percent}
+                      className={`relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-[#eee8e3]'}`}
+                    >
+                      <motion.div
+                        initial={false}
+                        animate={{ scaleX: taskProgress.percent / 100 }}
+                        transition={{ duration: 0.35, ease: 'easeOut' }}
+                        className="absolute inset-y-0 left-0 w-full origin-left rounded-full bg-[#D97A5D]"
+                      />
+                    </div>
+                    <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${darkMode ? 'text-[#FFA07A]' : 'text-[#B85F47]'}`}>
+                      {taskProgress.label}
+                    </span>
+                  </div>
+                )}
               </div>
               {showAction && (
                 <button

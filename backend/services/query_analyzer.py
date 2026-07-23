@@ -19,6 +19,20 @@ def _contains_any(query_lower: str, patterns: list[str]) -> bool:
     return any(pattern in query_lower for pattern in patterns)
 
 
+def _contains_terms(query_lower: str, patterns: list[str]) -> bool:
+    """中文按短语匹配，英文/数字术语按 token 边界匹配。"""
+    for pattern in patterns:
+        normalized = str(pattern or "").strip().lower()
+        if not normalized:
+            continue
+        if re.search(r"[a-z0-9]", normalized):
+            if re.search(rf"(?<![a-z0-9_]){re.escape(normalized)}(?![a-z0-9_])", query_lower):
+                return True
+        elif normalized in query_lower:
+            return True
+    return False
+
+
 def _is_numeric_table_cost_query(query_lower: str) -> bool:
     cost_patterns = [
         '额外开销', '计算开销', '推理开销', '推理时间', '训练时间', '耗时',
@@ -26,7 +40,7 @@ def _is_numeric_table_cost_query(query_lower: str) -> bool:
         'flops', 'inference time', 'inference-time', 'training time', 'training-time',
         'latency', 'runtime',
     ]
-    return _contains_any(query_lower, cost_patterns)
+    return _contains_terms(query_lower, cost_patterns)
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -259,15 +273,47 @@ def is_section_explanation_query(query: str) -> bool:
         return False
     query_lower = query.lower()
     section_scope_patterns = [
-        '部分', '章节', 'section', 'chapter', 'method', '方法',
+        '部分', '章节', 'section', 'chapter',
     ]
     section_explain_patterns = [
-        '讲解', '解释', '说明', '原理', '设计', '实现', '细节', '展开',
+        '讲解', '解释', '说明', '介绍', '原理', '设计', '实现', '细节', '展开',
+        '总结', '概括', '概述', '分析',
     ]
+    numbered_section = bool(re.search(
+        r"(?:第\s*[\d一二三四五六七八九十]+\s*(?:章|节)|\b(?:section|chapter)\s*\d+\b)",
+        query_lower,
+        re.IGNORECASE,
+    ))
     return (
-        any(p in query_lower for p in section_scope_patterns)
+        (any(p in query_lower for p in section_scope_patterns) or numbered_section)
         and any(p in query_lower for p in section_explain_patterns)
     )
+
+
+def is_overview_query(query: str) -> bool:
+    if not query:
+        return False
+    if is_section_explanation_query(query):
+        return False
+    query_lower = query.lower()
+    overview_patterns = [
+        '总结', '概括', '概述', '简述', '大意', '主要内容',
+        '讲什么', '关于什么', '整体', '全文',
+        '包括什么', '涉及什么',
+        'summary', 'summarize', 'overview', 'outline', 'main idea',
+        'what is this about', 'what does it cover',
+    ]
+    if any(pattern in query_lower for pattern in overview_patterns):
+        return True
+    whole_document_nouns = [
+        '这篇论文', '本文', '整篇论文', '这篇文章', '整篇文章', '该文档', '整个文档',
+        'this paper', 'the paper', 'this article', 'the document',
+    ]
+    if _contains_any(query_lower, ['介绍', '背景', 'introduce', 'introduction', 'background']):
+        return _contains_any(query_lower, whole_document_nouns)
+    if '有哪些' in query_lower:
+        return _contains_any(query_lower, ['主要贡献', '核心贡献', '章节', '主题', '关键点', '主要结论'])
+    return False
 
 
 def is_mechanism_explanation_query(query: str) -> bool:
@@ -277,7 +323,8 @@ def is_mechanism_explanation_query(query: str) -> bool:
     query_lower = query.lower()
     explain_patterns = [
         '解释', '说明', '讲解', '原理', '机制', '实现', '细节', '如何', '怎么',
-        'explain', 'how', 'mechanism', 'implementation', 'principle',
+        '是什么', '做什么', '解决什么', '解决了什么',
+        'explain', 'how', 'what is', 'what does', 'mechanism', 'implementation', 'principle',
     ]
     mechanism_scope_patterns = [
         '方法', '模型', '算法', '框架', '架构', '网络', '模块', '组件',
@@ -322,57 +369,65 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     evidence_need: list[EvidenceNeed] = []
     cost_query = _is_numeric_table_cost_query(query_lower)
 
-    if is_section_explanation_query(query) or is_mechanism_explanation_query(query):
+    if not is_overview_query(query) and (
+        is_section_explanation_query(query) or is_mechanism_explanation_query(query)
+    ):
         evidence_need.append('section_explanation')
 
     if is_analysis_explanation_query(query):
         evidence_need.append('analysis_explanation')
 
-    numeric_table_table_scope_patterns = [
-        '表', '表格', 'table', 'tables', 'caption',
-    ]
+    explicit_table_scope = bool(re.search(
+        r"(?:表格|表\s*\d+|第\s*\d+\s*表|表中|\btable(?:s)?(?:\s*\d+)?\b|\bcaption\b)",
+        query_lower,
+        re.IGNORECASE,
+    ))
     numeric_table_metric_scope_patterns = [
         'baseline', '基线', 'metric', '指标', '阈值', 'threshold',
         '比率', 'ratio', 'percentage', 'accuracy', 'acc', 'score',
         'f1', 'bleu', 'rouge', 'precision', 'recall', 'asr', 'lpips',
         'fid', 'map', 'ap50', 'ap75',
     ]
-    numeric_table_value_patterns = [
-        'accuracy', 'acc', 'score', 'f1', 'bleu', 'rouge', 'precision', 'recall',
-        '提升', '下降', '差值', '差距', '相比', '对比', '分别', '多少',
-        'many', 'medium', 'few', '数值', '准确率', '百分点',
+    numeric_value_request_patterns = [
+        '数值', '具体数据', '分别是多少', '是多少', '多少', '百分点', '最高', '最低',
+        '排名', '第几', '差值', '差距', '提升多少', '下降多少', '高多少', '低多少',
+        'what value', 'what score', 'how much', 'how many', 'highest', 'lowest',
+        'best result', 'metric value', 'percentage point',
     ]
+    metric_signal = _contains_terms(query_lower, numeric_table_metric_scope_patterns)
+    quantitative_request = _contains_terms(query_lower, numeric_value_request_patterns)
+    fewshot_columns = sum(
+        1 for term in ('many', 'medium', 'few')
+        if _contains_terms(query_lower, [term])
+    ) >= 2
     if (
-        cost_query
-        or
-        _contains_any(query_lower, ['many', 'medium', 'few'])
-        or (
-            _contains_any(query_lower, numeric_table_table_scope_patterns)
-            and _contains_any(query_lower, numeric_table_value_patterns)
-        )
-        or (
-            _contains_any(query_lower, numeric_table_metric_scope_patterns)
-            and _contains_any(query_lower, numeric_table_value_patterns)
-        )
+        (cost_query and quantitative_request)
+        or (fewshot_columns and (quantitative_request or explicit_table_scope or metric_signal))
+        or (explicit_table_scope and (quantitative_request or metric_signal))
+        or (metric_signal and quantitative_request)
     ):
         evidence_need.append('numeric_table')
 
     reference_trap_patterns = [
         '参考文献', 'references', 'bibliography', 'citation', 'cite',
         '引用', '被引用', 'related work', '相关工作',
-        '作者', '第一作者', '通讯作者', 'author', 'authors',
         'arxiv', 'doi', 'url', '链接', 'github',
     ]
-    author_analysis_query = bool(re.search(r"作者\s*(?:如何|怎么|怎样)?\s*(?:分析|认为|解释)", query_lower))
-    if _contains_any(query_lower, reference_trap_patterns) and not author_analysis_query:
+    if _contains_terms(query_lower, reference_trap_patterns):
         evidence_need.append('reference_trap')
 
     reference_meta_patterns = [
-        '第一作者', '通讯作者', '作者', 'author', 'authors',
+        '第一作者', '通讯作者', '作者是谁', '哪些作者', '作者名单', '作者信息',
         '机构', '单位', 'affiliation', 'institution', 'organization',
         'doi', 'arxiv', 'url', '链接', 'github', '邮箱', 'email',
     ]
-    if _contains_any(query_lower, reference_meta_patterns) and not author_analysis_query:
+    english_author_meta = bool(re.search(
+        r"(?:\bwho\s+(?:is|are|were)\b.{0,30}\bauthors?\b|"
+        r"\bauthors?\s+(?:list|names?|affiliations?)\b)",
+        query_lower,
+        re.IGNORECASE,
+    ))
+    if _contains_terms(query_lower, reference_meta_patterns) or english_author_meta:
         evidence_need.append('reference_meta')
 
     comparison_patterns = [
@@ -381,7 +436,7 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     ]
     multi_aspect_patterns = [
         '分别', '多个方面', '不同方面', '各方面', '多维度', '维度',
-        'many', 'medium', 'few', '优势', '劣势', '联系',
+        '优势', '劣势', '联系',
     ]
     if (
         _contains_any(query_lower, comparison_patterns)
@@ -407,21 +462,24 @@ def analyze_query_type(query: str) -> QueryType:
     
     query_lower = query.lower()
     evidence_need = analyze_evidence_need(query)
+    strong_numeric_extraction = bool(re.search(
+        r"(?:多少|数值|分别是多少|最高|最低|第几|百分点|差值|提升多少|下降多少|"
+        r"\b(?:what\s+(?:is|are|value|score)|how\s+(?:much|many)|highest|lowest|best\s+result)\b)",
+        query_lower,
+        re.IGNORECASE,
+    ))
+    if 'numeric_table' in evidence_need and strong_numeric_extraction:
+        return 'extraction'
+
+    # 概览性问题 - 需要更多上下文，但可以使用摘要
+    if is_overview_query(query):
+        return 'overview'
+
+    if 'section_explanation' in evidence_need or 'analysis_explanation' in evidence_need:
+        return 'analytical'
+
     if 'numeric_table' in evidence_need:
         return 'extraction'
-    if is_section_explanation_query(query) or 'analysis_explanation' in evidence_need:
-        return 'analytical'
-    
-    # 概览性问题 - 需要更多上下文，但可以使用摘要
-    overview_patterns = [
-        '总结', '概括', '概述', '简述', '大意', '主要内容', 
-        '讲什么', '关于什么', '介绍', '背景', '整体', '全文',
-        '有哪些', '包括什么', '涉及什么',
-        'summary', 'summarize', 'overview', 'outline', 'main idea',
-        'what is this about', 'what does it cover',
-    ]
-    if any(p in query_lower for p in overview_patterns):
-        return 'overview'
     
     # 分析性问题 - 需要适中上下文和细节
     analytical_patterns = [

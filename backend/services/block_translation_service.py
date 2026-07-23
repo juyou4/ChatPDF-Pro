@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import hashlib
 import inspect
 import json
@@ -26,7 +27,20 @@ MAX_BLOCKS_PER_REQUEST = 24
 MAX_BLOCK_CHARS = 1800
 TRANSLATION_CONCURRENCY = 8
 MAX_TRANSLATION_CONCURRENCY = 16
+
+
+def _bounded_env_int(name: str, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(int(os.getenv(name, str(default))), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+GLOBAL_TRANSLATION_CONCURRENCY = _bounded_env_int("CHATPDF_GLOBAL_TRANSLATION_CONCURRENCY", 16, 64)
+TRANSLATION_TASK_BATCH_SIZE = _bounded_env_int("CHATPDF_TRANSLATION_TASK_BATCH_SIZE", 48, 256)
 TABLE_BLOCK_TYPES = {"table"}
+
+_GLOBAL_TRANSLATION_SEMAPHORE = asyncio.Semaphore(GLOBAL_TRANSLATION_CONCURRENCY)
 
 _RE_MARKDOWN_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_MARKDOWN_TABLE_SEPARATOR = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
@@ -79,6 +93,9 @@ def _load_translation_cache_path(path: Path, doc_id: str) -> dict[str, Any]:
         data.setdefault("items", {})
         if not isinstance(data["items"], dict):
             data["items"] = {}
+        data.setdefault("outcomes", {})
+        if not isinstance(data["outcomes"], dict):
+            data["outcomes"] = {}
         return data
     except Exception as exc:
         logger.warning("[BlockTranslation] Failed to load %s: %s", path, exc)
@@ -128,6 +145,7 @@ def _new_translation_cache(doc_id: str, identity: dict[str, str] | None = None) 
             identity.get("ai_cache_generation") or LEGACY_AI_CACHE_GENERATION
         ),
         "items": {},
+        "outcomes": {},
     }
 
 
@@ -135,6 +153,7 @@ def _normalise_translation_cache(cache: dict[str, Any], doc_id: str) -> dict[str
     source = cache if isinstance(cache, dict) else {}
     normalised = _new_translation_cache(doc_id, source)
     normalised["items"] = dict(source.get("items") or {})
+    normalised["outcomes"] = dict(source.get("outcomes") or {})
     if isinstance(source.get("last_call"), dict):
         normalised["last_call"] = dict(source["last_call"])
     return normalised
@@ -164,6 +183,15 @@ def _merge_translation_caches(existing: dict[str, Any], candidate: dict[str, Any
         "ai_cache_generation": candidate["ai_cache_generation"],
     })
     merged["items"].update(candidate["items"])
+    for cache_key, outcome in candidate["outcomes"].items():
+        if not isinstance(outcome, dict):
+            continue
+        existing_outcome = merged["outcomes"].get(cache_key)
+        if (
+            not isinstance(existing_outcome, dict)
+            or float(outcome.get("updated_at") or 0) >= float(existing_outcome.get("updated_at") or 0)
+        ):
+            merged["outcomes"][cache_key] = dict(outcome)
     if "last_call" in candidate:
         merged["last_call"] = candidate["last_call"]
     return merged
@@ -333,6 +361,9 @@ def get_cached_translations(
             "doc_id": doc_id,
             "target_lang": normalized_target,
             "items": {},
+            "failed_block_ids": [],
+            "skipped_block_ids": [],
+            "status": "empty",
         }
     items: dict[str, Any] = {}
     for block_id, block in block_map.items():
@@ -345,10 +376,65 @@ def get_cached_translations(
         if model is not None and str(cached.get("model") or "") != str(model):
             continue
         items[block_id] = cached
+
+    failed_block_ids: list[str] = []
+    skipped_block_ids: list[str] = []
+    for outcome in (cache.get("outcomes") or {}).values():
+        if not isinstance(outcome, dict):
+            continue
+        status = str(outcome.get("status") or "").strip().lower()
+        if status not in {"failed", "skipped"}:
+            continue
+        if str(outcome.get("target_lang") or "") != normalized_target:
+            continue
+        if provider is not None and str(outcome.get("provider") or "") != str(provider):
+            continue
+        if model is not None and str(outcome.get("model") or "") != str(model):
+            continue
+        block_id = str(outcome.get("block_id") or "").strip()
+        if not block_id:
+            continue
+        block = block_map.get(block_id)
+        expected_signature = str(outcome.get("block_signature") or "")
+        if block is not None and expected_signature and expected_signature != _block_signature(block):
+            continue
+        target = failed_block_ids if status == "failed" else skipped_block_ids
+        if block_id not in target:
+            target.append(block_id)
+
+    if failed_block_ids or skipped_block_ids:
+        cache_status = "partial" if items else ("failed" if failed_block_ids else "skipped")
+    else:
+        cache_status = "cached" if items else "empty"
     return {
         "doc_id": doc_id,
         "target_lang": normalized_target,
         "items": items,
+        "failed_block_ids": failed_block_ids,
+        "skipped_block_ids": skipped_block_ids,
+        "status": cache_status,
+    }
+
+
+def _translation_outcome(
+    *,
+    block_id: str,
+    target_lang: str,
+    status: str,
+    provider: str,
+    model: str,
+    reason: str = "",
+    block: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "block_id": str(block_id),
+        "target_lang": target_lang,
+        "status": status,
+        "reason": reason,
+        "provider": provider,
+        "model": model,
+        "block_signature": _block_signature(block) if block is not None else "",
+        "updated_at": time.time(),
     }
 
 
@@ -372,7 +458,14 @@ async def translate_blocks(
     normalized_target = _normalize_target_lang(target_lang)
     unique_ids = list(dict.fromkeys(str(block_id) for block_id in block_ids if str(block_id).strip()))
     if not unique_ids:
-        return {"doc_id": doc_id, "target_lang": normalized_target, "items": {}}
+        return {
+            "doc_id": doc_id,
+            "target_lang": normalized_target,
+            "items": {},
+            "failed_block_ids": [],
+            "skipped_block_ids": [],
+            "status": "empty",
+        }
     if max_blocks is not None and len(unique_ids) > max_blocks:
         unique_ids = unique_ids[:max_blocks]
 
@@ -389,6 +482,7 @@ async def translate_blocks(
             save_translation_cache(data_dir, doc_id, envelope)
 
     cache_items = cache.setdefault("items", {})
+    cache_outcomes = cache.setdefault("outcomes", {})
     cache["last_call"] = {
         "purpose": "block_translation",
         "provider": provider,
@@ -409,18 +503,41 @@ async def translate_blocks(
 
     result_items: dict[str, Any] = {}
     missing: list[dict[str, Any]] = []
+    skipped_block_ids: list[str] = []
+    outcomes_changed = False
 
     for block_id in unique_ids:
         block = block_map.get(block_id)
+        cache_key = _cache_key(block_id, normalized_target)
         if not block:
+            skipped_block_ids.append(block_id)
+            cache_outcomes[cache_key] = _translation_outcome(
+                block_id=block_id,
+                target_lang=normalized_target,
+                status="skipped",
+                provider=provider,
+                model=model,
+                reason="block_not_found",
+            )
+            outcomes_changed = True
             continue
         text = str(block.get("text") or "").strip()
         if not text:
+            skipped_block_ids.append(block_id)
+            cache_outcomes[cache_key] = _translation_outcome(
+                block_id=block_id,
+                target_lang=normalized_target,
+                status="skipped",
+                provider=provider,
+                model=model,
+                reason="empty_block_text",
+                block=block,
+            )
+            outcomes_changed = True
             continue
         source_hash = _source_hash(text)
         block_type = _normalise_block_type(block)
         translation_mode = _get_translation_mode(block, text)
-        cache_key = _cache_key(block_id, normalized_target)
         cached = cache_items.get(cache_key)
         if (
             not force
@@ -429,6 +546,8 @@ async def translate_blocks(
             and cached.get("provider") == provider
         ):
             result_items[block_id] = cached
+            if cache_outcomes.pop(cache_key, None) is not None:
+                outcomes_changed = True
             continue
         if cached and not _is_valid_translation_record(cached):
             cache_items.pop(cache_key, None)
@@ -473,6 +592,7 @@ async def translate_blocks(
                     "created_at": now,
                 }
                 cache_items[_cache_key(block_id, normalized_target)] = record
+                cache_outcomes.pop(_cache_key(block_id, normalized_target), None)
                 result_items[block_id] = record
                 completed_block_ids.add(block_id)
                 changed = True
@@ -502,6 +622,16 @@ async def translate_blocks(
             for block in missing
             if block["block_id"] not in completed_block_ids
         ]
+        for block_id in failed_block_ids:
+            cache_outcomes[_cache_key(block_id, normalized_target)] = _translation_outcome(
+                block_id=block_id,
+                target_lang=normalized_target,
+                status="failed",
+                provider=provider,
+                model=model,
+                reason="model_returned_no_valid_translation",
+                block=block_map.get(block_id),
+            )
         await _write_translation_cache(cache_writer, cache)
     else:
         failed_block_ids = []
@@ -512,12 +642,20 @@ async def translate_blocks(
             model,
             len(result_items),
         )
+        if outcomes_changed:
+            await _write_translation_cache(cache_writer, cache)
 
+    if failed_block_ids or skipped_block_ids:
+        status = "partial" if result_items else ("failed" if failed_block_ids else "skipped")
+    else:
+        status = "completed" if result_items else "empty"
     return {
         "doc_id": doc_id,
         "target_lang": normalized_target,
         "items": result_items,
         "failed_block_ids": failed_block_ids,
+        "skipped_block_ids": skipped_block_ids,
+        "status": status,
     }
 
 
@@ -538,35 +676,40 @@ async def _generate_translations(
 
     async def translate_one(block: dict[str, Any]) -> dict[str, dict[str, str]]:
         async with semaphore:
-            try:
-                return await _generate_single_plain_translation(
-                    block=block,
-                    target_lang=target_lang,
-                    api_key=api_key,
-                    model=model,
-                    provider=provider,
-                    endpoint=endpoint,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[BlockTranslation] block %s failed: %s",
-                    block.get("block_id"),
-                    exc,
-                )
-                return {}
+            async with _GLOBAL_TRANSLATION_SEMAPHORE:
+                try:
+                    return await _generate_single_plain_translation(
+                        block=block,
+                        target_lang=target_lang,
+                        api_key=api_key,
+                        model=model,
+                        provider=provider,
+                        endpoint=endpoint,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[BlockTranslation] block %s failed: %s",
+                        block.get("block_id"),
+                        exc,
+                    )
+                    return {}
 
-    tasks = [asyncio.create_task(translate_one(block)) for block in blocks]
-    try:
-        for task in asyncio.as_completed(tasks):
-            item = await task
-            result.update(item)
-            if on_item:
-                await on_item(item)
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    for offset in range(0, len(blocks), TRANSLATION_TASK_BATCH_SIZE):
+        tasks = [
+            asyncio.create_task(translate_one(block))
+            for block in blocks[offset:offset + TRANSLATION_TASK_BATCH_SIZE]
+        ]
+        try:
+            for task in asyncio.as_completed(tasks):
+                item = await task
+                result.update(item)
+                if on_item:
+                    await on_item(item)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     return result
 

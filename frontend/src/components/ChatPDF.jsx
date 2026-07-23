@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, Bot, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical } from 'lucide-react';
+import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical } from 'lucide-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
@@ -42,13 +42,21 @@ import DocumentOutline from './DocumentOutline';
 import ReadingAnalysisPanel from './ReadingAnalysisPanel';
 import ReadingSummaryPanel from './ReadingSummaryPanel';
 import SettingsSegmentedControl from './SettingsSegmentedControl';
+import SettingsRange from './SettingsRange';
 import ParseRouteSelect from './ParseRouteSelect';
+import LocalParserInstallDialog from './LocalParserInstallDialog';
 import DocumentParseStatusBar from './DocumentParseStatusBar';
+import MinerUScanLoader from './MinerUScanLoader';
 import BackgroundTaskPanel, {
   getBackgroundTaskSummary,
   getVisibleBackgroundTasks,
 } from './BackgroundTaskPanel';
-import { loadStoredParseRoute, saveStoredParseRoute } from '../utils/parseRouteUtils';
+import {
+  loadStoredParseRoute,
+  saveStoredParseRoute,
+  shouldPollMinerUStatus,
+} from '../utils/parseRouteUtils';
+import { getMinerUProgressPresentation } from '../utils/mineruProgressUtils';
 import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
 import {
   blockIndexMatchesParseContext,
@@ -57,6 +65,20 @@ import {
   selectPendingPretranslateBlocks,
   shouldForcePretranslateRequest,
 } from '../utils/pretranslateUtils';
+import {
+  createDocumentNote,
+  createDocumentHighlight,
+  getDocumentHighlightFingerprint,
+  readDocumentHighlights,
+  readDocumentNotes,
+  writeDocumentHighlights,
+  writeDocumentNotes,
+} from '../utils/documentHighlightUtils';
+import {
+  buildSelectionSearchUrl,
+  openExternalHttpUrl,
+  writePlainTextToClipboard,
+} from '../utils/selectionToolUtils';
 
 const isLoopbackApiHost = (value) => {
   const input = String(value || '').trim();
@@ -73,6 +95,23 @@ const isLoopbackApiHost = (value) => {
   } catch {
     return false;
   }
+};
+
+const KEYLESS_LOCAL_PROVIDERS = new Set(['local', 'ollama']);
+const isKeylessLocalProvider = (providerId) => KEYLESS_LOCAL_PROVIDERS.has(
+  String(providerId || '').trim().toLowerCase()
+);
+const getMissingEmbeddingApiKeyMessage = (providerName) => `请先为 ${providerName || '当前 Embedding Provider'} 配置 Embedding API Key`;
+
+const buildProviderApiEndpoint = (apiHost, endpointPath) => {
+  const rawEndpoint = String(endpointPath || '').trim();
+  if (!rawEndpoint) return '';
+  if (/^https?:\/\//i.test(rawEndpoint)) return rawEndpoint;
+  const rawHost = String(apiHost || '').trim();
+  if (!rawHost) return '';
+  const normalizedHost = rawHost.replace(/\/+$/, '');
+  const normalizedPath = rawEndpoint.replace(/^\/+/, '');
+  return `${normalizedHost}/${normalizedPath}`;
 };
 
 const WebSearchSourcesBadge = ({ sources }) => {
@@ -197,6 +236,12 @@ const TABLE_VISUAL_VERIFICATION_STATUS_META = {
     className: 'border-rose-200 bg-rose-50 text-rose-700',
     iconClassName: '',
   },
+  stale: {
+    label: '结果已失效',
+    Icon: ScanText,
+    className: 'border-slate-200 bg-slate-50 text-slate-600',
+    iconClassName: '',
+  },
 };
 
 export const resolveTableVisualVerificationStatus = (verification) => {
@@ -220,6 +265,7 @@ const getTableVisualVerificationDetail = (verification, state) => {
   if (state === 'confirmed') return '视觉结果与结构化表格证据一致';
   if (state === 'conflict') return '视觉结果与结构化表格证据存在差异';
   if (state === 'indeterminate') return '图像证据不足以作出可靠判断';
+  if (state === 'stale') return '文档解析结果已更新，请按需重新核验';
   return '本次视觉核验未完成';
 };
 
@@ -239,6 +285,51 @@ const TableVisualVerificationStatus = ({ verification }) => {
       <span className="shrink-0 font-medium">表格视觉核验</span>
       <span className="shrink-0">{status.label}</span>
       <span className="min-w-0 truncate opacity-80" title={detail}>{detail}</span>
+    </div>
+  );
+};
+
+const CHAT_TURN_STATUS_META = {
+  interrupted: {
+    Icon: MessageCircle,
+    text: '生成已停止，当前内容可能不完整，不会用于后续对话上下文',
+    className: 'border-slate-200 bg-slate-50 text-slate-600',
+  },
+  degraded: {
+    Icon: X,
+    text: '模型服务异常，当前为降级回答，不会用于后续对话上下文',
+    className: 'border-rose-200 bg-rose-50 text-rose-700',
+  },
+  evidence_fallback: {
+    Icon: ScanText,
+    text: '模型生成失败，当前内容由文档证据兜底，不会用于后续对话上下文',
+    className: 'border-amber-200 bg-amber-50 text-amber-700',
+  },
+  recovered_retry: {
+    Icon: Sparkles,
+    text: '首次生成异常，已自动重试并完成回答',
+    className: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  },
+};
+
+const ChatTurnStatusNotice = ({ status, stale = false }) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  const meta = stale
+    ? {
+      Icon: ScanText,
+      text: '文档解析结果已更新，此回答仅作历史参考，不会用于后续对话上下文',
+      className: 'border-slate-200 bg-slate-50 text-slate-600',
+    }
+    : CHAT_TURN_STATUS_META[normalized];
+  if (!meta) return null;
+  const { Icon } = meta;
+  return (
+    <div
+      className={`mt-2 flex items-start gap-1.5 rounded-lg border px-2.5 py-2 text-xs ${meta.className}`}
+      role="status"
+    >
+      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span>{meta.text}</span>
     </div>
   );
 };
@@ -620,7 +711,7 @@ const getParseIdentity = (manifest) => {
 const getStatusParseIdentity = (status) => getParseIdentity(status?.parse_manifest);
 
 const buildOutlineCacheKey = (docId, parseIdentity, blockIndex) => (
-  `${docId || ''}:${parseIdentity || ''}:${blockIndex?.visual_supplement_revision || blockIndex?.source_hash || blockIndex?.generated_at || ''}`
+  `${docId || ''}:${parseIdentity || ''}:${blockIndex?.block_index_hash || blockIndex?.block_index_revision || blockIndex?.visual_supplement_revision || ''}`
 );
 
 const matchesOutlineGenerationFailure = (data, providerId, modelId) => {
@@ -632,9 +723,20 @@ const matchesOutlineGenerationFailure = (data, providerId, modelId) => {
 
 const isReusableOutlineResult = (data, kind, providerId, modelId) => {
   if (!data) return false;
-  if (data.source === 'ai') return true;
-  if (kind === 'section' && ['toc', 'bookmark'].includes(data.source)) return true;
+  if (['ai', 'ai_partial'].includes(data.source)) {
+    return String(data.provider || '').toLowerCase() === String(providerId || '').toLowerCase()
+      && String(data.model || '') === String(modelId || '');
+  }
+  if (kind === 'section' && ['toc', 'bookmark', 'mineru'].includes(data.source)) return true;
+  if (kind === 'reading') return false;
   return matchesOutlineGenerationFailure(data, providerId, modelId);
+};
+
+const getOutlineResultNotice = (data, fallbackMessage) => {
+  if (data?.source === 'ai_partial') {
+    return '部分章节未完成 AI 总结，当前保留已生成内容；可手动重新生成补齐。';
+  }
+  return data?.meta?.generation_error ? fallbackMessage : '';
 };
 
 const isMinerUParseGateError = (error) => {
@@ -647,7 +749,12 @@ const getMinerUParsePendingNotice = (manifest, deepParseStatus) => {
   const stage = String(manifest?.stage || deepParseStatus?.stage || '').trim().toLowerCase();
   const error = String(manifest?.error || deepParseStatus?.error || '').trim();
 
-  if (status === 'failed') return error || 'MinerU 全程解析失败，请重新上传后选择 MinerU 路线重试';
+  if (status === 'failed') {
+    if (deepParseStatus?.resume_available && deepParseStatus?.resume_kind === 'result_download') {
+      return 'MinerU 已完成远端解析，但结果下载连接中断。重试会复用原任务，不会重新上传 PDF。';
+    }
+    return error || 'MinerU 全程解析失败，请重新上传后选择 MinerU 路线重试';
+  }
   if (status === 'cancelled') return 'MinerU 全程解析已取消，请重新上传后选择 MinerU 路线重试';
   if (stage === 'awaiting_rag_index') {
     return 'MinerU 版面解析已完成，正在等待问答索引发布后统一开放阅读、翻译、速览和问答';
@@ -783,7 +890,6 @@ const ChatPDF = () => {
   const [apiKey, setApiKey] = useDebouncedLocalStorage('apiKey', '');
   const [apiProvider, setApiProvider] = useDebouncedLocalStorage('apiProvider', 'openai');
   const [model, setModel] = useDebouncedLocalStorage('model', 'gpt-4o');
-  const [embeddingApiKey, setEmbeddingApiKey] = useDebouncedLocalStorage('embeddingApiKey', '');
   const [enableVectorSearch, setEnableVectorSearch] = useDebouncedLocalStorage('enableVectorSearch', true);
   // 一次性迁移：旧版默认 enableVectorSearch=false，需强制升级为 true
   useEffect(() => {
@@ -823,6 +929,8 @@ const ChatPDF = () => {
   const [availableModels, setAvailableModels] = useState({});
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
   const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
+  const [documentHighlights, setDocumentHighlights] = useState([]);
+  const [documentNotes, setDocumentNotes] = useState([]);
   const [sidebarMode, setSidebarMode] = useState('history');
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [settingsSection, setSettingsSection] = useState('common');
@@ -864,6 +972,7 @@ const ChatPDF = () => {
   const [ragIndexNotice, setRagIndexNotice] = useState('');
   const [ragIndexError, setRagIndexError] = useState('');
   const [selectedParseRoute, setSelectedParseRoute] = useState(loadStoredParseRoute);
+  const [isLocalParserInstallOpen, setIsLocalParserInstallOpen] = useState(false);
   const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
   const [pinnedReadingBlockId, setPinnedReadingBlockId] = useState(null);
   const [readingJumpPulseToken, setReadingJumpPulseToken] = useState(0);
@@ -882,6 +991,8 @@ const ChatPDF = () => {
   const sectionOutlineCacheRef = useRef(new Map());
   const streamConfigMigratedRef = useRef(false);
   const uploadStartsNewChatRef = useRef(true);
+  const pendingLocalParserUploadRef = useRef(null);
+  const selectedPdfHighlightAnchorRef = useRef(null);
   const sidebarResizeRef = useRef({ active: false, pointerId: null, startX: 0, startWidth: SIDEBAR_DEFAULT_WIDTH, maxWidth: SIDEBAR_MAX_WIDTH });
 
   // 兼容旧配置：streamSpeed 和 streamOutput 过去分别持久化，
@@ -997,13 +1108,60 @@ const ChatPDF = () => {
     };
   }, [getDefaultModel, getProviderById, getModelById]);
 
-  const getEmbeddingApiKey = useCallback(() => {
+  const getEmbeddingCredentialState = useCallback(() => {
     const config = getEmbeddingConfig();
-    if (config.isValid && config.provider?.apiKey) {
-      return config.provider.apiKey;
+    if (!config.isValid) {
+      return {
+        isValid: false,
+        reason: String(config.reason || 'embedding_config_invalid'),
+        providerId: String(config.providerId || '').trim(),
+        providerName: String(config.provider?.name || config.providerId || '').trim(),
+        apiKey: '',
+        apiHost: '',
+        isMissingApiKey: false,
+      };
     }
-    return embeddingApiKey || apiKey;
-  }, [getEmbeddingConfig, embeddingApiKey, apiKey]);
+
+    const providerId = String(config.providerId || '').trim();
+    const providerName = String(config.provider?.name || providerId || '').trim();
+    const apiKey = isKeylessLocalProvider(providerId)
+      ? ''
+      : String(config.provider?.apiKey || '').trim();
+
+    return {
+      isValid: true,
+      providerId,
+      providerName,
+      apiKey,
+      apiHost: String(config.provider?.apiHost || '').trim(),
+      isMissingApiKey: !isKeylessLocalProvider(providerId) && !apiKey,
+    };
+  }, [getEmbeddingConfig]);
+
+  const getMissingEmbeddingCredential = useCallback(() => {
+    const credentials = getEmbeddingCredentialState();
+    if (!credentials.isValid) {
+      const messages = {
+        model_not_found: '当前默认 Embedding 模型不存在或已下线，请重新选择',
+        wrong_type: '当前默认模型不是 Embedding 类型，请切换后重试',
+        provider_missing: '当前默认 Embedding Provider 不存在，请在模型服务中重新配置',
+      };
+      return {
+        ...credentials,
+        message: messages[credentials.reason] || '请先在模型设置里选择可用的 Embedding 模型',
+      };
+    }
+    if (!credentials.isMissingApiKey) return null;
+    return {
+      ...credentials,
+      message: getMissingEmbeddingApiKeyMessage(credentials.providerName || credentials.providerId),
+    };
+  }, [getEmbeddingCredentialState]);
+
+  const getEmbeddingApiKey = useCallback(() => {
+    const credentials = getEmbeddingCredentialState();
+    return credentials.isValid ? credentials.apiKey : '';
+  }, [getEmbeddingCredentialState]);
 
   const getCurrentChatModel = useCallback(() => {
     const chatKey = getDefaultModel('assistantModel');
@@ -1096,12 +1254,22 @@ const ChatPDF = () => {
   const getCurrentRerankModel = useCallback(() => {
     const rrk = getDefaultModel('rerankModel');
     if (rrk) {
-      const [pid, mid] = rrk.split(':');
-      return { providerId: pid, modelId: mid };
+      const [pid, ...rest] = rrk.split(':');
+      return {
+        providerId: pid,
+        modelId: rest.join(':'),
+        compositeKey: rrk,
+        source: 'selected',
+      };
     }
     // 没有配置 rerank 模型时，仅在本地 rerank 可用时才 fallback 到本地
     if (hasLocalRerank) {
-      return { providerId: 'local', modelId: 'BAAI/bge-reranker-base' };
+      return {
+        providerId: 'local',
+        modelId: 'BAAI/bge-reranker-base',
+        compositeKey: 'local:BAAI/bge-reranker-base',
+        source: 'fallback_local',
+      };
     }
     return null;
   }, [getDefaultModel, hasLocalRerank]);
@@ -1109,10 +1277,79 @@ const ChatPDF = () => {
   const getRerankCredentials = useCallback(() => {
     const rerankModel = getCurrentRerankModel();
     if (!rerankModel) return null;
-    const { providerId, modelId } = rerankModel;
+    const { providerId, modelId, source } = rerankModel;
     const provider = getProviderById(providerId);
-    return { providerId, modelId, apiKey: provider?.apiKey || getEmbeddingApiKey() };
-  }, [getCurrentRerankModel, getProviderById, getEmbeddingApiKey]);
+    if (!provider) {
+      return {
+        isValid: false,
+        reason: 'provider_missing',
+        providerId,
+        modelId,
+        providerName: providerId,
+        errorMessage: '当前默认 Rerank Provider 不存在，请在模型服务中重新配置',
+      };
+    }
+
+    const modelObj = getModelById(modelId, providerId);
+    if (!modelObj && source !== 'fallback_local') {
+      return {
+        isValid: false,
+        reason: 'model_not_found',
+        providerId,
+        modelId,
+        providerName: provider.name || providerId,
+        errorMessage: '当前默认 Rerank 模型不存在或已下线，请重新选择后再搜索',
+      };
+    }
+    if (modelObj?.type && modelObj.type !== 'rerank') {
+      return {
+        isValid: false,
+        reason: 'wrong_type',
+        providerId,
+        modelId,
+        modelType: modelObj.type,
+        providerName: provider.name || providerId,
+        errorMessage: '当前默认模型不是 Rerank 类型，请切换后再搜索',
+      };
+    }
+
+    const apiHost = String(provider?.apiHost || '').trim();
+    const rerankEndpoint = buildProviderApiEndpoint(
+      apiHost,
+      provider?.apiConfig?.rerankEndpoint || '',
+    );
+    const apiKey = isKeylessLocalProvider(providerId) ? '' : String(provider?.apiKey || '').trim();
+    if (!isKeylessLocalProvider(providerId) && !apiKey) {
+      return {
+        isValid: false,
+        reason: 'api_key_missing',
+        providerId,
+        modelId,
+        providerName: provider.name || providerId,
+        errorMessage: `请先为 ${provider.name || providerId} 配置 Rerank API Key`,
+      };
+    }
+    if (!isKeylessLocalProvider(providerId) && !rerankEndpoint) {
+      return {
+        isValid: false,
+        reason: 'endpoint_missing',
+        providerId,
+        modelId,
+        providerName: provider.name || providerId,
+        errorMessage: `当前 Provider 未配置可用的 Rerank Endpoint：${provider.name || providerId}`,
+      };
+    }
+
+    return {
+      isValid: true,
+      providerId,
+      modelId,
+      providerName: provider.name || providerId,
+      apiKey,
+      apiHost,
+      rerankEndpoint,
+    };
+  }, [getCurrentRerankModel, getProviderById, getModelById]);
 
   const getDefaultModelLabel = useCallback((key, fallback = '未选择') => {
     if (!key) return fallback;
@@ -1215,13 +1452,55 @@ const ChatPDF = () => {
     startNewChat();
   }, [startNewChat]);
 
+  const ensureLocalParserReady = useCallback(async () => {
+    try {
+      const response = await fetch('/api/runtime/addons/local-parser/status');
+      if (response.ok) {
+        const status = await response.json();
+        if (status?.ready) return true;
+      }
+    } catch {
+      // The install dialog presents the retriable backend status to the user.
+    }
+    setIsLocalParserInstallOpen(true);
+    return false;
+  }, []);
+
   const handleUploadRouteChange = useCallback((route) => {
     const nextRoute = saveStoredParseRoute(route);
     setSelectedParseRoute(nextRoute);
+    if (nextRoute === 'local') {
+      void ensureLocalParserReady();
+    } else {
+      pendingLocalParserUploadRef.current = null;
+      setIsLocalParserInstallOpen(false);
+    }
+  }, [ensureLocalParserReady]);
+
+  const handleChooseUploadFile = useCallback(async (startsNewChat = true) => {
+    const shouldStartNewChat = typeof startsNewChat === 'boolean' ? startsNewChat : true;
+    if (selectedParseRoute === 'local') {
+      const localReady = await ensureLocalParserReady();
+      if (!localReady) {
+        pendingLocalParserUploadRef.current = shouldStartNewChat;
+        return;
+      }
+    }
+    uploadStartsNewChatRef.current = shouldStartNewChat;
+    fileInputRef.current?.click();
+  }, [ensureLocalParserReady, fileInputRef, selectedParseRoute]);
+
+  const handleLocalParserInstallClose = useCallback(() => {
+    pendingLocalParserUploadRef.current = null;
+    setIsLocalParserInstallOpen(false);
   }, []);
 
-  const handleChooseUploadFile = useCallback((startsNewChat = true) => {
-    uploadStartsNewChatRef.current = typeof startsNewChat === 'boolean' ? startsNewChat : true;
+  const handleLocalParserReady = useCallback(() => {
+    setIsLocalParserInstallOpen(false);
+    const shouldStartNewChat = pendingLocalParserUploadRef.current;
+    pendingLocalParserUploadRef.current = null;
+    if (typeof shouldStartNewChat !== 'boolean') return;
+    uploadStartsNewChatRef.current = shouldStartNewChat;
     fileInputRef.current?.click();
   }, [fileInputRef]);
 
@@ -1300,6 +1579,9 @@ const ChatPDF = () => {
   ).trim().toLowerCase();
   const isMinerUFullRouteFailed = isMinerUFullRoute(documentParseManifest)
     && currentParseStatus === 'failed';
+  const canResumeMinerUResultDownload = isMinerUFullRouteFailed
+    && currentDeepParseStatus?.resume_available === true
+    && currentDeepParseStatus?.resume_kind === 'result_download';
   const isMinerUFullRouteCancelled = isMinerUFullRoute(documentParseManifest)
     && currentParseStatus === 'cancelled';
   const isMinerUFullRoutePending = isMinerUFullRoute(documentParseManifest)
@@ -1313,9 +1595,21 @@ const ChatPDF = () => {
   const isNewMinerUPrimaryRoute = Boolean(
     documentParseManifest && !isLegacyParseManifest && primaryParseRoute === 'mineru'
   );
+  const shouldPollDeepParseStatus = shouldPollMinerUStatus({
+    status: currentDeepParseStatus?.status,
+    primaryMinerURoute: isNewMinerUPrimaryRoute,
+    routePending: isMinerUFullRoutePending,
+    routeFailed: isMinerUFullRouteFailed,
+    routeCancelled: isMinerUFullRouteCancelled,
+  });
   const canUseLegacyMinerUActions = !documentParseManifest || isLegacyParseManifest;
   const canPublishPendingMinerURag = isNewMinerUPrimaryRoute
     && documentParseManifest?.stage === 'awaiting_rag_index';
+  const requiresMinerURagSource = Boolean(
+    isNewMinerUPrimaryRoute
+    || canPublishPendingMinerURag
+    || currentDeepParseStatus?.active_mineru
+  );
   const minerUActionLockedNotice = isNewLocalPrimaryRoute
     ? '当前文档已按本地路线完成解析；如需 MinerU，请重新上传时选择 MinerU 全程解析'
     : '当前文档由 MinerU 全程路线管理；请等待统一发布，或重新上传时选择其他路线';
@@ -1334,9 +1628,12 @@ const ChatPDF = () => {
     docId,
     docInfo,
     documentIdentity: documentParseIdentity,
+    parseGeneration: documentParseManifest?.generation || '',
+    documentSourceHash: documentParseManifest?.source_hash || '',
     useRerank: useRerankSetting,
     rerankerModel,
     getRerankCredentials,
+    getEmbeddingConfig,
     embeddingApiKey: getEmbeddingApiKey(),
     apiKey,
   });
@@ -1350,12 +1647,19 @@ const ChatPDF = () => {
     searchResults,
     currentResultIndex,
     isSearching,
+    searchStatus,
     searchHistory,
     activeHighlight, setActiveHighlight,
     pdfContainerRef,
-    handleSearch, focusResult, handleCitationClick,
+    handleSearch, dismissSearchStatus, focusResult, handleCitationClick,
     formatSimilarity, renderHighlightedSnippet,
   } = pdfState;
+
+  useEffect(() => {
+    setDocumentHighlights(readDocumentHighlights(docId));
+    setDocumentNotes(readDocumentNotes(docId));
+    selectedPdfHighlightAnchorRef.current = null;
+  }, [docId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1586,6 +1890,8 @@ const ChatPDF = () => {
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setReadingOutline(null);
     setSectionOutline(null);
+    readingOutlineCacheRef.current.clear();
+    sectionOutlineCacheRef.current.clear();
     setReadingOutlineFallbackNotice('');
     setSectionOutlineFallbackNotice('');
     setReadingOutlineReloadKey((value) => value + 1);
@@ -1623,6 +1929,8 @@ const ChatPDF = () => {
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setReadingOutline(null);
     setSectionOutline(null);
+    readingOutlineCacheRef.current.clear();
+    sectionOutlineCacheRef.current.clear();
     setReadingOutlineFallbackNotice('');
     setSectionOutlineFallbackNotice('');
     setReadingOutlineReloadKey((value) => value + 1);
@@ -1662,53 +1970,61 @@ const ChatPDF = () => {
   }, [docId, refreshDeepParseStatus, refreshRagIndexStatus]);
 
   useEffect(() => {
-    if (!docId || !['queued', 'running'].includes(currentDeepParseStatus?.status)) {
+    if (!docId || !shouldPollDeepParseStatus) {
       return () => {};
     }
     let cancelled = false;
-    const timer = window.setInterval(async () => {
+    let timer = null;
+    const poll = async () => {
       try {
         const data = await refreshDeepParseStatus();
         if (cancelled || !data) return;
-        if (data.status === 'ready' && data.active_mineru && data.parse_ready === true) {
+        if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru && data.parse_ready === true) {
           setDeepParseNotice(
-            data.recommend_rag_index_rebuild
+            data.status === 'partial_ready'
+              ? 'MinerU 已完成，部分页面未识别出可用文本；阅读、问答和速览将基于其余页面'
+              : data.recommend_rag_index_rebuild
               ? 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
               : 'MinerU 深度解析完成，阅读结构、大纲与速览图表均已刷新'
           );
           refreshReadingBlocksAfterDeepParse();
           window.clearInterval(timer);
-        } else if (data.status === 'ready' && data.active_mineru) {
+        } else if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru) {
           setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
           window.clearInterval(timer);
         } else if (data.status === 'failed') {
           setDeepParseNotice(data.error || 'MinerU 深度解析失败');
-          window.clearInterval(timer);
+          if (timer) window.clearInterval(timer);
         } else if (data.status === 'cancelled') {
           setDeepParseNotice('MinerU 深度解析已取消');
-          window.clearInterval(timer);
+          if (timer) window.clearInterval(timer);
         }
       } catch (error) {
         if (!cancelled) {
           setDeepParseNotice(error.message || 'MinerU 深度解析状态同步失败');
         }
       }
-    }, 2500);
+    };
+    void poll();
+    timer = window.setInterval(poll, 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer) window.clearInterval(timer);
     };
   }, [
-    currentDeepParseStatus?.status,
     docId,
     documentParseIdentity,
     refreshDeepParseStatus,
     refreshReadingBlocksAfterDeepParse,
+    shouldPollDeepParseStatus,
   ]);
 
   const handleStartMinerUDeepParse = useCallback(async (options = {}) => {
     const retryFullRoute = options?.retryFullRoute === true;
     const canRetryFullRoute = retryFullRoute && isNewMinerUPrimaryRoute && isMinerUFullRouteFailed;
+    const canResumeResultDownload = canRetryFullRoute
+      && currentDeepParseStatus?.resume_available === true
+      && currentDeepParseStatus?.resume_kind === 'result_download';
     if (!canUseLegacyMinerUActions && !canRetryFullRoute) {
       setDeepParseNotice(minerUActionLockedNotice);
       return;
@@ -1719,7 +2035,9 @@ const ChatPDF = () => {
       ? 'MinerU 官方 API'
       : '你配置的 MinerU Worker 服务';
     const confirmed = window.confirm(
-      canRetryFullRoute
+      canResumeResultDownload
+        ? '将复用 MinerU 已完成的远端解析任务，仅重新获取并下载结果，不会重新上传 PDF。是否继续？'
+        : canRetryFullRoute
         ? `重试 MinerU 全程解析会把当前 PDF 重新上传到${parseTarget}，成功后统一替换正文、阅读、问答索引、大纲、总结、翻译与速览。是否继续？`
         : activeMinerU
         ? `重新运行 MinerU 深度解析会把当前 PDF 上传到${parseTarget}，并替换阅读块、大纲、翻译缓存和速览图表。是否继续？`
@@ -1746,15 +2064,19 @@ const ChatPDF = () => {
         || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
       ) return;
       setDeepParseStatus(data);
-      if (data.status === 'ready' && data.active_mineru && data.parse_ready === true) {
+      if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru && data.parse_ready === true) {
         setDeepParseNotice(
-          data.recommend_rag_index_rebuild
+          data.status === 'partial_ready'
+            ? 'MinerU 已完成，部分页面未识别出可用文本；阅读、问答和速览将基于其余页面'
+            : data.recommend_rag_index_rebuild
             ? 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新；建议重建问答索引以启用结构化表格证据'
             : 'MinerU 深度解析已就绪，阅读结构、大纲与速览图表均已刷新'
         );
         refreshReadingBlocksAfterDeepParse();
-      } else if (data.status === 'ready' && data.active_mineru) {
+      } else if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru) {
         setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
+      } else if (data.resume_kind === 'result_download' || data.stage === 'resuming_result_download') {
+        setDeepParseNotice('正在重新获取 MinerU 已完成的解析结果，不会重新上传 PDF');
       } else {
         setDeepParseNotice('MinerU 深度解析已开始，可继续阅读，完成后阅读结构与速览图表会自动刷新');
       }
@@ -1767,6 +2089,8 @@ const ChatPDF = () => {
     canUseLegacyMinerUActions,
     currentDeepParseStatus?.access_mode,
     currentDeepParseStatus?.active_mineru,
+    currentDeepParseStatus?.resume_available,
+    currentDeepParseStatus?.resume_kind,
     currentDeepParseStatus?.status,
     docId,
     documentParseIdentity,
@@ -1803,7 +2127,12 @@ const ChatPDF = () => {
   }, [currentDeepParseStatus?.status, docId, documentParseIdentity, isCurrentParseContext]);
 
   const handleRebuildMinerURagIndex = useCallback(async () => {
-    if (isNewLocalPrimaryRoute) {
+    const rebuildLocalIndex = Boolean(
+      !requiresMinerURagSource
+      && ragIndexStatus?.upgrade_required
+      && ragIndexStatus?.index_source !== 'mineru'
+    );
+    if (isNewLocalPrimaryRoute && !rebuildLocalIndex) {
       setRagIndexNotice('当前文档已固定为本地解析路线，不能单独切换到 MinerU 问答索引');
       return;
     }
@@ -1812,7 +2141,7 @@ const ChatPDF = () => {
       return;
     }
     if (!docId || ragIndexBusy) return;
-    if (!canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru) {
+    if (!rebuildLocalIndex && !canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru) {
       const message = '请先完成 MinerU 深度解析';
       setRagIndexNotice(message);
       setRagIndexError(message);
@@ -1825,18 +2154,26 @@ const ChatPDF = () => {
       setRagIndexError(message);
       return;
     }
-    const embeddingModel = embedConfig.compositeKey || getDefaultModel('embeddingModel') || 'local-minilm';
-    const embeddingApiKeyValue = getEmbeddingApiKey?.() || '';
-    const embeddingApiHost = embedConfig.provider?.apiHost || '';
+    const missingEmbeddingCredential = getMissingEmbeddingCredential();
+    if (missingEmbeddingCredential) {
+      setRagIndexNotice(missingEmbeddingCredential.message);
+      setRagIndexError(missingEmbeddingCredential.message);
+      return;
+    }
+    const embeddingCredentials = getEmbeddingCredentialState();
+    const embeddingModel = embedConfig.compositeKey;
+    const embeddingProvider = embedConfig.providerId || '';
+    const embeddingApiKeyValue = embeddingCredentials.apiKey || '';
+    const embeddingApiHost = embeddingCredentials.apiHost || '';
 
     setRagIndexBusy(true);
     setRagIndexError('');
-    setRagIndexNotice('正在评估 MinerU 问答索引重建成本...');
+    setRagIndexNotice(rebuildLocalIndex ? '正在评估本地问答索引升级成本...' : '正在评估 MinerU 问答索引重建成本...');
     try {
       const estimateRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ estimate_only: true }),
+        body: JSON.stringify({ estimate_only: true, source: rebuildLocalIndex ? 'local' : 'mineru' }),
       });
       const estimateData = await estimateRes.json().catch(() => ({}));
       if (!estimateRes.ok) {
@@ -1845,27 +2182,30 @@ const ChatPDF = () => {
       }
       if (!estimateData.can_rebuild) {
         const failures = (estimateData.quality_failures || []).join('、') || '质量门未通过';
-        throw new Error(`MinerU 结果暂不能重建问答索引：${failures}`);
+        throw new Error(`${rebuildLocalIndex ? '当前正文' : 'MinerU 结果'}暂不能重建问答索引：${failures}`);
       }
       const estimate = estimateData.estimate || {};
       const confirmed = window.confirm(
-        `将使用 MinerU 结构化结果重建问答索引。\n\n`
+        `${rebuildLocalIndex ? '将使用当前解析路线的正文阅读块升级问答索引。' : '将使用 MinerU 结构化结果重建问答索引。'}\n\n`
         + `预计重新嵌入约 ${estimate.estimated_embedding_tokens || 0} tokens，约 ${estimate.estimated_chunk_count || 0} 个分块，表格 ${estimate.structured_table_count || 0} 个，耗时约 1-3 分钟。\n`
         + `历史对话中的引用可能发生偏移；阅读侧翻译、大纲和速览不受影响。\n`
         + `重建期间旧问答索引会继续可用。是否继续？`
       );
       if (!confirmed) {
-        setRagIndexNotice('已取消问答索引重建');
+        setRagIndexNotice('问答索引尚未发布，可稍后继续');
+        setRagIndexError('');
         return;
       }
-      setRagIndexNotice('正在重建 MinerU 问答索引...');
+      setRagIndexNotice(rebuildLocalIndex ? '正在升级本地问答索引...' : '正在重建 MinerU 问答索引...');
       const rebuildRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           embedding_model: embeddingModel,
+          embedding_provider: embeddingProvider,
           embedding_api_key: embeddingApiKeyValue,
           embedding_api_host: embeddingApiHost,
+          source: rebuildLocalIndex ? 'local' : 'mineru',
         }),
       });
       const rebuildData = await rebuildRes.json().catch(() => ({}));
@@ -1875,14 +2215,20 @@ const ChatPDF = () => {
       }
       setRagIndexStatus(rebuildData.rag_index || null);
       setRagIndexError('');
-      setRagIndexNotice('MinerU 问答索引已重建，表格问答会优先使用结构化证据');
-      const status = await refreshDeepParseStatus();
-      if (status?.active_mineru && status?.parse_ready === true) {
-        setDeepParseNotice('MinerU 问答索引已发布，阅读结构、大纲、翻译、速览和问答现已同步切换');
-        refreshReadingBlocksAfterDeepParse();
+      setRagIndexNotice(
+        rebuildLocalIndex
+          ? '本地问答索引已升级，正文、表格与页码检索已按当前阅读结构重建'
+          : 'MinerU 问答索引已重建，表格问答会优先使用结构化证据'
+      );
+      if (!rebuildLocalIndex) {
+        const status = await refreshDeepParseStatus();
+        if (status?.active_mineru && status?.parse_ready === true) {
+          setDeepParseNotice('MinerU 问答索引已发布，阅读结构、大纲、翻译、速览和问答现已同步切换');
+          refreshReadingBlocksAfterDeepParse();
+        }
       }
     } catch (error) {
-      const message = error.message || 'MinerU 问答索引重建失败，已保留原索引';
+      const message = error.message || '问答索引重建失败，已保留原索引';
       setRagIndexNotice(message);
       setRagIndexError(message);
     } finally {
@@ -1892,14 +2238,17 @@ const ChatPDF = () => {
     canPublishPendingMinerURag,
     currentDeepParseStatus?.active_mineru,
     docId,
-    getDefaultModel,
-    getEmbeddingApiKey,
+    getEmbeddingCredentialState,
     getEmbeddingConfig,
+    getMissingEmbeddingCredential,
     isNewLocalPrimaryRoute,
     isNewMinerUPrimaryRoute,
     ragIndexBusy,
+    ragIndexStatus?.index_source,
+    ragIndexStatus?.upgrade_required,
     refreshDeepParseStatus,
     refreshReadingBlocksAfterDeepParse,
+    requiresMinerURagSource,
   ]);
 
   const handleRollbackRagIndex = useCallback(async () => {
@@ -1953,12 +2302,12 @@ const ChatPDF = () => {
     if (
       !shouldForce
       && cachedOutline
-      && (!shouldAutoGenerate || isReusableOutlineResult(cachedOutline, 'reading', providerId, modelId))
+      && isReusableOutlineResult(cachedOutline, 'reading', providerId, modelId)
     ) {
       setReadingOutline(cachedOutline);
       setReadingOutlineError('');
       setReadingOutlineFallbackNotice(
-        cachedOutline?.meta?.generation_error ? 'AI 总结生成失败，当前显示本地基础结果' : ''
+        getOutlineResultNotice(cachedOutline, 'AI 总结生成失败，当前显示本地基础结果')
       );
       setReadingOutlineLoading(false);
       return () => {
@@ -2001,7 +2350,7 @@ const ChatPDF = () => {
           readingOutlineCacheRef.current.set(cacheKey, data);
           setReadingOutline(data);
           setReadingOutlineFallbackNotice(
-            data?.meta?.generation_error ? 'AI 总结生成失败，当前显示本地基础结果' : ''
+            getOutlineResultNotice(data, 'AI 总结生成失败，当前显示本地基础结果')
           );
         }
       })
@@ -2048,6 +2397,8 @@ const ChatPDF = () => {
       return;
     }
     readingOutlineForceRef.current = true;
+    readingOutlineCacheRef.current.clear();
+    setReadingOutlineFallbackNotice('');
     setReadingOutlineReloadKey((value) => value + 1);
   }, [getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
 
@@ -2097,7 +2448,7 @@ const ChatPDF = () => {
       setSectionOutline(cachedOutline);
       setSectionOutlineError('');
       setSectionOutlineFallbackNotice(
-        cachedOutline?.meta?.generation_error ? 'AI 章节大纲生成失败，当前显示文档基础结构' : ''
+        getOutlineResultNotice(cachedOutline, 'AI 章节大纲生成失败，当前显示文档基础结构')
       );
       setSectionOutlineLoading(false);
       return () => {
@@ -2140,7 +2491,7 @@ const ChatPDF = () => {
           sectionOutlineCacheRef.current.set(cacheKey, data);
           setSectionOutline(data);
           setSectionOutlineFallbackNotice(
-            data?.meta?.generation_error ? 'AI 章节大纲生成失败，当前显示文档基础结构' : ''
+            getOutlineResultNotice(data, 'AI 章节大纲生成失败，当前显示文档基础结构')
           );
         }
       })
@@ -2217,6 +2568,14 @@ const ChatPDF = () => {
       .then((data) => {
         if (isActiveRequest()) {
           setBlockTranslations(filterValidBlockTranslations(data?.items || {}));
+          const restoredFailures = [
+            ...(Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : []),
+            ...(Array.isArray(data?.skipped_block_ids) ? data.skipped_block_ids : []),
+          ].filter(Boolean);
+          setFailedTranslationBlockIds(new Set(restoredFailures));
+          if (restoredFailures.length > 0) {
+            setBlockTranslateError(`有 ${restoredFailures.length} 个段落尚未完成翻译，可继续补齐`);
+          }
         }
       })
       .catch((error) => {
@@ -2353,38 +2712,6 @@ const ChatPDF = () => {
     return result;
   }, [readingOutlineFlat]);
 
-  const inlineBlockTranslations = useMemo(() => {
-    const result = { ...blockTranslations };
-    readingOutlineFlat.forEach((item) => {
-      const ids = item.evidence?.block_ids || item.evidence_block_ids || [];
-      const outlineSummary = (item.summary || item.title || '').trim();
-      ids.forEach((blockId) => {
-        if (!blockId || !outlineSummary) return;
-        if (result[blockId]) {
-          const currentSummary = String(result[blockId]?.summary || '').trim();
-          if (!currentSummary) {
-            result[blockId] = {
-              ...result[blockId],
-              summary: outlineSummary,
-              summary_source: 'reading_outline',
-            };
-          }
-          return;
-        }
-        if (item.summary) {
-          result[blockId] = {
-            block_id: blockId,
-            target_lang: 'zh',
-            translation: item.summary,
-            summary: item.title,
-            source: 'reading_outline',
-          };
-        }
-      });
-    });
-    return result;
-  }, [blockTranslations, readingOutlineFlat]);
-
   const activeReadingNode = activeReadingNodeId ? readingNodeById[activeReadingNodeId] : null;
   const focusedReadingBlockIds = useMemo(() => {
     const ids = activeReadingNode?.evidence?.block_ids || activeReadingNode?.evidence_block_ids || [];
@@ -2466,6 +2793,11 @@ const ChatPDF = () => {
 
         const items = data?.items || {};
         setBlockTranslations((prev) => ({ ...prev, ...items }));
+        const cachedFailures = [
+          ...(Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : []),
+          ...(Array.isArray(data?.skipped_block_ids) ? data.skipped_block_ids : []),
+        ].filter(Boolean);
+        setFailedTranslationBlockIds(new Set(cachedFailures));
         const done = allTranslatableReadingBlocks.filter((block) => items[block.block_id]).length;
         setPretranslateProgress((prev) => (
           prev.running && !prev.force && !prev.retryFailed
@@ -2517,6 +2849,39 @@ const ChatPDF = () => {
       return Number(item.page) === Number(currentPage);
     });
   }, [currentPage, readingOutlineFlat]);
+
+  const currentPageUserNotes = useMemo(() => (
+    documentNotes.filter((item) => Number(item.page) === Number(currentPage))
+  ), [currentPage, documentNotes]);
+
+  const handleUserNoteClick = useCallback((note) => {
+    if (!note) return;
+    const targetPage = Math.max(1, Number(note.page) || 1);
+    setCurrentPage(targetPage);
+    setActiveHighlight({
+      page: targetPage,
+      text: note.text,
+      source: 'note',
+      at: Date.now(),
+      citationAnchor: {
+        rects: (note.rects || []).map((rect) => [
+          rect.left,
+          rect.top,
+          rect.left + rect.width,
+          rect.top + rect.height,
+        ]),
+        coordinateSpace: 'pdf_top_left_points',
+      },
+    });
+  }, [setActiveHighlight, setCurrentPage]);
+
+  const handleDeleteUserNote = useCallback((noteId) => {
+    const nextNotes = documentNotes.filter((item) => item.id !== noteId);
+    setDocumentNotes(nextNotes);
+    if (!writeDocumentNotes(docId, nextNotes)) {
+      console.warn('[DocumentNote] 笔记已从当前界面移除，但持久化写入失败');
+    }
+  }, [docId, documentNotes]);
 
   const handleOutlineJump = useCallback((item) => {
     if (!item) return;
@@ -2663,6 +3028,7 @@ const ChatPDF = () => {
       setBlockTranslations((prev) => ({ ...prev, ...translatedItems }));
       const failedBlockIds = [
         ...(Array.isArray(data?.failed_block_ids) ? data.failed_block_ids : []),
+        ...(Array.isArray(data?.skipped_block_ids) ? data.skipped_block_ids : []),
         ...invalidReturnedIds,
       ].filter((blockId, index, arr) => blockId && arr.indexOf(blockId) === index);
       setFailedTranslationBlockIds((prev) => {
@@ -2674,7 +3040,12 @@ const ChatPDF = () => {
       if (failedBlockIds.length > 0) {
         setBlockTranslateError(`有 ${failedBlockIds.length} 个段落暂未翻译成功，可稍后补齐`);
       }
-      const normalizedData = { ...(data || {}), items: translatedItems, failed_block_ids: failedBlockIds };
+      const normalizedData = {
+        ...(data || {}),
+        items: translatedItems,
+        failed_block_ids: failedBlockIds,
+        skipped_block_ids: Array.isArray(data?.skipped_block_ids) ? data.skipped_block_ids : [],
+      };
       return options.returnRaw ? normalizedData : translatedItems;
     } catch (error) {
       if (error?.name === 'AbortError') {
@@ -2997,7 +3368,6 @@ const ChatPDF = () => {
     pdfContainerRef,
     textareaRef: textareaRefProxy,
     isVisionCapable,
-    setInputValue: (...args) => messageSettersRef.current.setInputValue?.(...args),
     sendMessage: (...args) => messageSettersRef.current.sendMessage?.(...args),
   });
   const {
@@ -3017,6 +3387,8 @@ const ChatPDF = () => {
   // ========== 消息状态 Hook（需求 1.2） ==========
   const messageState = useMessageState({
     docId,
+    parseGeneration: documentParseManifest?.generation || '',
+    documentSourceHash: documentParseManifest?.source_hash || '',
     screenshots,
     selectedText,
     getChatCredentials,
@@ -3026,6 +3398,7 @@ const ChatPDF = () => {
     streamSpeed,
     enableVectorSearch,
     embeddingApiKey: getEmbeddingApiKey(),
+    getEmbeddingConfig,
     enableGraphRAG,
     enableAgentRetrieval,
     forceAgentRetrieval,
@@ -3044,13 +3417,38 @@ const ChatPDF = () => {
     copiedMessageId,
     likedMessages, rememberedMessages,
     messagesEndRef, textareaRef,
-    sendMessage, handleStop,
-    regenerateMessage, copyMessage, saveToMemory,
+    sendMessage: sendMessageInternal, handleStop,
+    regenerateMessage: regenerateMessageInternal, copyMessage, saveToMemory,
     setInputValue,
+    invalidateVisualVerificationState,
     // ref 直写模式：流式输出期间直接更新 DOM
     streamingContentRef,
     streamingThinkingRef,
   } = messageState;
+  const hasEmbeddingDependentChatFeatures = enableVectorSearch
+    || enableGraphRAG
+    || enableAgentRetrieval
+    || forceAgentRetrieval;
+  const sendMessage = useCallback((overrides = {}) => {
+    if (hasEmbeddingDependentChatFeatures) {
+      const missingEmbeddingCredential = getMissingEmbeddingCredential();
+      if (missingEmbeddingCredential) {
+        alert(missingEmbeddingCredential.message);
+        return;
+      }
+    }
+    return sendMessageInternal(overrides);
+  }, [getMissingEmbeddingCredential, hasEmbeddingDependentChatFeatures, sendMessageInternal]);
+  const regenerateMessage = useCallback((...args) => {
+    if (hasEmbeddingDependentChatFeatures) {
+      const missingEmbeddingCredential = getMissingEmbeddingCredential();
+      if (missingEmbeddingCredential) {
+        alert(missingEmbeddingCredential.message);
+        return;
+      }
+    }
+    return regenerateMessageInternal(...args);
+  }, [getMissingEmbeddingCredential, hasEmbeddingDependentChatFeatures, regenerateMessageInternal]);
 
   // 双向联动：当前高亮的引文编号
   const [activeCitationRef, setActiveCitationRef] = useState(null);
@@ -3099,7 +3497,7 @@ const ChatPDF = () => {
   // 文档变更时保存会话
   useEffect(() => {
     if (docId && docInfo) saveCurrentSession(messages);
-  }, [docId, docInfo, messages]);
+  }, [docId, docInfo, messages, saveCurrentSession]);
 
   // ========== GraphRAG 构建 / 状态查询 ==========
   // 切换文档时先重置状态，然后查询是否已有图谱实例在后端内存中。
@@ -3163,15 +3561,26 @@ const ChatPDF = () => {
       return;
     }
 
+    const chatProviderFull = getProviderById?.(chatProvider);
+    const embedConfig = getEmbeddingConfig?.() || {};
+    if (!embedConfig.isValid) {
+      alert('请先在模型设置里选择可用的 Embedding 模型');
+      return;
+    }
+    const missingEmbeddingCredential = getMissingEmbeddingCredential();
+    if (missingEmbeddingCredential) {
+      alert(missingEmbeddingCredential.message);
+      return;
+    }
+    const embeddingCredentials = getEmbeddingCredentialState();
+
     setGraphragStatus('building');
     setGraphragError('');
 
-    const chatProviderFull = getProviderById?.(chatProvider);
-    const embedConfig = getEmbeddingConfig?.() || {};
-    const embedModel = embedConfig.model || chatModel;
-    const embedProvider = embedConfig.provider || chatProvider;
-    const embedApiKey = embedConfig.apiKey || chatApiKey;
-    const embedApiHost = embedConfig.apiHost || '';
+    const embedModel = embedConfig.compositeKey || '';
+    const embedProvider = embedConfig.providerId || '';
+    const embedApiKey = embeddingCredentials.apiKey || '';
+    const embedApiHost = embeddingCredentials.apiHost || '';
 
     const body = {
       api_key: chatApiKey,
@@ -3179,6 +3588,7 @@ const ChatPDF = () => {
       api_provider: chatProviderFull?.provider || chatProvider,
       api_host: chatProviderFull?.apiHost || '',
       embedding_model: embedModel,
+      embedding_provider: embedProvider,
       embedding_api_key: embedApiKey,
       embedding_api_host: embedApiHost,
       force_rebuild: opts.forceRebuild || false,
@@ -3242,9 +3652,10 @@ const ChatPDF = () => {
   }, [
     docId,
     getChatCredentials,
+    getEmbeddingCredentialState,
     getProviderById,
     getEmbeddingConfig,
-    getEmbeddingApiKey,
+    getMissingEmbeddingCredential,
     isMinerUFullRoutePending,
     minerUParsePendingNotice,
   ]);
@@ -3270,6 +3681,7 @@ const ChatPDF = () => {
     const selection = window.getSelection();
     const text = selection.toString().trim();
     if (text) {
+      selectedPdfHighlightAnchorRef.current = null;
       setSelectedText(text);
       setShowTextMenu(true);
       if (selection.rangeCount > 0) {
@@ -3283,6 +3695,7 @@ const ChatPDF = () => {
   }, [setSelectedText, setShowTextMenu, setMenuPosition]);
 
   const handleCloseToolbar = useCallback(() => {
+    selectedPdfHighlightAnchorRef.current = null;
     setShowTextMenu(false);
     setSelectedText('');
   }, [setShowTextMenu, setSelectedText]);
@@ -3291,8 +3704,9 @@ const ChatPDF = () => {
   const handleToolbarScaleChange = useCallback((scale) => setToolbarScale(scale), [setToolbarScale]);
 
   // PDFViewer 的文本选择回调（useCallback 稳定引用，避免 PDFViewer 不必要重渲染）
-  const handlePdfTextSelect = useCallback((text) => {
+  const handlePdfTextSelect = useCallback((text, anchor = null) => {
     if (text) {
+      selectedPdfHighlightAnchorRef.current = anchor;
       setSelectedText(text);
       setShowTextMenu(true);
       const selection = window.getSelection();
@@ -3311,89 +3725,137 @@ const ChatPDF = () => {
     setEnableThinking(enabled);
   }, [setEnableThinking]);
 
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(selectedText).then(() => {
-      alert('✅ 已复制到剪贴板');
-    });
+  const handleCopy = useCallback(async () => {
+    await writePlainTextToClipboard(selectedText);
+    return { message: '已复制到剪贴板' };
   }, [selectedText]);
 
   const handleHighlight = useCallback(() => {
-    const highlights = JSON.parse(localStorage.getItem(`highlights_${docId}`) || '[]');
-    const newHighlight = {
-      text: selectedText, page: currentPage,
-      timestamp: Date.now(), color: '#fef08a',
-    };
-    highlights.push(newHighlight);
-    localStorage.setItem(`highlights_${docId}`, JSON.stringify(highlights));
-    alert('✅ 已添加高亮标注');
-  }, [docId, selectedText, currentPage]);
+    if (!docId || !selectedText.trim()) return;
+    const anchor = selectedPdfHighlightAnchorRef.current;
+    const newHighlight = createDocumentHighlight({
+      text: selectedText,
+      page: Number(anchor?.page) || currentPage,
+      rects: anchor?.rects || [],
+    });
+    if (!newHighlight) return;
 
-  const handleAddNote = useCallback(() => {
-    const note = prompt('请输入您的笔记：', '');
-    if (note) {
-      const notes = JSON.parse(localStorage.getItem(`notes_${docId}`) || '[]');
-      notes.push({
-        text: selectedText, note, page: currentPage,
-        timestamp: Date.now(),
-      });
-      localStorage.setItem(`notes_${docId}`, JSON.stringify(notes));
-      alert('✅ 笔记已保存');
+    const fingerprint = getDocumentHighlightFingerprint(newHighlight);
+    const alreadySaved = documentHighlights.some(
+      (item) => getDocumentHighlightFingerprint(item) === fingerprint
+    );
+    const nextHighlights = alreadySaved
+      ? documentHighlights
+      : [...documentHighlights, newHighlight];
+    if (!alreadySaved) {
+      setDocumentHighlights(nextHighlights);
+      if (!writeDocumentHighlights(docId, nextHighlights)) {
+        console.warn('[DocumentHighlight] 高亮已显示，但持久化写入失败');
+      }
     }
-  }, [docId, selectedText, currentPage]);
+
+    window.getSelection()?.removeAllRanges?.();
+    handleCloseToolbar();
+  }, [currentPage, docId, documentHighlights, handleCloseToolbar, selectedText]);
+
+  const handleAddNote = useCallback(async (noteContent) => {
+    if (!docId || !selectedText.trim()) throw new Error('没有可关联的原文');
+    const anchor = selectedPdfHighlightAnchorRef.current;
+    const newNote = createDocumentNote({
+      text: selectedText,
+      note: noteContent,
+      page: Number(anchor?.page) || currentPage,
+      rects: anchor?.rects || [],
+    });
+    if (!newNote) throw new Error('笔记内容不能为空');
+
+    const nextNotes = [...documentNotes, newNote];
+    setDocumentNotes(nextNotes);
+    if (!writeDocumentNotes(docId, nextNotes)) {
+      console.warn('[DocumentNote] 笔记已显示，但持久化写入失败');
+    }
+    setRightPanelMode('analysis');
+    setActiveHighlight({
+      page: newNote.page,
+      text: newNote.text,
+      source: 'note',
+      at: Date.now(),
+      citationAnchor: {
+        rects: newNote.rects.map((rect) => [
+          rect.left,
+          rect.top,
+          rect.left + rect.width,
+          rect.top + rect.height,
+        ]),
+        coordinateSpace: 'pdf_top_left_points',
+      },
+    });
+    window.getSelection()?.removeAllRanges?.();
+    handleCloseToolbar();
+    return { message: '笔记已保存' };
+  }, [currentPage, docId, documentNotes, handleCloseToolbar, selectedText, setActiveHighlight, setRightPanelMode]);
 
   const handleAIExplain = useCallback(() => {
     if (isMinerUFullRoutePending) {
       setDeepParseNotice(minerUParsePendingNotice);
-      return;
+      return { message: minerUParsePendingNotice, tone: 'error' };
     }
-    setInputValue(`请解释这段话：\n\n"${selectedText}"`);
-    setShowTextMenu(false);
-    setTimeout(() => sendMessage(), 100);
+    const input = `请解释这段话：\n\n"${selectedText}"`;
+    setRightPanelMode('chat');
+    handleCloseToolbar();
+    return sendMessage({ input, interactionMode: 'selection' });
   }, [
+    handleCloseToolbar,
     isMinerUFullRoutePending,
     minerUParsePendingNotice,
     selectedText,
-    setInputValue,
     sendMessage,
-    setShowTextMenu,
+    setRightPanelMode,
   ]);
 
   const handleTranslate = useCallback(() => {
     if (isMinerUFullRoutePending) {
       setDeepParseNotice(minerUParsePendingNotice);
-      return;
+      return { message: minerUParsePendingNotice, tone: 'error' };
     }
-    setInputValue(`请将以下内容翻译成中文：\n\n"${selectedText}"`);
-    setShowTextMenu(false);
-    setTimeout(() => sendMessage(), 100);
+    const input = `请将以下内容翻译成中文：\n\n"${selectedText}"`;
+    setRightPanelMode('chat');
+    handleCloseToolbar();
+    return sendMessage({ input, interactionMode: 'selection' });
   }, [
+    handleCloseToolbar,
     isMinerUFullRoutePending,
     minerUParsePendingNotice,
     selectedText,
-    setInputValue,
     sendMessage,
-    setShowTextMenu,
+    setRightPanelMode,
   ]);
 
-  const handleWebSearch = useCallback(() => {
-    const q = encodeURIComponent(selectedText);
-    const searchTemplates = {
-      google: `https://www.google.com/search?q=${q}`,
-      bing: `https://www.bing.com/search?q=${q}`,
-      baidu: `https://www.baidu.com/s?wd=${q}`,
-      sogou: `https://www.sogou.com/web?query=${q}`,
-      custom: searchEngineUrl.includes('{query}')
-        ? searchEngineUrl.replace('{query}', q)
-        : `${searchEngineUrl}?q=${q}`,
-    };
-    window.open(searchTemplates[searchEngine] || searchTemplates.google, '_blank');
-  }, [selectedText, searchEngine, searchEngineUrl]);
-
-  const handleShare = useCallback(() => {
-    const shareText = `📄 来自《${docInfo?.filename || '文档'}》第 ${currentPage} 页：\n\n"${selectedText}"\n\n--- ChatPDF Pro ---`;
-    navigator.clipboard.writeText(shareText).then(() => {
-      alert('✅ 引用卡片已复制到剪贴板，可直接粘贴分享');
+  const handleWebSearch = useCallback(async () => {
+    const url = buildSelectionSearchUrl({
+      engine: searchEngine,
+      customUrl: searchEngineUrl,
+      query: selectedText,
     });
+    await openExternalHttpUrl(url);
+    handleCloseToolbar();
+  }, [handleCloseToolbar, searchEngine, searchEngineUrl, selectedText]);
+
+  const handleShare = useCallback(async () => {
+    const shareText = `📄 来自《${docInfo?.filename || '文档'}》第 ${currentPage} 页：\n\n"${selectedText}"\n\n--- ChatPDF Pro ---`;
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: `${docInfo?.filename || '文档'} · 第 ${currentPage} 页`,
+          text: shareText,
+        });
+        return { message: '已打开系统分享' };
+      } catch (error) {
+        if (error?.name === 'AbortError') return null;
+      }
+    }
+    await writePlainTextToClipboard(shareText);
+    return { message: '分享内容已复制' };
   }, [docInfo, currentPage, selectedText]);
 
   // ========== 搜索导航 ==========
@@ -3423,6 +3885,7 @@ const ChatPDF = () => {
     if (!window.confirm('只清理当前文档的 AI 辅助缓存，不会删除原始 PDF、向量索引或对话历史。确定继续吗？')) {
       return;
     }
+    handleStop();
     blockTranslationEpochRef.current += 1;
     pretranslateRunRef.current += 1;
     pretranslateAbortRef.current?.abort();
@@ -3436,8 +3899,18 @@ const ChatPDF = () => {
         const errData = await res.json().catch(() => ({ detail: '清理缓存失败' }));
         throw new Error(errData.detail || `HTTP ${res.status}`);
       }
+      const cleared = await res.json().catch(() => null);
+      if (!cleared || cleared.doc_id !== docId) {
+        throw new Error('后端未返回有效的缓存清理结果');
+      }
+      const removedCaches = Array.isArray(cleared.removed) ? cleared.removed : [];
+      if (!removedCaches.includes('table_visual_verification')) {
+        throw new Error('后端未确认表格视觉核验缓存已清理');
+      }
+      invalidateVisualVerificationState();
       readingOutlineCacheRef.current.clear();
       sectionOutlineCacheRef.current.clear();
+      setBlockIndexReloadKey((value) => value + 1);
       setReadingOutline(null);
       setReadingOutlineError('');
       setReadingOutlineFallbackNotice('');
@@ -3465,6 +3938,8 @@ const ChatPDF = () => {
     allTranslatableReadingBlocks.length,
     clearOverviewCache,
     docId,
+    handleStop,
+    invalidateVisualVerificationState,
     isMinerUFullRoutePending,
     minerUParsePendingNotice,
   ]);
@@ -3496,9 +3971,8 @@ const ChatPDF = () => {
       setDeepParseNotice(minerUParsePendingNotice);
       return;
     }
-    setInputValue(query);
-    requestAnimationFrame(() => sendMessage());
-  }, [isMinerUFullRoutePending, minerUParsePendingNotice, setInputValue, sendMessage]);
+    return sendMessage({ input: query, interactionMode: 'preset' });
+  }, [isMinerUFullRoutePending, minerUParsePendingNotice, sendMessage]);
 
   // ========== 懒加载设置面板关闭回调（useCallback 稳定引用） ==========
   const openSettings = useCallback(() => {
@@ -3630,11 +4104,9 @@ const ChatPDF = () => {
         style={{ fontSize: `${messageFontSize}px` }}
       >
         <div className={`${msg.type === 'user'
-          ? messageStyle === 'bubble'
-            ? 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
-            : 'max-w-[85%] rounded-2xl px-4 py-3 message-bubble-user rounded-tr-sm text-sm'
+          ? 'w-fit max-w-[78%] min-w-0 px-[18px] py-[10px] message-bubble-user'
           : messageStyle === 'bubble'
-            ? 'max-w-[90%] min-w-0 bg-gray-50 dark:bg-gray-800/50 rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 dark:text-gray-50 overflow-hidden shadow-sm'
+            ? 'max-w-[88%] min-w-0 px-5 py-4 message-bubble-ai overflow-hidden'
             : 'w-full max-w-full min-w-0 bg-transparent shadow-none p-0 text-gray-800 dark:text-gray-50 overflow-hidden'
         }`}
           style={msg.type !== 'user' && messageStyle !== 'bubble' ? { contain: 'inline-size' } : undefined}
@@ -3695,6 +4167,12 @@ const ChatPDF = () => {
             webSearchSources={msg.webSearchSources || null}
             suppressInitialDots={shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim())}
           />
+          {msg.type === 'assistant' && !msg.isStreaming && (
+            <ChatTurnStatusNotice
+              status={msg.turnStatus || msg.turn_status || msg.answerStatus || msg.answer_status}
+              stale={msg.parseIdentityStale === true}
+            />
+          )}
           {/* 联网搜索来源 */}
           {msg.webSearchSources && msg.webSearchSources.length > 0 && !msg.isStreaming && (
             <WebSearchSourcesBadge sources={msg.webSearchSources} />
@@ -3865,12 +4343,18 @@ const ChatPDF = () => {
           ? 'failed'
           : 'idle';
     const deepParseStage = currentDeepParseStatus?.stage || documentParseManifest?.stage;
+    const deepParseProgress = deepParseRunning
+      ? getMinerUProgressPresentation(currentDeepParseStatus, {
+        status: deepParseStatusValue || 'running',
+        stage: deepParseStage,
+      })
+      : null;
     const deepParseStatusText = deepParseFailed
       ? '失败'
       : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
         ? '已取消'
         : deepParseRunning
-      ? (currentDeepParseStatus?.poll_attempt && currentDeepParseStatus?.poll_total
+       ? (deepParseProgress?.label || (currentDeepParseStatus?.poll_attempt && currentDeepParseStatus?.poll_total
         ? `等待处理 ${currentDeepParseStatus.poll_attempt}/${currentDeepParseStatus.poll_total}`
         : deepParseStage === 'requesting_upload'
           ? '申请上传中'
@@ -3880,10 +4364,16 @@ const ChatPDF = () => {
               ? '等待处理'
               : deepParseStage === 'downloading'
                 ? '下载结果中'
+                : deepParseStage === 'retrying_download'
+                  ? '重试下载中'
+                  : deepParseStage === 'resuming_result_download'
+                    ? '恢复结果中'
                 : deepParseStage === 'building_index'
                   ? '重建索引中'
-                  : '解析中')
-        : currentDeepParseStatus?.status === 'ready' && currentDeepParseStatus?.active_mineru
+                  : '解析中'))
+        : deepParseStatusValue === 'partial_ready' && currentDeepParseStatus?.active_mineru
+          ? '部分完成'
+          : currentDeepParseStatus?.status === 'ready' && currentDeepParseStatus?.active_mineru
           ? '已完成'
           : currentDeepParseStatus?.configured === false
             ? '未配置'
@@ -3908,8 +4398,11 @@ const ChatPDF = () => {
     const canRetryFullRoute = isNewMinerUPrimaryRoute && deepParseFailed;
     const ragIndexSource = ragIndexStatus?.index_source || (ragIndexStatus?.ready ? 'pdf_native' : '');
     const ragIndexIsMinerU = ragIndexSource === 'mineru';
+    const ragIndexUpgradeRequired = Boolean(
+      !requiresMinerURagSource && ragIndexStatus?.upgrade_required
+    );
     const ragIndexRecommended = Boolean(
-      canPublishPendingMinerURag || (
+      ragIndexUpgradeRequired || canPublishPendingMinerURag || (
         isLegacyParseManifest
         && currentDeepParseStatus?.active_mineru
         && currentDeepParseStatus?.recommend_rag_index_rebuild
@@ -3933,6 +4426,8 @@ const ChatPDF = () => {
       ? '待发布'
       : ragIndexBusy
       ? '处理中'
+      : ragIndexUpgradeRequired
+        ? '建议升级'
       : !ragIndexStatus?.ready
         ? '未就绪'
         : ragIndexIsMinerU
@@ -3940,7 +4435,9 @@ const ChatPDF = () => {
           : ragIndexRecommended
             ? '建议重建'
             : '本地';
-    const ragIndexDesc = canPublishPendingMinerURag
+    const ragIndexDesc = ragIndexUpgradeRequired
+      ? '当前仍是旧版问答索引；升级后会按阅读块顺序重建正文，并隔离表格行与参考文献污染'
+      : canPublishPendingMinerURag
       ? 'MinerU 版面结果已就绪，使用当前 Embedding 配置发布问答索引后会统一开放全部能力'
       : !currentDeepParseStatus?.active_mineru
       ? '先完成 MinerU 深度解析后，才能把问答索引升级为同源结构化结果'
@@ -3959,7 +4456,9 @@ const ChatPDF = () => {
           : isMinerUFullRoutePending
           ? minerUParsePendingNotice
           : currentDeepParseStatus?.active_mineru
-          ? `当前阅读结构、大纲与速览图表均来自 MinerU${currentDeepParseStatus?.block_count ? `，${currentDeepParseStatus.block_count} 个块` : ''}${currentDeepParseStatus?.figure_count ? `，${currentDeepParseStatus.figure_count} 个图表` : ''}`
+          ? `当前阅读结构、大纲与速览图表均来自 MinerU${currentDeepParseStatus?.block_count ? `，${currentDeepParseStatus.block_count} 个块` : ''}${currentDeepParseStatus?.figure_count ? `，${currentDeepParseStatus.figure_count} 个图表` : ''}${deepParseStatusValue === 'partial_ready' ? '；部分页面未形成可用正文' : ''}`
+          : deepParseRunning && deepParseProgress?.detail
+            ? deepParseProgress.detail
           : deepParseRunning && currentDeepParseStatus?.message
             ? currentDeepParseStatus.message
             : currentDeepParseStatus?.status === 'failed' && currentDeepParseStatus?.error
@@ -3968,11 +4467,12 @@ const ChatPDF = () => {
                 ? currentDeepParseStatus.recommend_reason
                 : `用 MinerU 重建带坐标的阅读块、大纲和速览图表，手动触发才会上传 PDF${currentDeepParseStatus?.access_mode === 'direct' ? '到官方 API' : '到 Worker'}`,
         status: deepParseStatusText,
+        progress: deepParseProgress,
         busy: deepParseRunning,
         actionLabel: deepParseRunning && canCancelDeepParse
           ? '取消'
           : deepParseFailed
-            ? '重试'
+            ? (canResumeMinerUResultDownload ? '重试下载' : '重试')
             : deepParseRecommended
               ? '开始解析'
               : null,
@@ -3985,7 +4485,7 @@ const ChatPDF = () => {
               : undefined,
         disabled: !docId || currentDeepParseStatus?.configured === false || (!canUseLegacyMinerUActions && !canRetryFullRoute && !canCancelDeepParse),
       },
-      ...(isLegacyParseManifest || canPublishPendingMinerURag ? [{
+      ...(isLegacyParseManifest || canPublishPendingMinerURag || ragIndexUpgradeRequired ? [{
         id: 'rag_index',
         title: '问答索引',
         state: ragIndexState,
@@ -3994,18 +4494,35 @@ const ChatPDF = () => {
         busy: ragIndexBusy,
         actionLabel: ragIndexState === 'failed'
           ? (canPublishPendingMinerURag ? '重试发布' : '重试重建')
+          : ragIndexUpgradeRequired
+            ? '升级'
           : canPublishPendingMinerURag
             ? '发布'
             : currentDeepParseStatus?.active_mineru
               ? '重建'
               : null,
         onAction: handleRebuildMinerURagIndex,
-        disabled: !docId || ragIndexBusy || (!canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru),
+        disabled: !docId || ragIndexBusy || (!ragIndexUpgradeRequired && !canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru),
       }] : []),
     ];
 
+    const localRagUpgradeItems = isNewLocalPrimaryRoute && ragIndexUpgradeRequired
+      ? [{
+        id: 'rag_index',
+        title: '问答索引',
+        state: ragIndexState,
+        desc: ragIndexTaskError || ragIndexNotice || ragIndexDesc,
+        status: ragIndexStatusText,
+        busy: ragIndexBusy,
+        actionLabel: ragIndexState === 'failed' ? '重试升级' : '升级',
+        onAction: handleRebuildMinerURagIndex,
+        disabled: !docId || ragIndexBusy,
+      }]
+      : [];
+
     return [
       ...minerUActionItems,
+      ...localRagUpgradeItems,
       {
         id: 'summary',
         title: 'AI 总结',
@@ -4066,6 +4583,7 @@ const ChatPDF = () => {
   }, [
     allTranslatableReadingBlocks.length,
     canPublishPendingMinerURag,
+    canResumeMinerUResultDownload,
     canUseLegacyMinerUActions,
     cancelPretranslateReadingDocument,
     deepParseFailed,
@@ -4085,8 +4603,12 @@ const ChatPDF = () => {
     currentDeepParseStatus?.figure_count,
     currentDeepParseStatus?.configured,
     currentDeepParseStatus?.message,
+    currentDeepParseStatus?.created_at,
+    currentDeepParseStatus?.started_at,
     currentDeepParseStatus?.poll_attempt,
     currentDeepParseStatus?.poll_total,
+    currentDeepParseStatus?.progress,
+    currentDeepParseStatus?.remote_progress_percent,
     currentDeepParseStatus?.stage,
     currentDeepParseStatus?.status,
     failedReadingBlockCount,
@@ -4113,6 +4635,8 @@ const ChatPDF = () => {
     ragIndexStatus?.ready,
     ragIndexStatus?.status,
     ragIndexStatus?.table_chunk_count,
+    ragIndexStatus?.upgrade_required,
+    requiresMinerURagSource,
     readingOutlineError,
     readingOutlineFallbackNotice,
     readingOutlineLoading,
@@ -4145,6 +4669,8 @@ const ChatPDF = () => {
     () => getBackgroundTaskSummary(visibleBackgroundTasks),
     [visibleBackgroundTasks]
   );
+  const showMinerUScanInTaskPill = backgroundTaskSummary.state === 'running'
+    && visibleBackgroundTasks.some((item) => item?.id === 'deep_parse' && item?.state === 'running');
 
   useEffect(() => {
     if (!showDocumentWorkspace) setShowAiProcessingPanel(false);
@@ -4156,6 +4682,13 @@ const ChatPDF = () => {
       className={`chatpdf-shell ${docId ? 'chatpdf-shell--document' : 'chatpdf-shell--welcome'} ${darkMode ? 'chatpdf-shell--dark' : ''} h-screen w-full overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-[#0f1115] text-gray-200' : 'text-[var(--color-text-main)]'}`}
       onClick={handleRootClick}
     >
+      <LocalParserInstallDialog
+        open={isLocalParserInstallOpen}
+        darkMode={darkMode}
+        onClose={handleLocalParserInstallClose}
+        onReady={handleLocalParserReady}
+      />
+
       {/* 划词工具栏 */}
       {showTextMenu && selectedText && (
         <div className="text-selection-toolbar-container">
@@ -4204,7 +4737,16 @@ const ChatPDF = () => {
         <div className="mx-auto flex h-full flex-col items-stretch relative" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
           <div className="px-5 pt-6 pb-4 flex items-center justify-between mb-1">
             <div className="flex items-center gap-2.5 font-bold text-lg tracking-tight pl-1">
-              <Bot className="w-7 h-7 text-purple-400" />
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-7 w-7 flex-shrink-0 text-[#FFA07A]"
+              >
+                <path
+                  fill="currentColor"
+                  d="M11 1v1H7a3 3 0 0 0-3 3v3a5 5 0 0 0 5 5h6a5 5 0 0 0 5-5V5a3 3 0 0 0-3-3h-4V1zM6 5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3zm3.5 4a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3m5 0a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3M6 22a6 6 0 0 1 12 0h2a8 8 0 1 0-16 0z"
+                />
+              </svg>
               <span className="text-gray-100">ChatPDF</span>
             </div>
             <div className="flex items-center gap-1">
@@ -4330,6 +4872,7 @@ const ChatPDF = () => {
                 source={readingOutline?.source || ''}
                 generationError={readingOutline?.meta?.generation_error || ''}
                 retrying={readingOutlineLoading}
+                meta={readingOutline?.meta || {}}
                 darkMode={darkMode}
               />
             </div>
@@ -4425,6 +4968,7 @@ const ChatPDF = () => {
                     page={currentPage}
                     onPageChange={setCurrentPage}
                     highlightInfo={activeHighlight}
+                    savedHighlights={documentHighlights}
                     isSelecting={isSelectingArea}
                     onAreaSelected={handleAreaSelected}
                     onSelectionCancel={handleSelectionCancel}
@@ -4439,7 +4983,7 @@ const ChatPDF = () => {
                     inlineTranslationBlockIds={[]}
                     onBlockHover={handleReadingBlockHover}
                     onBlockClick={handleReadingBlockClick}
-                    blockTranslations={inlineBlockTranslations}
+                    blockTranslations={blockTranslations}
                     translatingBlockIds={[...translatingBlockIds]}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
@@ -4472,6 +5016,54 @@ const ChatPDF = () => {
                   </div>
                 )}
               </div>
+
+              <AnimatePresence initial={false}>
+                {['degraded', 'error', 'stale'].includes(searchStatus?.state) && (
+                  <motion.div
+                    key={`${searchStatus.state}:${searchStatus.errorCode || ''}`}
+                    initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                    transition={{ type: 'spring', stiffness: 360, damping: 30 }}
+                    role="status"
+                    aria-live="polite"
+                    className="pointer-events-none absolute left-4 right-4 top-[72px] z-40 flex justify-end"
+                  >
+                    <div className={`pointer-events-auto flex w-full max-w-[430px] items-start gap-3 rounded-[16px] border px-4 py-3 shadow-[0_16px_36px_rgba(15,23,42,0.16)] backdrop-blur-xl ${
+                      darkMode
+                        ? 'border-amber-300/15 bg-[#25282f]/95 text-gray-100'
+                        : 'border-amber-200/80 bg-white/95 text-gray-700'
+                    }`}>
+                      <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+                        searchStatus.state === 'degraded'
+                          ? (darkMode ? 'bg-amber-300/10 text-amber-300' : 'bg-amber-50 text-amber-600')
+                          : (darkMode ? 'bg-rose-300/10 text-rose-300' : 'bg-rose-50 text-rose-500')
+                      }`}>
+                        <Scan size={15} strokeWidth={2.2} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[13px] font-semibold leading-5">
+                          {searchStatus.state === 'degraded'
+                            ? (searchStatus.resultCount > 0 ? '检索已降级' : '检索暂时不可用')
+                            : searchStatus.state === 'stale' ? '搜索结果已失效' : '搜索未完成'}
+                        </p>
+                        <p className={`mt-0.5 text-[12px] leading-5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          {searchStatus.message}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={dismissSearchStatus}
+                        className={`mt-0.5 rounded-full p-1 transition-colors ${darkMode ? 'text-gray-500 hover:bg-white/10 hover:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-700'}`}
+                        aria-label="关闭搜索状态提示"
+                        title="关闭"
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           ) : (
             /* 空状态：左栏工作台（问候 + 上传 + 功能 + 最近文件），不再留大面积空白 */
@@ -4559,17 +5151,17 @@ const ChatPDF = () => {
             </div>
           )}
 
-          {/* 可拖拽分隔线 */}
+          {/* 阅读区与对话区共用的可拖拽分隔器 */}
           <div
             role="separator"
-            aria-label="调整 PDF 与 AI 面板宽度"
+            aria-label="调整阅读区与对话区宽度"
             aria-orientation="vertical"
             aria-valuemin={isNarrowDesktop ? 38 : 30}
             aria-valuemax={isNarrowDesktop ? 62 : 70}
             aria-valuenow={Math.round(pdfPanelWidth)}
             tabIndex={0}
-            title="拖拽或使用左右方向键调整面板宽度"
-            className="w-4 cursor-col-resize flex-shrink-0 relative group -ml-2 z-10 flex justify-center"
+            title="拖拽或使用左右方向键调整宽度，双击恢复均分"
+            className="group relative z-20 -ml-2 flex h-full w-4 flex-shrink-0 touch-none select-none cursor-col-resize items-center justify-center focus-visible:outline-none"
             onPointerDown={(event) => {
               event.preventDefault();
               const startX = event.clientX;
@@ -4590,8 +5182,9 @@ const ChatPDF = () => {
               };
               document.addEventListener('pointermove', handlePointerMove);
               document.addEventListener('pointerup', handlePointerUp);
-              document.addEventListener('pointercancel', handlePointerUp);
+                document.addEventListener('pointercancel', handlePointerUp);
             }}
+            onDoubleClick={() => setPdfPanelWidth(50)}
             onKeyDown={(event) => {
               if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
               event.preventDefault();
@@ -4603,7 +5196,13 @@ const ChatPDF = () => {
               setPdfPanelWidth(Math.max(minWidth, Math.min(maxWidth, nextWidth)));
             }}
           >
-            <div className="w-1 h-full rounded-full bg-transparent group-hover:bg-[#B85F47]/45 transition-colors duration-200" />
+            <div className={`flex h-12 w-3 items-center justify-center rounded-full border transition-all duration-200 group-hover:scale-105 group-active:scale-110 group-focus-visible:ring-2 group-focus-visible:ring-[#FFA07A]/40 ${
+              darkMode
+                ? 'border-white/10 bg-[#30333a] text-gray-500 group-hover:border-white/20 group-hover:bg-[#3a3e46] group-hover:text-[#FFA07A]'
+                : 'border-white/90 bg-white/90 text-gray-400 shadow-[0_5px_14px_rgba(60,56,52,0.16)] group-hover:text-[#B85F47]'
+            }`}>
+              <GripVertical className="h-4 w-3" />
+            </div>
           </div>
 
           {/* 右侧：聊天/速览/解析区域 */}
@@ -4628,18 +5227,22 @@ const ChatPDF = () => {
                 aria-label={`查看后台任务：${backgroundTaskSummary.label}`}
                 title={backgroundTaskSummary.label}
               >
-                <span className={`relative flex h-2 w-2 rounded-full ${
-                  backgroundTaskSummary.state === 'failed'
-                    ? 'bg-rose-400'
-                    : backgroundTaskSummary.state === 'running'
-                    ? 'bg-[#ed8c68]'
-                    : backgroundTaskSummary.state === 'recommended'
-                      ? 'bg-amber-400'
-                      : darkMode ? 'bg-gray-600' : 'bg-gray-300'
-                }`}>
-                  {backgroundTaskSummary.state === 'running' && <span className="absolute inset-0 animate-ping rounded-full bg-[#ed8c68]/50" />}
-                  {backgroundTaskSummary.state === 'recommended' && <span className="absolute inset-0 animate-ping rounded-full bg-amber-400/60" />}
-                </span>
+                {showMinerUScanInTaskPill ? (
+                  <MinerUScanLoader size={16} className={darkMode ? 'text-[#FFA07A]' : 'text-[#ed8c68]'} />
+                ) : (
+                  <span className={`relative flex h-2 w-2 rounded-full ${
+                    backgroundTaskSummary.state === 'failed'
+                      ? 'bg-rose-400'
+                      : backgroundTaskSummary.state === 'running'
+                      ? 'bg-[#ed8c68]'
+                      : backgroundTaskSummary.state === 'recommended'
+                        ? 'bg-amber-400'
+                        : darkMode ? 'bg-gray-600' : 'bg-gray-300'
+                  }`}>
+                    {backgroundTaskSummary.state === 'running' && <span className="absolute inset-0 animate-ping rounded-full bg-[#ed8c68]/50" />}
+                    {backgroundTaskSummary.state === 'recommended' && <span className="absolute inset-0 animate-ping rounded-full bg-amber-400/60" />}
+                  </span>
+                )}
                 {backgroundTaskSummary.label}
               </button>
 
@@ -4746,7 +5349,7 @@ const ChatPDF = () => {
                         : isMinerUFullRoutePending ? 'processing' : ''}
                     availabilityMessage={isMinerUFullRoutePending ? minerUParsePendingNotice : ''}
                     availabilityActionLabel={isMinerUFullRouteFailed
-                      ? '重试 MinerU'
+                      ? (canResumeMinerUResultDownload ? '重试结果下载' : '重试 MinerU')
                       : isMinerUFullRouteCancelled ? '重新上传' : ''}
                     onAvailabilityAction={isMinerUFullRouteFailed
                       ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
@@ -4765,6 +5368,7 @@ const ChatPDF = () => {
                   currentPage={currentPage}
                   activeBlockId={activeReadingBlockId}
                   notes={currentPageReadingNotes}
+                  userNotes={currentPageUserNotes}
                   activeNodeId={activeReadingNodeId}
                   visitedNodeIds={[...visitedReadingNodeIds]}
                   onTranslate={handleTranslateCurrentPage}
@@ -4773,6 +5377,8 @@ const ChatPDF = () => {
                   onBlockHover={handleReadingBlockHover}
                   onBlockClick={handleReadingBlockClick}
                   onNoteClick={handleOutlineJump}
+                  onUserNoteClick={handleUserNoteClick}
+                  onDeleteUserNote={handleDeleteUserNote}
                   darkMode={darkMode}
                 />
               ) : (
@@ -5006,8 +5612,8 @@ const ChatPDF = () => {
                 {settingsSection === 'reading' && (
                 <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${aiAutoProcess ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {aiAutoProcess && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${aiAutoProcess ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {aiAutoProcess && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5022,8 +5628,8 @@ const ChatPDF = () => {
 
                   <div className={`space-y-3 pt-1 ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
                     <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${autoOutlineSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                        {autoOutlineSummary && <Check size={13} strokeWidth={3.5} />}
+                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${autoOutlineSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                        {autoOutlineSummary && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                       </div>
                       <div className="flex flex-col flex-1">
                         <div className="flex items-center justify-between">
@@ -5037,8 +5643,8 @@ const ChatPDF = () => {
                     </label>
 
                     <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableHoverPretranslate ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                        {enableHoverPretranslate && <Check size={13} strokeWidth={3.5} />}
+                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableHoverPretranslate ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                        {enableHoverPretranslate && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                       </div>
                       <div className="flex flex-col flex-1">
                         <div className="flex items-center justify-between">
@@ -5059,14 +5665,14 @@ const ChatPDF = () => {
                         </div>
                         <span className="text-[12px] font-bold text-[#B85F47] tabular-nums">{pretranslateConcurrency}</span>
                       </div>
-                      <input
-                        type="range"
+                      <SettingsRange
+                        ariaLabel="预翻译并发"
                         min="1"
                         max="16"
                         step="1"
                         value={pretranslateConcurrency}
-                        onChange={(e) => setPretranslateConcurrency(Number(e.target.value))}
-                        className="mt-3 w-full accent-[#FFA07A]"
+                        onChange={setPretranslateConcurrency}
+                        className="mt-3"
                       />
                     </div>
 
@@ -5145,8 +5751,8 @@ const ChatPDF = () => {
                   
                   {settingsSection === 'retrieval' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableVectorSearch && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableVectorSearch && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5162,8 +5768,8 @@ const ChatPDF = () => {
 
                   {settingsSection === 'interface' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableScreenshot && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableScreenshot && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5179,8 +5785,8 @@ const ChatPDF = () => {
 
                   {settingsSection === 'retrieval' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableGraphRAG && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableGraphRAG && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5255,8 +5861,8 @@ const ChatPDF = () => {
                   {/* 检索代理：多轮规划 + 工具集 */}
                   {settingsSection === 'retrieval' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableAgentRetrieval && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableAgentRetrieval && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5297,8 +5903,8 @@ const ChatPDF = () => {
 
                   {settingsSection === 'retrieval' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableJiebaBM25 && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableJiebaBM25 && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5393,8 +5999,8 @@ const ChatPDF = () => {
 
                   {settingsSection === 'interface' && (
                   <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)]' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableBlurReveal && <Check size={13} strokeWidth={3.5} />}
+                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                      {enableBlurReveal && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
                     </div>
                     <div className="flex flex-col flex-1">
                       <div className="flex items-center justify-between">
@@ -5641,7 +6247,7 @@ const ChatPDF = () => {
                       <button
                         key={label}
                         onClick={onClick}
-                        className={`settings-entry-row w-full px-4 py-3 flex items-center gap-3 text-left transition-colors ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''} ${darkMode ? 'hover:bg-white/[0.04]' : 'hover:bg-gray-50'}`}
+                        className={`settings-entry-row w-full px-4 py-3 flex items-center gap-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#D97A5D]/25 ${i > 0 ? (darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100') : ''} ${darkMode ? 'hover:bg-white/[0.04]' : 'hover:bg-gray-50'}`}
                       >
                         <div className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
                           <Icon size={15} />
@@ -5651,7 +6257,7 @@ const ChatPDF = () => {
                           <div className={`text-[11px] mt-0.5 truncate ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{desc}</div>
                         </div>
                         <span className="settings-entry-arrow" aria-hidden="true">
-                          <ChevronRight className="h-4 w-4" strokeWidth={2.5} />
+                          <ChevronRight className="h-3.5 w-3.5" strokeWidth={2.2} />
                         </span>
                       </button>
                     ))}

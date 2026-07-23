@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Copy, Highlighter, MessageSquare, Sparkles, Globe, Search, Share2, X, Move } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Copy, Highlighter, Loader2, MessageSquare, Sparkles, Globe, Search, Share2, X, Move } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /**
@@ -23,10 +23,91 @@ const TextSelectionToolbar = ({
   onScaleChange
 }) => {
   const toolbarRef = useRef(null);
+  const noteEditorRef = useRef(null);
   const [adjustedPosition, setAdjustedPosition] = useState(position);
   const dragState = useRef({ dragging: false, start: { x: 0, y: 0 }, origin: { x: 0, y: 0 } });
   const resizeState = useRef({ resizing: false, start: { x: 0, y: 0 }, originScale: scale });
+  const feedbackTimerRef = useRef(null);
   const [hoverCorner, setHoverCorner] = useState('');
+  const [noteEditorOpen, setNoteEditorOpen] = useState(false);
+  const [noteEditorPlacement, setNoteEditorPlacement] = useState('bottom');
+  const [noteDraft, setNoteDraft] = useState('');
+  const [activeAction, setActiveAction] = useState('');
+  const [actionFeedback, setActionFeedback] = useState(null);
+
+  useEffect(() => () => {
+    if (feedbackTimerRef.current) window.clearTimeout(feedbackTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    setNoteEditorOpen(false);
+    setNoteDraft('');
+    setActionFeedback(null);
+  }, [selectedText]);
+
+  useEffect(() => {
+    if (!noteEditorOpen) return undefined;
+    const updatePlacement = () => {
+      const toolbarRect = toolbarRef.current?.getBoundingClientRect();
+      if (!toolbarRect) return;
+      const editorHeight = noteEditorRef.current?.getBoundingClientRect().height || 238;
+      const requiredSpace = editorHeight + 16;
+      const spaceBelow = window.innerHeight - toolbarRect.bottom;
+      const spaceAbove = toolbarRect.top;
+      setNoteEditorPlacement(spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? 'bottom' : 'top');
+    };
+    const frame = window.requestAnimationFrame(updatePlacement);
+    window.addEventListener('resize', updatePlacement);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('resize', updatePlacement);
+    };
+  }, [adjustedPosition, noteEditorOpen, scale]);
+
+  const showFeedback = (message, tone = 'success') => {
+    if (!message) return;
+    if (feedbackTimerRef.current) window.clearTimeout(feedbackTimerRef.current);
+    setActionFeedback({ message, tone });
+    feedbackTimerRef.current = window.setTimeout(() => setActionFeedback(null), 2400);
+  };
+
+  const runToolAction = async (tool) => {
+    if (tool.kind === 'note') {
+      setActionFeedback(null);
+      setNoteEditorOpen((open) => !open);
+      return;
+    }
+    if (typeof tool.action !== 'function' || activeAction) return;
+    setActiveAction(tool.label);
+    try {
+      const result = await tool.action();
+      if (result?.message) showFeedback(result.message, result.tone || 'success');
+    } catch (error) {
+      showFeedback(error?.message || `${tool.label}失败，请重试`, 'error');
+    } finally {
+      setActiveAction('');
+    }
+  };
+
+  const saveNote = async () => {
+    const value = noteDraft.trim();
+    if (!value) {
+      showFeedback('请输入笔记内容', 'error');
+      return;
+    }
+    if (typeof onAddNote !== 'function' || activeAction) return;
+    setActiveAction('笔记');
+    try {
+      const result = await onAddNote(value);
+      setNoteEditorOpen(false);
+      setNoteDraft('');
+      if (result?.message) showFeedback(result.message, result.tone || 'success');
+    } catch (error) {
+      showFeedback(error?.message || '笔记保存失败，请重试', 'error');
+    } finally {
+      setActiveAction('');
+    }
+  };
 
   // 智能定位：避免超出屏幕边界
   useEffect(() => {
@@ -101,7 +182,7 @@ const TextSelectionToolbar = ({
     {
       icon: MessageSquare,
       label: '笔记',
-      action: onAddNote,
+      kind: 'note',
       color: 'text-purple-600 hover:text-purple-700'
     },
     {
@@ -197,15 +278,21 @@ const TextSelectionToolbar = ({
                   key={tool.label}
                   onClick={(e) => {
                     e.stopPropagation();
-                    tool.action();
+                    void runToolAction(tool);
                   }}
+                  disabled={Boolean(activeAction)}
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: index * 0.03 }}
-                  className={`group relative ${config.padding} rounded-xl transition-all hover:bg-[var(--color-bg-subtle)]/80 ${tool.color}`}
+                  className={`group relative ${config.padding} rounded-xl transition-all hover:bg-[var(--color-bg-subtle)]/80 disabled:cursor-wait disabled:opacity-55 ${tool.color}`}
                   title={tool.label}
+                  aria-label={tool.label}
                 >
-                  <Icon className={config.iconSize} strokeWidth={2} />
+                  {activeAction === tool.label ? (
+                    <Loader2 className={`${config.iconSize} animate-spin`} strokeWidth={2} />
+                  ) : (
+                    <Icon className={config.iconSize} strokeWidth={2} />
+                  )}
 
                   {/* Tooltip */}
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-gray-900 text-white text-xs rounded-lg whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
@@ -234,6 +321,95 @@ const TextSelectionToolbar = ({
               <X className={config.iconSize} strokeWidth={2} />
             </motion.button>
           </div>
+
+          <AnimatePresence>
+            {noteEditorOpen && (
+              <motion.div
+                ref={noteEditorRef}
+                initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                transition={{ duration: 0.16, ease: 'easeOut' }}
+                data-placement={noteEditorPlacement}
+                className={`absolute left-1/2 w-[min(320px,calc(100vw-32px))] -translate-x-1/2 rounded-[16px] border border-white/70 bg-white/95 p-3.5 shadow-[0_18px_45px_rgba(45,38,34,0.18)] backdrop-blur-xl ${
+                  noteEditorPlacement === 'top'
+                    ? 'bottom-full mb-3 origin-bottom'
+                    : 'top-full mt-3 origin-top'
+                }`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="mb-2.5 flex items-center justify-between gap-3">
+                  <div className="text-[12px] font-bold text-gray-800">添加划词笔记</div>
+                  <button
+                    type="button"
+                    onClick={() => setNoteEditorOpen(false)}
+                    className="inline-flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                    aria-label="关闭笔记编辑器"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="mb-2.5 line-clamp-2 rounded-[10px] bg-[#f7f4f1] px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+                  {selectedText}
+                </div>
+                <textarea
+                  autoFocus
+                  value={noteDraft}
+                  onChange={(event) => setNoteDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setNoteEditorOpen(false);
+                      return;
+                    }
+                    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      void saveNote();
+                    }
+                  }}
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="记录你的理解、疑问或待核实内容"
+                  className="w-full resize-none rounded-[11px] border border-gray-200 bg-white px-3 py-2.5 text-[12px] leading-relaxed text-gray-800 outline-none transition-shadow placeholder:text-gray-400 focus:border-[#e9aa94] focus:ring-4 focus:ring-[#ed8c68]/10"
+                />
+                <div className="mt-2.5 flex items-center justify-between gap-3">
+                  <span className="text-[10px] tabular-nums text-gray-400">{noteDraft.length}/2000</span>
+                  <button
+                    type="button"
+                    onClick={() => void saveNote()}
+                    disabled={!noteDraft.trim() || activeAction === '笔记'}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-[#D97A5D] px-3.5 text-[11px] font-bold text-white shadow-[0_7px_16px_-7px_rgba(184,95,71,0.62)] transition-all hover:bg-[#c96b50] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    {activeAction === '笔记' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    保存笔记
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {actionFeedback && !noteEditorOpen && (
+              <motion.div
+                role="status"
+                initial={{ opacity: 0, y: -5, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                className={`absolute left-1/2 top-full mt-3 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-[11px] border px-3 py-2 text-[11px] font-semibold shadow-lg backdrop-blur-xl ${
+                  actionFeedback.tone === 'error'
+                    ? 'border-rose-200 bg-rose-50/95 text-rose-700'
+                    : 'border-emerald-200 bg-emerald-50/95 text-emerald-700'
+                }`}
+              >
+                {actionFeedback.tone === 'error' ? (
+                  <AlertCircle className="h-3.5 w-3.5" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                )}
+                {actionFeedback.message}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* 四角缩放感应区：靠近角落时显示提示，可拖动缩放 */}

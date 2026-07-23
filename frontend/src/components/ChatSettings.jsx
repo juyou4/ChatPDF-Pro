@@ -3,6 +3,7 @@ import { ChevronLeft, SlidersHorizontal, HelpCircle, RotateCcw, Plus, Trash2, Co
 import { useChatParams, CHAT_PARAMS_DEFAULT_SETTINGS } from '../contexts/ChatParamsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import SettingsSegmentedControl from './SettingsSegmentedControl';
+import SettingsRange from './SettingsRange';
 
 /**
  * 对话设置面板
@@ -342,9 +343,6 @@ const NumberInput = ({ value, onChange, min, max, step, precision, disabled }) =
  * 现代滑块 + 左侧标题/右侧控件
  */
 const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChange, min, max, step, precision }) => {
-    const pct = ((value - min) / (max - min)) * 100;
-    const gc = '#ed8c68';
-
     return (
         <div className="flex flex-col gap-2.5">
             <div className="flex items-center justify-between">
@@ -360,16 +358,11 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
                 </div>
             </div>
             <div className="px-1 py-1">
-                <input
-                    type="range" min={min} max={max} step={step} value={value}
-                    onChange={(e) => onChange(parseFloat(e.target.value))}
+                <SettingsRange
+                    ariaLabel={label}
+                    min={min} max={max} step={step} value={value}
+                    onChange={onChange}
                     disabled={enabled !== undefined && !enabled}
-                    className={`w-full h-[6px] rounded-full appearance-none bg-gray-100 ${enabled === false ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'}`}
-                    style={{
-                        background: enabled !== false
-                            ? `linear-gradient(to right, ${gc} 0%, ${gc} ${pct}%, #F3F4F6 ${pct}%, #F3F4F6 100%)`
-                            : '#F3F4F6'
-                    }}
                 />
             </div>
         </div>
@@ -380,9 +373,6 @@ const SettingToggleSlider = ({ label, tooltip, enabled, onToggle, value, onChang
  * 无开关滑块控件
  */
 const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, step, precision }) => {
-    const pct = ((value - min) / (max - min)) * 100;
-    const gc = '#ed8c68';
-
     return (
         <div className="flex flex-col gap-2.5">
             <div className="flex items-center justify-between">
@@ -395,11 +385,10 @@ const SettingSliderWithInput = ({ label, tooltip, value, onChange, min, max, ste
                 </div>
             </div>
             <div className="px-1 py-1">
-                <input
-                    type="range" min={min} max={max} step={step} value={value}
-                    onChange={(e) => onChange(parseFloat(e.target.value))}
-                    className="w-full h-[6px] rounded-full appearance-none bg-gray-100 cursor-pointer"
-                    style={{ background: `linear-gradient(to right, ${gc} 0%, ${gc} ${pct}%, #F3F4F6 ${pct}%, #F3F4F6 100%)` }}
+                <SettingsRange
+                    ariaLabel={label}
+                    min={min} max={max} step={step} value={value}
+                    onChange={onChange}
                 />
             </div>
         </div>

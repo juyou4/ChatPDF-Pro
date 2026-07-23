@@ -6,6 +6,16 @@ import os
 import time
 import logging
 from pathlib import Path
+
+# Keep local embedding/index migrations responsive on high-core desktop CPUs.
+try:
+    _cpu_thread_limit = max(1, min(8, int(os.getenv("CHATPDF_CPU_THREAD_LIMIT", "4"))))
+except ValueError:
+    _cpu_thread_limit = 4
+os.environ.setdefault("OMP_NUM_THREADS", str(_cpu_thread_limit))
+os.environ.setdefault("MKL_NUM_THREADS", str(_cpu_thread_limit))
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +26,11 @@ from models.model_registry import EMBEDDING_MODELS
 from models.dynamic_store import load_dynamic_models
 from routes.model_provider_routes import router as model_provider_router
 from routes.system_routes import router as system_router
-from routes.document_routes import router as document_router, documents_store
+from routes.document_routes import (
+    documents_store,
+    queue_stale_document_index_upgrades,
+    router as document_router,
+)
 from routes.search_routes import router as search_router
 from routes.chat_routes import router as chat_router
 from routes import chat_routes
@@ -98,14 +112,31 @@ summary_router.documents_store = documents_store
 search_router.vector_store_dir = str(VECTOR_STORE_DIR)
 chat_router.vector_store_dir = str(VECTOR_STORE_DIR)
 summary_router.vector_store_dir = str(VECTOR_STORE_DIR)
+summary_router.data_dir = str(DATA_DIR)
 
 # Middleware（注意：中间件按添加的逆序执行，最后添加的最先执行）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=runtime.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Content-Type",
+        "If-Modified-Since",
+        "If-None-Match",
+        "Range",
+        "X-ChatPDF-Token",
+    ],
+    expose_headers=[
+        "Accept-Ranges",
+        "Content-Length",
+        "Content-Range",
+        "ETag",
+        "X-Chat-Turn-Status",
+        "X-Chat-Parse-Generation",
+        "X-Chat-Document-Source-Hash",
+    ],
 )
 
 # 桌面模式安全中间件（仅桌面模式生效）
@@ -118,6 +149,13 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 @app.on_event("startup")
 async def startup_event():
     """应用启动时的事件处理"""
+    runtime.validate_startup_security()
+    index_upgrade = queue_stale_document_index_upgrades()
+    if index_upgrade.get("documents"):
+        logger.info(
+            "Queued %s stale document indexes for sequential upgrade.",
+            len(index_upgrade["documents"]),
+        )
     # 启动记忆文件监听器
     global _memory_watcher
     if _memory_watcher:
@@ -234,13 +272,16 @@ async def get_capabilities():
         "embedding_providers": embedding_providers,
         "rerank_providers": rerank_providers,
         "needs_api_key": runtime.is_desktop or not _HAS_SENTENCE_TRANSFORMERS,
-        "data_dir": runtime.data_dir,
+        # /capabilities is intentionally reachable before the Electron token
+        # is available; do not disclose the user's absolute storage path there.
+        "data_dir": "" if runtime.requires_token else runtime.data_dir,
         "uptime": int(time.time() - _startup_time),
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+    runtime.validate_startup_security()
     port = runtime.CHATPDF_PORT
     host = runtime.host
     _kill_port(port)
