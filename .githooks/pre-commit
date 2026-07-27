@@ -1,0 +1,33 @@
+#!/usr/bin/env sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+git_dir="$(git rev-parse --path-format=absolute --git-dir)"
+
+case "${git_dir}" in
+  "${git_common_dir}")
+    container_git_dir="/git-common"
+    ;;
+  "${git_common_dir}"/*)
+    container_git_dir="/git-common/${git_dir#"${git_common_dir}"/}"
+    ;;
+  *)
+    echo "Unable to map Git directory into the Gitleaks container." >&2
+    exit 1
+    ;;
+esac
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required to run the Gitleaks pre-commit scan." >&2
+  exit 1
+fi
+
+exec env MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "${repo_root}:/repo" \
+  -v "${git_common_dir}:/git-common" \
+  -e "GIT_DIR=${container_git_dir}" \
+  -e "GIT_WORK_TREE=/repo" \
+  -w /repo \
+  zricethezav/gitleaks:v8.30.0 \
+  protect --staged --redact --exit-code 1
