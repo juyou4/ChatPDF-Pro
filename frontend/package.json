@@ -15,6 +15,12 @@
     "check:streaming": "npm run test:stream-regression && npm run build"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/lang-markdown": "^6.5.1",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "@lezer/highlight": "^1.2.3",
     "clsx": "^2.1.0",
     "framer-motion": "^11.0.8",
     "html2canvas": "^1.4.1",
@@ -58,6 +64,7 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
+    "dompurify": "3.4.12",
     "picomatch@^2.3.1": "2.3.2"
   }
 }

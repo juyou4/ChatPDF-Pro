@@ -48,7 +48,9 @@ export function useScreenshotState({
       return;
     }
     const cr = container.getBoundingClientRect();
-    const clamped = clampSelectionToPage(rect, cr.width, cr.height);
+    const sourceWidth = Number(container.dataset?.pdfSourceWidth) || cr.width;
+    const sourceHeight = Number(container.dataset?.pdfSourceHeight) || cr.height;
+    const clamped = clampSelectionToPage(rect, sourceWidth, sourceHeight);
     try {
       const res = await captureArea(pdfContainerRef, clamped);
       if (res) {

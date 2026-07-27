@@ -21,8 +21,14 @@ const AtomIcon = ({ className = '' }) => (
   </svg>
 );
 
+// 后端把部分成功的精读结果标成 ai_partial（见 reading_outline_service 的质量门）。
+// 这里以前没有对应分支，它会落到最后那个 `if (source)`，被显示成灰色的「基础目录」，
+// 于是用户既看不出这是 AI 结果，也看不出它是降级的。
+const AI_SOURCES = ['ai', 'ai_partial'];
+
 const getSourceMeta = (source) => {
   if (source === 'ai') return { label: 'AI 快速精读', tone: 'ai' };
+  if (source === 'ai_partial') return { label: 'AI 快速精读（部分降级）', tone: 'partial' };
   if (source === 'fallback' || source === 'client_fallback') return { label: '章节结构导览', tone: 'fallback' };
   if (source) return { label: '基础目录', tone: 'fallback' };
   return { label: '待生成', tone: 'muted' };
@@ -138,7 +144,7 @@ function ReadingSummaryPanel({
   const appendixMissing = Math.max(0, Number(coverage.appendix_expected || 0) - Number(coverage.appendix_summarized || 0));
   const reportedFallbackSections = Math.max(0, Number(generation.fallback_sections || 0));
   const incompleteSectionCount = Math.max(reportedFallbackSections, bodyMissing + appendixMissing);
-  const hasPartialGeneration = source === 'ai' && incompleteSectionCount > 0;
+  const hasPartialGeneration = AI_SOURCES.includes(source) && incompleteSectionCount > 0;
   const samplingBySection = useMemo(() => new Map(
     (Array.isArray(meta?.sampling?.sections) ? meta.sampling.sections : [])
       .filter((item) => item?.source_section_id)
@@ -302,7 +308,7 @@ function ReadingSummaryPanel({
       ? item.keywords.filter(Boolean).slice(0, 4)
       : [];
     const sampling = samplingBySection.get(String(item.source_section_id || ''));
-    const showSamplingNotice = source === 'ai' && sampling?.review_recommended;
+    const showSamplingNotice = AI_SOURCES.includes(source) && sampling?.review_recommended;
     const study = item.study || {};
     const hasStudyDetail = Boolean(
       study.purpose
@@ -484,9 +490,11 @@ function ReadingSummaryPanel({
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
             sourceMeta.tone === 'ai'
               ? (darkMode ? 'border-white/10 bg-white/[0.06] text-gray-200' : 'border-slate-200 bg-white/85 text-slate-600')
-              : sourceMeta.tone === 'fallback'
-                ? (darkMode ? 'border-amber-400/20 bg-amber-400/10 text-amber-100' : 'border-amber-100 bg-amber-50 text-amber-700')
-                : (darkMode ? 'border-white/10 bg-white/[0.04] text-gray-500' : 'border-gray-200 bg-gray-50 text-gray-500')
+              : sourceMeta.tone === 'partial'
+                ? (darkMode ? 'border-amber-400/25 bg-amber-400/[0.07] text-amber-100' : 'border-amber-200 bg-amber-50/70 text-amber-700')
+                : sourceMeta.tone === 'fallback'
+                  ? (darkMode ? 'border-amber-400/20 bg-amber-400/10 text-amber-100' : 'border-amber-100 bg-amber-50 text-amber-700')
+                  : (darkMode ? 'border-white/10 bg-white/[0.04] text-gray-500' : 'border-gray-200 bg-gray-50 text-gray-500')
           }`}>
             {sourceMeta.label}
           </span>

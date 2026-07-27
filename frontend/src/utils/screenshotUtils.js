@@ -144,8 +144,10 @@ export async function captureArea(pdfContainerRef, rect) {
     try {
       // 计算 canvas 像素坐标（考虑 DPR 和 CSS 缩放）
       const canvasRect = pageCanvas.getBoundingClientRect()
-      const scaleX = pageCanvas.width / canvasRect.width
-      const scaleY = pageCanvas.height / canvasRect.height
+      const sourceWidth = Number(pdfContainerRef.current?.dataset?.pdfSourceWidth) || canvasRect.width
+      const sourceHeight = Number(pdfContainerRef.current?.dataset?.pdfSourceHeight) || canvasRect.height
+      const scaleX = pageCanvas.width / sourceWidth
+      const scaleY = pageCanvas.height / sourceHeight
 
       const sx = rect.x * scaleX
       const sy = rect.y * scaleY

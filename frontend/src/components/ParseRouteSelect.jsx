@@ -55,7 +55,12 @@ export default function ParseRouteSelect({
   }, [isOpen]);
 
   const selectOption = (option) => {
-    if (option.value !== selectedOption.value) onChange?.(option.value);
+    // 必须和**传入的** value 比，不能和 selectedOption 比：``selectedIndex`` 用
+    // ``Math.max(0, findIndex(...))`` 兜底，所以任何不在选项里的值（例如
+    // useDocumentState 的默认 parseRoute: 'auto'）都会被当成第 0 项 MinerU。
+    // 拿它做相等判断的话，这类用户点 MinerU 会被当成"没变化"而完全不回调，
+    // 路线永远钉不下来。
+    if (option.value !== value) onChange?.(option.value);
     setIsOpen(false);
   };
 

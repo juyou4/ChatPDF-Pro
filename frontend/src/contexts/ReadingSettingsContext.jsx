@@ -6,6 +6,7 @@ export const READING_SETTINGS_DEFAULTS = {
     aiAutoProcess: true,
     autoOutlineSummary: true,
     autoPretranslate: false,
+    blockSummary: true,
     pretranslateConcurrency: 8,
     overviewDefaultDepth: 'standard',
 };
@@ -24,6 +25,7 @@ export const ReadingSettingsProvider = ({ children }) => {
     const [aiAutoProcess, setAiAutoProcess] = useState(READING_SETTINGS_DEFAULTS.aiAutoProcess);
     const [autoOutlineSummary, setAutoOutlineSummary] = useState(READING_SETTINGS_DEFAULTS.autoOutlineSummary);
     const [autoPretranslate, setAutoPretranslateState] = useState(READING_SETTINGS_DEFAULTS.autoPretranslate);
+    const [blockSummary, setBlockSummaryState] = useState(READING_SETTINGS_DEFAULTS.blockSummary);
     const [pretranslateConcurrency, setPretranslateConcurrencyState] = useState(READING_SETTINGS_DEFAULTS.pretranslateConcurrency);
     const [overviewDefaultDepth, setOverviewDefaultDepthState] = useState(READING_SETTINGS_DEFAULTS.overviewDefaultDepth);
 
@@ -39,6 +41,7 @@ export const ReadingSettingsProvider = ({ children }) => {
                 if (settings.aiAutoProcess !== undefined) setAiAutoProcess(Boolean(settings.aiAutoProcess));
                 if (settings.autoOutlineSummary !== undefined) setAutoOutlineSummary(Boolean(settings.autoOutlineSummary));
                 if (settings.autoPretranslate !== undefined) setAutoPretranslateState(Boolean(settings.autoPretranslate));
+                if (settings.blockSummary !== undefined) setBlockSummaryState(Boolean(settings.blockSummary));
                 if (settings.pretranslateConcurrency !== undefined) {
                     const concurrency = clampConcurrency(settings.pretranslateConcurrency);
                     setPretranslateConcurrencyState(!migratedConcurrency && concurrency === 5 ? 8 : concurrency);
@@ -96,10 +99,11 @@ export const ReadingSettingsProvider = ({ children }) => {
             aiAutoProcess,
             autoOutlineSummary,
             autoPretranslate,
+            blockSummary,
             pretranslateConcurrency,
             overviewDefaultDepth,
         });
-    }, [aiAutoProcess, autoOutlineSummary, autoPretranslate, pretranslateConcurrency, overviewDefaultDepth, debouncedSave]);
+    }, [aiAutoProcess, autoOutlineSummary, autoPretranslate, blockSummary, pretranslateConcurrency, overviewDefaultDepth, debouncedSave]);
 
     useEffect(() => {
         const handleBeforeUnload = () => flushSave();
@@ -114,6 +118,7 @@ export const ReadingSettingsProvider = ({ children }) => {
     }, [flushSave]);
 
     const setAutoPretranslate = useCallback((value) => setAutoPretranslateState(Boolean(value)), []);
+    const setBlockSummary = useCallback((value) => setBlockSummaryState(Boolean(value)), []);
     const setPretranslateConcurrency = useCallback((value) => setPretranslateConcurrencyState(clampConcurrency(value)), []);
     const setOverviewDefaultDepth = useCallback((value) => setOverviewDefaultDepthState(normalizeDepth(value)), []);
 
@@ -121,6 +126,7 @@ export const ReadingSettingsProvider = ({ children }) => {
         setAiAutoProcess(READING_SETTINGS_DEFAULTS.aiAutoProcess);
         setAutoOutlineSummary(READING_SETTINGS_DEFAULTS.autoOutlineSummary);
         setAutoPretranslateState(READING_SETTINGS_DEFAULTS.autoPretranslate);
+        setBlockSummaryState(READING_SETTINGS_DEFAULTS.blockSummary);
         setPretranslateConcurrencyState(READING_SETTINGS_DEFAULTS.pretranslateConcurrency);
         setOverviewDefaultDepthState(READING_SETTINGS_DEFAULTS.overviewDefaultDepth);
     }, []);
@@ -129,11 +135,13 @@ export const ReadingSettingsProvider = ({ children }) => {
         aiAutoProcess,
         autoOutlineSummary,
         autoPretranslate,
+        blockSummary,
         pretranslateConcurrency,
         overviewDefaultDepth,
         setAiAutoProcess,
         setAutoOutlineSummary,
         setAutoPretranslate,
+        setBlockSummary,
         setPretranslateConcurrency,
         setOverviewDefaultDepth,
         resetReadingSettings,

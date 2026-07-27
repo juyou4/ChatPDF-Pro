@@ -1,6 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback, forwardRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Sidebar, FileText, Languages, Loader2, X } from 'lucide-react';
+import {
+    BookOpen,
+    Check,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    Columns2,
+    FileText,
+    Languages,
+    Loader2,
+    RotateCcw,
+    RotateCw,
+    ScrollText,
+    Sidebar,
+    X,
+    ZoomIn,
+    ZoomOut,
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import BreatheLoader from './BreatheLoader';
 import SelectionOverlay from './SelectionOverlay';
@@ -16,7 +33,24 @@ import {
     mergeClientRectsByLine,
     normalizeCitationBBox,
 } from '../utils/citationHighlightUtils';
-import { normalizeDocumentHighlightRect } from '../utils/documentHighlightUtils';
+import {
+    highlightColorToRgba,
+    normalizeDocumentHighlightColor,
+    normalizeDocumentHighlightRect,
+    normalizeDocumentHighlightStyle,
+} from '../utils/documentHighlightUtils';
+import {
+    PDF_READER_FLOW_MODES,
+    PDF_READER_LAYOUTS,
+    getPdfReaderDisplayPages,
+    getPdfReaderNavigationTarget,
+    getPdfReaderRotationTransform,
+    mapPdfReaderDisplayPointToPage,
+    mapPdfReaderDisplayRectToPage,
+    mapPdfReaderPageRectToDisplay,
+    normalizePdfReaderRotation,
+    rotatePdfReader,
+} from '../utils/pdfReaderLayoutUtils';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -152,10 +186,186 @@ const cancelIdleTask = (task) => {
     window.clearTimeout(task.id);
 };
 
-const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, savedHighlights = EMPTY_SAVED_HIGHLIGHTS, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [] }, ref) => {
+const DEFERRED_PAGE_WIDTH = 612;
+const DEFERRED_PAGE_HEIGHT = 792;
+
+const DeferredPdfPage = ({
+    pageNumber,
+    scale,
+    displayScale = scale,
+    rotation,
+    devicePixelRatio,
+    darkMode,
+    deferRender = false,
+    scrollRootRef,
+    onActivate,
+    isActive = false,
+    viewerRef,
+    pageInputRef,
+    cachedImage,
+    onLoadSuccess,
+    onRenderSuccess,
+    children,
+}) => {
+    const holderRef = useRef(null);
+    // 当前页永远立即渲染：它不该等 IntersectionObserver，也不该被 content-visibility 跳过。
+    const [shouldRender, setShouldRender] = useState(!deferRender || isActive);
+    const [pageSize, setPageSize] = useState({
+        width: DEFERRED_PAGE_WIDTH,
+        height: DEFERRED_PAGE_HEIGHT,
+    });
+    const loadedPageRef = useRef(null);
+    const renderedPageRef = useRef(null);
+    const [loadedVersion, setLoadedVersion] = useState(0);
+    const [renderedVersion, setRenderedVersion] = useState(0);
+
+    useEffect(() => {
+        if (!deferRender || isActive) {
+            setShouldRender(true);
+            return undefined;
+        }
+        if (shouldRender || typeof IntersectionObserver === 'undefined') {
+            setShouldRender(true);
+            return undefined;
+        }
+
+        const observer = new IntersectionObserver((entries) => {
+            if (!entries.some((entry) => entry.isIntersecting)) return;
+            setShouldRender(true);
+            observer.disconnect();
+        }, {
+            root: scrollRootRef?.current || null,
+            rootMargin: '1200px 0px',
+        });
+        const element = holderRef.current;
+        if (element) observer.observe(element);
+        return () => observer.disconnect();
+    }, [deferRender, isActive, scrollRootRef, shouldRender]);
+
+    const handleLoadSuccess = useCallback((pdfPage) => {
+        loadedPageRef.current = pdfPage;
+        const viewport = pdfPage?.getViewport?.({ scale: 1 });
+        const width = Number(viewport?.width);
+        const height = Number(viewport?.height);
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+            setPageSize((current) => (
+                current.width === width && current.height === height ? current : { width, height }
+            ));
+        }
+        setLoadedVersion((version) => version + 1);
+    }, []);
+
+    const handleRenderSuccess = useCallback((pdfPage) => {
+        renderedPageRef.current = pdfPage;
+        setRenderedVersion((version) => version + 1);
+    }, []);
+
+    useEffect(() => {
+        if (!isActive || !loadedPageRef.current) return;
+        onLoadSuccess?.(loadedPageRef.current);
+    }, [isActive, loadedVersion, onLoadSuccess]);
+
+    useEffect(() => {
+        if (!isActive || !renderedPageRef.current) return;
+        onRenderSuccess?.(renderedPageRef.current);
+    }, [isActive, onRenderSuccess, renderedVersion]);
+
+    const renderedWidth = pageSize.width * scale;
+    const renderedHeight = pageSize.height * scale;
+    const rotationTransform = getPdfReaderRotationTransform({
+        rotation,
+        width: renderedWidth,
+        height: renderedHeight,
+    });
+    const stageWidth = rotationTransform.stageWidth || renderedWidth;
+    const stageHeight = rotationTransform.stageHeight || renderedHeight;
+    const liveScaleRatio = scale > 0 ? displayScale / scale : 1;
+    const activatePage = (event) => {
+        event?.stopPropagation?.();
+        onActivate?.(pageNumber);
+    };
+
+    return (
+        <div
+            ref={holderRef}
+            data-pdf-page-number={pageNumber}
+            data-pdf-passive-page={isActive ? undefined : 'true'}
+            data-pdf-active-page={isActive ? 'true' : undefined}
+            data-pdf-source-width={isActive ? renderedWidth : undefined}
+            data-pdf-source-height={isActive ? renderedHeight : undefined}
+            className={`relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_2px_15px_rgba(0,0,0,0.06)] transition-shadow duration-200 ${
+                onActivate ? 'cursor-pointer hover:shadow-[0_8px_24px_rgba(62,42,30,0.14)] focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/45' : ''
+            } ${darkMode ? 'shadow-none !bg-transparent' : ''}`}
+            style={{
+                width: `${stageWidth}px`,
+                height: `${stageHeight}px`,
+                contentVisibility: deferRender && !isActive ? 'auto' : undefined,
+                containIntrinsicSize: deferRender && !isActive ? `${stageHeight}px ${stageWidth}px` : undefined,
+                filter: darkMode ? 'grayscale(1) invert(1)' : 'none',
+            }}
+            role={onActivate ? 'button' : undefined}
+            tabIndex={onActivate ? 0 : undefined}
+            aria-label={onActivate ? `切换到第 ${pageNumber} 页` : undefined}
+            onClick={onActivate ? activatePage : undefined}
+            onKeyDown={onActivate ? (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                activatePage();
+            } : undefined}
+        >
+            {shouldRender ? (
+                <div
+                    ref={isActive ? viewerRef : undefined}
+                    className="relative bg-white"
+                    style={{
+                        width: renderedWidth,
+                        minHeight: renderedHeight,
+                        transform: rotationTransform.transform,
+                        transformOrigin: 'top left',
+                    }}
+                >
+                    <div style={liveScaleRatio !== 1 ? {
+                        transform: `scale(${liveScaleRatio})`,
+                        transformOrigin: 'top left',
+                    } : undefined}>
+                        {cachedImage && (
+                            <img
+                                src={cachedImage}
+                                alt=""
+                                className="pointer-events-none absolute left-0 top-0 z-0"
+                            />
+                        )}
+                        <Page
+                            inputRef={isActive ? pageInputRef : undefined}
+                            pageNumber={pageNumber}
+                            scale={scale}
+                            devicePixelRatio={devicePixelRatio}
+                            renderTextLayer={isActive}
+                            renderAnnotationLayer={isActive}
+                            onLoadSuccess={handleLoadSuccess}
+                            onRenderSuccess={handleRenderSuccess}
+                        />
+                    </div>
+                    {isActive ? children : null}
+                </div>
+            ) : (
+                <div className={`flex h-full min-h-[240px] items-center justify-center text-xs ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>
+                    加载第 {pageNumber} 页
+                </div>
+            )}
+        </div>
+    );
+};
+
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, savedHighlights = EMPTY_SAVED_HIGHLIGHTS, onSavedHighlightClick, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [], hasDockedSelectionToolbar = false, selectionToolbar = null, translationSurface = 'panel', onTranslationSurfaceChange }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
+    const [pageFlowMode, setPageFlowMode] = useState(PDF_READER_FLOW_MODES.PAGED);
+    const [pageLayout, setPageLayout] = useState(PDF_READER_LAYOUTS.SINGLE);
+    const [pageRotation, setPageRotation] = useState(0);
+    const [isPageLayoutMenuOpen, setIsPageLayoutMenuOpen] = useState(false);
+    const [pageBaseSize, setPageBaseSize] = useState({ width: 0, height: 0 });
     // 防抖缩放值：实际 PDF 渲染使用防抖后的值（150ms），避免频繁重渲染
     const debouncedScale = useDebouncedValue(scale, 150);
     const [selectedText, setSelectedText] = useState('');
@@ -163,7 +373,23 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const [hoveredBlockId, setHoveredBlockId] = useState(null);
     const [hoverTranslationBlockId, setHoverTranslationBlockId] = useState(null);
     const [isTranslationPositionPinned, setIsTranslationPositionPinned] = useState(false);
-    const [isTranslationDocked, setIsTranslationDocked] = useState(false);
+    // 吸附栏由父级统管：它和右侧阅读区的「页面翻译」卡片是同一件事的两个落点，
+    // 同时开着只会重复占屏幕，所以状态提到 ChatPDF 里做互斥。
+    const isTranslationDocked = translationSurface === 'dock';
+    const translationSurfaceRef = useRef(translationSurface);
+    const onTranslationSurfaceChangeRef = useRef(onTranslationSurfaceChange);
+    useEffect(() => {
+        translationSurfaceRef.current = translationSurface;
+        onTranslationSurfaceChangeRef.current = onTranslationSurfaceChange;
+    }, [onTranslationSurfaceChange, translationSurface]);
+    // 身份恒定，等价于原来的 useState setter。
+    // 这个文件里好几处 useCallback 没把它列进依赖，如果 shim 自己捕获 state，
+    // 那些回调就会拿着冻住的旧值去取反，按钮变成点不动的死按钮。
+    const setIsTranslationDocked = useCallback((next) => {
+        const current = translationSurfaceRef.current === 'dock';
+        const resolved = typeof next === 'function' ? next(current) : next;
+        onTranslationSurfaceChangeRef.current?.(resolved ? 'dock' : 'panel');
+    }, []);
     const [translationDockWidth, setTranslationDockWidth] = useState(TRANSLATION_DOCK_DEFAULT_WIDTH);
     const [floatingTranslationStyle, setFloatingTranslationStyle] = useState(null);
     const [hoverCorner, setHoverCorner] = useState('');
@@ -178,6 +404,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const translationPanelResizeRef = useRef({ resizing: false, start: { x: 0, y: 0 }, origin: null });
     const translationDockResizeRef = useRef({ resizing: false, startX: 0, originWidth: TRANSLATION_DOCK_DEFAULT_WIDTH });
     const pdfDocumentRef = useRef(null);
+    const pageRef = useRef(null);
+    const pageLayoutMenuRef = useRef(null);
+    const pdfScrollRef = useRef(null);
+    const loadedPdfUrlRef = useRef('');
     const hasAutoFitRef = useRef(false);
     const backgroundDelayRef = useRef(null);
     const backgroundIdleTaskRef = useRef(null);
@@ -192,6 +422,25 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     }, [page, pageNumber]);
 
     useEffect(() => {
+        if (!isPageLayoutMenuOpen) return undefined;
+        const closeMenu = (event) => {
+            if (event.key === 'Escape') {
+                setIsPageLayoutMenuOpen(false);
+                return;
+            }
+            if (event.type === 'pointerdown' && !pageLayoutMenuRef.current?.contains(event.target)) {
+                setIsPageLayoutMenuOpen(false);
+            }
+        };
+        window.addEventListener('keydown', closeMenu);
+        window.addEventListener('pointerdown', closeMenu);
+        return () => {
+            window.removeEventListener('keydown', closeMenu);
+            window.removeEventListener('pointerdown', closeMenu);
+        };
+    }, [isPageLayoutMenuOpen]);
+
+    useEffect(() => {
         setIsTranslationPositionPinned(false);
         setFloatingTranslationStyle(null);
         hoveredBlockIdRef.current = null;
@@ -202,12 +451,27 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         translationDockResizeRef.current = { resizing: false, startX: 0, originWidth: TRANSLATION_DOCK_DEFAULT_WIDTH };
     }, [pdfUrl, pageNumber]);
 
+    // 退出吸附时复位悬浮态。开吸附时 toggleDockedTranslation 会把 popupHoveredRef 置 true，
+    // 而吸附期间悬浮窗是被卸载的，onMouseLeave 永远不会补发。
+    // 以前只有吸附栏自己的 X 按钮记得复位；现在右侧面板也能关，必须在这里统一收口，
+    // 否则 updateHoveredBlock(null) 会被 popupHoveredRef 挡住，悬浮译文窗再也清不掉。
     useEffect(() => {
+        if (isTranslationDocked) return;
+        popupHoveredRef.current = false;
+    }, [isTranslationDocked]);
+
+    useEffect(() => {
+        if (loadedPdfUrlRef.current === pdfUrl) return;
         setIsTranslationDocked(false);
         pdfDocumentRef.current = null;
         hasAutoFitRef.current = false;
         setNumPages(null);
         setError(null);
+        setPageBaseSize({ width: 0, height: 0 });
+        setPageRotation(0);
+        setPageFlowMode(PDF_READER_FLOW_MODES.PAGED);
+        setPageLayout(PDF_READER_LAYOUTS.SINGLE);
+        setIsPageLayoutMenuOpen(false);
     }, [pdfUrl]);
 
     // 桌面模式下通过 preload IPC 获取后端地址；鉴权由主进程网络层处理。
@@ -250,6 +514,53 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         if (typeof window === 'undefined') return 1;
         return Math.min(Math.max(window.devicePixelRatio || 1, 1), 1.5);
     }, []);
+    const normalizedPageRotation = normalizePdfReaderRotation(pageRotation);
+    const pageRenderedSize = useMemo(() => ({
+        width: Math.max(0, Number(pageBaseSize.width) || 0) * debouncedScale,
+        height: Math.max(0, Number(pageBaseSize.height) || 0) * debouncedScale,
+    }), [debouncedScale, pageBaseSize.height, pageBaseSize.width]);
+    const pageRotationTransform = useMemo(() => getPdfReaderRotationTransform({
+        rotation: normalizedPageRotation,
+        width: pageRenderedSize.width,
+        height: pageRenderedSize.height,
+    }), [normalizedPageRotation, pageRenderedSize.height, pageRenderedSize.width]);
+    const displayPageNumbers = useMemo(() => getPdfReaderDisplayPages({
+        totalPages: numPages,
+        pageNumber,
+        flowMode: pageFlowMode,
+        layout: pageLayout,
+    }), [numPages, pageFlowMode, pageLayout, pageNumber]);
+    const isContinuousReading = pageFlowMode === PDF_READER_FLOW_MODES.CONTINUOUS;
+    const pageIndicator = isContinuousReading
+        ? String(pageNumber)
+        : displayPageNumbers.join('–') || String(pageNumber);
+    const previousPageTarget = useMemo(() => getPdfReaderNavigationTarget({
+        totalPages: numPages,
+        pageNumber,
+        flowMode: pageFlowMode,
+        layout: pageLayout,
+        direction: -1,
+    }), [numPages, pageFlowMode, pageLayout, pageNumber]);
+    const nextPageTarget = useMemo(() => getPdfReaderNavigationTarget({
+        totalPages: numPages,
+        pageNumber,
+        flowMode: pageFlowMode,
+        layout: pageLayout,
+        direction: 1,
+    }), [numPages, pageFlowMode, pageLayout, pageNumber]);
+    const activePageStageStyle = pageRotationTransform.stageWidth > 0 && pageRotationTransform.stageHeight > 0
+        ? {
+            width: pageRotationTransform.stageWidth,
+            height: pageRotationTransform.stageHeight,
+        }
+        : undefined;
+    const readerPageStackClassName = isContinuousReading
+        ? (pageLayout === PDF_READER_LAYOUTS.SINGLE
+            ? 'flex min-w-full flex-col items-center gap-6'
+            : 'grid min-w-full w-max grid-cols-2 items-start justify-items-center gap-6')
+        : (displayPageNumbers.length > 1
+            ? 'flex min-h-full min-w-full items-start justify-center gap-6'
+            : 'flex min-h-full min-w-full items-start justify-center');
 
     // Electron 主进程会为本机后端请求注入 token，渲染进程不持有凭据。
     const pdfFile = useMemo(() => {
@@ -260,6 +571,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     function onDocumentLoadSuccess(pdfDocument) {
         const { numPages } = pdfDocument;
         pdfDocumentRef.current = pdfDocument;
+        loadedPdfUrlRef.current = pdfUrl;
         setNumPages(numPages);
         setError(null);
         setPageNumber(prev => {
@@ -271,8 +583,19 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         });
     }
 
+    const updatePageBaseSize = useCallback((pdfPage) => {
+        const viewport = pdfPage?.getViewport?.({ scale: 1 });
+        const width = Number(viewport?.width);
+        const height = Number(viewport?.height);
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+        setPageBaseSize((current) => (
+            current.width === width && current.height === height ? current : { width, height }
+        ));
+    }, []);
+
     // 首次加载按容器宽度自适应缩放（fit-width）；只做一次，不覆盖用户手动缩放
     const handleFirstPageLoad = useCallback((page) => {
+        updatePageBaseSize(page);
         if (hasAutoFitRef.current) return;
         const el = pdfScrollRef.current;
         if (!el) return;
@@ -283,12 +606,52 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             const fit = Math.min(Math.max(available / naturalWidth, 0.9), 1.75);
             setScale(Math.round(fit * 20) / 20);
         }
-    }, []);
+    }, [updatePageBaseSize]);
 
     function onDocumentLoadError(error) {
         console.error('❌ PDF load error:', error);
         setError(error.message || 'Failed to load PDF');
     }
+
+    const getCurrentPageMetrics = useCallback((pageElement = pageRef.current) => {
+        if (!pageElement) return null;
+        const bounds = pageElement.getBoundingClientRect();
+        const inferredWidth = normalizedPageRotation % 180 === 0 ? bounds.width : bounds.height;
+        const inferredHeight = normalizedPageRotation % 180 === 0 ? bounds.height : bounds.width;
+        const width = pageRenderedSize.width || inferredWidth;
+        const height = pageRenderedSize.height || inferredHeight;
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+        return { bounds, width, height };
+    }, [normalizedPageRotation, pageRenderedSize.height, pageRenderedSize.width]);
+
+    const clientRectsToPageLocal = useCallback((clientRects, pageElement, padding = 1) => {
+        const metrics = getCurrentPageMetrics(pageElement);
+        if (!metrics) return [];
+        const localRects = Array.from(clientRects || [])
+            .filter((rect) => (
+                rect.width > 1
+                && rect.height > 1
+                && rect.right > metrics.bounds.left
+                && rect.left < metrics.bounds.right
+                && rect.bottom > metrics.bounds.top
+                && rect.top < metrics.bounds.bottom
+            ))
+            .map((rect) => mapPdfReaderDisplayRectToPage({
+                left: rect.left - metrics.bounds.left,
+                top: rect.top - metrics.bounds.top,
+                width: rect.width,
+                height: rect.height,
+                pageWidth: metrics.width,
+                pageHeight: metrics.height,
+                rotation: normalizedPageRotation,
+            }))
+            .map((rect) => ({
+                ...rect,
+                right: rect.left + rect.width,
+                bottom: rect.top + rect.height,
+            }));
+        return mergeClientRectsByLine(localRects, { left: 0, top: 0 }, padding);
+    }, [getCurrentPageMetrics, normalizedPageRotation]);
 
     const handleTextSelection = () => {
         const selection = window.getSelection();
@@ -303,16 +666,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     const ancestor = range.commonAncestorContainer;
                     const ancestorElement = ancestor?.nodeType === 1 ? ancestor : ancestor?.parentElement;
                     if (ancestorElement && pageElement.contains(ancestorElement)) {
-                        const pageBounds = pageElement.getBoundingClientRect();
-                        const clientRects = Array.from(range.getClientRects()).filter((rect) => (
-                            rect.width > 1
-                            && rect.height > 1
-                            && rect.right > pageBounds.left
-                            && rect.left < pageBounds.right
-                            && rect.bottom > pageBounds.top
-                            && rect.top < pageBounds.bottom
-                        ));
-                        const rects = mergeClientRectsByLine(clientRects, pageBounds, 1).map((rect) => ({
+                        const metrics = getCurrentPageMetrics(pageElement);
+                        const rects = clientRectsToPageLocal(range.getClientRects(), pageElement, 1).map((rect) => ({
                             left: rect.left / debouncedScale,
                             top: rect.top / debouncedScale,
                             width: rect.width / debouncedScale,
@@ -322,7 +677,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             page: pageNumber,
                             rects,
                             coordinate_space: 'pdf_top_left_points',
-                            page_size: [pageBounds.width / debouncedScale, pageBounds.height / debouncedScale],
+                            page_size: metrics
+                                ? [metrics.width / debouncedScale, metrics.height / debouncedScale]
+                                : undefined,
                         };
                     }
                 }
@@ -331,15 +688,77 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         }
     };
 
-    const changePage = (offset) => {
-        setPageNumber(prevPageNumber => {
-            const nextPage = Math.max(1, Math.min(prevPageNumber + offset, numPages || prevPageNumber || 1));
-            if (onPageChange) {
-                onPageChange(nextPage);
-            }
-            return nextPage;
+    const scrollToReaderPage = useCallback((targetPage, behavior = 'smooth') => {
+        const target = pdfScrollRef.current?.querySelector?.(`[data-pdf-page-number="${targetPage}"]`);
+        target?.scrollIntoView?.({ block: 'start', inline: 'center', behavior });
+    }, []);
+
+    const updateReaderPage = useCallback((nextPage, { scroll = false, behavior = 'smooth' } = {}) => {
+        const total = Math.max(1, Number(numPages) || 1);
+        const safePage = Math.min(total, Math.max(1, Math.round(Number(nextPage) || 1)));
+        if (safePage !== pageNumber) {
+            setPageNumber(safePage);
+            onPageChange?.(safePage);
+        }
+        if (scroll && typeof window !== 'undefined') {
+            const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+            schedule(() => scrollToReaderPage(safePage, behavior));
+        }
+    }, [numPages, onPageChange, pageNumber, scrollToReaderPage]);
+
+    const changePage = useCallback((direction) => {
+        const nextPage = getPdfReaderNavigationTarget({
+            totalPages: numPages,
+            pageNumber,
+            flowMode: pageFlowMode,
+            layout: pageLayout,
+            direction,
         });
-    };
+        if (nextPage === pageNumber) return;
+        updateReaderPage(nextPage, { scroll: pageFlowMode === PDF_READER_FLOW_MODES.CONTINUOUS });
+    }, [numPages, pageFlowMode, pageLayout, pageNumber, updateReaderPage]);
+
+    const selectPageFlowMode = useCallback((nextMode) => {
+        if (nextMode === pageFlowMode) return;
+        setPageFlowMode(nextMode);
+        if (nextMode === PDF_READER_FLOW_MODES.PAGED) {
+            const firstVisiblePage = getPdfReaderDisplayPages({
+                totalPages: numPages,
+                pageNumber,
+                flowMode: nextMode,
+                layout: pageLayout,
+            })[0];
+            updateReaderPage(firstVisiblePage || pageNumber);
+            return;
+        }
+        if (typeof window !== 'undefined') {
+            const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+            schedule(() => scrollToReaderPage(pageNumber, 'auto'));
+        }
+    }, [numPages, pageFlowMode, pageLayout, pageNumber, scrollToReaderPage, updateReaderPage]);
+
+    const selectPageLayout = useCallback((nextLayout) => {
+        if (nextLayout === pageLayout) return;
+        setPageLayout(nextLayout);
+        if (!isContinuousReading) {
+            const firstVisiblePage = getPdfReaderDisplayPages({
+                totalPages: numPages,
+                pageNumber,
+                flowMode: pageFlowMode,
+                layout: nextLayout,
+            })[0];
+            updateReaderPage(firstVisiblePage || pageNumber);
+            return;
+        }
+        if (typeof window !== 'undefined') {
+            const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+            schedule(() => scrollToReaderPage(pageNumber, 'auto'));
+        }
+    }, [isContinuousReading, numPages, pageFlowMode, pageLayout, pageNumber, scrollToReaderPage, updateReaderPage]);
+
+    const rotateReader = useCallback((direction) => {
+        setPageRotation((current) => rotatePdfReader(current, direction));
+    }, []);
 
     const zoomIn = () => setScale(prev => Math.min(prev + 0.2, 3.0));
     const zoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
@@ -347,7 +766,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const [highlightRect, setHighlightRect] = useState(null);
     const [highlightRects, setHighlightRects] = useState([]);
     const [savedHighlightRects, setSavedHighlightRects] = useState([]);
-    const pageRef = useRef(null);
     const pageRenderEpoch = useMemo(() => ({
         documentKey: pdfCacheKey,
         pageNumber,
@@ -393,6 +811,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         ) {
             return;
         }
+        updatePageBaseSize(renderedPage);
         setRenderedPageEpoch(pageRenderEpoch);
         cancelBackgroundWork();
         const generation = backgroundGenerationRef.current;
@@ -432,7 +851,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 }
             }, 1200);
         }, 180);
-    }, [cancelBackgroundWork, debouncedScale, numPages, pageNumber, pageRenderEpoch, pdfCacheKey]);
+    }, [cancelBackgroundWork, debouncedScale, numPages, pageNumber, pageRenderEpoch, pdfCacheKey, updatePageBaseSize]);
 
     const currentBlockPage = useMemo(
         () => getPageBlockData(blockIndex, pageNumber),
@@ -446,10 +865,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     const findBlockAtPoint = useCallback((clientX, clientY) => {
         if (isSelecting || currentBlocks.length === 0) return null;
-        const pageElement = pageRef.current;
-        if (!pageElement) return null;
-
-        const pageRect = pageElement.getBoundingClientRect();
+        const metrics = getCurrentPageMetrics();
+        if (!metrics) return null;
+        const pageRect = metrics.bounds;
         if (
             clientX < pageRect.left ||
             clientX > pageRect.right ||
@@ -459,8 +877,15 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             return null;
         }
 
-        const x = (clientX - pageRect.left) / debouncedScale;
-        const y = (clientY - pageRect.top) / debouncedScale;
+        const point = mapPdfReaderDisplayPointToPage({
+            x: clientX - pageRect.left,
+            y: clientY - pageRect.top,
+            width: metrics.width,
+            height: metrics.height,
+            rotation: normalizedPageRotation,
+        });
+        const x = point.x / debouncedScale;
+        const y = point.y / debouncedScale;
         const matches = currentBlocks
             .map((block) => ({ block, bbox: normalizeBlockBBox(block.bbox) }))
             .filter(({ bbox }) => bbox && x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3])
@@ -472,7 +897,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             });
 
         return matches[0]?.block || null;
-    }, [currentBlocks, debouncedScale, isSelecting]);
+    }, [currentBlocks, debouncedScale, getCurrentPageMetrics, isSelecting, normalizedPageRotation]);
 
     const updateHoveredBlock = useCallback((block, point = null) => {
         const nextId = block?.block_id || null;
@@ -545,15 +970,44 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         updateHoveredBlock(null);
     }, [updateHoveredBlock]);
 
+    const findSavedHighlightAtPoint = useCallback((clientX, clientY) => {
+        const metrics = getCurrentPageMetrics();
+        if (!metrics) return null;
+        const pageRect = metrics.bounds;
+        const point = mapPdfReaderDisplayPointToPage({
+            x: clientX - pageRect.left,
+            y: clientY - pageRect.top,
+            width: metrics.width,
+            height: metrics.height,
+            rotation: normalizedPageRotation,
+        });
+        const localX = point.x;
+        const localY = point.y;
+        const hitSlop = 3;
+        const hit = [...savedHighlightRects].reverse().find(({ rect }) => (
+            localX >= rect.left - hitSlop
+            && localX <= rect.left + rect.width + hitSlop
+            && localY >= rect.top - hitSlop
+            && localY <= rect.top + rect.height + hitSlop
+        ));
+        return hit?.annotation || null;
+    }, [getCurrentPageMetrics, normalizedPageRotation, savedHighlightRects]);
+
     const handleBlockClick = useCallback((event) => {
         const selection = window.getSelection?.();
         const selectionText = selection?.toString().trim() || '';
         if (selectionText) return;
+        const savedHighlight = findSavedHighlightAtPoint(event.clientX, event.clientY);
+        if (savedHighlight) {
+            event.stopPropagation();
+            onSavedHighlightClick?.(savedHighlight);
+            return;
+        }
         const block = findBlockAtPoint(event.clientX, event.clientY);
         if (block) {
             onBlockClick?.(block);
         }
-    }, [findBlockAtPoint, onBlockClick]);
+    }, [findBlockAtPoint, findSavedHighlightAtPoint, onBlockClick, onSavedHighlightClick]);
 
     useEffect(() => () => {
         if (hoverClearTimerRef.current) {
@@ -566,7 +1020,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     // ── 自定义滚动条 ──
     const THUMB_SIZE = 48;
-    const pdfScrollRef = useRef(null);
     const [vThumb, setVThumb] = useState({ top: 0, visible: false });
     const [hThumb, setHThumb] = useState({ left: 0, visible: false });
     const isDragging = useRef(false);
@@ -584,6 +1037,34 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             : { visible: false, left: 0 });
     }, []);
 
+    const handlePdfScroll = useCallback((event) => {
+        updateThumbs();
+        if (!isContinuousReading) return;
+
+        const scroller = event.currentTarget || pdfScrollRef.current;
+        if (!scroller) return;
+        const viewport = scroller.getBoundingClientRect();
+        const readingLine = viewport.top + Math.min(viewport.height * 0.32, 220);
+        let closestPage = null;
+        let closestDistance = Number.POSITIVE_INFINITY;
+
+        scroller.querySelectorAll('[data-pdf-page-number]').forEach((element) => {
+            const candidate = Number(element.dataset.pdfPageNumber);
+            if (!Number.isFinite(candidate) || candidate < 1) return;
+            const bounds = element.getBoundingClientRect();
+            const distance = Math.abs(bounds.top + Math.min(bounds.height * 0.38, 180) - readingLine);
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closestPage = candidate;
+            }
+        });
+
+        if (closestPage && closestPage !== pageNumber) {
+            setPageNumber(closestPage);
+            onPageChange?.(closestPage);
+        }
+    }, [isContinuousReading, onPageChange, pageNumber, updateThumbs]);
+
     useEffect(() => {
         const el = pdfScrollRef.current;
         if (!el) return;
@@ -597,7 +1078,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     useEffect(() => {
         const t = setTimeout(updateThumbs, 300);
         return () => clearTimeout(t);
-    }, [scale, debouncedScale, pageNumber, numPages, updateThumbs]);
+    }, [scale, debouncedScale, pageNumber, numPages, pageFlowMode, pageLayout, updateThumbs]);
 
     const makeDragHandler = useCallback((axis) => (e) => {
         e.preventDefault();
@@ -643,10 +1124,19 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
         const pageBounds = pageElement.getBoundingClientRect();
         const viewportBounds = scroller.getBoundingClientRect();
-        const targetTop = scroller.scrollTop + pageBounds.top - viewportBounds.top + firstRect.top;
-        const targetLeft = scroller.scrollLeft + pageBounds.left - viewportBounds.left + firstRect.left;
-        const targetBottom = targetTop + firstRect.height;
-        const targetRight = targetLeft + firstRect.width;
+        const metrics = getCurrentPageMetrics(pageElement);
+        const displayRect = metrics
+            ? mapPdfReaderPageRectToDisplay({
+                ...firstRect,
+                pageWidth: metrics.width,
+                pageHeight: metrics.height,
+                rotation: normalizedPageRotation,
+            })
+            : firstRect;
+        const targetTop = scroller.scrollTop + pageBounds.top - viewportBounds.top + displayRect.top;
+        const targetLeft = scroller.scrollLeft + pageBounds.left - viewportBounds.left + displayRect.left;
+        const targetBottom = targetTop + displayRect.height;
+        const targetRight = targetLeft + displayRect.width;
         const margin = 48;
         const verticallyVisible = (
             targetTop >= scroller.scrollTop + margin
@@ -674,7 +1164,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             scroller.scrollTop = nextTop;
             scroller.scrollLeft = nextLeft;
         }
-    }, []);
+    }, [getCurrentPageMetrics, normalizedPageRotation]);
 
     useEffect(() => {
         let isMounted = true;
@@ -725,11 +1215,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         });
         const spatialBBox = anchorBBox || normalizeCitationBBox(blockMatch?.block?.bbox);
         const initialPageElement = pageRef.current;
-        const renderedBounds = initialPageElement?.getBoundingClientRect?.();
-        const renderedPageSize = renderedBounds && debouncedScale > 0
+        const renderedPageSize = pageRenderedSize.width > 0 && pageRenderedSize.height > 0 && debouncedScale > 0
             ? {
-                width: renderedBounds.width / debouncedScale,
-                height: renderedBounds.height / debouncedScale,
+                width: pageRenderedSize.width / debouncedScale,
+                height: pageRenderedSize.height / debouncedScale,
             }
             : null;
         const renderOptions = {
@@ -800,10 +1289,19 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
                 if (spatialFallbackRects.length > 0) {
                     const constraint = spatialFallbackRects[0];
-                    const left = pageRect.left + constraint.left;
-                    const top = pageRect.top + constraint.top;
-                    const right = left + constraint.width;
-                    const bottom = top + constraint.height;
+                    const metrics = getCurrentPageMetrics(pageElement);
+                    const displayConstraint = metrics
+                        ? mapPdfReaderPageRectToDisplay({
+                            ...constraint,
+                            pageWidth: metrics.width,
+                            pageHeight: metrics.height,
+                            rotation: normalizedPageRotation,
+                        })
+                        : constraint;
+                    const left = pageRect.left + displayConstraint.left;
+                    const top = pageRect.top + displayConstraint.top;
+                    const right = left + displayConstraint.width;
+                    const bottom = top + displayConstraint.height;
                     const constrainedSpans = allSpans.filter((span) => {
                         const rect = span.getBoundingClientRect();
                         const overlapX = Math.min(rect.right, right) - Math.max(rect.left, left);
@@ -840,11 +1338,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     spans,
                     { startIndex, endIndex }
                 );
-                const resultRects = mergeClientRectsByLine(
-                    clientRects,
-                    pageElement.getBoundingClientRect(),
-                    3
-                );
+                const resultRects = clientRectsToPageLocal(clientRects, pageElement, 3);
                 if (resultRects.length > 0 && isMounted) {
                     setHighlightRect(resultRects[0]);
                     setHighlightRects(resultRects);
@@ -864,7 +1358,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             if (retryTimer) clearTimeout(retryTimer);
         };
 
-    }, [blockIndex, currentBlockPage, currentBlocks, debouncedScale, highlightInfo, numPages, pageNumber, pageRenderEpoch, renderedPageEpoch, scrollHighlightIntoView]);
+    }, [blockIndex, clientRectsToPageLocal, currentBlockPage, currentBlocks, debouncedScale, getCurrentPageMetrics, highlightInfo, normalizedPageRotation, numPages, pageNumber, pageRenderEpoch, pageRenderedSize.height, pageRenderedSize.width, renderedPageEpoch, scrollHighlightIntoView]);
 
     useEffect(() => {
         if (renderedPageEpoch !== pageRenderEpoch) {
@@ -885,7 +1379,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             return;
         }
 
-        const pageBounds = pageElement.getBoundingClientRect();
         let allSpans = null;
         let fullText = '';
         const resolveLegacyTextRects = (highlight) => {
@@ -898,9 +1391,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             if (allSpans.length === 0) return [];
             const matchedRange = findCitationTextRange({ fullText, text: highlight.text });
             if (!matchedRange) return [];
-            return mergeClientRectsByLine(
+            return clientRectsToPageLocal(
                 collectTextRangeClientRects(allSpans, matchedRange),
-                pageBounds,
+                pageElement,
                 1
             );
         };
@@ -919,17 +1412,30 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 }))
                 : resolveLegacyTextRects(highlight);
             renderedRects.forEach((rect, rectIndex) => {
+                const color = String(highlight.color || '#FFE066');
                 nextRects.push({
-                    key: `${highlight.id || highlight.text}-${rectIndex}`,
+                    // Include color in key so color updates remount the overlay.
+                    key: `${highlight.id || highlight.text}-${color}-${rectIndex}`,
                     highlightId: String(highlight.id || ''),
+                    color,
+                    annotationStyle: normalizeDocumentHighlightStyle(highlight.style),
+                    annotation: highlight,
                     rect,
                 });
             });
         });
         setSavedHighlightRects(nextRects);
-    }, [debouncedScale, pageNumber, pageRenderEpoch, renderedPageEpoch, savedHighlights]);
+    }, [clientRectsToPageLocal, debouncedScale, normalizedPageRotation, pageNumber, pageRenderEpoch, renderedPageEpoch, savedHighlights]);
 
     const activeOverlayBlockId = hoveredBlockId || activeBlockId;
+    const savedMarkerRects = useMemo(
+        () => savedHighlightRects.filter(({ annotationStyle }) => annotationStyle === 'highlight'),
+        [savedHighlightRects]
+    );
+    const savedUnderlineRects = useMemo(
+        () => savedHighlightRects.filter(({ annotationStyle }) => annotationStyle === 'underline'),
+        [savedHighlightRects]
+    );
     const focusedBlockSet = useMemo(() => new Set(focusedBlockIds || []), [focusedBlockIds]);
     const visitedBlockSet = useMemo(() => new Set(visitedBlockIds || []), [visitedBlockIds]);
     const inlineTranslationSet = useMemo(() => new Set(inlineTranslationBlockIds || []), [inlineTranslationBlockIds]);
@@ -1245,9 +1751,12 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const activeHighlightIsNote = activeHighlightSource === 'note';
 
     return (
-        <div className={`relative h-full flex flex-col overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#f3f1ee]'}`}>
+        <div data-pdf-reader-surface className={`relative h-full flex flex-col overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#f3f1ee]'}`}>
             {/* Toolbar Area */}
-            <div className={`z-10 flex-shrink-0 border-b px-3 py-2.5 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
+            {/* relative 是必须的：原来只写 z-10 挂在 static 元素上，z-index 直接失效，
+                里面的页面转换下拉只能靠 DOM 顺序绘制，被后面的划词工具栏压住。
+                这里显式抬到 z-30，高于划词工具栏(z-20)和吸附翻译栏(z-20)。 */}
+            <div data-pdf-reader-toolbar className={`relative z-30 flex-shrink-0 border-b px-3 py-2.5 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
                 <div className="flex items-center justify-between px-1 py-1">
                     {/* Left Controls */}
                     <div className="flex items-center gap-1">
@@ -1263,18 +1772,134 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     </div>
 
                     <div className="flex items-center gap-2">
-                        <button onClick={() => changePage(-1)} disabled={pageNumber <= 1} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
+                        <button onClick={() => changePage(-1)} disabled={previousPageTarget === pageNumber} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`} title="上一页">
                             <ChevronLeft className="w-5 h-5" />
                         </button>
                         <div className={`flex items-center border rounded-md px-2 py-1 text-sm ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                            <span className="text-center font-medium min-w-[1.5rem]">{pageNumber}</span>
+                            <span className="text-center font-medium min-w-[1.5rem] tabular-nums">{pageIndicator}</span>
                         </div>
                         <span className="text-sm text-gray-400 font-medium">/ {numPages || '--'}</span>
-                        <button onClick={() => changePage(1)} disabled={pageNumber >= (numPages || 1)} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}>
+                        <button onClick={() => changePage(1)} disabled={nextPageTarget === pageNumber} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="下一页">
                             <ChevronRight className="w-5 h-5" />
                         </button>
                     </div>
                     <div className="flex items-center gap-1">
+                        <div ref={pageLayoutMenuRef} className="relative">
+                            <button
+                                type="button"
+                                onClick={() => setIsPageLayoutMenuOpen((open) => !open)}
+                                className={`inline-flex h-8 items-center gap-1.5 rounded-xl px-2 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/35 ${
+                                    isPageLayoutMenuOpen
+                                        ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f3ddd5] text-[#a4533d]')
+                                        : (darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-[#f0ebe7] hover:text-[#9f5541]')
+                                }`}
+                                title="页面转换"
+                                aria-label="页面转换"
+                                aria-expanded={isPageLayoutMenuOpen}
+                                aria-controls="pdf-reader-layout-menu"
+                            >
+                                <BookOpen className="h-4 w-4" />
+                                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${isPageLayoutMenuOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            <AnimatePresence>
+                                {isPageLayoutMenuOpen && (
+                                    <motion.div
+                                        id="pdf-reader-layout-menu"
+                                        role="menu"
+                                        initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                                        exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                                        transition={{ duration: 0.16, ease: 'easeOut' }}
+                                        className={`absolute right-0 top-[calc(100%+10px)] z-50 w-[196px] overflow-hidden rounded-2xl border p-2 shadow-[0_18px_46px_rgba(72,47,35,0.18)] ${
+                                            darkMode
+                                                ? 'border-white/10 bg-[#25292f] text-gray-100 shadow-black/35'
+                                                : 'border-[#ebe4dd] bg-[#fffdfb] text-[#3c342f]'
+                                        }`}
+                                    >
+                                        <div className={`px-2 pb-1 pt-1 text-[11px] font-semibold ${darkMode ? 'text-gray-500' : 'text-[#9b857a]'}`}>页面转换</div>
+                                        <button
+                                            type="button"
+                                            role="menuitemradio"
+                                            aria-checked={pageFlowMode === PDF_READER_FLOW_MODES.CONTINUOUS}
+                                            onClick={() => selectPageFlowMode(PDF_READER_FLOW_MODES.CONTINUOUS)}
+                                            className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                                                pageFlowMode === PDF_READER_FLOW_MODES.CONTINUOUS
+                                                    ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f1dfd8] text-[#9d503c]')
+                                                    : (darkMode ? 'text-gray-300 hover:bg-white/8' : 'text-[#51473f] hover:bg-[#f6efeb]')
+                                            }`}
+                                        >
+                                            <ScrollText className="h-4 w-4 shrink-0" />
+                                            <span className="flex-1">连续</span>
+                                            {pageFlowMode === PDF_READER_FLOW_MODES.CONTINUOUS && <Check className="h-4 w-4" />}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            role="menuitemradio"
+                                            aria-checked={pageFlowMode === PDF_READER_FLOW_MODES.PAGED}
+                                            onClick={() => selectPageFlowMode(PDF_READER_FLOW_MODES.PAGED)}
+                                            className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                                                pageFlowMode === PDF_READER_FLOW_MODES.PAGED
+                                                    ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f1dfd8] text-[#9d503c]')
+                                                    : (darkMode ? 'text-gray-300 hover:bg-white/8' : 'text-[#51473f] hover:bg-[#f6efeb]')
+                                            }`}
+                                        >
+                                            <FileText className="h-4 w-4 shrink-0" />
+                                            <span className="flex-1">逐页</span>
+                                            {pageFlowMode === PDF_READER_FLOW_MODES.PAGED && <Check className="h-4 w-4" />}
+                                        </button>
+
+                                        <div className={`mx-2 my-1.5 h-px ${darkMode ? 'bg-white/8' : 'bg-[#ebdfd9]'}`} />
+                                        <div className={`px-2 pb-1 text-[11px] font-semibold ${darkMode ? 'text-gray-500' : 'text-[#9b857a]'}`}>旋转</div>
+                                        <button
+                                            type="button"
+                                            role="menuitem"
+                                            onClick={() => rotateReader(1)}
+                                            className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${darkMode ? 'text-gray-300 hover:bg-white/8' : 'text-[#51473f] hover:bg-[#f6efeb]'}`}
+                                        >
+                                            <RotateCw className="h-4 w-4 shrink-0" />
+                                            <span>顺时针</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            role="menuitem"
+                                            onClick={() => rotateReader(-1)}
+                                            className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${darkMode ? 'text-gray-300 hover:bg-white/8' : 'text-[#51473f] hover:bg-[#f6efeb]'}`}
+                                        >
+                                            <RotateCcw className="h-4 w-4 shrink-0" />
+                                            <span>逆时针</span>
+                                        </button>
+
+                                        <div className={`mx-2 my-1.5 h-px ${darkMode ? 'bg-white/8' : 'bg-[#ebdfd9]'}`} />
+                                        <div className={`px-2 pb-1 text-[11px] font-semibold ${darkMode ? 'text-gray-500' : 'text-[#9b857a]'}`}>布局</div>
+                                        {[
+                                            { value: PDF_READER_LAYOUTS.SINGLE, label: '单页', Icon: FileText },
+                                            { value: PDF_READER_LAYOUTS.DOUBLE, label: '双页', Icon: Columns2 },
+                                            { value: PDF_READER_LAYOUTS.COVER, label: '封面', Icon: BookOpen },
+                                        ].map(({ value, label, Icon }) => {
+                                            const active = pageLayout === value;
+                                            return (
+                                                <button
+                                                    key={value}
+                                                    type="button"
+                                                    role="menuitemradio"
+                                                    aria-checked={active}
+                                                    onClick={() => selectPageLayout(value)}
+                                                    className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition-colors ${
+                                                        active
+                                                            ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f1dfd8] text-[#9d503c]')
+                                                            : (darkMode ? 'text-gray-300 hover:bg-white/8' : 'text-[#51473f] hover:bg-[#f6efeb]')
+                                                    }`}
+                                                >
+                                                    <Icon className="h-4 w-4 shrink-0" />
+                                                    <span className="flex-1">{label}</span>
+                                                    {active && <Check className="h-4 w-4" />}
+                                                </button>
+                                            );
+                                        })}
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
                         <div className={`flex items-center border rounded-lg p-0.5 ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
                             <button onClick={zoomOut} className={`p-1 rounded-md transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-white text-gray-500'}`}>
                                 <ZoomOut className="w-4 h-4" />
@@ -1287,18 +1912,26 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                     </div>
                 </div>
             </div>
+
+            {/* 划词工具栏就长在这里：正常流的下一条，跟着面板一起伸缩，
+                既不会盖住别的组件，也不可能溢出到面板外面。 */}
+            {selectionToolbar}
+
             <div className="relative flex-1 min-h-0">
             <div
                 ref={pdfScrollRef}
-                className={`absolute left-0 top-0 bottom-0 overflow-auto p-4 md:p-8 flex items-start justify-center pdf-scroll transition-[right] duration-300 ${
+                className={`absolute left-0 top-0 bottom-0 overflow-auto p-4 md:p-8 flex items-start justify-center pdf-scroll transition-[right,padding] duration-300 ${
                     isTranslationDocked ? 'md:pr-6' : ''
                 } ${darkMode ? 'bg-[#0f1115]' : 'bg-[#f6f4f1]'}`}
-                style={{ scrollbarWidth: 'none', right: translationDockReservedWidth }}
+                style={{
+                    scrollbarWidth: 'none',
+                    right: translationDockReservedWidth,
+                }}
                 onMouseUp={handleTextSelection}
                 onMouseMove={handleBlockMouseMove}
                 onMouseLeave={handleBlockMouseLeave}
                 onClick={handleBlockClick}
-                onScroll={updateThumbs}
+                onScroll={handlePdfScroll}
             >
                 {!pdfFile ? (
                     <PDFLoadingState darkMode={darkMode} />
@@ -1318,42 +1951,44 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         onLoadError={onDocumentLoadError}
                         loading={<PDFLoadingState darkMode={darkMode} />}
                     >
-                        <div ref={ref} className={`relative shadow-[0_2px_15px_rgba(0,0,0,0.06)] bg-white rounded-sm ${darkMode ? 'shadow-none !bg-transparent' : ''}`} style={{ filter: darkMode ? 'grayscale(1) invert(1)' : 'none' }}>
-                            {/* 缩放过渡期间使用 CSS transform 即时缩放缓存画面，避免白屏 */}
-                            <div style={scale !== debouncedScale ? {
-                                transform: `scale(${scale / debouncedScale})`,
-                                transformOrigin: 'top left',
-                            } : undefined}>
-                            {/* 缓存占位图：在页面加载/重渲染期间显示已缓存的 canvas 快照 */}
-                            {cachedImage && (
-                                <img
-                                    src={cachedImage}
-                                    alt=""
-                                    style={{
-                                        position: 'absolute',
-                                        top: 0,
-                                        left: 0,
-                                        zIndex: 0,
-                                        pointerEvents: 'none',
-                                    }}
-                                />
-                            )}
-                            <Page
-                                inputRef={pageRef}
-                                pageNumber={pageNumber}
-                                scale={debouncedScale}
-                                devicePixelRatio={renderPixelRatio}
-                                renderTextLayer={true}
-                                renderAnnotationLayer={true}
-                                onLoadSuccess={handleFirstPageLoad}
-                                onRenderSuccess={handlePageRenderSuccess}
-                            />
-                            </div>
+                        <div className={readerPageStackClassName}>
+                        {displayPageNumbers.map((visiblePageNumber) => {
+                            const isActivePage = visiblePageNumber === pageNumber;
+                            const isCoverPage = isContinuousReading
+                                && pageLayout === PDF_READER_LAYOUTS.COVER
+                                && visiblePageNumber === 1;
+                            // 当前页和其它页必须走同一棵组件树。以前当前页是一棵单独的内联树，
+                            // 翻页时两页要在两棵结构不同的树之间互换，React 只能卸载重挂：
+                            // canvas 被销毁重建、DeferredPdfPage 的 shouldRender 归位，
+                            // 于是先闪一下「加载第 N 页」占位再重绘 —— 连续模式翻页的卡顿就来自这里。
+                            return (
+                            <div key={visiblePageNumber} className={isCoverPage ? 'col-span-2' : undefined}>
+                                <DeferredPdfPage
+                                    pageNumber={visiblePageNumber}
+                                    scale={debouncedScale}
+                                    displayScale={scale}
+                                    rotation={normalizedPageRotation}
+                                    devicePixelRatio={renderPixelRatio}
+                                    darkMode={darkMode}
+                                    deferRender={isContinuousReading}
+                                    scrollRootRef={pdfScrollRef}
+                                    onActivate={isActivePage ? undefined : updateReaderPage}
+                                    isActive={isActivePage}
+                                    viewerRef={ref}
+                                    pageInputRef={pageRef}
+                                    cachedImage={isActivePage ? cachedImage : null}
+                                    onLoadSuccess={handleFirstPageLoad}
+                                    onRenderSuccess={handlePageRenderSuccess}
+                                >
+                            {isActivePage && (<>
                             {/* 框选遮罩层，覆盖在 PDF 页面上方 */}
                             <SelectionOverlay
                                 active={isSelecting}
                                 onCapture={onAreaSelected}
                                 onCancel={onSelectionCancel}
+                                rotation={normalizedPageRotation}
+                                pageWidth={pageRenderedSize.width}
+                                pageHeight={pageRenderedSize.height}
                             />
                             {currentBlocks.length > 0 && currentBlocks.map((block) => {
                                 const bbox = normalizeBlockBBox(block.bbox);
@@ -1430,6 +2065,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         left: hoverTranslationStyle.left,
                                         top: hoverTranslationStyle.top,
                                         width: hoverTranslationStyle.width,
+                                        transform: normalizedPageRotation
+                                            ? `rotate(${-normalizedPageRotation}deg)`
+                                            : undefined,
+                                        transformOrigin: 'top left',
                                     }}
                                     onMouseEnter={() => {
                                         popupHoveredRef.current = true;
@@ -1543,27 +2182,73 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     })}
                                 </div>
                             )}
-                            {savedHighlightRects.map(({ key, highlightId, rect }) => (
+                            {/* Marker layer: highlights use translucent ink; underlines stay crisp at the text baseline. */}
+                            {savedMarkerRects.length > 0 && (
                                 <div
-                                    key={key}
-                                    data-saved-highlight-id={highlightId}
+                                    className="absolute inset-0 z-[9] pointer-events-none"
                                     aria-hidden="true"
-                                    className="absolute z-[9] pointer-events-none rounded-[3px]"
                                     style={{
-                                        left: rect.left,
-                                        top: rect.top,
-                                        width: rect.width,
-                                        height: rect.height,
-                                        background: darkMode
-                                            ? 'rgba(0, 0, 0, 0.34)'
-                                            : 'rgba(242, 193, 92, 0.34)',
-                                        boxShadow: darkMode
-                                            ? 'none'
-                                            : 'inset 0 -1px 0 rgba(184, 95, 71, 0.18)',
-                                        mixBlendMode: darkMode ? 'normal' : 'multiply',
+                                        mixBlendMode: darkMode ? 'screen' : 'multiply',
                                     }}
-                                />
-                            ))}
+                                >
+                                    <div
+                                        className="absolute inset-0"
+                                        style={{
+                                            // Flatten children first, then fade the whole stamp once.
+                                            opacity: darkMode ? 0.42 : 0.52,
+                                        }}
+                                    >
+                                        {savedMarkerRects.map(({ key, highlightId, rect, color }) => {
+                                            const normalized = normalizeDocumentHighlightColor(color);
+                                            return (
+                                                <div
+                                                    key={key}
+                                                    data-saved-highlight-id={highlightId}
+                                                    data-saved-annotation-style="highlight"
+                                                    data-highlight-color={normalized}
+                                                    className="absolute rounded-[2px]"
+                                                    style={{
+                                                        left: rect.left,
+                                                        top: rect.top,
+                                                        width: rect.width,
+                                                        height: rect.height,
+                                                        background: normalized,
+                                                    }}
+                                                />
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+                            {savedUnderlineRects.length > 0 && (
+                                <div
+                                    className="absolute inset-0 z-[9] pointer-events-none"
+                                    aria-hidden="true"
+                                    style={{ opacity: darkMode ? 0.88 : 0.9 }}
+                                >
+                                    {savedUnderlineRects.map(({ key, highlightId, rect, color }) => {
+                                        const normalized = normalizeDocumentHighlightColor(color);
+                                        const underlineHeight = Math.max(2, Math.min(4, Math.round(rect.height * 0.16)));
+                                        return (
+                                            <div
+                                                key={key}
+                                                data-saved-highlight-id={highlightId}
+                                                data-saved-annotation-style="underline"
+                                                data-highlight-color={normalized}
+                                                className="absolute rounded-full"
+                                                style={{
+                                                    left: rect.left,
+                                                    top: rect.top + rect.height - underlineHeight,
+                                                    width: rect.width,
+                                                    height: underlineHeight,
+                                                    background: normalized,
+                                                    boxShadow: darkMode ? `0 0 5px ${normalized}` : undefined,
+                                                }}
+                                            />
+                                        );
+                                    })}
+                                </div>
+                            )}
                             {/* 多矩形高亮，避免跨越空白区域的巨大单一框 */}
                             <AnimatePresence>
                                 {highlightRects.length > 0 && highlightRects.map((rect, idx) => (
@@ -1621,6 +2306,11 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
+                            </>)}
+                                </DeferredPdfPage>
+                            </div>
+                            );
+                        })}
                         </div>
                     </Document>
                 )}

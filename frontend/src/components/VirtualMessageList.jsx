@@ -101,6 +101,12 @@ export function calculatePadding(
  * @param {number} props.bufferSize - 缓冲区大小，默认 5
  * @param {number} props.estimatedHeight - 未缓存消息的估算高度，默认 120px
  * @param {string} props.className - 外层容器的额外 CSS 类名
+ * @param {string} props.itemClassName - 每条消息外层包裹的类名。
+ *   消息之间的间距必须写在这里而且只能用 padding：
+ *   1) 在 className 上写 space-y-* 是无效的 —— 那只作用于滚动容器的直接子元素，
+ *      而消息全都包在内层的 paddingTop/paddingBottom 占位 div 里；
+ *   2) 高度是用 ResizeObserver 的 borderBoxSize 量的，它含 padding 不含 margin，
+ *      用 margin 会让每条消息少算一截，虚拟滚动的占位高度会持续偏移。
  */
 const VirtualMessageList = React.memo(function VirtualMessageList({
   messages = [],
@@ -109,6 +115,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
   bufferSize = DEFAULT_BUFFER_SIZE,
   estimatedHeight = DEFAULT_ESTIMATED_HEIGHT,
   className = '',
+  itemClassName = '',
 }) {
   // 滚动容器 ref
   const scrollContainerRef = useRef(null);
@@ -351,6 +358,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
               key={messageId}
               ref={(el) => setItemRef(messageId, el)}
               data-message-id={messageId}
+              className={itemClassName}
             >
               {renderMessage(msg, originalIndex)}
             </div>

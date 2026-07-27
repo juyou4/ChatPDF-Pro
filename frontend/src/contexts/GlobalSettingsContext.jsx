@@ -79,6 +79,9 @@ const GlobalSettingsBridge = ({ children }) => {
             reasoningEffort: chatParams.reasoningEffort,
             answerDetailLevel: chatParams.answerDetailLevel,
             enableMemory: chatParams.enableMemory,
+            memoryTopK: chatParams.memoryTopK,
+            memoryInjectionBudget: chatParams.memoryInjectionBudget,
+            memoryPrivacyMode: chatParams.memoryPrivacyMode,
             thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
             sendShortcut: chatParams.sendShortcut,
             confirmDeleteMessage: chatParams.confirmDeleteMessage,
@@ -113,6 +116,7 @@ const GlobalSettingsBridge = ({ children }) => {
         chatParams.contextCount, chatParams.streamOutput,
         chatParams.enableTemperature, chatParams.enableTopP, chatParams.enableMaxTokens,
         chatParams.customParams, chatParams.reasoningEffort, chatParams.answerDetailLevel, chatParams.enableMemory,
+        chatParams.memoryTopK, chatParams.memoryInjectionBudget, chatParams.memoryPrivacyMode,
         chatParams.thoughtAutoCollapse, chatParams.sendShortcut,
         chatParams.confirmDeleteMessage, chatParams.confirmRegenerateMessage,
         chatParams.codeCollapsible, chatParams.codeWrappable, chatParams.codeShowLineNumbers,
@@ -147,6 +151,9 @@ const GlobalSettingsBridge = ({ children }) => {
             if (settings.reasoningEffort !== undefined) chatParams.setReasoningEffort(settings.reasoningEffort);
             if (settings.answerDetailLevel !== undefined) chatParams.setAnswerDetailLevel(settings.answerDetailLevel);
             if (settings.enableMemory !== undefined) chatParams.setEnableMemory(settings.enableMemory);
+        if (settings.memoryTopK !== undefined) chatParams.setMemoryTopK(settings.memoryTopK);
+        if (settings.memoryInjectionBudget !== undefined) chatParams.setMemoryInjectionBudget(settings.memoryInjectionBudget);
+        if (settings.memoryPrivacyMode !== undefined) chatParams.setMemoryPrivacyMode(settings.memoryPrivacyMode);
             if (settings.thoughtAutoCollapse !== undefined) chatParams.setThoughtAutoCollapse(settings.thoughtAutoCollapse);
             if (settings.sendShortcut !== undefined) chatParams.setSendShortcut(settings.sendShortcut);
             if (settings.confirmDeleteMessage !== undefined) chatParams.setConfirmDeleteMessage(settings.confirmDeleteMessage);
@@ -229,6 +236,9 @@ const GlobalSettingsBridge = ({ children }) => {
         reasoningEffort: chatParams.reasoningEffort,
         answerDetailLevel: chatParams.answerDetailLevel,
         enableMemory: chatParams.enableMemory,
+        memoryTopK: chatParams.memoryTopK,
+        memoryInjectionBudget: chatParams.memoryInjectionBudget,
+        memoryPrivacyMode: chatParams.memoryPrivacyMode,
         thoughtAutoCollapse: chatParams.thoughtAutoCollapse,
         sendShortcut: chatParams.sendShortcut,
         confirmDeleteMessage: chatParams.confirmDeleteMessage,
@@ -270,6 +280,9 @@ const GlobalSettingsBridge = ({ children }) => {
         setReasoningEffort: chatParams.setReasoningEffort,
         setAnswerDetailLevel: chatParams.setAnswerDetailLevel,
         setEnableMemory: chatParams.setEnableMemory,
+        setMemoryTopK: chatParams.setMemoryTopK,
+        setMemoryInjectionBudget: chatParams.setMemoryInjectionBudget,
+        setMemoryPrivacyMode: chatParams.setMemoryPrivacyMode,
         setThoughtAutoCollapse: chatParams.setThoughtAutoCollapse,
         setSendShortcut: chatParams.setSendShortcut,
         setConfirmDeleteMessage: chatParams.setConfirmDeleteMessage,

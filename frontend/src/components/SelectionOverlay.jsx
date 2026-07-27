@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { isValidSelection } from '../utils/screenshotUtils'
+import { mapPdfReaderDisplayPointToPage, normalizePdfReaderRotation } from '../utils/pdfReaderLayoutUtils'
 
 /**
  * PDF 区域框选遮罩组件
@@ -12,7 +13,7 @@ import { isValidSelection } from '../utils/screenshotUtils'
  * @param {function} onCapture - 框选完成回调，参数为 { x, y, width, height }（相对于容器的 CSS 像素坐标）
  * @param {function} onCancel - 取消框选回调（Escape 键触发）
  */
-function SelectionOverlay({ active, onCapture, onCancel }) {
+function SelectionOverlay({ active, onCapture, onCancel, rotation = 0, pageWidth = 0, pageHeight = 0 }) {
   // 是否正在拖拽
   const [isDragging, setIsDragging] = useState(false)
   // 鼠标按下时的起始点
@@ -32,6 +33,26 @@ function SelectionOverlay({ active, onCapture, onCancel }) {
     return { left, top, width, height }
   }, [startPoint, currentPoint])
 
+  const getPagePoint = useCallback((event) => {
+    const rect = overlayRef.current?.getBoundingClientRect()
+    if (!rect) return { x: 0, y: 0 }
+
+    const normalizedRotation = normalizePdfReaderRotation(rotation)
+    const width = Number(pageWidth) || (normalizedRotation % 180 === 0 ? rect.width : rect.height)
+    const height = Number(pageHeight) || (normalizedRotation % 180 === 0 ? rect.height : rect.width)
+    if (!width || !height) {
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top }
+    }
+
+    return mapPdfReaderDisplayPointToPage({
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+      width,
+      height,
+      rotation: normalizedRotation,
+    })
+  }, [pageHeight, pageWidth, rotation])
+
   // 鼠标按下：开始拖拽
   const handleMouseDown = useCallback((e) => {
     // 仅响应左键
@@ -39,26 +60,22 @@ function SelectionOverlay({ active, onCapture, onCancel }) {
     e.preventDefault()
     e.stopPropagation()
 
-    const rect = overlayRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
+    const { x, y } = getPagePoint(e)
 
     setStartPoint({ x, y })
     setCurrentPoint({ x, y })
     setIsDragging(true)
-  }, [])
+  }, [getPagePoint])
 
   // 鼠标移动：更新当前位置
   const handleMouseMove = useCallback((e) => {
     if (!isDragging) return
     e.preventDefault()
 
-    const rect = overlayRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
+    const { x, y } = getPagePoint(e)
 
     setCurrentPoint({ x, y })
-  }, [isDragging])
+  }, [getPagePoint, isDragging])
 
   // 鼠标释放：完成框选
   const handleMouseUp = useCallback((e) => {

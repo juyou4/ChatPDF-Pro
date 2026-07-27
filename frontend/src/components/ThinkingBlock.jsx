@@ -86,8 +86,8 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
   useEffect(() => {
     if (!thoughtAutoCollapse || autoCollapsedRef.current || !thinkingFinished) return undefined
     autoCollapsedRef.current = true
-    // 延迟折叠，让用户看到完成状态
-    const timer = setTimeout(() => setExpanded(false), 600)
+    // 尽快折叠，避免挡住“思考结束 → 正文开始”的过渡观感。
+    const timer = setTimeout(() => setExpanded(false), 180)
     return () => clearTimeout(timer)
   }, [thinkingFinished, thoughtAutoCollapse])
 
@@ -136,25 +136,15 @@ const ThinkingBlock = ({ content, isStreaming, answerStarted = false, darkMode, 
   // “已深度思考 0.1s”的空壳；有真实思考或 Agent 轨迹时仍保留历史过程。
   if (answerStarted && !hasThinkingContent && !hasAgentTrace) return null
 
+  // 卡片投影由 section 自己的多层 box-shadow 承担。原来这里还有两个模糊椭圆 span，
+  // 是没有真实投影时伪造的接地阴影，叠在真实投影上只会把底边糊脏，已移除。
   return (
     <div className={`group/thinking relative isolate mb-5 mt-2 w-full ${darkMode ? 'dark' : ''}`}>
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute inset-x-10 -bottom-1 h-5 rounded-[50%] blur-[14px] transition-[opacity,transform] duration-300 ease-out group-hover/thinking:translate-y-0.5 group-hover/thinking:scale-x-[1.03] motion-reduce:transition-none ${
-          darkMode ? 'bg-black/35 opacity-65' : 'bg-[#574840]/[0.11] opacity-60'
-        }`}
-      />
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute inset-x-16 bottom-0 h-2 rounded-[50%] blur-[5px] transition-[opacity,transform] duration-300 ease-out group-hover/thinking:translate-y-0.5 group-hover/thinking:scale-x-[1.02] motion-reduce:transition-none ${
-          darkMode ? 'bg-black/40 opacity-60' : 'bg-[#302722]/[0.12] opacity-45'
-        }`}
-      />
       <section
-        className={`relative z-[1] w-full -translate-y-px overflow-hidden rounded-[18px] ring-1 ring-inset text-[13px] transition-[transform,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-[2px] motion-reduce:transform-none motion-reduce:transition-none ${
+        className={`relative z-[1] w-full -translate-y-px overflow-hidden rounded-[22px] ring-1 ring-inset text-[13px] transition-[transform,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-[2px] motion-reduce:transform-none motion-reduce:transition-none ${
           darkMode
-            ? 'bg-[#25282f] text-gray-300 ring-white/[0.055] shadow-[inset_0_1px_0_rgba(255,255,255,0.045)] hover:bg-[#272a31] hover:ring-white/[0.075]'
-            : 'bg-[#fffefd] text-gray-600 ring-[#66574f]/[0.075] shadow-[inset_0_1px_0_rgba(255,255,255,0.95)] hover:bg-white hover:ring-[#66574f]/[0.1]'
+            ? 'bg-[#282c33] text-gray-300 ring-white/[0.055] shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_1px_2px_rgba(0,0,0,0.22),0_6px_14px_-8px_rgba(0,0,0,0.5),0_18px_38px_-22px_rgba(0,0,0,0.7)] hover:bg-[#2b2f37] hover:ring-white/[0.075]'
+            : 'bg-white text-gray-600 ring-[#66574f]/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_1px_2px_rgba(83,65,55,0.05),0_6px_14px_-8px_rgba(83,65,55,0.10),0_18px_38px_-22px_rgba(83,65,55,0.24)] hover:ring-[#66574f]/[0.1]'
         }`}
       >
         <button

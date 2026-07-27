@@ -1,7 +1,11 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSmoothStream } from './useSmoothStream';
 import { useWebSearch } from '../contexts/WebSearchContext';
-import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
+import {
+  getInlineCitationMatches,
+  hasInlineCitationRefs,
+  replaceInlineCitationRefs,
+} from '../utils/citationUtils';
 import { buildChatHistory, isFailedChatHistoryAssistant } from '../utils/chatContextUsageUtils';
 
 // API base URL
@@ -128,23 +132,45 @@ const isChatParseIdentityConflict = (response, payload, expectedIdentity, messag
 
 const resolveRetryControlQuestion = (input, messages = []) => {
   if (!RETRY_CONTROL_INPUTS.has(normalizeRetryControlInput(input))) return '';
-  let latestAssistant = null;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.type === 'assistant' && latestAssistant === null) {
-      latestAssistant = message;
-      continue;
+  for (let assistantIndex = messages.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
+    const assistant = messages[assistantIndex];
+    if (assistant?.type !== 'assistant') continue;
+    let user = null;
+    for (let userIndex = assistantIndex - 1; userIndex >= 0; userIndex -= 1) {
+      const candidateMessage = messages[userIndex];
+      if (candidateMessage?.type === 'assistant') break;
+      if (candidateMessage?.type === 'user') {
+        user = candidateMessage;
+        break;
+      }
     }
-    if (message?.type !== 'user') continue;
-    const candidate = String(message.content || '').trim();
+    if (!user) return '';
+    const candidate = String(user.content || '').trim();
     if (candidate && !RETRY_CONTROL_INPUTS.has(normalizeRetryControlInput(candidate))) {
-      return latestAssistant === null || isFailedChatHistoryAssistant(latestAssistant)
-        ? candidate
-        : '';
+      return isFailedChatHistoryAssistant(assistant) ? candidate : '';
     }
+    return '';
   }
   return '';
 };
+const resolveClarificationTicket = (messages = []) => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.type !== 'assistant') continue;
+    if (!message.clarificationRequired) return null;
+    const ticket = message.intentDecision?.clarification_ticket;
+    if (!ticket || typeof ticket !== 'object') return null;
+    return {
+      version: String(ticket.version || ''),
+      ticket_id: String(ticket.ticket_id || ''),
+      original_question: String(ticket.original_question || ''),
+      parse_generation: String(ticket.parse_generation || ''),
+      document_source_hash: String(ticket.document_source_hash || ''),
+    };
+  }
+  return null;
+};
+
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -231,7 +257,7 @@ const formatThinkingStageEvent = (payload) => {
     const message = typeof payload.message === 'string' && payload.message.trim()
       ? payload.message.trim()
       : (payload.phase === 'complete' ? '检索完成，正在组织上下文...' : '正在检索文档...');
-    const stablePhaseKey = ['llm_waiting', 'llm_structuring_citations'].includes(payload.phase)
+    const stablePhaseKey = ['llm_waiting', 'llm_structuring_citations', 'answer_generating'].includes(payload.phase)
       ? `retrieval:${payload.phase}`
       : null;
     const keyParts = [payload.phase, payload.round, payload.step, message]
@@ -322,7 +348,7 @@ export const extractInlineCitationRefs = (content = '') => {
   if (!content) return [];
   const refs = [];
   const seen = new Set();
-  for (const m of String(content).matchAll(INLINE_CITATION_REGEX)) {
+  for (const m of getInlineCitationMatches(content)) {
     const ref = Number(m[1] || m[2]);
     if (!Number.isFinite(ref) || seen.has(ref)) continue;
     seen.add(ref);
@@ -332,7 +358,7 @@ export const extractInlineCitationRefs = (content = '') => {
 };
 
 const stripInlineCitations = (text = '') =>
-  String(text).replace(INLINE_CITATION_REGEX, '').replace(/[ \t]{2,}/g, ' ').trim();
+  replaceInlineCitationRefs(text, () => '').replace(/[ \t]{2,}/g, ' ').trim();
 
 const attachRefsToSentence = (sentence, refs) => {
   if (!sentence || !refs || refs.length === 0) return sentence;
@@ -370,7 +396,7 @@ const calcCitationSupportScore = (sentence = '', citation = null) => {
 
 const optimizeSentenceCitations = (sentence, citations) => {
   const refsInSentence = [];
-  for (const m of String(sentence).matchAll(INLINE_CITATION_REGEX)) {
+  for (const m of getInlineCitationMatches(sentence)) {
     const ref = Number(m[1] || m[2]);
     if (Number.isFinite(ref)) refsInSentence.push(ref);
   }
@@ -457,16 +483,13 @@ const finalizeAssistantContentAndCitations = (content, citations) => {
 export const normalizeAssistantCitations = (content, citations) => {
   if (!content || !Array.isArray(citations) || citations.length <= 1) return content;
 
-  const refRegex = /(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g;
-  const refsInText = [...String(content).matchAll(refRegex)].map(m => Number(m[2] || m[3]));
+  const refsInText = getInlineCitationMatches(content).map(m => Number(m[1] || m[2]));
   const uniqueRefs = new Set(refsInText);
   if (uniqueRefs.size !== 1) return content;
 
   const paragraphs = String(content).split(/\n{2,}/);
   const normalized = paragraphs.map((paragraph) => {
-    refRegex.lastIndex = 0;
-    if (!refRegex.test(paragraph)) return paragraph;
-    refRegex.lastIndex = 0;
+    if (!hasInlineCitationRefs(paragraph)) return paragraph;
 
     const paraTokens = tokenizeForCitation(paragraph);
     let bestRef = Number([...uniqueRefs][0]);
@@ -483,7 +506,7 @@ export const normalizeAssistantCitations = (content, citations) => {
       }
     }
 
-    return paragraph.replace(refRegex, `[${bestRef}]`);
+    return replaceInlineCitationRefs(paragraph, () => `[${bestRef}]`);
   });
 
   return normalized.join('\n\n');
@@ -492,7 +515,7 @@ export const normalizeAssistantCitations = (content, citations) => {
 export const ensureAssistantInlineCitationFallback = (content, citations) => {
   if (!content || !Array.isArray(citations) || citations.length === 0) return content;
 
-  const hasInlineRefs = /(?<!!)(\[(\d{1,3})\](?!\()|【(\d{1,3})】)/.test(String(content));
+  const hasInlineRefs = hasInlineCitationRefs(content);
   if (hasInlineRefs) return content;
 
   const normalized = normalizeCitationRecords(citations);
@@ -578,6 +601,8 @@ export const createInitialAgentTrace = () => ({
   contextChars: 0,
   agentMode: false,
   agentGate: null,
+  routeDiagnosis: null,
+  evidenceScoring: null,
   error: '',
   fallbackReason: '',
   diagnostics: null,
@@ -719,12 +744,50 @@ export const mergeAgentMetaIntoTrace = (trace, meta) => {
   }
   if (meta.agent_gate && typeof meta.agent_gate === 'object') {
     trace.agentGate = meta.agent_gate;
+    // Show the panel for both enabled Agent runs and explicit route denials,
+    // so users can see why a path was chosen.
+    trace.enabled = true;
     if (meta.agent_gate.agent_mode || meta.agent_gate.use_agent) {
-      trace.enabled = true;
+      trace.agentMode = true;
     }
+    if (!trace.startedAt && !trace.endedAt) {
+      trace.startedAt = Date.now();
+      trace.endedAt = Date.now();
+      if (!trace.finalMessage) {
+        trace.finalMessage = meta.agent_gate.use_agent || meta.agent_gate.agent_mode
+          ? 'Agent 检索完成'
+          : `未走 Agent（${meta.agent_gate.reason || 'route'}）`;
+      }
+    }
+  }
+  if (meta.route_diagnosis && typeof meta.route_diagnosis === 'object') {
+    trace.routeDiagnosis = meta.route_diagnosis;
+  } else if (meta.intent_decision && typeof meta.intent_decision === 'object') {
+    const intent = meta.intent_decision;
+    trace.routeDiagnosis = {
+      task: intent.task,
+      scope: intent.scope,
+      query_type: intent.query_type,
+      evidence_need: intent.evidence_need,
+      agent_policy: intent.agent_policy,
+      web_policy: intent.web_policy,
+      is_ambiguous: Boolean(intent.is_ambiguous),
+      confidence: intent.confidence,
+      matched_rules: intent.matched_rules,
+      clarification_llm: meta.clarification_llm || null,
+    };
   }
   if (meta.diagnostics?.agent && typeof meta.diagnostics.agent === 'object') {
     trace.diagnostics = meta.diagnostics.agent;
+    if (meta.diagnostics.agent.evidence_scoring) {
+      trace.evidenceScoring = meta.diagnostics.agent.evidence_scoring;
+    }
+    if (meta.diagnostics.agent.planner_academic_status) {
+      trace.academicStatus = meta.diagnostics.agent.planner_academic_status;
+    }
+  }
+  if (meta.diagnostics?.evidence_scoring && typeof meta.diagnostics.evidence_scoring === 'object') {
+    trace.evidenceScoring = meta.diagnostics.evidence_scoring;
   }
   if (meta.agent_evidence_state && typeof meta.agent_evidence_state === 'object') {
     trace.evidenceState = meta.agent_evidence_state;
@@ -856,6 +919,7 @@ export function useMessageState({
   const streamConvNameRef = useRef(null);
   const streamMindmapRef = useRef(null);
   const streamAnswerCriticRef = useRef(null);
+  const streamAnswerCertaintyRef = useRef(null);
   const streamWebSearchRef = useRef(null);
   const streamWebSearchStatusRef = useRef(null);
   const streamMemoryHitsRef = useRef(null);
@@ -876,7 +940,7 @@ export function useMessageState({
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens,
     customParams, reasoningEffort, answerDetailLevel,
-    enableMemory,
+    enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
     overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
     numericTableVisualVerification,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
@@ -1134,17 +1198,6 @@ export function useMessageState({
       : messages;
     const currentInput = overrideInput ?? textareaRef.current?.value ?? '';
     if (!currentInput.trim() && screenshots.length === 0) return;
-    const retryControlQuestion = resolveRetryControlQuestion(currentInput, historyMessages);
-    const requestedInteractionMode = String(overrides?.interactionMode || '').trim();
-    const interactionMode = CHAT_INTERACTION_MODES.has(requestedInteractionMode)
-      ? requestedInteractionMode
-      : retryControlQuestion
-        ? 'retry_failed_turn'
-        : screenshots.length > 0
-          ? 'image'
-          : String(selectedText || '').trim()
-            ? 'selection'
-            : 'default';
 
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
     const visualCredentials = getVisualCredentials?.() || null;
@@ -1164,6 +1217,29 @@ export function useMessageState({
       documentSourceHash: requestParseContext.documentSourceHash,
     };
     const requestIdentityFields = getChatIdentityFields(requestParseIdentity);
+    // A retry control must be resolved only from turns belonging to this
+    // parse generation. Otherwise an old failed answer can turn a normal
+    // "continue" into a hidden replay of a different document revision.
+    const identityBoundHistory = historyMessages.filter((message) => (
+      messageMatchesChatParseIdentity(message, requestParseIdentity)
+    ));
+    const retryControlQuestion = resolveRetryControlQuestion(
+      currentInput,
+      identityBoundHistory,
+    );
+    const clarificationTicket = retryControlQuestion
+      ? null
+      : resolveClarificationTicket(identityBoundHistory);
+    const requestedInteractionMode = String(overrides?.interactionMode || '').trim();
+    const interactionMode = CHAT_INTERACTION_MODES.has(requestedInteractionMode)
+      ? requestedInteractionMode
+      : retryControlQuestion
+        ? 'retry_failed_turn'
+        : screenshots.length > 0
+          ? 'image'
+          : String(selectedText || '').trim()
+            ? 'selection'
+            : 'default';
     const requestEpoch = ++requestEpochRef.current;
     const requestVisualVerificationEpoch = visualVerificationEpochRef.current;
     const requestController = new AbortController();
@@ -1198,9 +1274,6 @@ export function useMessageState({
     setIsLoading(true);
 
     // 构建聊天历史
-    const identityBoundHistory = historyMessages.filter((message) => (
-      messageMatchesChatParseIdentity(message, requestParseIdentity)
-    ));
     const chatHistory = buildChatHistory(identityBoundHistory, contextCount).map((message) => ({
       ...message,
       ...requestIdentityFields,
@@ -1253,6 +1326,7 @@ export function useMessageState({
       doc_id: docId,
       parse_generation: requestParseIdentity.parseGeneration || null,
       document_source_hash: requestParseIdentity.documentSourceHash || null,
+      clarification_ticket: clarificationTicket,
       question: requestQuestion,
       api_key: chatApiKey,
       model: chatModel,
@@ -1288,6 +1362,10 @@ export function useMessageState({
         ...visualRequestParams,
       },
       enable_memory: enableMemory,
+      // null 表示跟随后端 config，不做会话级覆盖
+      memory_top_k: memoryTopK ?? null,
+      memory_injection_budget: memoryInjectionBudget ?? null,
+      memory_privacy_mode: memoryPrivacyMode || 'personal',
       enable_web_search: enableWebSearch,
       web_search_mode: webSearchMode,
       web_search_provider: webSearchProvider,
@@ -1313,6 +1391,7 @@ export function useMessageState({
     streamConvNameRef.current = null;
     streamMindmapRef.current = null;
     streamAnswerCriticRef.current = null;
+    streamAnswerCertaintyRef.current = null;
     streamWebSearchRef.current = null;
     streamWebSearchStatusRef.current = null;
     streamMemoryHitsRef.current = null;
@@ -1465,14 +1544,30 @@ export function useMessageState({
           ));
         };
 
-        const markAnswerStarted = () => {
-          if (contentStartTime) return;
-          contentStartTime = Date.now();
-          // 终态 final_content 也可能是本轮唯一的正文来源。它到达时必须
-          // 和普通 token 一样立即结束“仅思考”的展示状态。
+        const markAnswerStarted = ({ generating = false } = {}) => {
+          const now = Date.now();
+          if (!contentStartTime) contentStartTime = now;
+          const nextGenerating = Boolean(generating) && !String(currentText || '').trim();
+          // 思考结束后立刻结束思考 UI。结构化引文可能先隐藏 CITATION LIST，
+          // 若等到可见 FINAL ANSWER 才切换，会出现“思考完了却半天不出字”。
           setMessages(prev => prev.map(m => (
-            m.id === tempMsgId ? { ...m, answerStarted: true } : m
+            m.id === tempMsgId
+              ? {
+                ...m,
+                answerStarted: true,
+                answerGenerating: nextGenerating,
+              }
+              : m
           )));
+        };
+
+        const markThinkingComplete = (message = '') => {
+          if (!isRequestCurrent()) return;
+          // 思考阶段结束：折叠为“已深度思考”，并进入“正在生成回答”过渡态。
+          if (message) {
+            appendThinkingStage(message, 'model:thinking_complete');
+          }
+          markAnswerStarted({ generating: true });
         };
 
         const appendAnswerContent = (text) => {
@@ -1481,7 +1576,10 @@ export function useMessageState({
           contentStream.addChunk(text);
           // 模型从 reasoning 切到正文时常先发换行。只有真正出现可见字符后
           // 才结束思考状态，避免“已深度思考”与首字之间出现空白等待。
-          if (currentText.trim()) markAnswerStarted();
+          // 若后端已发 thinking_complete，这里清除 generating 过渡态。
+          if (currentText.trim()) {
+            markAnswerStarted({ generating: false });
+          }
         };
 
         // SSE 分隔符查找
@@ -1567,6 +1665,17 @@ export function useMessageState({
               appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
             }
             if (p.type === 'retrieval_progress') {
+              // 思考已结束、正文可能仍在结构化引文阶段：立刻结束“思考中”UI。
+              if (
+                p.phase === 'answer_generating'
+                || p.phase === 'llm_structuring_citations'
+              ) {
+                markThinkingComplete(
+                  typeof p.message === 'string' && p.message.trim()
+                    ? p.message.trim()
+                    : '思考完成，正在生成回答...'
+                );
+              }
               // 聚合到 agentTrace（只对 agent 相关 phase 生效）
               if (!streamAgentTraceRef.current) {
                 streamAgentTraceRef.current = createInitialAgentTrace();
@@ -1614,7 +1723,31 @@ export function useMessageState({
               return;
             }
             if (p.type === 'answer_critic') {
-              streamAnswerCriticRef.current = p.critic || null;
+              const critic = p.critic || null;
+              streamAnswerCriticRef.current = critic
+                ? {
+                    ...critic,
+                    // Prefer top-level certainty event payload when present.
+                    certainty: p.certainty || critic.certainty || null,
+                  }
+                : null;
+              if (p.certainty) {
+                streamAnswerCertaintyRef.current = p.certainty;
+              } else if (critic?.certainty) {
+                streamAnswerCertaintyRef.current = critic.certainty;
+              }
+              return;
+            }
+            if (p.type === 'answer_certainty') {
+              streamAnswerCertaintyRef.current = p.certainty || null;
+              return;
+            }
+            if (p.type === 'thinking_complete') {
+              markThinkingComplete(
+                typeof p.message === 'string' && p.message.trim()
+                  ? p.message.trim()
+                  : '思考完成，正在生成回答...'
+              );
               return;
             }
             if (recoveredFinalContent) {
@@ -1799,7 +1932,7 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -1877,7 +2010,7 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
+            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -1939,7 +2072,7 @@ export function useMessageState({
     getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
     maxTokens, temperature, topP, contextCount, streamOutput,
     enableTemperature, enableTopP, enableMaxTokens, customParams,
-    reasoningEffort, answerDetailLevel, enableMemory,
+    reasoningEffort, answerDetailLevel, enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
     webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
     webSearchIncludeDocumentContext, embeddingApiKey, getEmbeddingConfig,
     streamRenderProfile, shouldUseStreaming,

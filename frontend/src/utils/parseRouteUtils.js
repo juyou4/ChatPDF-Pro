@@ -149,6 +149,20 @@ export const resolveDocumentParseState = ({ manifest, parseReady, deepParseStatu
     };
   }
 
+  // 后端在部分页面解析失败但产物仍可发布时给出 partial_ready。能力确实全开，
+  // 但覆盖面是残缺的 —— 之前这里没有分支，它要么被当成「全部能力已就绪」（降级
+  // 完全不可见），要么落到最后的 processing 分支一直显示「解析中」。
+  if (rawStatus === 'partial_ready' || stage === 'partial_ready') {
+    return {
+      requestedRoute,
+      resolvedRoute,
+      routeLabel,
+      state: 'partial_ready',
+      statusLabel: '部分页面未解析成功',
+      detail: error || '阅读与问答已开放，但仅覆盖解析成功的页面',
+    };
+  }
+
   if (ready) {
     return {
       requestedRoute,

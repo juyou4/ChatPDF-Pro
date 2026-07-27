@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { INLINE_CITATION_REGEX } from '../utils/citationUtils';
+import { replaceInlineCitationRefs } from '../utils/citationUtils';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -207,8 +207,7 @@ export const processCitationRefs = (text, citations) => {
       .filter((ref) => Number.isFinite(ref))
   );
 
-  // 使用共享正则，捕获组 1=半角数字，捕获组 2=全角数字
-  return text.replace(INLINE_CITATION_REGEX, (match, halfWidthRef, fullWidthRef) => {
+  return replaceInlineCitationRefs(text, (match, halfWidthRef, fullWidthRef) => {
     const ref = parseInt(halfWidthRef ?? fullWidthRef, 10);
     if (validRefs.has(ref)) {
       return `<cite data-ref="${ref}">[${ref}]</cite>`;
@@ -224,11 +223,11 @@ export const processCitationRefs = (text, citations) => {
 export const processWebSearchCitationRefs = (text, webSearchSources) => {
   if (!text || !webSearchSources || webSearchSources.length === 0) return text;
   const max = webSearchSources.length;
-  return text.replace(/\[(\d+)\]/g, (match, numStr, offset) => {
-    const n = parseInt(numStr, 10);
+  return replaceInlineCitationRefs(text, (match, halfWidthRef, fullWidthRef, offset, source) => {
+    const n = parseInt(halfWidthRef ?? fullWidthRef, 10);
     if (n < 1 || n > max) return match;
     // 如果已被 processCitationRefs 替换为 <cite...> 则跳过
-    const before = text.slice(Math.max(0, offset - 20), offset);
+    const before = source.slice(Math.max(0, offset - 20), offset);
     if (before.includes('<cite')) return match;
     return `<wsource data-idx="${n}">[${n}]</wsource>`;
   });

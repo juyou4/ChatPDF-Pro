@@ -323,7 +323,8 @@ body,
 /* 阅读工作区内部是平面分区，层级由底色和细边界表达，不再重复悬浮。 */
 .workspace-pane {
     background-color: #fffdfb;
-    border: 1px solid rgba(125, 103, 91, 0.11);
+    /* 11% 的边框在暖白底上几乎看不出来，面板边界全靠它撑不住 */
+    border: 1px solid rgba(125, 103, 91, 0.17);
     border-radius: 20px;
     box-shadow: none;
     transition: background-color 0.2s ease, border-color 0.2s ease;
@@ -392,6 +393,12 @@ body,
     height: 6px;
 }
 
+.custom-scrollbar::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
 .custom-scrollbar::-webkit-scrollbar-track {
     background: transparent;
 }
@@ -403,6 +410,487 @@ body,
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: rgba(125, 125, 135, 0.55);
+}
+
+/* 阅读组件按面板自身宽度排版，避免窗口宽度与实际可用空间不一致。 */
+.reading-widget-board-shell {
+    container-name: reading-widget-board;
+    container-type: inline-size;
+}
+
+.reading-widget-board {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    align-items: start;
+    /* 间距必须大于主投影向下的覆盖范围（offsetY + blur/2 + spread ≈ 15px），
+       否则上一张卡的阴影会糊在下一张卡的顶部，看起来就像两张卡叠在一起。 */
+    gap: 1.25rem;
+    /* 托盘要和纯白卡片拉开明确色差，卡片才「浮」得起来。
+       三档层级，任意两档都不能同色：
+       工作台底板 #f0edea  <  面板内托盘 #f7f5f2  <  卡片 #ffffff
+       之前这里直接用了 #f0edea，和外层底板撞色，右面板的边界就整个消失了。 */
+    background-color: #f7f5f2;
+}
+
+.chatpdf-shell--dark .reading-widget-board {
+    /* 深色同理：叠在面板 #20232a 上要比工作台底板 #16181d 浅，否则边界一样看不见 */
+    background-color: rgba(0, 0, 0, 0.12);
+}
+
+.reading-widget-board > [data-reading-widget-id] {
+    min-width: 0;
+}
+
+.reading-widget-board[data-dragging='true'] {
+    user-select: none;
+    cursor: grabbing;
+}
+
+.reading-widget-board[data-col-resizing='true'] {
+    user-select: none;
+    cursor: col-resize;
+}
+
+/* 中缝拖宽手柄只在双栏出现；单栏（以及 JS 侧未确认双栏）时不占格子 */
+.reading-col-resize {
+    display: none;
+}
+
+/* 单栏下没有「列 / 通栏」之分，落点提示也就没有意义 */
+.reading-drop-zone {
+    display: none;
+}
+
+.reading-widget-resize {
+    user-select: none;
+}
+
+/* 用户手动拖过高度的卡片：卡片撑满这个高度，内部列表接管滚动，
+   原来那些 52vh / 58vh / 360px 的默认上限一律让位。 */
+.reading-widget-shell[data-sized='true'] .reading-widget-body {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+}
+
+.reading-widget-shell[data-sized='true'] .reading-widget-flex {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.reading-widget-shell[data-sized='true'] .reading-widget-scroll {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+}
+
+/* 双栏对照：断点按面板宽度而非窗口宽度。50% 分栏下 1440 屏可用宽约 688px，
+   48rem(768px) 会让绝大多数笔记本永远落在单栏，故收到 42rem。 */
+@container reading-widget-board (min-width: 42rem) {
+    .reading-widget-board {
+        /* 中间 1rem 的列就是原来的 column-gap，现在由拖宽手柄占据；
+           左右比例来自 JS 写入的 CSS 变量，拖动实时更新 */
+        grid-template-columns:
+            minmax(0, var(--reading-col-main, 61fr))
+            1.25rem
+            minmax(15rem, var(--reading-col-side, 39fr));
+        /* 第一行是列区；通栏的卡片排进后面的行，可以有任意多张。
+           列区给一个下限，否则通栏卡片一多就会把它压成 0，主列直接消失。 */
+        grid-template-rows: minmax(12rem, 1fr);
+        grid-auto-rows: auto;
+        row-gap: 1.25rem;
+        column-gap: 0;
+        align-items: stretch;
+        /* 这里不能写 overflow: hidden。通栏卡片可以有任意多张，总高一旦超过面板，
+           hidden 会让超出的部分既不滚动也看不见，内容彻底够不着。
+           外层保持 className 上的 overflow-y: auto —— 只有真的溢出时才出滚动条。 */
+    }
+
+    /* 槽位由用户选：标了通栏的进底部，其余按顺序填主列、副列 */
+    .reading-widget-board > [data-widget-slot='main'] {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .reading-col-resize {
+        display: flex;
+        grid-column: 2;
+        grid-row: 1;
+        align-items: center;
+        justify-content: center;
+        cursor: col-resize;
+        touch-action: none;
+        user-select: none;
+    }
+
+    .reading-widget-board > [data-widget-slot='side'] {
+        grid-column: 3;
+        grid-row: 1;
+    }
+
+    /* 行号由 JS 显式给出。只写 grid-column 交给自动放置的话，
+       列区为空时（所有卡片都通栏）第一张会被塞进那个 0 高度的行，压在下一张上面。 */
+    .reading-widget-board > [data-widget-slot='foot'] {
+        grid-column: 1 / -1;
+        grid-row: var(--widget-row, auto);
+    }
+
+    /* 只剩一张卡在列区时让它横跨整行，右边不留空洞，中缝也没意义了 */
+    .reading-widget-board[data-columns='1'] > [data-widget-slot='main'] {
+        grid-column: 1 / -1;
+    }
+
+    .reading-widget-board[data-columns='1'] .reading-col-resize,
+    .reading-widget-board[data-columns='0'] .reading-col-resize {
+        display: none;
+    }
+
+    /* 列区里没有展开的卡片时，那一行不该再按 1fr 抢走全部剩余高度：
+       否则一张 58px 的折叠卡会独占几百像素，把通栏卡片全挤到面板底部。
+       （列区为空、或列区的卡片全被折叠，都算在内。） */
+    .reading-widget-board[data-columns-open='false'] {
+        grid-template-rows: auto;
+    }
+
+    .reading-drop-zone {
+        display: flex;
+        min-height: 4rem;
+    }
+
+    .reading-drop-zone--column {
+        grid-column: 3;
+        grid-row: 1;
+    }
+
+    .reading-drop-zone--foot {
+        grid-column: 1 / -1;
+        grid-row: var(--widget-row, auto);
+    }
+
+    .reading-widget-board > [data-widget-slot='main'],
+    .reading-widget-board > [data-widget-slot='side'] {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    /* 收起时不跟着行高拉伸，避免留下一个空壳 */
+    .reading-widget-board > [data-collapsed='true'] {
+        align-self: start;
+    }
+
+    .reading-widget-board > [data-widget-slot='main'] > .reading-widget-card > .reading-widget-body,
+    .reading-widget-board > [data-widget-slot='side'] > .reading-widget-card > .reading-widget-body {
+        flex: 1;
+        min-height: 0;
+        max-height: none;
+    }
+
+    /* 只有需要「头部固定 + 列表撑满」的组件才转成纵向 flex，
+       纯滚动列表保持块级，避免子项被 flex 压缩。 */
+    .reading-widget-board > [data-widget-slot='main'] .reading-widget-flex,
+    .reading-widget-board > [data-widget-slot='side'] .reading-widget-flex {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+    }
+
+    .reading-widget-board > [data-widget-slot='main'] .reading-widget-scroll,
+    .reading-widget-board > [data-widget-slot='side'] .reading-widget-scroll {
+        flex: 1;
+        min-height: 0;
+        max-height: none;
+    }
+}
+
+/* 对照阅读：翻译列表够宽时，原文和译文并排且顶部对齐；
+   窄的时候自动回退成上下排，不靠 JS 测宽度。 */
+.translation-block-list {
+    container-name: translation-list;
+    container-type: inline-size;
+}
+
+.translation-target {
+    min-width: 0;
+}
+
+@container translation-list (min-width: 34rem) {
+    .translation-block[data-compare='true'] .translation-pair {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+        column-gap: 1.5rem;
+        align-items: start;
+    }
+
+    .translation-block[data-compare='true'] .translation-target {
+        margin-top: 0;
+        border-left: 1px solid #f2ece6;
+        padding-left: 1.5rem;
+        /* 抵消 column-gap，让分隔线落在两列正中 */
+        margin-left: -0.75rem;
+    }
+
+    .chatpdf-shell--dark .translation-block[data-compare='true'] .translation-target {
+        border-left-color: rgba(255, 255, 255, 0.07);
+    }
+}
+
+/* CodeMirror 笔记编辑器：外层容器决定高度，滚动交给 CM 自己的 scroller，避免双层滚动。 */
+.markdown-note-surface .cm-editor {
+    max-height: 100%;
+}
+
+.markdown-note-surface--fill .cm-editor {
+    height: 100%;
+}
+
+/* 笔记 Markdown：面向侧栏阅读的紧凑排版，不依赖 typography 插件。 */
+.note-markdown {
+    min-width: 0;
+    color: #34383f;
+    font-size: 0.78rem;
+    line-height: 1.72;
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
+}
+
+.note-markdown--dark {
+    color: #e5e7eb;
+}
+
+.note-markdown > :first-child {
+    margin-top: 0;
+}
+
+.note-markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.note-markdown h1,
+.note-markdown h2,
+.note-markdown h3,
+.note-markdown h4,
+.note-markdown h5,
+.note-markdown h6 {
+    margin: 0.9em 0 0.4em;
+    color: #20242a;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: 0;
+}
+
+.note-markdown--dark h1,
+.note-markdown--dark h2,
+.note-markdown--dark h3,
+.note-markdown--dark h4,
+.note-markdown--dark h5,
+.note-markdown--dark h6 {
+    color: #f3f4f6;
+}
+
+.note-markdown h1 { font-size: 1.12rem; }
+.note-markdown h2 { font-size: 1rem; }
+.note-markdown h3 { font-size: 0.9rem; }
+.note-markdown h4,
+.note-markdown h5,
+.note-markdown h6 { font-size: 0.8rem; }
+
+.note-markdown p {
+    margin: 0.45em 0;
+}
+
+.note-markdown strong {
+    color: #24282e;
+    font-weight: 700;
+}
+
+.note-markdown--dark strong {
+    color: #f9fafb;
+}
+
+.note-markdown ul,
+.note-markdown ol {
+    margin: 0.45em 0;
+    padding-left: 1.4rem;
+}
+
+.note-markdown ul { list-style: disc; }
+.note-markdown ol { list-style: decimal; }
+.note-markdown li { margin: 0.18em 0; }
+.note-markdown li > ul,
+.note-markdown li > ol { margin: 0.15em 0; }
+
+.note-markdown .contains-task-list {
+    padding-left: 0.15rem;
+    list-style: none;
+}
+
+.note-markdown .task-list-item {
+    list-style: none;
+}
+
+.note-markdown input[type='checkbox'] {
+    width: 0.78rem;
+    height: 0.78rem;
+    margin: 0 0.4rem 0 0;
+    accent-color: #c96b50;
+    vertical-align: -0.08rem;
+}
+
+.note-markdown blockquote {
+    margin: 0.65em 0;
+    padding: 0.45em 0.75em;
+    border-left: 2px solid #d8cec6;
+    background: #f7f4f1;
+    color: #666b73;
+}
+
+.note-markdown--dark blockquote {
+    border-left-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.05);
+    color: #b7bdc7;
+}
+
+.note-markdown hr {
+    margin: 0.9em 0;
+    border: 0;
+    border-top: 1px solid #e8e2dc;
+}
+
+.note-markdown--dark hr {
+    border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+.note-markdown a {
+    color: #b85f47;
+    text-decoration: underline;
+    text-decoration-color: rgba(184, 95, 71, 0.35);
+    text-underline-offset: 0.16em;
+}
+
+.note-markdown a:hover {
+    color: #934832;
+    text-decoration-color: currentColor;
+}
+
+.note-markdown--dark a {
+    color: #f0a88e;
+}
+
+.note-markdown code:not(pre code) {
+    padding: 0.12em 0.34em;
+    border: 1px solid #e7e1db;
+    border-radius: 0.3rem;
+    background: #f4f1ee;
+    color: #9d4f39;
+    font-size: 0.9em;
+}
+
+.note-markdown--dark code:not(pre code) {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.07);
+    color: #fdc4af;
+}
+
+.note-markdown pre {
+    max-width: 100%;
+    margin: 0.65em 0;
+    overflow: auto;
+    border: 1px solid #e5dfd9;
+    border-radius: 0.5rem;
+    background: #f6f4f1;
+    padding: 0.7rem 0.8rem;
+    color: #30343a;
+    font-size: 0.72rem;
+    line-height: 1.6;
+}
+
+.note-markdown pre code,
+.note-markdown pre .hljs {
+    padding: 0;
+    background: transparent;
+}
+
+.note-markdown--dark pre {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.18);
+    color: #e5e7eb;
+}
+
+.note-markdown--dark .hljs {
+    color: #e5e7eb;
+}
+
+.note-markdown-table-wrap {
+    max-width: 100%;
+    margin: 0.65em 0;
+    overflow-x: auto;
+    border: 1px solid #e5dfd9;
+    border-radius: 0.45rem;
+}
+
+.note-markdown--dark .note-markdown-table-wrap {
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.note-markdown table {
+    width: 100%;
+    min-width: 22rem;
+    border-collapse: collapse;
+    font-size: 0.72rem;
+}
+
+.note-markdown th,
+.note-markdown td {
+    padding: 0.42rem 0.55rem;
+    border-right: 1px solid #ebe5df;
+    border-bottom: 1px solid #ebe5df;
+    text-align: left;
+    vertical-align: top;
+}
+
+.note-markdown th:last-child,
+.note-markdown td:last-child {
+    border-right: 0;
+}
+
+.note-markdown tr:last-child td {
+    border-bottom: 0;
+}
+
+.note-markdown th {
+    background: #f5f2ef;
+    color: #34383f;
+    font-weight: 700;
+}
+
+.note-markdown--dark th,
+.note-markdown--dark td {
+    border-color: rgba(255, 255, 255, 0.09);
+}
+
+.note-markdown--dark th {
+    background: rgba(255, 255, 255, 0.06);
+    color: #f3f4f6;
+}
+
+.note-markdown img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 0.7em 0;
+    border-radius: 0.45rem;
+}
+
+.note-markdown .katex-display {
+    max-width: 100%;
+    margin: 0.7em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
 /* --- Component Classes --- */
@@ -886,7 +1374,9 @@ body,
 
 .message-bubble-user {
     background: #FFF8F4;
-    color: #A85640;
+    /* 气泡底色负责「这是我说的」，正文用暖调深色负责可读。
+       原来正文也是强调色(#A85640, 对白 4.9:1)，长段落读起来像链接或警告。 */
+    color: #4a3a33;
     box-shadow:
         0 1px 2px rgba(91, 65, 52, 0.025),
         0 7px 18px -16px rgba(91, 65, 52, 0.3),

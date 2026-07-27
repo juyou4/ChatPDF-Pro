@@ -67,7 +67,7 @@ const buildEligibleChatTurns = (messages = []) => {
         turns.push([pendingUser, message]);
       } else if (pendingUser?.hasImage) {
         // 图片本身不能进入文本上下文，但模型已产出的文字结论仍可复用。
-        turns.push([message]);
+        turns.push([{ ...message, historyKind: 'image_summary' }]);
       }
     }
     // 空答/错误答意味着整轮失败，对应 user 也不能孤立进入后续上下文。
@@ -87,12 +87,16 @@ export const buildChatHistory = (messages = [], contextCount) => {
   return buildEligibleChatTurns(messages)
     .slice(-normalizedCount)
     .flat()
-    .map((message) => ({
-      role: message.type === 'user' ? 'user' : 'assistant',
-      content: message.type === 'user' && String(message.contextContent || '').trim()
-        ? message.contextContent
-        : message.content,
-    }));
+    .map((message) => {
+      const payload = {
+        role: message.type === 'user' ? 'user' : 'assistant',
+        content: message.type === 'user' && String(message.contextContent || '').trim()
+          ? message.contextContent
+          : message.content,
+      };
+      if (message.historyKind) payload.history_kind = message.historyKind;
+      return payload;
+    });
 };
 
 /**

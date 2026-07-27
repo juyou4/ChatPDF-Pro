@@ -23,6 +23,12 @@ function manualChunks(id) {
     ) {
         return 'vendor-markdown';
     }
+    if (
+        normalizedId.includes('/node_modules/@codemirror/') ||
+        normalizedId.includes('/node_modules/@lezer/')
+    ) {
+        return 'vendor-editor';
+    }
     if (normalizedId.includes('/node_modules/framer-motion/')) return 'vendor-motion';
     if (
         normalizedId.includes('/node_modules/react/') ||

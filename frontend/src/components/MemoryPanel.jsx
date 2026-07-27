@@ -11,6 +11,7 @@ const TAB_CONFIGS = [
   { id: 'doc_fact', label: '文档事实', kind: 'doc_fact', icon: Database },
   { id: 'consolidated', label: '压缩事实', kind: 'consolidated', icon: PackageIcon },
   { id: 'graph', label: '图谱摘要', kind: 'graph', icon: Network },
+  { id: 'evolution', label: '演化历史', kind: 'evolution', icon: History },
 ];
 
 function PackageIcon(props) {
@@ -38,6 +39,70 @@ const MEMORY_KIND_LABELS = {
 const STATUS_LABELS = {
   active: '生效中',
   archived_raw: '原始归档',
+};
+
+const AUDIT_EVENT_LABELS = {
+  add: '新增',
+  update: '改写',
+  invalidate: '判定失效',
+  revalidate: '恢复生效',
+  disable: '停用',
+  enable: '启用',
+  delete: '删除',
+  archive: '归档',
+  promote: '晋升',
+};
+
+const AUDIT_EVENT_TONES = {
+  add: 'emerald',
+  update: 'blue',
+  invalidate: 'rose',
+  revalidate: 'emerald',
+  disable: 'slate',
+  enable: 'emerald',
+  delete: 'rose',
+  archive: 'amber',
+  promote: 'purple',
+};
+
+const ENTITY_TYPE_LABELS = {
+  method: '方法', dataset: '数据集', metric: '指标', model: '骨干',
+  task: '任务', figure: '图', table: '表', concept: '概念',
+  paper: '论文', author: '作者',
+};
+
+const ENTITY_TYPE_TONES = {
+  method: 'purple', dataset: 'emerald', metric: 'blue', model: 'blue',
+  task: 'slate', figure: 'amber', table: 'rose', concept: 'slate',
+  paper: 'slate', author: 'slate',
+};
+
+const AUDIT_ACTOR_LABELS = {
+  user: '用户',
+  system: '系统',
+  arbiter: '写入裁决',
+};
+
+/** 条目当前处于哪种生命周期状态，决定徽章与可用操作 */
+const lifecycleOf = (entry) => {
+  if (entry.disabled_at) return 'disabled';
+  if (entry.invalid_at) return 'invalidated';
+  if (entry.status === 'archived_raw') return 'archived';
+  return 'active';
+};
+
+const LIFECYCLE_LABELS = {
+  active: '生效中',
+  invalidated: '已失效',
+  disabled: '已停用',
+  archived: '原始归档',
+};
+
+const LIFECYCLE_TONES = {
+  active: 'emerald',
+  invalidated: 'rose',
+  disabled: 'slate',
+  archived: 'amber',
 };
 
 const truncateContent = (content, maxLen = 64) => {
@@ -117,6 +182,15 @@ const MemoryPanel = ({ isOpen, onClose }) => {
   const [statusData, setStatusData] = useState(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [rebuilding, setRebuilding] = useState(false);
+  const [historyById, setHistoryById] = useState({});
+  const [historyLoadingId, setHistoryLoadingId] = useState(null);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newContent, setNewContent] = useState('');
+  const [newScope, setNewScope] = useState('profile');
+  const [lifecycleFilter, setLifecycleFilter] = useState('all');
+  const [adding, setAdding] = useState(false);
 
   const fetchAllData = useCallback(async () => {
     setLoading(true);
@@ -149,6 +223,12 @@ const MemoryPanel = ({ isOpen, onClose }) => {
     }
   }, []);
 
+  const nodeLabelById = useMemo(() => {
+    const map = {};
+    (graphData?.nodes || []).forEach((node) => { map[node.id] = node.label; });
+    return map;
+  }, [graphData]);
+
   const docOptions = useMemo(
     () => [...new Set(allEntries.map((entry) => entry.doc_id).filter(Boolean))],
     [allEntries]
@@ -164,17 +244,25 @@ const MemoryPanel = ({ isOpen, onClose }) => {
 
     return allEntries.filter((entry) => {
       if (!matchesTab(entry)) return false;
+      if (lifecycleFilter !== 'all' && lifecycleOf(entry) !== lifecycleFilter) return false;
       if (!selectedDocId || activeTab === 'profile') return true;
       return entry.doc_id === selectedDocId;
     });
-  }, [activeTab, allEntries, selectedDocId]);
+  }, [activeTab, allEntries, selectedDocId, lifecycleFilter]);
+
+  const lifecycleCounts = useMemo(() => {
+    const counts = { all: allEntries.length, active: 0, invalidated: 0, disabled: 0, archived: 0 };
+    allEntries.forEach((entry) => { counts[lifecycleOf(entry)] += 1; });
+    return counts;
+  }, [allEntries]);
 
   const tabCounts = useMemo(() => ({
     profile: allEntries.filter((entry) => entry.memory_scope === 'profile').length,
     doc_fact: allEntries.filter((entry) => entry.memory_kind === 'doc_fact').length,
     consolidated: allEntries.filter((entry) => entry.memory_kind === 'consolidated').length,
     graph: docOptions.length,
-  }), [allEntries, docOptions.length]);
+    evolution: auditEvents.length,
+  }), [allEntries, docOptions.length, auditEvents.length]);
 
   const fetchTrace = useCallback(async (entryId) => {
     if (traceById[entryId]) return;
@@ -228,6 +316,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
     fetchAllData();
     setExpandedId(null); setEditingId(null); setTraceById({}); setGraphData(null);
     setShowClearConfirm(false); setStatusMessage('');
+    setHistoryById({}); setShowAddForm(false); setNewContent('');
   }, [isOpen, fetchAllData]);
 
   useEffect(() => {
@@ -268,6 +357,108 @@ const MemoryPanel = ({ isOpen, onClose }) => {
       if (editingId === entryId) setEditingId(null);
     } catch (err) { console.error('删除失败:', err); } finally { setOperatingId(null); }
   };
+
+  const fetchHistory = useCallback(async (entryId) => {
+    if (historyById[entryId]) return;
+    setHistoryLoadingId(entryId);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries/${entryId}/history`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setHistoryById((prev) => ({ ...prev, [entryId]: data.history || [] }));
+    } catch (err) {
+      console.error('获取演化历史失败:', err);
+    } finally {
+      setHistoryLoadingId(null);
+    }
+  }, [historyById]);
+
+  const fetchAudit = useCallback(async () => {
+    setAuditLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/audit?limit=100`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setAuditEvents(data.events || []);
+    } catch (err) {
+      console.error('获取记忆变更历史失败:', err);
+      setAuditEvents([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  }, []);
+
+  const handleToggleDisabled = async (entry) => {
+    const nextDisabled = !entry.disabled_at;
+    setOperatingId(entry.id);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries/${entry.id}/disable`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabled: nextDisabled }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHistoryById((prev) => { const next = { ...prev }; delete next[entry.id]; return next; });
+      await fetchAllData();
+    } catch (err) {
+      console.error('切换记忆停用状态失败:', err);
+    } finally { setOperatingId(null); }
+  };
+
+  const handleRevalidate = async (entry) => {
+    setOperatingId(entry.id);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries/${entry.id}/revalidate`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHistoryById((prev) => { const next = { ...prev }; delete next[entry.id]; return next; });
+      await fetchAllData();
+    } catch (err) {
+      console.error('恢复记忆失败:', err);
+    } finally { setOperatingId(null); }
+  };
+
+  const handleRestoreArchived = async (entry) => {
+    setOperatingId(entry.id);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries/${entry.id}/restore`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHistoryById((prev) => { const next = { ...prev }; delete next[entry.id]; return next; });
+      await fetchAllData();
+    } catch (err) {
+      console.error('从归档恢复记忆失败:', err);
+    } finally { setOperatingId(null); }
+  };
+
+  const handleAddEntry = async () => {
+    const content = newContent.trim();
+    if (!content) return;
+    setAdding(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/memory/entries`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content,
+          source_type: 'manual',
+          doc_id: newScope === 'document' ? (selectedDocId || null) : null,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setNewContent('');
+      setShowAddForm(false);
+      await fetchAllData();
+    } catch (err) {
+      console.error('添加记忆失败:', err);
+      setStatusMessage('添加记忆失败，请检查后端日志。');
+    } finally { setAdding(false); }
+  };
+
+  // 必须放在 fetchAudit 定义之后：useEffect 的依赖在渲染期求值，
+  // 提前引用 useCallback 常量会触发 TDZ 报错让整个面板白屏。
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'evolution') return;
+    fetchAudit();
+  }, [isOpen, activeTab, fetchAudit]);
 
   const handleClearAll = async () => {
     try {
@@ -327,8 +518,14 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                <button onClick={fetchAllData} disabled={loading} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-white hover:bg-gray-50 border border-gray-200/80 text-gray-700 font-bold text-[13px] shadow-sm transition-all">
                  <RotateCcw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={2.5}/> 刷新状态
                </button>
+               <button onClick={() => setShowAddForm((prev) => !prev)} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-white hover:bg-gray-50 border border-gray-200/80 text-gray-700 font-bold text-[13px] shadow-sm transition-all">
+                 <Plus className="w-3.5 h-3.5" strokeWidth={2.5}/> 添加记忆
+               </button>
                <button onClick={handleRebuildFromEvents} disabled={rebuilding} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-[#f07345] hover:bg-[#d55a2d] text-white font-bold text-[13px] shadow-[0_8px_16px_-6px_rgba(241, 107, 58,0.4)] transition-all">
                  {rebuilding ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <RefreshCw className="w-3.5 h-3.5" strokeWidth={2.5}/>} 事件恢复
+               </button>
+               <button onClick={() => setShowClearConfirm(true)} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-[24px] bg-rose-50 hover:bg-rose-100 border border-rose-100 text-rose-600 font-bold text-[13px] transition-all">
+                 <Trash2 className="w-3.5 h-3.5" strokeWidth={2.5}/> 清空
                </button>
             </div>
           </div>
@@ -394,7 +591,97 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                   </select>
                 </div>
               )}
+              {/* 生命周期筛选：默认全部，用于翻出被压缩归档/已失效/已停用的条目 */}
+              {activeTab !== 'graph' && activeTab !== 'evolution' && (
+                <div className="flex flex-wrap items-center gap-1 rounded-full border border-gray-100 bg-gray-100/50 p-1">
+                  {[
+                    { id: 'all', label: '全部' },
+                    { id: 'active', label: '生效中' },
+                    { id: 'archived', label: '原始归档' },
+                    { id: 'invalidated', label: '已失效' },
+                    { id: 'disabled', label: '已停用' },
+                  ].map((option) => (
+                    <button
+                      key={option.id}
+                      onClick={() => setLifecycleFilter(option.id)}
+                      className={`rounded-full px-3 py-1.5 text-[12px] font-bold transition-all ${
+                        lifecycleFilter === option.id
+                          ? 'bg-white text-[#f16b3a] shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      {option.label}
+                      <span className="ml-1 text-[10px] text-gray-400 tabular-nums">
+                        {lifecycleCounts[option.id] ?? 0}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+
+            {/* ========== 手动添加记忆 ========== */}
+            <AnimatePresence>
+              {showAddForm && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="mb-5 rounded-[24px] border border-gray-100 bg-white p-5 shadow-sm">
+                    <div className="mb-3 flex items-center gap-2">
+                      <Plus className="h-4 w-4 text-[#f16b3a]" strokeWidth={2.5} />
+                      <span className="text-[14px] font-bold text-gray-900">手动添加一条记忆</span>
+                    </div>
+                    <textarea
+                      value={newContent}
+                      onChange={(e) => setNewContent(e.target.value)}
+                      placeholder="例如：我只关心方法与结论，实验细节可以略过。"
+                      className="min-h-[100px] w-full resize-none rounded-xl border border-gray-200 bg-gray-50/50 px-4 py-3 text-[13px] font-medium outline-none transition-all focus:border-[#ed8c68]/50 focus:ring-2 focus:ring-[#ed8c68]/20"
+                    />
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[12px] font-bold text-gray-500">作用域</span>
+                        <div className="flex gap-1 rounded-[14px] bg-gray-100/70 p-1">
+                          {[
+                            { id: 'profile', label: '全局画像' },
+                            { id: 'document', label: '当前文档' },
+                          ].map((option) => (
+                            <button
+                              key={option.id}
+                              onClick={() => setNewScope(option.id)}
+                              disabled={option.id === 'document' && !selectedDocId}
+                              className={`rounded-[11px] px-3 py-1 text-[12px] font-bold transition-all disabled:cursor-not-allowed disabled:opacity-40 ${
+                                newScope === option.id ? 'bg-white text-[#f16b3a] shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                        {newScope === 'document' && selectedDocId && (
+                          <span className="text-[11px] font-bold text-gray-400">{selectedDocId}</span>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setShowAddForm(false); setNewContent(''); }}
+                          className="rounded-[16px] px-4 py-2 text-[12px] font-bold text-gray-600 transition-colors hover:bg-gray-100"
+                        >
+                          取消
+                        </button>
+                        <button
+                          onClick={handleAddEntry}
+                          disabled={adding || !newContent.trim()}
+                          className="inline-flex items-center gap-1.5 rounded-[16px] bg-[#f16b3a] px-5 py-2 text-[12px] font-bold text-white shadow-sm transition-all hover:bg-[#d55a2d] disabled:opacity-40"
+                        >
+                          {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} 保存记忆
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* ========== Lists & Empty State ========== */}
             {loading && (
@@ -439,10 +726,31 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                     <div className="bg-white rounded-[28px] p-6 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.06)] border border-gray-100/50">
                       <div className="mb-4 text-[13px] font-bold text-gray-800 uppercase tracking-widest border-b border-gray-50 pb-2">图谱神经元网络预览</div>
                       {graphData.nodes && graphData.nodes.length > 0 ? (
-                        <div className="flex flex-wrap gap-2.5">
-                          {graphData.nodes.map((node) => (
-                            <KindBadge key={node.id} label={`${node.type}: ${node.label}`} tone={node.type === 'figure' ? 'amber' : node.type === 'table' ? 'rose' : 'blue'} />
-                          ))}
+                        <div className="space-y-4">
+                          <div className="flex flex-wrap gap-2.5">
+                            {graphData.nodes.map((node) => (
+                              <KindBadge
+                                key={node.id}
+                                label={`${ENTITY_TYPE_LABELS[node.type] || node.type}: ${node.label}${node.mentions > 1 ? ` ×${node.mentions}` : ''}`}
+                                tone={ENTITY_TYPE_TONES[node.type] || 'blue'}
+                              />
+                            ))}
+                          </div>
+                          {graphData.edges && graphData.edges.length > 0 && (
+                            <div className="border-t border-gray-50 pt-3">
+                              <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-gray-400">实体关系</div>
+                              <div className="space-y-1.5">
+                                {graphData.edges.map((edge, i) => (
+                                  <div key={`${edge.source}-${edge.type}-${edge.target}-${i}`} className="flex flex-wrap items-center gap-2 text-[12px]">
+                                    <span className="font-bold text-gray-800">{nodeLabelById[edge.source] || edge.source}</span>
+                                    <span className="rounded-full bg-gray-100 px-2 py-0.5 font-mono text-[11px] text-gray-600">{edge.type}</span>
+                                    <span className="font-bold text-gray-800">{nodeLabelById[edge.target] || edge.target}</span>
+                                    {edge.mentions > 1 && <span className="text-[10px] text-gray-400">×{edge.mentions}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="text-[13px] text-gray-400 font-bold">神经元尚未固化内容</div>
@@ -453,7 +761,59 @@ const MemoryPanel = ({ isOpen, onClose }) => {
               </div>
             )}
 
-            {!loading && activeTab !== 'graph' && filteredEntries.length === 0 && (
+            {!loading && activeTab === 'evolution' && (
+              <div className="space-y-3">
+                {auditLoading && (
+                  <div className="flex items-center justify-center gap-2 py-10 text-[13px] font-bold text-gray-400">
+                    <Loader2 className="h-4 w-4 animate-spin" /> 正在加载变更历史
+                  </div>
+                )}
+                {!auditLoading && auditEvents.length === 0 && (
+                  <div className="rounded-[24px] border border-dashed border-gray-200 bg-white/60 py-16 text-center">
+                    <History className="mx-auto mb-3 h-8 w-8 text-gray-300" />
+                    <div className="text-[15px] font-bold text-gray-700">暂无记忆变更记录</div>
+                    <p className="mt-2 text-[13px] text-gray-500">
+                      记忆的新增、改写、失效与恢复都会记录在这里，可用于追溯"某条记忆为什么变成现在这样"。
+                    </p>
+                  </div>
+                )}
+                {!auditLoading && auditEvents.map((event) => (
+                  <div key={event.id} className="rounded-[20px] border border-gray-100 bg-white p-4 shadow-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <KindBadge
+                        label={AUDIT_EVENT_LABELS[event.event] || event.event}
+                        tone={AUDIT_EVENT_TONES[event.event] || 'slate'}
+                      />
+                      <KindBadge label={AUDIT_ACTOR_LABELS[event.actor] || event.actor || '系统'} tone="slate" />
+                      {event.doc_id && <KindBadge label={event.doc_id} tone="blue" />}
+                      {event.reason && <span className="text-[11px] font-bold text-gray-400">{event.reason}</span>}
+                      <span className="ml-auto inline-flex items-center gap-1 text-[11px] font-bold text-gray-400">
+                        <Clock className="h-3 w-3" /> {formatTime(event.created_at)}
+                      </span>
+                    </div>
+                    <div className="mt-3 space-y-2 border-l-2 border-gray-100 pl-4">
+                      {event.old_content && (
+                        <div className="text-[12px] leading-relaxed text-rose-700">
+                          <span className="mr-1 font-bold text-rose-400">变更前</span>
+                          <span className="line-through decoration-rose-200">{truncateContent(event.old_content, 160)}</span>
+                        </div>
+                      )}
+                      {event.new_content && (
+                        <div className="text-[12px] leading-relaxed text-emerald-800">
+                          <span className="mr-1 font-bold text-emerald-500">变更后</span>
+                          {truncateContent(event.new_content, 160)}
+                        </div>
+                      )}
+                      {!event.old_content && !event.new_content && (
+                        <div className="text-[12px] text-gray-400">（该操作不涉及内容变化）</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!loading && activeTab !== 'graph' && activeTab !== 'evolution' && filteredEntries.length === 0 && (
               <div className="flex flex-col items-center justify-center py-20 opacity-90 mt-4">
                  <div className="relative flex items-center justify-center mb-8">
                     <div className="absolute w-[180px] h-[180px] rounded-full border border-gray-100 bg-gray-50/30 shadow-[inset_0_0_20px_rgba(0,0,0,0.02)]" />
@@ -470,7 +830,7 @@ const MemoryPanel = ({ isOpen, onClose }) => {
               </div>
             )}
 
-            {!loading && activeTab !== 'graph' && filteredEntries.length > 0 && (
+            {!loading && activeTab !== 'graph' && activeTab !== 'evolution' && filteredEntries.length > 0 && (
               <div className="space-y-4">
                 {filteredEntries.map((entry) => {
                   const isExpanded = expandedId === entry.id;
@@ -484,7 +844,10 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                           <div className="mb-2.5 flex flex-wrap items-center gap-2">
                             <KindBadge label={MEMORY_KIND_LABELS[entry.memory_kind] || entry.memory_kind || '记忆'} tone={entry.memory_kind === 'consolidated' ? 'amber' : entry.memory_scope === 'profile' ? 'emerald' : 'blue'} />
                             <KindBadge label={SOURCE_TYPE_LABELS[entry.source_type] || entry.source_type} tone="slate" />
-                            <KindBadge label={STATUS_LABELS[entry.status] || entry.status || '生效'} tone={entry.status === 'archived_raw' ? 'rose' : 'emerald'} />
+                            <KindBadge
+                              label={LIFECYCLE_LABELS[lifecycleOf(entry)]}
+                              tone={LIFECYCLE_TONES[lifecycleOf(entry)]}
+                            />
                             {entry.doc_id && <KindBadge label={entry.doc_id} tone="slate" />}
                             <span className="inline-flex items-center gap-1 text-[11px] font-bold text-gray-400 ml-1">
                               <History className="h-3 w-3" />
@@ -547,11 +910,61 @@ const MemoryPanel = ({ isOpen, onClose }) => {
                                     <button onClick={() => handleEdit(entry)} disabled={isOperating} className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-gray-600 border border-gray-200 transition-colors hover:bg-gray-50">
                                       <Edit3 className="h-3 w-3" /> 修改内容
                                     </button>
+                                    <button
+                                      onClick={() => fetchHistory(entry.id)} disabled={historyLoadingId === entry.id}
+                                      className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-purple-600 bg-purple-50 transition-all hover:bg-purple-100"
+                                    >
+                                      {historyLoadingId === entry.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <History className="h-3 w-3" />}
+                                      演化历史
+                                    </button>
+                                    {lifecycleOf(entry) === 'archived' && (
+                                      <button onClick={() => handleRestoreArchived(entry)} disabled={isOperating} className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-amber-700 bg-amber-50 transition-colors hover:bg-amber-100">
+                                        {isOperating ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />} 恢复到检索
+                                      </button>
+                                    )}
+                                    {entry.invalid_at ? (
+                                      <button onClick={() => handleRevalidate(entry)} disabled={isOperating} className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-emerald-700 bg-emerald-50 transition-colors hover:bg-emerald-100">
+                                        {isOperating ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />} 恢复生效
+                                      </button>
+                                    ) : (
+                                      <button onClick={() => handleToggleDisabled(entry)} disabled={isOperating} className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-gray-600 border border-gray-200 transition-colors hover:bg-gray-50">
+                                        {isOperating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}
+                                        {entry.disabled_at ? '重新启用' : '停用此条'}
+                                      </button>
+                                    )}
                                     <button onClick={() => handleDelete(entry.id)} disabled={isOperating} className="inline-flex items-center gap-1.5 rounded-[16px] px-4 py-2 text-[12px] font-bold text-rose-600 bg-rose-50 transition-colors hover:bg-rose-100">
                                       {isOperating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />} 释放删除
                                     </button>
                                   </div>
                                 </>
+                              )}
+
+                              {historyById[entry.id] && (
+                                <motion.div initial={{opacity:0}} animate={{opacity:1}} className="mt-4 rounded-[20px] border border-purple-100 bg-purple-50/40 p-5">
+                                  <div className="mb-3 text-[13px] font-bold text-purple-800 tracking-wide">🕓 这条记忆的演化过程</div>
+                                  {historyById[entry.id].length === 0 ? (
+                                    <div className="text-[12px] text-gray-500">暂无变更记录（可能是审计日志启用前写入的旧记忆）。</div>
+                                  ) : (
+                                    <div className="space-y-3 border-l-2 border-purple-200 pl-4">
+                                      {historyById[entry.id].map((row) => (
+                                        <div key={row.id}>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <KindBadge label={AUDIT_EVENT_LABELS[row.event] || row.event} tone={AUDIT_EVENT_TONES[row.event] || 'slate'} />
+                                            <span className="text-[11px] font-bold text-gray-500">{AUDIT_ACTOR_LABELS[row.actor] || row.actor}</span>
+                                            {row.reason && <span className="text-[11px] text-gray-400">{row.reason}</span>}
+                                            <span className="text-[11px] text-gray-400">{formatTime(row.created_at)}</span>
+                                          </div>
+                                          {row.old_content && (
+                                            <div className="mt-1 text-[12px] text-rose-700 line-through decoration-rose-200">{truncateContent(row.old_content, 120)}</div>
+                                          )}
+                                          {row.new_content && (
+                                            <div className="mt-1 text-[12px] text-emerald-800">{truncateContent(row.new_content, 120)}</div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </motion.div>
                               )}
 
                               {trace && (

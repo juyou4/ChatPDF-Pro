@@ -3,6 +3,8 @@ import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn,
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
+import { buildCriticDetailLines, hasCitationRisk, locateTextInElement } from '../utils/answerCriticUtils';
+import AnswerCriticNotice from './AnswerCriticNotice';
 import ScreenshotPreview from './ScreenshotPreview';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
@@ -68,7 +70,10 @@ import {
 import {
   createDocumentNote,
   createDocumentHighlight,
+  DEFAULT_DOCUMENT_HIGHLIGHT_COLOR,
   getDocumentHighlightFingerprint,
+  normalizeDocumentHighlightColor,
+  normalizeDocumentHighlightStyle,
   readDocumentHighlights,
   readDocumentNotes,
   writeDocumentHighlights,
@@ -183,11 +188,49 @@ const MemoryHitsBadge = ({ hits, meta }) => {
       >
         <Brain className="w-3.5 h-3.5" />
         <span>记忆命中 ({hits.length})</span>
+        {typeof meta?.used_tokens === 'number' && meta?.token_budget ? (
+          <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700 tabular-nums">
+            {meta.used_tokens}/{meta.token_budget} token
+          </span>
+        ) : null}
         {meta?.truncated && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">已截断</span>}
         <ChevronDown className={`w-3 h-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
       {expanded && (
         <div className="mt-2 space-y-2">
+          {meta && (
+            <div className="rounded-xl border border-emerald-100/80 bg-white px-2.5 py-2 text-[11px] text-gray-600">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                {typeof meta.retrieved_count === 'number' && (
+                  <span>召回 <b className="text-gray-800 tabular-nums">{meta.retrieved_count}</b></span>
+                )}
+                {typeof meta.selected_count === 'number' && (
+                  <span>注入 <b className="text-gray-800 tabular-nums">{meta.selected_count}</b></span>
+                )}
+                {typeof meta.used_tokens === 'number' && (
+                  <span>
+                    占用 <b className="text-gray-800 tabular-nums">{meta.used_tokens}</b>
+                    {meta.token_budget ? <span className="text-gray-400"> / {meta.token_budget}</span> : null} token
+                  </span>
+                )}
+                {meta.strategy && <span className="text-gray-400">{meta.strategy}</span>}
+              </div>
+              {Array.isArray(meta.selected_kinds) && meta.selected_kinds.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {Object.entries(
+                    meta.selected_kinds.reduce((acc, kind) => {
+                      acc[kind] = (acc[kind] || 0) + 1;
+                      return acc;
+                    }, {})
+                  ).map(([kind, count]) => (
+                    <span key={kind} className="rounded-full bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-600">
+                      {MEMORY_KIND_LABELS[kind] || kind} ×{count}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {hits.map((hit, i) => (
             <div key={hit.id || `${hit.memory_kind}-${i}`} className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-2.5">
               <div className="flex items-center gap-2 text-[11px] text-emerald-700">
@@ -879,12 +922,20 @@ const ChatPDF = () => {
     setAutoOutlineSummary,
     autoPretranslate: enableHoverPretranslate,
     setAutoPretranslate,
+    blockSummary,
+    setBlockSummary,
     pretranslateConcurrency,
     setPretranslateConcurrency,
     overviewDefaultDepth,
     setOverviewDefaultDepth,
   } = useReadingSettings();
   const shouldAutoPretranslate = aiAutoProcess && enableHoverPretranslate;
+  // 走 ref 读取：翻译那个 useCallback 的依赖数组很大，
+  // 把一个开关塞进去会让它频繁重建，进而拖累依赖它的一串 memo。
+  const blockSummaryRef = useRef(blockSummary);
+  useEffect(() => {
+    blockSummaryRef.current = blockSummary;
+  }, [blockSummary]);
 
   // ========== 设置状态 - 使用防抖 localStorage 写入（需求 8.1） ==========
   const [apiKey, setApiKey] = useDebouncedLocalStorage('apiKey', '');
@@ -916,7 +967,6 @@ const ChatPDF = () => {
   const [searchEngine, setSearchEngine] = useDebouncedLocalStorage('searchEngine', 'google');
   const [searchEngineUrl, setSearchEngineUrl] = useDebouncedLocalStorage('searchEngineUrl', 'https://www.google.com/search?q={query}');
   const [toolbarSize, setToolbarSize] = useDebouncedLocalStorage('toolbarSize', 'normal');
-  const [toolbarScale, setToolbarScale] = useDebouncedLocalStorage('toolbarScale', 1);
   const [useRerankSetting, setUseRerankSetting] = useDebouncedLocalStorage('useRerank', true);
   const [rerankerModel, setRerankerModel] = useDebouncedLocalStorage('rerankerModel', 'BAAI/bge-reranker-base');
   const [enableGraphRAG, setEnableGraphRAG] = useDebouncedLocalStorage('enableGraphRAG', false);
@@ -928,9 +978,13 @@ const ChatPDF = () => {
   // 不需要持久化的设置状态
   const [availableModels, setAvailableModels] = useState({});
   const [availableEmbeddingModels, setAvailableEmbeddingModels] = useState({});
-  const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 0 });
   const [documentHighlights, setDocumentHighlights] = useState([]);
   const [documentNotes, setDocumentNotes] = useState([]);
+  const [annotationTool, setAnnotationTool] = useState(null);
+  const [annotationColor, setAnnotationColor] = useState(DEFAULT_DOCUMENT_HIGHLIGHT_COLOR);
+  const [selectedSavedHighlightId, setSelectedSavedHighlightId] = useState('');
+  const [autoAnnotationRevision, setAutoAnnotationRevision] = useState(0);
+  const [pendingUserNoteRevealId, setPendingUserNoteRevealId] = useState('');
   const [sidebarMode, setSidebarMode] = useState('history');
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [settingsSection, setSettingsSection] = useState('common');
@@ -993,6 +1047,7 @@ const ChatPDF = () => {
   const uploadStartsNewChatRef = useRef(true);
   const pendingLocalParserUploadRef = useRef(null);
   const selectedPdfHighlightAnchorRef = useRef(null);
+  const pendingAutoAnnotationRef = useRef(null);
   const sidebarResizeRef = useRef({ active: false, pointerId: null, startX: 0, startWidth: SIDEBAR_DEFAULT_WIDTH, maxWidth: SIDEBAR_MAX_WIDTH });
 
   // 兼容旧配置：streamSpeed 和 streamOutput 过去分别持久化，
@@ -1024,6 +1079,10 @@ const ChatPDF = () => {
     rightPanelMode, setRightPanelMode,
     overviewDepth, setOverviewDepth,
   } = useUIState();
+
+  // 译文只在一个地方落地：'panel' = 右侧阅读区的「页面翻译」卡片，
+  // 'dock' = PDF 右侧吸附栏。两者都要固定占屏幕，同时开着就是把同一份内容画两遍。
+  const [translationSurface, setTranslationSurface] = useState('panel');
 
   useEffect(() => {
     if (!isNarrowDesktop || !showSidebar) return undefined;
@@ -1642,7 +1701,6 @@ const ChatPDF = () => {
     pdfScale, setPdfScale,
     selectedText, setSelectedText,
     showTextMenu, setShowTextMenu,
-    menuPosition, setMenuPosition,
     searchQuery, setSearchQuery,
     searchResults,
     currentResultIndex,
@@ -1658,7 +1716,12 @@ const ChatPDF = () => {
   useEffect(() => {
     setDocumentHighlights(readDocumentHighlights(docId));
     setDocumentNotes(readDocumentNotes(docId));
+    setPendingUserNoteRevealId('');
+    setAnnotationTool(null);
+    setSelectedSavedHighlightId('');
+    setAutoAnnotationRevision(0);
     selectedPdfHighlightAnchorRef.current = null;
+    pendingAutoAnnotationRef.current = null;
   }, [docId]);
 
   useEffect(() => {
@@ -2854,10 +2917,16 @@ const ChatPDF = () => {
     documentNotes.filter((item) => Number(item.page) === Number(currentPage))
   ), [currentPage, documentNotes]);
 
+  const handleUserNoteReveal = useCallback((noteId) => {
+    setPendingUserNoteRevealId((currentId) => currentId === noteId ? '' : currentId);
+  }, []);
+
   const handleUserNoteClick = useCallback((note) => {
     if (!note) return;
     const targetPage = Math.max(1, Number(note.page) || 1);
     setCurrentPage(targetPage);
+    const hasSelectionAnchor = note.anchor_type !== 'page' && Boolean(note.text || note.rects?.length);
+    if (!hasSelectionAnchor) return;
     setActiveHighlight({
       page: targetPage,
       text: note.text,
@@ -2876,12 +2945,77 @@ const ChatPDF = () => {
   }, [setActiveHighlight, setCurrentPage]);
 
   const handleDeleteUserNote = useCallback((noteId) => {
+    const targetNote = documentNotes.find((item) => item.id === noteId);
+    if (!targetNote) return;
+
     const nextNotes = documentNotes.filter((item) => item.id !== noteId);
+    const selectionFingerprint = getDocumentHighlightFingerprint(targetNote);
+    const hasRemainingLinkedNote = Boolean(selectionFingerprint) && nextNotes.some(
+      (item) => getDocumentHighlightFingerprint(item) === selectionFingerprint
+    );
+    const nextHighlights = selectionFingerprint && !hasRemainingLinkedNote
+      ? documentHighlights.filter((item) => getDocumentHighlightFingerprint(item) !== selectionFingerprint)
+      : documentHighlights;
+
     setDocumentNotes(nextNotes);
     if (!writeDocumentNotes(docId, nextNotes)) {
       console.warn('[DocumentNote] 笔记已从当前界面移除，但持久化写入失败');
     }
-  }, [docId, documentNotes]);
+    if (nextHighlights !== documentHighlights) {
+      setDocumentHighlights(nextHighlights);
+      if (!writeDocumentHighlights(docId, nextHighlights)) {
+        console.warn('[DocumentHighlight] 关联标注已从当前界面移除，但持久化写入失败');
+      }
+    }
+
+    if (selectedSavedHighlightId && !nextHighlights.some((item) => item.id === selectedSavedHighlightId)) {
+      selectedPdfHighlightAnchorRef.current = null;
+      pendingAutoAnnotationRef.current = null;
+      setSelectedSavedHighlightId('');
+      setShowTextMenu(false);
+      setSelectedText('');
+    }
+  }, [docId, documentHighlights, documentNotes, selectedSavedHighlightId, setSelectedText, setShowTextMenu]);
+
+  const handleSaveUserNote = useCallback(async ({ id, note, page }) => {
+    if (!docId) throw new Error('请先打开文档');
+    const content = String(note || '').trim();
+    if (!content) throw new Error('笔记内容不能为空');
+    const targetPage = Math.max(1, Math.floor(Number(page) || currentPage));
+    const updatedAt = Date.now();
+    let savedNote;
+    let nextNotes;
+
+    if (id) {
+      const existingNote = documentNotes.find((item) => item.id === id);
+      if (!existingNote) throw new Error('这条笔记已不存在');
+      savedNote = {
+        ...existingNote,
+        note: content,
+        page: targetPage,
+        updated_at: updatedAt,
+      };
+      nextNotes = documentNotes.map((item) => item.id === id ? savedNote : item);
+    } else {
+      savedNote = createDocumentNote({
+        text: '',
+        note: content,
+        page: targetPage,
+        rects: [],
+        anchorType: 'page',
+        now: updatedAt,
+      });
+      if (!savedNote) throw new Error('笔记内容不能为空');
+      nextNotes = [...documentNotes, savedNote];
+    }
+
+    setDocumentNotes(nextNotes);
+    setPendingUserNoteRevealId(savedNote.id);
+    if (!writeDocumentNotes(docId, nextNotes)) {
+      console.warn('[DocumentNote] 笔记已显示，但持久化写入失败');
+    }
+    return savedNote;
+  }, [currentPage, docId, documentNotes]);
 
   const handleOutlineJump = useCallback((item) => {
     if (!item) return;
@@ -3003,6 +3137,7 @@ const ChatPDF = () => {
         block_ids: blockIds,
         target_lang: 'zh',
         force: Boolean(options.force),
+        with_summary: Boolean(blockSummaryRef.current),
       };
       if (options.bulk) {
         requestBody.concurrency = pretranslateConcurrency;
@@ -3311,6 +3446,44 @@ const ChatPDF = () => {
       : (options.retryFailed ?? failedReadingBlockCount > 0);
     pretranslateReadingDocument({ ...options, retryFailed });
   }, [failedReadingBlockCount, pretranslateReadingDocument]);
+
+  // 打开「逐段要点」之前翻好的块，缓存里 summary 是空的。
+  // 这里只补那一次要点调用，复用已有译文，不重跑翻译。
+  const [summaryBackfillRunning, setSummaryBackfillRunning] = useState(false);
+  const handleBackfillSummaries = useCallback(async () => {
+    if (!docId || summaryBackfillRunning) return;
+    setSummaryBackfillRunning(true);
+    setPretranslateNotice('正在为已翻译的段落补要点…');
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const { chatApiKey, chatProviderFull } = getChatRequestConfig();
+      if (chatApiKey) headers['X-ChatPDF-Api-Key'] = chatApiKey;
+      if (chatProviderFull?.apiHost) headers['X-ChatPDF-Api-Host'] = chatProviderFull.apiHost;
+
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/blocks/backfill-summaries`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ target_lang: 'zh', concurrency: pretranslateConcurrency }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const filled = Object.keys(data?.items || {}).length;
+      setBlockTranslations((prev) => ({ ...prev, ...(data?.items || {}) }));
+      setPretranslateNotice(
+        filled > 0
+          ? `已为 ${filled} 段补上要点`
+          : '没有需要补要点的段落'
+      );
+    } catch (error) {
+      setPretranslateNotice('');
+      setBlockTranslateError(sanitizeTranslationError(error?.message, '补齐要点失败，请稍后重试'));
+    } finally {
+      setSummaryBackfillRunning(false);
+    }
+  }, [docId, getChatRequestConfig, pretranslateConcurrency, summaryBackfillRunning]);
 
   useEffect(() => {
     const wasEnabled = prevShouldAutoPretranslateRef.current;
@@ -3677,48 +3850,63 @@ const ChatPDF = () => {
   }, []);
 
   // ========== 划词工具栏相关函数 ==========
+  const handleAnnotationToolChange = useCallback((tool) => {
+    const nextTool = tool === 'highlight' || tool === 'underline' ? tool : null;
+    if (!nextTool) pendingAutoAnnotationRef.current = null;
+    setAnnotationTool(nextTool);
+  }, []);
+
+  const handleAnnotationColorChange = useCallback((color) => {
+    setAnnotationColor(normalizeDocumentHighlightColor(color));
+  }, []);
+
+  const queueAutoAnnotation = useCallback((text, anchor = null) => {
+    const normalizedText = String(text || '').trim();
+    if (!normalizedText || !annotationTool) return false;
+
+    setSelectedSavedHighlightId('');
+    selectedPdfHighlightAnchorRef.current = anchor;
+    pendingAutoAnnotationRef.current = {
+      text: normalizedText,
+      color: annotationColor,
+      style: annotationTool,
+    };
+    setSelectedText(normalizedText);
+    setShowTextMenu(true);
+    setAutoAnnotationRevision((value) => value + 1);
+    return true;
+  }, [annotationColor, annotationTool, setSelectedText, setShowTextMenu]);
+
   const handleTextSelection = useCallback(() => {
     const selection = window.getSelection();
     const text = selection.toString().trim();
     if (text) {
+      if (queueAutoAnnotation(text)) return;
+      setSelectedSavedHighlightId('');
       selectedPdfHighlightAnchorRef.current = null;
       setSelectedText(text);
       setShowTextMenu(true);
-      if (selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        const nextPos = { x: rect.left + rect.width / 2, y: rect.top - 10 };
-        setMenuPosition(nextPos);
-        setToolbarPosition(nextPos);
-      }
     }
-  }, [setSelectedText, setShowTextMenu, setMenuPosition]);
+  }, [queueAutoAnnotation, setSelectedText, setShowTextMenu]);
 
   const handleCloseToolbar = useCallback(() => {
     selectedPdfHighlightAnchorRef.current = null;
+    pendingAutoAnnotationRef.current = null;
+    setSelectedSavedHighlightId('');
     setShowTextMenu(false);
     setSelectedText('');
-  }, [setShowTextMenu, setSelectedText]);
-
-  const handleToolbarPositionChange = useCallback((pos) => setToolbarPosition(pos), []);
-  const handleToolbarScaleChange = useCallback((scale) => setToolbarScale(scale), [setToolbarScale]);
+  }, [setSelectedText, setShowTextMenu]);
 
   // PDFViewer 的文本选择回调（useCallback 稳定引用，避免 PDFViewer 不必要重渲染）
   const handlePdfTextSelect = useCallback((text, anchor = null) => {
     if (text) {
+      if (queueAutoAnnotation(text, anchor)) return;
+      setSelectedSavedHighlightId('');
       selectedPdfHighlightAnchorRef.current = anchor;
       setSelectedText(text);
       setShowTextMenu(true);
-      const selection = window.getSelection();
-      if (selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        const nextPos = { x: rect.left + rect.width / 2, y: rect.top - 10 };
-        setMenuPosition(nextPos);
-        setToolbarPosition(nextPos);
-      }
     }
-  }, [setSelectedText, setShowTextMenu, setMenuPosition]);
+  }, [queueAutoAnnotation, setSelectedText, setShowTextMenu]);
 
   // ModelQuickSwitch 的思考模式切换回调（useCallback 稳定引用）
   const handleThinkingChange = useCallback((enabled) => {
@@ -3730,33 +3918,119 @@ const ChatPDF = () => {
     return { message: '已复制到剪贴板' };
   }, [selectedText]);
 
-  const handleHighlight = useCallback(() => {
-    if (!docId || !selectedText.trim()) return;
+  const handleHighlight = useCallback((color, style = 'highlight') => {
+    if (!docId || !selectedText.trim()) return { message: '没有可高亮的文字', tone: 'error' };
+    // Guard against accidental event objects from onClick wiring.
+    const resolvedColor = normalizeDocumentHighlightColor(
+      typeof color === 'string' ? color : DEFAULT_DOCUMENT_HIGHLIGHT_COLOR
+    );
+    const resolvedStyle = normalizeDocumentHighlightStyle(style);
+    const annotationLabel = resolvedStyle === 'underline' ? '下划线' : '高亮';
     const anchor = selectedPdfHighlightAnchorRef.current;
     const newHighlight = createDocumentHighlight({
       text: selectedText,
       page: Number(anchor?.page) || currentPage,
       rects: anchor?.rects || [],
+      color: resolvedColor,
+      style: resolvedStyle,
     });
-    if (!newHighlight) return;
+    if (!newHighlight) return { message: '高亮创建失败', tone: 'error' };
 
     const fingerprint = getDocumentHighlightFingerprint(newHighlight);
-    const alreadySaved = documentHighlights.some(
+    // Same text+geometry with a different color is treated as an update.
+    const existingIndex = documentHighlights.findIndex(
       (item) => getDocumentHighlightFingerprint(item) === fingerprint
     );
-    const nextHighlights = alreadySaved
-      ? documentHighlights
-      : [...documentHighlights, newHighlight];
-    if (!alreadySaved) {
-      setDocumentHighlights(nextHighlights);
-      if (!writeDocumentHighlights(docId, nextHighlights)) {
-        console.warn('[DocumentHighlight] 高亮已显示，但持久化写入失败');
+    let nextHighlights;
+    let message = `已添加${annotationLabel}`;
+    if (existingIndex >= 0) {
+      const existing = documentHighlights[existingIndex];
+      if (
+        normalizeDocumentHighlightColor(existing.color) === newHighlight.color
+        && normalizeDocumentHighlightStyle(existing.style) === newHighlight.style
+      ) {
+        window.getSelection()?.removeAllRanges?.();
+        handleCloseToolbar();
+        return { message: `该区域已有${annotationLabel}` };
       }
+      nextHighlights = documentHighlights.map((item, index) => (
+        index === existingIndex
+          ? { ...item, color: newHighlight.color, style: newHighlight.style }
+          : item
+      ));
+      message = `已更新${annotationLabel}`;
+    } else {
+      nextHighlights = [...documentHighlights, newHighlight];
+    }
+    setDocumentHighlights(nextHighlights);
+    if (!writeDocumentHighlights(docId, nextHighlights)) {
+      console.warn('[DocumentHighlight] 高亮已显示，但持久化写入失败');
     }
 
     window.getSelection()?.removeAllRanges?.();
     handleCloseToolbar();
+    return { message };
   }, [currentPage, docId, documentHighlights, handleCloseToolbar, selectedText]);
+
+  useEffect(() => {
+    const pending = pendingAutoAnnotationRef.current;
+    if (!pending || autoAnnotationRevision === 0) return;
+    if (pending.text !== selectedText) {
+      pendingAutoAnnotationRef.current = null;
+      return;
+    }
+
+    pendingAutoAnnotationRef.current = null;
+    void handleHighlight(pending.color, pending.style);
+  }, [autoAnnotationRevision, handleHighlight, selectedText]);
+
+  const handleSavedHighlightClick = useCallback((highlight) => {
+    const text = String(highlight?.text || '').trim();
+    if (!text) return;
+    const page = Math.max(1, Number(highlight.page) || currentPage);
+    selectedPdfHighlightAnchorRef.current = {
+      page,
+      rects: Array.isArray(highlight.rects) ? highlight.rects : [],
+      coordinate_space: 'pdf_top_left_points',
+    };
+    pendingAutoAnnotationRef.current = null;
+    setSelectedSavedHighlightId(highlight.id || '');
+    setSelectedText(text);
+    setShowTextMenu(true);
+  }, [currentPage, setSelectedText, setShowTextMenu]);
+
+  const handleDeleteSelectedAnnotation = useCallback(() => {
+    const targetHighlight = documentHighlights.find((item) => item.id === selectedSavedHighlightId);
+    if (!targetHighlight) return { message: '没有可删除的标注', tone: 'error' };
+
+    const selectionFingerprint = getDocumentHighlightFingerprint(targetHighlight);
+    const relatedNotes = selectionFingerprint
+      ? documentNotes.filter((item) => getDocumentHighlightFingerprint(item) === selectionFingerprint)
+      : [];
+    const nextHighlights = documentHighlights.filter((item) => item.id !== targetHighlight.id);
+    const nextNotes = relatedNotes.length > 0
+      ? documentNotes.filter((item) => !relatedNotes.some((note) => note.id === item.id))
+      : documentNotes;
+    const annotationLabel = normalizeDocumentHighlightStyle(targetHighlight.style) === 'underline'
+      ? '下划线'
+      : '高亮';
+
+    setDocumentHighlights(nextHighlights);
+    if (!writeDocumentHighlights(docId, nextHighlights)) {
+      console.warn('[DocumentHighlight] 标注已从当前界面移除，但持久化写入失败');
+    }
+    if (nextNotes !== documentNotes) {
+      setDocumentNotes(nextNotes);
+      if (!writeDocumentNotes(docId, nextNotes)) {
+        console.warn('[DocumentNote] 关联笔记已从当前界面移除，但持久化写入失败');
+      }
+    }
+
+    setPendingUserNoteRevealId('');
+    window.getSelection()?.removeAllRanges?.();
+    handleCloseToolbar();
+    return { message: relatedNotes.length > 0 ? `已删除${annotationLabel}及关联笔记` : `已删除${annotationLabel}` };
+  }, [docId, documentHighlights, documentNotes, handleCloseToolbar, selectedSavedHighlightId]);
 
   const handleAddNote = useCallback(async (noteContent) => {
     if (!docId || !selectedText.trim()) throw new Error('没有可关联的原文');
@@ -3771,6 +4045,7 @@ const ChatPDF = () => {
 
     const nextNotes = [...documentNotes, newNote];
     setDocumentNotes(nextNotes);
+    setPendingUserNoteRevealId(newNote.id);
     if (!writeDocumentNotes(docId, nextNotes)) {
       console.warn('[DocumentNote] 笔记已显示，但持久化写入失败');
     }
@@ -4096,6 +4371,12 @@ const ChatPDF = () => {
       )
     );
     const shouldStreamContent = isStreamingCurrentMessage;
+    const criticDetailLines = buildCriticDetailLines(msg.answerCritic);
+    const criticAnswerScopeId = `critic-answer-${msg.id ?? idx}`;
+    const handleLocateClaim = (claimSpan) => {
+      const scope = document.querySelector(`[data-critic-answer="${criticAnswerScopeId}"]`);
+      if (scope) locateTextInElement(scope, claimSpan);
+    };
     return (
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -4113,7 +4394,8 @@ const ChatPDF = () => {
         >
           {msg.type === 'assistant' && (
             <div className="flex items-center gap-2 mb-2 select-none">
-              <span className="px-3 py-1 bg-[#FFF4EF] text-[#B85F47] dark:bg-[#FFA07A]/20 dark:text-[#FFDCCF] rounded-[24px] text-[11px] font-bold uppercase tracking-wider">
+              {/* 模型名是元信息，不该用 bold 抢正文的注意力 */}
+              <span className="px-2.5 py-1 bg-[#FFF4EF] text-[#B85F47] dark:bg-[#FFA07A]/20 dark:text-[#FFDCCF] rounded-full text-[10.5px] font-medium uppercase tracking-[0.06em]">
                 {msg.model || 'ASSISTANT'}
               </span>
             </div>
@@ -4142,31 +4424,45 @@ const ChatPDF = () => {
               <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
             </div>
           )}
-          {msg.answerCritic && msg.answerCritic.has_hallucination && !msg.isStreaming && (
-            <div className="mb-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-200 text-orange-700 text-xs flex items-start gap-1.5">
-              <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
-              <div className="flex-1">
-                <div className="font-medium">答案自审检测到潜在幻觉</div>
-                {msg.answerCritic.reason && (
-                  <div className="mt-0.5 text-orange-600/80">{msg.answerCritic.reason}</div>
-                )}
-                {typeof msg.answerCritic.confidence === 'number' && (
-                  <div className="mt-0.5 text-orange-600/70">自审置信度: {(msg.answerCritic.confidence * 100).toFixed(0)}%</div>
-                )}
-              </div>
+          {msg.answerCritic && !msg.isStreaming && msg.answerCritic.has_hallucination && (
+            <AnswerCriticNotice
+              critic={msg.answerCritic}
+              variant="hallucination"
+              detailLines={criticDetailLines}
+              onLocateClaim={handleLocateClaim}
+            />
+          )}
+          {msg.answerCritic && !msg.isStreaming && !msg.answerCritic.has_hallucination && hasCitationRisk(msg.answerCritic) && (
+            <AnswerCriticNotice
+              critic={msg.answerCritic}
+              variant="citation"
+              detailLines={criticDetailLines}
+              onLocateClaim={handleLocateClaim}
+            />
+          )}
+          {msg.answerGenerating && isStreamingCurrentMessage && !(msg.content && String(msg.content).trim()) && (
+            <div className={`mb-2 text-[12px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+              正在生成回答...
             </div>
           )}
-          <StreamingMarkdown
-            content={msg.content}
-            isStreaming={shouldStreamContent}
-            enableBlurReveal={enableBlurReveal}
-            blurIntensity={blurIntensity}
-            citations={msg.citations || null}
-            onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
-            streamingRef={shouldStreamContent ? streamingContentRef : undefined}
-            webSearchSources={msg.webSearchSources || null}
-            suppressInitialDots={shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim())}
-          />
+          {/* data-critic-answer 供自审提示的「定位原句」按钮反查这条回答的正文容器 */}
+          <div data-critic-answer={criticAnswerScopeId}>
+            <StreamingMarkdown
+              content={msg.content}
+              isStreaming={shouldStreamContent}
+              enableBlurReveal={enableBlurReveal}
+              blurIntensity={blurIntensity}
+              citations={msg.citations || null}
+              onCitationClick={(c) => { setActiveCitationRef(c?.ref ?? null); handleCitationClick(c); }}
+              streamingRef={shouldStreamContent ? streamingContentRef : undefined}
+              webSearchSources={msg.webSearchSources || null}
+              suppressInitialDots={
+                // 思考结束后进入“生成中”时不再用三个点占位，改用明确文案。
+                Boolean(msg.answerGenerating)
+                || (shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim()) && !msg.answerStarted)
+              }
+            />
+          </div>
           {msg.type === 'assistant' && !msg.isStreaming && (
             <ChatTurnStatusNotice
               status={msg.turnStatus || msg.turn_status || msg.answerStatus || msg.answer_status}
@@ -4200,7 +4496,7 @@ const ChatPDF = () => {
         )}
         {/* 消息操作按钮 */}
         {msg.type === 'assistant' && !msg.isStreaming && (
-          <div className="flex items-center gap-1 mt-1 ml-2">
+          <div className="flex flex-wrap items-center gap-1.5 mt-3 ml-2">
             <button onClick={() => copyMessage(msg.content, msg.id || idx)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors" title="复制">
               {copiedMessageId === (msg.id || idx) ? (
                 <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
@@ -4219,15 +4515,39 @@ const ChatPDF = () => {
               <Brain className={`w-4 h-4 ${rememberedMessages.has(idx) ? 'fill-current' : ''}`} />
             </button>
             {msg.qaScore != null && (
-              <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${msg.qaScore >= 0.7 ? 'bg-green-50 text-green-600' : msg.qaScore >= 0.4 ? 'bg-yellow-50 text-yellow-600' : 'bg-red-50 text-red-600'}`} title={`回答置信度: ${(msg.qaScore * 100).toFixed(0)}%`}>
+              <span className={`ml-1.5 text-[10px] px-2 py-1 rounded-full font-medium ${msg.qaScore >= 0.7 ? 'bg-green-50 text-green-600' : msg.qaScore >= 0.4 ? 'bg-yellow-50 text-yellow-600' : 'bg-red-50 text-red-600'}`} title={`回答置信度: ${(msg.qaScore * 100).toFixed(0)}%`}>
                 {(msg.qaScore * 100).toFixed(0)}%
               </span>
             )}
+            {msg.answerCertainty?.label && (() => {
+              const label = String(msg.answerCertainty.label);
+              const styles = {
+                Certain: 'bg-green-50 text-green-700 border-green-200',
+                Partial: 'bg-amber-50 text-amber-700 border-amber-200',
+                Unsure: 'bg-orange-50 text-orange-700 border-orange-200',
+                Refused: 'bg-slate-100 text-slate-600 border-slate-200',
+              };
+              const titles = {
+                Certain: '证据充分且引用覆盖较好',
+                Partial: '部分证据充分，请核对关键结论',
+                Unsure: '证据不足或引用偏弱，请谨慎参考',
+                Refused: '模型判定文档证据不足以作答',
+              };
+              const zh = { Certain: '较确定', Partial: '部分确定', Unsure: '不确定', Refused: '已拒答' };
+              return (
+                <span
+                  className={`ml-1.5 text-[10px] px-2 py-1 rounded-full font-medium border ${styles[label] || styles.Unsure}`}
+                  title={titles[label] || '回答确定性'}
+                >
+                  {zh[label] || label}
+                </span>
+              );
+            })()}
           </div>
         )}
         {/* 动态追问建议 */}
         {msg.type === 'assistant' && !msg.isStreaming && msg.followupQuestions && msg.followupQuestions.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2 ml-2">
+          <div className="flex flex-wrap gap-2 mt-3 ml-2">
             {msg.followupQuestions.map((q, qi) => (
               <button
                 key={qi}
@@ -4240,7 +4560,9 @@ const ChatPDF = () => {
                     textarea.focus();
                   }
                 }}
-                className="text-xs px-2.5 py-1.5 rounded-full border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-300 transition-colors cursor-pointer"
+                // 与 PresetQuestions 用同一套样式：两处都是「可点的问题药丸」，
+                // 原来这里是蓝色系，整个应用里只有它是冷色，看着像另一个产品的控件。
+                className="text-xs px-3 py-1.5 rounded-full border border-gray-200 bg-white text-gray-600 shadow-[0_1px_3px_rgba(30,30,35,0.05)] transition-all duration-200 hover:border-[#FFA07A] hover:bg-[#FFF4EF] hover:text-[#B85F47] active:scale-95 cursor-pointer dark:border-white/10 dark:bg-white/[0.06] dark:text-gray-300 dark:shadow-none dark:hover:border-[#FFA07A]/40 dark:hover:bg-[#FFA07A]/10 dark:hover:text-[#FFDCCF]"
               >
                 {q}
               </button>
@@ -4655,6 +4977,37 @@ const ChatPDF = () => {
   const uploadStatusMeta = UPLOAD_STATUS_META[uploadStatus] || UPLOAD_STATUS_META.uploading;
   const uploadProgressLabel = Math.max(0, Math.min(100, Math.round(Number(uploadProgress) || 0)));
   const showDocumentWorkspace = Boolean(docId && !isUploading);
+  const hasDockedSelectionToolbar = showDocumentWorkspace;
+
+  // 吸附栏只存在于 PDFViewer 里（需要 showDocumentWorkspace && pdf_url）。
+  // 没有阅读器却残留 'dock'，右侧翻译卡会被过滤掉、左边又没有吸附栏 —— 两边都看不到译文，
+  // 而窄条还理直气壮写着「译文在 PDF 吸附栏」。所以阅读器不在场时强制回落。
+  const canDockTranslation = showDocumentWorkspace && Boolean(docInfo?.pdf_url);
+  useEffect(() => {
+    if (canDockTranslation) return;
+    setTranslationSurface((current) => (current === 'panel' ? current : 'panel'));
+  }, [canDockTranslation]);
+
+  // 工具栏渲染在 PDF 面板内部（PDFViewer 的正常流里），不再是浮在应用最顶层的 fixed 层。
+  const selectionToolbarNode = hasDockedSelectionToolbar ? (
+    <TextSelectionToolbar
+      selectedText={selectedText}
+      darkMode={darkMode}
+      onCopy={handleCopy}
+      annotationTool={annotationTool}
+      annotationColor={annotationColor}
+      onAnnotationToolChange={handleAnnotationToolChange}
+      onAnnotationColorChange={handleAnnotationColorChange}
+      canDeleteAnnotation={Boolean(selectedSavedHighlightId)}
+      onDeleteAnnotation={handleDeleteSelectedAnnotation}
+      onAddNote={handleAddNote}
+      onAIExplain={handleAIExplain}
+      onTranslate={handleTranslate}
+      onWebSearch={handleWebSearch}
+      onShare={handleShare}
+      size={toolbarSize}
+    />
+  ) : null;
   const canRollbackCurrentRagIndex = Boolean(
     canUseLegacyMinerUActions
     && ragIndexStatus?.index_source === 'mineru'
@@ -4688,28 +5041,6 @@ const ChatPDF = () => {
         onClose={handleLocalParserInstallClose}
         onReady={handleLocalParserReady}
       />
-
-      {/* 划词工具栏 */}
-      {showTextMenu && selectedText && (
-        <div className="text-selection-toolbar-container">
-          <TextSelectionToolbar
-            selectedText={selectedText}
-            position={toolbarPosition.x === 0 && toolbarPosition.y === 0 ? menuPosition : toolbarPosition}
-            onPositionChange={handleToolbarPositionChange}
-            scale={toolbarScale}
-            onScaleChange={handleToolbarScaleChange}
-            onClose={handleCloseToolbar}
-            onCopy={handleCopy}
-            onHighlight={handleHighlight}
-            onAddNote={handleAddNote}
-            onAIExplain={handleAIExplain}
-            onTranslate={handleTranslate}
-            onWebSearch={handleWebSearch}
-            onShare={handleShare}
-            size={toolbarSize}
-          />
-        </div>
-      )}
 
       {/* 统一应用外壳：2K 屏基本铺满，超宽屏保留上限；阅读态继续使用紧凑间距。 */}
       <div className={`relative mx-auto flex h-full w-full max-w-[2400px] ${docId ? 'px-3 py-3' : 'px-3 py-4 sm:px-4 sm:py-5'}`}>
@@ -4969,6 +5300,7 @@ const ChatPDF = () => {
                     onPageChange={setCurrentPage}
                     highlightInfo={activeHighlight}
                     savedHighlights={documentHighlights}
+                    onSavedHighlightClick={handleSavedHighlightClick}
                     isSelecting={isSelectingArea}
                     onAreaSelected={handleAreaSelected}
                     onSelectionCancel={handleSelectionCancel}
@@ -4985,10 +5317,14 @@ const ChatPDF = () => {
                     onBlockClick={handleReadingBlockClick}
                     blockTranslations={blockTranslations}
                     translatingBlockIds={[...translatingBlockIds]}
+                    hasDockedSelectionToolbar={hasDockedSelectionToolbar}
+                    selectionToolbar={selectionToolbarNode}
+                    translationSurface={translationSurface}
+                    onTranslationSurfaceChange={setTranslationSurface}
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
                   <>
-                    <div className="h-14 border-b border-black/5 flex items-center justify-between px-6 bg-white/30 backdrop-blur-sm">
+                    <div data-pdf-reader-toolbar className="h-14 border-b border-black/5 flex items-center justify-between px-6 bg-white/30 backdrop-blur-sm">
                       <div className="flex items-center gap-2">
                         <button onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ChevronLeft className="w-5 h-5" /></button>
                         <span className="text-sm font-medium w-16 text-center">{currentPage} / {docInfo?.total_pages || docInfo?.data?.total_pages || 1}</span>
@@ -5000,8 +5336,12 @@ const ChatPDF = () => {
                         <button onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))} className="p-1.5 hover:bg-black/5 rounded-lg"><ZoomIn className="w-5 h-5" /></button>
                       </div>
                     </div>
+                    {selectionToolbarNode}
                     <div ref={pdfContainerRef} className="h-full overflow-auto bg-gray-50/50">
-                      <div className="min-h-full flex items-start justify-center p-8" style={{ zoom: pdfScale }}>
+                      <div
+                        className="min-h-full flex items-start justify-center p-8 transition-[padding] duration-200"
+                        style={{ zoom: pdfScale }}
+                      >
                         <div className="bg-white shadow-2xl p-12 rounded-lg max-w-4xl w-full" onMouseUp={handleTextSelection}>
                           <pre className="whitespace-pre-wrap font-serif text-gray-800 leading-relaxed">
                             {(docInfo.pages || docInfo.data?.pages)?.[currentPage - 1]?.content || 'No content'}
@@ -5369,17 +5709,25 @@ const ChatPDF = () => {
                   activeBlockId={activeReadingBlockId}
                   notes={currentPageReadingNotes}
                   userNotes={currentPageUserNotes}
+                  revealUserNoteId={pendingUserNoteRevealId}
+                  onUserNoteReveal={handleUserNoteReveal}
                   activeNodeId={activeReadingNodeId}
                   visitedNodeIds={[...visitedReadingNodeIds]}
                   onTranslate={handleTranslateCurrentPage}
                   onRetranslateBlock={handleRetranslateReadingBlock}
                   onPretranslate={handleStartPretranslate}
+                  onBackfillSummaries={blockSummary ? handleBackfillSummaries : undefined}
+                  backfillingSummaries={summaryBackfillRunning}
                   onBlockHover={handleReadingBlockHover}
                   onBlockClick={handleReadingBlockClick}
                   onNoteClick={handleOutlineJump}
                   onUserNoteClick={handleUserNoteClick}
+                  onSaveUserNote={handleSaveUserNote}
                   onDeleteUserNote={handleDeleteUserNote}
+                  documentId={docId}
                   darkMode={darkMode}
+                  translationSurface={translationSurface}
+                  onTranslationSurfaceChange={setTranslationSurface}
                 />
               ) : (
                 <>
@@ -5388,7 +5736,8 @@ const ChatPDF = () => {
                     messages={messages}
                     renderMessage={renderMessage}
                     streamingMessageId={streamingMessageId}
-                    className="flex-1 overflow-y-auto overflow-x-hidden p-6 pb-36 space-y-6 min-w-0"
+                    className="flex-1 overflow-y-auto overflow-x-hidden p-6 pb-36 min-w-0"
+                    itemClassName="pb-8"
                   />
 
                   {/* 预设问题：空对话时贴近输入框显示，形成「看到建议 → 提问」的动线 */}
@@ -5653,6 +6002,21 @@ const ChatPDF = () => {
                         </div>
                         <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                           提前缓存正文、标题和图注翻译，悬浮时直接显示；会产生较多模型调用
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${blockSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+                        {blockSummary && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
+                      </div>
+                      <div className="flex flex-col flex-1">
+                        <div className="flex items-center justify-between">
+                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>逐段要点</h4>
+                          <input type="checkbox" checked={blockSummary} onChange={e => setBlockSummary(e.target.checked)} className="hidden" />
+                        </div>
+                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                          翻译正文段落时额外生成一句话要点，显示在译文上方和悬浮窗里；每段多一次模型调用，标题和图注不生成
                         </p>
                       </div>
                     </label>

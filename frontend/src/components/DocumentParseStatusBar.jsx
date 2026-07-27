@@ -26,6 +26,13 @@ const STATE_STYLES = {
     icon: 'bg-amber-500/10',
     iconClassName: 'animate-spin',
   },
+  // 能力已开放但覆盖面残缺：不能用 ready 的绿色勾，那会把降级说成完成。
+  partial_ready: {
+    Icon: AlertCircle,
+    light: 'border-amber-200/90 bg-[#fffaf0]/95 text-amber-700',
+    dark: 'border-amber-300/20 bg-[#2a261b]/95 text-amber-300',
+    icon: 'bg-amber-500/10',
+  },
   failed: {
     Icon: AlertCircle,
     light: 'border-rose-200/90 bg-[#fff7f7]/95 text-rose-700',

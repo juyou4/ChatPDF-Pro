@@ -15,7 +15,13 @@ const GlobalSettings = ({ isOpen, onClose }) => {
         fontFamily, customFont, globalScale, setFontFamily, setCustomFont, setGlobalScale, resetFontSettings
     } = useFontSettings();
     // 检索增强调优已上移到设置中心一级「检索」tab；此处仅保留重置能力
-    const { enableMemory, setEnableMemory, resetChatParams } = useChatParams();
+    const {
+        enableMemory, setEnableMemory,
+        memoryTopK, setMemoryTopK,
+        memoryInjectionBudget, setMemoryInjectionBudget,
+        memoryPrivacyMode, setMemoryPrivacyMode,
+        resetChatParams,
+    } = useChatParams();
     const [activeSection, setActiveSection] = useState('display');
     const { exportSettings, importSettings } = useGlobalSettings();
     // 阅读相关设置已上移到设置中心一级「阅读」tab；此处仅保留重置能力
@@ -270,6 +276,46 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         <ToggleSwitch checked={enableMemory} onChange={setEnableMemory} color="#3b82f6" />
                                     </div>
                                 </div>
+                                {enableMemory && (
+                                    <div className="mt-4 space-y-3">
+                                        <MemoryOverrideSlider
+                                            label="记忆检索条数"
+                                            desc="每轮最多召回多少条历史记忆。调高更全面，也更占上下文。"
+                                            value={memoryTopK}
+                                            onChange={setMemoryTopK}
+                                            min={1}
+                                            max={20}
+                                            step={1}
+                                            fallbackValue={3}
+                                        />
+                                        <MemoryOverrideSlider
+                                            label="记忆注入预算"
+                                            desc="记忆最多占用的 token 数。中文按每字 1 token 估算，调低会先丢弃低优先层。"
+                                            value={memoryInjectionBudget}
+                                            onChange={setMemoryInjectionBudget}
+                                            min={100}
+                                            max={3000}
+                                            step={100}
+                                            fallbackValue={800}
+                                        />
+                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="text-[13px] font-bold text-gray-800">共享 / 演示模式</div>
+                                                    <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                                                        开启后个人画像与跨文档对话摘要不会进入上下文，只保留当前文档的事实。
+                                                        录屏、答辩或把会话分享给他人时使用。
+                                                    </div>
+                                                </div>
+                                                <ToggleSwitch
+                                                    checked={memoryPrivacyMode === 'shared'}
+                                                    onChange={(next) => setMemoryPrivacyMode(next ? 'shared' : 'personal')}
+                                                    color="#3b82f6"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Web Search Settings */}
@@ -442,6 +488,50 @@ const ToggleSwitch = ({ checked, onChange, color = '#ed8c68' }) => (
         <div className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200 ${checked ? 'translate-x-[18px]' : ''}`} />
     </button>
 );
+
+/**
+ * 记忆参数滑块：null 表示"跟随后端 config"，拖动即转为会话级覆盖。
+ * 和检索增强的 tri-state 是同一套语义，只是这里是数值而非开关。
+ */
+const MemoryOverrideSlider = ({ label, desc, value, onChange, min, max, step, fallbackValue }) => {
+    const isOverridden = value !== null && value !== undefined;
+    const displayValue = isOverridden ? value : fallbackValue;
+    return (
+        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-bold text-gray-800">{label}</div>
+                    {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className={`text-[12px] font-bold tabular-nums ${isOverridden ? 'text-blue-600' : 'text-gray-400'}`}>
+                        {displayValue}
+                    </span>
+                    {isOverridden && (
+                        <button
+                            onClick={() => onChange(null)}
+                            className="text-[11px] font-bold text-gray-500 hover:text-gray-700 bg-white border border-gray-200 px-2 py-0.5 rounded-[9px] transition-colors"
+                        >
+                            跟随后端
+                        </button>
+                    )}
+                </div>
+            </div>
+            <SettingsRange
+                ariaLabel={label}
+                min={String(min)}
+                max={String(max)}
+                step={String(step)}
+                value={displayValue}
+                onChange={(next) => onChange(Math.round(next))}
+                className="mt-3"
+            />
+            {!isOverridden && (
+                <div className="text-[11px] text-gray-400 mt-1.5">当前跟随后端配置，拖动滑块即可本地覆盖</div>
+            )}
+        </div>
+    );
+};
 
 const KeyIcon = (props) => (
     <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg>

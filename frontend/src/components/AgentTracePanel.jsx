@@ -57,10 +57,36 @@ const formatElapsedMs = (value) => {
 const AGENT_GATE_REASON_LABELS = {
   matched_query_type: '题型匹配',
   matched_evidence_need: '证据需求匹配',
+  matched_visual_intent: '视觉意图匹配',
   route_not_matched: '题型未匹配',
   selected_text_present: '框选文本优先',
   switch_disabled: '开关未启用',
   stream_only: '非流式未执行',
+  structural_inventory: '结构化枚举优先',
+  numeric_table_exactness: '数值表精确路径',
+  page_range_deterministic_scope: '页范围确定性检索',
+  forced: '用户强制 Agent',
+  force_user: '用户强制 Agent',
+};
+
+const TASK_LABELS = {
+  qa: '问答',
+  summarize: '总结',
+  extract: '抽取',
+  explain: '解释',
+  compare: '比较',
+  calculate: '计算',
+  translate: '翻译',
+  continue: '继续',
+  inventory: '枚举',
+};
+
+const QUERY_TYPE_LABELS = {
+  overview: '概览',
+  extraction: '抽取',
+  analytical: '分析',
+  specific: '具体',
+  inventory: '枚举',
 };
 
 const EVIDENCE_STATUS_LABELS = {
@@ -171,14 +197,43 @@ export default function AgentTracePanel({ trace, embedded = false }) {
 
   const renderMetaSummary = () => {
     const items = [];
+    const route = trace.routeDiagnosis || null;
     if (gate) {
+      const enabledLabel = gate.enabled || gate.use_agent || gate.agent_mode ? '启用' : '未启用';
       items.push(
-        `触发: ${AGENT_GATE_REASON_LABELS[gate.reason] || gate.reason || '未知'}${
+        `Agent ${enabledLabel}: ${AGENT_GATE_REASON_LABELS[gate.reason] || gate.reason || '未知'}${
+          gate.agent_gate_source ? ` · ${gate.agent_gate_source}` : ''
+        }${
           gate.requested_reason
             ? `（原始: ${AGENT_GATE_REASON_LABELS[gate.requested_reason] || gate.requested_reason}）`
             : ''
         }`
       );
+      if (Array.isArray(gate.matched_evidence_need) && gate.matched_evidence_need.length > 0) {
+        items.push(`证据需求: ${gate.matched_evidence_need.join(', ')}`);
+      }
+      if (gate.query_type) {
+        items.push(`题型: ${QUERY_TYPE_LABELS[gate.query_type] || gate.query_type}`);
+      }
+    }
+    if (route && typeof route === 'object') {
+      const taskLabel = TASK_LABELS[route.task] || route.task;
+      const scopeLabel = route.scope || '';
+      if (taskLabel) {
+        items.push(`意图: ${taskLabel}${scopeLabel ? ` · ${scopeLabel}` : ''}`);
+      }
+      if (route.is_ambiguous) {
+        items.push('澄清: 需要用户补充');
+      } else if (route.clarification_llm?.attempted) {
+        items.push(
+          route.clarification_llm.is_clear === false
+            ? '澄清: LLM 判定不清晰'
+            : '澄清: LLM 判定清晰'
+        );
+      }
+      if (Number.isFinite(Number(route.confidence))) {
+        items.push(`置信度: ${Number(route.confidence).toFixed(2)}`);
+      }
     }
     if (Number.isFinite(trace.contextChars) && trace.contextChars > 0) {
       items.push(`上下文: ${trace.contextChars}字`);
@@ -189,6 +244,29 @@ export default function AgentTracePanel({ trace, embedded = false }) {
           contextBudget.truncated ? '（已截断）' : ''
         }`
       );
+    }
+    const evidenceScoring = diagnostics?.evidence_scoring || trace.evidenceScoring || null;
+    if (evidenceScoring && typeof evidenceScoring === 'object') {
+      if (evidenceScoring.applied) {
+        items.push(
+          `评分: 高${evidenceScoring.high_score_count || 0}/中${evidenceScoring.mid_score_count || 0}/丢${evidenceScoring.dropped_count || 0}`
+        );
+      } else if (evidenceScoring.reason) {
+        items.push(`评分: 跳过(${evidenceScoring.reason})`);
+      }
+    }
+    const academicStatus = diagnostics?.planner_academic_status || trace.academicStatus || '';
+    if (typeof academicStatus === 'string' && academicStatus.includes('HighScore=')) {
+      const high = academicStatus.match(/HighScore=(\d+)/)?.[1];
+      const table = academicStatus.match(/TableHits=(\d+)/)?.[1];
+      const formula = academicStatus.match(/FormulaHits=(\d+)/)?.[1];
+      const uncovered = academicStatus.match(/UncoveredSubQ=(\d+)/)?.[1];
+      const bits = [];
+      if (high != null) bits.push(`高分${high}`);
+      if (table != null) bits.push(`表${table}`);
+      if (formula != null) bits.push(`公式${formula}`);
+      if (uncovered != null) bits.push(`缺口${uncovered}`);
+      if (bits.length) items.push(`取证: ${bits.join(' · ')}`);
     }
     if (evidenceState && typeof evidenceState === 'object') {
       const status = String(evidenceState.status || 'gathering');

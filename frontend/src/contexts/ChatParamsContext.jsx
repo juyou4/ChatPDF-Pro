@@ -48,6 +48,9 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     answerDetailLevel: 'standard', // 'concise' | 'standard' | 'detailed'
     // 记忆功能
     enableMemory: true,         // 是否启用智能记忆系统
+    memoryTopK: null,           // 记忆检索条数覆盖 (null=跟随后端 config)
+    memoryInjectionBudget: null,// 记忆注入 token 预算覆盖 (null=跟随后端 config)
+    memoryPrivacyMode: 'personal', // 'personal' | 'shared'（共享模式不注入个人画像）
     // 思考过程自动折叠
     thoughtAutoCollapse: true,  // 思考完成后自动折叠
     // 发送快捷键
@@ -101,6 +104,9 @@ export const ChatParamsProvider = ({ children }) => {
     const [answerDetailLevel, setAnswerDetailLevel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.answerDetailLevel);
     // 记忆功能
     const [enableMemory, setEnableMemory] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
+    const [memoryTopK, setMemoryTopK] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.memoryTopK);
+    const [memoryInjectionBudget, setMemoryInjectionBudget] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.memoryInjectionBudget);
+    const [memoryPrivacyMode, setMemoryPrivacyMode] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.memoryPrivacyMode);
     // 思考过程自动折叠
     const [thoughtAutoCollapse, setThoughtAutoCollapse] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.thoughtAutoCollapse);
     // 发送快捷键
@@ -155,6 +161,9 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.reasoningEffort !== undefined) setReasoningEffort(settings.reasoningEffort);
                 if (settings.answerDetailLevel !== undefined) setAnswerDetailLevel(settings.answerDetailLevel);
                 if (settings.enableMemory !== undefined) setEnableMemory(settings.enableMemory);
+                if (settings.memoryTopK !== undefined) setMemoryTopK(settings.memoryTopK);
+                if (settings.memoryInjectionBudget !== undefined) setMemoryInjectionBudget(settings.memoryInjectionBudget);
+                if (settings.memoryPrivacyMode !== undefined) setMemoryPrivacyMode(settings.memoryPrivacyMode);
                 if (settings.thoughtAutoCollapse !== undefined) setThoughtAutoCollapse(settings.thoughtAutoCollapse);
                 if (settings.sendShortcut !== undefined) setSendShortcut(settings.sendShortcut);
                 if (settings.confirmDeleteMessage !== undefined) setConfirmDeleteMessage(settings.confirmDeleteMessage);
@@ -250,6 +259,9 @@ export const ChatParamsProvider = ({ children }) => {
             reasoningEffort,
             answerDetailLevel,
             enableMemory,
+            memoryTopK,
+            memoryInjectionBudget,
+            memoryPrivacyMode,
             thoughtAutoCollapse,
             sendShortcut,
             confirmDeleteMessage,
@@ -276,7 +288,8 @@ export const ChatParamsProvider = ({ children }) => {
         debouncedSave(settings);
     }, [maxTokens, temperature, topP, contextCount, streamOutput,
         enableTemperature, enableTopP, enableMaxTokens, customParams,
-        reasoningEffort, answerDetailLevel, enableMemory, thoughtAutoCollapse, sendShortcut,
+        reasoningEffort, answerDetailLevel, enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
+        thoughtAutoCollapse, sendShortcut,
         confirmDeleteMessage, confirmRegenerateMessage,
         codeCollapsible, codeWrappable, codeShowLineNumbers,
         mathEngine, mathEnableSingleDollar,
@@ -313,6 +326,9 @@ export const ChatParamsProvider = ({ children }) => {
         setReasoningEffort(CHAT_PARAMS_DEFAULT_SETTINGS.reasoningEffort);
         setAnswerDetailLevel(CHAT_PARAMS_DEFAULT_SETTINGS.answerDetailLevel);
         setEnableMemory(CHAT_PARAMS_DEFAULT_SETTINGS.enableMemory);
+        setMemoryTopK(CHAT_PARAMS_DEFAULT_SETTINGS.memoryTopK);
+        setMemoryInjectionBudget(CHAT_PARAMS_DEFAULT_SETTINGS.memoryInjectionBudget);
+        setMemoryPrivacyMode(CHAT_PARAMS_DEFAULT_SETTINGS.memoryPrivacyMode);
         setThoughtAutoCollapse(CHAT_PARAMS_DEFAULT_SETTINGS.thoughtAutoCollapse);
         setSendShortcut(CHAT_PARAMS_DEFAULT_SETTINGS.sendShortcut);
         setConfirmDeleteMessage(CHAT_PARAMS_DEFAULT_SETTINGS.confirmDeleteMessage);
@@ -351,6 +367,9 @@ export const ChatParamsProvider = ({ children }) => {
         reasoningEffort,
         answerDetailLevel,
         enableMemory,
+        memoryTopK,
+        memoryInjectionBudget,
+        memoryPrivacyMode,
         thoughtAutoCollapse,
         sendShortcut,
         confirmDeleteMessage,
@@ -387,6 +406,9 @@ export const ChatParamsProvider = ({ children }) => {
         setReasoningEffort,
         setAnswerDetailLevel,
         setEnableMemory,
+        setMemoryTopK,
+        setMemoryInjectionBudget,
+        setMemoryPrivacyMode,
         setThoughtAutoCollapse,
         setSendShortcut,
         setConfirmDeleteMessage,
