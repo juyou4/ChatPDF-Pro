@@ -18,6 +18,8 @@ from typing import List, Optional, Tuple
 
 import httpx
 
+from services.document_context_sampling import sample_document_text
+
 logger = logging.getLogger(__name__)
 
 # 当前数据格式版本号，用于数据格式演进
@@ -543,7 +545,7 @@ class SemanticGroupService:
         - max_length=80：生成 summary（简短摘要）
         - max_length=1000：生成 digest（精要）
 
-        失败时降级为文本截断，status 标记为 "failed"。
+        失败时降级为覆盖首尾的有界文本样本，status 标记为 "failed"。
 
         Args:
             text: 待摘要的原始文本
@@ -557,10 +559,10 @@ class SemanticGroupService:
         if len(text) <= max_length:
             return text, "ok"
 
-        # 如果没有配置 API key，直接降级为截断
+        # 如果没有配置 API key，保留首尾证据的有界降级文本。
         if not self.api_key:
-            logger.warning("未配置 LLM API key，降级为文本截断")
-            return text[:max_length], "failed"
+            logger.warning("未配置 LLM API key，降级为文档覆盖样本")
+            return sample_document_text(text, max_chars=max_length), "failed"
 
         try:
             # 构建提示词，限制输入文本长度避免超出 LLM 上下文
@@ -577,15 +579,15 @@ class SemanticGroupService:
                 result = result[:max_length]
 
             if not result.strip():
-                # LLM 返回空内容，降级为截断
-                logger.warning("LLM 返回空摘要，降级为文本截断")
-                return text[:max_length], "failed"
+                # LLM 返回空内容，保留该语义组两端的可检索证据。
+                logger.warning("LLM 返回空摘要，降级为文档覆盖样本")
+                return sample_document_text(text, max_chars=max_length), "failed"
 
             return result, "ok"
 
         except Exception as e:
-            logger.warning(f"LLM 摘要生成失败，降级为文本截断: {e}")
-            return text[:max_length], "failed"
+            logger.warning(f"LLM 摘要生成失败，降级为文档覆盖样本: {e}")
+            return sample_document_text(text, max_chars=max_length), "failed"
 
     async def _extract_keywords(self, text: str) -> List[str]:
         """调用 LLM 提取关键词，失败时返回空列表
@@ -694,7 +696,7 @@ class SemanticGroupService:
                     max_retries=3, base_delay=0.6, max_delay=5.0,
                 )
             except Exception:
-                summary, summary_status = full_text[:80], "failed"
+                summary, summary_status = sample_document_text(full_text, max_chars=80), "failed"
 
             # 生成 digest（≤1000 字）— 带指数退避重试
             try:
@@ -703,7 +705,7 @@ class SemanticGroupService:
                     max_retries=3, base_delay=0.6, max_delay=5.0,
                 )
             except Exception:
-                digest, digest_status = full_text[:1000], "failed"
+                digest, digest_status = sample_document_text(full_text, max_chars=1000), "failed"
 
             # 提取关键词 — 带指数退避重试
             try:

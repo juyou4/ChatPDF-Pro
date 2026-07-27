@@ -28,6 +28,13 @@ MAX_BLOCK_CHARS = 1800
 TRANSLATION_CONCURRENCY = 8
 MAX_TRANSLATION_CONCURRENCY = 16
 
+# 逐块要点：只给正文段落生成，且太短的段落不值得再花一次请求。
+# 标题、图注、表格、公式块要么本身就是一句话，要么摘要毫无意义。
+SUMMARY_BLOCK_TYPES = {"paragraph"}
+SUMMARY_MIN_SOURCE_CHARS = 120
+SUMMARY_MAX_TOKENS = 160
+SUMMARY_MAX_CHARS = 120
+
 
 def _bounded_env_int(name: str, default: int, maximum: int) -> int:
     try:
@@ -450,6 +457,7 @@ async def translate_blocks(
     provider: str,
     endpoint: str = "",
     force: bool = False,
+    with_summary: bool = True,
     max_blocks: int | None = MAX_BLOCKS_PER_REQUEST,
     concurrency: int = TRANSLATION_CONCURRENCY,
     cache_writer: TranslationCacheWriter | None = None,
@@ -581,7 +589,7 @@ async def translate_blocks(
                     "block_id": block_id,
                     "target_lang": normalized_target,
                     "translation": translation,
-                    "summary": "",
+                    "summary": _clean_summary_text(payload.get("summary")),
                     "source_hash": block["source_hash"],
                     "block_type": block["type"],
                     "model": model,
@@ -659,6 +667,132 @@ async def translate_blocks(
     }
 
 
+async def backfill_block_summaries(
+    *,
+    data_dir: Path | str,
+    doc_id: str,
+    block_index: dict[str, Any],
+    target_lang: str,
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str = "",
+    block_ids: list[str] | None = None,
+    concurrency: int = TRANSLATION_CONCURRENCY,
+    cache_writer: TranslationCacheWriter | None = None,
+    ai_cache_generation: str = LEGACY_AI_CACHE_GENERATION,
+) -> dict[str, Any]:
+    """只给已翻译、但还没有要点的段落补生成要点，不重跑任何翻译。
+
+    打开「逐段要点」开关之前翻好的块，缓存里 summary 是空的。全量重译代价太大，
+    所以这里复用已有译文，只补那一次要点调用。
+    """
+    normalized_target = _normalize_target_lang(target_lang)
+    block_map = flatten_blocks(block_index)
+    cache_identity = _translation_cache_identity(
+        block_index,
+        ai_cache_generation=ai_cache_generation,
+    )
+    cache = load_translation_cache(data_dir, doc_id)
+    if not _cache_matches_identity(cache, cache_identity):
+        # 缓存已经属于另一代解析结果，这里没有可复用的译文
+        return {
+            "doc_id": doc_id,
+            "target_lang": normalized_target,
+            "items": {},
+            "filled_block_ids": [],
+            "candidate_count": 0,
+            "status": "empty",
+        }
+
+    if cache_writer is None:
+        def cache_writer(envelope: dict[str, Any]) -> None:
+            save_translation_cache(data_dir, doc_id, envelope)
+
+    cache_items = cache.setdefault("items", {})
+    wanted = None
+    if block_ids:
+        wanted = {str(block_id) for block_id in block_ids if str(block_id).strip()}
+
+    candidates: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for block_id, block in block_map.items():
+        if wanted is not None and block_id not in wanted:
+            continue
+        record = cache_items.get(_cache_key(block_id, normalized_target))
+        if not isinstance(record, dict) or not _is_valid_translation_record(record):
+            continue
+        if str(record.get("summary") or "").strip():
+            continue
+        translation_mode = str(record.get("translation_mode") or _get_translation_mode(block, str(block.get("text") or "")))
+        if not _should_generate_summary(block, translation_mode):
+            continue
+        candidates.append((block_id, block, record))
+
+    if not candidates:
+        return {
+            "doc_id": doc_id,
+            "target_lang": normalized_target,
+            "items": {},
+            "filled_block_ids": [],
+            "candidate_count": 0,
+            "status": "empty",
+        }
+
+    safe_concurrency = max(1, min(int(concurrency or TRANSLATION_CONCURRENCY), MAX_TRANSLATION_CONCURRENCY))
+    semaphore = asyncio.Semaphore(safe_concurrency)
+    filled: dict[str, dict[str, Any]] = {}
+    lock = asyncio.Lock()
+
+    async def fill_one(block_id: str, block: dict[str, Any], record: dict[str, Any]) -> None:
+        async with semaphore:
+            async with _GLOBAL_TRANSLATION_SEMAPHORE:
+                summary = await _generate_block_summary(
+                    source=str(block.get("text") or ""),
+                    translation=str(record.get("translation") or ""),
+                    api_key=api_key,
+                    model=model,
+                    provider=provider,
+                    endpoint=endpoint,
+                )
+        if not summary:
+            return
+        async with lock:
+            updated = dict(record)
+            updated["summary"] = summary
+            cache_items[_cache_key(block_id, normalized_target)] = updated
+            filled[block_id] = updated
+
+    for offset in range(0, len(candidates), TRANSLATION_TASK_BATCH_SIZE):
+        chunk = candidates[offset:offset + TRANSLATION_TASK_BATCH_SIZE]
+        tasks = [asyncio.create_task(fill_one(*item)) for item in chunk]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        if filled:
+            await _write_translation_cache(cache_writer, cache)
+
+    logger.info(
+        "[AI-Audit] purpose=block_summary_backfill doc=%s provider=%s model=%s candidates=%s filled=%s",
+        doc_id,
+        provider,
+        model,
+        len(candidates),
+        len(filled),
+    )
+    return {
+        "doc_id": doc_id,
+        "target_lang": normalized_target,
+        "items": filled,
+        "filled_block_ids": list(filled.keys()),
+        "candidate_count": len(candidates),
+        "status": "completed" if len(filled) == len(candidates) else ("partial" if filled else "failed"),
+    }
+
+
 async def _generate_translations(
     *,
     blocks: list[dict[str, Any]],
@@ -667,6 +801,7 @@ async def _generate_translations(
     model: str,
     provider: str,
     endpoint: str,
+    with_summary: bool = True,
     concurrency: int = TRANSLATION_CONCURRENCY,
     on_item: Callable[[dict[str, dict[str, str]]], Awaitable[None]] | None = None,
 ) -> dict[str, dict[str, str]]:
@@ -685,6 +820,7 @@ async def _generate_translations(
                         model=model,
                         provider=provider,
                         endpoint=endpoint,
+                        with_summary=with_summary,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -722,6 +858,7 @@ async def _generate_single_plain_translation(
     model: str,
     provider: str,
     endpoint: str,
+    with_summary: bool = True,
 ) -> dict[str, dict[str, str]]:
     """Last-resort single-block translation without JSON output."""
     block_id = str(block.get("block_id") or "")
@@ -759,13 +896,90 @@ async def _generate_single_plain_translation(
     translation = "".join(translated_segments).strip()
     if not _is_valid_translation_text(translation):
         raise RuntimeError("模型返回了无效译文")
+
+    summary = ""
+    if with_summary and _should_generate_summary(block, translation_mode):
+        summary = await _generate_block_summary(
+            source=source,
+            translation=translation,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+        )
+
     return {
         block_id: {
             "translation": translation,
-            "summary": "",
+            "summary": summary,
             "translation_mode": translation_mode,
         }
     }
+
+
+def _should_generate_summary(block: dict[str, Any], translation_mode: str) -> bool:
+    """要点只给够长的正文段落生成，避免为标题和图注白花一次请求。"""
+    if translation_mode == "preserve":
+        return False
+    if str(block.get("type") or "paragraph") not in SUMMARY_BLOCK_TYPES:
+        return False
+    return len(str(block.get("text") or "").strip()) >= SUMMARY_MIN_SOURCE_CHARS
+
+
+def _clean_summary_text(content: str) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    # 模型偶尔会带上「要点：」这类前缀或整句加引号
+    text = re.sub(r"^\s*(要点|摘要|概括|总结)\s*[:：]\s*", "", text)
+    text = text.strip().strip("“”\"'`").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > SUMMARY_MAX_CHARS:
+        text = text[:SUMMARY_MAX_CHARS].rstrip() + "…"
+    return text
+
+
+async def _generate_block_summary(
+    *,
+    source: str,
+    translation: str,
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+) -> str:
+    """给单个段落生成一句话要点。失败一律降级为空串，绝不影响译文。"""
+    try:
+        response = await call_ai_api(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是学术论文精读助手。用一句中文点出这段话在论证里承担什么作用"
+                        "（提出问题 / 给出方法 / 报告结果 / 指出局限 等），"
+                        "并带上最关键的那个事实或数字。"
+                        "只输出这一句话，不要前缀、不要引号、不要换行，不超过 40 字。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"原文：\n{source}\n\n译文：\n{translation}",
+                },
+            ],
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            max_tokens=SUMMARY_MAX_TOKENS,
+            temperature=0.3,
+            purpose="translation",
+        )
+        if isinstance(response, dict) and response.get("error"):
+            return ""
+        return _clean_summary_text(_extract_content(response))
+    except Exception as exc:  # noqa: BLE001 - 要点是增强项，不能拖垮翻译
+        logger.debug("[BlockTranslation] summary skipped: %s", exc)
+        return ""
 
 
 async def _translate_source_segment(

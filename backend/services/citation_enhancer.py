@@ -45,10 +45,17 @@ _CITATION_PLUS_PROMPT = """你是一名严谨的引用助手，负责为已写�
 请直接输出注入引用后的答案文本（不要带任何前缀如"以下是答案"），保持原文结构和内容。"""
 
 
-# 中文/英文标点都计数
-_SENTENCE_END_RE = re.compile(r"[。！？.!?；;]\s*")
+# 中文/英文标点都计数。ASCII 句点须不紧跟在数字后且后随空白，否则 95.2 这类
+# 小数会被切成两句，使覆盖率被低估、白白触发二次 LLM 注入。
+# （_SELECTOR_SENTENCE_SPLIT_RE 早就有这个守卫，这里此前漏了。）
+# 仅作为 split_sentences 不可用时的兜底；正常路径见 _split_answer_sentences。
+_SENTENCE_END_RE = re.compile(r"(?:[。！？；;]|(?<!\d)[.!?](?=\s|$))\s*")
 _SELECTOR_SENTENCE_SPLIT_RE = re.compile(r"([。！？!?；;]\s*|(?<!\d)\.(?=\s|$)\s*)")
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+# 与 academic_answer_contract._CITATION_RE 和 chat_routes._INLINE_CITATION_PATTERN
+# 保持同一识别标准：遗留的全角【n】也是合法引用。此前只认半角，导致用【n】标注
+# 的答案被判成「零引用」，既触发无谓的二次注入，又会在已有【n】的句子上再补一个
+# [n]。用字符类而非两个分组，保证本文件里的 findall/group(1) 调用点不受影响。
+_CITATION_RE = re.compile(r"(?<!!)[\[【](\d+)[\]】](?!\()")
 _BILINGUAL_TERM_ALIASES = {
     "框架": {"framework"},
     "统一": {"unified", "universal"},
@@ -82,6 +89,26 @@ _BILINGUAL_TERM_ALIASES = {
 }
 
 
+def _split_answer_sentences(answer: str, *, min_length: int = 5) -> List[str]:
+    """与 academic_answer_contract 共用同一套分句。
+
+    本模块此前自己用正则切句，和自审那边的实现结论不一致：引号或括号里合法地
+    含有句末标点时（「作者指出「…95.2%。这是最优。」并给出证据 [1]。」），
+    这里会切成 3 句、覆盖率算成 0.33，而自审算 1.0。覆盖率是二次注入的触发
+    条件，低估就会白白多打一次 LLM。
+    """
+    text = str(answer or "")
+    if not text.strip():
+        return []
+    try:
+        from services.academic_answer_contract import split_sentences
+
+        parts = split_sentences(text)
+    except Exception:  # pragma: no cover - 仅依赖异常时兜底
+        parts = _SENTENCE_END_RE.split(text)
+    return [s.strip() for s in parts if s and len(s.strip()) > min_length]
+
+
 def estimate_citation_coverage(answer: str) -> Tuple[float, int, int]:
     """估计答案的引用覆盖率（带 [N] 引文的句子比例）
 
@@ -91,9 +118,11 @@ def estimate_citation_coverage(answer: str) -> Tuple[float, int, int]:
     if not answer or not answer.strip():
         return 0.0, 0, 0
 
-    # 简单分句：按 ., !, ?, 。, ！, ？, 分隔
-    sentences = _SENTENCE_END_RE.split(answer)
-    sentences = [s.strip() for s in sentences if s and len(s.strip()) > 5]
+    # 这里刻意不套用 _is_non_factual_sentence：它是为「要不要给这句加引用」
+    # 设计的保守谓词（拿不准就跳过），其中「纯文本且 ≤14 字」一条会连
+    # 「模型优于 baseline」这类真实结论句一起滤掉。当分母用会把真句子丢光，
+    # 极端情况下整段被滤成 0 句、覆盖率反而算成 0.0，触发本不该有的二次调用。
+    sentences = _split_answer_sentences(answer)
     if not sentences:
         return 0.0, 0, 0
 
@@ -339,7 +368,7 @@ def _evaluate_citation_support(answer: str, evidence_units: List[Dict[str, Any]]
             evidence_by_ref[int(e["ref"])] = e
         except (KeyError, TypeError, ValueError):
             continue
-    sentences = [s.strip() for s in _SENTENCE_END_RE.split(answer or "") if s and len(s.strip()) > 5]
+    sentences = _split_answer_sentences(answer)
     cited_sentences = 0
     supported = 0
     invalid_refs: list[int] = []
@@ -377,7 +406,7 @@ def _evaluate_answer_sentence_selector(answer: str, evidence_units: List[Dict[st
             evidence_by_ref[int(e["ref"])] = e
         except (KeyError, TypeError, ValueError):
             continue
-    sentences = [s.strip() for s in _SENTENCE_END_RE.split(answer or "") if s and len(s.strip()) > 5]
+    sentences = _split_answer_sentences(answer)
     sentence_count = len(sentences)
     supported_sentences = 0
     candidate_sentences = 0

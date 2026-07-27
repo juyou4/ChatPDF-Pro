@@ -68,7 +68,7 @@ def _get_sentence_transformer_class():
 
 # 只要分块来源、候选隔离或 semantic-group 构建规则发生变化就必须递增。
 # 该版本用于阻止旧的污染型 semantic groups 继续参与新检索链路。
-RAG_INDEX_VERSION = 3
+RAG_INDEX_VERSION = 4
 EMBEDDING_IDENTITY_VERSION = 1
 EMBEDDING_IDENTITY_MISMATCH_DETAIL = "当前 Embedding 配置与文档索引不一致，请切换原配置或重建索引"
 KEYLESS_EMBEDDING_PROVIDERS = frozenset({"local", "ollama"})
@@ -936,8 +936,11 @@ def preprocess_text(text: str) -> str:
         
         # 移除 NULL 字符
         cleaned_line = line.replace('\u0000', '').replace('\x00', '')
-        if cleaned_line.strip():
-            lines.append(cleaned_line)
+        # 保留段落空行。``\n\n`` 是 RecursiveCharacterTextSplitter 的首选分隔符，
+        # 丢掉空行会让下面的 ``\n{3,}`` 折叠变成死代码、输出里永远不存在 ``\n\n``，
+        # 于是切分器在主路径和兜底路径上都退化成按单行/空格/字符切。
+        # 空白行归一为空串，连续空行交给下面的折叠规则收敛成一个段落分隔符。
+        lines.append(cleaned_line if cleaned_line.strip() else "")
 
     cleaned = "\n".join(lines)
     # 修复连字符断行：word-\nword -> wordword
@@ -1823,8 +1826,12 @@ def get_embedding_function(
                     )
                 )
             except Exception as exc:
-                # 模型不存在时，自动探测可用 embedding 模型并回退一次
-                if allow_model_fallback and not fallback_checked and _is_model_not_found_error(exc):
+                if not _is_model_not_found_error(exc):
+                    raise
+
+                # 自动换模型是 opt-in 的：换掉用户选定的 embedding 模型会产出与已持久化
+                # 索引不兼容的向量，所以每个生产调用点都显式关掉了它。
+                if allow_model_fallback and not fallback_checked:
                     fallback_checked = True
                     available_models = _fetch_available_model_ids(api_base, actual_key)
                     fallback_model = _select_fallback_embedding_model(
@@ -1848,12 +1855,13 @@ def get_embedding_function(
                         )
                         continue
 
-                    raise ValueError(
-                        f"Embedding模型 '{model_for_request}' 不存在或未开通。"
-                        "请在「模型服务」中同步模型后重新选择可用的 Embedding 模型。"
-                    ) from exc
-
-                raise
+                # 但把 provider 的原始异常翻译成可操作的提示与"是否自动换模型"无关。
+                # 这条 raise 曾经也被关在 allow_model_fallback 里，于是在**所有**生产
+                # 调用点上，模型没开通时用户只会看到一个裸的 provider 异常。
+                raise ValueError(
+                    f"Embedding模型 '{model_for_request}' 不存在或未开通。"
+                    "请在「模型服务」中同步模型后重新选择可用的 Embedding 模型。"
+                ) from exc
 
         if len(vectors) != len(text_list):
             raise ValueError(
@@ -8845,6 +8853,16 @@ def _sanitize_structured_table_bundle(bundle: dict) -> dict:
         "bbox",
         "table_bbox",
         "bounding_boxes",
+        # Parser-owned bboxes above are NOT in canonical page points (MinerU emits
+        # ``normalized_0_1000``, ODL emits ``pdf_bottom_left_points``). The additive
+        # geometry below carries the converted box plus the label that tells every
+        # downstream consumer how to read the raw one; dropping it here is what let
+        # citation anchors publish parser coordinates as ``pdf_top_left_points``.
+        "raw_bbox",
+        "bbox_coordinate_space",
+        "page_size",
+        "visual_bbox",
+        "visual_coordinate_space",
         "source_ids",
         "source_id",
         "table_bundle_id",
@@ -9111,30 +9129,71 @@ def _structured_table_exact_row_pages(row: dict, fallback_page: int) -> List[int
     return sorted(set(pages))
 
 
-def _structured_table_row_bboxes(row: dict, bundle: dict) -> List[list]:
-    bboxes: List[list] = []
-    for key in ("bounding_box", "bbox", "table_bbox"):
-        value = row.get(key)
+_CANONICAL_CHUNK_BBOX_SPACE = "pdf_top_left_points"
+
+
+def _canonical_bbox_of(record: Any) -> list:
+    """Return a record's bbox in PDF top-left points, or [] when it has none.
+
+    Table records keep their parser-owned bbox verbatim — MinerU emits
+    ``normalized_0_1000`` and ODL emits ``pdf_bottom_left_points`` — and carry
+    the converted box alongside it as ``visual_bbox`` (see
+    ``services.document_geometry.visual_geometry``). Only the converted box may
+    leave for a citation anchor.
+    """
+    if not isinstance(record, dict):
+        return []
+    candidates = [record.get("visual_bbox")]
+    space = str(
+        record.get("bbox_coordinate_space") or record.get("coordinate_space") or ""
+    ).strip().lower()
+    if space == _CANONICAL_CHUNK_BBOX_SPACE:
+        # Records already authored in canonical points may carry only the raw key.
+        candidates.extend([record.get("bounding_box"), record.get("bbox"), record.get("table_bbox")])
+    for value in candidates:
         if isinstance(value, list) and len(value) >= 4:
-            bboxes.append(value)
-    value = row.get("bounding_boxes")
-    if isinstance(value, list):
-        bboxes.extend([box for box in value if isinstance(box, list) and len(box) >= 4])
-    cells = row.get("cell_evidence_units")
-    if isinstance(cells, list):
-        for cell in cells:
-            if not isinstance(cell, dict):
+            try:
+                return [float(part) for part in value[:4]]
+            except (TypeError, ValueError):
                 continue
-            for key in ("bounding_box", "bbox"):
-                box = cell.get(key)
-                if isinstance(box, list) and len(box) >= 4:
-                    bboxes.append(box)
-                    break
+    return []
+
+
+def _structured_table_chunk_geometry(bundle: dict, row: Optional[dict] = None) -> dict:
+    """Build the bbox fields of a table chunk's metadata.
+
+    ``_attach_block_index_citation_anchors`` treats any chunk that already has a
+    bbox as authoritative: it stamps ``coordinate_space="pdf_top_left_points"``
+    and skips the block-index backfill. Publishing a parser-space box there
+    therefore both mislabels it and suppresses the correct fallback, so the
+    highlight is drawn in the wrong place. Emit only converted boxes, with the
+    space spelled out; when nothing is convertible the chunk carries no bbox and
+    the block-index backfill takes over.
+    """
+    bboxes: list = []
+    seen: set = set()
+
+    def _add(bbox: list) -> None:
+        if not bbox:
+            return
+        key = tuple(bbox)
+        if key not in seen:
+            seen.add(key)
+            bboxes.append(bbox)
+
+    if isinstance(row, dict):
+        _add(_canonical_bbox_of(row))
+        for cell in row.get("cell_evidence_units") or []:
+            _add(_canonical_bbox_of(cell))
     if not bboxes:
-        fallback = bundle.get("bounding_box")
-        if isinstance(fallback, list) and len(fallback) >= 4:
-            bboxes.append(fallback)
-    return bboxes
+        _add(_canonical_bbox_of(bundle))
+    if not bboxes:
+        return {"table_bbox": [], "table_bboxes": []}
+    return {
+        "table_bbox": bboxes[0],
+        "table_bboxes": bboxes,
+        "coordinate_space": _CANONICAL_CHUNK_BBOX_SPACE,
+    }
 
 
 def _build_structured_table_exact_row_chunk(bundle: dict, row: dict, row_number: int) -> str:
@@ -9254,8 +9313,7 @@ def _append_structured_table_bundle_chunks(
             "page_uid": primary_page_uid,
             "table_page_indices": table_page_indices,
             "table_page_uids": table_page_uids,
-            "table_bbox": sanitized.get("bounding_box", []),
-            "table_bboxes": sanitized.get("bounding_boxes", []),
+            **_structured_table_chunk_geometry(sanitized),
             "table_source_ids": sanitized.get("source_ids", []),
             "table_instance_id": sanitized.get("table_instance_id", ""),
             "table_source_hash": sanitized.get("table_source_hash", ""),
@@ -9288,7 +9346,6 @@ def _append_structured_table_bundle_chunks(
             row_page_uids = [_build_page_uid(page) for page in row_pages]
             row_id = re.sub(r"\s+", " ", str(row.get("row_id") or f"row {row_number}")).strip()
             exact_id = f"{bundle_id or sanitized.get('table_id') or 'table'}:row:{row_number}"
-            row_bboxes = _structured_table_row_bboxes(row, sanitized)
 
             chunk_metadata.append({
                 "structured_table_bundle": True,
@@ -9318,8 +9375,7 @@ def _append_structured_table_bundle_chunks(
                 "page_uid": _build_page_uid(row_primary_page),
                 "table_page_indices": row_page_indices,
                 "table_page_uids": row_page_uids,
-                "table_bbox": row_bboxes[0] if row_bboxes else sanitized.get("bounding_box", []),
-                "table_bboxes": row_bboxes or sanitized.get("bounding_boxes", []),
+                **_structured_table_chunk_geometry(sanitized, row=row),
                 "table_source_ids": sanitized.get("source_ids", []),
                 "table_instance_id": sanitized.get("table_instance_id", ""),
                 "table_source_hash": sanitized.get("table_source_hash", ""),
@@ -9380,8 +9436,7 @@ def _append_structured_table_bundle_chunks(
                 "page_uid": _build_page_uid(shard_primary_page),
                 "table_page_indices": shard_page_indices,
                 "table_page_uids": shard_page_uids,
-                "table_bbox": sanitized.get("bounding_box", []),
-                "table_bboxes": sanitized.get("bounding_boxes", []),
+                **_structured_table_chunk_geometry(sanitized),
                 "table_source_ids": sanitized.get("source_ids", []),
                 "table_instance_id": sanitized.get("table_instance_id", ""),
                 "table_source_hash": sanitized.get("table_source_hash", ""),
@@ -10112,12 +10167,26 @@ def _extract_page_text_table_bundles(pages: Optional[List[dict]]) -> List[dict]:
     return bundles
 
 
-def _split_evidence_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+# 这些块的结构本身就是语义，不能过长度切分器。表格被按字符切开后表头只留在片 0，
+# 后续片以 ``| cell48 | value48 |`` 这样的无表头残片进入索引；公式和代码同理会被腰斩。
+# 参考 kotaemon 的做法：按 metadata type 分桶，只有文本类过 splitter。
+# 表格的可检索粒度由 ``_append_structured_table_bundle_chunks`` 的整表 / exact-row /
+# shard 三级负责，这里的 block 级副本只是粗粒度兜底，切碎它有害无益。
+_UNSPLITTABLE_EVIDENCE_BLOCK_TYPES = frozenset({"table", "formula", "code"})
+
+
+def _split_evidence_text(
+    text: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    *,
+    allow_split: bool = True,
+) -> List[str]:
     """Split one source block without discarding its evidence identity."""
     value = preprocess_text(text)
     if not value:
         return []
-    if len(value) <= chunk_size:
+    if not allow_split or len(value) <= chunk_size:
         return [value]
     try:
         from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -10156,9 +10225,6 @@ def _build_structured_evidence_chunks(
         if not isinstance(item, dict):
             continue
         raw_text = str(item.get("text") or item.get("content") or "").strip()
-        pieces = _split_evidence_text(raw_text, chunk_size, chunk_overlap)
-        if not pieces:
-            continue
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         metadata = dict(metadata)
         heading = str(item.get("heading") or metadata.get("section_path") or "").strip()
@@ -10174,6 +10240,14 @@ def _build_structured_evidence_chunks(
             or metadata.get("chunk_type")
             or "text"
         ).strip().lower() or "text"
+        pieces = _split_evidence_text(
+            raw_text,
+            chunk_size,
+            chunk_overlap,
+            allow_split=chunk_type not in _UNSPLITTABLE_EVIDENCE_BLOCK_TYPES,
+        )
+        if not pieces:
+            continue
         block_id = str(metadata.get("block_id") or "").strip()
         if block_id and not metadata.get("block_ids"):
             metadata["block_ids"] = [block_id]
@@ -10194,6 +10268,11 @@ def _build_structured_evidence_chunks(
                 fragment_metadata["evidence_id"] = (
                     f"{metadata['evidence_id']}:f{fragment_index + 1}"
                 )
+                # 每个分片都原样继承整块 bbox（浅拷贝），高亮框会覆盖远多于该片的
+                # 文字。这里没有片级坐标可用，但至少要把精度说清楚，别让引用层
+                # 把它当成片级精确框。
+                if fragment_metadata.get("bbox") or fragment_metadata.get("rects"):
+                    fragment_metadata["bbox_precision"] = "block"
             chunks.append(piece)
             headings.append(heading)
             pages.append(page)
@@ -10277,12 +10356,28 @@ def build_vector_index(
             chunk_overlap=chunk_overlap,
         )
         if chunks:
+            evidence_schema_versions: list[int] = []
+            for item in chunk_metadata:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    evidence_schema_versions.append(
+                        int(item.get("evidence_schema_version") or 0)
+                    )
+                except (TypeError, ValueError):
+                    continue
+            effective_index_meta["content_source"] = "block_index_evidence"
+            effective_index_meta["evidence_schema_version"] = max(evidence_schema_versions, default=0)
             logger.info(
                 "[%s] 使用 block-index evidence 分块，生成 %s 个带来源身份的分块",
                 doc_id,
                 len(chunks),
             )
         else:
+            # Do not trust caller-provided provenance: a missing evidence_chunks
+            # argument means this artifact was actually rebuilt from flattened text.
+            effective_index_meta["content_source"] = "document_full_text"
+            effective_index_meta["evidence_schema_version"] = 0
             preprocessed_text = preprocess_text(text)
             # 优先使用结构感知分块，保护表格和公式完整性（需求 4.1, 4.2, 4.3, 4.4）
             try:
@@ -11375,7 +11470,7 @@ def filter_reference_trap_results(
     """统一过滤参考文献型污染结果，供主检索链路和其他调用方复用。"""
     if not results:
         return results
-    if _is_reference_query(query):
+    if _is_reference_query(query) or "reference_meta" in (evidence_need or []):
         normalized = []
         for item in results:
             normalized_item = dict(item)
@@ -13371,9 +13466,16 @@ def _load_block_index_for_citation_anchors(
     expected_source_hash = str(
         metadata.get("document_source_hash") or metadata.get("source_hash") or ""
     ).strip()
+    expected_block_index_hash = str(
+        metadata.get("block_index_hash") or metadata.get("block_index_revision") or ""
+    ).strip()
     if expected_generation and str(block_index.get("parse_generation") or "") != expected_generation:
         return None
     if expected_source_hash and str(block_index.get("document_source_hash") or "") != expected_source_hash:
+        return None
+    if expected_block_index_hash and str(
+        block_index.get("block_index_hash") or block_index.get("block_index_revision") or ""
+    ).strip() != expected_block_index_hash:
         return None
     return block_index
 
@@ -13471,6 +13573,70 @@ def _attach_block_index_citation_anchors(
     return results
 
 
+def _normalize_intent_page_ranges(intent_decision: Optional[dict]) -> tuple[tuple[int, int], ...]:
+    """Read page constraints from the frozen route without expanding them."""
+    raw_ranges = intent_decision.get("page_ranges") if isinstance(intent_decision, dict) else []
+    normalized: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for raw_range in raw_ranges or []:
+        if not isinstance(raw_range, (list, tuple)) or len(raw_range) < 2:
+            continue
+        try:
+            start = int(raw_range[0])
+            end = int(raw_range[1])
+        except (TypeError, ValueError):
+            continue
+        if start <= 0 or end <= 0:
+            continue
+        value = (min(start, end), max(start, end))
+        if value not in seen:
+            normalized.append(value)
+            seen.add(value)
+    return tuple(normalized)
+
+
+def _result_overlaps_page_scope(
+    result: dict,
+    page_ranges: tuple[tuple[int, int], ...],
+) -> bool:
+    if not page_ranges:
+        return True
+    if not isinstance(result, dict):
+        return False
+
+    page_intervals: list[tuple[int, int]] = []
+    raw_range = result.get("page_range")
+    if isinstance(raw_range, (list, tuple)) and len(raw_range) >= 2:
+        try:
+            range_start = int(raw_range[0])
+            range_end = int(raw_range[1])
+        except (TypeError, ValueError):
+            range_start = range_end = 0
+        if range_start > 0 and range_end > 0:
+            page_intervals.append((min(range_start, range_end), max(range_start, range_end)))
+
+    for page in _extract_page_candidates_from_metadata(result):
+        page_intervals.append((page, page))
+    if not page_intervals:
+        return False
+    return any(
+        start <= interval_end and interval_start <= end
+        for interval_start, interval_end in page_intervals
+        for start, end in page_ranges
+    )
+
+
+def _filter_results_to_intent_page_scope(
+    results: List[dict],
+    page_ranges: tuple[tuple[int, int], ...],
+) -> List[dict]:
+    if not page_ranges:
+        return results
+    return [
+        result for result in results
+        if _result_overlaps_page_scope(result, page_ranges)
+    ]
+
 def search_document_chunks(
     doc_id: str,
     query: str,
@@ -13510,6 +13676,7 @@ def search_document_chunks(
     original_query = query
 
     decision = _resolve_intent_decision(original_query, intent_decision)
+    page_scope_ranges = _normalize_intent_page_ranges(decision)
     query_is_canonical = bool(
         query_is_canonical
         or (
@@ -13661,7 +13828,10 @@ def search_document_chunks(
         pages,
     )
 
-    semantic_groups_current = _semantic_groups_match_vector_index(doc_id, vector_store_dir)
+    semantic_groups_current = (
+        _semantic_groups_match_vector_index(doc_id, vector_store_dir)
+        and not page_scope_ranges
+    )
     group_chunk_map = _load_group_data(doc_id) or {} if semantic_groups_current else {}
 
     embed_fn = get_embedding_function(
@@ -14254,6 +14424,11 @@ def search_document_chunks(
         query=analysis_query,
         index_meta=data.get("index_meta", {}) if isinstance(data, dict) else {},
     )
+    if page_scope_ranges:
+        page_scope_candidates = len(results)
+        results = _filter_results_to_intent_page_scope(results, page_scope_ranges)
+        timings["page_scope_candidate_count"] = page_scope_candidates
+        timings["page_scope_result_count"] = len(results)
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     logger.info(f"[{doc_id}] 检索耗时: {timings}")
@@ -14500,6 +14675,7 @@ def get_relevant_context(
     decision = _resolve_intent_decision(query, intent_decision)
     query_type = str(decision.get("query_type") or "specific")
     evidence_need = list(decision.get("evidence_need") or [])
+    page_scope_ranges = _normalize_intent_page_ranges(decision)
 
     # 延迟导入（仅首次触发模块加载，后续为字典查找）
     from services.semantic_group_service import SemanticGroupService
@@ -14536,7 +14712,10 @@ def get_relevant_context(
 
     config = _rag_config_singleton
     prefer_raw_chunk_context = "numeric_table" in evidence_need
-    semantic_groups_current = _semantic_groups_match_vector_index(doc_id, vector_store_dir)
+    semantic_groups_current = (
+        _semantic_groups_match_vector_index(doc_id, vector_store_dir)
+        and not page_scope_ranges
+    )
 
     # 动态 Token 预算：根据模型上下文窗口动态调整，同时扣除输出预留
     if config.token_budget_ratio > 0 and model_context_window > 0:
@@ -14837,6 +15016,12 @@ def get_relevant_context(
         for idx, entry in enumerate(layered_entries)
     ]
 
+    if page_scope_ranges:
+        retrieval_meta["page_scope"] = {
+            "ranges": [list(item) for item in page_scope_ranges],
+            "enforced": True,
+            "result_count": len(results),
+        }
     return context_string, retrieval_meta
 
 

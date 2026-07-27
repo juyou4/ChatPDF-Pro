@@ -7,6 +7,7 @@
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -18,6 +19,34 @@ from services.memory_store import MemoryStore
 _DECAY_HALF_LIFE_DAYS = 30.0
 
 logger = logging.getLogger(__name__)
+
+
+def _archive_recall_enabled() -> bool:
+    try:
+        from config import settings
+        return bool(settings.memory_archive_recall_enabled)
+    except Exception:
+        return True
+
+
+def _archive_recall_min_overlap() -> float:
+    try:
+        from config import settings
+        return float(settings.memory_archive_recall_min_overlap)
+    except Exception:
+        return 0.3
+
+
+def _is_retrievable(entry) -> bool:
+    """条目是否可参与检索；对缺少新字段的旧对象保持宽松。"""
+    checker = getattr(entry, "is_retrievable", None)
+    if isinstance(checker, bool):
+        return checker
+    return (
+        getattr(entry, "status", "active") == "active"
+        and not getattr(entry, "invalid_at", "")
+        and not getattr(entry, "disabled_at", "")
+    )
 
 
 class MemoryRetriever:
@@ -69,24 +98,37 @@ class MemoryRetriever:
         if not all_entries:
             return []
 
-        # 非破坏压缩后，归档原始记忆仅用于追溯，不参与默认检索。
-        all_entries = [e for e in all_entries if getattr(e, "status", "active") != "archived_raw"]
-        if not all_entries:
+        # 三类记忆不参与默认检索，但都保留可追溯：
+        # - archived_raw：非破坏压缩后的原始条目
+        # - invalid_at 非空：已被后续对话推翻的事实
+        # - disabled_at 非空：用户手动停用的条目
+        archived_entries = [
+            e for e in all_entries
+            if getattr(e, "status", "active") == "archived_raw"
+            and not getattr(e, "invalid_at", "")
+            and not getattr(e, "disabled_at", "")
+        ]
+        all_entries = [e for e in all_entries if _is_retrievable(e)]
+        if not all_entries and not archived_entries:
             return []
 
         # 如果启用文档过滤，仅保留当前文档记忆和全局画像记忆。
         # 这样既能阻断跨文档串记忆，又不会丢掉用户级偏好/画像。
         if filter_by_doc and doc_id:
             all_entries = [e for e in all_entries if e.doc_id in (None, doc_id)]
-            if not all_entries:
-                return []
+            archived_entries = [e for e in archived_entries if e.doc_id in (None, doc_id)]
 
         # 标签过滤：仅保留包含指定标签的记忆
         if filter_tags:
             filter_set = set(filter_tags)
             all_entries = [e for e in all_entries if filter_set.intersection(e.tags)]
-            if not all_entries:
-                return []
+            archived_entries = [e for e in archived_entries if filter_set.intersection(e.tags)]
+
+        if not all_entries and not archived_entries:
+            return []
+        if not all_entries:
+            # 活跃记忆被过滤空了，直接走归档回捞
+            return self._archive_recall(query, archived_entries, limit=top_k)
 
         # 构建 entry_id -> entry 的映射，方便后续查找
         entry_map = {entry.id: entry for entry in all_entries}
@@ -170,7 +212,82 @@ class MemoryRetriever:
                     if entry is not None:
                         self.active_pool.put(entry)
 
-        return results[:top_k]
+        results = results[:top_k]
+
+        # Page fault：活跃记忆没填满配额时，去归档里补检一次。
+        # 压缩是有损的——LLM 可能把某个数字摘丢了，而原始条目还躺在归档里。
+        # 只填补空位，绝不挤掉任何一条活跃记忆。
+        if len(results) < top_k and archived_entries:
+            recalled = self._archive_recall(
+                query,
+                archived_entries,
+                limit=top_k - len(results),
+            )
+            if recalled:
+                logger.info("[Memory] 归档回捞补充 %d 条记忆", len(recalled))
+                results.extend(recalled)
+
+        return results
+
+    @staticmethod
+    def _tokenize_for_recall(text: str) -> set[str]:
+        """给归档回捞用的轻量分词：英文按词、中文按 2-gram。"""
+        sample = str(text or "").lower()
+        tokens = set(re.findall(r"[a-z0-9]+", sample))
+        cjk = re.findall(r"[一-鿿]", sample)
+        tokens.update("".join(pair) for pair in zip(cjk, cjk[1:]))
+        return {t for t in tokens if t}
+
+    def _archive_recall(
+        self,
+        query: str,
+        archived_entries: list,
+        *,
+        limit: int,
+    ) -> list[dict]:
+        """在归档条目里做关键词回捞。
+
+        归档条目已被移出向量/BM25 索引，所以这里用轻量 token 重叠打分，
+        而不是再建一次索引——page fault 是兜底通路，要便宜。
+        """
+        if limit <= 0 or not archived_entries:
+            return []
+        if not _archive_recall_enabled():
+            return []
+
+        query_tokens = self._tokenize_for_recall(query)
+        if not query_tokens:
+            return []
+
+        min_overlap = _archive_recall_min_overlap()
+        scored: list[tuple[float, object]] = []
+        for entry in archived_entries:
+            entry_tokens = self._tokenize_for_recall(entry.content)
+            if not entry_tokens:
+                continue
+            overlap = len(query_tokens & entry_tokens) / len(query_tokens)
+            if overlap >= min_overlap:
+                scored.append((overlap, entry))
+
+        if not scored:
+            return []
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        recalled: list[dict] = []
+        for overlap, entry in scored[:limit]:
+            recalled.append({
+                "entry_id": entry.id,
+                "text": entry.content,
+                "source_type": entry.source_type,
+                "doc_id": entry.doc_id,
+                # 归档命中排在活跃记忆之后：分数刻意压到很低，
+                # 它只是兜底证据，不该盖过正常召回。
+                "rrf_score": overlap * 0.01,
+                "from_active_pool": False,
+                "from_archive": True,
+                "archive_overlap": round(overlap, 3),
+            })
+        return recalled
 
     def _active_pool_search(
         self,

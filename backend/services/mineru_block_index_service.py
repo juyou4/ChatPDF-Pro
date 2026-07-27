@@ -27,6 +27,7 @@ from services.block_index_service import (
 )
 from services.mineru_text_normalizer import (
     build_mineru_page_ledger,
+    table_html_to_markdown,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,14 @@ def save_mineru_result(
     temp_path.replace(path)
 
 
+class MinerUResultUnreadable(RuntimeError):
+    """Raised when a stored MinerU payload exists but cannot be read.
+
+    Distinct from ``load_mineru_result`` returning ``None``, which only means
+    "no payload for this identity".
+    """
+
+
 def load_mineru_result(
     data_dir: Path | str,
     doc_id: str,
@@ -110,8 +119,13 @@ def load_mineru_result(
         payload = data.get("payload")
         return payload if isinstance(payload, dict) else None
     except Exception as exc:
-        logger.warning("[MinerUBlockIndex] failed to load %s: %s", path, exc)
-        return None
+        # ``None`` above means "no artifact for this identity" — a normal,
+        # expected answer. A file that exists but cannot be read is a different
+        # event: returning ``None`` for it made a corrupted MinerU payload
+        # indistinguishable from "never parsed", so a full-MinerU document could
+        # quietly rebuild from something else instead of refusing to publish.
+        logger.error("[MinerUBlockIndex] failed to load %s: %s", path, exc)
+        raise MinerUResultUnreadable(f"MinerU 原始解析产物不可读: {path}") from exc
 
 
 def build_block_index_from_mineru_payload(
@@ -441,6 +455,35 @@ def _mineru_structure_diagnostics(
         emitted_text_level_heading_count + intentionally_excluded_text_level_heading_count
     )
     missing_run_in_paths = sorted(raw_run_in_paths - outline_numbered_paths)
+
+    # 两个失明分支：
+    # 1) ``outline_heading_count`` 一直被算出来却没有任何读取方，于是 ``_build_outline``
+    #    的过滤器把标题丢掉一半时，下面三个比较仍然全是 False；
+    # 2) MinerU 把全部标题输出成普通 text 时 raw 计数全为 0，三个比较退化成 ``0 < 0``，
+    #    塌成单条「全文」的 outline 照样过闸。
+    # 这里只对**静默**损失 fail-closed：``_build_outline`` 现在会给每次刻意丢弃的标题块
+    # 打上 ``structure_exclusion_reason``，所以"既没进 outline 又没有排除理由"才算损失，
+    # 不需要拍任何阈值。
+    # ``outline_is_fallback_only`` 与 ``flat_structure_without_headings`` 只作为诊断字段
+    # 暴露给恢复器，**不**参与拒绝发布：前者会误伤"唯一标题被 front-matter 规则正当
+    # 排除"的文档（真正的塌陷已经被静默损失那条抓住了），后者是文档属性而非流水线缺陷。
+    outline_block_ids = {
+        str(item.get("first_block") or "")
+        for item in outline
+        if isinstance(item, dict) and str(item.get("first_block") or "")
+    }
+    silently_dropped_headings = [
+        block
+        for block in emitted_headings
+        if not str(block.get("structure_exclusion_reason") or "").strip()
+        and str(block.get("block_id") or "") not in outline_block_ids
+    ]
+    outline_is_fallback_only = (
+        len(outline) == 1
+        and str((outline[0] or {}).get("source") or "").strip().lower() == "fallback"
+        if outline and isinstance(outline[0], dict)
+        else False
+    )
     return {
         "structure_version": MINERU_STRUCTURE_VERSION,
         "raw_text_level_heading_count": raw_heading_count,
@@ -455,10 +498,15 @@ def _mineru_structure_diagnostics(
         "covered_run_in_heading_count": len(raw_run_in_paths & emitted_numbered_paths),
         "missing_run_in_outline_paths": [".".join((str(page), path)) for page, path in missing_run_in_paths],
         "outline_heading_count": len(outline),
+        "emitted_heading_block_count": len(emitted_headings),
+        "silently_dropped_heading_count": len(silently_dropped_headings),
+        "outline_is_fallback_only": outline_is_fallback_only,
+        "flat_structure_without_headings": not emitted_headings,
         "structure_degraded": (
             covered_text_level_heading_count < raw_heading_count
             or len(raw_native_headings & emitted_native_heading_keys) < raw_native_heading_count
             or bool(missing_run_in_paths)
+            or bool(silently_dropped_headings)
         ),
     }
 
@@ -613,12 +661,16 @@ def _restore_content_list_order(
 _RUN_IN_NUMBERED_HEADING_RE = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)+)(?:\.)?\s+(?P<tail>.+)$"
 )
+# 这条规则找的是"正文句子的开头"。英文句首必然大写，所以**不能**加 IGNORECASE：
+# 加了之后 ``The\b`` 会匹配正文里任意一个小写 the，于是以小数/版本号/金额开头的
+# 句子会被当成 run-in 标题切成"假标题 + 残句"——
+# ``3.14 is approximately the ratio of ...`` 会在大纲里变出一条 ``3.14 is approximately``。
+# 中文分支本来就没有大小写，不受影响。
 _RUN_IN_BODY_START_RE = re.compile(
     r"\s+(?P<body>"
     r"(?:根据|我们|本文|该|实验|结果|通过|在|从|对于|此外|因此|同时|随后|然后|"
     r"The\b|We\b|This\b|Our\b|In\b|For\b|To\b|Results?\b|Experiments?\b)"
-    r")",
-    re.IGNORECASE,
+    r")"
 )
 
 
@@ -1034,7 +1086,13 @@ def _extract_item_text(item: dict[str, Any], block_type: str) -> str:
 
     text = "\n".join(_dedupe(values))
     if block_type == "table" and text:
-        return text
+        # 表格块以前直接返回原始 HTML，于是 ``<table><tr><td>`` 会一路进到
+        # 大纲与速览的 prompt，再被 800/900 字的截断从标签中间切开，摘要里就
+        # 出现 ``<td`` 和半截标签。渲染成 markdown 与 RAG 侧口径一致；
+        # 解析不出来时退回按普通文本清洗，而不是把标签原样放出去。
+        markdown = table_html_to_markdown(text)
+        if markdown:
+            return markdown
     return _clean_text(text)
 
 

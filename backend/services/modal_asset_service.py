@@ -57,10 +57,144 @@ _VISUAL_QUERY_PATTERN = re.compile(
     r"screenshot|visual|axis|legend)s?\b)",
     re.IGNORECASE,
 )
-_FIGURE_QUERY_PATTERN = re.compile(
-    r"(?:图片|图像|图表|插图|曲线图|柱状图|折线图|散点图|流程图|示意图|截图|"
-    r"坐标轴|图例|"
-    r"\b(?:figure|fig|image|picture|chart|plot|diagram|curve|screenshot|axis|legend)s?\b)",
+# ---------------------------------------------------------------------------
+# figure 模态判定：编号直通 → 强信号 → 术语掩码 → 弱信号+文档锚点
+# ---------------------------------------------------------------------------
+# 判据口径：modalities 只在问句**显式指认文档里的模态资产**时才置位，而不是
+# 因为「问句里出现了模态词」或「答案可能长在哪」而推断。这与 fixture
+# zh_modality_trap_008 的 audit_reason 是同一条判据。
+#
+# 方向性来自 kotaemon `indices/qa/format_context.py`：evidence_mode 默认 TEXT，
+# 只有证据里真出现了图片才升级。figure 不是「没有反证就成立」，而是「有正证
+# 才成立」。旧写法反过来——词表命中即置位，再靠一串负向前瞻往回削——每多一类
+# 反例就要多一个 lookahead，规则只会越堆越脆（「图像分类」「images from a
+# different domain」就是这样漏出去的）。
+#
+# 四层，顺序是**硬约束**，不能调换：
+#   L0 编号引用（figure 2 / 图2）直通，不进后面任何一层。
+#   L1 文档产物强信号（插图/流程图/figure/chart…）单独成立。必须在 L2 掩码
+#      **之前**匹配：掩码里的「意图」会把「示意图」挖成「示 」，那正是我们
+#      要修的子串误伤在掩码侧原样复发。用顺序解决，不要给掩码加 (?<!示) 这
+#      类前瞻——那是同一个坑再挖一遍。
+#   L2 术语掩码：把「图像分类」「image classification」这类含模态字、但指研究
+#      对象而非文档产物的复合术语替换成空格。结构同 RAGFlow
+#      `common/query_base.py` 的 rmWWW（先剥噪声再判定），并照抄它
+#      `if not txt: txt = otxt` 的「剥空必回退」不变式。
+#   L3 弱信号（图像 / 裸「图」/ images）必须与文档锚点（第N页 / 本文 / page /
+#      appendix …）落在**同一子句**才置位。
+#
+# 中英词表在这里**同一处定义**，不许分居两地各自漂移：RAG-Anything 的中文
+# prompt 包把索引期表头译成「图片路径：」，而检索期解析正则仍写死英文
+# `Image Path:`（prompts_zh.py:274 vs query.py:611），整条中文多模态链路静默
+# 失效、不报错也不打 warning。写入侧和读取侧、中文侧和英文侧必须一起改。
+
+# L1 强信号：只可能是「文档里的那张图」的名词。单独出现即判定 figure。
+# 注意这里刻意**不含**「图像 / image / picture」——那三个既能指文档插图，
+# 也能指研究对象（图像分类 / image encoder），已降级到 L3 弱信号。
+_FIGURE_STRONG_TERMS_ZH = (
+    "图片", "图表", "插图", "曲线图", "柱状图", "折线图", "散点图",
+    "流程图", "示意图", "截图", "坐标轴", "图例",
+)
+_FIGURE_STRONG_TERMS_EN = (
+    "figure", "fig", "chart", "plot", "diagram", "curve", "screenshot",
+    "axis", "legend",
+)
+# 「图中/图里/如图所示」这类指认的就是文档里那张图，但因为落在裸「图」上，
+# 必须带上和 L3 同一份前置排除（试图中断 / 意图上 / 地图上 …）。
+_FIGURE_STRONG_BARE_SUFFIXES = ("中", "里", "上", "所示")
+_FIGURE_BARE_PREFIX_EXCLUSION = "意试企妄视蓝地拼版宏"
+_FIGURE_STRONG_PATTERN = re.compile(
+    "(?:"
+    + "|".join(_FIGURE_STRONG_TERMS_ZH)
+    + rf"|(?<![{_FIGURE_BARE_PREFIX_EXCLUSION}])图(?:"
+    + "|".join(_FIGURE_STRONG_BARE_SUFFIXES)
+    + r")"
+    + r"|\b(?:" + "|".join(_FIGURE_STRONG_TERMS_EN) + r")s?\b)",
+    re.IGNORECASE,
+)
+
+# L2 术语掩码：含模态字但指研究对象/任务/模型组件的复合术语。
+# 中英两侧成对维护——只补一边会重演 RAG-Anything 的中文链路静默失效。
+_FIGURE_TERM_SUFFIXES_ZH = (
+    "分类", "识别", "分割", "检索", "生成", "去噪", "超分辨率", "超分", "修复",
+    "配准", "增强", "编码器", "解码器", "表征", "理解", "描述", "标注", "处理",
+    "合成", "重建", "检测", "压缩", "翻译", "特征", "数据集", "数据", "领域", "语义",
+)
+_FIGURE_TERM_SUFFIXES_EN = (
+    "classification", "recognition", "segmentation", "retrieval", "generation",
+    "denoising", "captioning", "caption", "encoder", "decoder", "embeddings",
+    "embedding", "understanding", "processing", "synthesis", "restoration",
+    "registration", "super-resolution", "superresolution", "features", "feature",
+    "datasets", "dataset", "domains", "domain", "patches", "patch", "tokens",
+    "token", "space", "pairs", "pair",
+)
+# 独立成词的术语（不带后缀也必须掩掉）。
+_FIGURE_TERM_WORDS_ZH = (
+    "图神经网络", "图卷积网络", "图卷积", "图注意力网络", "图注意力",
+    "知识图谱", "图嵌入", "图结构", "图学习", "图论", "图谱", "图灵",
+    "意图", "试图", "企图", "妄图", "视图", "蓝图", "拼图", "版图", "宏图",
+    "图书", "图标",
+)
+_FIGURE_TERM_WORDS_EN = (
+    "imagenet", "image-to-image", "text-to-image", "image-level",
+    "computer vision",
+)
+_FIGURE_TERM_MASK_PATTERN = re.compile(
+    r"(?:图像\s*(?:" + "|".join(_FIGURE_TERM_SUFFIXES_ZH) + r")"
+    + r"|" + "|".join(_FIGURE_TERM_WORDS_ZH)
+    + r"|\bimages?[-\s]*(?:" + "|".join(_FIGURE_TERM_SUFFIXES_EN) + r")\b"
+    + r"|\b(?:" + "|".join(
+        word.replace("-", r"[-\s]*").replace(" ", r"\s+")
+        for word in _FIGURE_TERM_WORDS_EN
+    ) + r")\b)",
+    re.IGNORECASE,
+)
+
+# L3 弱信号：既可能是文档插图，也可能是研究对象。必须配文档锚点。
+_FIGURE_WEAK_PATTERN = re.compile(
+    r"(?:图像"
+    rf"|(?<![{_FIGURE_BARE_PREFIX_EXCLUSION}])图(?!谱|灵|书|论|标|案|腾)"
+    r"|\b(?:images?|pictures?)\b)",
+    re.IGNORECASE,
+)
+# L3 文档锚点：说明用户指的是「这份文档里的」东西，而不是某个研究对象。
+_FIGURE_DOC_ANCHOR_PATTERN = re.compile(
+    r"(?:页|本文|该文|原文|全文|文中|文里|论文|这篇|那篇|文档|文献|附录|章节|"
+    r"[这那][张幅]|上面|下面|"
+    r"\b(?:pages?|papers?|documents?|pdfs?|articles?|appendix|sections?|"
+    r"captions?|manuscripts?|above|below)\b|"
+    r"\bthis\s+(?:image|picture|figure|paper|document|article|page|section)s?\b)",
+    re.IGNORECASE,
+)
+
+# 与 services/chat_intent_service.py 的 _CLAUSE_SPLIT_RE 同源；该模块已经 import
+# 本模块，反向 import 会形成循环依赖，因此这里保留一份等价副本。
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[，,。；;、\n]|(?:而是|但是|但)|\b(?:instead|rather\s+than)\b",
+    re.IGNORECASE,
+)
+# 版面强信号：单独出现即可判定为 layout 问句。
+_LAYOUT_STRONG_PATTERN = re.compile(
+    r"(?:版面|排版|布局|页眉|页脚|双栏|单栏|分栏|"
+    r"\bbounding\s*box(?:es)?\b|"
+    r"\blayouts?\s+of\s+(?:the\s+)?(?:page|document|paper|figure|table|section|column)s?\b|"
+    r"\b(?:page|column|document|two[-\s]?column)\s+layouts?\b)",
+    re.IGNORECASE,
+)
+# 版面弱信号：方位/位置词，必须与版面名词落在同一子句才计入，否则
+# "What is left after ..." / "the right choice" 这类纯文本问句会被误判。
+_LAYOUT_WEAK_PATTERN = re.compile(
+    r"(?:位置|区域|上方|下方|左侧|右侧|顶部|底部|角落|[左右][上下]角|"
+    r"\blayouts?\b|\bpositions?\b|\bregions?\b|\bbottom\b|"
+    r"\btop\b(?![-\s]?(?:\d|k\b))|"
+    r"\bleft\b(?!\s+(?:after|over))|"
+    r"\bright\b(?!\s+(?:after|before|now)))",
+    re.IGNORECASE,
+)
+# 版面名词：弱信号需要它同子句共现才说明问的是页面上的位置。
+_LAYOUT_ANCHOR_PATTERN = re.compile(
+    r"(?:(?<![意试企])图|(?<![代发])表(?!示|明|达|现|征|述)|公式|方程|页|栏|"
+    r"\b(?:fig(?:ure)?s?|tables?|equations?|formulas?|pages?|columns?|sections?)\b)",
     re.IGNORECASE,
 )
 
@@ -242,12 +376,7 @@ def search_modal_assets(
 
 def looks_like_figure_query(query: str) -> bool:
     """Return whether a question explicitly asks about a Figure-like asset."""
-    normalized = _clean_text(query, 2400)
-    if not normalized:
-        return False
-    if any(reference.startswith("figure:") for reference in _extract_references(normalized)):
-        return True
-    return bool(_FIGURE_QUERY_PATTERN.search(normalized))
+    return _has_figure_context(_clean_text(query, 2400))
 
 
 def looks_like_visual_query(query: str) -> bool:
@@ -265,6 +394,57 @@ def looks_like_visual_query(query: str) -> bool:
     )
 
 
+def _mask_figure_terms(normalized: str) -> str:
+    """剥掉「含模态字但不指文档产物」的复合术语，结构同 RAGFlow 的 rmWWW。
+
+    掩码**只服务于弱信号判定**；强信号已经在调用本函数之前判完（见模块顶部
+    的层次说明）。末尾保留 rmWWW 的「剥空必回退」不变式：一旦规则把整句吃
+    光就整体退回原文——rmWWW 下游是 BM25 打分，剥多了只是召回变差；我们下游
+    是布尔判定，剥多了会直接改结论，这条回退是防止掩码把行为悄悄改掉。
+    """
+    masked = _FIGURE_TERM_MASK_PATTERN.sub(" ", normalized)
+    if not masked.strip():
+        return normalized
+    return masked
+
+
+def _has_figure_context(normalized: str, references: set[str] | None = None) -> bool:
+    """判断问句是否显式指认了「文档里的那张图」。
+
+    层次顺序见模块顶部：L0 编号直通 → L1 强信号（掩码之前）→ L2 术语掩码 →
+    L3 弱信号与文档锚点同子句共现。调换 L1/L2 会让「示意图」被「意图」挖空。
+    """
+    if not normalized:
+        return False
+    if references is None:
+        references = _extract_references(normalized)
+    if any(item.startswith("figure:") for item in references):
+        return True
+    if _FIGURE_STRONG_PATTERN.search(normalized):
+        return True
+    masked = _mask_figure_terms(normalized)
+    for clause in _CLAUSE_SPLIT_RE.split(masked):
+        if not clause:
+            continue
+        if _FIGURE_WEAK_PATTERN.search(clause) and _FIGURE_DOC_ANCHOR_PATTERN.search(clause):
+            return True
+    return False
+
+
+def _has_layout_context(normalized: str) -> bool:
+    """判断问句是否真的在问版面：强信号直通，弱信号需与版面名词同子句共现。"""
+    if not normalized:
+        return False
+    if _LAYOUT_STRONG_PATTERN.search(normalized):
+        return True
+    for clause in _CLAUSE_SPLIT_RE.split(normalized):
+        if not clause:
+            continue
+        if _LAYOUT_WEAK_PATTERN.search(clause) and _LAYOUT_ANCHOR_PATTERN.search(clause):
+            return True
+    return False
+
+
 def detect_query_modalities(query: str) -> list[str]:
     """返回稳定、有序的查询模态，不执行任何视觉模型调用。"""
     normalized = _clean_text(query, 2400)
@@ -273,10 +453,7 @@ def detect_query_modalities(query: str) -> list[str]:
 
     references = _extract_references(normalized)
     modalities: list[str] = []
-    if (
-        any(item.startswith("figure:") for item in references)
-        or _FIGURE_QUERY_PATTERN.search(normalized)
-    ):
+    if _has_figure_context(normalized, references):
         modalities.append("figure")
     if (
         any(item.startswith("table:") for item in references)
@@ -288,12 +465,7 @@ def detect_query_modalities(query: str) -> list[str]:
         or re.search(r"(?:公式|方程|\b(?:formula|equation)s?\b)", normalized, re.IGNORECASE)
     ):
         modalities.append("formula")
-    if re.search(
-        r"(?:布局|排版|位置|区域|上方|下方|左侧|右侧|角落|"
-        r"\b(?:layout|position|region|top|bottom|left|right)\b)",
-        normalized,
-        re.IGNORECASE,
-    ):
+    if _has_layout_context(normalized):
         modalities.append("layout")
     if not modalities:
         return ["text"]

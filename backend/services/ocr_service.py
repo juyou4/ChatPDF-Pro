@@ -1773,13 +1773,22 @@ class MinerUAdapter(WorkerOCRAdapter):
                     elif name.endswith("content_list.json"):
                         content_list_path = name
 
-                if full_md_path is None:
+                # 必需项以前恰好反了：缺 full.md 直接 raise，而缺 content_list.json /
+                # middle.json 只记一条 info 就继续。真正喂数据的是后两者——正文、块
+                # 结构、表格与坐标全部来自它们；full.md 的唯一活消费点是文本覆盖率
+                # 见证。一份没有结构化数据的产物本来是不该通过的。
+                if content_list_path is None and middle_json_path is None:
                     raise RuntimeError(
-                        "MinerU ZIP 中未找到 full.md 文件，"
+                        "MinerU ZIP 中未找到 content_list.json 或 middle.json，"
                         f"ZIP 包含: {[info.filename for info in infos]}"
                     )
 
-                full_md = zf.read(full_md_path).decode("utf-8")
+                if full_md_path is None:
+                    logger.warning(
+                        "MinerU ZIP 中未找到 full.md，文本覆盖率见证将不可用。"
+                        f"ZIP 包含: {[info.filename for info in infos]}"
+                    )
+                full_md = zf.read(full_md_path).decode("utf-8") if full_md_path else ""
                 middle_json = None
                 content_list_json = None
                 if middle_json_path:
@@ -2288,13 +2297,22 @@ class MinerUDirectAdapter(MinerUAdapter):
                     elif name.endswith("content_list.json"):
                         content_list_path = name
 
-                if full_md_path is None:
+                # 必需项以前恰好反了：缺 full.md 直接 raise，而缺 content_list.json /
+                # middle.json 只记一条 info 就继续。真正喂数据的是后两者——正文、块
+                # 结构、表格与坐标全部来自它们；full.md 的唯一活消费点是文本覆盖率
+                # 见证。一份没有结构化数据的产物本来是不该通过的。
+                if content_list_path is None and middle_json_path is None:
                     raise RuntimeError(
-                        "MinerU ZIP 中未找到 full.md 文件，"
+                        "MinerU ZIP 中未找到 content_list.json 或 middle.json，"
                         f"ZIP 包含: {[info.filename for info in infos]}"
                     )
 
-                full_md = zf.read(full_md_path).decode("utf-8")
+                if full_md_path is None:
+                    logger.warning(
+                        "MinerU ZIP 中未找到 full.md，文本覆盖率见证将不可用。"
+                        f"ZIP 包含: {[info.filename for info in infos]}"
+                    )
+                full_md = zf.read(full_md_path).decode("utf-8") if full_md_path else ""
                 middle_json = json.loads(zf.read(middle_json_path).decode("utf-8")) if middle_json_path else None
                 content_list_json = json.loads(zf.read(content_list_path).decode("utf-8")) if content_list_path else None
 

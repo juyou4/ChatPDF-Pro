@@ -348,6 +348,7 @@ def _maybe_upgrade_mineru_structure_cache(
     try:
         from services.mineru_block_index_service import (
             MINERU_STRUCTURE_VERSION,
+            MinerUResultUnreadable,
             build_block_index_from_mineru_payload,
             load_mineru_result,
         )
@@ -368,13 +369,23 @@ def _maybe_upgrade_mineru_structure_cache(
         parse_identity.get("parse_generation")
         and parse_identity.get("document_source_hash")
     )
-    payload = load_mineru_result(
-        data_dir,
-        doc_id,
-        parse_generation=parse_identity.get("parse_generation") if has_parse_identity else None,
-        document_source_hash=parse_identity.get("document_source_hash") if has_parse_identity else None,
-        require_identity=has_parse_identity,
-    )
+    try:
+        payload = load_mineru_result(
+            data_dir,
+            doc_id,
+            parse_generation=parse_identity.get("parse_generation") if has_parse_identity else None,
+            document_source_hash=parse_identity.get("document_source_hash") if has_parse_identity else None,
+            require_identity=has_parse_identity,
+        )
+    except MinerUResultUnreadable as exc:
+        # This is an *optional* structure upgrade, so a damaged payload must not
+        # take the reader down — but it also must not look like "no payload".
+        logger.error(
+            "[BlockIndex] raw MinerU result is unreadable for %s; keeping old structure cache: %s",
+            doc_id,
+            exc,
+        )
+        return cached
     if payload is None:
         logger.warning(
             "[BlockIndex] matching raw MinerU result unavailable; retaining old structure cache for %s",
@@ -554,6 +565,31 @@ def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[st
     if route == "local":
         return source != "mineru_vlm"
     return True
+
+
+def active_block_index_revision(
+    index: dict[str, Any] | None,
+    doc: dict[str, Any] | None,
+) -> str | None:
+    """Return the revision only when a modern document owns this index.
+
+    ``None`` is intentionally distinct from an empty string: it means a
+    modern parse has no trustworthy published block snapshot and consumers
+    must not reuse an artifact that was built from an earlier structure.  An
+    empty string remains the compatibility value for documents created before
+    parse identities and block revisions existed.
+    """
+    identity = _document_parse_identity(doc if isinstance(doc, dict) else {})
+    if identity.get("invalid_manifest"):
+        return None
+    if not identity:
+        return ""
+    if not isinstance(index, dict) or not _block_index_matches_parse_identity(index, identity):
+        return None
+    revision = str(
+        index.get("block_index_hash") or index.get("block_index_revision") or ""
+    ).strip()
+    return revision or None
 
 
 def _build_pages_from_pdf(pdf_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1058,6 +1094,11 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
                 continue
             title = _normalize_outline_title(block.get("text"))
             if not title or len(title) > 180:
+                # Record every deliberate drop. A heading block that leaves this
+                # loop with neither an outline entry nor an exclusion reason is a
+                # *silent* loss, and that is the only thing the structure
+                # diagnostics can safely fail closed on.
+                block["structure_exclusion_reason"] = "unusable_heading_title"
                 continue
             is_mineru_heading = str(block.get("source") or "").strip().lower() == "mineru_vlm"
             has_mineru_structure_signal = is_mineru_heading and str(
@@ -1103,12 +1144,21 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
             # evidence, though: a textbook can legitimately contain chapter
             # 51+ and those anchors must not disappear from the unified index.
             if _looks_like_non_section_noise(title) and not has_mineru_structure_signal:
+                block["structure_exclusion_reason"] = "non_section_noise"
                 continue
-            if _looks_like_run_in_paragraph_heading(title):
+            # 同一条 MinerU 豁免（见上方注释）也适用于这里：run-in 判定是给原生
+            # PDF 路线用的段落启发式，而 MinerU 侧的真正 run-in 段落早在
+            # ``_split_run_in_numbered_heading_blocks`` 就被拆成标题 + 正文了。
+            # 对一个带 text_level/type 显式结构信号的标题再判一次，只会把长标题、
+            # 以句号结尾的标题、含 ". 大写" 的标题白白丢出大纲。
+            if _looks_like_run_in_paragraph_heading(title) and not has_mineru_structure_signal:
+                block["structure_exclusion_reason"] = "run_in_paragraph_heading"
                 continue
             if page_num == 1 and not body_heading_seen and _looks_like_front_matter_title(title):
+                block["structure_exclusion_reason"] = "front_matter_title"
                 continue
             if block.get("source") != "mineru_vlm" and _looks_like_layout_noise(title, _normalize_bbox(block.get("bbox")), page_width, page_height):
+                block["structure_exclusion_reason"] = "layout_noise"
                 continue
             body_heading_seen = True
             if is_reference_heading(title):
@@ -1126,7 +1176,22 @@ def _build_outline(toc_items: list[dict[str, Any]], pages: list[dict[str, Any]])
         # Do not silently truncate a long paper or textbook. Every heading is
         # a section anchor; truncating here assigns all later blocks to the
         # last retained section and poisons every downstream consumer.
-        return _merge_bare_outline_labels(outline)
+        merged = _merge_bare_outline_labels(outline)
+        # A merged-away heading keeps no outline entry of its own, so tag its
+        # block too — otherwise the diagnostics below would read a legitimate
+        # bare-label merge as silent structure loss.
+        surviving_blocks = {str(item.get("first_block") or "") for item in merged}
+        merged_away = {
+            str(item.get("first_block") or "")
+            for item in outline
+            if str(item.get("first_block") or "") not in surviving_blocks
+        }
+        if merged_away:
+            for page in pages:
+                for block in page.get("blocks", []):
+                    if isinstance(block, dict) and str(block.get("block_id") or "") in merged_away:
+                        block.setdefault("structure_exclusion_reason", "merged_into_previous_heading")
+        return merged
 
     first_page = pages[0].get("page", 1) if pages else 1
     return [{

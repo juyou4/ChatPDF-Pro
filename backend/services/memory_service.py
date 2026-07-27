@@ -10,7 +10,7 @@
 - CRUD 操作：增删改查记忆条目
 - 摘要上限控制：超过上限时移除最早的非重要摘要
 """
-import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -21,6 +21,12 @@ from typing import Any, Optional
 
 from services.keyword_extractor import KeywordExtractor
 from services.memory_index import MemoryIndex
+from services.memory_llm import (
+    MemoryLLMBudget,
+    call_llm_sync,
+    consume_budget,
+    parse_bullet_list,
+)
 from services.memory_quality import (
     is_unusable_automatic_answer,
     sanitize_automatic_memory_content,
@@ -49,6 +55,33 @@ ANSWER_MAX_LEN = 200  # 回答截取最大长度
 # 文档内容会随着重新解析切换 generation。自动生成的文档记忆必须绑定
 # 当时的解析身份；用户主动保存/点赞的记忆则是用户意图，不应随之丢失。
 _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES = {"auto_qa", "llm_distilled", "compressed"}
+
+# 提炼模型表示"本轮没有值得记住的内容"时使用的哨兵回复。
+_NO_FACT_SENTINELS = {"无", "none", "no important fact", "n/a", "null", "nothing"}
+
+# 用户显式的记忆指令。命中后该轮记忆直接按用户主动保存对待，
+# 不必再等命中次数累积到晋升阈值。
+_EXPLICIT_MEMORY_REQUEST_RE = re.compile(
+    r"记住|记一下|记下来|别忘|不要忘|以后都|以后请|从现在起|今后|一直用|"
+    r"我的偏好|我偏好|默认就|下次也|不要再|别再|"
+    r"remember (?:that|this)|keep in mind|from now on|always |never ",
+    re.IGNORECASE,
+)
+
+
+def _is_no_fact_sentinel(text: str) -> bool:
+    """判断提炼结果是否为"无事实"哨兵，容忍标点与大小写差异。"""
+    normalized = str(text or "").strip().strip("。.!！,，:：\"'`*")
+    if not normalized:
+        return True
+    return normalized.lower() in _NO_FACT_SENTINELS
+
+
+def has_explicit_memory_request(text: str) -> bool:
+    """用户是否在本轮明确要求记住某件事。"""
+    if not text:
+        return False
+    return bool(_EXPLICIT_MEMORY_REQUEST_RE.search(str(text)))
 
 
 class MemoryService:
@@ -88,7 +121,17 @@ class MemoryService:
         self.index = MemoryIndex(
             os.path.join(data_dir, "memory_index"), embedding_model_id
         )
+        # 审计日志与主存储解耦：记忆被删掉后，它的演化历史仍然查得到。
+        try:
+            from services.memory_audit_log import MemoryAuditLog
+            self.audit_log = MemoryAuditLog(data_dir)
+        except Exception as exc:
+            logger.warning(f"[MemoryService] 审计日志初始化失败，跳过审计: {exc}")
+            self.audit_log = None
         self.keyword_extractor = KeywordExtractor()
+        # doc_id -> {signature, fact_count, summary}；图谱抽取的结果缓存，
+        # 让检索热路径不必也不会触发 LLM 调用。
+        self._graph_cache: dict[str, dict[str, Any]] = {}
         self.max_summaries = DEFAULT_MAX_SUMMARIES
         self.keyword_threshold = DEFAULT_KEYWORD_THRESHOLD
 
@@ -106,13 +149,29 @@ class MemoryService:
             MemoryTagger, MemoryCompressor, ContextInjector, ActivePool = _import_new_modules()
             self.tagger = MemoryTagger()
             compression_threshold = getattr(app_settings, "memory_compression_threshold", 20) if app_settings else 20
-            self.compressor = MemoryCompressor(compression_threshold=compression_threshold)
+            self.compressor = MemoryCompressor(
+                compression_threshold=compression_threshold,
+                max_compressed=getattr(app_settings, "memory_compression_max_items", 5) if app_settings else 5,
+                oversized_chars=getattr(app_settings, "memory_compression_oversized_chars", 2000) if app_settings else 2000,
+            )
             token_budget = getattr(app_settings, "memory_injection_token_budget", 800) if app_settings else 800
-            self.context_injector = ContextInjector(token_budget=token_budget)
+            kind_budgets = getattr(app_settings, "memory_injection_kind_budgets", None) if app_settings else None
+            self.context_injector = ContextInjector(
+                token_budget=token_budget,
+                kind_budgets=dict(kind_budgets) if kind_budgets else None,
+            )
             pool_size = getattr(app_settings, "memory_active_pool_size", 100) if app_settings else 100
             self.active_pool = ActivePool(capacity=pool_size)
         except Exception as e:
             logger.warning(f"[MemoryService] 新增模块初始化失败，降级为基础功能: {e}")
+
+        # 写入裁决器：新事实与既有记忆比对后决定 ADD/UPDATE/DELETE/NONE
+        self.arbiter = None
+        try:
+            from services.memory_arbiter import MemoryArbiter
+            self.arbiter = MemoryArbiter()
+        except Exception as exc:
+            logger.warning(f"[MemoryService] 裁决器初始化失败，写入退回纯追加: {exc}")
 
         # 初始化检索器（传入 active_pool）
         self.retriever = MemoryRetriever(self.store, self.index, active_pool=self.active_pool)
@@ -249,6 +308,10 @@ class MemoryService:
             "derived_from": list(entry.derived_from or []),
             "trace": trace,
             "last_used_query": entry.last_used_query or query or "",
+            "valid_at": entry.valid_at or entry.created_at,
+            "invalid_at": entry.invalid_at,
+            "disabled_at": entry.disabled_at,
+            "retrievable": entry.is_retrievable,
         }
 
     def _serialize_entry(self, entry: MemoryEntry, include_content: bool = True) -> dict[str, Any]:
@@ -380,10 +443,15 @@ class MemoryService:
         return filtered
 
     def _build_working_memory_hits(self, chat_history: list[dict] | None, doc_id: str | None = None) -> list[dict[str, Any]]:
-        """将最近两轮对话转成工作记忆命中。"""
+        """将最近若干轮对话转成工作记忆命中。
+
+        窗口大小取 ``memory_working_window_size``。命中按"越近分越高"排序，
+        这样 ContextInjector 在 working 配额装不下全部轮次时保留最近的对话，
+        而不是被稳定排序留下最旧的几轮。
+        """
         if not chat_history:
             return []
-        working_messages = self.get_working_memory(chat_history, window_size=2)
+        working_messages = self.get_working_memory(chat_history)
         if not working_messages:
             return []
 
@@ -397,7 +465,7 @@ class MemoryService:
             idx += 2
 
         hits: list[dict[str, Any]] = []
-        for round_idx, (user_msg, assistant_msg) in enumerate(rounds[-2:]):
+        for round_idx, (user_msg, assistant_msg) in enumerate(reversed(rounds)):
             question = (user_msg or {}).get("content", "").strip()
             answer = (assistant_msg or {}).get("content", "").strip()
             if not question or is_unusable_automatic_answer(answer):
@@ -405,6 +473,8 @@ class MemoryService:
             content = f"Q: {question}\nA: {answer}".strip()
             if not content:
                 continue
+            # round_idx=0 是最近一轮；分数随距离递减但保持在 profile 之上。
+            recency_score = max(0.5, 1.0 - round_idx * 0.05)
             synthetic = MemoryEntry(
                 id=f"working-{round_idx}-{abs(hash(content))}",
                 content=content,
@@ -419,7 +489,7 @@ class MemoryService:
                 source_ref={"question": question[:200]} if question else {},
                 trace={"kind": "working_memory", "round": round_idx},
             )
-            hits.append(self._build_memory_hit(synthetic, score=1.0, query=question))
+            hits.append(self._build_memory_hit(synthetic, score=recency_score, query=question))
         return hits
 
     @staticmethod
@@ -628,9 +698,16 @@ class MemoryService:
                         query=query,
                         content_override=mem.get("text", ""),
                     )
+                if mem.get("from_archive"):
+                    # 让用户看得出这条是压缩归档里回捞出来的兜底证据
+                    enriched_mem["from_archive"] = True
+                    enriched_mem["title"] = f"（归档回捞）{enriched_mem.get('title', '')}".strip()
                 enriched.append(enriched_mem)
             graph_hits = self._build_graph_memory_hits(doc_id, query, parse_identity=identity)
-            return self._dedupe_memory_hits([*working_hits, *graph_hits, *enriched])
+            summary_hits = self._build_session_summary_hits(doc_id, query, parse_identity=identity)
+            return self._dedupe_memory_hits(
+                [*working_hits, *summary_hits, *graph_hits, *enriched]
+            )
         except Exception as e:
             logger.error(f"记忆原始检索失败: {e}")
             return []
@@ -806,6 +883,629 @@ class MemoryService:
             result.extend(round_msgs)
         return result
 
+    # ==================== 写入去重闸门 ====================
+
+    @staticmethod
+    def _normalize_for_dedupe(text: str) -> str:
+        return " ".join(str(text or "").split()).strip().lower()
+
+    @classmethod
+    def _content_fingerprint(cls, text: str) -> str:
+        normalized = cls._normalize_for_dedupe(text)
+        if not normalized:
+            return ""
+        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _explicit_promotion_enabled() -> bool:
+        try:
+            from config import settings
+            return bool(settings.memory_explicit_promotion_enabled)
+        except Exception:
+            return True
+
+    @staticmethod
+    def _dedupe_similarity_threshold() -> float:
+        try:
+            from config import settings
+            return float(settings.memory_dedup_similarity_threshold)
+        except Exception:
+            return 0.85
+
+    def _find_duplicate_memory(
+        self,
+        content: str,
+        *,
+        doc_id: str | None,
+        candidates: list[MemoryEntry],
+    ) -> Optional[MemoryEntry]:
+        """在同作用域的活跃记忆中找出与 content 重复的条目。
+
+        先做归一化内容指纹的精确查重，再用向量近邻拦截近义重复。
+        只有当前文档记忆与全局画像记忆参与比对，别的文档不会挡住本文档的新事实。
+        任何一步失败都放行写入——去重是优化，不是正确性前提。
+        """
+        fingerprint = self._content_fingerprint(content)
+        if not fingerprint:
+            return None
+
+        scoped: dict[str, MemoryEntry] = {}
+        for entry in candidates:
+            if getattr(entry, "status", "active") != "active":
+                continue
+            if entry.doc_id not in (None, doc_id):
+                continue
+            scoped[entry.id] = entry
+        if not scoped:
+            return None
+
+        for entry in scoped.values():
+            if self._content_fingerprint(entry.content) == fingerprint:
+                return entry
+
+        threshold = self._dedupe_similarity_threshold()
+        if threshold >= 1.0:
+            return None
+        try:
+            # 迭代也放进 try：索引可能返回非列表（旧实现或被替换的后端），
+            # 去重失败必须放行写入，不能让它把整条写入链路带崩。
+            for hit in self.index.search(content, top_k=5) or []:
+                try:
+                    similarity = float(hit.get("similarity", 0.0))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if similarity < threshold:
+                    continue
+                entry = scoped.get(hit.get("entry_id", ""))
+                if entry is not None:
+                    return entry
+        except Exception as exc:
+            logger.debug(f"[MemoryDedupe] 相似度检索失败，放行写入: {exc}")
+        return None
+
+    def _select_non_duplicate(
+        self,
+        items: list[tuple[Any, str]],
+        *,
+        doc_id: str | None,
+    ) -> tuple[list[Any], int]:
+        """从 (标识, 内容) 列表中筛掉重复项，返回 (保留的标识, 丢弃数量)。"""
+        if not items:
+            return [], 0
+        try:
+            candidates = self.store.get_all_entries()
+        except Exception as exc:
+            logger.debug(f"[MemoryDedupe] 读取既有记忆失败，放行本批写入: {exc}")
+            return [key for key, _ in items], 0
+
+        kept: list[Any] = []
+        dropped = 0
+        seen_fingerprints: set[str] = set()
+        for key, content in items:
+            fingerprint = self._content_fingerprint(content)
+            if fingerprint and fingerprint in seen_fingerprints:
+                dropped += 1
+                continue
+            duplicate = self._find_duplicate_memory(
+                content, doc_id=doc_id, candidates=candidates
+            )
+            if duplicate is not None:
+                logger.debug(
+                    "[MemoryDedupe] 跳过与 %s 重复的候选记忆", duplicate.id
+                )
+                dropped += 1
+                continue
+            if fingerprint:
+                seen_fingerprints.add(fingerprint)
+            kept.append(key)
+        return kept, dropped
+
+    # ==================== 写入裁决与失效 ====================
+
+    @staticmethod
+    def _arbitration_enabled() -> bool:
+        try:
+            from config import settings
+            return bool(settings.memory_arbitration_enabled)
+        except Exception:
+            return True
+
+    def _record_audit(self, memory_id: str, event: str, **kwargs) -> None:
+        """写审计日志；失败只记 debug，绝不影响记忆写入本身。"""
+        if not getattr(self, "audit_log", None):
+            return
+        try:
+            self.audit_log.record(memory_id, event, **kwargs)
+        except Exception as exc:
+            logger.debug(f"[MemoryAudit] 记录 {event} 失败: {exc}")
+
+    def _arbitrate_facts(
+        self,
+        facts: list[str],
+        *,
+        doc_id: str | None,
+        api_key: str | None,
+        model: str | None,
+        api_provider: str | None,
+        budget: MemoryLLMBudget | None = None,
+    ) -> tuple[list[str], list[tuple[str, str, str]], list[tuple[str, str]]]:
+        """对提炼出的事实做写入裁决。
+
+        Returns:
+            (要新增的事实, [(target_id, 新内容, 旧内容)], [(target_id, 旧内容)])
+            分别对应 ADD、UPDATE、DELETE(失效)。
+        """
+        if not facts or not self.arbiter or not self._arbitration_enabled():
+            return list(facts), [], []
+        if not (api_key and model and api_provider):
+            return list(facts), [], []
+
+        try:
+            entry_map = self._get_entry_map()
+            candidates = self.arbiter.collect_candidates(
+                facts, index=self.index, entry_map=entry_map, doc_id=doc_id
+            )
+            if not candidates:
+                return list(facts), [], []
+            if not consume_budget(budget, "arbitrate"):
+                logger.info("[MemoryLLMBudget] 预算已尽，跳过写入裁决（本轮退回纯追加）")
+                return list(facts), [], []
+            decisions = self.arbiter.arbitrate(
+                facts,
+                candidates,
+                api_key=api_key,
+                model=model,
+                provider=api_provider,
+            )
+        except Exception as exc:
+            logger.warning(f"[MemoryArbiter] 裁决过程异常，降级为全部新增: {exc}")
+            return list(facts), [], []
+
+        from services.memory_arbiter import (
+            ACTION_ADD,
+            ACTION_DELETE,
+            ACTION_UPDATE,
+        )
+
+        to_add: list[str] = []
+        to_update: list[tuple[str, str, str]] = []
+        to_invalidate: list[tuple[str, str]] = []
+        for decision in decisions:
+            if decision.action == ACTION_ADD:
+                to_add.append(decision.text)
+            elif decision.action == ACTION_UPDATE:
+                to_update.append((decision.target_id, decision.text, decision.old_content))
+            elif decision.action == ACTION_DELETE:
+                to_invalidate.append((decision.target_id, decision.old_content))
+                # 矛盾的旧记忆失效后，新事实仍要进来，否则这轮信息就丢了。
+                to_add.append(decision.text)
+            # NONE：语义等价，什么都不做
+
+        if to_update or to_invalidate:
+            logger.info(
+                "[MemoryArbiter] doc_id=%s 裁决结果: 新增 %d, 更新 %d, 失效 %d",
+                doc_id,
+                len(to_add),
+                len(to_update),
+                len(to_invalidate),
+            )
+        return to_add, to_update, to_invalidate
+
+    def invalidate_entry(
+        self,
+        entry_id: str,
+        *,
+        reason: str = "superseded",
+        actor: str = "system",
+    ) -> bool:
+        """把一条记忆标记为已失效：不再参与检索，但保留可追溯且可恢复。"""
+        entry = self._find_entry(entry_id)
+        if entry is None:
+            return False
+        if entry.invalid_at:
+            return True
+
+        now = datetime.now(timezone.utc).isoformat()
+        trace = dict(entry.trace or {})
+        trace["invalidated_reason"] = reason
+        ok = self.store.update_entry_fields(
+            entry_id, {"invalid_at": now, "trace": trace}
+        )
+        if not ok:
+            return False
+        try:
+            self.index.remove_entry(entry_id)
+        except Exception as exc:
+            logger.debug(f"[Memory] 失效条目移出索引失败 {entry_id}: {exc}")
+        self._record_audit(
+            entry_id,
+            "invalidate",
+            old_content=entry.content,
+            reason=reason,
+            actor=actor,
+            doc_id=entry.doc_id,
+        )
+        return True
+
+    def revalidate_entry(self, entry_id: str, *, actor: str = "user") -> bool:
+        """撤销失效，把记忆放回检索池。"""
+        entry = self._find_entry(entry_id)
+        if entry is None:
+            return False
+        if not entry.invalid_at:
+            return True
+
+        trace = dict(entry.trace or {})
+        trace.pop("invalidated_reason", None)
+        ok = self.store.update_entry_fields(entry_id, {"invalid_at": "", "trace": trace})
+        if not ok:
+            return False
+        try:
+            self.index.add_entry(entry_id, entry.content)
+        except Exception as exc:
+            logger.debug(f"[Memory] 恢复条目重新索引失败 {entry_id}: {exc}")
+        self._record_audit(
+            entry_id,
+            "revalidate",
+            new_content=entry.content,
+            actor=actor,
+            doc_id=entry.doc_id,
+        )
+        return True
+
+    def set_entry_disabled(
+        self,
+        entry_id: str,
+        disabled: bool,
+        *,
+        actor: str = "user",
+    ) -> bool:
+        """用户手动停用/启用一条记忆（负向控制，可逆）。"""
+        entry = self._find_entry(entry_id)
+        if entry is None:
+            return False
+
+        if disabled:
+            if entry.disabled_at:
+                return True
+            now = datetime.now(timezone.utc).isoformat()
+            if not self.store.update_entry_fields(entry_id, {"disabled_at": now}):
+                return False
+            try:
+                self.index.remove_entry(entry_id)
+            except Exception as exc:
+                logger.debug(f"[Memory] 停用条目移出索引失败 {entry_id}: {exc}")
+            self._record_audit(
+                entry_id, "disable", old_content=entry.content,
+                actor=actor, doc_id=entry.doc_id,
+            )
+            return True
+
+        if not entry.disabled_at:
+            return True
+        if not self.store.update_entry_fields(entry_id, {"disabled_at": ""}):
+            return False
+        try:
+            self.index.add_entry(entry_id, entry.content)
+        except Exception as exc:
+            logger.debug(f"[Memory] 启用条目重新索引失败 {entry_id}: {exc}")
+        self._record_audit(
+            entry_id, "enable", new_content=entry.content,
+            actor=actor, doc_id=entry.doc_id,
+        )
+        return True
+
+    # ==================== 记忆 LLM 预算 ====================
+
+    @staticmethod
+    def _llm_calls_per_turn() -> int:
+        try:
+            from config import settings
+            return max(0, int(settings.memory_llm_calls_per_turn))
+        except Exception:
+            return 3
+
+    def _new_llm_budget(self) -> MemoryLLMBudget:
+        return MemoryLLMBudget(self._llm_calls_per_turn())
+
+    # ==================== 滚动会话摘要 ====================
+
+    @staticmethod
+    def _session_summary_enabled() -> bool:
+        try:
+            from config import settings
+            return bool(settings.memory_session_summary_enabled)
+        except Exception:
+            return True
+
+    @staticmethod
+    def _session_summary_interval() -> int:
+        try:
+            from config import settings
+            return max(2, int(settings.memory_session_summary_interval))
+        except Exception:
+            return 6
+
+    def _find_session_summary_entry(self, doc_id: str) -> Optional[MemoryEntry]:
+        from services.memory_summary import SESSION_SUMMARY_KIND
+
+        for entry in self.store.get_all_entries():
+            if entry.doc_id == doc_id and entry.memory_kind == SESSION_SUMMARY_KIND:
+                return entry
+        return None
+
+    def update_session_summary(
+        self,
+        doc_id: str,
+        chat_history: list[dict] | None,
+        *,
+        api_key: str | None,
+        model: str | None,
+        api_provider: str | None,
+        parse_identity: dict | None = None,
+        budget: MemoryLLMBudget | None = None,
+    ) -> Optional[str]:
+        """维护该文档的滚动会话摘要，返回新摘要文本；未更新返回 None。
+
+        只在后台写入线程里调用——它会发起一次 LLM 调用。
+        """
+        if not self._session_summary_enabled() or not doc_id:
+            return None
+        if not (api_key and model and api_provider):
+            return None
+        if not chat_history:
+            return None
+
+        usable = [
+            m for m in chat_history
+            if isinstance(m, dict) and m.get("role") in {"user", "assistant"} and m.get("content")
+        ]
+        if len(usable) < 2:
+            return None
+
+        from services.memory_summary import (
+            SESSION_SUMMARY_KIND,
+            SESSION_SUMMARY_SOURCE_TYPE,
+            build_rolling_summary,
+        )
+
+        existing = self._find_session_summary_entry(doc_id)
+        covered = int((existing.source_ref or {}).get("covered_messages", 0)) if existing else 0
+
+        # 攒够增量才更新，把 LLM 成本摊薄到多轮对话上
+        if len(usable) - covered < self._session_summary_interval():
+            return None
+
+        if not consume_budget(budget, "session_summary"):
+            logger.info("[MemoryLLMBudget] 预算已尽，跳过会话摘要更新")
+            return None
+
+        new_messages = usable[covered:] if covered < len(usable) else usable
+        summary_text = build_rolling_summary(
+            existing.content if existing else "",
+            new_messages,
+            api_key=api_key,
+            model=model,
+            provider=api_provider,
+        )
+        if not summary_text:
+            return None
+
+        identity = self._normalize_parse_identity(parse_identity) or {}
+        source_ref = {**identity, "covered_messages": len(usable)}
+
+        if existing is not None:
+            self.store.update_entry_fields(existing.id, {"source_ref": source_ref})
+            self.update_entry(
+                existing.id, summary_text, actor="system", reason="session_summary_roll"
+            )
+        else:
+            entry = MemoryEntry(
+                id=str(uuid.uuid4()),
+                content=summary_text,
+                source_type=SESSION_SUMMARY_SOURCE_TYPE,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                doc_id=doc_id,
+                importance=0.8,
+                memory_tier="short_term",
+                memory_kind=SESSION_SUMMARY_KIND,
+                memory_scope="document",
+                title="会话摘要",
+                summary=self._truncate_text(summary_text),
+                source_ref=source_ref,
+                trace={"kind": "session_summary"},
+            )
+            self.store.add_entry(entry)
+            self._record_audit(
+                entry.id, "add", new_content=summary_text,
+                reason="session_summary", actor="system", doc_id=doc_id,
+            )
+        logger.info("[SessionSummary] doc_id=%s 摘要已更新（覆盖 %d 条消息）", doc_id, len(usable))
+        return summary_text
+
+    def _build_session_summary_hits(
+        self,
+        doc_id: str | None,
+        query: str,
+        parse_identity: dict | None = None,
+    ) -> list[dict[str, Any]]:
+        """滚动摘要总是注入（不依赖检索命中），它是会话连续性而非相关性。"""
+        if not doc_id or not self._session_summary_enabled():
+            return []
+        entry = self._find_session_summary_entry(doc_id)
+        if entry is None or not entry.is_retrievable:
+            return []
+        if not self._entry_matches_parse_identity(
+            entry, doc_id=doc_id, parse_identity=parse_identity
+        ):
+            return []
+        return [self._build_memory_hit(entry, score=0.9, query=query)]
+
+    # ==================== 存储配额 ====================
+
+    @staticmethod
+    def _quota_chars_per_doc() -> int:
+        try:
+            from config import settings
+            return max(0, int(settings.memory_quota_chars_per_doc))
+        except Exception:
+            return 200_000
+
+    def _doc_entries_for_quota(self, doc_id: str) -> list[MemoryEntry]:
+        """从单个文档的 session 里取出记忆条目，供配额统计与回收使用。"""
+        try:
+            session = self.store.load_session(doc_id)
+        except Exception as exc:
+            logger.debug(f"[MemoryQuota] 读取 session 失败 doc_id={doc_id}: {exc}")
+            return []
+
+        entries: list[MemoryEntry] = []
+        for item in session.get("qa_summaries", []) or []:
+            source_type = item.get("source_type", "auto_qa")
+            if source_type in {"llm_distilled", "compressed"} and not item.get("answer"):
+                content = item.get("question", "")
+            else:
+                content = "Q: {}\nA: {}".format(
+                    item.get("question", ""), item.get("answer", "")
+                )
+            entries.append(MemoryEntry.from_dict({**item, "content": content, "doc_id": doc_id}))
+        for item in session.get("important_memories", []) or []:
+            entries.append(MemoryEntry.from_dict({**item, "doc_id": doc_id}))
+        return entries
+
+    def enforce_quota(self, doc_id: str | None) -> int:
+        """把单文档记忆的总字符数压回配额内，返回清理条数。
+
+        条数阈值（压缩用）对长短记忆一视同仁——20 条长表格记忆和 20 条一句话
+        记忆占用差一个数量级，只有配额能给出可预测的存储上界。
+
+        清理顺序刻意保守：
+        1. 先回收已停用的条目（用户已经表示不想要）
+        2. 再回收已失效的条目（已被后续对话推翻）
+        3. 再回收压缩归档的原始条目（信息已进 consolidated）
+        4. 仍超额才动活跃条目，且按"重要度低、最久未命中"排序，
+           **永不删除 importance>=1.0 的用户主动保存记忆**
+        """
+        quota = self._quota_chars_per_doc()
+        if quota <= 0 or not doc_id:
+            return 0
+
+        # 只读该文档的 session，不做全量 get_all_entries()：
+        # 文档级配额本就不需要全量数据，而全量读会触发存储层的快照重放，
+        # 那是写入路径上不该顺带发生的副作用。
+        entries = self._doc_entries_for_quota(doc_id)
+        used = sum(len(e.content or "") for e in entries)
+        if used <= quota:
+            return 0
+
+        def _sort_key(entry: MemoryEntry) -> tuple:
+            return (entry.importance, entry.last_hit_at or "", entry.created_at or "")
+
+        tiers = [
+            sorted([e for e in entries if e.disabled_at], key=_sort_key),
+            sorted([e for e in entries if e.invalid_at and not e.disabled_at], key=_sort_key),
+            sorted(
+                [e for e in entries if e.status == "archived_raw" and not e.invalid_at and not e.disabled_at],
+                key=_sort_key,
+            ),
+            sorted(
+                [e for e in entries if e.is_retrievable and e.importance < 1.0],
+                key=_sort_key,
+            ),
+        ]
+
+        removed = 0
+        for tier in tiers:
+            for entry in tier:
+                if used <= quota:
+                    break
+                if self.delete_entry(entry.id):
+                    used -= len(entry.content or "")
+                    removed += 1
+            if used <= quota:
+                break
+
+        if removed:
+            logger.info(
+                "[MemoryQuota] doc_id=%s 超出配额，已回收 %d 条记忆（剩余 %d/%d 字符）",
+                doc_id, removed, used, quota,
+            )
+        elif used > quota:
+            logger.warning(
+                "[MemoryQuota] doc_id=%s 仍超出配额但无可回收条目（%d/%d 字符），"
+                "剩余全部是用户主动保存的记忆", doc_id, used, quota,
+            )
+        return removed
+
+    def get_quota_status(self, doc_id: str | None) -> dict[str, Any]:
+        """返回配额占用情况，供面板展示。"""
+        quota = self._quota_chars_per_doc()
+        entries = [
+            e for e in self.store.get_all_entries()
+            if doc_id is None or e.doc_id == doc_id
+        ]
+        used = sum(len(e.content or "") for e in entries)
+        return {
+            "doc_id": doc_id,
+            "used_chars": used,
+            "quota_chars": quota,
+            "entry_count": len(entries),
+            "over_quota": bool(quota and used > quota),
+        }
+
+    def restore_archived_entry(self, entry_id: str, *, actor: str = "user") -> bool:
+        """把压缩归档的原始记忆恢复为活跃状态。
+
+        压缩是有损的——LLM 可能摘丢了某个数值。用户在归档里找回那条时，
+        应当能一键让它重新参与检索，而不是只能只读查看。
+        """
+        entry = self._find_entry(entry_id)
+        if entry is None:
+            return False
+        if entry.status != "archived_raw":
+            return True
+
+        trace = dict(entry.trace or {})
+        trace["restored_from_archive"] = True
+        trace.pop("archived_reason", None)
+        ok = self.store.update_entry_fields(
+            entry_id,
+            {"status": "active", "memory_tier": "short_term", "trace": trace},
+        )
+        if not ok:
+            return False
+        try:
+            self.index.add_entry(entry_id, entry.content)
+        except Exception as exc:
+            logger.debug(f"[Memory] 归档恢复重新索引失败 {entry_id}: {exc}")
+        self._page_in_active_pool(entry)
+        self._record_audit(
+            entry_id,
+            "revalidate",
+            new_content=entry.content,
+            reason="restored_from_archive",
+            actor=actor,
+            doc_id=entry.doc_id,
+        )
+        return True
+
+    def get_entry_history(self, entry_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """返回单条记忆的演化链。"""
+        if not getattr(self, "audit_log", None):
+            return []
+        return self.audit_log.history(entry_id, limit=limit)
+
+    def get_recent_audit(
+        self,
+        limit: int = 50,
+        doc_id: str | None = None,
+        event: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """返回最近的记忆变更，用于面板总览。"""
+        if not getattr(self, "audit_log", None):
+            return []
+        return self.audit_log.recent(limit=limit, doc_id=doc_id, event=event)
+
     # ==================== 记忆写入 ====================
 
     def save_qa_summary(
@@ -850,12 +1550,72 @@ class MemoryService:
         identity = self._normalize_parse_identity(parse_identity)
         source_ref = dict(identity or {})
 
+        # 一轮写入的 LLM 调用总预算：提炼/裁决/压缩/会话摘要/图谱按优先级消费，
+        # 预算耗尽时低优先级的那些直接跳过（它们各自的触发阈值仍在，下轮会重试）。
+        llm_budget = self._new_llm_budget()
+
         # 尝试 LLM 提炼
         distilled_facts = None
         if api_key and model and api_provider:
             distilled_facts = self._distill_facts(
-                recent_pairs, api_key, model, api_provider
+                recent_pairs, api_key, model, api_provider, budget=llm_budget
             )
+
+        # 裁决产出的改写与失效，在下面的写入事务里一并落地。
+        pending_updates: list[tuple[str, str, str]] = []
+        pending_invalidations: list[tuple[str, str]] = []
+
+        # 用户明说"记住…"时，本批记忆直接按用户主动保存对待。
+        explicit_request = bool(
+            self._explicit_promotion_enabled()
+            and any(has_explicit_memory_request(question) for question, _ in recent_pairs)
+        )
+
+        # 去重闸门放在锁外：向量检索不应压进存储临界区。
+        if distilled_facts:
+            normalized_facts = [
+                text for text in (str(fact or "").strip() for fact in distilled_facts) if text
+            ]
+            distilled_facts, dropped = self._select_non_duplicate(
+                [(fact, fact) for fact in normalized_facts],
+                doc_id=doc_id,
+            )
+            if dropped:
+                logger.info(
+                    "[MemoryDedupe] doc_id=%s 跳过 %d 条重复提炼事实", doc_id, dropped
+                )
+            if not distilled_facts:
+                # 全部重复：清空候选让写入块自然写不出东西。
+                # 这里**不能直接 return**——会话摘要、配额、图谱这些后台维护
+                # 与"这轮有没有新事实"无关，短路掉它们会让长会话里的摘要停更。
+                # 也不能落回 auto_qa 分支，否则低质截断摘要会绕过去重再进来一次。
+                recent_pairs = []
+            # 去重之后才做裁决：能省掉一次 LLM 调用。
+            distilled_facts, pending_updates, pending_invalidations = self._arbitrate_facts(
+                distilled_facts,
+                doc_id=doc_id,
+                api_key=api_key,
+                model=model,
+                api_provider=api_provider,
+                budget=llm_budget,
+            )
+            if not distilled_facts and not pending_updates and not pending_invalidations:
+                recent_pairs = []
+        else:
+            recent_pairs, dropped = self._select_non_duplicate(
+                [
+                    (
+                        (question, answer),
+                        f"Q: {question[:QUESTION_MAX_LEN]}\nA: {answer[:ANSWER_MAX_LEN]}",
+                    )
+                    for question, answer in recent_pairs
+                ],
+                doc_id=doc_id,
+            )
+            if dropped:
+                logger.info(
+                    "[MemoryDedupe] doc_id=%s 跳过 %d 条重复 QA 摘要", doc_id, dropped
+                )
 
         # Keep snapshot/session/event writes in one short critical section. The
         # expensive LLM and embedding calls stay outside it, but their final
@@ -864,6 +1624,26 @@ class MemoryService:
             if expected_generation != self._write_generation:
                 logger.info("[Memory] clear 后拒绝过期 QA 摘要写入: doc_id=%s", doc_id)
                 return False
+
+            # 先落地裁决对既有记忆的改写与失效，再写新条目，
+            # 这样"旧事实失效 + 新事实入库"在同一个临界区内完成。
+            for target_id, new_content, _old_content in pending_updates:
+                try:
+                    self.update_entry(
+                        target_id,
+                        new_content,
+                        actor="arbiter",
+                        reason="arbitration_merge",
+                    )
+                except Exception as exc:
+                    logger.warning(f"[MemoryArbiter] 应用更新失败 {target_id}: {exc}")
+            for target_id, _old_content in pending_invalidations:
+                try:
+                    self.invalidate_entry(
+                        target_id, reason="contradicted_by_new_fact", actor="arbiter"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[MemoryArbiter] 应用失效失败 {target_id}: {exc}")
 
             session = self.store.load_session(doc_id)
             created_entries: list[MemoryEntry] = []
@@ -888,21 +1668,28 @@ class MemoryService:
                         continue
                     existing_distilled.add(fact)
                     entry_id = str(uuid.uuid4())
+                    # 本批含显式记忆指令时无法精确归因到某条事实，整批一起晋升。
+                    fact_importance = 1.0 if explicit_request else 0.7
+                    fact_trace = {"kind": "distilled_fact", "source": "qa_history"}
+                    if explicit_request:
+                        fact_trace["promoted_by"] = "explicit_request"
                     summary = {
                         "id": entry_id,
                         "question": fact,
                         "answer": "",
                         "source_type": "llm_distilled",
                         "created_at": datetime.now(timezone.utc).isoformat(),
-                        "importance": 0.7,
+                        "importance": fact_importance,
                         "memory_kind": "doc_fact",
                         "memory_scope": "document",
                         "status": "active",
                         "title": "文档事实",
                         "summary": self._truncate_text(fact),
                         "source_ref": dict(source_ref),
-                        "trace": {"kind": "distilled_fact", "source": "qa_history"},
+                        "trace": dict(fact_trace),
                     }
+                    if explicit_request:
+                        summary["memory_tier"] = "long_term"
                     session["qa_summaries"].append(summary)
                     created_entries.append(MemoryEntry(
                         id=entry_id,
@@ -910,7 +1697,8 @@ class MemoryService:
                         source_type="llm_distilled",
                         created_at=summary["created_at"],
                         doc_id=doc_id,
-                        importance=0.7,
+                        importance=fact_importance,
+                        memory_tier="long_term" if explicit_request else "short_term",
                         memory_kind="doc_fact",
                         memory_scope="document",
                         title="文档事实",
@@ -928,21 +1716,32 @@ class MemoryService:
                         continue
                     existing_auto_qa.add(qa_key)
                     entry_id = str(uuid.uuid4())
+                    # 摘要能精确归因到提问，逐条判断是否为显式记忆指令。
+                    pair_explicit = bool(
+                        self._explicit_promotion_enabled()
+                        and has_explicit_memory_request(question)
+                    )
+                    pair_importance = 1.0 if pair_explicit else 0.5
+                    pair_trace = {"kind": "qa_summary", "source": "chat_history"}
+                    if pair_explicit:
+                        pair_trace["promoted_by"] = "explicit_request"
                     summary = {
                         "id": entry_id,
                         "question": truncated_q,
                         "answer": truncated_a,
                         "source_type": "auto_qa",
                         "created_at": datetime.now(timezone.utc).isoformat(),
-                        "importance": 0.5,
+                        "importance": pair_importance,
                         "memory_kind": "episodic",
                         "memory_scope": "document",
                         "status": "active",
                         "title": truncated_q[:60] or "对话摘要",
                         "summary": self._truncate_text(f"Q: {truncated_q}\nA: {truncated_a}"),
                         "source_ref": dict(source_ref),
-                        "trace": {"kind": "qa_summary", "source": "chat_history"},
+                        "trace": dict(pair_trace),
                     }
+                    if pair_explicit:
+                        summary["memory_tier"] = "long_term"
                     session["qa_summaries"].append(summary)
                     created_entries.append(MemoryEntry(
                         id=entry_id,
@@ -950,7 +1749,8 @@ class MemoryService:
                         source_type="auto_qa",
                         created_at=summary["created_at"],
                         doc_id=doc_id,
-                        importance=0.5,
+                        importance=pair_importance,
+                        memory_tier="long_term" if pair_explicit else "short_term",
                         memory_kind="episodic",
                         memory_scope="document",
                         title=summary["title"],
@@ -968,6 +1768,14 @@ class MemoryService:
                 for entry in created_entries:
                     self.store._write_memory_markdown(entry, is_long_term=False)
                     self.store._append_event("add", {"entry": entry.to_dict(), "scope": "qa_summary"})
+                    self._record_audit(
+                        entry.id,
+                        "add",
+                        new_content=entry.content,
+                        reason=entry.source_type,
+                        actor="system",
+                        doc_id=doc_id,
+                    )
             except Exception as exc:
                 logger.warning(f"同步写入 Markdown 失败: {exc}")
 
@@ -992,11 +1800,48 @@ class MemoryService:
                 api_provider,
                 identity,
                 expected_generation,
+                llm_budget,
             )
         # QA 摘要直接更新 session，不会经过 MemoryStore.add_entry。
         # 在压缩收敛后才失效缓存，避免压缩阶段读取到半更新会话。
         if self.is_write_generation_current(expected_generation):
             self.store.cache.invalidate()
+
+        # 滚动会话摘要：补上 working 层之外的中期叙事连续性。
+        # 同样跑在后台，按消息增量阈值触发。
+        if self.is_write_generation_current(expected_generation):
+            self._safe_execute(
+                "SessionSummary.update",
+                self.update_session_summary,
+                doc_id,
+                chat_history,
+                api_key=api_key,
+                model=model,
+                api_provider=api_provider,
+                parse_identity=identity,
+                budget=llm_budget,
+            )
+
+        # 配额回收：压缩用的条数阈值管不住"20 条长表格记忆"，
+        # 这里给存储一个可预测的上界。
+        if self.is_write_generation_current(expected_generation):
+            self._safe_execute("MemoryQuota.enforce", self.enforce_quota, doc_id)
+
+        # 图谱重建放在这条后台写入链路的最后：凭证现成、不占响应路径，
+        # 且由增量阈值把 LLM 成本摊薄到多轮对话上。
+        if self.is_write_generation_current(expected_generation):
+            self._safe_execute(
+                "MemoryGraph.rebuild",
+                self.rebuild_graph,
+                doc_id,
+                api_key=api_key,
+                model=model,
+                api_provider=api_provider,
+                parse_identity=identity,
+                budget=llm_budget,
+            )
+
+        llm_budget.log_summary(doc_id)
         return True
 
     def _check_and_compress(
@@ -1007,6 +1852,7 @@ class MemoryService:
         api_provider: str = None,
         parse_identity: dict | None = None,
         expected_generation: int | None = None,
+        budget: MemoryLLMBudget | None = None,
     ) -> None:
         """检查并执行记忆压缩
 
@@ -1037,7 +1883,12 @@ class MemoryService:
         ]
         if not self.compressor.should_compress(doc_id, doc_entries):
             return
-        compressed = self.compressor.compress(doc_entries, api_key=api_key, model=model, api_provider=api_provider)
+        if not consume_budget(budget, "compress"):
+            logger.info("[MemoryLLMBudget] 预算已尽，跳过本轮压缩（阈值仍在，下轮会重试）")
+            return
+        compressed = self.compressor.compress(
+            doc_entries, api_key=api_key, model=model, api_provider=api_provider
+        )
         if not compressed:
             return
 
@@ -1087,6 +1938,7 @@ class MemoryService:
         api_key: str,
         model: str,
         api_provider: str,
+        budget: MemoryLLMBudget | None = None,
     ) -> Optional[list[str]]:
         """使用 LLM 从 QA 对中提炼持久性事实
 
@@ -1102,8 +1954,6 @@ class MemoryService:
             事实列表，失败时返回 None
         """
         try:
-            from services.chat_service import call_ai_api
-
             # 构建 QA 文本
             qa_text = ""
             for q, a in qa_pairs:
@@ -1113,81 +1963,104 @@ class MemoryService:
                 {
                     "role": "system",
                     "content": (
-                        "你是记忆提炼助手。从以下问答记录中提取值得长期记住的关键事实，"
-                        "包括：用户偏好、重要结论、关键数据、用户纠正的错误。\n"
+                        "你是论文阅读助手的记忆提炼模块。从问答记录中提取值得长期记住的事实。\n"
+                        "\n"
+                        "可以提取两类内容：\n"
+                        "1) 用户侧：用户的偏好、研究关注点、明确要求、对错误的纠正。"
+                        "这类事实【只能】来自『用户问』，绝不能从『AI答』中推断——"
+                        "把 AI 自己生成的内容当作用户偏好会污染用户画像。\n"
+                        "2) 文档侧：论文中确定的结论、关键数值、方法与数据集名称。"
+                        "这类可以来自『AI答』，但必须是论文本身的内容，"
+                        "不能是 AI 的寒暄、免责声明、检索失败说明或对话过程描述。\n"
+                        "\n"
                         "规则：\n"
-                        "- 每条事实一行，前面加 '- '\n"
-                        "- 最多提取 5 条最重要的事实\n"
-                        "- 只提取持久性信息，忽略临时性对话内容\n"
-                        "- 如果没有值得记住的内容，只回复：无\n"
-                        "- 不要添加任何解释或前缀"
+                        "- 每条事实一行，前面加 '- '，写成脱离上下文也能读懂的完整陈述\n"
+                        "- 最多 5 条，只保留持久有效的信息，丢弃一次性的追问与澄清\n"
+                        "- 用与用户提问相同的语言书写，数值、单位、专有名词保持原样\n"
+                        "- 没有值得长期记住的内容时，只回复两个字：无\n"
+                        "- 不要输出任何解释、编号或前缀\n"
+                        "\n"
+                        "示例一（无信息量，输出哨兵）：\n"
+                        "用户问：你好\n"
+                        "AI答：你好，有什么可以帮你的吗？\n"
+                        "输出：无\n"
+                        "\n"
+                        "示例二（检索失败，不得记录）：\n"
+                        "用户问：表3的F1是多少\n"
+                        "AI答：抱歉，我在文档中没有找到表3的相关内容。\n"
+                        "输出：无\n"
+                        "\n"
+                        "示例三（正常提取）：\n"
+                        "用户问：我主要关心方法部分，实验可以略过。表2里他们的方法比基线高多少？\n"
+                        "AI答：表2中该方法达到 82.4 Acc，最强基线为 79.1 Acc，高 3.3 个百分点。\n"
+                        "输出：\n"
+                        "- 用户主要关注方法部分，希望略过实验细节\n"
+                        "- 表2中论文方法为 82.4 Acc，最强基线 79.1 Acc，领先 3.3 个百分点"
                     ),
                 },
                 {"role": "user", "content": qa_text.strip()},
             ]
 
-            # 在新事件循环中同步调用异步 LLM API
-            loop = None
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                pass
+            if not consume_budget(budget, "distill"):
+                logger.info("[MemoryLLMBudget] 预算已尽，跳过事实提炼")
+                return None
+            response = call_llm_sync(
+                messages,
+                api_key=api_key,
+                model=model,
+                provider=api_provider,
+                max_tokens=300,
+            )
+            facts = self._parse_distilled_facts(response)
+            if facts is not None:
+                return facts
 
-            if loop and loop.is_running():
-                # 已在异步上下文中（不应该，因为是 threading 调用），用 run_coroutine_threadsafe
-                import concurrent.futures
-                future = asyncio.run_coroutine_threadsafe(
-                    call_ai_api(
-                        messages=messages,
-                        api_key=api_key,
-                        model=model,
-                        provider=api_provider,
-                        temperature=0.1,
-                        max_tokens=300,
+            # 提炼失败就直接降级成截断摘要，记忆质量会明显掉一档。
+            # 先带着失败原因重试一次（借鉴 paper-qa 的 prior-attempt 模式），
+            # 成本只多一次调用。
+            retry_messages = messages + [
+                {
+                    "role": "user",
+                    "content": (
+                        "上一次回复无法解析成事实列表。请严格按格式重新输出："
+                        "每条事实一行、以 '- ' 开头；没有值得记住的内容就只回复两个字：无。"
                     ),
-                    loop,
-                )
-                response = future.result(timeout=30)
-            else:
-                response = asyncio.run(
-                    call_ai_api(
-                        messages=messages,
-                        api_key=api_key,
-                        model=model,
-                        provider=api_provider,
-                        temperature=0.1,
-                        max_tokens=300,
-                    )
-                )
-
-            if isinstance(response, dict) and response.get("error"):
-                logger.warning(f"LLM 记忆提炼返回错误: {response['error']}")
+                }
+            ]
+            if not consume_budget(budget, "distill_retry"):
                 return None
-
-            # 解析响应
-            content = ""
-            if isinstance(response, dict):
-                content = response.get("content", "") or response.get("message", {}).get("content", "")
-            elif isinstance(response, str):
-                content = response
-
-            if not content or content.strip() == "无":
-                return None
-
-            # 提取事实行
-            facts = []
-            for line in content.strip().split("\n"):
-                line = line.strip()
-                if line.startswith("- "):
-                    fact = line[2:].strip()
-                    if fact and len(fact) > 3:
-                        facts.append(fact)
-
-            return facts if facts else None
+            response = call_llm_sync(
+                retry_messages,
+                api_key=api_key,
+                model=model,
+                provider=api_provider,
+                max_tokens=300,
+            )
+            return self._parse_distilled_facts(response)
 
         except Exception as e:
             logger.warning(f"LLM 记忆提炼失败，降级为截断: {e}")
             return None
+
+    @staticmethod
+    def _parse_distilled_facts(response: str | None) -> Optional[list[str]]:
+        """解析提炼结果。
+
+        返回 None 表示"没解析出东西"（可重试）；
+        返回 [] 表示模型明确说没有值得记的内容（不该重试）。
+        """
+        content = str(response or "").strip()
+        if not content:
+            return None
+        if _is_no_fact_sentinel(content):
+            return []
+        # require_marker=True：模型返回解释性散文时要判为解析失败并触发重试，
+        # 不能把那段散文当成一条"事实"存进记忆库。
+        facts = [
+            item for item in parse_bullet_list(content, require_marker=True)
+            if len(item) > 3 and not _is_no_fact_sentinel(item)
+        ]
+        return facts or None
 
     def _extract_qa_pairs(self, chat_history: list[dict]) -> list[tuple[str, str]]:
         """从对话历史中提取 QA 对
@@ -1304,6 +2177,14 @@ class MemoryService:
         except Exception as e:
             logger.error(f"添加重要记忆到向量索引失败: {e}")
         self._page_in_active_pool(entry)
+        self._record_audit(
+            entry.id,
+            "add",
+            new_content=entry.content,
+            reason=source_type,
+            actor="user",
+            doc_id=doc_id,
+        )
 
         return entry
 
@@ -1376,9 +2257,43 @@ class MemoryService:
         memory_kind: str | None = None,
         memory_scope: str | None = None,
         status: str | None = None,
+        lifecycle: str | None = None,
         include_content: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """列出记忆条目，支持按层级/作用域/状态筛选。"""
+        """列出记忆条目，支持按层级/作用域/状态/生命周期筛选与分页。
+
+        lifecycle 取值：
+        - ``retrievable``：当前真正参与检索的条目
+        - ``invalidated``：被裁决判定已被推翻的条目
+        - ``disabled``：用户手动停用的条目
+        - ``archived``：非破坏压缩后归档的原始条目
+        """
+        return self.list_entries_page(
+            doc_id=doc_id,
+            memory_kind=memory_kind,
+            memory_scope=memory_scope,
+            status=status,
+            lifecycle=lifecycle,
+            include_content=include_content,
+            limit=limit,
+            offset=offset,
+        )["items"]
+
+    def list_entries_page(
+        self,
+        *,
+        doc_id: str | None = None,
+        memory_kind: str | None = None,
+        memory_scope: str | None = None,
+        status: str | None = None,
+        lifecycle: str | None = None,
+        include_content: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """与 list_entries 相同的筛选，但额外返回总数便于前端分页。"""
         if doc_id is not None:
             doc_id = self.validate_doc_id(doc_id)
         entries = self.store.get_all_entries()
@@ -1392,9 +2307,39 @@ class MemoryService:
                 continue
             if status and entry.status != status:
                 continue
+            if lifecycle and not self._matches_lifecycle(entry, lifecycle):
+                continue
             filtered.append(entry)
         filtered.sort(key=self._entry_sort_key, reverse=True)
-        return [self._serialize_entry(entry, include_content=include_content) for entry in filtered]
+
+        total = len(filtered)
+        start = max(0, int(offset or 0))
+        if limit is None:
+            window = filtered[start:]
+        else:
+            window = filtered[start : start + max(0, int(limit))]
+        return {
+            "items": [
+                self._serialize_entry(entry, include_content=include_content)
+                for entry in window
+            ],
+            "total": total,
+            "offset": start,
+            "limit": limit,
+        }
+
+    @staticmethod
+    def _matches_lifecycle(entry: MemoryEntry, lifecycle: str) -> bool:
+        normalized = str(lifecycle or "").strip().lower()
+        if normalized == "retrievable":
+            return entry.is_retrievable
+        if normalized == "invalidated":
+            return bool(entry.invalid_at)
+        if normalized == "disabled":
+            return bool(entry.disabled_at)
+        if normalized == "archived":
+            return entry.status == "archived_raw"
+        return True
 
     def get_entry_trace(self, entry_id: str) -> dict[str, Any]:
         """返回指定记忆的来源链与派生关系。"""
@@ -1447,40 +2392,116 @@ class MemoryService:
                 )
             ]
 
-        node_map: dict[tuple[str, str], dict[str, Any]] = {}
-        edges: list[dict[str, Any]] = []
+        # 优先用缓存里的 LLM 图谱（由后台写入线程构建），拿不到就走正则降级。
+        # 这个方法在检索热路径上被调用，**绝不能**在这里发起 LLM 调用。
+        from services.memory_graph import build_regex_graph, facts_signature
 
-        def upsert_node(node_type: str, label: str) -> str:
-            key = (node_type, label)
-            if key not in node_map:
-                node_id = f"{node_type}:{len(node_map) + 1}"
-                node_map[key] = {"id": node_id, "type": node_type, "label": label}
-            return node_map[key]["id"]
+        cached = self._graph_cache.get(doc_id or "__global__")
+        if cached and cached.get("signature") == facts_signature(
+            [entry.content for entry in entries]
+        ):
+            summary = dict(cached["summary"])
+            summary["doc_id"] = doc_id
+            summary["source"] = "llm"
+            return summary
 
-        figure_pattern = re.compile(r"(?:图|Fig(?:ure)?\.?)\s*(\d+)", re.IGNORECASE)
-        table_pattern = re.compile(r"(?:表|Table)\s*(\d+)", re.IGNORECASE)
+        summary = build_regex_graph(entries).to_summary(doc_id)
+        summary["source"] = "regex"
+        return summary
 
-        for entry in entries:
-            entry_label = entry.title or self._truncate_text(entry.summary or entry.content, limit=50) or "记忆"
-            entry_node_id = upsert_node("fact", entry_label)
-            for match in figure_pattern.finditer(entry.content or ""):
-                figure_node_id = upsert_node("figure", f"Figure {match.group(1)}")
-                edges.append({"source": entry_node_id, "target": figure_node_id, "type": "shown_in"})
-            for match in table_pattern.finditer(entry.content or ""):
-                table_node_id = upsert_node("table", f"Table {match.group(1)}")
-                edges.append({"source": entry_node_id, "target": table_node_id, "type": "supports"})
-            for tag in entry.tags or []:
-                tag_node_id = upsert_node("entity", tag)
-                edges.append({"source": entry_node_id, "target": tag_node_id, "type": "derived_from"})
+    def rebuild_graph(
+        self,
+        doc_id: str | None,
+        *,
+        api_key: str,
+        model: str,
+        api_provider: str,
+        parse_identity: dict | None = None,
+        force: bool = False,
+        budget: MemoryLLMBudget | None = None,
+    ) -> dict[str, Any] | None:
+        """用 LLM 重建文档图谱并写入缓存。
 
-        nodes = list(node_map.values())
-        return {
-            "doc_id": doc_id,
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "nodes": nodes[:40],
-            "edges": edges[:80],
+        只应从后台线程或用户显式触发的接口调用——它会发起一次 LLM 调用。
+        返回 None 表示未重建（未启用/无凭证/事实太少/签名未变/增量不够/抽取失败）。
+        """
+        if not self._graph_llm_enabled() or not (api_key and model and api_provider):
+            return None
+
+        from services.memory_graph import build_llm_graph, facts_signature
+
+        entries = self._graph_source_entries(doc_id, parse_identity)
+        facts = [entry.content for entry in entries if (entry.content or "").strip()]
+        if len(facts) < 2:
+            return None
+
+        cache_key = doc_id or "__global__"
+        signature = facts_signature(facts)
+        cached = self._graph_cache.get(cache_key)
+        if cached and not force:
+            if cached.get("signature") == signature:
+                return None
+            # 事实增量不够就先不重建，把成本摊薄到多轮对话上
+            if abs(len(facts) - cached.get("fact_count", 0)) < self._graph_rebuild_delta():
+                return None
+
+        if not consume_budget(budget, "graph"):
+            logger.info("[MemoryLLMBudget] 预算已尽，跳过图谱重建")
+            return None
+
+        graph = build_llm_graph(
+            facts, api_key=api_key, model=model, provider=api_provider
+        )
+        if graph is None:
+            return None
+
+        summary = graph.to_summary(doc_id)
+        self._graph_cache[cache_key] = {
+            "signature": signature,
+            "fact_count": len(facts),
+            "summary": summary,
         }
+        logger.info(
+            "[MemoryGraph] doc_id=%s 图谱重建完成: %d 实体 / %d 关系",
+            doc_id,
+            summary["node_count"],
+            summary["edge_count"],
+        )
+        return summary
+
+    def _graph_source_entries(
+        self, doc_id: str | None, parse_identity: dict | None
+    ) -> list[MemoryEntry]:
+        entries = [
+            entry for entry in self.store.get_all_entries()
+            if entry.memory_kind in {"doc_fact", "consolidated", "graph"}
+            and entry.is_retrievable
+            and (doc_id is None or entry.doc_id == doc_id)
+        ]
+        if doc_id and self._normalize_parse_identity(parse_identity):
+            entries = [
+                entry for entry in entries
+                if self._entry_matches_parse_identity(
+                    entry, doc_id=doc_id, parse_identity=parse_identity
+                )
+            ]
+        return entries
+
+    @staticmethod
+    def _graph_llm_enabled() -> bool:
+        try:
+            from config import settings
+            return bool(settings.memory_graph_llm_enabled)
+        except Exception:
+            return True
+
+    @staticmethod
+    def _graph_rebuild_delta() -> int:
+        try:
+            from config import settings
+            return max(1, int(settings.memory_graph_rebuild_delta))
+        except Exception:
+            return 5
 
     def add_entry(
         self, content: str, source_type: str, doc_id: str = None
@@ -1529,6 +2550,14 @@ class MemoryService:
         except Exception as e:
             logger.error(f"添加记忆条目到向量索引失败: {e}")
         self._page_in_active_pool(entry)
+        self._record_audit(
+            entry.id,
+            "add",
+            new_content=entry.content,
+            reason=source_type,
+            actor="user",
+            doc_id=doc_id,
+        )
 
         return entry
 
@@ -1543,26 +2572,44 @@ class MemoryService:
         Returns:
             是否删除成功
         """
+        existing = self._find_entry(entry_id)
         success = self.store.delete_entry(entry_id)
         if success:
             try:
                 self.index.remove_entry(entry_id)
             except Exception as e:
                 logger.error(f"从向量索引移除记忆条目失败: {e}")
+            self._record_audit(
+                entry_id,
+                "delete",
+                old_content=existing.content if existing else "",
+                actor="user",
+                doc_id=existing.doc_id if existing else None,
+            )
         return success
 
-    def update_entry(self, entry_id: str, content: str) -> bool:
+    def update_entry(
+        self,
+        entry_id: str,
+        content: str,
+        *,
+        actor: str = "user",
+        reason: str = "",
+    ) -> bool:
         """更新指定记忆条目的内容
 
-        同时更新 store 和 index。
+        同时更新 store 和 index，并记一条审计。
 
         Args:
             entry_id: 记忆条目 ID
             content: 新的内容文本
+            actor: 变更发起方，用于审计区分人工编辑与裁决改写
+            reason: 变更原因，写入审计
 
         Returns:
             是否更新成功
         """
+        existing = self._find_entry(entry_id)
         success = self.store.update_entry(entry_id, content)
         if success:
             try:
@@ -1571,6 +2618,15 @@ class MemoryService:
                 self.index.add_entry(entry_id, content)
             except Exception as e:
                 logger.error(f"更新向量索引失败: {e}")
+            self._record_audit(
+                entry_id,
+                "update",
+                old_content=existing.content if existing else "",
+                new_content=content,
+                reason=reason,
+                actor=actor,
+                doc_id=existing.doc_id if existing else None,
+            )
         return success
 
     def clear_all(self) -> None:
@@ -1596,6 +2652,11 @@ class MemoryService:
             self.index.flush_sync(reason="manual")
         except Exception as e:
             logger.error(f"清空向量索引失败: {e}")
+        if getattr(self, "audit_log", None):
+            try:
+                self.audit_log.clear()
+            except Exception as e:
+                logger.warning(f"清空审计日志失败: {e}")
 
     def rebuild_from_events(self) -> dict[str, Any]:
         """从事件日志重建 JSON 快照和向量索引。"""
@@ -1741,6 +2802,7 @@ class MemoryService:
             "total_entries": total_entries,
             "index_size": index_size,
             "profile_focus_areas": focus_areas,
+            "llm_calls_per_turn": self._llm_calls_per_turn(),
             **self.store.get_storage_status(),
             **self.index.get_status(),
         }

@@ -126,7 +126,16 @@ def build_logical_figures_for_overview(
 
     # MinerU 全程路线发布后，结构化块索引是图表定位的第一来源。
     # 先读取它再判断本地 images/figures，避免纯 MinerU 文档被提前判为空。
-    deep_parse_figures = _load_deep_parse_figures(doc_id) if allow_mineru_sources else []
+    if is_mineru_route and not allow_legacy_mineru:
+        deep_parse_figures = _load_deep_parse_figures(
+            doc_id,
+            parse_manifest=parse_manifest,
+        )
+    elif allow_mineru_sources:
+        # Legacy documents have no durable generation identity to fence.
+        deep_parse_figures = _load_deep_parse_figures(doc_id)
+    else:
+        deep_parse_figures = []
 
     # 没有任何结构信号且也没有原始 PDF 时，视觉兜底无从运行。
     if not deep_parse_figures and not images and not figures and not pdf_url:
@@ -369,7 +378,11 @@ def _logical_figure_matches_reference(
     )
 
 
-def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
+def _load_deep_parse_figures(
+    doc_id: str,
+    *,
+    parse_manifest: Optional[dict] = None,
+) -> List[FigureBlock]:
     """从已重建的 MinerU 深度解析块索引中提取 figure/table，并配对邻近 caption。
 
     刻意不重新解析 mineru_results 的原始 middle_json/content_list_json：那条
@@ -390,6 +403,39 @@ def _load_deep_parse_figures(doc_id: str) -> List[FigureBlock]:
     block_index = load_block_index(DATA_DIR, doc_id)
     if not isinstance(block_index, dict) or block_index.get("source") != MINERU_BLOCK_INDEX_SOURCE:
         return []
+
+    # A document id can be reused for a new parse generation.  This helper is
+    # called by the overview path, where a stale MinerU index would otherwise
+    # look structurally valid and leak figures from the prior document state.
+    # Legacy callers retain the historical behavior because they have no
+    # generation fence to enforce.
+    manifest = parse_manifest if isinstance(parse_manifest, dict) else {}
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    if manifest and not metadata.get("legacy_inferred"):
+        expected_route = str(manifest.get("resolved_route") or "").strip().lower()
+        expected_generation = str(manifest.get("generation") or "").strip()
+        expected_source_hash = str(manifest.get("source_hash") or "").strip()
+        actual_route = str(block_index.get("parser_route") or "").strip().lower()
+        actual_generation = str(block_index.get("parse_generation") or "").strip()
+        actual_source_hash = str(block_index.get("document_source_hash") or "").strip()
+        if (
+            expected_route != "mineru"
+            or not expected_generation
+            or not expected_source_hash
+            or (actual_route, actual_generation, actual_source_hash)
+            != (expected_route, expected_generation, expected_source_hash)
+        ):
+            logger.warning(
+                "[FigureExtraction] Ignore stale MinerU block index doc=%s expected=%s/%s/%s actual=%s/%s/%s",
+                doc_id,
+                expected_route,
+                expected_generation,
+                expected_source_hash,
+                actual_route,
+                actual_generation,
+                actual_source_hash,
+            )
+            return []
 
     blocks: List[FigureBlock] = []
     for page in block_index.get("pages") or []:

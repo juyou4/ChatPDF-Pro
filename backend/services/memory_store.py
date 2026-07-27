@@ -51,6 +51,22 @@ class MemoryEntry:
     derived_from: list[str] = field(default_factory=list)
     trace: dict[str, Any] = field(default_factory=dict)
     last_used_query: str = ""
+    # 双时态：valid_at 是该事实开始成立的时间（留空表示自 created_at 起），
+    # invalid_at 非空表示已被后续对话推翻/取代，不再参与检索但保留可追溯。
+    valid_at: str = ""
+    invalid_at: str = ""
+    # 用户手动停用（负向控制）。与 invalid_at 分开，便于区分"系统判定过期"
+    # 和"用户不想要"，两者都可逆。
+    disabled_at: str = ""
+
+    @property
+    def is_retrievable(self) -> bool:
+        """该条记忆是否应参与检索与注入。"""
+        return (
+            self.status == "active"
+            and not self.invalid_at
+            and not self.disabled_at
+        )
 
     def __post_init__(self) -> None:
         if not self.memory_kind:
@@ -99,6 +115,9 @@ class MemoryEntry:
             "derived_from": self.derived_from,
             "trace": self.trace,
             "last_used_query": self.last_used_query,
+            "valid_at": self.valid_at,
+            "invalid_at": self.invalid_at,
+            "disabled_at": self.disabled_at,
         }
 
     @classmethod
@@ -124,6 +143,9 @@ class MemoryEntry:
             derived_from=data.get("derived_from", []),
             trace=data.get("trace", {}),
             last_used_query=data.get("last_used_query", ""),
+            valid_at=data.get("valid_at", ""),
+            invalid_at=data.get("invalid_at", ""),
+            disabled_at=data.get("disabled_at", ""),
         )
 
 
@@ -845,6 +867,9 @@ class MemoryStore:
                     derived_from=item.get("derived_from", []),
                     trace=item.get("trace", {}),
                     last_used_query=item.get("last_used_query", ""),
+                    valid_at=item.get("valid_at", ""),
+                    invalid_at=item.get("invalid_at", ""),
+                    disabled_at=item.get("disabled_at", ""),
                 )
                 entries.append(entry)
             # 从 important_memories 中收集

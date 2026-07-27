@@ -403,6 +403,82 @@ def matches_parse_generation(
     return source_hash is None or current["source_hash"] == str(source_hash)
 
 
+PARSE_ARTIFACT_IDENTITY_KEYS = (
+    "parse_generation",
+    "document_source_hash",
+    "block_index_hash",
+)
+
+
+def artifact_parse_identity(source: Mapping[str, Any] | None) -> dict[str, str]:
+    """Read the parse identity an artifact recorded about itself.
+
+    Accepts every envelope this repo actually persists: a vector pickle (whose
+    identity lives under ``index_meta``), a block index, and a GraphRAG identity
+    file. Missing fields come back as empty strings so callers never have to
+    distinguish "absent" from "blank" — both mean "cannot prove it belongs here".
+    """
+    if not isinstance(source, Mapping):
+        return {key: "" for key in PARSE_ARTIFACT_IDENTITY_KEYS}
+    nested = source.get("index_meta")
+    record: Mapping[str, Any] = nested if isinstance(nested, Mapping) else source
+    return {
+        "parse_generation": str(record.get("parse_generation") or "").strip(),
+        "document_source_hash": str(record.get("document_source_hash") or "").strip(),
+        "block_index_hash": str(
+            record.get("block_index_hash") or record.get("block_index_revision") or ""
+        ).strip(),
+    }
+
+
+def parse_identity_matches(
+    artifact: Mapping[str, Any] | None,
+    manifest: Mapping[str, Any] | None,
+    *,
+    block_index: Mapping[str, Any] | None = None,
+    require_block_index_hash: bool = True,
+) -> bool:
+    """The single admission rule for any artifact bound to a parse run.
+
+    Every consumer used to carry its own copy of this comparison and they had
+    drifted: some checked ``(parse_generation, document_source_hash)`` only, so
+    a parser repair that rebuilt the block tree *within* one generation left
+    their artifacts admissible while the reading UI had already moved on — the
+    same document then answered from stale block ids and section paths.
+
+    ``block_index`` is the currently published block tree. Pass it whenever one
+    exists; omitting it keeps a legacy artifact that predates immersive reading
+    blocks usable. ``require_block_index_hash`` decides what to do when the
+    published block tree carries no revision hash at all: reject (the default,
+    matching the RAG index gate) or fall through on the generation pair alone.
+    """
+    if not isinstance(manifest, Mapping):
+        return False
+    expected_generation = str(manifest.get("generation") or "").strip()
+    expected_source_hash = str(manifest.get("source_hash") or "").strip()
+    if not expected_generation or not expected_source_hash:
+        return False
+
+    stored = artifact_parse_identity(artifact)
+    if stored["parse_generation"] != expected_generation:
+        return False
+    if stored["document_source_hash"] != expected_source_hash:
+        return False
+
+    if not isinstance(block_index, Mapping):
+        return True
+
+    published = artifact_parse_identity(block_index)
+    if (
+        published["parse_generation"] != expected_generation
+        or published["document_source_hash"] != expected_source_hash
+    ):
+        return False
+    if not published["block_index_hash"]:
+        return not require_block_index_hash
+    return stored["block_index_hash"] == published["block_index_hash"]
+
+
 def _normalize_manifest(raw: Mapping[str, Any], *, data: Mapping[str, Any], doc_id: str) -> dict[str, Any]:
     raw = raw if isinstance(raw, Mapping) else {}
     inferred_route = _legacy_route(data)

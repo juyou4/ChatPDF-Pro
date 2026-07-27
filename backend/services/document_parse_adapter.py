@@ -121,7 +121,11 @@ def validate_mineru_block_index_quality(normalized: Any) -> None:
 
     expected_page_count = quality["expected_page_count"]
     coverage = quality["coverage"]
-    if expected_page_count > 0 and coverage < MINERU_MIN_PAGE_COVERAGE:
+    if expected_page_count <= 0:
+        # 页数未知时覆盖率的分母是 MinerU 自己返回的页，coverage 恒为 1.0，
+        # 全覆盖契约等于被跳过。无法核对就不能发布。
+        raise MinerUQualityError("MinerU 无法确认源文档页数，拒绝发布", **failed_quality)
+    if coverage < MINERU_MIN_PAGE_COVERAGE:
         raise MinerUQualityError("MinerU 页面覆盖不完整，拒绝发布", **failed_quality)
     if quality["failed_pages"]:
         raise MinerUQualityError("MinerU 存在失败页面，拒绝发布", **failed_quality)

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 _fallback_keyword_extractor = KeywordExtractor()
 
 READING_OUTLINE_VERSION = 4
-READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.13"
+READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.15"
 READING_OUTLINE_CONTRACT = "thematic-quick-study-v3"
 READING_OUTLINE_DETAIL_LEVEL = "thematic-quick-study"
 SECTION_BATCH_SIZE = 5
@@ -50,11 +50,24 @@ SECTION_OUTPUT_MIN_TOKENS = 1200
 SECTION_OUTPUT_TOKENS_PER_SECTION = 520
 SECTION_OUTPUT_MAX_TOKENS = 4096
 SECTION_OUTPUT_CLAIM_RISK_TOKENS = 160
+# 「摘要不完整」原先无论涉及多少章节都归为可重试的 partial，于是一份 21 章里
+# 15 章回退的结果照样会被当成 ai_partial 缓存下来（v4.8 的 6 生成/15 回退就是
+# 这个形状）。超过这个比例说明整轮生成本身失败了，必须走 blocking 分支：不缓存、
+# 回退到结构化目录，而不是把一份大面积空洞的结果留给用户。
+SECTION_INCOMPLETE_BLOCKING_RATIO = 0.3
+# 同时要求一个绝对下限：只有两三章的短文里缺 1 章就有 33%~50%，但那恰恰是
+# partial 存在的意义——保住其余可用章节。少量缺失永远走可重试的 partial。
+SECTION_INCOMPLETE_BLOCKING_MIN_COUNT = 3
 OVERVIEW_OUTPUT_MIN_TOKENS = 1800
 OVERVIEW_OUTPUT_MAX_TOKENS = 3200
 LONG_SECTION_REVIEW_COVERAGE_PCT = 60.0
 MAX_SECTION_REVIEW_BLOCKS = 12
 MAX_SECTION_REVIEW_SECTIONS = 2
+# A sampled long section is revisited as ordered source segments.  Each
+# segment stays below the structured-output prompt budget; the final pass only
+# sees grounded segment summaries, never a silently truncated tail.
+SECTION_SEGMENT_BLOCK_BUDGET = 8
+SECTION_SEGMENT_PROMPT_CHARS = 5_600
 MAX_SECTION_BLOCK_TEXT = 800
 MAX_SECTION_SUMMARY_CHARS = 90
 MAX_STUDY_FIELD_CHARS = 180
@@ -67,6 +80,13 @@ MAX_THEME_POINT_TEXT_CHARS = 80
 MAX_SECTION_TABLE_BUNDLES = 4
 MAX_SECTION_TABLE_ROWS = 40
 MAX_TABLE_ROW_TEXT_CHARS = 600
+# The final overview is a reduce stage. Keep its prompt bounded even for a
+# document with hundreds of valid section summaries, rather than letting a
+# provider silently truncate the tail of the JSON payload.
+OVERVIEW_REDUCE_INPUT_CHARS = 48_000
+OVERVIEW_REDUCE_BATCH_CHARS = 18_000
+OVERVIEW_REDUCE_MAX_BATCHES = 12
+OVERVIEW_REDUCE_OUTPUT_TOKENS = 1_400
 FLOW_SECTION_TITLE_PATTERN = re.compile(
     r"(?:method|approach|framework|architecture|pipeline|training|generation|adaptation|algorithm|"
     r"方法|框架|架构|流程|训练|生成|适配|算法)",
@@ -510,6 +530,31 @@ def _matches_failed_generation(
 
 def _is_ai_outline_source(value: Any) -> bool:
     return str(value or "").strip().lower() in {"ai", "ai_partial"}
+
+
+def _incomplete_section_issue(
+    label: str,
+    incomplete: list[str],
+    expected: set[str],
+) -> str:
+    """Classify missing per-section summaries as retriable or blocking.
+
+    A few unfinished sections are worth keeping: the rest of the document is
+    evidence-bound and useful, and the UI offers an explicit regenerate action.
+    Widespread loss is a different event — the generation round itself failed —
+    and caching it as ``ai_partial`` is how a 15-of-21 result (v4.8) reached
+    users looking like a finished outline. Blocking issues carry no
+    ``摘要不完整:`` prefix, so ``_partial_reading_outline_quality_issues``
+    leaves them to the blocking branch: no cache, fall back to the structural
+    outline.
+    """
+    widespread = (
+        len(incomplete) >= SECTION_INCOMPLETE_BLOCKING_MIN_COUNT
+        and len(incomplete) > len(expected) * SECTION_INCOMPLETE_BLOCKING_RATIO
+    )
+    if widespread:
+        return f"{label}章节摘要大面积缺失:{len(incomplete)}/{len(expected)}"
+    return f"{label}章节摘要不完整:{len(incomplete)}"
 
 
 def _partial_reading_outline_quality_issues(issues: list[str]) -> list[str]:
@@ -1230,6 +1275,278 @@ def _section_result_is_usable(item: dict[str, Any] | None) -> bool:
     )
 
 
+async def _generate_segmented_section_review(
+    *,
+    doc_id: str,
+    doc: dict[str, Any],
+    payload: dict[str, Any],
+    block_map: dict[str, dict[str, Any]],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Map every ordered source segment, then conservatively reduce it.
+
+    This is deliberately a review-only path for the few sections whose first
+    pass cannot represent its pages or characters.  A failed map or reduce
+    never replaces the already validated first-pass result.
+    """
+    section_id = str(payload.get("source_section_id") or "").strip()
+    segments = _build_segmented_section_payloads(payload, block_map)
+    source_ids = [
+        str(block_id) for block_id in payload.get("allowed_block_ids") or []
+        if str(block_id) and str(block_id) in block_map
+    ]
+    expected_chars = sum(
+        len(str(block_map[block_id].get("text") or "").strip())
+        for block_id in source_ids
+    )
+    meta: dict[str, Any] = {
+        "source_section_id": section_id,
+        "segment_count": len(segments),
+        "expected_block_count": len(source_ids),
+        "expected_char_count": expected_chars,
+        "map_completed_segments": 0,
+        "failed_segments": [],
+        "coverage_complete": False,
+    }
+    if not section_id or not segments:
+        meta["reason"] = "segment_not_needed"
+        return None, meta
+
+    semaphore = asyncio.Semaphore(SECTION_BATCH_CONCURRENCY)
+
+    async def generate_segment(segment: dict[str, Any]) -> dict[str, Any]:
+        async with semaphore:
+            raw = await _generate_section_batch(
+                doc_id=doc_id,
+                doc=doc,
+                sections=[segment],
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+            )
+        item = next(
+            (
+                value for value in raw.get("sections") or []
+                if isinstance(value, dict)
+                and str(value.get("source_section_id") or "") == section_id
+            ),
+            None,
+        )
+        if not item:
+            raise RuntimeError("分段补读未返回目标章节")
+        candidate = _canonical_brief_section_result(
+            item,
+            section_id=section_id,
+            section_hash=str(payload.get("section_hash") or ""),
+            payload=segment,
+        )
+        if not _section_result_is_usable(candidate):
+            raise RuntimeError("分段补读结果未通过证据校验")
+        return candidate
+
+    outcomes = await asyncio.gather(
+        *(generate_segment(segment) for segment in segments),
+        return_exceptions=True,
+    )
+    map_results: list[dict[str, Any]] = []
+    for index, outcome in enumerate(outcomes, start=1):
+        if isinstance(outcome, Exception):
+            meta["failed_segments"].append(index)
+            continue
+        map_results.append(outcome)
+    meta["map_completed_segments"] = len(map_results)
+    if len(map_results) != len(segments):
+        meta["reason"] = "segment_map_incomplete"
+        return None, meta
+
+    segment_to_source: dict[str, str] = {}
+    for segment in segments:
+        for prompt_id, source_id in (segment.get("segment_prompt_to_source_block_id") or {}).items():
+            if prompt_id and source_id:
+                segment_to_source[str(prompt_id)] = str(source_id)
+
+    def finalize_coverage_meta() -> None:
+        covered_prompt_ids = {
+            str(block.get("block_id") or "")
+            for segment in segments
+            for block in segment.get("blocks") or []
+            if isinstance(block, dict) and str(block.get("block_id") or "")
+        }
+        covered_source_ids = {
+            segment_to_source.get(prompt_id, prompt_id)
+            for prompt_id in covered_prompt_ids
+        }
+        covered_chars = sum(
+            len(str(block.get("text") or ""))
+            for segment in segments
+            for block in segment.get("blocks") or []
+            if isinstance(block, dict)
+        )
+        meta.update({
+            "covered_block_count": len(covered_source_ids),
+            "covered_char_count": covered_chars,
+            "coverage_complete": (
+                set(source_ids).issubset(covered_source_ids)
+                and covered_chars >= expected_chars
+            ),
+        })
+
+    if len(map_results) == 1:
+        segment = segments[0]
+        mapped_item = dict(map_results[0])
+        prompt_ids = [
+            str(block.get("block_id") or "")
+            for block in segment.get("blocks") or []
+            if isinstance(block, dict) and str(block.get("block_id") or "")
+        ]
+        mapped_evidence_ids = list(dict.fromkeys(
+            segment_to_source.get(block_id, block_id)
+            for block_id in mapped_item.get("evidence_block_ids") or []
+            if segment_to_source.get(block_id, block_id) in source_ids
+        ))
+        if not mapped_evidence_ids:
+            mapped_evidence_ids = list(dict.fromkeys(
+                segment_to_source.get(block_id, block_id)
+                for block_id in prompt_ids
+                if segment_to_source.get(block_id, block_id) in source_ids
+            ))[:3]
+        mapped_item["evidence_block_ids"] = mapped_evidence_ids
+        mapped_item["prose_claims"] = [
+            {
+                **claim,
+                "evidence_block_id": segment_to_source.get(
+                    str(claim.get("evidence_block_id") or ""),
+                    str(claim.get("evidence_block_id") or ""),
+                ),
+            }
+            for claim in mapped_item.get("prose_claims") or []
+            if isinstance(claim, dict)
+        ]
+        candidate = _canonical_brief_section_result(
+            mapped_item,
+            section_id=section_id,
+            section_hash=str(payload.get("section_hash") or ""),
+            payload=_full_section_validation_payload(payload, block_map),
+        )
+        if not _section_result_is_usable(candidate):
+            meta["reason"] = "single_segment_review_unusable"
+            return None, meta
+        finalize_coverage_meta()
+        candidate["repair_kind"] = "segmented_coverage_review"
+        return candidate, meta
+
+    reduce_blocks: list[dict[str, Any]] = []
+    supported_source_ids_by_reduce_block: dict[str, list[str]] = {}
+    for index, (segment, result) in enumerate(zip(segments, map_results), start=1):
+        reduce_id = f"segment_{index}"
+        prompt_ids = [
+            str(block.get("block_id") or "")
+            for block in segment.get("blocks") or []
+            if isinstance(block, dict) and str(block.get("block_id") or "")
+        ]
+        result_ids = [
+            str(block_id) for block_id in result.get("evidence_block_ids") or []
+            if str(block_id) in prompt_ids
+        ]
+        source_evidence = list(dict.fromkeys(
+            segment_to_source.get(block_id, block_id)
+            for block_id in result_ids
+            if segment_to_source.get(block_id, block_id) in source_ids
+        ))
+        if not source_evidence:
+            source_evidence = list(dict.fromkeys(
+                segment_to_source.get(block_id, block_id)
+                for block_id in prompt_ids
+                if segment_to_source.get(block_id, block_id) in source_ids
+            ))[:3]
+        supported_source_ids_by_reduce_block[reduce_id] = source_evidence
+        reduce_blocks.append({
+            "block_id": reduce_id,
+            "page": (segment.get("blocks") or [{}])[0].get("page") if segment.get("blocks") else payload.get("page"),
+            "type": "paragraph",
+            "text": _limit(result.get("summary"), MAX_SECTION_SUMMARY_CHARS),
+        })
+
+    reduce_payload = dict(payload)
+    reduce_payload.update({
+        "allowed_block_ids": [str(block.get("block_id")) for block in reduce_blocks],
+        "blocks": reduce_blocks,
+        "table_evidence": [],
+        "allowed_table_evidence_unit_ids": [],
+        "flow_spine_block_ids": [],
+        "motivation_block_ids": [],
+        "flow_labels": [],
+        "review_pass": True,
+        "segmented_reduce": True,
+        "segment_count": len(segments),
+        "coverage_ledger": _section_coverage_ledger(reduce_blocks, reduce_blocks),
+    })
+    try:
+        reduce_raw = await _generate_section_batch(
+            doc_id=doc_id,
+            doc=doc,
+            sections=[reduce_payload],
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+        )
+        reduced_item = next(
+            (
+                value for value in reduce_raw.get("sections") or []
+                if isinstance(value, dict)
+                and str(value.get("source_section_id") or "") == section_id
+            ),
+            None,
+        )
+        if not reduced_item:
+            raise RuntimeError("分段归并未返回目标章节")
+    except Exception as exc:
+        meta["reason"] = "segment_reduce_failed"
+        meta["error"] = type(exc).__name__
+        return None, meta
+
+    requested_reduce_ids = [
+        str(block_id) for block_id in reduced_item.get("evidence_block_ids") or []
+        if str(block_id) in supported_source_ids_by_reduce_block
+    ]
+    final_evidence_ids = list(dict.fromkeys(
+        source_id
+        for reduce_id in requested_reduce_ids
+        for source_id in supported_source_ids_by_reduce_block.get(reduce_id, [])
+    ))
+    if not final_evidence_ids:
+        final_evidence_ids = list(dict.fromkeys(
+            source_id
+            for source_ids_for_segment in supported_source_ids_by_reduce_block.values()
+            for source_id in source_ids_for_segment
+        ))
+    reduced_item = dict(reduced_item)
+    reduced_item["evidence_block_ids"] = final_evidence_ids[:6]
+    # Map-stage summaries are sufficient for a conservative section sentence,
+    # but never for exact numeric or causal claims.  Keep those claims only
+    # when a direct source block was supplied in the first pass.
+    reduced_item["metric_claims"] = []
+    reduced_item["prose_claims"] = []
+    candidate = _canonical_brief_section_result(
+        reduced_item,
+        section_id=section_id,
+        section_hash=str(payload.get("section_hash") or ""),
+        payload=_full_section_validation_payload(payload, block_map),
+    )
+    if not _section_result_is_usable(candidate):
+        meta["reason"] = "segment_reduce_unusable"
+        return None, meta
+
+    finalize_coverage_meta()
+    candidate["repair_kind"] = "segmented_coverage_review"
+    return candidate, meta
+
+
 async def _generate_ai_outline(
     *,
     doc_id: str,
@@ -1368,11 +1685,48 @@ async def _generate_ai_outline(
     )[:MAX_SECTION_REVIEW_SECTIONS]
     supplemental_reviewed_ids: list[str] = []
     supplemental_review_failures: list[str] = []
+    segmented_review_meta: dict[str, dict[str, Any]] = {}
     for review_info in review_candidates:
         section_id = str(review_info.get("source_section_id") or "")
         payload = payloads.get(section_id)
-        review_payload = _build_section_review_payload(payload or {}, block_map_all)
-        if not section_id or not review_payload:
+        if not section_id or not payload:
+            continue
+        try:
+            segmented_candidate, segment_meta = await _generate_segmented_section_review(
+                doc_id=doc_id,
+                doc=doc,
+                payload=payload,
+                block_map=block_map_all,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+            )
+            segmented_review_meta[section_id] = segment_meta
+            if segmented_candidate:
+                results[section_id] = segmented_candidate
+                payload["coverage_ledger"] = {
+                    **(
+                        payload.get("coverage_ledger")
+                        if isinstance(payload.get("coverage_ledger"), dict)
+                        else {}
+                    ),
+                    "segmented_review": segment_meta,
+                }
+                supplemental_reviewed_ids.append(section_id)
+                continue
+        except Exception as exc:
+            segmented_review_meta[section_id] = {
+                "source_section_id": section_id,
+                "reason": "segment_review_exception",
+                "error": type(exc).__name__,
+            }
+            warnings.append(
+                f"章节 {payload.get('title') or section_id} 分段覆盖补读异常，尝试有限补读：{exc}"
+            )
+
+        review_payload = _build_section_review_payload(payload, block_map_all)
+        if not review_payload:
             continue
         try:
             review_raw = await _generate_section_batch(
@@ -1682,6 +2036,20 @@ async def _generate_ai_outline(
         "reviewed_sections": supplemental_reviewed_ids,
         "failed_sections": supplemental_review_failures,
         "max_sections": MAX_SECTION_REVIEW_SECTIONS,
+    }
+    raw["sampling_stats"]["segmented_review"] = {
+        "attempted_sections": list(segmented_review_meta),
+        "reviewed_sections": [
+            section_id for section_id, meta in segmented_review_meta.items()
+            if bool(meta.get("coverage_complete"))
+            and section_id in supplemental_reviewed_ids
+        ],
+        "fallback_sections": [
+            section_id for section_id, meta in segmented_review_meta.items()
+            if section_id not in supplemental_reviewed_ids
+            or not bool(meta.get("coverage_complete"))
+        ],
+        "sections": list(segmented_review_meta.values()),
     }
     raw["numeric_repair_stats"] = {
         "suspect_sections": len(numeric_feedback),
@@ -2427,6 +2795,34 @@ def _select_section_blocks(blocks: list[dict[str, Any]], section_title: str = ""
         if block and block not in picked and len(picked) < limit:
             picked.append(block)
 
+    # Formulae, tables and media captions often carry the only concrete
+    # definition/result on a page. Give them a reserved lane before generic
+    # narrative scoring so a long prose section cannot erase those modalities.
+    structural_blocks = [
+        block for block in blocks
+        if str(block.get("type") or "").lower()
+        in {"formula", "table", "figure", "caption", "visual_enrichment", "code"}
+    ]
+    structural_quota = min(len(structural_blocks), max(2, limit // 3))
+    for block in _evenly_spaced_blocks(structural_blocks, structural_quota):
+        add(block)
+
+    # Preserve document-order page coverage in the first pass. This is not a
+    # claim of full text coverage; the ledger records the exact remaining gap.
+    page_representatives: list[dict[str, Any]] = []
+    seen_pages: set[int] = set()
+    for block in blocks:
+        try:
+            page = max(1, int(block.get("page") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        if page not in seen_pages:
+            seen_pages.add(page)
+            page_representatives.append(block)
+    page_quota = min(len(page_representatives), max(2, limit // 3))
+    for block in _evenly_spaced_blocks(page_representatives, page_quota):
+        add(block)
+
     flow_blocks = [block for block in blocks if _flow_signal_score(block) > 0]
     flow_quota = min(len(flow_blocks), max(2, limit // 3))
     for block in _evenly_spaced_blocks(flow_blocks, flow_quota):
@@ -2534,6 +2930,85 @@ def _section_hash(
     return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:16]
 
 
+def _prompt_block_from_source(block: dict[str, Any]) -> dict[str, Any]:
+    """Project one source block into the exact shape sent to a section prompt."""
+    return {
+        "block_id": block.get("block_id"),
+        "page": block.get("page"),
+        "type": block.get("type") or "paragraph",
+        "text": _limit(block.get("text"), MAX_SECTION_BLOCK_TEXT),
+    }
+
+
+def _section_coverage_ledger(
+    all_blocks: list[dict[str, Any]],
+    selected_blocks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Describe exactly which section evidence reached the first model pass."""
+    all_ids = [str(block.get("block_id") or "") for block in all_blocks]
+    selected_ids = [str(block.get("block_id") or "") for block in selected_blocks]
+    selected_id_set = {block_id for block_id in selected_ids if block_id}
+
+    def pages_for(blocks: list[dict[str, Any]]) -> list[int]:
+        pages: set[int] = set()
+        for block in blocks:
+            try:
+                pages.add(max(1, int(block.get("page") or 1)))
+            except (TypeError, ValueError):
+                pages.add(1)
+        return sorted(pages)
+
+    structural_types = {"formula", "table", "figure", "caption", "visual_enrichment", "code"}
+    expected_pages = pages_for(all_blocks)
+    selected_pages = pages_for(selected_blocks)
+    expected_structural = [
+        block for block in all_blocks
+        if str(block.get("type") or "").lower() in structural_types
+    ]
+    selected_structural = [
+        block for block in selected_blocks
+        if str(block.get("type") or "").lower() in structural_types
+    ]
+    expected_chars = sum(len(str(block.get("text") or "").strip()) for block in all_blocks)
+    selected_source_chars = sum(
+        len(str(block.get("text") or "").strip()) for block in selected_blocks
+    )
+    selected_prompt_chars = sum(
+        min(len(str(block.get("text") or "").strip()), MAX_SECTION_BLOCK_TEXT)
+        for block in selected_blocks
+    )
+    truncated_block_ids = [
+        str(block.get("block_id") or "")
+        for block in selected_blocks
+        if len(str(block.get("text") or "").strip()) > MAX_SECTION_BLOCK_TEXT
+        and str(block.get("block_id") or "")
+    ]
+    input_coverage_complete = (
+        bool(all_ids)
+        and set(all_ids).issubset(selected_id_set)
+        and not truncated_block_ids
+        and selected_prompt_chars >= expected_chars
+    )
+    return {
+        "expected_block_count": len([block_id for block_id in all_ids if block_id]),
+        "selected_block_count": len([block_id for block_id in selected_ids if block_id]),
+        "expected_pages": expected_pages,
+        "selected_pages": selected_pages,
+        "missing_pages": [page for page in expected_pages if page not in set(selected_pages)],
+        "expected_char_count": expected_chars,
+        # ``selected_char_count`` is the source text actually visible to the
+        # model, not merely the size of selected source blocks.  The separate
+        # source count makes any per-block clipping auditable.
+        "selected_char_count": selected_prompt_chars,
+        "selected_source_char_count": selected_source_chars,
+        "truncated_block_count": len(truncated_block_ids),
+        "truncated_block_ids": truncated_block_ids,
+        "expected_structural_block_count": len(expected_structural),
+        "selected_structural_block_count": len(selected_structural),
+        "input_coverage_complete": input_coverage_complete,
+    }
+
+
 def _prepare_section_payloads(
     skeleton: list[dict[str, Any]],
     block_index: dict[str, Any],
@@ -2636,6 +3111,7 @@ def _prepare_section_payloads(
             "page_end": page_end,
             "section_hash": _section_hash(node, all_blocks, table_evidence),
             "allowed_block_ids": [str(block.get("block_id")) for block in all_blocks if block.get("block_id")],
+            "coverage_ledger": _section_coverage_ledger(all_blocks, selected),
             "table_evidence": table_evidence,
             "allowed_table_evidence_unit_ids": allowed_table_evidence_unit_ids,
             "summary_role": summary_role,
@@ -2646,24 +3122,8 @@ def _prepare_section_payloads(
             "motivation_block_ids": [
                 str(block.get("block_id")) for block in selected_motivation_blocks[:4] if block.get("block_id")
             ],
-            "keyword_blocks": [
-                {
-                    "block_id": block.get("block_id"),
-                    "page": block.get("page"),
-                    "type": block.get("type") or "paragraph",
-                    "text": _limit(block.get("text"), MAX_SECTION_BLOCK_TEXT),
-                }
-                for block in keyword_blocks
-            ],
-            "blocks": [
-                {
-                    "block_id": block.get("block_id"),
-                    "page": block.get("page"),
-                    "type": block.get("type") or "paragraph",
-                    "text": _limit(block.get("text"), MAX_SECTION_BLOCK_TEXT),
-                }
-                for block in selected
-            ],
+            "keyword_blocks": [_prompt_block_from_source(block) for block in keyword_blocks],
+            "blocks": [_prompt_block_from_source(block) for block in selected],
         }
     return payloads
 
@@ -2694,15 +3154,7 @@ def _build_section_review_payload(
     order = {str(block.get("block_id") or ""): index for index, block in enumerate(all_blocks)}
     merged.sort(key=lambda block: order.get(str(block.get("block_id") or ""), 10**9))
     review_payload = dict(payload)
-    review_payload["blocks"] = [
-        {
-            "block_id": block.get("block_id"),
-            "page": block.get("page"),
-            "type": block.get("type") or "paragraph",
-            "text": _limit(block.get("text"), MAX_SECTION_BLOCK_TEXT),
-        }
-        for block in merged
-    ]
+    review_payload["blocks"] = [_prompt_block_from_source(block) for block in merged]
     review_payload["review_pass"] = True
     review_payload["supplementary_block_ids"] = [
         str(block.get("block_id") or "")
@@ -2710,6 +3162,185 @@ def _build_section_review_payload(
         if str(block.get("block_id") or "")
     ]
     return review_payload
+
+
+def _build_segmented_section_payloads(
+    payload: dict[str, Any],
+    block_map: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Split a long section into ordered, prompt-bounded source segments.
+
+    Unlike the legacy supplementary lane, every substantive source block is
+    assigned to exactly one segment.  A later reduce pass can therefore state
+    its real coverage instead of treating a dispersed sample as the section.
+    """
+    source_blocks = [
+        block_map[block_id]
+        for block_id in payload.get("allowed_block_ids") or []
+        if block_id in block_map
+    ]
+    if not source_blocks:
+        return []
+
+    # A single MinerU block can exceed the normal 800-character prompt limit.
+    # Preserve its tail as ordered prompt units instead of marking the block as
+    # covered merely because its first 800 characters were selected.
+    prompt_units: list[dict[str, Any]] = []
+    for block in source_blocks:
+        source_id = str(block.get("block_id") or "").strip()
+        text = str(block.get("text") or "").strip()
+        if not source_id or not text:
+            continue
+        start = 0
+        part_index = 1
+        while start < len(text):
+            end = min(len(text), start + MAX_SECTION_BLOCK_TEXT)
+            if end < len(text):
+                boundary = max(text.rfind(" ", start + MAX_SECTION_BLOCK_TEXT // 2, end), text.rfind("\n", start + MAX_SECTION_BLOCK_TEXT // 2, end))
+                if boundary > start:
+                    end = boundary
+            fragment = text[start:end]
+            if not fragment.strip():
+                end = min(len(text), start + MAX_SECTION_BLOCK_TEXT)
+                fragment = text[start:end]
+            unit_id = source_id if start == 0 and end >= len(text) else f"{source_id}__part_{part_index}"
+            prompt_units.append({
+                "block_id": unit_id,
+                "page": block.get("page"),
+                "type": block.get("type") or "paragraph",
+                "text": fragment,
+                "_source_block_id": source_id,
+            })
+            start = end
+            part_index += 1
+
+    if len(prompt_units) < 2:
+        return []
+
+    grouped: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+    for unit in prompt_units:
+        prompt_chars = len(str(unit.get("text") or ""))
+        if current and (
+            len(current) >= SECTION_SEGMENT_BLOCK_BUDGET
+            or current_chars + prompt_chars > SECTION_SEGMENT_PROMPT_CHARS
+        ):
+            grouped.append(current)
+            current = []
+            current_chars = 0
+        current.append(unit)
+        current_chars += prompt_chars
+    if current:
+        grouped.append(current)
+    # A single oversized source block may split into several prompt units that
+    # still fit one safe map call. Keep that one-group review so its tail is
+    # actually read; only skip when no source block needed splitting.
+    if len(grouped) < 2 and len(prompt_units) == len(source_blocks):
+        return []
+
+    segment_count = len(grouped)
+    segments: list[dict[str, Any]] = []
+    for index, prompt_segment in enumerate(grouped, start=1):
+        segment_ids = {
+            str(unit.get("block_id") or "")
+            for unit in prompt_segment
+            if str(unit.get("block_id") or "")
+        }
+        source_ids = {
+            str(unit.get("_source_block_id") or "")
+            for unit in prompt_segment
+            if str(unit.get("_source_block_id") or "")
+        }
+
+        def unit_page(unit: dict[str, Any]) -> int:
+            try:
+                return max(1, int(unit.get("page") or payload.get("page") or 1))
+            except (TypeError, ValueError):
+                return 1
+
+        segment_pages = {unit_page(unit) for unit in prompt_segment}
+        source_segment = [
+            block for block in source_blocks
+            if str(block.get("block_id") or "") in source_ids
+        ]
+        ledger_blocks = [
+            {
+                "block_id": unit.get("block_id"),
+                "page": unit.get("page"),
+                "type": unit.get("type"),
+                "text": unit.get("text"),
+            }
+            for unit in prompt_segment
+        ]
+
+        def bundle_matches_segment(bundle: Any) -> bool:
+            if not isinstance(bundle, dict):
+                return True
+            raw_pages = bundle.get("pages")
+            if not isinstance(raw_pages, list) or not raw_pages:
+                return True
+            bundle_pages: set[int] = set()
+            for page in raw_pages:
+                try:
+                    bundle_pages.add(int(page))
+                except (TypeError, ValueError):
+                    continue
+            return not bundle_pages or bool(segment_pages.intersection(bundle_pages))
+
+        segment = dict(payload)
+        segment.update({
+            "allowed_block_ids": [
+                str(unit.get("block_id"))
+                for unit in prompt_segment
+                if str(unit.get("block_id") or "")
+            ],
+            "blocks": ledger_blocks,
+            "coverage_ledger": _section_coverage_ledger(ledger_blocks, ledger_blocks),
+            "table_evidence": [
+                bundle for bundle in payload.get("table_evidence") or []
+                if bundle_matches_segment(bundle)
+            ],
+            "flow_spine_block_ids": [
+                block_id for block_id in payload.get("flow_spine_block_ids") or []
+                if str(block_id) in source_ids
+            ],
+            "motivation_block_ids": [
+                block_id for block_id in payload.get("motivation_block_ids") or []
+                if str(block_id) in source_ids
+            ],
+            "flow_labels": _named_flow_labels(source_segment)[:4],
+            "review_pass": True,
+            "segmented_map": True,
+            "segment_index": index,
+            "segment_count": segment_count,
+            "segment_prompt_to_source_block_id": {
+                str(unit.get("block_id") or ""): str(unit.get("_source_block_id") or "")
+                for unit in prompt_segment
+                if str(unit.get("block_id") or "") and str(unit.get("_source_block_id") or "")
+            },
+        })
+        segments.append(segment)
+    return segments
+
+
+def _full_section_validation_payload(
+    payload: dict[str, Any],
+    block_map: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Expose all source blocks to deterministic result validation only."""
+    source_blocks = [
+        block_map[block_id]
+        for block_id in payload.get("allowed_block_ids") or []
+        if block_id in block_map
+    ]
+    validation_payload = dict(payload)
+    # This payload never crosses an LLM boundary. Keep full source text here
+    # so a claim grounded in the tail of an oversized block remains verifiable
+    # after segmented map processing.
+    validation_payload["blocks"] = [dict(block) for block in source_blocks]
+    validation_payload["coverage_ledger"] = _section_coverage_ledger(source_blocks, source_blocks)
+    return validation_payload
 
 
 def _cached_section_results(
@@ -2935,6 +3566,7 @@ def _build_section_outline_raw(
             "section_first_block": node.get("first_block") or "",
             "page_start": payload.get("page_start") or node.get("page") or 1,
             "page_end": payload.get("page_end") or node.get("page") or 1,
+            "coverage": payload.get("coverage_ledger") or {},
             "children": [build(child) for child in node.get("children") or []],
         }
 
@@ -3131,6 +3763,11 @@ async def _generate_section_batch(
             "motivation_block_ids": section.get("motivation_block_ids") or [],
             "review_pass": bool(section.get("review_pass")),
             "supplementary_block_ids": section.get("supplementary_block_ids") or [],
+            "coverage_ledger": section.get("coverage_ledger") or {},
+            "segmented_map": bool(section.get("segmented_map")),
+            "segmented_reduce": bool(section.get("segmented_reduce")),
+            "segment_index": section.get("segment_index"),
+            "segment_count": section.get("segment_count"),
         }
         for section in sections
     ]
@@ -3185,6 +3822,17 @@ async def _generate_section_batch(
             "\n补读规则：review_pass=true 的章节含有与首轮不同的分散补充证据。"
             "请重新通读该章节的全部给定 blocks，并让 summary 同时覆盖首轮主线与补充证据中的关键结果、限制或边界；"
             "不得只复述首轮开头段落，也不得因为补读而引入证据外结论。"
+        )
+    if any(section.get("segmented_map") for section in sections):
+        user += (
+            "\n分段规则：segmented_map=true 表示当前 blocks 是同一章节按阅读顺序切出的连续原文片段。"
+            "只概括这个片段中最重要、可直接支持的内容；不得猜测其他片段的结论。"
+        )
+    if any(section.get("segmented_reduce") for section in sections):
+        user += (
+            "\n归并规则：segmented_reduce=true 时当前 blocks 是已验证的分段提要，不是原文。"
+            "只把各片段共同支持的高层要点压成一句，不得新增精确数字、最高/最低、强比较、因果或适用边界；"
+            "metric_claims 与 prose_claims 必须返回空数组，evidence_block_ids 只能使用给定的 segment_* ID。"
         )
     if numeric_feedback:
         feedback_lines = "；".join(
@@ -3598,6 +4246,196 @@ def _raw_overview_requirement_issues(
     return issues
 
 
+def _overview_digest_char_count(digest: list[dict[str, Any]]) -> int:
+    return len(json.dumps(digest, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def _pack_overview_digest_batches(digest: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Pack ordered section digests without cutting an individual section."""
+    if not digest:
+        return []
+    total_chars = _overview_digest_char_count(digest)
+    target_chars = max(
+        OVERVIEW_REDUCE_BATCH_CHARS,
+        (total_chars + OVERVIEW_REDUCE_MAX_BATCHES - 1) // OVERVIEW_REDUCE_MAX_BATCHES,
+    )
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+    for item in digest:
+        item_chars = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str))
+        if current and current_chars + item_chars > target_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(item)
+        current_chars += item_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _compact_overview_digest_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deterministic fallback when an intermediate reduce call is unavailable."""
+    sections = []
+    source_ids: list[str] = []
+    for item in batch:
+        section_id = str(item.get("source_section_id") or "").strip()
+        if section_id:
+            source_ids.append(section_id)
+        sections.append({
+            "source_section_id": section_id,
+            "title": _limit(item.get("title"), 120),
+            "summary_role": str(item.get("summary_role") or "general"),
+            "summary": _limit(item.get("summary"), 180),
+            "pages": list(item.get("pages") or [])[:12],
+            "metric_claims": [
+                {
+                    "claim_text": _limit(claim.get("claim_text"), 180),
+                    "subject": _limit(claim.get("subject"), 80),
+                    "values": list(claim.get("values") or [])[:4],
+                }
+                for claim in (item.get("metric_claims") or [])[:3]
+                if isinstance(claim, dict)
+            ],
+            "prose_claims": [
+                {
+                    "claim_text": _limit(claim.get("claim_text"), 180),
+                    "subject": _limit(claim.get("subject"), 80),
+                    "values": list(claim.get("values") or [])[:4],
+                }
+                for claim in (item.get("prose_claims") or [])[:2]
+                if isinstance(claim, dict)
+            ],
+        })
+    return {
+        "kind": "overview_reduce_batch",
+        "source_section_ids": source_ids,
+        "sections": sections,
+    }
+
+
+def _normalize_overview_reduce_batch(
+    value: dict[str, Any],
+    *,
+    source_ids: list[str],
+) -> dict[str, Any] | None:
+    summary = _limit(value.get("summary"), 900)
+    themes: list[dict[str, Any]] = []
+    allowed_ids = set(source_ids)
+    for raw_theme in value.get("themes") or []:
+        if not isinstance(raw_theme, dict):
+            continue
+        kind = str(raw_theme.get("kind") or "").strip()
+        if kind not in {"background", "innovation", "experiment", "conclusion"}:
+            continue
+        theme_ids = [
+            str(item) for item in raw_theme.get("source_section_ids") or []
+            if str(item) in allowed_ids
+        ]
+        points = [
+            {
+                "label": _limit(point.get("label"), MAX_THEME_POINT_LABEL_CHARS),
+                "text": _limit(point.get("text"), MAX_THEME_POINT_TEXT_CHARS),
+            }
+            for point in raw_theme.get("points") or []
+            if isinstance(point, dict) and str(point.get("text") or "").strip()
+        ][:5]
+        if not str(raw_theme.get("summary") or "").strip() and not points:
+            continue
+        themes.append({
+            "kind": kind,
+            "summary": _limit(raw_theme.get("summary"), 360),
+            "points": points,
+            "source_section_ids": theme_ids,
+        })
+    if not summary and not themes:
+        return None
+    return {
+        "kind": "overview_reduce_batch",
+        "source_section_ids": source_ids,
+        "summary": summary,
+        "themes": themes,
+    }
+
+
+async def _reduce_overview_digest_if_needed(
+    *,
+    digest: list[dict[str, Any]],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Perform a bounded map-reduce before the final thematic overview."""
+    input_chars = _overview_digest_char_count(digest)
+    if input_chars <= OVERVIEW_REDUCE_INPUT_CHARS:
+        return digest, {
+            "applied": False,
+            "input_sections": len(digest),
+            "input_chars": input_chars,
+            "batch_count": 1,
+            "failed_batches": [],
+        }
+
+    batches = _pack_overview_digest_batches(digest)
+    reduced: list[dict[str, Any]] = []
+    failed_batches: list[int] = []
+    for batch_index, batch in enumerate(batches, start=1):
+        compact = _compact_overview_digest_batch(batch)
+        source_ids = list(compact.get("source_section_ids") or [])
+        try:
+            response = await _call_structured_reading_model(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你负责全文导读的中间归并。只能压缩给定的已验证章节摘要，"
+                            "不得补充任何事实、数字或章节；必须保留每个主题实际使用的 source_section_ids。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "将这一批章节压缩为严格 JSON："
+                            "{\"summary\":\"批次要旨\",\"themes\":[{\"kind\":\"background|innovation|experiment|conclusion\","
+                            "\"summary\":\"主题归纳\",\"points\":[{\"label\":\"短标签\",\"text\":\"完整句\"}],"
+                            "\"source_section_ids\":[\"只可使用输入 ID\"]}]}。"
+                            "可省略本批不存在的主题；不要输出任何输入外的 ID。\n"
+                            f"章节摘要：{json.dumps(compact, ensure_ascii=False)}"
+                        ),
+                    },
+                ],
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+                max_tokens=OVERVIEW_REDUCE_OUTPUT_TOKENS,
+                diagnostic_label=f"reading_overview_reduce:{batch_index}/{len(batches)}",
+            )
+            normalized = _normalize_overview_reduce_batch(response, source_ids=source_ids)
+            if normalized is None:
+                raise ValueError("empty_overview_reduce_batch")
+            reduced.append(normalized)
+        except Exception as exc:
+            logger.warning(
+                "[ReadingOutline] overview reduce batch=%s/%s failed: %s",
+                batch_index,
+                len(batches),
+                exc,
+            )
+            failed_batches.append(batch_index)
+            reduced.append(compact)
+    return reduced, {
+        "applied": True,
+        "input_sections": len(digest),
+        "input_chars": input_chars,
+        "batch_count": len(batches),
+        "failed_batches": failed_batches,
+        "output_chars": _overview_digest_char_count(reduced),
+    }
+
+
 async def _generate_learning_overview(
     *,
     doc_id: str,
@@ -3652,6 +4490,13 @@ async def _generate_learning_overview(
         }
         for item in section_summaries
     ]
+    digest_for_model, reduce_meta = await _reduce_overview_digest_if_needed(
+        digest=digest,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+    )
     messages = [
         {
             "role": "system",
@@ -3686,7 +4531,7 @@ async def _generate_learning_overview(
                 f"文档名：{doc.get('filename', doc_id)}"
                 f"\ncoverage_plan：{json.dumps(coverage_plan, ensure_ascii=False)}"
                 f"\nlandmark_claims：{json.dumps(landmark_claims, ensure_ascii=False)}"
-                f"\n逐章摘要：{json.dumps(digest, ensure_ascii=False)}"
+                f"\n逐章摘要：{json.dumps(digest_for_model, ensure_ascii=False)}"
             ),
         },
     ]
@@ -3736,6 +4581,7 @@ async def _generate_learning_overview(
             result = repaired
     result["_coverage_plan"] = coverage_plan
     result["_landmark_claims"] = landmark_claims
+    result["_reduce_meta"] = reduce_meta
     return result
 
 
@@ -3851,12 +4697,69 @@ def _build_section_sampling_stats(
             round(len(summary_numeric) * 100 / len(available_numeric), 1)
             if available_numeric else None
         )
-        sampled = selected_count < block_count
+        ledger = payload.get("coverage_ledger") if isinstance(payload.get("coverage_ledger"), dict) else {}
+
+        def page_numbers(values: list[dict[str, Any]]) -> list[int]:
+            pages: set[int] = set()
+            for value in values:
+                try:
+                    pages.add(max(1, int(value.get("page") or 1)))
+                except (TypeError, ValueError):
+                    pages.add(1)
+            return sorted(pages)
+
+        expected_pages = (
+            [int(page) for page in ledger.get("expected_pages") or []]
+            if isinstance(ledger.get("expected_pages"), list)
+            else page_numbers(full_blocks)
+        )
+        selected_pages = (
+            [int(page) for page in ledger.get("selected_pages") or []]
+            if isinstance(ledger.get("selected_pages"), list)
+            else page_numbers(selected)
+        )
+        expected_chars = int(
+            ledger.get("expected_char_count")
+            or sum(len(str(block.get("text") or "")) for block in full_blocks)
+        )
+        selected_chars = int(
+            ledger.get("selected_char_count")
+            or sum(len(str(block.get("text") or "")) for block in selected)
+        )
+        expected_structural = int(ledger.get("expected_structural_block_count") or 0)
+        selected_structural = int(ledger.get("selected_structural_block_count") or 0)
+        page_input_coverage = (
+            round(len(set(selected_pages)) * 100 / len(set(expected_pages)), 1)
+            if expected_pages else 100.0
+        )
+        char_input_coverage = (
+            round(selected_chars * 100 / expected_chars, 1)
+            if expected_chars else 100.0
+        )
+        structural_input_coverage = (
+            round(selected_structural * 100 / expected_structural, 1)
+            if expected_structural else 100.0
+        )
+        # A section can contain every selected block but still be sampled when
+        # one of those blocks was clipped to the prompt text limit.
+        sampled = selected_count < block_count or selected_chars < expected_chars
+        segmented_review = (
+            ledger.get("segmented_review")
+            if isinstance(ledger.get("segmented_review"), dict)
+            else {}
+        )
+        segmented_coverage_complete = bool(segmented_review.get("coverage_complete"))
         review_recommended = sampled and (
-            block_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
-            or (
-                numeric_input_coverage is not None
-                and numeric_input_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+            not segmented_coverage_complete
+            and (
+                block_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+                or page_input_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+                or char_input_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+                or structural_input_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+                or (
+                    numeric_input_coverage is not None
+                    and numeric_input_coverage < LONG_SECTION_REVIEW_COVERAGE_PCT
+                )
             )
         )
         sections.append({
@@ -3865,6 +4768,18 @@ def _build_section_sampling_stats(
             "total_blocks": block_count,
             "selected_blocks": selected_count,
             "block_coverage_pct": block_coverage,
+            "expected_pages": expected_pages,
+            "selected_pages": selected_pages,
+            "missing_pages": [page for page in expected_pages if page not in set(selected_pages)],
+            "page_input_coverage_pct": page_input_coverage,
+            "char_input_coverage_pct": char_input_coverage,
+            "truncated_block_count": int(ledger.get("truncated_block_count") or 0),
+            "structural_input_coverage_pct": structural_input_coverage,
+            "input_coverage_complete": bool(ledger.get("input_coverage_complete")) if ledger else not sampled,
+            "segmented_coverage_complete": segmented_coverage_complete,
+            "effective_input_coverage_complete": (
+                bool(ledger.get("input_coverage_complete")) if ledger else not sampled
+            ) or segmented_coverage_complete,
             "significant_numbers": len(available_numeric),
             "selected_significant_numbers": len(selected_numeric),
             "summary_significant_numbers": len(summary_numeric),
@@ -4051,6 +4966,31 @@ def _strip_missing_summary_prefix(value: Any) -> str:
     return text
 
 
+def _representative_child_summary_text(
+    child_summaries: list[str],
+    *,
+    max_children: int = 3,
+    max_chars_per_child: int = 28,
+) -> str:
+    """Keep first/middle/last child coverage in a compact parent fallback."""
+    values = [" ".join(str(value or "").split()) for value in child_summaries]
+    values = [value for value in values if value]
+    if not values:
+        return ""
+    count = min(max_children, len(values))
+    if len(values) <= count:
+        selected = values
+    elif count == 1:
+        selected = [values[0]]
+    else:
+        selected_indices = sorted({
+            round(slot * (len(values) - 1) / (count - 1))
+            for slot in range(count)
+        })
+        selected = [values[index] for index in selected_indices]
+    return "；".join(_limit(value, max_chars_per_child) for value in selected)
+
+
 def _repair_cached_summary_tree(outline: dict[str, Any]) -> bool:
     """Migrate cached parent summaries that absorbed unavailable child text."""
     items = outline.get("items") if isinstance(outline.get("items"), list) else []
@@ -4072,7 +5012,7 @@ def _repair_cached_summary_tree(outline: dict[str, Any]) -> bool:
         ]
         if children and (original.startswith(LEGACY_MISSING_SECTION_SUMMARY) or not cleaned):
             cleaned = _limit_claim_text(
-                " ".join(child_summaries[:3]),
+                _representative_child_summary_text(child_summaries),
                 MAX_SECTION_SUMMARY_CHARS,
             ) if child_summaries else MISSING_SECTION_SUMMARY
         elif not cleaned:
@@ -4594,7 +5534,7 @@ def _normalize_section_study_outline(
                 }
             ]
             has_substantive_child_summary = bool(child_summaries)
-            summary = " ".join(child_summaries[:2])
+            summary = _representative_child_summary_text(child_summaries)
         if not summary and section_id:
             summary = MISSING_SECTION_SUMMARY
         summary, final_summary_unsupported = _sanitize_and_limit_claim(
@@ -4868,6 +5808,7 @@ def _normalize_section_study_outline(
             },
             "overview_coverage": overview_coverage,
             "landmark_result_coverage": landmark_result_coverage,
+            "overview_reduce": raw_overview.get("_reduce_meta") or {},
             "presentation": {
                 "mode": "thematic" if is_ai_source else "section_guide",
                 "theme_count": len(theme_items) if is_ai_source else 0,
@@ -5499,10 +6440,14 @@ def _is_substantive_evidence_block(block: dict[str, Any]) -> bool:
     block_type = str(block.get("type") or "").lower()
     if block_type == "paragraph":
         return len(text) >= 60
+    if block_type == "formula":
+        # A standalone equation may be the entire mathematical definition of
+        # a method, so word-count thresholds must not erase it from a section.
+        return len(text) >= 3
     if block_type == "caption":
         return len(text) >= 40
     if block_type == "table":
-        return len(text) >= 60
+        return len(text) >= 12
     if block_type == "visual_enrichment":
         return len(text) >= 40
     return _is_semantic_figure_block(block)
@@ -5526,6 +6471,8 @@ def _evidence_relevant(
     if category == "background" and int(block.get("page") or 1) <= 2:
         return True
     if category == "experiment" and block.get("type") in {"caption", "table", "visual_enrichment"}:
+        return True
+    if category == "innovation" and block.get("type") in {"formula", "code"}:
         return True
     english_claim_terms = re.findall(r"[A-Za-z][A-Za-z-]{3,}", f"{title} {summary}".lower())
     return bool(english_claim_terms and sum(term in haystack for term in english_claim_terms) >= 2)
@@ -5607,9 +6554,9 @@ def _section_study_quality_issues(
     incomplete_body = [section_id for section_id in expected_body if section_incomplete(section_id)]
     incomplete_appendix = [section_id for section_id in expected_appendix if section_incomplete(section_id)]
     if incomplete_body:
-        issues.append(f"正文章节摘要不完整:{len(incomplete_body)}")
+        issues.append(_incomplete_section_issue("正文", incomplete_body, expected_body))
     if incomplete_appendix:
-        issues.append(f"附录章节摘要不完整:{len(incomplete_appendix)}")
+        issues.append(_incomplete_section_issue("附录", incomplete_appendix, expected_appendix))
 
     evidence_errors = 0
     for section_id, item in by_section.items():

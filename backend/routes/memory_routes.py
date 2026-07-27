@@ -31,6 +31,18 @@ class MemoryEntryUpdate(BaseModel):
     content: str
 
 
+class MemoryEntryToggle(BaseModel):
+    """停用/启用记忆条目的请求体"""
+    disabled: bool = True
+
+
+class MemoryGraphRebuild(BaseModel):
+    """LLM 重建图谱的请求体（需要调用方提供模型凭证）"""
+    api_key: str
+    model: str
+    api_provider: str
+
+
 class MemoryEntryResponse(BaseModel):
     """记忆条目响应模型"""
     id: str
@@ -66,6 +78,7 @@ class MemoryStatusResponse(BaseModel):
     stored_embedding_model: str = ""
     rebuild_required: bool = False
     rebuild_reason: str = ""
+    llm_calls_per_turn: int = 3
 
 
 # ==================== 辅助函数 ====================
@@ -108,18 +121,54 @@ async def list_entries(
     memory_kind: str | None = Query(default=None),
     memory_scope: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    lifecycle: str | None = Query(
+        default=None,
+        description="retrievable | invalidated | disabled | archived",
+    ),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
-    """按条件列出记忆条目。"""
+    """按条件列出记忆条目，支持生命周期筛选与分页。"""
     svc = _get_service()
     doc_id = _validate_doc_id(svc, doc_id)
+    page = svc.list_entries_page(
+        doc_id=doc_id,
+        memory_kind=memory_kind,
+        memory_scope=memory_scope,
+        status=status,
+        lifecycle=lifecycle,
+        limit=limit,
+        offset=offset,
+    )
+    # 保留 entries 键，老前端不受影响
     return {
-        "entries": svc.list_entries(
-            doc_id=doc_id,
-            memory_kind=memory_kind,
-            memory_scope=memory_scope,
-            status=status,
-        )
+        "entries": page["items"],
+        "total": page["total"],
+        "offset": page["offset"],
+        "limit": page["limit"],
     }
+
+
+@router.get("/entries/{entry_id}/history")
+async def get_entry_history(
+    entry_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """返回单条记忆的演化链（ADD/UPDATE/INVALIDATE/... 全过程）。"""
+    svc = _get_service()
+    return {"entry_id": entry_id, "history": svc.get_entry_history(entry_id, limit=limit)}
+
+
+@router.get("/audit")
+async def get_recent_audit(
+    limit: int = Query(default=50, ge=1, le=200),
+    doc_id: str | None = Query(default=None),
+    event: str | None = Query(default=None),
+):
+    """返回最近的记忆变更，用于面板的演化历史时间线。"""
+    svc = _get_service()
+    doc_id = _validate_doc_id(svc, doc_id)
+    return {"events": svc.get_recent_audit(limit=limit, doc_id=doc_id, event=event)}
 
 
 @router.get("/entries/{entry_id}/trace")
@@ -137,6 +186,37 @@ async def get_graph_summary(doc_id: str):
     """返回指定文档的轻量图谱摘要。"""
     svc = _get_service()
     return svc.get_graph_summary(_validate_doc_id(svc, doc_id))
+
+
+@router.post("/graph/{doc_id}/rebuild")
+async def rebuild_graph(doc_id: str, body: MemoryGraphRebuild):
+    """用 LLM 重建指定文档的实体关系图谱。
+
+    这是一次真实的 LLM 调用，所以只放在用户显式触发的入口上；
+    GET /graph/{doc_id} 永远只读缓存或走正则降级。
+    """
+    svc = _get_service()
+    doc_id = _validate_doc_id(svc, doc_id)
+    summary = svc.rebuild_graph(
+        doc_id,
+        api_key=body.api_key,
+        model=body.model,
+        api_provider=body.api_provider,
+        force=True,
+    )
+    if summary is None:
+        raise HTTPException(
+            status_code=422,
+            detail="图谱重建未执行：请检查是否启用、凭证是否有效、该文档事实是否少于 2 条",
+        )
+    return summary
+
+
+@router.get("/quota")
+async def get_quota(doc_id: str | None = Query(default=None)):
+    """返回记忆存储配额占用情况。"""
+    svc = _get_service()
+    return svc.get_quota_status(_validate_doc_id(svc, doc_id))
 
 
 @router.get("/status", response_model=MemoryStatusResponse)
@@ -208,6 +288,49 @@ async def delete_entry(entry_id: str):
     if not success:
         raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
     return {"message": f"记忆条目 {entry_id} 已删除"}
+
+
+@router.post("/entries/{entry_id}/disable")
+async def disable_entry(entry_id: str, body: MemoryEntryToggle):
+    """停用/启用一条记忆。停用后不再参与检索，但可随时恢复。"""
+    svc = _get_service()
+    if not svc.set_entry_disabled(entry_id, body.disabled, actor="user"):
+        raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
+    return {
+        "entry_id": entry_id,
+        "disabled": body.disabled,
+        "message": "记忆已停用" if body.disabled else "记忆已启用",
+    }
+
+
+@router.post("/entries/{entry_id}/revalidate")
+async def revalidate_entry(entry_id: str):
+    """撤销失效，把被裁决判为过期的记忆放回检索池。"""
+    svc = _get_service()
+    if not svc.revalidate_entry(entry_id, actor="user"):
+        raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
+    return {"entry_id": entry_id, "message": "记忆已恢复"}
+
+
+@router.post("/entries/{entry_id}/restore")
+async def restore_archived_entry(entry_id: str):
+    """把压缩归档的原始记忆恢复为活跃状态（压缩可能摘丢了细节）。"""
+    svc = _get_service()
+    if not svc.restore_archived_entry(entry_id, actor="user"):
+        raise HTTPException(status_code=404, detail=f"记忆条目 {entry_id} 不存在")
+    return {"entry_id": entry_id, "message": "已从归档恢复"}
+
+
+@router.delete("/sessions/{doc_id}")
+async def clear_session(doc_id: str):
+    """清空指定文档的全部记忆。"""
+    svc = _get_service()
+    doc_id = _validate_doc_id(svc, doc_id)
+    removed = 0
+    for item in svc.list_entries(doc_id=doc_id, include_content=False):
+        if svc.delete_entry(item["id"]):
+            removed += 1
+    return {"doc_id": doc_id, "removed": removed, "message": f"已删除 {removed} 条记忆"}
 
 
 @router.delete("/all")

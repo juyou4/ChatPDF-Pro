@@ -39,6 +39,8 @@ _INCLUDE_TEXT_TYPES = {
     "list_item",
     "code",
     "code_body",
+    # CONTENT_LIST_V2 把 sub_type=algorithm 的代码块提升成独立类型。
+    "algorithm",
     "ref_text",
     "reference",
     "references",
@@ -49,6 +51,41 @@ _INCLUDE_TEXT_TYPES = {
     "table_caption",
     "chart_caption",
 }
+# MinerU 的 list / code 块不把正文放在 ``text``：content_list v1 用 ``list_items``
+# （字符串数组）和 ``code_body`` / ``code_caption``，CONTENT_LIST_V2 则把整块内容
+# 塞进一个 ``content`` 字典（``list_items`` 变成 ``{"item_content": ...}`` 的数组，
+# 代码正文叫 ``code_content``）。取值键漏掉这些名字时整块会被判空丢弃——注意拦下
+# 它们的从来不是 ``_INCLUDE_TEXT_TYPES``，那里早就有 list/code/ref_text。
+# 依据：MinerU docs/en/reference/output_files.md:641-643 与
+# mineru/backend/vlm/vlm_middle_json_mkcontent.py:204-213 / :406-471。
+_TEXT_VALUE_KEYS = (
+    "text",
+    "content",
+    "list_items",
+    "code_caption",
+    "code_body",
+    "blocks",
+    "lines",
+    "spans",
+)
+_NESTED_TEXT_KEYS = (
+    "text",
+    "content",
+    "item_content",
+    "list_items",
+    "code_caption",
+    "code_body",
+    "code_content",
+    "algorithm_caption",
+    "algorithm_content",
+    "html",
+    "latex",
+    "table_body",
+    "blocks",
+    "lines",
+    "spans",
+)
+_MAX_TEXT_EXTRACT_DEPTH = 6
 _CAPTION_ONLY_TYPES = {"image", "chart"}
 _TABLE_TYPES = {"table", "table_body"}
 _FORMULA_TYPES = {"equation", "interline_equation", "inline_equation", "formula"}
@@ -64,6 +101,28 @@ _EXCLUDE_TYPES = {
     "header_footer",
 }
 _HTML_TAG_RE = re.compile(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", re.IGNORECASE)
+
+# 剥标签必须认标签名，不能用通配的 ``<[^>]+>``。学术正文里 ``p<0.05``、
+# ``n>30``、``\alpha < 1 \text{ and } \beta > 0`` 都会被通配规则当成一个"标签"，
+# 连同中间的文字一起删掉（``We report p<0.05 and n>30`` 会变成 ``We report p 30``）。
+# 允许清单只覆盖 MinerU 会吐出的内联/表格 HTML，其余 ``<...>`` 一律当正文保留。
+_INLINE_HTML_TAG_NAMES = (
+    "a", "abbr", "b", "big", "blockquote", "br", "caption", "center", "cite",
+    "code", "col", "colgroup", "dd", "del", "div", "dl", "dt", "em",
+    "figcaption", "figure", "font", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+    "i", "img", "ins", "kbd", "li", "mark", "nobr", "ol", "p", "pre", "q", "s",
+    "samp", "small", "span", "strike", "strong", "sub", "sup", "table", "tbody",
+    "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var", "wbr",
+)
+# 属性必须带 ``=``。裸属性名虽然是合法 HTML，但 MinerU 输出里不出现，而放行它们
+# 会让 ``if a<b and b>c`` 这类正文重新落进射程（``b`` 恰好是个标签名）。
+_HTML_ATTRIBUTE_RE = r"""[A-Za-z_:][-\w:.]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+)"""
+_INLINE_HTML_TAG_RE = re.compile(
+    r"</?(?:" + "|".join(_INLINE_HTML_TAG_NAMES) + r")"
+    r"(?:\s+" + _HTML_ATTRIBUTE_RE + r")*"
+    r"\s*/?>",
+    re.IGNORECASE,
+)
 
 
 class _TableHTMLParser(HTMLParser):
@@ -287,7 +346,7 @@ def normalize_mineru_for_rag(
 
         text = ""
         if raw_type in _INCLUDE_TEXT_TYPES:
-            text = _clean_text(_extract_text(item, ("text", "content", "blocks", "lines", "spans")))
+            text = _clean_text(_extract_text(item, _TEXT_VALUE_KEYS))
         elif raw_type in _CAPTION_ONLY_TYPES:
             text = _clean_text(_extract_text(item, (
                 "image_caption",
@@ -318,7 +377,7 @@ def normalize_mineru_for_rag(
             # MinerU evolves its paragraph taxonomy frequently. A text-bearing
             # unknown block is still evidence, so retain it as generic text and
             # make the schema drift visible in the quality report.
-            text = _clean_text(_extract_text(item, ("text", "content", "html", "latex", "blocks", "lines", "spans")))
+            text = _clean_text(_extract_text(item, _NESTED_TEXT_KEYS))
             if text:
                 unknown_types.add(normalized_raw_type)
                 warnings.append(f"unknown_text_type_downgraded:{normalized_raw_type}:p{page_num}:i{item_index}")
@@ -406,14 +465,42 @@ def validate_mineru_rag_data(
         if isinstance(page, (int, float, str)) and str(page).strip()
     ]
 
+    quality_report = (normalized or {}).get("quality_report") if isinstance(normalized, dict) else None
+    quality_report = quality_report if isinstance(quality_report, dict) else {}
+
     if not isinstance(pages, list) or not pages:
         failures.append("pages_empty")
     if not full_text.strip():
         failures.append("full_text_empty")
-    if expected_page_count > 0 and coverage < float(min_page_coverage):
+    if expected_page_count <= 0:
+        # 页数未知时，覆盖率的分母退化成"MinerU 自己返回了哪些页"，coverage 恒为 1.0，
+        # 尾部缺页根本不在分母里。全覆盖契约在这种情况下等于不存在，只能拒绝发布——
+        # 不能靠换分母口径把一个无法核对的结果说成完整。
+        failures.append("expected_page_count_unknown")
+    elif coverage < float(min_page_coverage):
         failures.append("page_coverage_incomplete")
     if failed_pages:
         failures.append("page_parse_failed")
+
+    # 表格失败此前只记 warning，一个都不进闸门：整张表拍平成纯文本、甚至全表丢失，
+    # 都可以静默通过发布。
+    try:
+        malformed_table_count = max(0, int(quality_report.get("malformed_table_count") or 0))
+    except (TypeError, ValueError):
+        malformed_table_count = 0
+    if malformed_table_count > 0:
+        failures.append("table_bundle_malformed")
+    raw_type_counts = quality_report.get("raw_type_counts")
+    if isinstance(raw_type_counts, dict):
+        raw_table_blocks = 0
+        for raw_type, count in raw_type_counts.items():
+            if str(raw_type).strip().lower() in _TABLE_TYPES:
+                try:
+                    raw_table_blocks += max(0, int(count or 0))
+                except (TypeError, ValueError):
+                    continue
+        if raw_table_blocks > 0 and not bundles:
+            failures.append("table_blocks_without_bundles")
     if quality_status != "success":
         failures.append("parse_quality_not_complete")
     original_len = len(str(original_full_text or "").strip())
@@ -478,11 +565,29 @@ def _merge_content_items(
     primary_items: list[dict[str, Any]],
     fallback_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep content-list ordering but append only middle-JSON blocks it lacks."""
+    """Keep content-list ordering but splice in the middle-JSON blocks it lacks.
+
+    Appending recovered blocks to the end of the whole list left a page-2 block
+    sitting behind page-20 content, which shifts every later item's index and so
+    numbers table bundle ids (``mineru:p{page}:table:{n}``) by recovery order
+    instead of by position on the page. Splice each one behind the last item of
+    its own page instead. Ordering *within* a page still follows content-list
+    order; middle-only blocks land at the end of their page because nothing here
+    carries a trustworthy intra-page reading order (geometric sorting is
+    explicitly barred — it reorders two-column papers).
+    """
     merged = [dict(item) for item in primary_items]
     for item in fallback_items:
-        if not any(_content_items_overlap(existing, item) for existing in merged):
-            merged.append(dict(item))
+        if any(_content_items_overlap(existing, item) for existing in merged):
+            continue
+        candidate = dict(item)
+        page = _page_num(candidate)
+        insert_at = 0
+        for position in range(len(merged) - 1, -1, -1):
+            if _page_num(merged[position]) <= page:
+                insert_at = position + 1
+                break
+        merged.insert(insert_at, candidate)
     return merged
 
 
@@ -830,6 +935,26 @@ def _table_pages_for_item(item: dict[str, Any], page_num: int) -> list[int]:
             if page > 0 and page not in pages:
                 pages.append(page)
     return sorted(pages)
+
+
+def table_html_to_markdown(table_html: str, *, caption: str = "") -> str:
+    """Render a MinerU table HTML body as markdown, or "" when unparseable.
+
+    The block index used to hand a table block's raw ``<table><tr><td>`` string
+    straight to the outline and overview prompts, where an 800/900-char cap then
+    cut it mid-tag — the summary came back containing ``<td`` and half-open
+    tags. The RAG path already renders the same table as markdown; this is the
+    shared entry point so both sides agree.
+    """
+    if not str(table_html or "").strip():
+        return ""
+    try:
+        matrix = _html_table_to_matrix(table_html)
+    except Exception:
+        return ""
+    if not matrix:
+        return ""
+    return _matrix_to_markdown(matrix, caption=caption)
 
 
 def _html_table_to_matrix(table_html: str) -> list[list[str]]:
@@ -1218,21 +1343,25 @@ def _inc(counter: dict[str, int], key: str) -> None:
     counter[key] = counter.get(key, 0) + 1
 
 
-def _extract_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+def _extract_text(item: dict[str, Any], keys: tuple[str, ...], _depth: int = 0) -> str:
+    if _depth > _MAX_TEXT_EXTRACT_DEPTH or not isinstance(item, dict):
+        return ""
     parts: list[str] = []
     for key in keys:
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             parts.append(value.strip())
+        elif isinstance(value, dict):
+            # CONTENT_LIST_V2 把整块正文包进一个 ``content`` 字典。
+            nested = _extract_text(value, _NESTED_TEXT_KEYS, _depth + 1)
+            if nested:
+                parts.append(nested)
         elif isinstance(value, list):
             for child in value:
                 if isinstance(child, str) and child.strip():
                     parts.append(child.strip())
                 elif isinstance(child, dict):
-                    nested = _extract_text(
-                        child,
-                        ("text", "content", "html", "latex", "table_body", "blocks", "lines", "spans"),
-                    )
+                    nested = _extract_text(child, _NESTED_TEXT_KEYS, _depth + 1)
                     if nested:
                         parts.append(nested)
     return "\n".join(_dedupe(parts)).strip()
@@ -1368,7 +1497,13 @@ def _clean_cell_text(text: str) -> str:
 
 
 def _strip_html_tags(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", str(text or ""))
+    """Remove recognised HTML tags, leaving every other ``<...>`` run intact.
+
+    Anything this drops is gone from ``full_text``/``pages``, from table cell
+    text, and from the fast-overview context that goes straight to the answer
+    model, so an over-eager rule silently rewrites the paper's own claims.
+    """
+    return _INLINE_HTML_TAG_RE.sub(" ", str(text or ""))
 
 
 def _dedupe(values: list[str]) -> list[str]:

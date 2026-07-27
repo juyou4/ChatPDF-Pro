@@ -11,6 +11,72 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+_REWRITE_SEMANTIC_TAGS: tuple[tuple[str, re.Pattern], ...] = (
+    ("method", re.compile(r"核心方法|主要方法|方法|机制|原理|架构|方案|approach|method|mechanism|architecture", re.IGNORECASE)),
+    ("contribution", re.compile(r"贡献|创新|亮点|创新点|contribution|novelty", re.IGNORECASE)),
+    ("formula", re.compile(r"公式|方程|损失函数|equation|formula|loss", re.IGNORECASE)),
+    ("table", re.compile(r"表格|表\s*\d+|table", re.IGNORECASE)),
+    ("figure", re.compile(r"图表|图片|图\s*\d+|figure|fig(?:ure)?|chart|plot", re.IGNORECASE)),
+    ("reference", re.compile(r"参考文献|引用|doi|arxiv|bibliography|reference|citation", re.IGNORECASE)),
+    ("author_meta", re.compile(r"作者|机构|单位|邮箱|affiliation|author|institution|email", re.IGNORECASE)),
+    ("experiment", re.compile(r"实验|结果|性能|指标|数据集|benchmark|experiment|result|performance|dataset|metric", re.IGNORECASE)),
+    ("comparison", re.compile(r"比较|对比|区别|差异|相比|compare|versus|difference", re.IGNORECASE)),
+    ("explain", re.compile(r"解释|说明|为什么|如何|怎么|原理|explain|why|how", re.IGNORECASE)),
+    ("summary", re.compile(r"总结|概述|摘要|概览|summary|overview", re.IGNORECASE)),
+    ("translate", re.compile(r"翻译|译文|translate|translation", re.IGNORECASE)),
+    ("inventory", re.compile(r"全部|所有|列出|哪些|多少个|all|every|list", re.IGNORECASE)),
+    ("code", re.compile(r"代码|算法|伪代码|code|algorithm|pseudocode", re.IGNORECASE)),
+    ("limitation", re.compile(r"局限|限制|缺点|不足|limitation|limitation", re.IGNORECASE)),
+)
+_REWRITE_NEGATION_RE = re.compile(r"(?:不|没有|未|无|不是|无法|不要|not\b|no\b|without\b)", re.IGNORECASE)
+_ROUTE_SENSITIVE_REWRITE_TAGS = frozenset({
+    "formula", "table", "figure", "reference", "author_meta",
+    "comparison", "explain", "summary", "translate", "inventory",
+    "code", "limitation",
+})
+
+
+_REWRITE_IDENTIFIER_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-_/][A-Za-z0-9]+)+\b")
+
+
+def _semantic_tags(text: str) -> set[str]:
+    sample = str(text or "")
+    return {name for name, pattern in _REWRITE_SEMANTIC_TAGS if pattern.search(sample)}
+
+
+def _llm_rewrite_preserves_semantics(source: str, candidate: str) -> bool:
+    """Reject contextual rewrites that change an already stated task or modality."""
+    source_text = str(source or "").strip()
+    candidate_text = str(candidate or "").strip()
+    if not source_text or not candidate_text:
+        return False
+
+    source_tags = _semantic_tags(source_text)
+    candidate_tags = _semantic_tags(candidate_text)
+    if not source_tags.issubset(candidate_tags):
+        return False
+    if (
+        source_tags & _ROUTE_SENSITIVE_REWRITE_TAGS
+        != candidate_tags & _ROUTE_SENSITIVE_REWRITE_TAGS
+    ):
+        return False
+
+    if bool(_REWRITE_NEGATION_RE.search(source_text)) != bool(_REWRITE_NEGATION_RE.search(candidate_text)):
+        return False
+
+    source_numbers = set(re.findall(r"\d+(?:\.\d+)?", source_text))
+    if not source_numbers.issubset(set(re.findall(r"\d+(?:\.\d+)?", candidate_text))):
+        return False
+
+    source_identifiers = {
+        item.lower() for item in _REWRITE_IDENTIFIER_RE.findall(source_text)
+    }
+    candidate_identifiers = {
+        item.lower() for item in _REWRITE_IDENTIFIER_RE.findall(candidate_text)
+    }
+    return source_identifiers.issubset(candidate_identifiers)
+
+
 class QueryRewriter:
     """查询改写器 - 使用本地规则将口语化查询转换为检索友好形式"""
 
@@ -761,6 +827,13 @@ class QueryRewriter:
 
             content = content.strip()
             if content and len(content) > 3 and content != query:
+                if not _llm_rewrite_preserves_semantics(rewritten, content):
+                    logger.warning(
+                        "[LLM QueryRewrite] 拒绝语义漂移的改写: %r → %r",
+                        query,
+                        content,
+                    )
+                    return rewritten
                 logger.info(f"[LLM QueryRewrite] '{query}' → '{content}'")
                 return content
 

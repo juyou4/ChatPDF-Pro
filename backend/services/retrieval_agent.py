@@ -31,6 +31,13 @@ from services.query_analyzer import (
     extract_hl_ll_terms,
 )
 from services.modal_asset_service import looks_like_visual_query
+from services.evidence_scorer import (
+    DEFAULT_HIGH_SCORE,
+    collect_score_candidates,
+    evidence_identity,
+    score_evidence_batch,
+    sufficiency_from_scores,
+)
 from services.retrieval_tool_schemas import TOOL_SCHEMAS, get_tool_spec
 from services.retrieval_tools import DocContext, execute_async_tool
 from utils.middleware import RetryMiddleware
@@ -548,6 +555,7 @@ _AGENT_SYSTEM_PROMPT = """你是文档检索规划助手。任务：分析用户
 - `regex_search` 和 `boolean_search` 仅在用户明确要求对应能力时可用
 - `web_search` 仅在用户明确要求联网，或问题需要文档外的时效信息时使用；网页内容只能作为外部补充证据
 - 检查【搜索历史】避免重复搜索；内容足够时设置 `final: true`，或调用 `complete` 声明证据状态
+- 每轮会提供【学术取证状态】与【高分证据摘要】：已有高分/exact 证据时禁止同向重复检索，应补未覆盖子问题、表格或公式缺口，或直接 final
 - 每轮最多 5 个操作
 
 ## 输出（严格 JSON）
@@ -737,6 +745,10 @@ _HINT_EMPTY = "💡 上轮检索无结果，请尝试不同的关键词或更宽
 _HINT_UNCOVERED_SUBQUESTIONS_PREFIX = "🧭 仍有子问题未覆盖，请优先补检索："
 _HINT_SUFFICIENT = "✓ 信息可能已充足，若无明显空缺可考虑 final=true"
 _HINT_FINAL_ROUND = "🚨 已是最终轮，必须设置 final=true"
+_HINT_HIGH_SCORE_EVIDENCE = (
+    "✓ 已有高分证据摘要（见【高分证据摘要】），避免同向重复检索；"
+    "优先补未覆盖子问题、表格数值或公式缺口，否则可 final=true"
+)
 
 
 def _format_uncovered_subquestion_hint(uncovered_sub_questions: List[str] | None = None) -> str:
@@ -752,6 +764,163 @@ def _format_uncovered_subquestion_hint(uncovered_sub_questions: List[str] | None
     return f"{_HINT_UNCOVERED_SUBQUESTIONS_PREFIX}{'；'.join(preview)}{suffix}"
 
 
+def _looks_table_evidence_text(text: str, meta: Optional[dict] = None) -> bool:
+    meta = meta if isinstance(meta, dict) else {}
+    chunk_type = str(meta.get("chunk_type") or "").strip().lower()
+    if chunk_type in {"table", "table_row", "table_cell", "caption"}:
+        return True
+    if any(meta.get(key) not in (None, "", [], {}) for key in (
+        "table_id", "table_bundle_id", "evidence_unit_id",
+        "numeric_table_exact_context_row_text",
+    )):
+        return True
+    lowered = str(text or "").lower()
+    return bool(
+        "[structured table" in lowered
+        or re.search(r"(?:\btable\b|\btab\.?\b|表\s*\d)", lowered)
+    )
+
+
+def _looks_formula_evidence_text(text: str, meta: Optional[dict] = None) -> bool:
+    meta = meta if isinstance(meta, dict) else {}
+    chunk_type = str(meta.get("chunk_type") or "").strip().lower()
+    if chunk_type in {"formula", "equation"}:
+        return True
+    raw = str(text or "")
+    return bool(
+        looks_formula_like(raw)
+        or re.search(r"(?:\\begin\{|\\frac|\\sum|\\int|\$\$|方程|公式\s*\()", raw)
+    )
+
+
+def _format_academic_evidence_status(
+    *,
+    score_report: Optional[dict] = None,
+    scored_by_id: Optional[Dict[str, Any]] = None,
+    evidence_state: Optional[dict] = None,
+    sufficiency: Optional[dict] = None,
+    uncovered_sub_questions: Optional[List[str]] = None,
+    search_history: Optional[List[dict]] = None,
+) -> str:
+    """paper-qa 风格的全局取证 status，供 Planner 每轮感知进度。"""
+    report = score_report if isinstance(score_report, dict) else {}
+    state = evidence_state if isinstance(evidence_state, dict) else {}
+    suf = sufficiency if isinstance(sufficiency, dict) else {}
+    scored_items = list((scored_by_id or {}).values())
+
+    high = int(report.get("high_score_count") or 0)
+    mid = int(report.get("mid_score_count") or 0)
+    dropped = int(report.get("dropped_count") or 0)
+    bypass = int(report.get("bypass_count") or 0)
+    if not high and scored_items:
+        high = sum(
+            1
+            for item in scored_items
+            if getattr(item, "bypass", False) or int(getattr(item, "relevance_score", 0) or 0) >= DEFAULT_HIGH_SCORE
+        )
+        mid = sum(
+            1
+            for item in scored_items
+            if (not getattr(item, "bypass", False))
+            and 4 <= int(getattr(item, "relevance_score", 0) or 0) < DEFAULT_HIGH_SCORE
+        )
+
+    table_hits = 0
+    formula_hits = 0
+    for item in scored_items:
+        text = str(getattr(item, "text", "") or "")
+        meta = getattr(item, "meta", None)
+        meta = meta if isinstance(meta, dict) else {}
+        if _looks_table_evidence_text(text, meta) or getattr(item, "bypass", False):
+            table_hits += 1
+        if _looks_formula_evidence_text(text, meta):
+            formula_hits += 1
+
+    tool_calls = 0
+    for item in search_history or []:
+        if isinstance(item, dict) and str(item.get("tool") or "") != "complete":
+            tool_calls += 1
+    if not tool_calls:
+        try:
+            tool_calls = max(0, int(state.get("tool_call_count") or 0))
+        except (TypeError, ValueError):
+            tool_calls = 0
+
+    independent = 0
+    try:
+        independent = max(
+            0,
+            int(state.get("independent_evidence_count") or suf.get("independent_evidence_count") or 0),
+        )
+    except (TypeError, ValueError):
+        independent = 0
+
+    uncovered_n = len([
+        re.sub(r"\s+", " ", str(item or "")).strip()
+        for item in (uncovered_sub_questions or [])
+        if str(item or "").strip()
+    ])
+    evidence_status = str(state.get("status") or "gathering").strip() or "gathering"
+    sufficiency_level = str(suf.get("level") or "").strip() or "unknown"
+    scoring_note = "scored" if report.get("applied") else str(report.get("reason") or "not_scored")
+
+    return (
+        "【学术取证状态】\n"
+        f"Status: HighScore={high} | MidScore={mid} | Dropped={dropped} | BypassExact={bypass} | "
+        f"TableHits={table_hits} | FormulaHits={formula_hits} | "
+        f"Independent={independent} | ToolCalls={tool_calls} | "
+        f"UncoveredSubQ={uncovered_n} | Evidence={evidence_status} | "
+        f"Sufficiency={sufficiency_level} | Scoring={scoring_note}"
+    )
+
+
+def _format_high_score_evidence_block(
+    scored_by_id: Optional[Dict[str, Any]] = None,
+    *,
+    top_n: int = 5,
+    min_score: int = DEFAULT_HIGH_SCORE,
+) -> str:
+    """Feed paper-qa style top evidence summaries back to the planner."""
+    items = list((scored_by_id or {}).values())
+    if not items:
+        return ""
+
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            0 if getattr(item, "bypass", False) else 1,
+            -int(getattr(item, "relevance_score", 0) or 0),
+        ),
+    )
+    lines: list[str] = []
+    for item in ranked:
+        score = int(getattr(item, "relevance_score", 0) or 0)
+        bypass = bool(getattr(item, "bypass", False))
+        if not bypass and score < min_score:
+            continue
+        summary = re.sub(r"\s+", " ", str(getattr(item, "summary", "") or "")).strip()
+        text = re.sub(r"\s+", " ", str(getattr(item, "text", "") or "")).strip()
+        body = summary or text[:220]
+        if not body:
+            continue
+        if len(body) > 220:
+            body = body[:220].rstrip() + "..."
+        eid = str(getattr(item, "evidence_id", "") or "")[:48]
+        tag = "exact" if bypass else f"score={score}"
+        kind = str(getattr(item, "source_kind", "") or "search")
+        lines.append(f"{len(lines) + 1}. [{tag} | {kind} | {eid}] {body}")
+        if len(lines) >= max(1, int(top_n or 5)):
+            break
+
+    if not lines:
+        return ""
+    return (
+        "【高分证据摘要】（已掌握的高相关证据；不要对同一方向重复检索，"
+        "若仍不足请针对缺口换关键词/工具）\n"
+        + "\n".join(lines)
+    )
+
+
 def _compute_planner_hints(
     *,
     round_idx: int,
@@ -761,11 +930,12 @@ def _compute_planner_hints(
     duplicate_detected: bool,
     sufficiency_level: str,
     uncovered_sub_questions: List[str] | None = None,
+    high_score_count: int = 0,
 ) -> List[str]:
     """根据当前轮状态生成 Planner_Hint 列表
 
     优先级（列表首位为最高优先级）：
-        final > duplicate > empty > sufficient > first_round
+        final > duplicate > empty > uncovered > high_score > sufficient > first_round
 
     触发条件：
     - final:       round_idx == max_rounds - 1（最终轮，必须收尾）
@@ -808,11 +978,15 @@ def _compute_planner_hints(
     if round_idx > 0 and uncovered_hint:
         hints.append(uncovered_hint)
 
-    # 优先级 5：信息充足提示
+    # 优先级 5：已有高分证据时避免同向空转
+    if round_idx > 0 and int(high_score_count or 0) >= 1:
+        hints.append(_HINT_HIGH_SCORE_EVIDENCE)
+
+    # 优先级 6：信息充足提示
     if sufficiency_level == "sufficient":
         hints.append(_HINT_SUFFICIENT)
 
-    # 优先级 6：首轮提示（仅在非最终轮触发，避免与 final 冲突）
+    # 优先级 7：首轮提示（仅在非最终轮触发，避免与 final 冲突）
     if round_idx == 0 and not is_final:
         hints.append(_HINT_FIRST_ROUND)
 
@@ -859,6 +1033,21 @@ class RetrievalAgent:
         self.max_tool_concurrency = max(1, min(int(max_tool_concurrency or 5), 5))
         self.sufficiency_threshold_chars: int = 2000
         self.sufficiency_min_sources: int = 2
+        self.evidence_scoring_enabled: bool = bool(
+            getattr(settings, "agent_evidence_scoring_enabled", True)
+        )
+        self.evidence_scoring_timeout: float = max(
+            1.0, float(getattr(settings, "agent_evidence_scoring_timeout", 8.0) or 8.0)
+        )
+        self.evidence_scoring_min_candidates: int = max(
+            1, int(getattr(settings, "agent_evidence_scoring_min_candidates", 3) or 3)
+        )
+        self.evidence_k: int = max(1, int(getattr(settings, "agent_evidence_k", 10) or 10))
+        self.answer_max_sources: int = max(
+            1, int(getattr(settings, "agent_answer_max_sources", 8) or 8)
+        )
+        self._scored_evidence_by_id: Dict[str, Any] = {}
+        self._latest_evidence_score_report: Dict[str, Any] = {}
         self.sub_questions: Optional[List[str]] = sub_questions  # 由 decompose 拆分的子问题列表
         self.backfilled_groups: set = set()  # 跨轮去重：已回填的 group_id 集合
         self.use_rerank = bool(use_rerank)
@@ -1408,6 +1597,16 @@ class RetrievalAgent:
                 query_uncovered_sub_questions,
                 evidence_uncovered_sub_questions,
             )
+            high_score_count = int(
+                (self._latest_evidence_score_report or {}).get("high_score_count") or 0
+            )
+            if not high_score_count and self._scored_evidence_by_id:
+                high_score_count = sum(
+                    1
+                    for item in self._scored_evidence_by_id.values()
+                    if getattr(item, "bypass", False)
+                    or int(getattr(item, "relevance_score", 0) or 0) >= DEFAULT_HIGH_SCORE
+                )
             hints = _compute_planner_hints(
                 round_idx=round_idx,
                 max_rounds=loop_limit,
@@ -1416,6 +1615,7 @@ class RetrievalAgent:
                 duplicate_detected=last_round_duplicate_detected,
                 sufficiency_level=sufficiency_level,
                 uncovered_sub_questions=uncovered_sub_questions,
+                high_score_count=high_score_count,
             )
             self.diagnostics.setdefault("planner_hints_per_round", []).append(list(hints))
             self.diagnostics.setdefault("uncovered_sub_questions_per_round", []).append(list(uncovered_sub_questions))
@@ -1431,11 +1631,12 @@ class RetrievalAgent:
             # 本轮是否在去重检查处发现 planner 输出了重复搜索
             duplicate_detected_this_round: bool = False
 
-            # 构建用户消息（注入本轮的动态提示）
+            # 构建用户消息（注入本轮的动态提示 + 高分证据摘要闭环）
             user_content = self._build_user_message(
                 question, doc_name, search_results, search_history,
                 fetched_content, task_status, round_idx,
                 hints=hints,
+                uncovered_sub_questions=uncovered_sub_questions,
             )
 
             # 调用 LLM 规划
@@ -1848,6 +2049,14 @@ class RetrievalAgent:
                         "status_code": tool_issue.get("status_code") if tool_issue else None,
                     })
                     self._merge_tool_result(tool_name, tool_args, result, search_results, fetched_content)
+                    # Evidence scoring is request-local and only re-runs when new
+                    # document evidence arrives; exact table units bypass scoring.
+                    if tool_name not in {"web_search", "complete", "map"} and result_count:
+                        await self._maybe_score_accumulated_evidence(
+                            question,
+                            search_results,
+                            fetched_content,
+                        )
                     if tool_name == "web_search":
                         for source in result.get("web_search_sources") or []:
                             if not isinstance(source, dict):
@@ -2113,7 +2322,8 @@ class RetrievalAgent:
             phase="loop",
         )
 
-        # 构建最终上下文
+        # 构建最终上下文前再尝试一次评分，覆盖仅有 fetch/map 的路径。
+        await self._maybe_score_accumulated_evidence(question, search_results, fetched_content)
         document_search_results = self._document_search_results(search_results)
         final_context, detail, context_budget = self._build_final_context(
             question, search_results, fetched_content
@@ -2199,6 +2409,7 @@ class RetrievalAgent:
         task_status: dict,
         round_idx: int,
         hints: List[str] = (),
+        uncovered_sub_questions: Optional[List[str]] = None,
     ) -> str:
         """构建每轮发送给 planner LLM 的用户消息
 
@@ -2207,6 +2418,7 @@ class RetrievalAgent:
                 非空时会在消息最前面注入 ``【动态提示】`` 区块，便于 Planner_LLM
                 感知首轮/重复搜索/空结果/充足/最终轮等状态。默认 ``()``（空元组）
                 以避免使用可变默认值。
+            uncovered_sub_questions: 仍未覆盖的子问题，用于学术 status 行。
         """
         parts = []
 
@@ -2228,6 +2440,40 @@ class RetrievalAgent:
 
         parts.append(f"文档名称: {doc_name}")
         parts.append(f"\n用户问题:\n{question}")
+
+        # paper-qa 风格：把全局取证状态与高分摘要回传 planner，形成评分闭环。
+        evidence_state = None
+        if self._evidence_state is not None:
+            try:
+                evidence_state = self._evidence_state.snapshot()
+            except Exception:
+                evidence_state = self.diagnostics.get("evidence_state")
+        else:
+            evidence_state = self.diagnostics.get("evidence_state")
+        academic_status = _format_academic_evidence_status(
+            score_report=self._latest_evidence_score_report,
+            scored_by_id=self._scored_evidence_by_id,
+            evidence_state=evidence_state if isinstance(evidence_state, dict) else None,
+            sufficiency=self.diagnostics.get("sufficiency") if isinstance(self.diagnostics.get("sufficiency"), dict) else None,
+            uncovered_sub_questions=uncovered_sub_questions
+            or self.diagnostics.get("latest_uncovered_sub_questions"),
+            search_history=search_history,
+        )
+        parts.append(f"\n{academic_status}")
+        self.diagnostics["planner_academic_status"] = academic_status
+        self.diagnostics.setdefault("planner_academic_status_per_round", []).append(academic_status)
+
+        high_score_block = _format_high_score_evidence_block(
+            self._scored_evidence_by_id,
+            top_n=5,
+            min_score=DEFAULT_HIGH_SCORE,
+        )
+        if high_score_block:
+            parts.append(f"\n{high_score_block}")
+            self.diagnostics["planner_high_score_summaries"] = high_score_block
+            self.diagnostics.setdefault("planner_high_score_summaries_per_round", []).append(
+                high_score_block
+            )
 
         pending_visual_ids = [
             asset_id
@@ -3101,6 +3347,91 @@ class RetrievalAgent:
                 logger.warning(f"[RetrievalAgent] group_backfill fetch 失败 gid={gid}: {e}")
         return count
 
+    async def _maybe_score_accumulated_evidence(
+        self,
+        question: str,
+        search_results: List[str],
+        fetched_content: Dict[str, dict],
+    ) -> None:
+        """Score newly accumulated document evidence for sufficiency + context tiers."""
+        if not self.evidence_scoring_enabled:
+            self.diagnostics["evidence_scoring"] = {"applied": False, "reason": "disabled"}
+            return
+        if not self.api_key or not self.model:
+            self.diagnostics["evidence_scoring"] = {"applied": False, "reason": "missing_credentials"}
+            return
+
+        document_results = self._document_search_results(search_results)
+        candidates = collect_score_candidates(
+            search_results=document_results,
+            fetched_content=fetched_content,
+            extract_meta=self._extract_tool_chunk_meta,
+            evidence_k=self.evidence_k,
+        )
+        # Skip re-scoring when the candidate identity set is unchanged.
+        candidate_ids = {item.evidence_id for item in candidates}
+        cached_ids = set(self._scored_evidence_by_id.keys())
+        if candidate_ids and candidate_ids.issubset(cached_ids) and self._latest_evidence_score_report.get("applied"):
+            self.diagnostics["evidence_scoring"] = {
+                **dict(self._latest_evidence_score_report or {}),
+                "cache_hit": True,
+            }
+            return
+
+        report = await score_evidence_batch(
+            question=self._root_intent_question or question,
+            candidates=candidates,
+            api_key=self.api_key,
+            model=self.model,
+            provider=self.provider,
+            endpoint=self.endpoint or "",
+            max_concurrency=self.max_tool_concurrency,
+            timeout_s=self.evidence_scoring_timeout,
+            min_candidates=self.evidence_scoring_min_candidates,
+            call_ai_api=call_ai_api,
+            # 缓存键要带解析身份：文档重新解析后旧摘要必须失效
+            doc_id=getattr(self._doc_ctx, "doc_id", "") or "",
+            parse_generation=str(
+                (getattr(self._doc_ctx, "modal_asset_index", None) or {}).get("generation")
+                or (getattr(self._doc_ctx, "modal_asset_index", None) or {}).get("parse_generation")
+                or ""
+            ),
+        )
+        by_id = report.get("by_id") if isinstance(report.get("by_id"), dict) else {}
+        if by_id:
+            self._scored_evidence_by_id.update(by_id)
+        self._latest_evidence_score_report = {
+            "applied": bool(report.get("applied")),
+            "reason": str(report.get("reason") or ""),
+            "high_score_count": int(report.get("high_score_count") or 0),
+            "mid_score_count": int(report.get("mid_score_count") or 0),
+            "dropped_count": int(report.get("dropped_count") or 0),
+            "bypass_count": int(report.get("bypass_count") or 0),
+            "elapsed_ms": float(report.get("elapsed_ms") or 0.0),
+            "timeout": bool(report.get("timeout")),
+            "candidate_count": len(candidates),
+            "scored_count": len(list(report.get("scored") or [])),
+            "cache_hit": False,
+        }
+        self.diagnostics["evidence_scoring"] = dict(self._latest_evidence_score_report)
+        # Surface top summaries so the next planner round knows what is already in hand.
+        top_summaries: list[dict[str, Any]] = []
+        for item in list(report.get("scored") or [])[:5]:
+            score = int(getattr(item, "relevance_score", 0) or 0)
+            summary = str(getattr(item, "summary", "") or "").strip()
+            if score < DEFAULT_HIGH_SCORE and not getattr(item, "bypass", False):
+                continue
+            top_summaries.append(
+                {
+                    "evidence_id": str(getattr(item, "evidence_id", "") or ""),
+                    "score": score,
+                    "summary": summary[:220],
+                    "bypass": bool(getattr(item, "bypass", False)),
+                }
+            )
+        if top_summaries:
+            self.diagnostics["evidence_score_top"] = top_summaries
+
     def _assess_sufficiency(
         self,
         question: str,
@@ -3176,6 +3507,28 @@ class RetrievalAgent:
         ):
             level = "maybe_sufficient"
 
+        score_report: Dict[str, Any] = {}
+        scored_items = list(self._scored_evidence_by_id.values()) if self._scored_evidence_by_id else []
+        if self.evidence_scoring_enabled and scored_items and self._latest_evidence_score_report.get("applied"):
+            score_report = sufficiency_from_scores(
+                scored_items,
+                high_score=DEFAULT_HIGH_SCORE,
+                min_high=max(1, min(self.sufficiency_min_sources, 2)),
+                min_sources=required_independent_evidence,
+            )
+            score_level = str(score_report.get("level") or "")
+            # Score gate can only demote or confirm; never invent sufficiency from empty text.
+            if score_level == "insufficient" and level != "insufficient":
+                level = "insufficient"
+            elif score_level == "maybe_sufficient" and level == "sufficient":
+                level = "maybe_sufficient"
+            elif (
+                score_level == "sufficient"
+                and independent_evidence_count >= required_independent_evidence
+                and total_chars >= max(200, int(self.sufficiency_threshold_chars * 0.25))
+            ):
+                level = "sufficient"
+
         return {
             "level": level,
             "total_chars": total_chars,
@@ -3187,6 +3540,7 @@ class RetrievalAgent:
             "min_sources": self.sufficiency_min_sources,
             "question_anchor_coverage": anchor_report,
             "sub_question_evidence_coverage": sub_question_report,
+            "evidence_score_gate": score_report,
         }
 
     def _document_search_results(self, search_results: List[str]) -> List[str]:
@@ -4056,6 +4410,11 @@ class RetrievalAgent:
             context_details,
         )
         self.diagnostics["final_unified_anchor_coverage"] = unified_anchor_stats
+        context_parts, context_details, score_tier_stats = self._apply_evidence_score_tiers(
+            context_parts,
+            context_details,
+        )
+        self.diagnostics["final_evidence_score_tiers"] = score_tier_stats
 
         raw_before_tokens = self._estimate_tokens("\n\n".join(context_parts))
         context_parts, page_seed_stats = self._compact_page_seeds_for_budget(context_parts)
@@ -4142,6 +4501,93 @@ class RetrievalAgent:
             "budget_anchor_covered_count": len(budget_covered_anchors),
         }
         return context_string, detail, budget
+
+    def _apply_evidence_score_tiers(
+        self,
+        context_parts: List[str],
+        context_details: List[Dict[str, Any]],
+    ) -> tuple[List[str], List[Dict[str, Any]], Dict[str, Any]]:
+        """Drop low-score evidence and compress mid-score units to summaries."""
+        stats: Dict[str, Any] = {
+            "applied": False,
+            "reason": "",
+            "kept": 0,
+            "summarized": 0,
+            "dropped": 0,
+            "bypassed": 0,
+        }
+        if not self.evidence_scoring_enabled:
+            stats["reason"] = "disabled"
+            return context_parts, context_details, stats
+        if not self._latest_evidence_score_report.get("applied"):
+            stats["reason"] = str(self._latest_evidence_score_report.get("reason") or "not_scored")
+            return context_parts, context_details, stats
+        if not self._scored_evidence_by_id or len(context_parts) < 2:
+            stats["reason"] = "too_few_parts_or_empty_cache"
+            return context_parts, context_details, stats
+
+        enriched: list[tuple[int, int, str, dict, bool]] = []
+        for idx, part in enumerate(context_parts):
+            detail = context_details[idx] if idx < len(context_details) else {}
+            detail = dict(detail) if isinstance(detail, dict) else {}
+            meta = self._extract_tool_chunk_meta(part)
+            body = str(meta.get("text") or part or "")
+            identity = evidence_identity(
+                body,
+                meta={**meta, **{k: detail.get(k) for k in (
+                    "evidence_id", "context_id", "group_id", "block_id", "chunk_id", "chunk_type",
+                    "table_id", "table_bundle_id", "evidence_unit_id",
+                ) if detail.get(k) not in (None, "")}},
+                group_id=str(detail.get("group_id") or meta.get("group_id") or ""),
+                fallback_scope=f"part:{idx}",
+            )
+            scored = self._scored_evidence_by_id.get(identity)
+            if scored is None:
+                # Keep unscored residuals with a neutral mid priority.
+                enriched.append((5, idx, part, detail, False))
+                continue
+            score = int(getattr(scored, "relevance_score", 0) or 0)
+            bypass = bool(getattr(scored, "bypass", False))
+            if bypass:
+                detail["relevance_score"] = score
+                detail["evidence_score_bypass"] = True
+                enriched.append((10, idx, part, detail, True))
+                stats["bypassed"] += 1
+                continue
+            if score < 4:
+                stats["dropped"] += 1
+                continue
+            if score < DEFAULT_HIGH_SCORE:
+                summary = str(getattr(scored, "summary", "") or "").strip()
+                if not summary:
+                    stats["dropped"] += 1
+                    continue
+                text = f"[相关摘要 score={score}]\n{summary}"
+                detail["text"] = re.sub(r"\s+", " ", summary).strip()[:1400]
+                detail["char_count"] = len(summary)
+                detail["relevance_score"] = score
+                detail["evidence_score_tier"] = "summary"
+                enriched.append((score, idx, text, detail, False))
+                stats["summarized"] += 1
+                continue
+            detail["relevance_score"] = score
+            detail["evidence_score_tier"] = "full"
+            enriched.append((score, idx, part, detail, False))
+
+        if not enriched:
+            stats["reason"] = "all_dropped_fallback"
+            return context_parts, context_details, stats
+
+        enriched.sort(key=lambda item: (-item[0], item[1]))
+        limit = max(1, int(self.answer_max_sources or 8))
+        kept_parts = [item[2] for item in enriched[:limit]]
+        kept_details = [item[3] for item in enriched[:limit]]
+        stats["kept"] = len(kept_parts)
+        stats["applied"] = True
+        stats["reason"] = "scored_tiers"
+        stats["parts_before"] = len(context_parts)
+        stats["parts_after"] = len(kept_parts)
+        return kept_parts, kept_details, stats
 
     def _prioritize_context_parts_by_anchor_coverage(
         self,

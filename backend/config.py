@@ -20,6 +20,7 @@ except ImportError:  # 极旧版本兜底
 _CSV_FIELDS_FOR_LIST = {
     "agent_trigger_query_types",
     "agent_trigger_evidence_needs",
+    "memory_shared_mode_allowed_kinds",
 }
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,74 @@ class AppSettings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("agent_external_rerank_enabled", "CHATPDF_AGENT_EXT_RERANK"),
         description="是否允许 Agent 在最终上下文构造阶段调用外部/本地 rerank_service 做终选重排"
+    )
+    # paper-qa 风格证据级 LLM 评分：按条打 summary + relevance_score，再分层消费
+    agent_evidence_scoring_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "agent_evidence_scoring_enabled",
+            "CHATPDF_AGENT_EVIDENCE_SCORING",
+        ),
+        description="Agent 是否对意群/chunk 级证据做 LLM 相关性评分（exact table 直通）",
+    )
+    agent_evidence_scoring_timeout: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices(
+            "agent_evidence_scoring_timeout",
+            "CHATPDF_AGENT_EVIDENCE_SCORING_TIMEOUT",
+        ),
+        description="证据评分整批超时秒数，超时后回退启发式充足度判断",
+    )
+    agent_evidence_scoring_min_candidates: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "agent_evidence_scoring_min_candidates",
+            "CHATPDF_AGENT_EVIDENCE_SCORING_MIN",
+        ),
+        description="非 exact 候选少于此数时跳过 LLM 评分",
+    )
+    agent_evidence_k: int = Field(
+        default=10,
+        validation_alias=AliasChoices("agent_evidence_k", "CHATPDF_AGENT_EVIDENCE_K"),
+        description="进入 LLM 评分的最大证据候选数",
+    )
+    agent_answer_max_sources: int = Field(
+        default=8,
+        validation_alias=AliasChoices(
+            "agent_answer_max_sources",
+            "CHATPDF_AGENT_ANSWER_MAX_SOURCES",
+        ),
+        description="评分后进入最终上下文的最大证据条数",
+    )
+    # Agent 模式模糊问句的 cheap-model 澄清判定（规则层之后）
+    agent_llm_clarification_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "agent_llm_clarification_enabled",
+            "CHATPDF_AGENT_LLM_CLARIFICATION",
+        ),
+        description="Agent 路径是否用 cheap model 二次判定问句是否足够清晰",
+    )
+    # is_ambiguous 为真时如何影响这一轮：
+    #   off       —— 完全忽略，不产生任何用户可见影响
+    #   hint      —— 检索照常执行，仅附带 clarification_hint（默认，fail-open）
+    #   interrupt —— 旧行为：直接返回澄清问句、跳过检索（向后兼容）
+    intent_clarification_mode: str = Field(
+        default="hint",
+        validation_alias=AliasChoices(
+            "intent_clarification_mode",
+            "CHATPDF_INTENT_CLARIFICATION_MODE",
+        ),
+        description="模糊意图处理模式：off / hint / interrupt",
+    )
+    # 意图判定 trace 落盘（只观测不干预）。关闭时不产生任何文件 IO。
+    intent_trace_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "intent_trace_enabled",
+            "CHATPDF_INTENT_TRACE_ENABLED",
+        ),
+        description="是否把每轮意图判定的判据落成 JSONL trace",
     )
 
     # ==================== Agent 触发白名单与增强开关 ====================
@@ -484,6 +553,95 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_compression_threshold", "CHATPDF_MEMORY_COMPRESSION_THRESHOLD"),
         description="压缩触发条目数，范围 5-200"
     )
+    # 压缩后最多保留的条目数
+    memory_compression_max_items: int = Field(
+        default=5,
+        validation_alias=AliasChoices("memory_compression_max_items", "CHATPDF_MEMORY_COMPRESSION_MAX_ITEMS"),
+        description="压缩后最多保留几条记忆，范围 1-20"
+    )
+    # 单条记忆超过此字符数视为超长，压缩失败时优先剔除
+    memory_compression_oversized_chars: int = Field(
+        default=2000,
+        validation_alias=AliasChoices("memory_compression_oversized_chars", "CHATPDF_MEMORY_COMPRESSION_OVERSIZED_CHARS"),
+        description="超长记忆判定字符数，范围 200-20000"
+    )
+    # 单文档记忆的存储配额（字符数，0 表示不限制）
+    memory_quota_chars_per_doc: int = Field(
+        default=200_000,
+        validation_alias=AliasChoices("memory_quota_chars_per_doc", "CHATPDF_MEMORY_QUOTA_CHARS_PER_DOC"),
+        description="单文档记忆内容总字符上限，0 表示不限制；条数阈值对长短记忆一视同仁，配额才给得出存储上界"
+    )
+    # 共享/演示场景下允许注入的记忆层白名单（默认排除个人画像与跨文档对话摘要）
+    memory_shared_mode_allowed_kinds: list[str] = Field(
+        default_factory=lambda: ["working", "doc_fact", "consolidated", "graph"],
+        validation_alias=AliasChoices("memory_shared_mode_allowed_kinds", "CHATPDF_MEMORY_SHARED_MODE_ALLOWED_KINDS"),
+        description="共享模式下可注入的记忆层，逗号分隔；profile/episodic 默认被排除"
+    )
+    # 证据评分缓存：同一 (解析身份, 问题, 证据) 的 summary+score 复用
+    evidence_score_cache_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("evidence_score_cache_enabled", "CHATPDF_EVIDENCE_SCORE_CACHE_ENABLED"),
+        description="重新生成/重试/多轮迭代时复用证据摘要，跳过重复的 LLM 打分"
+    )
+    evidence_score_cache_size: int = Field(
+        default=2000,
+        validation_alias=AliasChoices("evidence_score_cache_size", "CHATPDF_EVIDENCE_SCORE_CACHE_SIZE"),
+        description="证据评分缓存条目上限，范围 100-50000"
+    )
+    # 全部证据（文档 + 联网 + 记忆 + 术语）的统一 token 预算
+    memory_evidence_total_budget: int = Field(
+        default=13000,
+        validation_alias=AliasChoices("memory_evidence_total_budget", "CHATPDF_MEMORY_EVIDENCE_TOTAL_BUDGET"),
+        description="证据上下文总预算；记忆在其中取剩余额度，范围 1000-100000"
+    )
+    # 记忆的保底注入额度：文档再长也要留一点，否则长文档会话里记忆等于被静默关掉
+    memory_injection_floor_tokens: int = Field(
+        default=200,
+        validation_alias=AliasChoices("memory_injection_floor_tokens", "CHATPDF_MEMORY_INJECTION_FLOOR_TOKENS"),
+        description="记忆注入的保底 token 数，范围 0-2000"
+    )
+    # 单轮记忆写入允许发起的后台 LLM 调用总数上限
+    memory_llm_calls_per_turn: int = Field(
+        default=3,
+        validation_alias=AliasChoices("memory_llm_calls_per_turn", "CHATPDF_MEMORY_LLM_CALLS_PER_TURN"),
+        description="一轮对话里记忆链路最多发起几次后台 LLM 调用（提炼/裁决/压缩/会话摘要/图谱按此优先级消费），范围 0-10；0 表示禁用全部记忆 LLM 调用"
+    )
+    # 滚动会话摘要：补上 working 层与长期记忆之间的中期叙事连续性
+    memory_session_summary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_session_summary_enabled", "CHATPDF_MEMORY_SESSION_SUMMARY_ENABLED"),
+        description="维护每文档一条滚动会话摘要，长会话里保住指代链"
+    )
+    # 每积累多少条消息更新一次滚动摘要
+    memory_session_summary_interval: int = Field(
+        default=6,
+        validation_alias=AliasChoices("memory_session_summary_interval", "CHATPDF_MEMORY_SESSION_SUMMARY_INTERVAL"),
+        description="滚动摘要更新的消息条数间隔，范围 2-50"
+    )
+    # 用 LLM 从记忆事实里抽取实体关系三元组构建论文图谱
+    memory_graph_llm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_graph_llm_enabled", "CHATPDF_MEMORY_GRAPH_LLM_ENABLED"),
+        description="关闭后图谱退回只抓 Figure/Table 引用的正则版本"
+    )
+    # 事实数变化超过此增量才重建图谱，用于摊薄 LLM 成本
+    memory_graph_rebuild_delta: int = Field(
+        default=5,
+        validation_alias=AliasChoices("memory_graph_rebuild_delta", "CHATPDF_MEMORY_GRAPH_REBUILD_DELTA"),
+        description="图谱重建的事实增量阈值，范围 1-100"
+    )
+    # 归档回捞（page fault）：活跃记忆没填满配额时从归档里补检
+    memory_archive_recall_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_archive_recall_enabled", "CHATPDF_MEMORY_ARCHIVE_RECALL_ENABLED"),
+        description="压缩归档的原始记忆是否可在召回不足时被回捞"
+    )
+    # 归档回捞的最小 token 重叠率
+    memory_archive_recall_min_overlap: float = Field(
+        default=0.3,
+        validation_alias=AliasChoices("memory_archive_recall_min_overlap", "CHATPDF_MEMORY_ARCHIVE_RECALL_MIN_OVERLAP"),
+        description="归档回捞的查询 token 最小重叠率，范围 0-1"
+    )
     # 活跃记忆池容量（类 OS RAM，LRU 策略管理）
     memory_active_pool_size: int = Field(
         default=100,
@@ -496,10 +654,47 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_injection_token_budget", "CHATPDF_MEMORY_INJECTION_TOKEN_BUDGET"),
         description="注入 token 预算，范围 100-5000"
     )
+    # 分层注入配额：留空则使用 ContextInjector 内置默认值
+    memory_injection_kind_budgets: dict[str, int] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("memory_injection_kind_budgets", "CHATPDF_MEMORY_INJECTION_KIND_BUDGETS"),
+        description='各记忆层 token 配额，JSON 对象如 {"doc_fact": 260}；留空用内置默认'
+    )
+    # 记忆检索软超时（秒），0 表示不限时
+    memory_retrieval_timeout: float = Field(
+        default=2.0,
+        validation_alias=AliasChoices("memory_retrieval_timeout", "CHATPDF_MEMORY_RETRIEVAL_TIMEOUT"),
+        description="记忆检索软超时秒数，范围 0-30，0 表示不限时"
+    )
+    # 记忆后台写线程并发上限
+    memory_background_max_pending: int = Field(
+        default=6,
+        validation_alias=AliasChoices("memory_background_max_pending", "CHATPDF_MEMORY_BACKGROUND_MAX_PENDING"),
+        description="记忆后台写线程并发上限，范围 1-32"
+    )
+    # 写入去重的向量相似度阈值，>=1.0 表示关闭相似度去重
+    memory_dedup_similarity_threshold: float = Field(
+        default=0.85,
+        validation_alias=AliasChoices("memory_dedup_similarity_threshold", "CHATPDF_MEMORY_DEDUP_SIMILARITY_THRESHOLD"),
+        description="新记忆与既有记忆的相似度超过此值则拒写，范围 0-1，1.0 关闭"
+    )
+    # 是否启用写入裁决（新事实与既有记忆比对后决定 ADD/UPDATE/DELETE/NONE）
+    memory_arbitration_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_arbitration_enabled", "CHATPDF_MEMORY_ARBITRATION_ENABLED"),
+        description="启用后每轮记忆写入会多一次 LLM 调用，换取去重与冲突消解"
+    )
+    # 用户显式记忆指令（"记住…"）是否直接晋升为长期高价值记忆
+    memory_explicit_promotion_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("memory_explicit_promotion_enabled", "CHATPDF_MEMORY_EXPLICIT_PROMOTION_ENABLED"),
+        description="用户显式要求记住的内容是否跳过命中计数直接晋升为长期记忆"
+    )
 
     @field_validator(
         "agent_trigger_query_types",
         "agent_trigger_evidence_needs",
+        "memory_shared_mode_allowed_kinds",
         mode="before",
     )
     @classmethod
@@ -598,6 +793,105 @@ class AppSettings(BaseSettings):
             return 20
         return v
 
+    @field_validator("evidence_score_cache_size")
+    @classmethod
+    def validate_evidence_score_cache_size(cls, v: int) -> int:
+        """校验证据评分缓存容量，范围 100-50000，超出范围使用默认值"""
+        if not (100 <= v <= 50_000):
+            logger.warning(
+                f"evidence_score_cache_size 值 {v} 超出合理范围 (100-50000)，使用默认值 2000"
+            )
+            return 2000
+        return v
+
+    @field_validator("memory_evidence_total_budget")
+    @classmethod
+    def validate_memory_evidence_total_budget(cls, v: int) -> int:
+        """校验证据总预算，范围 1000-100000，超出范围使用默认值"""
+        if not (1000 <= v <= 100_000):
+            logger.warning(
+                f"memory_evidence_total_budget 值 {v} 超出合理范围 (1000-100000)，使用默认值 13000"
+            )
+            return 13000
+        return v
+
+    @field_validator("memory_injection_floor_tokens")
+    @classmethod
+    def validate_memory_injection_floor_tokens(cls, v: int) -> int:
+        """校验记忆保底额度，范围 0-2000，超出范围使用默认值"""
+        if not (0 <= v <= 2000):
+            logger.warning(
+                f"memory_injection_floor_tokens 值 {v} 超出合理范围 (0-2000)，使用默认值 200"
+            )
+            return 200
+        return v
+
+    @field_validator("memory_llm_calls_per_turn")
+    @classmethod
+    def validate_memory_llm_calls_per_turn(cls, v: int) -> int:
+        """校验单轮记忆 LLM 调用上限，范围 0-10，超出范围使用默认值"""
+        if not (0 <= v <= 10):
+            logger.warning(
+                f"memory_llm_calls_per_turn 值 {v} 超出合理范围 (0-10)，使用默认值 3"
+            )
+            return 3
+        return v
+
+    @field_validator("memory_session_summary_interval")
+    @classmethod
+    def validate_memory_session_summary_interval(cls, v: int) -> int:
+        """校验滚动摘要更新间隔，范围 2-50，超出范围使用默认值"""
+        if not (2 <= v <= 50):
+            logger.warning(
+                f"memory_session_summary_interval 值 {v} 超出合理范围 (2-50)，使用默认值 6"
+            )
+            return 6
+        return v
+
+    @field_validator("memory_graph_rebuild_delta")
+    @classmethod
+    def validate_memory_graph_rebuild_delta(cls, v: int) -> int:
+        """校验图谱重建增量阈值，范围 1-100，超出范围使用默认值"""
+        if not (1 <= v <= 100):
+            logger.warning(
+                f"memory_graph_rebuild_delta 值 {v} 超出合理范围 (1-100)，使用默认值 5"
+            )
+            return 5
+        return v
+
+    @field_validator("memory_archive_recall_min_overlap")
+    @classmethod
+    def validate_memory_archive_recall_min_overlap(cls, v: float) -> float:
+        """校验归档回捞重叠率，范围 0-1，超出范围使用默认值"""
+        if not (0.0 <= v <= 1.0):
+            logger.warning(
+                f"memory_archive_recall_min_overlap 值 {v} 超出合理范围 (0-1)，使用默认值 0.3"
+            )
+            return 0.3
+        return v
+
+    @field_validator("memory_compression_max_items")
+    @classmethod
+    def validate_memory_compression_max_items(cls, v: int) -> int:
+        """校验压缩输出上限，范围 1-20，超出范围使用默认值"""
+        if not (1 <= v <= 20):
+            logger.warning(
+                f"memory_compression_max_items 值 {v} 超出合理范围 (1-20)，使用默认值 5"
+            )
+            return 5
+        return v
+
+    @field_validator("memory_compression_oversized_chars")
+    @classmethod
+    def validate_memory_compression_oversized_chars(cls, v: int) -> int:
+        """校验超长记忆判定阈值，范围 200-20000，超出范围使用默认值"""
+        if not (200 <= v <= 20000):
+            logger.warning(
+                f"memory_compression_oversized_chars 值 {v} 超出合理范围 (200-20000)，使用默认值 2000"
+            )
+            return 2000
+        return v
+
     @field_validator("memory_active_pool_size")
     @classmethod
     def validate_memory_active_pool_size(cls, v: int) -> int:
@@ -620,6 +914,59 @@ class AppSettings(BaseSettings):
             return 800
         return v
 
+    @field_validator("memory_retrieval_timeout")
+    @classmethod
+    def validate_memory_retrieval_timeout(cls, v: float) -> float:
+        """校验记忆检索软超时，范围 0-30 秒，超出范围使用默认值"""
+        if not (0.0 <= v <= 30.0):
+            logger.warning(
+                f"memory_retrieval_timeout 值 {v} 超出合理范围 (0-30)，使用默认值 2.0"
+            )
+            return 2.0
+        return v
+
+    @field_validator("memory_background_max_pending")
+    @classmethod
+    def validate_memory_background_max_pending(cls, v: int) -> int:
+        """校验记忆后台写并发上限，范围 1-32，超出范围使用默认值"""
+        if not (1 <= v <= 32):
+            logger.warning(
+                f"memory_background_max_pending 值 {v} 超出合理范围 (1-32)，使用默认值 6"
+            )
+            return 6
+        return v
+
+    @field_validator("memory_dedup_similarity_threshold")
+    @classmethod
+    def validate_memory_dedup_similarity_threshold(cls, v: float) -> float:
+        """校验写入去重相似度阈值，范围 0-1，超出范围使用默认值"""
+        if not (0.0 <= v <= 1.0):
+            logger.warning(
+                f"memory_dedup_similarity_threshold 值 {v} 超出合理范围 (0-1)，使用默认值 0.85"
+            )
+            return 0.85
+        return v
+
+    @field_validator("memory_injection_kind_budgets")
+    @classmethod
+    def validate_memory_injection_kind_budgets(cls, v: dict) -> dict:
+        """丢弃非法的分层配额项，避免一个坏 key 让整份配置失效。"""
+        if not isinstance(v, dict):
+            logger.warning("memory_injection_kind_budgets 不是对象，已忽略")
+            return {}
+        cleaned: dict[str, int] = {}
+        for kind, budget in v.items():
+            try:
+                budget_value = int(budget)
+            except (TypeError, ValueError):
+                logger.warning(f"memory_injection_kind_budgets['{kind}'] 非整数，已忽略")
+                continue
+            if budget_value < 0:
+                logger.warning(f"memory_injection_kind_budgets['{kind}'] 为负数，已忽略")
+                continue
+            cleaned[str(kind)] = budget_value
+        return cleaned
+
     @field_validator("ocr_default_mode")
     @classmethod
     def validate_ocr_default_mode(cls, v: str) -> str:
@@ -630,6 +977,19 @@ class AppSettings(BaseSettings):
                 f"ocr_default_mode 必须为 {allowed} 之一，当前值: {v!r}"
             )
         return v
+
+    @field_validator("intent_clarification_mode")
+    @classmethod
+    def validate_intent_clarification_mode(cls, v: str) -> str:
+        """校验模糊意图处理模式；非法值降级为 hint 而不是让进程起不来。"""
+        normalized = str(v or "").strip().lower()
+        allowed = {"off", "hint", "interrupt"}
+        if normalized not in allowed:
+            logger.warning(
+                f"intent_clarification_mode 值 {v!r} 非法（应为 {allowed} 之一），使用默认值 hint"
+            )
+            return "hint"
+        return normalized
 
     @field_validator("ocr_dpi")
     @classmethod

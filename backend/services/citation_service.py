@@ -451,8 +451,11 @@ def match_citations_to_chunks(
     segment_map: dict[int, dict] = {}
     if context_segments:
         for seg in context_segments:
-            ref = seg.get("ref")
-            if ref is not None and seg.get("text"):
+            try:
+                ref = int(seg.get("ref"))
+            except (TypeError, ValueError):
+                continue
+            if seg.get("text"):
                 segment_map[ref] = seg
 
     enhanced = []
@@ -467,9 +470,16 @@ def match_citations_to_chunks(
         best_chunk_idx = None
         best_seg_ref = None
 
-        # 策略 1：优先在对应 ref 的意群文本中精准匹配
-        if evidence.idx and evidence.idx in segment_map:
-            seg = segment_map[evidence.idx]
+        try:
+            target_ref = int(evidence.idx) if evidence.idx is not None else None
+        except (TypeError, ValueError):
+            target_ref = None
+
+        # 策略 1：只在该 citation 指向的意群中匹配。以前的全局回退会让
+        # ``CITATION [1]`` 的短语落到 [2]，随后调用方却保留 [1] 的其它
+        # 元数据，形成无法回放的拼接证据。
+        if target_ref is not None and target_ref in segment_map:
+            seg = segment_map[target_ref]
             segment_text = seg["text"]
             span, length = find_start_end_phrase(
                 evidence.start_phrase or "",
@@ -481,10 +491,11 @@ def match_citations_to_chunks(
                 best_match = span
                 best_length = length
                 best_text = raw_text[span[0]:span[1]]
-                best_seg_ref = evidence.idx
+                best_seg_ref = target_ref
 
-        # 策略 2：意群匹配失败时，遍历所有意群文本搜索
-        if not best_match and segment_map:
+        # 没有可用编号的旧格式才允许全局搜索；有编号但匹配失败时宁可
+        # 不提供精确高亮，也不能把另一条 evidence 的身份借给它。
+        if not best_match and target_ref is None and segment_map:
             for seg_ref, seg in segment_map.items():
                 seg_text = seg["text"]
                 span, length = find_start_end_phrase(
@@ -499,9 +510,17 @@ def match_citations_to_chunks(
                     best_text = raw_text[span[0]:span[1]]
                     best_seg_ref = seg_ref
 
-        # 策略 3：回退到原始 chunk 级别匹配
+        # 策略 3：回退到原始 chunk 级别匹配。带编号的 citation 仍只能
+        # 匹配同一 ref 的 chunk，避免跨块拼接页码/bbox/group identity。
         if not best_match:
             for ci, chunk in enumerate(chunks):
+                if target_ref is not None:
+                    try:
+                        chunk_ref = int(chunk.get("ref"))
+                    except (TypeError, ValueError):
+                        continue
+                    if chunk_ref != target_ref:
+                        continue
                 text = chunk.get("text", "") or chunk.get("chunk", "")
                 if not text:
                     continue
@@ -534,6 +553,7 @@ def match_citations_to_chunks(
             "highlight_text": best_text if best_match else None,
             "matched_chunk_idx": best_chunk_idx,
             "match_confidence": round(match_confidence, 3),
+            "matched_ref": best_seg_ref if best_seg_ref is not None else target_ref,
         }
 
         # B4 修复：策略 1/2 成功时从 segment 继承 page_range / group_id

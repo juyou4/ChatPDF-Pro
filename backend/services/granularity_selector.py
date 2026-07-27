@@ -8,6 +8,7 @@
 - extraction（提取）→ full 粒度，最多 3 个意群
 - analytical（分析）→ digest 粒度，最多 5 个意群
 - specific（具体）→ digest 粒度，最多 5 个意群
+- inventory（完整枚举）→ 不分配语义意群，由结构块清单路径处理
 
 混合粒度分配规则（按排名位置）：
 - 第 1 名 → full（全文）
@@ -30,6 +31,7 @@ QUERY_TYPE_MAPPING: dict[str, tuple[str, int]] = {
     "extraction": ("full", 3),
     "analytical": ("digest", 5),
     "specific": ("digest", 5),
+    "inventory": ("full", 0),
 }
 
 # 查询类型到选择理由的映射
@@ -38,6 +40,7 @@ QUERY_TYPE_REASONING: dict[str, str] = {
     "extraction": "提取性查询：使用全文粒度确保精确内容，限制意群数量",
     "analytical": "分析性查询：使用精要粒度平衡细节与覆盖范围",
     "specific": "具体性查询：使用精要粒度提供适中的上下文细节",
+    "inventory": "完整结构化枚举：不使用语义意群，改由按页块索引枚举",
 }
 
 
@@ -100,10 +103,13 @@ class GranularitySelector:
         ) or analyze_query_type(query)  # type: ignore[assignment]
 
         # 根据映射规则获取粒度和最大意群数
-        granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
+        granularity, max_groups = QUERY_TYPE_MAPPING.get(
+            query_type,
+            QUERY_TYPE_MAPPING["specific"],
+        )
 
         # 获取选择理由
-        reasoning = QUERY_TYPE_REASONING[query_type]
+        reasoning = QUERY_TYPE_REASONING.get(query_type, QUERY_TYPE_REASONING["specific"])
         evidence_need = set((intent_decision or {}).get("evidence_need") or []) if isinstance(intent_decision, dict) else set()
         section_explanation = (
             "section_explanation" in evidence_need
@@ -233,7 +239,10 @@ class GranularitySelector:
             if isinstance(intent_decision, dict)
             else ""
         ) or analyze_query_type(query)  # type: ignore[assignment]
-        base_granularity, max_groups = QUERY_TYPE_MAPPING[query_type]
+        base_granularity, max_groups = QUERY_TYPE_MAPPING.get(
+            query_type,
+            QUERY_TYPE_MAPPING["specific"],
+        )
         if query_type == "analytical" and is_section_explanation_query(query):
             max_groups = max(max_groups, 7)
 

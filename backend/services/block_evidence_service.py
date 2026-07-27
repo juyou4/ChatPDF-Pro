@@ -10,16 +10,31 @@ import re
 from typing import Any
 
 
-EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2
 
 _EXCLUDED_BLOCK_TYPES = frozenset({
     "artifact",
     "image",
-    "table",
     "table_row",
     "table_cell",
 })
-_EVIDENCE_BLOCK_TYPES = frozenset({"paragraph", "caption", "formula", "code", "figure"})
+_EVIDENCE_BLOCK_TYPES = frozenset({
+    "heading",
+    "paragraph",
+    "caption",
+    "formula",
+    "code",
+    "figure",
+    "table",
+    "visual_enrichment",
+})
+_SECONDARY_CONTENT_ROLES = frozenset({
+    "reference",
+    "author",
+    "affiliation",
+    "contact",
+    "publication_header",
+})
 
 
 def _text(value: Any) -> str:
@@ -79,14 +94,9 @@ def _is_retrievable_block(block: dict[str, Any], block_type: str) -> bool:
         # Visual supplements only reach a public block index after the
         # document-level publish marker is written.  Require its revision here
         # as a second guard so staged VLM output cannot become retrievable.
-        if block_type != "caption" or not str(block.get("visual_supplement_revision") or "").strip():
+        if block_type not in {"caption", "visual_enrichment"} or not str(block.get("visual_supplement_revision") or "").strip():
             return False
     if block.get("exclude_from_reading"):
-        return False
-    # References and front-matter are allowed in page text for faithful source
-    # display, but should not become primary semantic evidence.
-    role = str(block.get("content_role") or "").strip().lower()
-    if role in {"reference", "author", "affiliation", "contact", "publication_header"}:
         return False
     text = _text(block.get("text") or block.get("content") or block.get("caption"))
     # Bare labels such as "Figure 1" are navigation noise.  A figure only
@@ -94,6 +104,13 @@ def _is_retrievable_block(block: dict[str, Any], block_type: str) -> bool:
     if block_type == "figure":
         return len(text) >= 24
     return bool(text)
+
+
+def _evidence_text(block: dict[str, Any], block_type: str) -> str:
+    text = _text(block.get("text") or block.get("content") or block.get("caption"))
+    if block_type == "table":
+        text = _text(re.sub(r"<[^>]+>", " ", text))
+    return text
 
 
 def build_rag_source_from_block_index(
@@ -148,7 +165,9 @@ def build_rag_source_from_block_index(
             block_type = str(block.get("type") or block.get("block_type") or "paragraph").strip().lower()
             if not _is_retrievable_block(block, block_type):
                 continue
-            text = _text(block.get("text") or block.get("content") or block.get("caption"))
+            text = _evidence_text(block, block_type)
+            if not text:
+                continue
             text_key = re.sub(r"\s+", " ", text).casefold()
             if text_key not in seen_page_text:
                 seen_page_text.add(text_key)
@@ -178,6 +197,7 @@ def build_rag_source_from_block_index(
                 "page_range": [page_number, page_number],
                 "block_type": block_type,
                 "chunk_type": block_type,
+                "content_role": str(block.get("content_role") or "body").strip().lower() or "body",
                 "reading_order": int(block.get("reading_order") or block_order),
                 "parse_generation": active_generation,
                 "document_source_hash": active_source_hash,
@@ -186,6 +206,12 @@ def build_rag_source_from_block_index(
                 "page_size": [page_width, page_height],
                 "coordinate_space": "pdf_top_left_points",
             }
+            if metadata["content_role"] in _SECONDARY_CONTENT_ROLES:
+                metadata["retrieval_tier"] = "secondary"
+            else:
+                metadata["retrieval_tier"] = "primary"
+            if block_type == "table":
+                metadata["table_text_fallback"] = True
             for key in (
                 "figure_id",
                 "purpose",

@@ -31,6 +31,7 @@ from services.vector_service import (
 from services.url_loader_service import fetch_url_content
 from services.multi_format_loader import is_supported_format, extract_from_file
 from services.block_index_service import (
+    active_block_index_revision,
     build_block_index,
     ensure_block_index,
     load_block_index,
@@ -40,8 +41,10 @@ from services.block_evidence_service import (
     EVIDENCE_SCHEMA_VERSION,
     build_rag_source_from_block_index,
 )
+from services.block_inventory_service import enumerate_block_inventory
 from services.mineru_block_index_service import (
     MINERU_BLOCK_INDEX_SOURCE,
+    MinerUResultUnreadable,
     build_block_index_from_mineru_payload,
     get_mineru_result_path,
     load_mineru_result,
@@ -74,6 +77,7 @@ from services.document_parse_state import (
     is_parse_prepared,
     matches_parse_generation,
     normalize_parse_route,
+    parse_identity_matches,
     read_parse_manifest,
     transition_parse_manifest,
 )
@@ -104,6 +108,7 @@ from services.semantic_group_store import (
 from services.ai_cache_state import load_ai_cache_generation, rotate_ai_cache_generation
 from services.block_translation_service import (
     MAX_BLOCKS_PER_REQUEST,
+    backfill_block_summaries,
     get_cached_translations,
     get_translation_cache_path,
     save_translation_cache,
@@ -801,6 +806,32 @@ def save_document(doc_id: str, data: dict) -> bool:
         return False
 
 
+def _store_new_document_or_raise(
+    doc_id: str,
+    document: dict,
+    *,
+    previous: dict | None,
+    message: str,
+) -> None:
+    """Persist a freshly uploaded document, rolling memory back if the write fails.
+
+    ``save_document`` reports failure by returning False and logging a warning.
+    Ignoring that leaves ``documents_store`` advertising a document that never
+    reached disk: the upload answers 200, the record is gone after a restart,
+    and ``resume_pending_mineru_deep_parse_jobs`` skips the doc entirely because
+    it keys off ``documents_store`` — so an already-paid remote MinerU batch is
+    never collected. Every other publication fence in this module already
+    rolls back and raises on a failed write; these upload paths did not.
+    """
+    if save_document(doc_id, document):
+        return
+    if previous is None:
+        documents_store.pop(doc_id, None)
+    else:
+        documents_store[doc_id] = previous
+    raise RuntimeError(message)
+
+
 def _is_document_backup_file(file_path: str | Path) -> bool:
     """Return whether a JSON file is an internal RAG rollback snapshot."""
     return Path(file_path).stem.lower().endswith(".bak.doc")
@@ -1064,37 +1095,15 @@ def _parse_manifest_index_matches(
     metadata = _read_vector_index_meta(doc_id, artifact_validation=artifact_validation)
     if metadata.get("upgrade_required"):
         return False
-    index_meta = metadata.get("index_meta") or {}
-    expected_generation = str(manifest.get("generation") or "").strip()
-    expected_source_hash = str(manifest.get("source_hash") or "").strip()
-    if not expected_generation or not expected_source_hash:
-        return False
-    if not (
-        str(index_meta.get("parse_generation") or "").strip() == expected_generation
-        and str(index_meta.get("document_source_hash") or "").strip() == expected_source_hash
-    ):
-        return False
-
     # A parser adapter repair can replace the block tree without changing the
     # selected parse generation.  Vector chunks, semantic groups and the
     # reading UI must all consume the same published block revision, otherwise
     # one document can answer from stale section ids after a rebuild.
-    block_index = load_block_index(DATA_DIR, doc_id)
-    if not isinstance(block_index, dict):
-        # A legacy vector index may predate immersive reading blocks entirely.
-        # Keep it usable until a block index is first published; from that
-        # point onward every modern block revision is enforced below.
-        return True
-    if (
-        str(block_index.get("parse_generation") or "").strip() != expected_generation
-        or str(block_index.get("document_source_hash") or "").strip() != expected_source_hash
-    ):
-        return False
-    expected_block_index_hash = str(
-        block_index.get("block_index_hash") or block_index.get("block_index_revision") or ""
-    ).strip()
-    actual_block_index_hash = str(index_meta.get("block_index_hash") or "").strip()
-    return bool(expected_block_index_hash and actual_block_index_hash == expected_block_index_hash)
+    return parse_identity_matches(
+        metadata.get("index_meta") or {},
+        manifest,
+        block_index=load_block_index(DATA_DIR, doc_id),
+    )
 
 
 def _warm_block_index(doc_id: str) -> dict | None:
@@ -1129,7 +1138,7 @@ def _rag_source_from_block_index(block_index: dict | None, data: dict) -> dict:
     fallback_pages = data.get("pages") or []
     fallback_text = str(data.get("full_text") or "")
     source = build_rag_source_from_block_index(block_index)
-    if len(source["full_text"]) < 200 or not source["pages"]:
+    if not str(source.get("full_text") or "").strip() or not source["pages"]:
         return {
             "full_text": fallback_text,
             "pages": fallback_pages,
@@ -1157,6 +1166,8 @@ def _inspect_vector_index_artifacts(
     expected_parse_generation: str = "",
     expected_document_source_hash: str = "",
     expected_block_index_hash: str = "",
+    expected_content_source: str = "",
+    expected_evidence_schema_version: int = 0,
 ) -> dict:
     """Load and verify a vector artifact pair instead of trusting file existence."""
     index_path, chunks_path = _vector_index_paths(doc_id, base_dir)
@@ -1213,15 +1224,36 @@ def _inspect_vector_index_artifacts(
         actual_generation = str(index_meta.get("parse_generation") or "").strip()
         actual_source_hash = str(index_meta.get("document_source_hash") or "").strip()
         actual_block_index_hash = str(index_meta.get("block_index_hash") or "").strip()
+        actual_content_source = str(index_meta.get("content_source") or "").strip()
+        try:
+            actual_evidence_schema_version = int(index_meta.get("evidence_schema_version") or 0)
+        except (TypeError, ValueError):
+            actual_evidence_schema_version = 0
         if expected_parse_generation and actual_generation != expected_parse_generation:
             failures.append("parse_generation_mismatch")
         if expected_document_source_hash and actual_source_hash != expected_document_source_hash:
             failures.append("document_source_hash_mismatch")
         if expected_block_index_hash and actual_block_index_hash != expected_block_index_hash:
             failures.append("block_index_hash_mismatch")
+        if expected_content_source and actual_content_source != expected_content_source:
+            failures.append(
+                f"content_source_mismatch:{actual_content_source or 'missing'}"
+            )
+        if (
+            expected_evidence_schema_version
+            and actual_evidence_schema_version != expected_evidence_schema_version
+        ):
+            failures.append("evidence_schema_version_mismatch")
     elif isinstance(data, list):
         chunks = data
-        if expected_source or expected_parse_generation or expected_document_source_hash or expected_block_index_hash:
+        if (
+            expected_source
+            or expected_parse_generation
+            or expected_document_source_hash
+            or expected_block_index_hash
+            or expected_content_source
+            or expected_evidence_schema_version
+        ):
             failures.append("legacy_pkl_missing_identity")
     elif data is not None:
         failures.append("pkl_invalid_shape")
@@ -1742,6 +1774,26 @@ def _build_document_indexes(
             parse_generation=parse_generation,
             document_source_hash=parse_source_hash,
         )
+        background_index_meta = {
+            "source_hash": data.get("rag_source_hash") or parse_manifest.get("source_hash", ""),
+            "document_source_hash": parse_manifest.get("source_hash", ""),
+            "parse_generation": parse_manifest.get("generation", ""),
+            "parser_route": parse_manifest.get("resolved_route", ""),
+            "content_source": "block_index_evidence" if rag_source["evidence_chunks"] else "document_full_text",
+            "block_index_version": (block_index or {}).get("version", ""),
+            "block_index_hash": block_index_hash,
+            "evidence_schema_version": rag_source.get("evidence_schema_version", 0),
+        }
+        background_index_kwargs = {
+            "pages": rag_source["pages"],
+            "structured_table_bundles": data.get("structured_table_bundles"),
+            "summary_api_key": summary_api_key,
+            "index_source": expected_index_source,
+            "index_meta": background_index_meta,
+            "build_semantic_groups": False,
+        }
+        if rag_source["evidence_chunks"] and _callable_accepts_keyword(create_index, "evidence_chunks"):
+            background_index_kwargs["evidence_chunks"] = rag_source["evidence_chunks"]
         _call_with_optional_keyword(
             create_index,
             "embedding_provider",
@@ -1752,20 +1804,7 @@ def _build_document_indexes(
             embedding_model,
             embedding_api_key,
             embedding_api_host,
-            pages=rag_source["pages"],
-            structured_table_bundles=data.get("structured_table_bundles"),
-            summary_api_key=summary_api_key,
-            index_source=expected_index_source,
-            index_meta={
-                "source_hash": data.get("rag_source_hash") or parse_manifest.get("source_hash", ""),
-                "document_source_hash": parse_manifest.get("source_hash", ""),
-                "parse_generation": parse_manifest.get("generation", ""),
-                "parser_route": parse_manifest.get("resolved_route", ""),
-                "content_source": "block_index" if rag_source["block_count"] else "document_full_text",
-                "block_index_version": (block_index or {}).get("version", ""),
-                "block_index_hash": block_index_hash,
-            },
-            build_semantic_groups=False,
+            **background_index_kwargs,
         )
 
         failure_stage = "validating_vector_index_staging"
@@ -1776,6 +1815,8 @@ def _build_document_indexes(
             expected_parse_generation=parse_generation,
             expected_document_source_hash=parse_source_hash,
             expected_block_index_hash=block_index_hash,
+            expected_content_source=background_index_meta["content_source"],
+            expected_evidence_schema_version=background_index_meta["evidence_schema_version"],
         )
         if not vector_ok:
             raise RuntimeError("后台问答索引质量门失败: " + ", ".join(vector_failures))
@@ -2166,11 +2207,17 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
     # the old block ids may finish later, but it can no longer republish its
     # result into the newly rebuilt document.
     removed: list[str] = []
+    # Fail closed here. Warning and carrying on deleted the artifacts *without*
+    # advancing the fence, which is strictly worse than doing nothing: the old
+    # results are gone and a late worker from the previous generation can still
+    # publish into the freshly rebuilt document. Callers all run inside a
+    # publication lock and abort the publish on an exception.
     try:
         rotate_ai_cache_generation(DATA_DIR, doc_id)
-        removed.append("ai_cache_generation")
     except Exception as exc:
-        logger.warning("[ParseRoute] 轮换 AI 缓存代际失败 doc=%s err=%s", doc_id, exc)
+        logger.error("[ParseRoute] 轮换 AI 缓存代际失败 doc=%s err=%s", doc_id, exc)
+        raise RuntimeError("AI 缓存代际轮换失败，已中止解析产物发布") from exc
+    removed.append("ai_cache_generation")
     removed.extend(_clear_block_bound_reading_cache(doc_id))
     try:
         from services.overview_service import invalidate_overview_work
@@ -2544,15 +2591,21 @@ def _get_deep_parse_status(doc_id: str) -> dict:
     if legacy_parse:
         mineru_result_exists = get_mineru_result_path(DATA_DIR, doc_id).exists()
     else:
-        mineru_result_exists = bool(
-            load_mineru_result(
-                DATA_DIR,
-                doc_id,
-                parse_generation=str(parse_manifest.get("generation") or ""),
-                document_source_hash=str(parse_manifest.get("source_hash") or ""),
-                require_identity=True,
+        try:
+            mineru_result_exists = bool(
+                load_mineru_result(
+                    DATA_DIR,
+                    doc_id,
+                    parse_generation=str(parse_manifest.get("generation") or ""),
+                    document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                    require_identity=True,
+                )
             )
-        )
+        except MinerUResultUnreadable as exc:
+            # 这里只是状态探针，不能因为产物损坏就让状态接口 500；
+            # 但也不能当成"没有产物"静默带过。
+            logger.error("[DeepParse] MinerU 原始产物不可读 doc=%s: %s", doc_id, exc)
+            mineru_result_exists = False
     block_index = load_block_index(DATA_DIR, doc_id)
     block_matches_parse = legacy_parse or (
         isinstance(block_index, dict)
@@ -4113,6 +4166,8 @@ def _validate_temp_vector_index(
     expected_parse_generation: str = "",
     expected_document_source_hash: str = "",
     expected_block_index_hash: str = "",
+    expected_content_source: str = "",
+    expected_evidence_schema_version: int = 0,
 ) -> tuple[bool, list[str]]:
     inspection = _inspect_vector_index_artifacts(
         doc_id,
@@ -4121,6 +4176,8 @@ def _validate_temp_vector_index(
         expected_parse_generation=expected_parse_generation,
         expected_document_source_hash=expected_document_source_hash,
         expected_block_index_hash=expected_block_index_hash,
+        expected_content_source=expected_content_source,
+        expected_evidence_schema_version=expected_evidence_schema_version,
     )
     failures: list[str] = [f"temp_{error}" for error in inspection.get("errors") or []]
     data = inspection.get("_data")
@@ -4430,6 +4487,8 @@ def _rebuild_local_rag_index(
             expected_parse_generation=parse_generation,
             expected_document_source_hash=document_source_hash,
             expected_block_index_hash=block_index_hash,
+            expected_content_source=local_index_meta["content_source"],
+            expected_evidence_schema_version=int(local_index_meta.get("evidence_schema_version") or 0),
         )
         if not temp_ok:
             raise RuntimeError("本地问答索引质量门失败: " + ", ".join(temp_failures))
@@ -4742,6 +4801,8 @@ def _rebuild_mineru_rag_index_unlocked(
             expected_parse_generation=expected_parse_generation,
             expected_document_source_hash=expected_document_source_hash,
             expected_block_index_hash=block_index_hash,
+            expected_content_source=mineru_index_meta["content_source"],
+            expected_evidence_schema_version=int(mineru_index_meta.get("evidence_schema_version") or 0),
         )
         if not temp_ok:
             raise RuntimeError(f"MinerU 问答索引质量门失败，已保留原索引: {', '.join(temp_failures)}")
@@ -5070,6 +5131,7 @@ def _start_mineru_full_route_upload(
         _retire_superseded_mineru_job(doc_id)
         _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
         _remove_current_semantic_groups(doc_id)
+        previous_document = documents_store.get(doc_id)
         documents_store[doc_id] = {
             "filename": filename,
             "upload_time": datetime.now().isoformat(),
@@ -5077,7 +5139,12 @@ def _start_mineru_full_route_upload(
             "pdf_url": f"/uploads/{pdf_filename}",
         }
         _normalize_page_keys(documents_store[doc_id])
-        save_document(doc_id, documents_store[doc_id])
+        _store_new_document_or_raise(
+            doc_id,
+            documents_store[doc_id],
+            previous=previous_document,
+            message="MinerU 解析任务的文档记录写入失败",
+        )
         _set_document_index_status(doc_id, "queued", stage="waiting_for_mineru")
     deep_status = _queue_mineru_deep_parse(
         doc_id,
@@ -6807,13 +6874,19 @@ async def upload_pdf(
 
                 _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
                 _remove_current_semantic_groups(doc_id)
+                previous_document = documents_store.get(doc_id)
                 documents_store[doc_id] = {
                     "filename": filename,
                     "upload_time": datetime.now().isoformat(),
                     "data": extracted_data,
                     "pdf_url": None,
                 }
-                save_document(doc_id, documents_store[doc_id])
+                _store_new_document_or_raise(
+                    doc_id,
+                    documents_store[doc_id],
+                    previous=previous_document,
+                    message="文档记录写入失败",
+                )
                 summary_api_key = (api_key or "").strip() or None
                 index_status = _call_with_optional_keyword(
                     _queue_document_indexes,
@@ -7011,6 +7084,7 @@ async def upload_pdf(
             _retire_superseded_mineru_job(doc_id)
             _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
             _remove_current_semantic_groups(doc_id)
+            previous_document = documents_store.get(doc_id)
             documents_store[doc_id] = {
                 "filename": filename,
                 "upload_time": datetime.now().isoformat(),
@@ -7046,7 +7120,18 @@ async def upload_pdf(
                     documents_store[doc_id]["data"]["parse_artifact"]
                 )
             _normalize_page_keys(documents_store[doc_id])
-            save_document(doc_id, documents_store[doc_id])
+            try:
+                from services.paper_metadata_service import ensure_paper_metadata
+
+                ensure_paper_metadata(documents_store[doc_id])
+            except Exception:
+                logger.debug("[Upload] paper_metadata extraction skipped", exc_info=True)
+            _store_new_document_or_raise(
+                doc_id,
+                documents_store[doc_id],
+                previous=previous_document,
+                message="上传文档记录写入失败",
+            )
 
         summary_api_key = (api_key or "").strip() or None
         index_status = _call_with_optional_keyword(
@@ -7178,6 +7263,7 @@ async def import_url(
 
         _clear_block_dependent_ai_cache(doc_id, documents_store.get(doc_id))
         _remove_current_semantic_groups(doc_id)
+        previous_document = documents_store.get(doc_id)
         documents_store[doc_id] = {
             "filename": f"🌐 {title[:60]}",
             "upload_time": datetime.now().isoformat(),
@@ -7185,7 +7271,12 @@ async def import_url(
             "pdf_url": None,
         }
 
-        save_document(doc_id, documents_store[doc_id])
+        _store_new_document_or_raise(
+            doc_id,
+            documents_store[doc_id],
+            previous=previous_document,
+            message="网页导入的文档记录写入失败",
+        )
 
         _call_with_optional_keyword(
             create_index,
@@ -7233,6 +7324,34 @@ async def get_document(doc_id: str, include_content: bool = True):
 
     doc = documents_store[doc_id]
     parse_manifest = _read_document_parse_manifest(doc_id, doc)
+    # Lazily attach academic DocDetails for older uploads; best-effort only.
+    paper_metadata = {}
+    try:
+        from services.paper_metadata_service import ensure_paper_metadata
+
+        # Bind parse identity so reparse invalidates stale metadata.
+        if isinstance(parse_manifest, dict):
+            if parse_manifest.get("generation") and not doc.get("parse_generation"):
+                doc["parse_generation"] = str(parse_manifest.get("generation") or "")
+            if parse_manifest.get("source_hash") and not doc.get("document_source_hash"):
+                doc["document_source_hash"] = str(parse_manifest.get("source_hash") or "")
+        before = doc.get("paper_metadata")
+        paper_metadata = ensure_paper_metadata(doc) or {}
+        if paper_metadata and paper_metadata != before:
+            try:
+                # Opportunistic metadata refresh on a read path: a failed write
+                # must not fail the request, but it must not be invisible either
+                # — the next read will silently redo the same work.
+                if not save_document(doc_id, doc):
+                    logger.warning(
+                        "[Document] paper_metadata refresh was not persisted doc=%s", doc_id
+                    )
+            except Exception:
+                logger.debug("[Document] persist paper_metadata failed doc=%s", doc_id, exc_info=True)
+    except Exception:
+        logger.debug("[Document] paper_metadata ensure failed doc=%s", doc_id, exc_info=True)
+        paper_metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else {}
+
     response = {
         "doc_id": doc_id,
         "filename": doc["filename"],
@@ -7256,6 +7375,7 @@ async def get_document(doc_id: str, include_content: bool = True):
         "parse_manifest": parse_manifest,
         "parse_ready": is_parse_prepared(parse_manifest),
         "indexing": _get_document_index_status(doc_id),
+        "paper_metadata": paper_metadata or None,
     }
     if include_content:
         _require_document_parse_ready(doc_id, doc)
@@ -7712,6 +7832,43 @@ async def get_document_blocks(doc_id: str, force_rebuild: bool = False):
         raise HTTPException(status_code=500, detail=f"块索引生成失败: {exc}")
 
 
+@router.get("/documents/{doc_id}/blocks/inventory")
+async def get_document_block_inventory(
+    doc_id: str,
+    kind: str,
+    cursor: int = 0,
+    limit: int = 100,
+):
+    """Return a deterministic, paginated structural inventory.
+
+    This endpoint is intentionally separate from semantic search.  A client can
+    keep following ``next_cursor`` until ``coverage_complete`` without any
+    Top-K relevance sampling.
+    """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    doc = documents_store[doc_id]
+    _require_document_parse_ready(doc_id, doc)
+    try:
+        block_index = ensure_block_index(
+            doc_id=doc_id,
+            doc=doc,
+            data_dir=DATA_DIR,
+            pdf_path=_resolve_document_pdf_path(doc),
+        )
+        return enumerate_block_inventory(
+            block_index,
+            kind,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("[BlockInventory] failed for %s", doc_id)
+        raise HTTPException(status_code=500, detail=f"结构清单生成失败: {exc}")
+
+
 @router.get("/documents/{doc_id}/reading-outline")
 async def get_document_reading_outline(doc_id: str, force: bool = False):
     """Return cached/fallback AI reading outline with evidence block bindings."""
@@ -7987,12 +8144,13 @@ def _block_index_content_hash(block_index: dict | None) -> str:
     ).strip()
 
 
-def _graphrag_active_block_index_hash(doc_id: str) -> str:
-    """Return the published block snapshot used by the active parse route."""
+def _graphrag_active_block_index_hash(doc_id: str) -> str | None:
+    """Return the current parse route's published block snapshot revision."""
     try:
-        return _block_index_content_hash(load_block_index(DATA_DIR, doc_id))
+        index = load_block_index(DATA_DIR, doc_id)
     except Exception:
-        return ""
+        return None
+    return active_block_index_revision(index, documents_store.get(doc_id))
 
 
 def _is_loopback_service_url(url: str) -> bool:
@@ -8022,9 +8180,7 @@ def _graphrag_build_matches_active_parse(
     ):
         return False
     expected_block_index_hash = str(block_index_hash or "").strip()
-    return not expected_block_index_hash or (
-        _graphrag_active_block_index_hash(doc_id) == expected_block_index_hash
-    )
+    return not expected_block_index_hash or _graphrag_active_block_index_hash(doc_id) == expected_block_index_hash
 
 
 def _bind_graphrag_progress_identity(
@@ -8045,8 +8201,10 @@ def _graphrag_progress_matches_parse(
     progress,
     manifest: dict,
     *,
-    block_index_hash: str = "",
+    block_index_hash: str | None = "",
 ) -> bool:
+    if block_index_hash is None:
+        return False
     return bool(
         progress
         and str(getattr(progress, "parse_generation", "") or "")
@@ -8069,8 +8227,10 @@ def _graphrag_index_matches_parse(
     working_dir: str | Path,
     manifest: dict,
     *,
-    block_index_hash: str = "",
+    block_index_hash: str | None = "",
 ) -> bool:
+    if block_index_hash is None:
+        return False
     expected = _graphrag_parse_identity(manifest, block_index_hash=block_index_hash)
     if not expected["parse_generation"] or not expected["document_source_hash"]:
         return False
@@ -9713,6 +9873,8 @@ async def translate_document_blocks(
 
     target_lang = body.get("target_lang") or target_lang
     force = bool(body.get("force", force))
+    # 逐段要点是设置里的开关，缺省保持开启（老客户端不传时行为不变）
+    with_summary = bool(body.get("with_summary", True))
 
     api_key, model, provider, api_host = _resolve_overview_runtime_params(
         request,
@@ -9749,6 +9911,7 @@ async def translate_document_blocks(
             provider=provider,
             endpoint=_get_overview_provider_endpoint(provider, api_host),
             force=force,
+            with_summary=with_summary,
             ai_cache_generation=ai_cache_generation,
             cache_writer=_build_parse_bound_cache_writer(
                 doc_id,
@@ -9801,6 +9964,8 @@ async def pretranslate_document_blocks(
 
     target_lang = body.get("target_lang") or target_lang
     force = bool(body.get("force", force))
+    # 逐段要点是设置里的开关，缺省保持开启（老客户端不传时行为不变）
+    with_summary = bool(body.get("with_summary", True))
     try:
         concurrency = int(body.get("concurrency", concurrency) or 8)
     except Exception:
@@ -9841,6 +10006,7 @@ async def pretranslate_document_blocks(
             provider=provider,
             endpoint=_get_overview_provider_endpoint(provider, api_host),
             force=force,
+            with_summary=with_summary,
             max_blocks=None,
             concurrency=concurrency,
             ai_cache_generation=ai_cache_generation,
@@ -9859,6 +10025,94 @@ async def pretranslate_document_blocks(
     except Exception as exc:
         logger.exception("[BlockTranslation] pretranslate failed for %s", doc_id)
         raise HTTPException(status_code=502, detail=f"全文预翻译失败: {exc}")
+
+
+@router.post("/documents/{doc_id}/blocks/backfill-summaries")
+async def backfill_document_block_summaries(
+    request: Request,
+    doc_id: str,
+    target_lang: str = "zh",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_host: Optional[str] = None,
+    concurrency: int = 8,
+):
+    """给已翻译但没有要点的段落补要点，复用已有译文，不重跑翻译。"""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    block_ids = body.get("block_ids") or []
+    if isinstance(block_ids, str):
+        block_ids = [item.strip() for item in block_ids.split(",") if item.strip()]
+    if not isinstance(block_ids, list):
+        raise HTTPException(status_code=400, detail="block_ids 必须是数组")
+    block_ids = [str(item) for item in block_ids if str(item).strip()]
+
+    target_lang = body.get("target_lang") or target_lang
+    try:
+        concurrency = int(body.get("concurrency", concurrency) or 8)
+    except Exception:
+        concurrency = 8
+
+    api_key, model, provider, api_host = _resolve_overview_runtime_params(
+        request,
+        api_key,
+        model,
+        provider,
+        api_host,
+    )
+    if not api_key:
+        api_key = _configured_provider_api_key_for_target(provider, api_host)
+
+    provider_lower = (provider or "").lower()
+    if not api_key and provider_lower not in {"local", "ollama"}:
+        raise HTTPException(status_code=400, detail="请先配置用于翻译的对话模型 API Key")
+
+    doc = documents_store[doc_id]
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+    ai_cache_generation = load_ai_cache_generation(DATA_DIR, doc_id)
+
+    try:
+        return await backfill_block_summaries(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            block_index=block_index,
+            target_lang=target_lang,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=_get_overview_provider_endpoint(provider, api_host),
+            block_ids=block_ids or None,
+            concurrency=concurrency,
+            ai_cache_generation=ai_cache_generation,
+            cache_writer=_build_parse_bound_cache_writer(
+                doc_id,
+                parse_generation=str(parse_manifest.get("generation") or ""),
+                document_source_hash=str(parse_manifest.get("source_hash") or ""),
+                persist=lambda envelope: save_translation_cache(DATA_DIR, doc_id, envelope),
+                ai_cache_generation=ai_cache_generation,
+            ),
+        )
+    except _SupersededAICacheGeneration:
+        raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新翻译后再补要点")
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新翻译后再补要点")
+    except Exception as exc:
+        logger.exception("[BlockTranslation] summary backfill failed for %s", doc_id)
+        raise HTTPException(status_code=502, detail=f"补齐要点失败: {exc}")
 
 
 @router.delete("/documents/{doc_id}/ai-cache")

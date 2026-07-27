@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 _advanced_search = AdvancedSearchService()
 
+# 工具层错误码。两者语义不同，绝不能合并：
+# - RETRIEVAL_ERROR: 工具执行报错，上游应换工具；
+# - NO_RELEVANT_CHUNKS: 工具正常执行但 0 命中，上游应换措辞重搜。
+# 取值用小写，与 _normalize_tool_error_code 的 [a-z0-9_] 约束一致。
+_RETRIEVAL_ERROR_CODE = "retrieval_error"
+_NO_RELEVANT_CHUNKS_ERROR_CODE = "no_relevant_chunks"
+
 _VISUAL_KEYWORD_OVERLAY_LIMIT = 6
 _VISUAL_KEYWORD_TEXT_LIMIT = 1200
 _VISUAL_KEYWORD_SCORE_WEIGHT = 0.65
@@ -413,6 +420,30 @@ def _annotate_vector_visual_result(result: dict) -> dict:
     return annotated
 
 
+def _mark_zero_hit_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """给"检索成功但 0 命中"打上与"检索报错"不同的哨兵码。
+
+    ``RETRIEVAL_ERROR`` 表示工具本身失败（上游应换工具），
+    ``NO_RELEVANT_CHUNKS`` 表示工具正常但没命中（上游应换措辞重搜）。
+    两者必须可区分，因此这里只补 ``error_code``，不写 ``error``——
+    否则会被上游当成真正的执行失败。
+    """
+    if not isinstance(result, dict):
+        return result
+    if result.get("error") or result.get("error_code"):
+        return result
+    raw_count = result.get("result_count")
+    if raw_count is None:
+        raw_count = len(result.get("results") or [])
+    try:
+        count = int(raw_count or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        result["error_code"] = _NO_RELEVANT_CHUNKS_ERROR_CODE
+    return result
+
+
 def execute_tool(
     tool_name: str,
     args: Dict[str, Any],
@@ -430,37 +461,49 @@ def execute_tool(
     """
     try:
         if tool_name == "search_document":
-            return _exec_search_document(args, doc_ctx)
+            result = _exec_search_document(args, doc_ctx)
         elif tool_name == "web_search":
             return {
                 "error": "web_search_requires_async_executor",
+                "error_code": "web_search_requires_async_executor",
                 "results": [],
                 "result_count": 0,
                 "summary": "联网搜索只能通过请求级异步执行器调用",
             }
         elif tool_name == "visual_search":
-            return _exec_visual_search(args, doc_ctx)
+            result = _exec_visual_search(args, doc_ctx)
         elif tool_name == "vector_search":
-            return _exec_vector_search(args, doc_ctx)
+            result = _exec_vector_search(args, doc_ctx)
         elif tool_name == "keyword_search":
-            return _exec_keyword_search(args, doc_ctx)
+            result = _exec_keyword_search(args, doc_ctx)
         elif tool_name == "grep":
-            return _exec_grep(args, doc_ctx)
+            result = _exec_grep(args, doc_ctx)
         elif tool_name == "regex_search":
-            return _exec_regex_search(args, doc_ctx)
+            result = _exec_regex_search(args, doc_ctx)
         elif tool_name == "boolean_search":
-            return _exec_boolean_search(args, doc_ctx)
+            result = _exec_boolean_search(args, doc_ctx)
         elif tool_name == "read_blocks":
-            return _exec_read_blocks(args, doc_ctx)
+            result = _exec_read_blocks(args, doc_ctx)
         elif tool_name == "fetch":
-            return _exec_fetch_group(args, doc_ctx)
+            result = _exec_fetch_group(args, doc_ctx)
         elif tool_name == "map":
-            return _exec_map(args, doc_ctx)
+            result = _exec_map(args, doc_ctx)
         else:
-            return {"error": f"未知工具: {tool_name}", "results": []}
+            return {
+                "error": f"未知工具: {tool_name}",
+                "error_code": "unknown_tool",
+                "results": [],
+                "result_count": 0,
+            }
     except Exception as e:
-        logger.error(f"[RetrievalTools] 工具 {tool_name} 执行失败: {e}")
-        return {"error": str(e), "results": []}
+        logger.exception(f"[RetrievalTools] 工具 {tool_name} 执行失败: {e}")
+        return {
+            "error": str(e),
+            "error_code": _RETRIEVAL_ERROR_CODE,
+            "results": [],
+            "result_count": 0,
+        }
+    return _mark_zero_hit_result(result)
 
 
 async def execute_async_tool(
@@ -474,7 +517,8 @@ async def execute_async_tool(
     if tool_name == "web_search":
         return await _exec_web_search(args, doc_ctx)
     if tool_name == "search_document":
-        return await _exec_search_document_async(args, doc_ctx)
+        # 与同步 execute_tool 保持同一错误码约定：0 命中 != 执行报错。
+        return _mark_zero_hit_result(await _exec_search_document_async(args, doc_ctx))
     return await asyncio.to_thread(execute_tool, tool_name, args, doc_ctx)
 
 

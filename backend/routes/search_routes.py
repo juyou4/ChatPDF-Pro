@@ -19,7 +19,12 @@ from services.embedding_service import (
     _get_semantic_groups_dir,
     _semantic_generation_identity_complete,
 )
-from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.block_index_service import load_block_index
+from services.document_parse_state import (
+    is_parse_prepared,
+    parse_identity_matches,
+    read_parse_manifest,
+)
 from services.visual_supplement_service import committed_visual_evidence_for_document
 from services.semantic_group_store import active_manifest_path
 from utils.middleware import (
@@ -84,16 +89,18 @@ def _vector_index_matches_parse_manifest(
     if index_version != RAG_INDEX_VERSION:
         return False
     index_meta = data.get("index_meta") if isinstance(data.get("index_meta"), dict) else {}
-    expected_generation = str(manifest.get("generation") or "").strip()
-    expected_source_hash = str(manifest.get("source_hash") or "").strip()
-    if not expected_generation or not expected_source_hash:
+    # Search used to compare only (parse_generation, document_source_hash), so a
+    # parser repair that rebuilt the block tree inside one generation left these
+    # chunks admissible while the reading UI had moved on. Share the admission
+    # rule with the RAG index gate, chat retrieval and GraphRAG.
+    try:
+        block_index = load_block_index(Path(runtime.data_dir), doc_id)
+    except Exception as exc:
+        logger.warning("[%s] 块索引不可读，拒绝该向量索引: %s", doc_id, exc)
         return False
-    if (
-        str(index_meta.get("parse_generation") or "").strip() == expected_generation
-        and str(index_meta.get("document_source_hash") or "").strip() == expected_source_hash
-    ):
-        return _semantic_generation_identity_complete(_extract_vector_semantic_identity(data))
-    return False
+    if not parse_identity_matches(index_meta, manifest, block_index=block_index):
+        return False
+    return _semantic_generation_identity_complete(_extract_vector_semantic_identity(data))
 
 
 def _semantic_groups_match_parse_manifest(doc_id: str, groups_dir: str, manifest: dict) -> bool:

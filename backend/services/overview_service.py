@@ -844,10 +844,33 @@ async def get_document_info(doc_id: str) -> Optional[Dict]:
         return None
     
     doc = documents_store[doc_id]
-    return {
+    paper_metadata = None
+    try:
+        from services.paper_metadata_service import ensure_paper_metadata
+
+        paper_metadata = ensure_paper_metadata(doc) or None
+    except Exception:
+        paper_metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else None
+    info = {
         "doc_id": doc_id,
         "filename": doc.get("filename", "未知文档"),
     }
+    if paper_metadata:
+        info["paper_metadata"] = paper_metadata
+        title = str(paper_metadata.get("title") or "").strip()
+        if title:
+            info["paper_title"] = title
+        short = ""
+        try:
+            from services.paper_metadata_service import paper_metadata_from_dict
+
+            meta_obj = paper_metadata_from_dict(paper_metadata)
+            short = meta_obj.short_citation() if meta_obj else ""
+        except Exception:
+            short = title
+        if short:
+            info["short_citation"] = short
+    return info
 
 
 async def get_document_images_and_pages(doc_id: str) -> tuple:

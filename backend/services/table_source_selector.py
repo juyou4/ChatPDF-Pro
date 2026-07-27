@@ -226,7 +226,7 @@ def _score_group(group: list[TableCandidate]) -> None:
         score -= metrics["duplicate_header_ratio"] * 6.0
         score -= metrics["blank_header_ratio"] * 10.0
         score -= min(metrics["cross_source_missing_row_count"], 12) * 0.35
-        score -= 3.0 if metrics["table8_pollution"] else 0.0
+        score -= 3.0 if metrics["adjacent_table_pollution"] else 0.0
         score -= 2.0 if metrics["suspicious_concatenated_number_count"] else 0.0
         score -= min(metrics["overpacked_metric_cell_count"], 24) * 0.45
 
@@ -289,7 +289,7 @@ def _bundle_metrics(bundle: dict[str, Any]) -> dict[str, Any]:
         "header_bound_row_ratio": header_bound_rows / max(1, len(data_rows)),
         "blank_header_ratio": _blank_header_ratio(header),
         "duplicate_header_ratio": _duplicate_header_ratio(header),
-        "table8_pollution": bool(re.search(r"\bTable\s*8\b", text, re.IGNORECASE) and re.search(r"\bTable\s*7\b", text, re.IGNORECASE)),
+        "adjacent_table_pollution": len(_distinct_table_labels(text)) > 1,
         "suspicious_concatenated_number_count": len(re.findall(r"\d+\.\d{3,}\b", text)),
         "overpacked_metric_cell_count": _overpacked_metric_cell_count(data_rows),
     }
@@ -362,7 +362,7 @@ def _candidate_reasons(candidate: TableCandidate) -> list[str]:
         f"row_key_coverage={metrics.get('row_key_coverage', 0.0):.2f}",
         f"numeric_consensus={metrics.get('numeric_consensus', 0.0):.2f}",
     ]
-    if metrics.get("table8_pollution"):
+    if metrics.get("adjacent_table_pollution"):
         reasons.append("penalty=adjacent_table_pollution")
     if metrics.get("suspicious_concatenated_number_count"):
         reasons.append("penalty=concatenated_numbers")
@@ -526,6 +526,31 @@ def _duplicate_header_ratio(header: str) -> float:
     counts = Counter(cells)
     repeated = sum(count for count in counts.values() if count > 1)
     return repeated / len(cells)
+
+
+# 一个 bundle 的文本里同时出现两个不同的表号，说明抽取时把相邻的表串到了一起。
+# 这条信号本来写成 ``bool(re.search(r"\bTable\s*8\b") and re.search(r"\bTable\s*7\b"))``
+# —— 把某一篇论文的具体现象写进了通用打分器，换一篇论文（Table 3 串 Table 4）就
+# 完全失效。惩罚项的 reason 字符串一直叫 ``adjacent_table_pollution``，这里让实现
+# 与它的本意对齐。
+_TABLE_LABEL_RE = re.compile(
+    r"\b(?:table|tab)\s*\.?\s*(\d+)\b|表\s*\.?\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _distinct_table_labels(text: str) -> set[str]:
+    """Return every distinct table number mentioned in one bundle's text."""
+    labels: set[str] = set()
+    for match in _TABLE_LABEL_RE.finditer(str(text or "")):
+        number = match.group(1) or match.group(2)
+        if not number:
+            continue
+        try:
+            labels.add(str(int(number)))
+        except ValueError:
+            continue
+    return labels
 
 
 def _blank_header_ratio(header: str) -> float:

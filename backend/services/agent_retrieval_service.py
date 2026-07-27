@@ -18,17 +18,15 @@ from typing import Any
 
 from fastapi import HTTPException
 from config import settings
+from services.clarification_service import read_decomposition_signals
 from services.decompose_service import decompose_question, should_decompose
+from services.document_context_sampling import sample_document_text
 from services.retrieval_agent import RetrievalAgent
+# 联网三态策略的唯一实现在 services/web_search_policy.py。此处只做转发，
+# 保证 route 层与 Agent 层永远看到同一个 mode。
+from services.web_search_policy import resolve_web_search_mode as _resolve_web_search_mode
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_web_search_mode(request) -> str:
-    explicit = str(getattr(request, "web_search_mode", "") or "").strip().lower()
-    if explicit in {"off", "auto", "force"}:
-        return explicit
-    return "auto" if bool(getattr(request, "enable_web_search", False)) else "off"
 
 
 def _intent_field(intent_decision: Any, field: str, default: Any = None) -> Any:
@@ -92,6 +90,7 @@ class AgentRetrievalDependencies:
     build_numbered_context_and_citations: Callable[..., tuple[str, list[dict]]]
     generate_page_level_citations: Callable[..., list[dict]]
     build_agent_detail_citations: Callable[..., list[dict]]
+    build_page_covered_context: Callable[..., str] | None = None
     build_visual_evidence_analyzer: Callable[..., Any] | None = None
     perform_web_search: Callable[..., Any] | None = None
     primary_key_for_target: Callable[[Any, str, str], str] | None = None
@@ -407,6 +406,63 @@ async def _iterate_with_total_timeout(async_iterable, timeout_seconds: float):
             raise
 
 
+def _build_degraded_agent_result(
+    agent: Any,
+    *,
+    degraded_to: str,
+    error_kind: str = "",
+    last_error: str = "",
+    error_entry: dict | None = None,
+    extra_diagnostics: dict | None = None,
+) -> dict:
+    """构造降级时的 ``retrieval_complete`` 结果，保留 agent 已积累的 partial 状态。
+
+    超时降级、异常降级与"真空"（agent 未产出 retrieval_complete）共用同一 shape，
+    调用方只通过 ``status`` / ``degraded_to`` / ``diagnostics`` 区分，
+    避免下游拿到两种类型的结果对象。
+    """
+    partial_state = getattr(agent, "_partial_state", None)
+    if not isinstance(partial_state, dict):
+        partial_state = {}
+    try:
+        partial_retrieval_diag = agent.snapshot_partial_diagnostics(
+            fallback_reason=degraded_to
+        )
+    except Exception as exc:
+        logger.warning(f"[Agent] snapshot_partial_diagnostics 失败: {exc}")
+        partial_retrieval_diag = {
+            "retrieval": {"fallback_reason": degraded_to},
+            "context_assembly": {"fallback_reason": degraded_to},
+        }
+    partial_agent_diag = dict(getattr(agent, "diagnostics", {}) or {})
+    partial_agent_diag.update({
+        "fallback_reason": degraded_to,
+        "last_error": last_error,
+        "errors": [
+            *(partial_agent_diag.get("errors") or []),
+            *([error_entry] if isinstance(error_entry, dict) else []),
+        ],
+    })
+    if error_kind:
+        partial_agent_diag["error_kind"] = error_kind
+    if isinstance(extra_diagnostics, dict):
+        partial_agent_diag.update(extra_diagnostics)
+    return {
+        "type": "retrieval_complete",
+        "context": "",
+        "detail": [],
+        "search_history": list(partial_state.get("search_history") or []),
+        "task_status": {},
+        "diagnostics": partial_agent_diag,
+        "retrieval_diagnostics": partial_retrieval_diag,
+        "web_search_sources": list(partial_state.get("web_search_sources") or []),
+        "web_search_context": "\n\n".join(partial_state.get("web_search_context_parts") or []),
+        "status": "degraded",
+        "error_kind": error_kind,
+        "degraded_to": degraded_to,
+    }
+
+
 async def run_agent_retrieval_for_context(
     *,
     request,
@@ -421,6 +477,7 @@ async def run_agent_retrieval_for_context(
     trace: Callable[..., None] | None = None,
     vector_store_dir: str = "",
     deps: AgentRetrievalDependencies | None = None,
+    decomposition_signals: dict | None = None,
 ) -> tuple[str, dict]:
     """执行 Agentic RAG 并返回上下文与检索元数据。
 
@@ -464,23 +521,43 @@ async def run_agent_retrieval_for_context(
     # remain useful as retrieval provenance, but must not make the planner
     # reclassify a rewritten template as a different user intent.
     decomposition_question = citation_query or str(search_query or request.question or "").strip()
-    sub_questions: list = []
-    if should_decompose(decomposition_question):
-        try:
-            sub_questions = await asyncio.wait_for(
-                decompose_question(
-                    question=decomposition_question,
-                    api_key=agent_api_key,
-                    model=agent_model,
-                    provider=agent_provider,
-                    endpoint=agent_endpoint or "",
-                ),
-                timeout=2.5,
-            )
-            sub_questions = (sub_questions or [])[:3]
-        except (asyncio.TimeoutError, Exception) as exc:
-            logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")
+    # 阶段 3.1（降级版）：分解信号优先读路由层那次澄清调用的产物。
+    # ``decided`` 为真表示 LLM 确实对**这一句**给出了判定（含"判定为不用拆"），
+    # 此时不再发那次独立的 decompose_question——这就是本阶段净减少的一次往返。
+    # 信号缺失 / 身份不匹配 / LLM 失败，一律回落既有规则 + 独立调用（fail-open）。
+    hint_subs, hint_decided, hint_source = read_decomposition_signals(
+        decomposition_signals,
+        decomposition_question,
+    )
+    sub_questions: list = list(hint_subs)
+    decompose_source = f"llm_signals:{hint_source}" if hint_decided else "rule"
+    if not hint_decided:
+        if should_decompose(decomposition_question):
+            try:
+                sub_questions = await asyncio.wait_for(
+                    decompose_question(
+                        question=decomposition_question,
+                        api_key=agent_api_key,
+                        model=agent_model,
+                        provider=agent_provider,
+                        endpoint=agent_endpoint or "",
+                    ),
+                    timeout=2.5,
+                )
+                sub_questions = (sub_questions or [])[:3]
+                decompose_source = "rule_llm_call"
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")
+                sub_questions = []
+                decompose_source = "rule_llm_failed"
+        else:
             sub_questions = []
+            decompose_source = "rule_no_split"
+    retrieval_meta["decompose"] = {
+        "source": decompose_source,
+        "signal_source": hint_source,
+        "sub_questions": len(sub_questions or []),
+    }
 
     web_search_mode = _resolve_web_search_mode(request)
     web_search_executor = None
@@ -608,43 +685,42 @@ async def run_agent_retrieval_for_context(
             "message": f"Agent 检索超过 {agent_timeout:.0f}s，使用降级上下文。",
             "error": timeout_error,
         })
-        try:
-            partial_retrieval_diag = agent.snapshot_partial_diagnostics(
-                fallback_reason="agent_total_timeout"
-            )
-        except Exception as exc:
-            logger.warning(f"[Agent] snapshot_partial_diagnostics 失败: {exc}")
-            partial_retrieval_diag = {
-                "retrieval": {"fallback_reason": "agent_total_timeout"},
-                "context_assembly": {"fallback_reason": "agent_total_timeout"},
-            }
-        partial_agent_diag = dict(getattr(agent, "diagnostics", {}) or {})
-        partial_agent_diag.update({
-            "fallback_reason": "agent_total_timeout",
-            "last_error": timeout_error,
-            "errors": [
-                *(partial_agent_diag.get("errors") or []),
-                {"type": "timeout", "message": timeout_error},
-            ],
-            "timeout_s": agent_timeout,
-        })
-        agent_result = {
-            "type": "retrieval_complete",
-            "context": "",
-            "detail": [],
-            "search_history": list(
-                (agent._partial_state.get("search_history") if hasattr(agent, "_partial_state") else None) or []
-            ),
-            "task_status": {},
-            "diagnostics": partial_agent_diag,
-            "retrieval_diagnostics": partial_retrieval_diag,
-            "web_search_sources": list((agent._partial_state.get("web_search_sources") if hasattr(agent, "_partial_state") else None) or []),
-            "web_search_context": "\n\n".join((agent._partial_state.get("web_search_context_parts") if hasattr(agent, "_partial_state") else None) or []),
-        }
+        agent_result = _build_degraded_agent_result(
+            agent,
+            degraded_to="agent_total_timeout",
+            error_kind="TimeoutError",
+            last_error=timeout_error,
+            error_entry={"type": "timeout", "message": timeout_error},
+            extra_diagnostics={"timeout_s": agent_timeout},
+        )
     except Exception as exc:
-        logger.warning(f"[Agent] 多轮检索失败，降级为全文编号上下文: {exc}")
-        _trace("retrieval_agent_exception", error=str(exc))
-        agent_result = {}
+        # 非超时异常同样保留 partial 诊断（search_history / candidate_pool /
+        # evidence_state），不再把 agent_result 清空导致全部诊断丢失。
+        error_kind = type(exc).__name__
+        agent_error = f"agent_exception({error_kind})"
+        logger.exception(f"[Agent] 多轮检索失败，降级为全文编号上下文: {exc}")
+        _trace("retrieval_agent_exception", error=str(exc), error_kind=error_kind)
+        await _emit_progress(emit_progress, {
+            "type": "retrieval_progress",
+            "phase": "loop_guard",
+            "message": "Agent 检索异常中断，使用降级上下文。",
+            "error": agent_error,
+        })
+        agent_result = _build_degraded_agent_result(
+            agent,
+            degraded_to="agent_exception",
+            error_kind=error_kind,
+            last_error=agent_error,
+            error_entry={"type": "exception", "message": _safe_issue_message(exc)},
+        )
+
+    if not agent_result:
+        # agent 正常结束却没有产出 retrieval_complete：真空与降级返回同一 shape。
+        agent_result = _build_degraded_agent_result(
+            agent,
+            degraded_to="agent_no_result",
+            last_error="agent_no_retrieval_complete_event",
+        )
 
     agent_context = agent_result.get("context", "") if isinstance(agent_result, dict) else ""
     agent_detail = agent_result.get("detail", []) if isinstance(agent_result, dict) else []
@@ -679,6 +755,13 @@ async def run_agent_retrieval_for_context(
                 retrieval_meta["agent_error"] = agent_diagnostics.get("last_error")
             if agent_diagnostics.get("fallback_reason"):
                 retrieval_meta["agent_fallback_reason"] = agent_diagnostics.get("fallback_reason")
+        # 让降级对调用方可见，而不是只埋在 diagnostics 里。
+        if agent_result.get("status"):
+            retrieval_meta["agent_status"] = str(agent_result.get("status") or "")
+        if agent_result.get("error_kind"):
+            retrieval_meta["agent_error_kind"] = str(agent_result.get("error_kind") or "")
+        if agent_result.get("degraded_to"):
+            retrieval_meta["degraded_to"] = str(agent_result.get("degraded_to") or "")
 
     fatal_vector_issue = _find_fatal_vector_identity_issue(agent_result)
     if fatal_vector_issue is not None:
@@ -803,7 +886,20 @@ async def run_agent_retrieval_for_context(
                 )
                 return context, retrieval_meta
 
-    fallback_text = (doc.get("data", {}) or {}).get("full_text", "")[:30000]
+    full_text = str((doc.get("data", {}) or {}).get("full_text", "") or "")
+    if deps.build_page_covered_context is not None:
+        # Do not turn an agent timeout into a first-30k-character answer. The
+        # route's page-covered builder preserves evidence from the middle and
+        # tail while keeping the same bounded fallback budget.
+        fallback_text = deps.build_page_covered_context(
+            pages,
+            full_text,
+            max_total_chars=30_000,
+        )
+    else:
+        # External callers can omit the route helper. Keep their fallback
+        # bounded and page-agnostic, but never reduce it to the document prefix.
+        fallback_text = sample_document_text(full_text, max_chars=30_000)
     numbered_ctx, fb_cits = deps.build_numbered_context_and_citations(
         pages,
         fallback_text,
@@ -813,9 +909,12 @@ async def run_agent_retrieval_for_context(
     retrieval_meta["citations"] = fb_cits
     retrieval_meta["agent_fallback"] = True
     retrieval_meta["agent_fallback_reason"] = retrieval_meta.get("agent_fallback_reason") or "empty_agent_context"
+    # 这条上下文来自全文取样而非检索命中，必须显式标注，避免静默降级。
+    retrieval_meta["degraded_to"] = "fulltext_sampling"
     _trace(
         "retrieval_agent_fallback",
         context_chars=len(context),
         citations=len(fb_cits or []),
+        degraded_to="fulltext_sampling",
     )
     return context, retrieval_meta
