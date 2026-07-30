@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR" || exit 1
@@ -8,46 +8,52 @@ if [ -z "$APP_VERSION" ]; then
     APP_VERSION="3.0.2"
 fi
 
-# 颜色和样式定义
-BOLD='\033[1m'
-GREEN='\033[0;32m'
-BLUE='\033[0;36m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+# 颜色和样式定义；NO_COLOR 可用于关闭 ANSI 颜色。
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD='\033[1m'
+    ACCENT='\033[38;2;201;103;77m'
+    GREEN='\033[38;2;84;150;111m'
+    YELLOW='\033[38;2;190;139;63m'
+    RED='\033[38;2;194;82;82m'
+    MUTED='\033[38;2;137;132;129m'
+    NC='\033[0m'
+else
+    BOLD=''
+    ACCENT=''
+    GREEN=''
+    YELLOW=''
+    RED=''
+    MUTED=''
+    NC=''
+fi
 
-# 清屏
-clear
+if [ -t 1 ] && [ -n "${TERM:-}" ]; then
+    clear
+fi
 
-# 打印 Banner
-echo -e "${BLUE}${BOLD}"
-cat << EOF
-  ╔═══════════════════════════════════════╗
-  ║                                       ║
-EOF
-printf "  ║%-39s║\n" "     ChatPDF Pro v${APP_VERSION}"
-cat << EOF
-  ║     智能文档助手                      ║
-  ║                                       ║
-  ╚═══════════════════════════════════════╝
-EOF
-echo -e "${NC}"
+printf '\n'
+printf "  ${ACCENT}${BOLD}ChatPDF${NC}\n"
+printf "  ${MUTED}本地文档工作区  /  v%s${NC}\n" "$APP_VERSION"
+printf "  ${MUTED}------------------------------------------------------------${NC}\n\n"
 
-# 进度显示函数
 show_progress() {
-    echo -ne "${BLUE}  ▶${NC} $1"
+    printf "\n  ${ACCENT}>${NC} ${BOLD}%s${NC}\n" "$1"
 }
 
 show_success() {
-    echo -e "\r${GREEN}  ✓${NC} $1"
+    printf "     ${GREEN}done${NC}  %s\n" "$1"
+}
+
+show_info() {
+    printf "     ${MUTED}note${NC}  %s\n" "$1"
 }
 
 show_error() {
-    echo -e "\r${RED}  ✗${NC} $1"
+    printf "     ${RED}error${NC} %s\n" "$1"
 }
 
 command_exists() {
-    command -v "$1" > /dev/null 2>&1
+    command -v "$1" >/dev/null 2>&1
 }
 
 python_version() {
@@ -88,7 +94,6 @@ select_python() {
             resolved="$(command -v "$candidate" 2>/dev/null || true)"
             [ -n "$resolved" ] || continue
         fi
-
         if python_is_supported "$resolved"; then
             PYTHON_CMD="$resolved"
             return 0
@@ -99,8 +104,7 @@ select_python() {
 
 node_is_supported() {
     node - <<'NODE' >/dev/null 2>&1
-const parts = process.versions.node.split('.').map(Number);
-const [major, minor, patch] = parts;
+const [major, minor, patch] = process.versions.node.split('.').map(Number);
 const ok =
   (major === 20 && (minor > 19 || (minor === 19 && patch >= 0))) ||
   (major === 22 && (minor > 12 || (minor === 12 && patch >= 0))) ||
@@ -109,170 +113,177 @@ process.exit(ok ? 0 : 1);
 NODE
 }
 
-cleanup_backend() {
-    if [ -n "${BACKEND_PID:-}" ] && ps -p "$BACKEND_PID" > /dev/null 2>&1; then
-        kill "$BACKEND_PID" 2>/dev/null
+kill_port() {
+    local port="$1" pids=""
+    if command_exists lsof; then
+        pids="$(lsof -ti TCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    elif command_exists fuser; then
+        pids="$(fuser "$port"/tcp 2>/dev/null || true)"
     fi
+    local pid
+    for pid in $pids; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
+CLEANED_UP=0
+cleanup_services() {
+    if [ "$CLEANED_UP" = "1" ]; then
+        return
+    fi
+    CLEANED_UP=1
+    if [ -n "${BACKEND_PID:-}" ] && ps -p "$BACKEND_PID" >/dev/null 2>&1; then
+        kill "$BACKEND_PID" 2>/dev/null || true
+    fi
+    for port in 3000 8000 8001 8002 8003 8004 8005; do
+        kill_port "$port"
+    done
 }
 
 # ==================== 自动更新 ====================
-show_progress "检查代码更新..."
-
-# 获取当前分支名
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-
-# 只在main分支时自动更新，其他分支跳过
-if [ "$CURRENT_BRANCH" = "main" ]; then
-    git pull origin main > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        show_success "代码已更新到最新版本"
+show_progress "检查代码更新"
+CURRENT_BRANCH=""
+if command_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ "$CURRENT_BRANCH" = "main" ]; then
+        if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+            show_info "检测到本地代码改动，为避免覆盖已跳过自动更新"
+        elif git pull --ff-only origin main >/dev/null 2>&1; then
+            show_success "代码已更新到 main 最新版本"
+        else
+            show_info "自动更新未完成，将继续使用当前版本"
+        fi
+    elif [ -n "$CURRENT_BRANCH" ]; then
+        show_info "当前在分支 $CURRENT_BRANCH（仅 main 自动更新）"
     else
-        show_success "已是最新版本 (或更新跳过)"
+        show_info "无法识别当前分支，跳过自动更新"
     fi
 else
-    if [ -n "$CURRENT_BRANCH" ]; then
-        show_success "当前在分支 $CURRENT_BRANCH (跳过自动更新)"
-    else
-        show_success "跳过更新检查"
-    fi
+    show_info "当前目录不是 Git 工作区，跳过自动更新"
 fi
 
 # ==================== 环境检查 ====================
-show_progress "检查运行环境..."
-
-# 检查 Python
+show_progress "检查运行环境"
 if ! select_python; then
     show_error "未找到 Python 3.10+，请先安装或设置 PYTHON=/path/to/python"
     exit 1
 fi
-
-# 检查 Node.js
 if ! command_exists node; then
-    show_error "未找到 Node.js，请先安装"
+    show_error "未找到 Node.js，请先安装 Node.js 20.19+ 或 22.12+"
     exit 1
 fi
-
 if ! command_exists npm; then
-    show_error "未找到 npm，请先安装 Node.js/npm"
+    show_error "未找到 npm，请重新安装包含 npm 的 Node.js"
     exit 1
 fi
-
 if ! node_is_supported; then
-    show_error "Node.js 版本不兼容，当前 $(node --version)，需要 ^20.19.0 或 >=22.12.0"
+    show_error "Node.js 版本不兼容，当前 $(node --version)，需要 20.19+、22.12+ 或更新版本"
     exit 1
 fi
 
-if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
-    show_progress "安装 pip..."
-    "$PYTHON_CMD" -m ensurepip --upgrade > /dev/null 2>&1
+if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
+    show_info "当前 Python 缺少 pip，正在安装"
+    "$PYTHON_CMD" -m ensurepip --upgrade >/dev/null 2>&1 || true
 fi
-
-if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
+if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
     show_error "当前 Python 缺少 pip：$PYTHON_CMD"
     exit 1
 fi
-
-show_success "环境检查通过 (Python $(python_version "$PYTHON_CMD"), Node $(node --version))"
+show_success "环境检查通过（Python $(python_version "$PYTHON_CMD")，Node $(node --version)）"
 
 # ==================== 清理旧进程 ====================
-show_progress "清理旧进程..."
-
-# 清理端口 8000
-PORT_PIDS=$(lsof -ti :8000 2>/dev/null || true)
-if [ -n "$PORT_PIDS" ]; then
-    echo "$PORT_PIDS" | xargs kill -9 2>/dev/null
-fi
-pkill -f "python.*backend/app.py" 2>/dev/null
-find backend -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
-
-show_success "清理完成"
+show_progress "清理旧进程"
+for port in 3000 8000 8001 8002 8003 8004 8005; do
+    kill_port "$port"
+done
+show_success "旧服务端口已释放"
 
 # ==================== 基础运行时 ====================
-show_progress "检查基础运行时..."
-
-# MinerU 是默认解析路线。只确保通用后端、预览和检索依赖；
-# 本地 OCR / ODL / YOLO 由用户选择“本地解析”后按需安装。
-if ! "$PYTHON_CMD" -c "import fastapi, uvicorn, fitz, pdfplumber, faiss, langchain, openai, sentence_transformers" > /dev/null 2>&1; then
-    show_progress "首次安装基础运行时..."
+show_progress "检查基础运行时"
+if ! "$PYTHON_CMD" -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >/dev/null 2>&1; then
+    show_info "首次运行，正在安装基础运行时"
     if ! "$PYTHON_CMD" -m pip install -q -r backend/requirements-core.txt; then
         show_error "基础运行时安装失败，请检查 Python、网络或 requirements-core.txt"
         exit 1
     fi
 fi
-
 show_success "基础运行时已就绪"
-echo -e "${BLUE}  i${NC} 本地解析组件将在选择本地路线时按需准备"
-# 前端依赖
-cd frontend
-if [ ! -d "node_modules" ]; then
-    show_progress "首次运行，安装前端依赖 (需要1-2分钟)..."
-    npm install --silent > /dev/null 2>&1
+show_info "本地解析组件将在选择本地路线时按需准备"
+
+if [ ! -d "frontend/node_modules" ]; then
+    show_info "首次运行，正在安装前端依赖（约 1-2 分钟）"
+    if ! (cd frontend && npm install --silent >/dev/null 2>&1); then
+        show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
+        exit 1
+    fi
 fi
-
-# 确保 rehype-raw 已安装（Blur Reveal 效果依赖）
-npm list rehype-raw > /dev/null 2>&1 || npm install rehype-raw --silent > /dev/null 2>&1
-
-cd ..
-
-show_success "依赖检查完成"
+if [ ! -d "frontend/node_modules/rehype-raw" ]; then
+    if ! (cd frontend && npm install rehype-raw --silent >/dev/null 2>&1); then
+        show_error "rehype-raw 安装失败，请检查 npm 和网络"
+        exit 1
+    fi
+fi
+show_success "前端依赖已就绪"
 
 # ==================== 启动服务 ====================
-show_progress "启动后端服务..."
+show_progress "启动后端服务"
 BACKEND_LOG="$BASE_DIR/backend/backend_startup.log"
-nohup "$PYTHON_CMD" backend/app.py > "$BACKEND_LOG" 2>&1 &
+nohup "$PYTHON_CMD" backend/app.py >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+trap cleanup_services EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-trap cleanup_backend EXIT INT TERM
-
-# 检查后端是否成功启动
 BACKEND_READY=0
-for i in $(seq 1 90); do
-    if command_exists curl && curl -fsS --max-time 2 http://127.0.0.1:8000/health > /dev/null 2>&1; then
+WAIT_COUNT=0
+while [ "$WAIT_COUNT" -lt 90 ]; do
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    if "$PYTHON_CMD" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()" >/dev/null 2>&1; then
         BACKEND_READY=1
         break
     fi
-    if ! ps -p "$BACKEND_PID" > /dev/null 2>&1; then
+    if ! ps -p "$BACKEND_PID" >/dev/null 2>&1; then
         break
     fi
     sleep 1
 done
 
 if [ "$BACKEND_READY" = "1" ]; then
-    show_success "后端服务启动成功 (PID: $BACKEND_PID)"
+    show_success "后端服务启动成功（PID: $BACKEND_PID）"
 else
     show_error "后端启动失败或超时"
     if [ -f "$BACKEND_LOG" ]; then
-        echo ""
-        echo -e "${YELLOW}  后端错误日志:${NC}"
+        printf '\n'
+        printf "     ${YELLOW}log${NC}   后端错误日志\n"
         tail -80 "$BACKEND_LOG"
     fi
     exit 1
 fi
 
-show_progress "启动前端服务..."
-cd frontend
-
-# 延迟打开浏览器（等待前端服务完全启动）
+show_progress "启动前端服务"
 (sleep 3 && "$PYTHON_CMD" -m webbrowser http://localhost:3000 2>/dev/null || \
  open http://localhost:3000 2>/dev/null || \
  xdg-open http://localhost:3000 2>/dev/null) &
 
-echo ""
-echo -e "${GREEN}${BOLD}  🎉 ChatPDF Pro 已启动！${NC}"
-echo ""
-echo -e "  ${BLUE}访问地址:${NC} ${BOLD}http://localhost:3000${NC}"
-echo -e "  ${BLUE}后端API:${NC}  ${BOLD}http://127.0.0.1:8000${NC}"
-echo ""
-echo -e "  ${YELLOW}提示:${NC} 浏览器将自动打开，按 ${BOLD}Ctrl+C${NC} 停止服务"
-echo ""
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
+printf '\n'
+printf "  ${GREEN}${BOLD}Ready${NC}  ChatPDF 正在运行\n"
+printf "  ${MUTED}------------------------------------------------------------${NC}\n"
+printf "  ${MUTED}Web${NC}     ${BOLD}http://localhost:3000${NC}\n"
+printf "  ${MUTED}API${NC}     ${BOLD}http://127.0.0.1:8000${NC}\n"
+printf '\n'
+printf "  ${MUTED}浏览器将自动打开。按 ${BOLD}Ctrl+C${NC}${MUTED} 停止所有服务。${NC}\n\n"
 
-# 启动前端（前台运行，按 Ctrl+C 停止后会清理后端）
+cd frontend || exit 1
 npm run dev
+FRONTEND_EXIT=$?
+cd "$BASE_DIR" || exit 1
 
-# ==================== 清理 ====================
-echo ""
-show_progress "正在停止服务..."
-cleanup_backend
+printf '\n'
+show_progress "正在停止服务"
+cleanup_services
+trap - EXIT INT TERM
 show_success "已停止所有服务"
+if [ "$FRONTEND_EXIT" -ne 0 ]; then
+    show_error "前端服务已异常退出（代码 $FRONTEND_EXIT）"
+fi
+exit "$FRONTEND_EXIT"
