@@ -17,6 +17,7 @@ import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Any, Optional
 
 from services.keyword_extractor import KeywordExtractor
@@ -30,6 +31,8 @@ from services.memory_llm import (
 from services.memory_quality import (
     is_unusable_automatic_answer,
     sanitize_automatic_memory_content,
+    is_unsafe_automatic_document_answer,
+    is_unscoped_document_absence_claim,
 )
 from services.memory_retriever import MemoryRetriever
 from services.memory_store import MemoryEntry, MemoryStore
@@ -54,7 +57,14 @@ ANSWER_MAX_LEN = 200  # 回答截取最大长度
 
 # 文档内容会随着重新解析切换 generation。自动生成的文档记忆必须绑定
 # 当时的解析身份；用户主动保存/点赞的记忆则是用户意图，不应随之丢失。
-_AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES = {"auto_qa", "llm_distilled", "compressed"}
+_AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES = {
+    "auto_qa",
+    "llm_distilled",
+    "compressed",
+    # A rolling summary contains model-derived conclusions from a particular
+    # parse generation. It must not survive a local <-> MinerU route switch.
+    "session_summary",
+}
 
 # 提炼模型表示"本轮没有值得记住的内容"时使用的哨兵回复。
 _NO_FACT_SENTINELS = {"无", "none", "no important fact", "n/a", "null", "nothing"}
@@ -76,12 +86,52 @@ def _is_no_fact_sentinel(text: str) -> bool:
         return True
     return normalized.lower() in _NO_FACT_SENTINELS
 
+_DOCUMENT_ABSENCE_RE = re.compile(
+    r"未(?:给出|说明|提供|公开)|没有(?:给出|说明|提供)|未披露|不(?:清楚|明确)|无法(?:确认|得知)|"
+    r"\b(?:does not|doesn't|did not|has not|have not)\s+(?:give|provide|describe|specify|disclose)\b|"
+    r"\bnot\s+(?:given|provided|described|specified|disclosed)\b|\b(?:unclear|unknown)\b",
+    re.IGNORECASE,
+)
+_ARCHITECTURE_BROAD_RE = re.compile(
+    r"架构|结构|拓扑|机制|交互|流程|网络|检测头|"
+    r"architecture|structure|topology|mechanism|interaction|pipeline|network|detector",
+    re.IGNORECASE,
+)
+_ARCHITECTURE_DETAIL_SCOPE_RE = re.compile(
+    r"逐层|层数|通道|维度|张量|投影|归一化|配置|超参|具体(?:模块|字段|实现)|实现细节|"
+    r"\b(?:layer(?:s)?|channel(?:s)?|dimension(?:s)?|tensor(?:s)?|projection|normalization|"
+    r"configuration|hyperparameter(?:s)?|implementation(?:\s+details?)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_unscoped_architecture_absence_fact(text: str) -> bool:
+    """拒绝把“没有结构”这类无边界否定写成文档事实。"""
+    normalized = str(text or "").strip()
+    return bool(
+        normalized
+        and _DOCUMENT_ABSENCE_RE.search(normalized)
+        and _ARCHITECTURE_BROAD_RE.search(normalized)
+        and not _ARCHITECTURE_DETAIL_SCOPE_RE.search(normalized)
+    )
+
 
 def has_explicit_memory_request(text: str) -> bool:
     """用户是否在本轮明确要求记住某件事。"""
     if not text:
         return False
     return bool(_EXPLICIT_MEMORY_REQUEST_RE.search(str(text)))
+
+
+def _serialized_memory_mutation(method):
+    """Serialize a service-level mutation with delayed memory publishers."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._store_mutation_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class MemoryService:
@@ -103,13 +153,16 @@ class MemoryService:
         self._write_generation_lock = threading.RLock()
         self._store_mutation_lock = threading.RLock()
         self._write_generation = 0
+        # A document-level clear must only fence delayed writers for that
+        # document. The global generation remains for ``clear_all``.
+        self._document_write_generations: dict[str, int] = {}
         
         # 根据配置选择存储后端
         if use_sqlite:
             try:
                 from services.memory_store_sqlite import MemoryStoreSQLite
                 self.store = MemoryStoreSQLite(data_dir, use_sqlite=True)
-                logger.info("使用 SQLite 存储后端（增强查询性能）")
+                logger.info("启用 SQLite FTS 镜像；JSON/事件快照仍是生命周期权威源")
             except Exception as e:
                 logger.warning(f"SQLite 存储初始化失败，回退到 JSON: {e}")
                 from services.memory_store import MemoryStore
@@ -182,19 +235,65 @@ class MemoryService:
             self._safe_execute("MemoryIndex.recover", self._recover_index_from_store)
 
         # 预加载活跃记忆池
+        self._safe_execute(
+            "MemoryGuard.quarantine",
+            self._quarantine_unscoped_architecture_absence_memories,
+        )
         self._safe_execute("ActivePool.preload", self._preload_active_pool)
 
-    def capture_write_generation(self) -> int:
-        """Capture the generation an asynchronous memory write may publish to."""
+    def capture_write_generation(self, doc_id: str | None = None) -> int | tuple[int, str, int]:
+        """Capture the global/document fence for a delayed memory writer."""
         with self._write_generation_lock:
+            if doc_id:
+                return (
+                    self._write_generation,
+                    str(doc_id),
+                    self._document_write_generations.get(str(doc_id), 0),
+                )
             return self._write_generation
 
-    def is_write_generation_current(self, expected_generation: int | None) -> bool:
-        """Return whether a delayed writer still belongs to the active store."""
+    def is_write_generation_current(
+        self,
+        expected_generation: int | tuple[int, str, int] | None,
+        *,
+        doc_id: str | None = None,
+    ) -> bool:
+        """Return whether a delayed writer still belongs to the active store.
+
+        Older callers may still pass a plain global integer. New document
+        writers carry ``(global_generation, doc_id, doc_generation)`` so a
+        document-local clear cannot be undone by a late background task.
+        """
         if expected_generation is None:
             return True
         with self._write_generation_lock:
-            return int(expected_generation) == self._write_generation
+            if isinstance(expected_generation, tuple) and len(expected_generation) == 3:
+                global_generation, expected_doc_id, document_generation = expected_generation
+                if doc_id is not None and str(doc_id) != str(expected_doc_id):
+                    return False
+                return (
+                    int(global_generation) == self._write_generation
+                    and self._document_write_generations.get(str(expected_doc_id), 0)
+                    == int(document_generation)
+                )
+            try:
+                return int(expected_generation) == self._write_generation
+            except (TypeError, ValueError):
+                return False
+
+    def _global_generation_from_fence(
+        self,
+        expected_generation: int | tuple[int, str, int] | None,
+    ) -> int | None:
+        """Extract the global component for profile-scoped writes."""
+        if expected_generation is None:
+            return None
+        if isinstance(expected_generation, tuple) and len(expected_generation) == 3:
+            return int(expected_generation[0])
+        try:
+            return int(expected_generation)
+        except (TypeError, ValueError):
+            return None
 
     # ==================== 安全执行与预加载 ====================
 
@@ -215,6 +314,44 @@ class MemoryService:
             logger.warning(f"[{component_name}] 执行失败，降级处理: {e}")
             return None
 
+    @staticmethod
+    def _is_unscoped_architecture_absence_automatic_memory(
+        source_type: str,
+        content: str,
+    ) -> bool:
+        return bool(
+            str(source_type or "").strip().lower()
+            in _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES
+            and is_unsafe_automatic_document_answer(content)
+        )
+
+    def _quarantine_unscoped_architecture_absence_memories(self) -> int:
+        """Invalidate pre-guard automatic document facts without deleting them."""
+        candidates = [
+            entry
+            for entry in self.store.get_all_entries()
+            if entry.doc_id
+            and entry.is_retrievable
+            and self._is_unscoped_architecture_absence_automatic_memory(
+                entry.source_type,
+                entry.content,
+            )
+        ]
+        invalidated = 0
+        for entry in candidates:
+            if self.invalidate_entry(
+                entry.id,
+                reason="unsafe_document_absence_guard",
+                actor="system_guard",
+            ):
+                invalidated += 1
+        if invalidated:
+            logger.warning(
+                "[MemoryGuard] invalidated %d pre-existing unsafe document claims",
+                invalidated,
+            )
+        return invalidated
+
     def _preload_active_pool(self) -> None:
         """预加载活跃记忆池（服务启动时调用）
 
@@ -224,6 +361,15 @@ class MemoryService:
             return
         try:
             all_entries = self.store.get_all_entries()
+            all_entries = [
+                entry
+                for entry in all_entries
+                if entry.is_retrievable
+                and not self._is_unscoped_architecture_absence_automatic_memory(
+                    entry.source_type,
+                    entry.content,
+                )
+            ]
             # 按 last_hit_at 降序排列，取前 N 条
             sorted_entries = sorted(
                 all_entries,
@@ -239,6 +385,11 @@ class MemoryService:
         entries = [
             entry for entry in self.store.get_all_entries()
             if entry.status != "archived_raw"
+            and entry.is_retrievable
+            and not self._is_unscoped_architecture_absence_automatic_memory(
+                entry.source_type,
+                entry.content,
+            )
         ]
         if not entries:
             logger.info("[MemoryIndex] 无可恢复条目，跳过索引重建")
@@ -412,6 +563,9 @@ class MemoryService:
                 )
             )
             if source_type in _AUTOMATIC_DOCUMENT_MEMORY_SOURCE_TYPES:
+                if is_unsafe_automatic_document_answer(content):
+                    logger.info("[MemoryGuard] suppressing unsafe automatic memory hit")
+                    continue
                 content = sanitize_automatic_memory_content(content, source_type)
                 if not content:
                     continue
@@ -469,6 +623,8 @@ class MemoryService:
             question = (user_msg or {}).get("content", "").strip()
             answer = (assistant_msg or {}).get("content", "").strip()
             if not question or is_unusable_automatic_answer(answer):
+                continue
+            if is_unsafe_automatic_document_answer(answer):
                 continue
             content = f"Q: {question}\nA: {answer}".strip()
             if not content:
@@ -714,6 +870,7 @@ class MemoryService:
 
     # ==================== 分层记忆架构 ====================
 
+    @_serialized_memory_mutation
     def check_and_promote(self, entry: MemoryEntry) -> None:
         """检查并执行记忆晋升
 
@@ -922,7 +1079,8 @@ class MemoryService:
         """在同作用域的活跃记忆中找出与 content 重复的条目。
 
         先做归一化内容指纹的精确查重，再用向量近邻拦截近义重复。
-        只有当前文档记忆与全局画像记忆参与比对，别的文档不会挡住本文档的新事实。
+        只有当前文档的同代际记忆参与比对。用户画像不是文档事实的
+        去重基线，不能让自动提炼把用户手工偏好当作可覆盖的旧事实。
         任何一步失败都放行写入——去重是优化，不是正确性前提。
         """
         fingerprint = self._content_fingerprint(content)
@@ -933,7 +1091,7 @@ class MemoryService:
         for entry in candidates:
             if getattr(entry, "status", "active") != "active":
                 continue
-            if entry.doc_id not in (None, doc_id):
+            if entry.doc_id != doc_id:
                 continue
             scoped[entry.id] = entry
         if not scoped:
@@ -968,12 +1126,22 @@ class MemoryService:
         items: list[tuple[Any, str]],
         *,
         doc_id: str | None,
+        parse_identity: dict | None = None,
     ) -> tuple[list[Any], int]:
         """从 (标识, 内容) 列表中筛掉重复项，返回 (保留的标识, 丢弃数量)。"""
         if not items:
             return [], 0
         try:
-            candidates = self.store.get_all_entries()
+            candidates = [
+                entry
+                for entry in self.store.get_all_entries()
+                if entry.doc_id == doc_id
+                and self._entry_matches_parse_identity(
+                    entry,
+                    doc_id=doc_id,
+                    parse_identity=parse_identity,
+                )
+            ]
         except Exception as exc:
             logger.debug(f"[MemoryDedupe] 读取既有记忆失败，放行本批写入: {exc}")
             return [key for key, _ in items], 0
@@ -1027,6 +1195,7 @@ class MemoryService:
         api_key: str | None,
         model: str | None,
         api_provider: str | None,
+        parse_identity: dict | None = None,
         budget: MemoryLLMBudget | None = None,
     ) -> tuple[list[str], list[tuple[str, str, str]], list[tuple[str, str]]]:
         """对提炼出的事实做写入裁决。
@@ -1041,7 +1210,21 @@ class MemoryService:
             return list(facts), [], []
 
         try:
-            entry_map = self._get_entry_map()
+            # LLM arbitration is allowed to evolve system-derived facts in the
+            # current document revision only. It must never update/delete a
+            # profile or a manual/liked record merely because wording happens
+            # to be similar.
+            entry_map = {
+                entry.id: entry
+                for entry in self.store.get_all_entries()
+                if entry.doc_id == doc_id
+                and entry.source_type in {"auto_qa", "llm_distilled", "compressed"}
+                and self._entry_matches_parse_identity(
+                    entry,
+                    doc_id=doc_id,
+                    parse_identity=parse_identity,
+                )
+            }
             candidates = self.arbiter.collect_candidates(
                 facts, index=self.index, entry_map=entry_map, doc_id=doc_id
             )
@@ -1091,6 +1274,7 @@ class MemoryService:
             )
         return to_add, to_update, to_invalidate
 
+    @_serialized_memory_mutation
     def invalidate_entry(
         self,
         entry_id: str,
@@ -1127,6 +1311,7 @@ class MemoryService:
         )
         return True
 
+    @_serialized_memory_mutation
     def revalidate_entry(self, entry_id: str, *, actor: str = "user") -> bool:
         """撤销失效，把记忆放回检索池。"""
         entry = self._find_entry(entry_id)
@@ -1153,6 +1338,7 @@ class MemoryService:
         )
         return True
 
+    @_serialized_memory_mutation
     def set_entry_disabled(
         self,
         entry_id: str,
@@ -1226,11 +1412,24 @@ class MemoryService:
         except Exception:
             return 6
 
-    def _find_session_summary_entry(self, doc_id: str) -> Optional[MemoryEntry]:
+    def _find_session_summary_entry(
+        self,
+        doc_id: str,
+        *,
+        parse_identity: dict | None = None,
+    ) -> Optional[MemoryEntry]:
         from services.memory_summary import SESSION_SUMMARY_KIND
 
         for entry in self.store.get_all_entries():
-            if entry.doc_id == doc_id and entry.memory_kind == SESSION_SUMMARY_KIND:
+            if (
+                entry.doc_id == doc_id
+                and entry.memory_kind == SESSION_SUMMARY_KIND
+                and self._entry_matches_parse_identity(
+                    entry,
+                    doc_id=doc_id,
+                    parse_identity=parse_identity,
+                )
+            ):
                 return entry
         return None
 
@@ -1243,6 +1442,7 @@ class MemoryService:
         model: str | None,
         api_provider: str | None,
         parse_identity: dict | None = None,
+        expected_generation: int | tuple[int, str, int] | None = None,
         budget: MemoryLLMBudget | None = None,
     ) -> Optional[str]:
         """维护该文档的滚动会话摘要，返回新摘要文本；未更新返回 None。
@@ -1251,15 +1451,22 @@ class MemoryService:
         """
         if not self._session_summary_enabled() or not doc_id:
             return None
+        if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
+            return None
         if not (api_key and model and api_provider):
             return None
         if not chat_history:
             return None
 
-        usable = [
-            m for m in chat_history
-            if isinstance(m, dict) and m.get("role") in {"user", "assistant"} and m.get("content")
-        ]
+        usable = []
+        for message in chat_history:
+            if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"} or not message.get("content"):
+                continue
+            if message.get("role") == "assistant" and is_unsafe_automatic_document_answer(
+                str(message.get("content") or "")
+            ):
+                continue
+            usable.append(message)
         if len(usable) < 2:
             return None
 
@@ -1269,7 +1476,10 @@ class MemoryService:
             build_rolling_summary,
         )
 
-        existing = self._find_session_summary_entry(doc_id)
+        existing = self._find_session_summary_entry(
+            doc_id,
+            parse_identity=parse_identity,
+        )
         covered = int((existing.source_ref or {}).get("covered_messages", 0)) if existing else 0
 
         # 攒够增量才更新，把 LLM 成本摊薄到多轮对话上
@@ -1290,36 +1500,42 @@ class MemoryService:
         )
         if not summary_text:
             return None
+        if is_unsafe_automatic_document_answer(summary_text):
+            logger.warning("[MemoryGuard] rejected unsafe session summary")
+            return None
 
         identity = self._normalize_parse_identity(parse_identity) or {}
         source_ref = {**identity, "covered_messages": len(usable)}
-
-        if existing is not None:
-            self.store.update_entry_fields(existing.id, {"source_ref": source_ref})
-            self.update_entry(
-                existing.id, summary_text, actor="system", reason="session_summary_roll"
-            )
-        else:
-            entry = MemoryEntry(
-                id=str(uuid.uuid4()),
-                content=summary_text,
-                source_type=SESSION_SUMMARY_SOURCE_TYPE,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                doc_id=doc_id,
-                importance=0.8,
-                memory_tier="short_term",
-                memory_kind=SESSION_SUMMARY_KIND,
-                memory_scope="document",
-                title="会话摘要",
-                summary=self._truncate_text(summary_text),
-                source_ref=source_ref,
-                trace={"kind": "session_summary"},
-            )
-            self.store.add_entry(entry)
-            self._record_audit(
-                entry.id, "add", new_content=summary_text,
-                reason="session_summary", actor="system", doc_id=doc_id,
-            )
+        with self._write_generation_lock, self._store_mutation_lock:
+            if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
+                logger.info("[Memory] clear 后拒绝过期会话摘要: doc_id=%s", doc_id)
+                return None
+            if existing is not None:
+                self.store.update_entry_fields(existing.id, {"source_ref": source_ref})
+                self.update_entry(
+                    existing.id, summary_text, actor="system", reason="session_summary_roll"
+                )
+            else:
+                entry = MemoryEntry(
+                    id=str(uuid.uuid4()),
+                    content=summary_text,
+                    source_type=SESSION_SUMMARY_SOURCE_TYPE,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    doc_id=doc_id,
+                    importance=0.8,
+                    memory_tier="short_term",
+                    memory_kind=SESSION_SUMMARY_KIND,
+                    memory_scope="document",
+                    title="会话摘要",
+                    summary=self._truncate_text(summary_text),
+                    source_ref=source_ref,
+                    trace={"kind": "session_summary"},
+                )
+                self.store.add_entry(entry)
+                self._record_audit(
+                    entry.id, "add", new_content=summary_text,
+                    reason="session_summary", actor="system", doc_id=doc_id,
+                )
         logger.info("[SessionSummary] doc_id=%s 摘要已更新（覆盖 %d 条消息）", doc_id, len(usable))
         return summary_text
 
@@ -1332,8 +1548,13 @@ class MemoryService:
         """滚动摘要总是注入（不依赖检索命中），它是会话连续性而非相关性。"""
         if not doc_id or not self._session_summary_enabled():
             return []
-        entry = self._find_session_summary_entry(doc_id)
+        entry = self._find_session_summary_entry(
+            doc_id,
+            parse_identity=parse_identity,
+        )
         if entry is None or not entry.is_retrievable:
+            return []
+        if is_unsafe_automatic_document_answer(entry.content):
             return []
         if not self._entry_matches_parse_identity(
             entry, doc_id=doc_id, parse_identity=parse_identity
@@ -1453,6 +1674,7 @@ class MemoryService:
             "over_quota": bool(quota and used > quota),
         }
 
+    @_serialized_memory_mutation
     def restore_archived_entry(self, entry_id: str, *, actor: str = "user") -> bool:
         """把压缩归档的原始记忆恢复为活跃状态。
 
@@ -1537,7 +1759,7 @@ class MemoryService:
             return False
 
         if expected_generation is None:
-            expected_generation = self.capture_write_generation()
+            expected_generation = self.capture_write_generation(doc_id)
 
         # 提取 QA 对：从对话历史中配对 user/assistant 消息
         qa_pairs = self._extract_qa_pairs(chat_history)
@@ -1546,6 +1768,19 @@ class MemoryService:
 
         # 取最后 N 轮
         recent_pairs = qa_pairs[-n:]
+        safe_recent_pairs = [
+            (question, answer)
+            for question, answer in recent_pairs
+            if not is_unsafe_automatic_document_answer(answer)
+        ]
+        if len(safe_recent_pairs) != len(recent_pairs):
+            logger.info(
+                "[MemoryGuard] skipped %d unsafe automatic QA summaries",
+                len(recent_pairs) - len(safe_recent_pairs),
+            )
+        if not safe_recent_pairs:
+            return True
+        recent_pairs = safe_recent_pairs
 
         identity = self._normalize_parse_identity(parse_identity)
         source_ref = dict(identity or {})
@@ -1573,12 +1808,27 @@ class MemoryService:
 
         # 去重闸门放在锁外：向量检索不应压进存储临界区。
         if distilled_facts:
-            normalized_facts = [
+            candidate_facts = [
                 text for text in (str(fact or "").strip() for fact in distilled_facts) if text
             ]
+            rejected_absence_facts = [
+                fact for fact in candidate_facts
+                if is_unscoped_document_absence_claim(fact)
+            ]
+            normalized_facts = [
+                fact for fact in candidate_facts
+                if not is_unscoped_document_absence_claim(fact)
+            ]
+            if rejected_absence_facts:
+                logger.info(
+                    "[MemoryDistill] doc_id=%s 跳过 %d 条无边界结构缺失断言",
+                    doc_id,
+                    len(rejected_absence_facts),
+                )
             distilled_facts, dropped = self._select_non_duplicate(
                 [(fact, fact) for fact in normalized_facts],
                 doc_id=doc_id,
+                parse_identity=identity,
             )
             if dropped:
                 logger.info(
@@ -1597,6 +1847,7 @@ class MemoryService:
                 api_key=api_key,
                 model=model,
                 api_provider=api_provider,
+                parse_identity=identity,
                 budget=llm_budget,
             )
             if not distilled_facts and not pending_updates and not pending_invalidations:
@@ -1611,6 +1862,7 @@ class MemoryService:
                     for question, answer in recent_pairs
                 ],
                 doc_id=doc_id,
+                parse_identity=identity,
             )
             if dropped:
                 logger.info(
@@ -1621,7 +1873,7 @@ class MemoryService:
         # expensive LLM and embedding calls stay outside it, but their final
         # publication is fenced below.
         with self._write_generation_lock, self._store_mutation_lock:
-            if expected_generation != self._write_generation:
+            if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
                 logger.info("[Memory] clear 后拒绝过期 QA 摘要写入: doc_id=%s", doc_id)
                 return False
 
@@ -1784,13 +2036,15 @@ class MemoryService:
                 self.index.add_entry(
                     entry.id,
                     entry.content,
-                    should_commit=lambda: self.is_write_generation_current(expected_generation),
+                    should_commit=lambda: self.is_write_generation_current(
+                        expected_generation, doc_id=doc_id
+                    ),
                 )
             except Exception as exc:
                 logger.error(f"添加 QA 摘要到向量索引失败: {exc}")
 
         # 保存完成后检查是否需要压缩（安全执行）
-        if self.is_write_generation_current(expected_generation):
+        if self.is_write_generation_current(expected_generation, doc_id=doc_id):
             self._safe_execute(
                 "MemoryCompressor.check",
                 self._check_and_compress,
@@ -1804,12 +2058,12 @@ class MemoryService:
             )
         # QA 摘要直接更新 session，不会经过 MemoryStore.add_entry。
         # 在压缩收敛后才失效缓存，避免压缩阶段读取到半更新会话。
-        if self.is_write_generation_current(expected_generation):
+        if self.is_write_generation_current(expected_generation, doc_id=doc_id):
             self.store.cache.invalidate()
 
         # 滚动会话摘要：补上 working 层之外的中期叙事连续性。
         # 同样跑在后台，按消息增量阈值触发。
-        if self.is_write_generation_current(expected_generation):
+        if self.is_write_generation_current(expected_generation, doc_id=doc_id):
             self._safe_execute(
                 "SessionSummary.update",
                 self.update_session_summary,
@@ -1819,17 +2073,18 @@ class MemoryService:
                 model=model,
                 api_provider=api_provider,
                 parse_identity=identity,
+                expected_generation=expected_generation,
                 budget=llm_budget,
             )
 
         # 配额回收：压缩用的条数阈值管不住"20 条长表格记忆"，
         # 这里给存储一个可预测的上界。
-        if self.is_write_generation_current(expected_generation):
+        if self.is_write_generation_current(expected_generation, doc_id=doc_id):
             self._safe_execute("MemoryQuota.enforce", self.enforce_quota, doc_id)
 
         # 图谱重建放在这条后台写入链路的最后：凭证现成、不占响应路径，
         # 且由增量阈值把 LLM 成本摊薄到多轮对话上。
-        if self.is_write_generation_current(expected_generation):
+        if self.is_write_generation_current(expected_generation, doc_id=doc_id):
             self._safe_execute(
                 "MemoryGraph.rebuild",
                 self.rebuild_graph,
@@ -1838,6 +2093,7 @@ class MemoryService:
                 model=model,
                 api_provider=api_provider,
                 parse_identity=identity,
+                expected_generation=expected_generation,
                 budget=llm_budget,
             )
 
@@ -1866,7 +2122,7 @@ class MemoryService:
         """
         if not self.compressor or not doc_id:
             return
-        if not self.is_write_generation_current(expected_generation):
+        if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
             return
         all_entries = self.store.get_all_entries()
         doc_entries = [
@@ -1874,6 +2130,7 @@ class MemoryService:
             if e.doc_id == doc_id
             and e.status == "active"
             and e.source_type in {"auto_qa", "llm_distilled"}
+            and not is_unsafe_automatic_document_answer(e.content)
             and e.memory_kind != "consolidated"
             and self._entry_matches_parse_identity(
                 e,
@@ -1891,9 +2148,17 @@ class MemoryService:
         )
         if not compressed:
             return
+        compressed = [
+            entry
+            for entry in compressed
+            if not is_unsafe_automatic_document_answer(entry.content)
+        ]
+        if not compressed:
+            logger.warning("[MemoryGuard] rejected unsafe compressed memory")
+            return
 
         with self._write_generation_lock, self._store_mutation_lock:
-            if expected_generation is not None and expected_generation != self._write_generation:
+            if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
                 logger.info("[Memory] clear 后拒绝过期压缩结果: doc_id=%s", doc_id)
                 return
             identity = self._normalize_parse_identity(parse_identity)
@@ -1924,7 +2189,9 @@ class MemoryService:
                 committed = self.index.add_entry(
                     entry.id,
                     entry.content,
-                    should_commit=lambda: self.is_write_generation_current(expected_generation),
+                    should_commit=lambda: self.is_write_generation_current(
+                        expected_generation, doc_id=doc_id
+                    ),
                 )
                 if committed:
                     self._page_in_active_pool(entry)
@@ -1972,6 +2239,10 @@ class MemoryService:
                         "2) 文档侧：论文中确定的结论、关键数值、方法与数据集名称。"
                         "这类可以来自『AI答』，但必须是论文本身的内容，"
                         "不能是 AI 的寒暄、免责声明、检索失败说明或对话过程描述。\n"
+                        "文档侧的否定性结论只有在明确限定具体缺失字段时才可保存，例如层数、通道、投影或超参；"
+                        "不要保存“论文未给出结构”这类无边界判断。\n"
+                        "若答案同时给出架构级拓扑又说明实现细节未公开，优先保存肯定的拓扑，"
+                        "缺失项必须单独限定到具体字段。\n"
                         "\n"
                         "规则：\n"
                         "- 每条事实一行，前面加 '- '，写成脱离上下文也能读懂的完整陈述\n"
@@ -2125,6 +2396,7 @@ class MemoryService:
                 break
         session["qa_summaries"] = summaries
 
+    @_serialized_memory_mutation
     def save_important_memory(
         self,
         doc_id: str,
@@ -2204,7 +2476,11 @@ class MemoryService:
             return False
 
         with self._write_generation_lock, self._store_mutation_lock:
-            if expected_generation is not None and expected_generation != self._write_generation:
+            expected_global_generation = self._global_generation_from_fence(expected_generation)
+            if (
+                expected_global_generation is not None
+                and expected_global_generation != self._write_generation
+            ):
                 logger.info("[Memory] clear 后拒绝过期关键词写入")
                 return False
             profile = self.store.load_profile()
@@ -2392,6 +2668,14 @@ class MemoryService:
                 )
             ]
 
+        entries = [
+            entry
+            for entry in entries
+            if not self._is_unscoped_architecture_absence_automatic_memory(
+                entry.source_type,
+                entry.content,
+            )
+        ]
         # 优先用缓存里的 LLM 图谱（由后台写入线程构建），拿不到就走正则降级。
         # 这个方法在检索热路径上被调用，**绝不能**在这里发起 LLM 调用。
         from services.memory_graph import build_regex_graph, facts_signature
@@ -2418,6 +2702,7 @@ class MemoryService:
         api_provider: str,
         parse_identity: dict | None = None,
         force: bool = False,
+        expected_generation: int | tuple[int, str, int] | None = None,
         budget: MemoryLLMBudget | None = None,
     ) -> dict[str, Any] | None:
         """用 LLM 重建文档图谱并写入缓存。
@@ -2426,6 +2711,8 @@ class MemoryService:
         返回 None 表示未重建（未启用/无凭证/事实太少/签名未变/增量不够/抽取失败）。
         """
         if not self._graph_llm_enabled() or not (api_key and model and api_provider):
+            return None
+        if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
             return None
 
         from services.memory_graph import build_llm_graph, facts_signature
@@ -2456,11 +2743,15 @@ class MemoryService:
             return None
 
         summary = graph.to_summary(doc_id)
-        self._graph_cache[cache_key] = {
-            "signature": signature,
-            "fact_count": len(facts),
-            "summary": summary,
-        }
+        with self._write_generation_lock, self._store_mutation_lock:
+            if not self.is_write_generation_current(expected_generation, doc_id=doc_id):
+                logger.info("[Memory] clear 后拒绝过期图谱: doc_id=%s", doc_id)
+                return None
+            self._graph_cache[cache_key] = {
+                "signature": signature,
+                "fact_count": len(facts),
+                "summary": summary,
+            }
         logger.info(
             "[MemoryGraph] doc_id=%s 图谱重建完成: %d 实体 / %d 关系",
             doc_id,
@@ -2476,6 +2767,10 @@ class MemoryService:
             entry for entry in self.store.get_all_entries()
             if entry.memory_kind in {"doc_fact", "consolidated", "graph"}
             and entry.is_retrievable
+            and not self._is_unscoped_architecture_absence_automatic_memory(
+                entry.source_type,
+                entry.content,
+            )
             and (doc_id is None or entry.doc_id == doc_id)
         ]
         if doc_id and self._normalize_parse_identity(parse_identity):
@@ -2503,6 +2798,7 @@ class MemoryService:
         except Exception:
             return 5
 
+    @_serialized_memory_mutation
     def add_entry(
         self, content: str, source_type: str, doc_id: str = None
     ) -> MemoryEntry:
@@ -2561,6 +2857,7 @@ class MemoryService:
 
         return entry
 
+    @_serialized_memory_mutation
     def delete_entry(self, entry_id: str) -> bool:
         """删除指定记忆条目
 
@@ -2588,6 +2885,7 @@ class MemoryService:
             )
         return success
 
+    @_serialized_memory_mutation
     def update_entry(
         self,
         entry_id: str,
@@ -2629,6 +2927,44 @@ class MemoryService:
             )
         return success
 
+    @_serialized_memory_mutation
+    def clear_document(self, doc_id: str) -> int:
+        """Permanently erase every document-scoped memory artifact.
+
+        Delayed LLM workers receive a document fence at request start. Advance
+        that fence before touching storage so they cannot recreate entries,
+        graph cache, vectors, audit rows or Markdown after the clear returns.
+        """
+        doc_id = self.validate_doc_id(doc_id)
+        with self._write_generation_lock:
+            self._document_write_generations[doc_id] = (
+                self._document_write_generations.get(doc_id, 0) + 1
+            )
+
+        entry_ids = self.store.clear_document(doc_id)
+        self._graph_cache.pop(doc_id, None)
+        if self.active_pool:
+            for entry_id in entry_ids:
+                try:
+                    self.active_pool.remove_entry(entry_id)
+                except Exception as exc:
+                    logger.debug("清理活跃记忆池失败 %s: %s", entry_id, exc)
+
+        for entry_id in entry_ids:
+            try:
+                self.index.remove_entry(entry_id)
+            except Exception as exc:
+                logger.debug("清理文档向量索引失败 %s: %s", entry_id, exc)
+        try:
+            self.index.flush_sync(reason="document_clear")
+        except Exception as exc:
+            logger.warning("同步文档记忆清理索引失败: %s", exc)
+
+        if getattr(self, "audit_log", None):
+            self.audit_log.clear_document(doc_id)
+        return len(entry_ids)
+
+    @_serialized_memory_mutation
     def clear_all(self) -> None:
         """清空所有记忆数据
 
@@ -2664,6 +3000,11 @@ class MemoryService:
         entries = [
             entry for entry in self.store.get_all_entries()
             if entry.status != "archived_raw"
+            and entry.is_retrievable
+            and not self._is_unscoped_architecture_absence_automatic_memory(
+                entry.source_type,
+                entry.content,
+            )
         ]
         self.index.safe_reindex(entries, reason="events_restore")
         self.index.flush_sync(reason="manual")
@@ -2675,6 +3016,7 @@ class MemoryService:
             **storage_status,
         }
 
+    @_serialized_memory_mutation
     def evaluate_and_update_importance(self) -> None:
         """自动评估并更新记忆重要性
         

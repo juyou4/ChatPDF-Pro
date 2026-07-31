@@ -102,8 +102,14 @@ def call_llm_sync(
 ) -> Optional[str]:
     """在同步上下文里调用异步 LLM 接口，返回文本内容。
 
-    记忆写入跑在守护线程里，通常没有运行中的事件循环；
-    但流式请求的回调也可能带着循环进来，两种情况都要能工作。
+    记忆写入跑在守护线程里，通常没有运行中的事件循环。这里必须把
+    ``timeout`` 包到真正的协程上：只给 ``future.result`` 设超时会在
+    ``asyncio.run`` 分支失效，慢连接会长期占住后台写入槽位。
+
+    此函数是同步接口，不能从正在运行的事件循环线程直接调用。此前用
+    ``run_coroutine_threadsafe(..., 当前循环)`` 后立刻 ``result()``，会让
+    当前线程等待自己，直到超时。异步路由应使用 ``asyncio.to_thread``
+    调用本函数（图谱重建入口已按此方式处理）。
     """
     from services.chat_service import call_ai_api
 
@@ -117,6 +123,14 @@ def call_llm_sync(
             max_tokens=max_tokens,
         )
 
+    try:
+        timeout_seconds = max(0.01, float(timeout))
+    except (TypeError, ValueError):
+        timeout_seconds = DEFAULT_LLM_TIMEOUT
+
+    async def _call_with_timeout():
+        return await asyncio.wait_for(_make_coro(), timeout=timeout_seconds)
+
     loop = None
     try:
         loop = asyncio.get_running_loop()
@@ -124,10 +138,11 @@ def call_llm_sync(
         pass
 
     if loop and loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(_make_coro(), loop)
-        response = future.result(timeout=timeout)
-    else:
-        response = asyncio.run(_make_coro())
+        raise RuntimeError(
+            "call_llm_sync 不能在运行中的事件循环线程直接调用；请使用 asyncio.to_thread"
+        )
+
+    response = asyncio.run(_call_with_timeout())
 
     return extract_response_text(response)
 

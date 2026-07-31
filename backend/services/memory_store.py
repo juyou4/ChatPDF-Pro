@@ -14,9 +14,12 @@ import logging
 import os
 import re
 import shutil
+import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +29,24 @@ from services.memory_quality import sanitize_automatic_memory_content
 logger = logging.getLogger(__name__)
 
 _SESSION_DOC_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _synchronized_store(method):
+    """Serialize a store operation without preventing nested helper calls.
+
+    Memory mutations are load-modify-save transactions across several JSON
+    files. Locking an individual file write is not enough: concurrent callers
+    could still overwrite each other's freshly loaded state. ``RLock`` keeps
+    the existing helper composition safe while making each public operation a
+    single in-process transaction.
+    """
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 @dataclass
@@ -167,6 +188,10 @@ class MemoryStore:
         self.snapshots_dir = os.path.join(data_dir, "snapshots")
         self.snapshot_sessions_dir = os.path.join(self.snapshots_dir, "sessions")
         self.legacy_migration_state_path = os.path.join(self.snapshots_dir, "legacy_migration_state.json")
+        # JSON snapshots and event logs are shared by request handlers and
+        # delayed memory workers. Use one re-entrant transaction lock so a
+        # load-modify-save operation cannot lose a concurrent update.
+        self._lock = threading.RLock()
         # 初始化内存缓存
         self.cache = MemoryCache()
         # 确保目录结构存在
@@ -255,6 +280,7 @@ class MemoryStore:
             except OSError as exc:
                 logger.warning(f"删除 session 文件失败 {filepath}: {exc}")
 
+    @_synchronized_store
     def _list_session_doc_ids(self) -> list[str]:
         """列出当前可见的文档会话 ID，优先使用快照。"""
         doc_ids: set[str] = set()
@@ -348,19 +374,74 @@ class MemoryStore:
 
     def _read_json(self, path: str) -> Optional[dict]:
         """安全读取 JSON 文件，失败时返回 None"""
-        try:
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except (json.JSONDecodeError, IOError, OSError) as e:
-            logger.warning(f"读取 JSON 文件失败 {path}: {e}")
+        with self._lock:
+            try:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                logger.warning(f"读取 JSON 文件失败 {path}: {e}")
         return None
 
     def _write_json(self, path: str, data: dict) -> None:
-        """安全写入 JSON 文件，自动创建父目录"""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        """Durably publish a JSON snapshot without exposing a partial file."""
+        with self._lock:
+            directory = os.path.dirname(path)
+            os.makedirs(directory, exist_ok=True)
+            temporary_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    delete=False,
+                    dir=directory,
+                    prefix=f".{os.path.basename(path)}.",
+                    suffix=".tmp",
+                ) as handle:
+                    temporary_path = handle.name
+                    json.dump(data, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # ``replace`` is atomic when both paths are in the same
+                # directory, including on Windows where this app primarily
+                # runs. A reader sees either the previous complete snapshot or
+                # the new complete snapshot, never a truncated JSON file.
+                os.replace(temporary_path, path)
+                temporary_path = ""
+            finally:
+                if temporary_path:
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
+
+    def _write_text_atomically(self, path: str, text: str) -> None:
+        """Publish a derived text file with the same crash-safety as JSON."""
+        with self._lock:
+            directory = os.path.dirname(path)
+            os.makedirs(directory, exist_ok=True)
+            temporary_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    delete=False,
+                    dir=directory,
+                    prefix=f".{os.path.basename(path)}.",
+                    suffix=".tmp",
+                ) as handle:
+                    temporary_path = handle.name
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, path)
+                temporary_path = ""
+            finally:
+                if temporary_path:
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
 
     def _load_legacy_migration_state(self) -> dict[str, Any]:
         """加载旧 JSON 迁移状态。"""
@@ -395,12 +476,15 @@ class MemoryStore:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **payload,
         }
-        try:
-            os.makedirs(self.events_dir, exist_ok=True)
-            with open(self._event_log_path(), "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.warning(f"写入记忆事件日志失败 {event_type}: {e}")
+        with self._lock:
+            try:
+                os.makedirs(self.events_dir, exist_ok=True)
+                with open(self._event_log_path(), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception as e:
+                logger.warning(f"写入记忆事件日志失败 {event_type}: {e}")
 
     def _iter_event_records(self) -> list[dict[str, Any]]:
         """按时间顺序读取事件日志。"""
@@ -638,6 +722,16 @@ class MemoryStore:
                 entry_order = []
                 continue
 
+            if event_type == "clear_document":
+                doc_id = record.get("doc_id")
+                if not doc_id:
+                    continue
+                for entry_id in list(entry_order):
+                    if placements.get(entry_id, {}).get("doc_id") == doc_id:
+                        remove_entry(entry_id)
+                session_meta.pop(doc_id, None)
+                continue
+
             if event_type == "legacy_profile_seed":
                 reset_profile_scope(dict(record.get("profile") or {}), timestamp)
                 continue
@@ -732,6 +826,7 @@ class MemoryStore:
 
         return {"profile": profile, "sessions": sessions}
 
+    @_synchronized_store
     def rebuild_snapshots_from_events(self, *, mirror_legacy: bool = True) -> dict[str, Any]:
         """从事件日志重建事件快照，可选镜像回旧 JSON。"""
         state = self.replay_events()
@@ -766,6 +861,7 @@ class MemoryStore:
 
     # ==================== Profile 操作 ====================
 
+    @_synchronized_store
     def load_profile(self) -> dict:
         """加载用户画像，优先读取事件快照，失败时再回放事件或回退旧 JSON。"""
         snapshot = self._read_json(self._snapshot_profile_path())
@@ -782,6 +878,7 @@ class MemoryStore:
             return data
         return self._default_profile()
 
+    @_synchronized_store
     def save_profile(self, profile: dict) -> None:
         """保存用户画像"""
         self._sync_profile_snapshot(profile)
@@ -793,6 +890,7 @@ class MemoryStore:
         """获取文档会话记忆文件路径"""
         return self._safe_session_file_path(self.sessions_dir, doc_id, "_session.json")
 
+    @_synchronized_store
     def load_session(self, doc_id: str) -> dict:
         """加载文档会话记忆，优先读取事件快照，失败时再回放事件或回退旧 JSON。"""
         snapshot = self._read_json(self._snapshot_session_path(doc_id))
@@ -811,6 +909,7 @@ class MemoryStore:
             return data
         return self._default_session(doc_id)
 
+    @_synchronized_store
     def save_session(self, doc_id: str, session: dict) -> None:
         """保存文档会话记忆"""
         self._sync_session_snapshot(doc_id, session)
@@ -818,6 +917,7 @@ class MemoryStore:
 
     # ==================== 条目 CRUD ====================
 
+    @_synchronized_store
     def get_all_entries(self) -> list:
         """获取所有记忆条目（从 profile + 所有 session 快照中汇总），优先使用缓存。"""
         # 先检查缓存
@@ -888,6 +988,7 @@ class MemoryStore:
         self.cache.set_all_entries(entries)
         return entries
 
+    @_synchronized_store
     def add_entry(self, entry: MemoryEntry) -> None:
         """
         添加记忆条目到对应存储位置
@@ -910,6 +1011,7 @@ class MemoryStore:
         # 写入后使缓存失效
         self.cache.invalidate()
 
+    @_synchronized_store
     def delete_entry(self, entry_id: str) -> bool:
         """删除指定记忆条目，返回是否成功"""
         # 先在 profile 中查找
@@ -958,6 +1060,7 @@ class MemoryStore:
 
         return False
 
+    @_synchronized_store
     def batch_add_entries(self, entries: list) -> None:
         """批量写入记忆条目，按 doc_id 分组减少文件 I/O
 
@@ -1001,6 +1104,7 @@ class MemoryStore:
         # 写入后使缓存失效
         self.cache.invalidate()
 
+    @_synchronized_store
     def update_entry(self, entry_id: str, content: str) -> bool:
         """更新指定记忆条目的内容，返回是否成功"""
         # 先在 profile 中查找
@@ -1046,6 +1150,7 @@ class MemoryStore:
 
         return False
 
+    @_synchronized_store
     def update_entry_fields(self, entry_id: str, updates: dict[str, Any]) -> bool:
         """局部更新记忆条目字段，保持旧存储结构兼容。"""
         if not updates:
@@ -1084,6 +1189,61 @@ class MemoryStore:
 
         return False
 
+    @_synchronized_store
+    def record_hits(
+        self,
+        entry_ids: list[str] | set[str],
+        *,
+        now_iso: str,
+        entry_doc_ids: dict[str, str | None] | None = None,
+    ) -> None:
+        """Persist retrieval hit counters as one store transaction.
+
+        Hit accounting used to directly load and save profile/session files in
+        ``MemoryRetriever``. It therefore bypassed the mutation lock and could
+        overwrite a simultaneous manual edit or background summary write.
+        """
+        hit_ids = {str(entry_id) for entry_id in entry_ids if entry_id}
+        if not hit_ids:
+            return
+        doc_map = entry_doc_ids or {}
+        profile_ids = {
+            entry_id for entry_id in hit_ids if doc_map.get(entry_id) is None
+        }
+        session_ids: dict[str, set[str]] = {}
+        for entry_id in hit_ids - profile_ids:
+            doc_id = doc_map.get(entry_id)
+            if not doc_id:
+                continue
+            session_ids.setdefault(doc_id, set()).add(entry_id)
+
+        profile_changed = False
+        if profile_ids:
+            profile = self.load_profile()
+            for entry in profile.get("entries", []):
+                if entry.get("id") in profile_ids:
+                    entry["hit_count"] = int(entry.get("hit_count", 0) or 0) + 1
+                    entry["last_hit_at"] = now_iso
+                    profile_changed = True
+            if profile_changed:
+                self.save_profile(profile)
+
+        for doc_id, ids in session_ids.items():
+            session = self.load_session(doc_id)
+            changed = False
+            for collection in ("qa_summaries", "important_memories"):
+                for entry in session.get(collection, []) or []:
+                    if entry.get("id") in ids:
+                        entry["hit_count"] = int(entry.get("hit_count", 0) or 0) + 1
+                        entry["last_hit_at"] = now_iso
+                        changed = True
+            if changed:
+                session["last_accessed"] = now_iso
+                self.save_session(doc_id, session)
+
+        if profile_changed or session_ids:
+            self.cache.invalidate()
+
     # ==================== Markdown 源文件支持 ====================
     
     def _get_memory_file_path(self) -> str:
@@ -1095,15 +1255,19 @@ class MemoryStore:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return os.path.join(self.memory_dir, f"{today}.md")
     
+    @_synchronized_store
     def _append_to_markdown(self, filepath: str, content: str) -> None:
         """追加内容到 Markdown 文件（append-only）"""
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             with open(filepath, "a", encoding="utf-8") as f:
                 f.write(content + "\n\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception as e:
             logger.warning(f"写入 Markdown 文件失败 {filepath}: {e}")
     
+    @_synchronized_store
     def _write_memory_markdown(self, entry: MemoryEntry, is_long_term: bool = False) -> None:
         """将记忆条目写入 Markdown 文件
         
@@ -1128,14 +1292,169 @@ class MemoryStore:
             "compressed": "压缩记忆",
         }.get(entry.source_type, entry.source_type)
         
+        doc_marker = (
+            f"<!-- memory-doc-id: {entry.doc_id} -->\n"
+            if entry.doc_id else ""
+        )
         content = f"""{prefix} [{source_label}] {timestamp}
+
+{doc_marker}
 
 {entry.content}
 
 ---
 """
         self._append_to_markdown(filepath, content)
+
+    def _event_record_belongs_to_document(
+        self,
+        record: dict[str, Any],
+        doc_id: str,
+        entry_ids: set[str],
+    ) -> bool:
+        """Return whether an event can contain a document's removed content."""
+        if str(record.get("doc_id") or "") == doc_id:
+            return True
+        entry = record.get("entry")
+        if isinstance(entry, dict) and str(entry.get("doc_id") or "") == doc_id:
+            return True
+        session = record.get("session")
+        if isinstance(session, dict) and str(session.get("doc_id") or "") == doc_id:
+            return True
+        return str(record.get("entry_id") or "") in entry_ids
+
+    def _purge_document_event_records(self, doc_id: str, entry_ids: set[str]) -> None:
+        """Remove a document's payload from append-only logs after a clear.
+
+        A tombstone is appended before this compaction so a crash during the
+        purge still replays as deleted. Once compaction finishes, no old
+        document text remains in the event directory.
+        """
+        if not os.path.exists(self.events_dir):
+            return
+        for filename in list(os.listdir(self.events_dir)):
+            if not filename.endswith(".jsonl"):
+                continue
+            path = os.path.join(self.events_dir, filename)
+            kept_lines: list[str] = []
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    for raw_line in handle:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            # A malformed event is not replayable. Dropping it
+                            # is safer than retaining potentially deleted text.
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        if self._event_record_belongs_to_document(record, doc_id, entry_ids):
+                            continue
+                        kept_lines.append(json.dumps(record, ensure_ascii=False))
+            except OSError as exc:
+                logger.warning("清理文档事件日志失败 %s: %s", path, exc)
+                continue
+            if kept_lines:
+                self._write_text_atomically(path, "\n".join(kept_lines) + "\n")
+            else:
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    logger.warning("删除空事件日志失败 %s: %s", path, exc)
+
+    def _rebuild_markdown_from_entries(self) -> None:
+        """Regenerate derived Markdown so a document clear leaves no stale text."""
+        try:
+            if os.path.exists(self.memory_dir):
+                shutil.rmtree(self.memory_dir)
+            os.makedirs(self.memory_dir, exist_ok=True)
+            self.cache.invalidate()
+            for entry in self.get_all_entries():
+                self._write_memory_markdown(
+                    entry,
+                    is_long_term=entry.memory_tier == "long_term",
+                )
+        except OSError as exc:
+            logger.warning("重建记忆 Markdown 失败: %s", exc)
+
+    def _purge_document_sqlite_mirror(self, doc_id: str) -> None:
+        """Best-effort privacy purge for an older optional SQLite mirror."""
+        db_path = os.path.join(self.data_dir, "memory.db")
+        if not os.path.exists(db_path):
+            return
+        try:
+            import sqlite3
+
+            with sqlite3.connect(db_path, timeout=5.0) as connection:
+                table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_entries'"
+                ).fetchone()
+                if not table:
+                    return
+                try:
+                    connection.execute(
+                        "DELETE FROM memory_fts WHERE rowid IN "
+                        "(SELECT rowid FROM memory_entries WHERE doc_id = ?)",
+                        (doc_id,),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                connection.execute("DELETE FROM memory_entries WHERE doc_id = ?", (doc_id,))
+                connection.commit()
+                # Deleted rows can otherwise remain in free pages. Vacuum is
+                # intentionally best-effort because an active optional mirror
+                # may hold a connection during shutdown.
+                try:
+                    connection.execute("VACUUM")
+                except sqlite3.DatabaseError:
+                    pass
+        except Exception as exc:
+            logger.warning("清理历史 SQLite 文档镜像失败 doc_id=%s: %s", doc_id, exc)
+
+    @_synchronized_store
+    def clear_document(self, doc_id: str) -> list[str]:
+        """Delete one document's snapshots, event payloads and derived text.
+
+        The returned IDs let ``MemoryService`` remove the matching vector and
+        active-pool records as the same document-level operation.
+        """
+        doc_id = self.validate_session_doc_id(doc_id)
+        session = self.load_session(doc_id)
+        entry_ids = {
+            str(item.get("id") or "")
+            for item in [
+                *(session.get("qa_summaries", []) or []),
+                *(session.get("important_memories", []) or []),
+            ]
+            if str(item.get("id") or "")
+        }
+
+        # First persist a replay barrier. If the process stops before event
+        # compaction, the next startup still cannot resurrect this session.
+        self._append_event("clear_document", {"doc_id": doc_id})
+        for path in (self._session_path(doc_id), self._snapshot_session_path(doc_id)):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as exc:
+                logger.warning("删除文档记忆文件失败 %s: %s", path, exc)
+
+        self._purge_document_event_records(doc_id, entry_ids)
+        self._purge_document_sqlite_mirror(doc_id)
+        migration_state = self._load_legacy_migration_state()
+        migration_state["session_doc_ids"] = [
+            value for value in migration_state.get("session_doc_ids", [])
+            if value != doc_id
+        ]
+        self._save_legacy_migration_state(migration_state)
+        self.cache.invalidate()
+        self._rebuild_markdown_from_entries()
+        return sorted(entry_ids)
     
+    @_synchronized_store
     def clear_all(self) -> None:
         """彻底删除所有记忆及其可回放、Markdown 和索引副本。"""
         # 重置 profile
@@ -1172,6 +1491,17 @@ class MemoryStore:
                 os.remove(self.legacy_migration_state_path)
         except OSError as exc:
             logger.warning("删除记忆迁移状态失败: %s", exc)
+        # A previous SQLite opt-in may leave a mirror behind even when the
+        # current process runs the JSON backend. It is still memory data and
+        # must not survive an explicit "clear all" request.
+        if not getattr(self, "use_sqlite", False):
+            for suffix in ("", "-wal", "-shm"):
+                sqlite_path = os.path.join(self.data_dir, f"memory.db{suffix}")
+                try:
+                    if os.path.exists(sqlite_path):
+                        os.remove(sqlite_path)
+                except OSError as exc:
+                    logger.warning("删除历史 SQLite 记忆副本失败 %s: %s", sqlite_path, exc)
         self._ensure_dirs()
 
     def get_storage_status(self) -> dict[str, Any]:

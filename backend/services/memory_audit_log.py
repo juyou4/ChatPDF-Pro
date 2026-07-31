@@ -211,3 +211,13 @@ class MemoryAuditLog:
                 conn.execute("DELETE FROM memory_history")
         except Exception as exc:
             logger.warning(f"[MemoryAudit] 清空失败: {exc}")
+
+    def clear_document(self, doc_id: str) -> None:
+        """Permanently remove one document's audit payloads on document clear."""
+        if not self._available or not doc_id:
+            return
+        try:
+            with self._lock, self._connect() as conn:
+                conn.execute("DELETE FROM memory_history WHERE doc_id = ?", (str(doc_id),))
+        except Exception as exc:
+            logger.warning(f"[MemoryAudit] 清理文档审计失败 doc_id={doc_id}: {exc}")

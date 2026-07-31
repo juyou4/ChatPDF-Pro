@@ -8,6 +8,8 @@
 - 记忆系统状态查询
 - 清空所有记忆
 """
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -197,7 +199,12 @@ async def rebuild_graph(doc_id: str, body: MemoryGraphRebuild):
     """
     svc = _get_service()
     doc_id = _validate_doc_id(svc, doc_id)
-    summary = svc.rebuild_graph(
+    # ``rebuild_graph`` uses the synchronous memory LLM wrapper. Running it
+    # on the request loop would make that wrapper wait on its own loop and
+    # time out. A worker thread has no running event loop, so the call remains
+    # synchronous there without blocking other API requests.
+    summary = await asyncio.to_thread(
+        svc.rebuild_graph,
         doc_id,
         api_key=body.api_key,
         model=body.model,
@@ -326,10 +333,7 @@ async def clear_session(doc_id: str):
     """清空指定文档的全部记忆。"""
     svc = _get_service()
     doc_id = _validate_doc_id(svc, doc_id)
-    removed = 0
-    for item in svc.list_entries(doc_id=doc_id, include_content=False):
-        if svc.delete_entry(item["id"]):
-            removed += 1
+    removed = svc.clear_document(doc_id)
     return {"doc_id": doc_id, "removed": removed, "message": f"已删除 {removed} 条记忆"}
 
 

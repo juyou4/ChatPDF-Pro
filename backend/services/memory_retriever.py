@@ -421,57 +421,15 @@ class MemoryRetriever:
             now: 当前 UTC 时间
         """
         hit_set = set(entry_ids)
-        now_iso = now.isoformat()
-
-        # 使用 entry_id → doc_id 索引（在 retrieve 中构建）
-        entry_doc_index = getattr(self, "_entry_doc_index", {})
-
         try:
-            # 按 doc_id 分组命中的 entry_id，减少文件 I/O
-            profile_hits = set()
-            session_hits: dict[str, set[str]] = {}  # doc_id -> set of entry_ids
-
-            for eid in hit_set:
-                doc_id = entry_doc_index.get(eid)
-                if doc_id is None:
-                    # 无 doc_id 的条目在 profile 中
-                    profile_hits.add(eid)
-                else:
-                    if doc_id not in session_hits:
-                        session_hits[doc_id] = set()
-                    session_hits[doc_id].add(eid)
-
-            # 更新 profile 中的 entries
-            if profile_hits:
-                profile = self.memory_store.load_profile()
-                profile_changed = False
-                for e_data in profile.get("entries", []):
-                    if e_data.get("id") in profile_hits:
-                        e_data["hit_count"] = e_data.get("hit_count", 0) + 1
-                        e_data["last_hit_at"] = now_iso
-                        profile_changed = True
-                if profile_changed:
-                    self.memory_store.save_profile(profile)
-
-            # 仅加载包含命中条目的 session
-            for doc_id, eids in session_hits.items():
-                session = self.memory_store.load_session(doc_id)
-                session_changed = False
-
-                for item in session.get("qa_summaries", []):
-                    if item.get("id") in eids:
-                        item["hit_count"] = item.get("hit_count", 0) + 1
-                        item["last_hit_at"] = now_iso
-                        session_changed = True
-
-                for item in session.get("important_memories", []):
-                    if item.get("id") in eids:
-                        item["hit_count"] = item.get("hit_count", 0) + 1
-                        item["last_hit_at"] = now_iso
-                        session_changed = True
-
-                if session_changed:
-                    self.memory_store.save_session(doc_id, session)
+            # Store owns the full load-modify-save transaction. Keeping this
+            # out of the retriever prevents a hit counter update from racing a
+            # manual edit, document clear, or delayed memory writer.
+            self.memory_store.record_hits(
+                hit_set,
+                now_iso=now.isoformat(),
+                entry_doc_ids=getattr(self, "_entry_doc_index", {}),
+            )
         except Exception as e:
             logger.warning(f"记录记忆命中统计失败: {e}")
 

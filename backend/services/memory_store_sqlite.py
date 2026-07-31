@@ -211,6 +211,24 @@ class MemoryStoreSQLite(MemoryStore):
                 self._db.rollback()
                 logger.warning("清空 SQLite 记忆失败: %s", exc)
         super().clear_all()
+
+    def clear_document(self, doc_id: str) -> list[str]:
+        """Clear the SQLite mirror together with the authoritative JSON state."""
+        doc_id = self.validate_session_doc_id(doc_id)
+        if self.use_sqlite and self._db:
+            try:
+                if self._has_fts5():
+                    self._db.execute(
+                        "DELETE FROM memory_fts WHERE rowid IN "
+                        "(SELECT rowid FROM memory_entries WHERE doc_id = ?)",
+                        (doc_id,),
+                    )
+                self._db.execute("DELETE FROM memory_entries WHERE doc_id = ?", (doc_id,))
+                self._db.commit()
+            except Exception as exc:
+                self._db.rollback()
+                logger.warning("清理 SQLite 文档记忆失败 doc_id=%s: %s", doc_id, exc)
+        return super().clear_document(doc_id)
     
     def _has_fts5(self) -> bool:
         """检查 FTS5 是否可用"""
@@ -223,45 +241,13 @@ class MemoryStoreSQLite(MemoryStore):
             return False
     
     def get_all_entries(self) -> List[MemoryEntry]:
-        """获取所有记忆条目（优先从 SQLite 读取，回退到 JSON）"""
-        if self.use_sqlite and self._db:
-            try:
-                # 首次使用时同步 JSON 数据
-                self._sync_from_json()
-                
-                rows = self._db.execute("""
-                    SELECT id, content, source_type, doc_id, importance,
-                           created_at, hit_count, last_hit_at, memory_tier, tags
-                    FROM memory_entries
-                    ORDER BY created_at DESC
-                """).fetchall()
-                
-                import json as _json
-                entries = []
-                for row in rows:
-                    # 解析 tags JSON 字符串
-                    tags_raw = row["tags"] if "tags" in row.keys() else "[]"
-                    try:
-                        tags = _json.loads(tags_raw) if tags_raw else []
-                    except (ValueError, TypeError):
-                        tags = []
-                    entries.append(MemoryEntry(
-                        id=row["id"],
-                        content=row["content"],
-                        source_type=row["source_type"],
-                        doc_id=row["doc_id"],
-                        importance=row["importance"],
-                        created_at=row["created_at"],
-                        hit_count=row["hit_count"],
-                        last_hit_at=row["last_hit_at"],
-                        memory_tier=row["memory_tier"] if "memory_tier" in row.keys() else "short_term",
-                        tags=tags,
-                    ))
-                return entries
-            except Exception as e:
-                logger.warning(f"从 SQLite 读取失败，回退到 JSON: {e}")
-        
-        # 回退到 JSON
+        """Return JSON/event state, which is the lifecycle authority.
+
+        The historical SQLite schema predates parse identity, invalidation and
+        archive fields. Reading it as a primary source could revive disabled
+        or stale entries. It remains a best-effort FTS mirror only until its
+        full lifecycle migration is available.
+        """
         return super().get_all_entries()
     
     def add_entry(self, entry: MemoryEntry) -> None:
