@@ -8,10 +8,11 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from services.intent_trace_store import append_intent_correction
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,19 @@ class FeedbackRequest(BaseModel):
     question: Optional[str] = None
     answer: Optional[str] = None
     model: Optional[str] = None
+
+
+class IntentCorrectionRequest(BaseModel):
+    intent_id: str
+    intent_version: str = ""
+    verdict: Literal["correct", "incorrect"]
+    predicted_task: str = ""
+    predicted_scope: str = ""
+    predicted_is_ambiguous: bool = False
+    decision_strength: float = 0.0
+    corrected_task: Optional[str] = None
+    corrected_scope: Optional[str] = None
+    corrected_is_ambiguous: Optional[bool] = None
 
 
 def init_feedback_dir(data_dir: Path):
@@ -76,6 +90,18 @@ async def submit_feedback(request: FeedbackRequest):
     except Exception as e:
         logger.error(f"[Feedback] 保存失败: {e}")
         raise HTTPException(status_code=500, detail=f"反馈保存失败: {str(e)}")
+
+
+@router.post("/intent/corrections")
+async def submit_intent_correction(request: IntentCorrectionRequest):
+    """记录用户对意图判定的显式纠错，不保存问题原文。"""
+    if not request.intent_id.strip():
+        raise HTTPException(status_code=400, detail="intent_id 不能为空")
+    if not 0.0 <= request.decision_strength <= 1.0:
+        raise HTTPException(status_code=400, detail="decision_strength 必须在 0 到 1 之间")
+    if not append_intent_correction(request.model_dump()):
+        raise HTTPException(status_code=500, detail="意图纠错记录失败")
+    return {"status": "ok"}
 
 
 @router.get("/feedback/stats")

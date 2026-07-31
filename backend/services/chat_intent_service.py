@@ -18,8 +18,8 @@ from services.modal_asset_service import detect_query_modalities
 from services.query_analyzer import count_content_terms, get_retrieval_strategy
 
 
-INTENT_DECISION_VERSION = "v2"
-INTENT_TRACE_VERSION = "intent_trace_v1"
+INTENT_DECISION_VERSION = "v3"
+INTENT_TRACE_VERSION = "intent_trace_v2"
 # rule_version 覆盖的规则模块：其中任何一处正则/常量改动都会让 hash 变化。
 _RULE_SOURCE_MODULES = (
     "services.chat_intent_service",
@@ -267,6 +267,9 @@ class IntentDecision:
     task: IntentTask
     scope: IntentScope
     modalities: tuple[str, ...]
+    # Derived once with the frozen modalities/interaction mode. Downstream
+    # gates must consume this instead of reclassifying raw question text.
+    visual_intent: bool
     query_type: str
     evidence_need: tuple[str, ...]
     top_k: int
@@ -274,7 +277,8 @@ class IntentDecision:
     agent_policy: RoutePolicy
     web_policy: RoutePolicy
     graph_mode: GraphMode
-    confidence: float
+    # A deterministic rule-match strength, not a calibrated probability.
+    decision_strength: float
     is_ambiguous: bool
     clarification_question: str
     matched_rules: tuple[str, ...]
@@ -284,6 +288,11 @@ class IntentDecision:
     evidence_sources: tuple[str, ...] = ("document",)
     continuation_ref: dict[str, str] | None = None
     ambiguities: tuple[dict[str, str], ...] = ()
+
+    @property
+    def confidence(self) -> float:
+        """Compatibility shim for internal callers; omitted from serialized output."""
+        return self.decision_strength
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -398,6 +407,9 @@ def prepare_chat_intent(
     evidence_need = tuple(_dedupe_strings(strategy.get("evidence_need") or []))
     query_type = str(strategy.get("query_type") or "specific")
     modalities = tuple(detect_query_modalities(question))
+    visual_intent = bool(
+        set(modalities) & {"figure", "table", "formula", "layout"}
+    ) or mode == "image"
     operations = _infer_operations(question, query_type, retry_resolved=retry_resolved)
     task, task_rule = _infer_task(
         question,
@@ -460,7 +472,7 @@ def prepare_chat_intent(
         # 所以这一轮不澄清直接检索。没有这条 trace 就看不出闸门是否在工作。
         matched_rules.append("retrievability:content_terms_present")
     if is_ambiguous:
-        confidence = 0.35
+        decision_strength = 0.35
         if unresolved_continuation or (bare_follow_up and not ambiguous_reference):
             clarification_question = "你想继续展开上一轮中的哪一项内容？可以补充主题、章节或页码。"
             ambiguities.append({"kind": "continuation", "missing": "prior_turn"})
@@ -470,13 +482,13 @@ def prepare_chat_intent(
             ambiguities.append({"kind": "reference", "missing": "referent"})
             matched_rules.append("ambiguity:unresolved_reference")
     elif mode in {"selection", "image", "retry_failed_turn"}:
-        confidence = 0.98
+        decision_strength = 0.98
         clarification_question = ""
     elif task != "qa" or evidence_need:
-        confidence = 0.9
+        decision_strength = 0.9
         clarification_question = ""
     else:
-        confidence = 0.65
+        decision_strength = 0.65
         clarification_question = ""
 
     identity_payload = {
@@ -490,6 +502,7 @@ def prepare_chat_intent(
         "inventory_kinds": inventory_kinds,
         "evidence_sources": evidence_sources,
         "modalities": modalities,
+        "visual_intent": visual_intent,
         "query_type": query_type,
         "evidence_need": evidence_need,
         "agent_policy": agent_policy,
@@ -513,6 +526,7 @@ def prepare_chat_intent(
         task=task,
         scope=scope,
         modalities=modalities,
+        visual_intent=visual_intent,
         query_type=query_type,
         evidence_need=evidence_need,
         top_k=top_k,
@@ -520,7 +534,7 @@ def prepare_chat_intent(
         agent_policy=agent_policy,  # type: ignore[arg-type]
         web_policy=normalized_web_policy,
         graph_mode=graph_mode,
-        confidence=confidence,
+        decision_strength=decision_strength,
         is_ambiguous=is_ambiguous,
         clarification_question=clarification_question,
         matched_rules=tuple(matched_rules),
@@ -559,7 +573,7 @@ def apply_llm_clarification(
             intent,
             is_ambiguous=False,
             clarification_question="",
-            confidence=_unambiguous_confidence(intent),
+            decision_strength=_unambiguous_decision_strength(intent),
             matched_rules=tuple(matched),
         )
     if intent.is_ambiguous:
@@ -579,14 +593,14 @@ def apply_llm_clarification(
         intent,
         is_ambiguous=True,
         clarification_question=question[:280],
-        confidence=min(float(intent.confidence or 0.5), 0.4),
+        decision_strength=min(float(intent.decision_strength or 0.5), 0.4),
         matched_rules=tuple(matched),
         ambiguities=tuple(ambiguities),
     )
 
 
-def _unambiguous_confidence(intent: IntentDecision) -> float:
-    """Confidence this intent would have carried had the rules not flagged it.
+def _unambiguous_decision_strength(intent: IntentDecision) -> float:
+    """Rule-match strength this intent carries when not flagged as ambiguous.
 
     Mirrors the non-ambiguous branches of ``prepare_chat_intent`` so an LLM
     override does not leave the turn stuck at the 0.35 ambiguity score.
@@ -674,7 +688,7 @@ def build_intent_trace(
         "translate_target_code": translate_target_code or None,
         "operations": [dict(item) for item in operations],
         "top_k": int(getattr(intent, "top_k", 0) or 0),
-        "confidence": float(getattr(intent, "confidence", 0.0) or 0.0),
+        "decision_strength": float(getattr(intent, "decision_strength", 0.0) or 0.0),
         "retrieval_skipped_reason": str(skipped_reason) if skipped_reason else None,
         "agent_used": bool(agent_used) if agent_used is not None else None,
         "degraded_to": str(degraded_to) if degraded_to else None,
@@ -750,9 +764,6 @@ def _infer_task(
         if operation.get("polarity") != "requested":
             continue
         kind = str(operation.get("kind") or "")
-        if kind in prohibited_kinds:
-            # 同一问题里被明确禁止的动作，即使别处又被识别为 requested 也不能当主任务。
-            continue
         if kind == "qa":
             # _infer_operations 在「一个 requested 都没有」时补的兜底项，
             # 不是用户显式请求的动作。这里必须让位给下面按 query_type / 残余请求
@@ -760,6 +771,10 @@ def _infer_task(
             # 兜底 qa 抢在 query_type == "extraction" 之前返回。
             continue
         if kind in allowed:
+            # A later request can intentionally narrow an earlier negation:
+            # "不要总结全文，只总结第 3 页" and "不要翻译全文，只翻译摘要".
+            # Operation records preserve both clauses for diagnostics, but the
+            # positive, scoped action is still the turn's primary task.
             return kind, f"task:{kind}"  # type: ignore[return-value]
     if query_type == "extraction":
         return "extract", "task:extract"

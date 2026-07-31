@@ -7,7 +7,7 @@
 - 文档上下文很短时，记忆也拿不到多出来的余量。
 
 这里让记忆知道"别人已经占了多少"，在总预算里取剩余额度，
-并用下限保证记忆不会被完全挤没、用上限防止记忆反过来吃掉文档的空间。
+并在预算尚有余量时保留记忆下限、用上限防止记忆反过来吃掉文档的空间。
 """
 import logging
 
@@ -33,8 +33,7 @@ def resolve_memory_token_budget(
     Args:
         memory_ceiling: 记忆的配置上限（即原来的 memory_injection_token_budget）
         total_budget: 全部证据（文档 + 联网 + 记忆 + 术语）的总预算
-        memory_floor: 记忆的保底额度——文档再长也要留一点，
-            否则长文档会话里记忆等于被静默关掉
+        memory_floor: 记忆的期望保底额度；仅在总预算尚能容纳时生效
 
     Returns:
         含 resolved / ceiling / floor / others_used / total 的字典，
@@ -53,11 +52,12 @@ def resolve_memory_token_budget(
 
     if slack >= ceiling:
         resolved = ceiling
-    elif slack <= floor:
-        # 文档已经吃满：记忆退到保底额度，而不是归零
-        resolved = floor
     else:
-        resolved = slack
+        # The floor is a preference, never permission to exceed the evidence
+        # budget. If document/web evidence already consumes the whole budget,
+        # injecting even a small memory block turns the advertised ceiling into
+        # a lie and can push an otherwise valid request over the model window.
+        resolved = max(0, slack)
 
     if resolved < ceiling:
         logger.debug(

@@ -51,6 +51,13 @@ SUMMARY_USER_PROMPT = (
     "Excerpt from {citation}\n\n---\n\n{text}\n\n---\n\nQuestion: {question}"
 )
 
+# The cache is intentionally invalidated when either scoring prompt changes.
+# This derives the revision from the actual prompt templates instead of relying
+# on a manually maintained version string being remembered during an edit.
+EVIDENCE_SCORE_PROMPT_VERSION = hashlib.sha256(
+    (SUMMARY_SYSTEM_PROMPT + "\n" + SUMMARY_USER_PROMPT).encode("utf-8")
+).hexdigest()[:16]
+
 DEFAULT_SUMMARY_LENGTH = "about 40"
 DEFAULT_EVIDENCE_K = 10
 DEFAULT_ANSWER_MAX_SOURCES = 8
@@ -339,6 +346,8 @@ async def score_evidence_batch(
     call_ai_api: Optional[Callable[..., Any]] = None,
     doc_id: str = "",
     parse_generation: str = "",
+    document_source_hash: str = "",
+    block_index_hash: str = "",
 ) -> dict[str, Any]:
     """Score a batch of candidates with total timeout and exact-bypass protection.
 
@@ -398,6 +407,13 @@ async def score_evidence_batch(
                 evidence_id=item.evidence_id,
                 doc_id=doc_id,
                 parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
+                block_index_hash=block_index_hash,
+                evidence_text=item.text,
+                provider=provider,
+                model=model,
+                endpoint=endpoint,
+                prompt_version=EVIDENCE_SCORE_PROMPT_VERSION,
             )
             hit = cache.get(key) if key else None
             if hit is None:

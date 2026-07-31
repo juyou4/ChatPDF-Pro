@@ -29,6 +29,11 @@ from fastapi import HTTPException
 from services.grep_service import grep_search
 from services.bm25_service import bm25_search
 from services.advanced_search import AdvancedSearchService
+from services.citation_authorization import (
+    CITATION_AUTHORIZATION_POLICY,
+    CITATION_IDENTITY_FIELDS,
+    extract_citation_identity_values,
+)
 from services.formula_text import formula_term_matches, looks_formula_like
 from services.query_analyzer import analyze_evidence_need, expand_academic_bilingual_terms
 from services.visual_retriever import (
@@ -168,6 +173,14 @@ class DocContext:
         self._web_search_executor = web_search_executor if callable(web_search_executor) else None
         self._web_search_lock = threading.Lock()
         self._web_search_claimed = False
+        # Citation authority is request-local.  IDs only enter this ledger after
+        # a successful Agent tool result is received; no text or cache state is
+        # retained here.
+        self._citation_authorization_lock = threading.Lock()
+        self._authorized_citation_values = {
+            field: set() for field in CITATION_IDENTITY_FIELDS
+        }
+        self._citation_authorized_tool_counts: dict[str, int] = {}
 
     def set_intent_decision(self, intent_decision: Any) -> None:
         """Attach the route-frozen decision for compatibility with older builders."""
@@ -231,6 +244,10 @@ class DocContext:
     def intent_modalities(self) -> tuple[str, ...]:
         return self._intent_text_values("modalities")
 
+    def intent_visual_intent(self) -> bool:
+        """Read the frozen visual decision without revisiting question text."""
+        return bool(self._intent_value("visual_intent", False))
+
     def has_intent_evidence_need(self, evidence_need: str) -> bool:
         return str(evidence_need or "").strip().lower() in set(self.intent_evidence_need())
 
@@ -240,9 +257,7 @@ class DocContext:
             return True
         if self.has_intent_evidence_need("numeric_table"):
             return False
-        modalities = set(self.intent_modalities())
-        interaction_mode = str(self._intent_value("interaction_mode", "") or "").strip().lower()
-        return bool(modalities & {"figure", "table", "formula", "layout"}) or interaction_mode == "image"
+        return self.intent_visual_intent()
 
     def allows_visual_analysis(self) -> bool:
         return self.allows_visual_search()
@@ -269,6 +284,54 @@ class DocContext:
                 return None, "web_search_limit_reached"
             self._web_search_claimed = True
             return self._web_search_executor, ""
+
+    def record_tool_citation_evidence(self, tool_name: str, result: Any) -> int:
+        """Authorize only stable IDs returned by one successful tool execution."""
+        if not isinstance(result, dict) or result.get("error"):
+            return 0
+        try:
+            result_count = int(result.get("result_count", len(result.get("results") or [])) or 0)
+        except (TypeError, ValueError):
+            result_count = 0
+        if result_count <= 0:
+            return 0
+        records = [
+            item for item in (result.get("chunk_meta") or []) if isinstance(item, dict)
+        ]
+        # Visual tools return structured result items; keep this fallback local
+        # to metadata-bearing results and never parse IDs out of untrusted text.
+        records.extend(
+            item for item in (result.get("results") or []) if isinstance(item, dict)
+        )
+        values = extract_citation_identity_values(records)
+        added = 0
+        with self._citation_authorization_lock:
+            for field, field_values in values.items():
+                target = self._authorized_citation_values[field]
+                before = len(target)
+                target.update(field_values)
+                added += len(target) - before
+            if any(values.values()):
+                normalized_tool = str(tool_name or "").strip()
+                if normalized_tool:
+                    self._citation_authorized_tool_counts[normalized_tool] = (
+                        self._citation_authorized_tool_counts.get(normalized_tool, 0) + 1
+                    )
+        return added
+
+    def citation_authorization_snapshot(self) -> dict:
+        """Return an ID-only immutable-by-convention snapshot for final citation filtering."""
+        with self._citation_authorization_lock:
+            return {
+                "policy": CITATION_AUTHORIZATION_POLICY,
+                "enforced": True,
+                "authorized": {
+                    field: sorted(values)
+                    for field, values in self._authorized_citation_values.items()
+                    if values
+                },
+                "tool_counts": dict(self._citation_authorized_tool_counts),
+            }
 
     def configure_visual_analyzer(self, analyzer, active_question: str = "") -> None:
         """Bind an async visual analyzer to this request-local document snapshot."""
@@ -484,6 +547,10 @@ def execute_tool(
             result = _exec_boolean_search(args, doc_ctx)
         elif tool_name == "read_blocks":
             result = _exec_read_blocks(args, doc_ctx)
+        elif tool_name == "read_section":
+            result = _exec_read_section(args, doc_ctx)
+        elif tool_name == "read_around":
+            result = _exec_read_around(args, doc_ctx)
         elif tool_name == "fetch":
             result = _exec_fetch_group(args, doc_ctx)
         elif tool_name == "map":
@@ -3248,6 +3315,296 @@ def _iter_readable_blocks(ctx: DocContext):
             text = _block_index_text(block)
             if block_id and text:
                 yield page, block_id, block, text
+
+
+def _ordered_readable_blocks(ctx: DocContext) -> list[tuple[int, str, dict, str]]:
+    """Return the current parse snapshot in the parser's stable reading order."""
+    ordered: list[tuple[int, int, int, str, dict, str]] = []
+    for source_index, (page, block_id, block, text) in enumerate(_iter_readable_blocks(ctx)):
+        try:
+            reading_order = int(block.get("reading_order"))
+        except (TypeError, ValueError):
+            reading_order = source_index
+        ordered.append((page, reading_order, source_index, block_id, block, text))
+    ordered.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [(page, block_id, block, text) for page, _order, _source, block_id, block, text in ordered]
+
+
+def _section_windows(ctx: DocContext, blocks: list[tuple[int, str, dict, str]]) -> list[dict]:
+    """Resolve flat outline entries to deterministic reading-order windows."""
+    outline = ctx.block_index.get("outline") if isinstance(ctx.block_index, dict) else []
+    if not isinstance(outline, list) or not blocks:
+        return []
+    position_by_block = {block_id: index for index, (_page, block_id, _block, _text) in enumerate(blocks)}
+    entries: list[dict] = []
+    for source_index, raw in enumerate(outline):
+        if not isinstance(raw, dict):
+            continue
+        section_id = str(raw.get("section_id") or "").strip()
+        if not section_id:
+            continue
+        first_block = str(raw.get("first_block") or "").strip()
+        start = position_by_block.get(first_block)
+        if start is None:
+            try:
+                page = max(1, int(raw.get("page") or 1))
+            except (TypeError, ValueError):
+                page = 1
+            start = next((index for index, (block_page, *_rest) in enumerate(blocks) if block_page >= page), None)
+        if start is None:
+            continue
+        try:
+            level = max(1, min(int(raw.get("level") or 1), 6))
+        except (TypeError, ValueError):
+            level = 1
+        entries.append({
+            "section_id": section_id,
+            "title": str(raw.get("title") or "").strip()[:400],
+            "level": level,
+            "start": start,
+            "source_index": source_index,
+        })
+    entries.sort(key=lambda item: (item["start"], item["source_index"], item["section_id"]))
+    for index, entry in enumerate(entries):
+        end = len(blocks)
+        for following in entries[index + 1:]:
+            if following["level"] <= entry["level"]:
+                end = following["start"]
+                break
+        entry["end"] = max(entry["start"] + 1, end)
+    return entries
+
+
+def _block_evidence(
+    *,
+    ctx: DocContext,
+    page: int,
+    block_id: str,
+    block: dict,
+    text: str,
+    source: str,
+    extra: dict | None = None,
+) -> tuple[str, dict] | None:
+    block_type = str(block.get("type") or block.get("block_type") or "text").strip()
+    bbox = _validated_visual_bbox(block.get("bbox"))
+    item = {
+        "chunk": text,
+        "page": page,
+        "context_id": f"block:{block_id}",
+        "evidence_id": f"block:{block_id}",
+        "block_id": block_id,
+        "chunk_id": block_id,
+        "chunk_type": "block",
+        "block_type": block_type,
+        "bbox": bbox,
+        "source": source,
+        "section_id": block.get("section_id"),
+        "section_path": block.get("section_path"),
+        "rects": [
+            anchor.get("bbox")
+            for anchor in (block.get("line_anchors") or [])
+            if isinstance(anchor, dict) and anchor.get("bbox")
+        ],
+        "page_size": block.get("page_size"),
+        "coordinate_space": block.get("coordinate_space"),
+        "parser_route": block.get("parser_route"),
+    }
+    if isinstance(extra, dict):
+        item.update(extra)
+    rendered = _format_tool_chunk(
+        text,
+        page=page,
+        source=source,
+        context_id=item["context_id"],
+        evidence_id=item["evidence_id"],
+        block_id=block_id,
+        chunk_idx=block_id,
+        chunk_type=block_type,
+        bbox=bbox,
+        section_id=item.get("section_id"),
+        section_path=item.get("section_path"),
+        rects=item.get("rects"),
+        page_size=item.get("page_size"),
+        coordinate_space=item.get("coordinate_space"),
+        parser_route=item.get("parser_route"),
+    )
+    if not rendered:
+        return None
+    meta = _build_tool_candidate_meta(
+        item,
+        ctx=ctx,
+        page=page,
+        group_id="",
+        chunk_idx=block_id,
+    )
+    if isinstance(extra, dict):
+        meta.update(extra)
+    return rendered, meta
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _exec_read_section(args: dict, ctx: DocContext) -> dict:
+    """Read a bounded, paginated outline section from the active block index."""
+    if not ctx.has_block_index():
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": "当前解析版本没有可读取的稳定章节",
+        }
+    section_id = str(args.get("sectionId") or args.get("section_id") or "").strip()
+    if not section_id:
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": "read_section 需要 sectionId",
+        }
+    blocks = _ordered_readable_blocks(ctx)
+    section = next((item for item in _section_windows(ctx, blocks) if item["section_id"] == section_id), None)
+    if section is None:
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": f"未找到章节 {section_id}",
+        }
+    cursor = _bounded_int(args.get("cursor", 0), default=0, minimum=0, maximum=2_000_000)
+    max_chars = _bounded_int(args.get("maxChars", args.get("max_chars", 6000)), default=6000, minimum=256, maximum=12000)
+    section_blocks = blocks[section["start"]:section["end"]]
+    spans: list[tuple[int, int, int, str, dict, str]] = []
+    offset = 0
+    for index, (page, block_id, block, text) in enumerate(section_blocks):
+        if index:
+            offset += 2
+        start = offset
+        offset += len(text)
+        spans.append((start, offset, page, block_id, block, text))
+    total_chars = offset
+    if cursor >= total_chars:
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "section_id": section_id,
+            "cursor": cursor,
+            "next_cursor": total_chars,
+            "has_more": False,
+            "total_chars": total_chars,
+            "summary": f"章节 {section_id} 已读取完毕",
+        }
+
+    requested_end = min(total_chars, cursor + max_chars)
+    selected: list[tuple[int, int, int, str, dict, str]] = []
+    for span in spans:
+        start, end, _page, _block_id, _block, _text = span
+        if end <= cursor or start >= requested_end:
+            continue
+        selected.append(span)
+        if len(selected) >= 24:
+            requested_end = min(requested_end, end)
+            break
+    results: list[str] = []
+    meta_items: list[dict] = []
+    for start, end, page, block_id, block, text in selected:
+        slice_start = max(0, cursor - start)
+        slice_end = min(len(text), requested_end - start)
+        fragment = text[slice_start:slice_end].strip()
+        if not fragment:
+            continue
+        evidence = _block_evidence(
+            ctx=ctx,
+            page=page,
+            block_id=block_id,
+            block=block,
+            text=fragment,
+            source="block_index_section",
+            extra={
+                "section_id": section_id,
+                "section_title": section["title"],
+                "section_level": section["level"],
+                "section_cursor_start": max(cursor, start),
+                "section_cursor_end": min(requested_end, end),
+                "section_block_truncated": slice_start > 0 or slice_end < len(text),
+            },
+        )
+        if evidence is None:
+            continue
+        rendered, meta = evidence
+        results.append(rendered)
+        meta_items.append(meta)
+    next_cursor = requested_end
+    return {
+        "results": results,
+        "chunk_meta": meta_items,
+        "candidate_meta": list(meta_items),
+        "result_count": len(results),
+        "section_id": section_id,
+        "section_title": section["title"],
+        "section_level": section["level"],
+        "cursor": cursor,
+        "next_cursor": next_cursor,
+        "has_more": next_cursor < total_chars,
+        "total_chars": total_chars,
+        "selected_block_ids": [item.get("block_id") for item in meta_items],
+        "summary": (
+            f"读取章节 {section_id}（{cursor}-{next_cursor}/{total_chars} 字符），"
+            f"返回 {len(results)} 个稳定块"
+        ),
+    }
+
+
+def _exec_read_around(args: dict, ctx: DocContext) -> dict:
+    """Read stable neighbouring blocks around an evidence block id."""
+    if not ctx.has_block_index():
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": "当前解析版本没有可读取的稳定阅读块",
+        }
+    block_id = str(args.get("blockId") or args.get("block_id") or "").strip()
+    if not block_id:
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": "read_around 需要 blockId",
+        }
+    before = _bounded_int(args.get("before", 2), default=2, minimum=0, maximum=12)
+    after = _bounded_int(args.get("after", 2), default=2, minimum=0, maximum=12)
+    blocks = _ordered_readable_blocks(ctx)
+    anchor_index = next((index for index, (_page, item_id, _block, _text) in enumerate(blocks) if item_id == block_id), None)
+    if anchor_index is None:
+        return {
+            "results": [], "chunk_meta": [], "candidate_meta": [], "result_count": 0,
+            "summary": f"未找到阅读块 {block_id}",
+        }
+    start = max(0, anchor_index - before)
+    end = min(len(blocks), anchor_index + after + 1)
+    results: list[str] = []
+    meta_items: list[dict] = []
+    for index, (page, item_id, block, text) in enumerate(blocks[start:end], start=start):
+        evidence = _block_evidence(
+            ctx=ctx,
+            page=page,
+            block_id=item_id,
+            block=block,
+            text=text,
+            source="block_index_around",
+            extra={
+                "anchor_block_id": block_id,
+                "relative_position": index - anchor_index,
+            },
+        )
+        if evidence is None:
+            continue
+        rendered, meta = evidence
+        results.append(rendered)
+        meta_items.append(meta)
+    return {
+        "results": results,
+        "chunk_meta": meta_items,
+        "candidate_meta": list(meta_items),
+        "result_count": len(results),
+        "anchor_block_id": block_id,
+        "selected_block_ids": [item.get("block_id") for item in meta_items],
+        "summary": f"读取块 {block_id} 前 {before} / 后 {after} 个相邻稳定块，返回 {len(results)} 个",
+    }
 
 
 def _exec_read_blocks(args: dict, ctx: DocContext) -> dict:

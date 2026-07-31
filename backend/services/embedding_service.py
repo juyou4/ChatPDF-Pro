@@ -2626,6 +2626,7 @@ def _build_context_text_for_result(item: dict, query: str = "") -> str:
     """构造真正进入最终上下文的文本；table_row 必须带上 caption 和 header。"""
     _maybe_attach_numeric_table_bundle_exact_context(item, query)
     chunk_text = (item.get("chunk") or item.get("raw_chunk_text") or "").strip()
+    expanded_text = str(item.get("expanded_chunk") or "").strip()
     chunk_type = (item.get("chunk_type") or item.get("block_type") or "").strip().lower()
     exact_row_text = re.sub(
         r"\s+",
@@ -2688,9 +2689,11 @@ def _build_context_text_for_result(item: dict, query: str = "") -> str:
         if parts:
             return "\n".join(parts)
     if chunk_type != "table_row":
+        if has_typed_table_evidence:
+            return chunk_text
         if chunk_type == "formula" or looks_formula_like(query) or looks_formula_like(chunk_text):
             return build_formula_alias_text(chunk_text)
-        return chunk_text
+        return expanded_text or chunk_text
 
     parts: list[str] = []
     for value in (
@@ -15218,6 +15221,69 @@ def _format_layered_context(
     })
     return "\n\n---\n\n".join(parts), layer_stats
 
+_STRUCTURAL_EVIDENCE_QUERY_RE = re.compile(
+    r"架构|结构|拓扑|交互|机制|流程|网络|模块|"
+    r"architecture|structure|topology|interaction|mechanism|pipeline|network|module",
+    re.IGNORECASE,
+)
+
+
+def _build_direct_hit_evidence_by_group(
+    fitted_selections: list[dict],
+    group_best_chunk_meta: dict,
+    *,
+    query: str,
+    evidence_need: list[str],
+) -> dict[str, str]:
+    """为结构性问题保留少量原始命中，避免意群摘要压掉关键拓扑句。"""
+    needs_direct_evidence = bool(
+        {str(item or "").strip() for item in evidence_need}
+        & {"section_explanation", "analysis_explanation"}
+    ) or bool(_STRUCTURAL_EVIDENCE_QUERY_RE.search(str(query or "")))
+    if not needs_direct_evidence or not isinstance(group_best_chunk_meta, dict):
+        return {}
+
+    direct_evidence: dict[str, str] = {}
+    used_chars = 0
+    max_groups = 8
+    max_per_group = 720
+    max_total = 5000
+    for selection in fitted_selections:
+        if len(direct_evidence) >= max_groups or used_chars >= max_total:
+            break
+        group = selection.get("group") if isinstance(selection, dict) else None
+        group_id = str(getattr(group, "group_id", "") or "").strip()
+        if not group_id:
+            continue
+        metadata = group_best_chunk_meta.get(group_id) or {}
+        direct_text = str(metadata.get("_direct_context_text") or "").strip()
+        if not direct_text:
+            continue
+
+        granularity = str(selection.get("granularity") or "full")
+        text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}.get(
+            granularity, "full_text"
+        )
+        group_text = str(getattr(group, text_attr, "") or "")
+        if direct_text in group_text:
+            continue
+        if len(direct_text) > max_per_group:
+            direct_text = (
+                _context_builder_singleton._extract_relevant_snippet(
+                    direct_text, query, max_len=max_per_group
+                )
+                or direct_text[:max_per_group]
+            )
+        remaining = max_total - used_chars
+        if remaining < 120:
+            break
+        direct_text = direct_text[:remaining].strip()
+        if not direct_text:
+            continue
+        direct_evidence[group_id] = direct_text
+        used_chars += len(direct_text)
+
+    return direct_evidence
 
 def _build_context_with_groups(
     doc_id: str,
@@ -15337,6 +15403,15 @@ def _build_context_with_groups(
         reserve_for_answer=config.reserve_for_answer,
     )
     fitted_selections = budget_manager.fit_within_budget(mixed_selections)
+    evidence_need_for_context = list((intent_decision or {}).get("evidence_need") or [])
+    if not isinstance(intent_decision, dict):
+        evidence_need_for_context = _analyze_evidence_need(query)
+    direct_hit_evidence_by_group = _build_direct_hit_evidence_by_group(
+        fitted_selections,
+        group_best_chunk_meta,
+        query=query,
+        evidence_need=evidence_need_for_context,
+    )
 
     # 步骤 5：使用 ContextBuilder 构建格式化上下文
     context_builder = ContextBuilder()
@@ -15344,6 +15419,7 @@ def _build_context_with_groups(
         fitted_selections,
         group_best_chunks=group_best_chunks,
         group_best_chunk_meta=group_best_chunk_meta,
+        direct_evidence_by_group=direct_hit_evidence_by_group,
         query=query,
     )
 
@@ -15476,8 +15552,8 @@ def _build_context_with_groups(
         group = selection["group"]
         granularity = selection.get("granularity", "full")
         text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}.get(granularity, "full_text")
-        text = getattr(group, text_attr, "")
         citation = citation_by_group.get(group.group_id, {})
+        text = str(citation.get("source_text") or getattr(group, text_attr, "") or "")
         segment = {
             "ref": idx + 1,
             "evidence_id": f"{doc_id}:group:{idx + 1}",
@@ -15621,9 +15697,11 @@ def _rank_groups_by_results(
     ranked_groups = [group_map[gid] for gid in sorted_group_ids if gid in group_map]
     if isinstance(best_chunk_meta_out, dict):
         best_chunk_meta_out.clear()
-        best_chunk_meta_out.update({
-            gid: _citation_anchor_metadata_from_result(item)
-            for gid, item in group_best_results.items()
-        })
+        for group_id, item in group_best_results.items():
+            metadata = _citation_anchor_metadata_from_result(item)
+            direct_context_text = (_build_context_text_for_result(item) or "").strip()
+            if direct_context_text:
+                metadata["_direct_context_text"] = direct_context_text
+            best_chunk_meta_out[group_id] = metadata
 
     return ranked_groups, group_best_chunks

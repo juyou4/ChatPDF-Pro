@@ -10,10 +10,11 @@
 配置：默认关闭（增加延迟），通过 config.enable_answer_critic 启用
 """
 import asyncio
+import hashlib
 import json
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,17 @@ _ISSUE_TYPES = frozenset({
 })
 _DEFAULT_ISSUE_TYPE = "other"
 _MAX_ISSUES = 5
+_MAX_CLAIM_VERIFIER_CANDIDATES = 8
+_CLAIM_VERDICTS = frozenset({"supported", "unsupported", "uncertain"})
+_ANSWER_CITATION_RE = re.compile(r"\[(\d{1,3})\]")
+_ANSWER_NUMBER_RE = re.compile(r"(?<![\w])[-+]?\d+(?:\.\d+)?%?(?![\w])")
+_REPAIRABLE_ISSUE_TYPES = frozenset({
+    "hallucination",
+    "unsupported_number",
+    "missing_citation",
+    "wrong_citation",
+    "overreach",
+})
 
 
 class _CriticResponseError(ValueError):
@@ -225,6 +237,198 @@ def _parse_critic_json(text: str) -> dict:
     raise _CriticResponseError("invalid_json", "自审响应无法解析为 JSON 对象")
 
 
+def _normalize_claim_verifier_candidates(claims: object) -> list[dict[str, Any]]:
+    """Keep a bounded, ID-addressable verifier payload.
+
+    The verifier is deliberately not allowed to discover new evidence.  Every
+    evidence ID and excerpt must already have survived the deterministic
+    summary guards before it reaches this function.
+    """
+    if not isinstance(claims, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen_claim_ids: set[str] = set()
+    for raw in claims:
+        if not isinstance(raw, dict):
+            continue
+        claim_id = str(raw.get("claim_id") or "").strip()
+        claim_text = " ".join(str(raw.get("claim_text") or "").split())
+        if not claim_id or not claim_text or claim_id in seen_claim_ids:
+            continue
+        evidence: list[dict[str, str]] = []
+        seen_evidence_ids: set[str] = set()
+        for item in raw.get("evidence") if isinstance(raw.get("evidence"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            evidence_id = str(item.get("evidence_id") or "").strip()
+            text = " ".join(str(item.get("text") or "").split())
+            if not evidence_id or not text or evidence_id in seen_evidence_ids:
+                continue
+            seen_evidence_ids.add(evidence_id)
+            evidence.append({"evidence_id": evidence_id, "text": text[:900]})
+            if len(evidence) >= 4:
+                break
+        if not evidence:
+            continue
+        seen_claim_ids.add(claim_id)
+        normalized.append({
+            "claim_id": claim_id,
+            "claim_kind": str(raw.get("claim_kind") or "claim")[:40],
+            "source_section_id": str(raw.get("source_section_id") or "")[:120],
+            "claim_text": claim_text[:240],
+            "evidence": evidence,
+        })
+        if len(normalized) >= _MAX_CLAIM_VERIFIER_CANDIDATES:
+            break
+    return normalized
+
+
+def _normalize_claim_verdicts(
+    raw: object,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Authorize verifier output against the exact input claim/evidence IDs."""
+    candidate_by_id = {
+        str(candidate["claim_id"]): candidate
+        for candidate in candidates
+        if candidate.get("claim_id")
+    }
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            claim_id = str(item.get("claim_id") or "").strip()
+            if claim_id in candidate_by_id and claim_id not in raw_by_id:
+                raw_by_id[claim_id] = item
+
+    verdicts: list[dict[str, Any]] = []
+    for claim_id, candidate in candidate_by_id.items():
+        item = raw_by_id.get(claim_id) or {}
+        status = str(item.get("status") or "uncertain").strip().lower()
+        if status not in _CLAIM_VERDICTS:
+            status = "uncertain"
+        allowed_evidence_ids = {
+            str(evidence.get("evidence_id") or "")
+            for evidence in candidate.get("evidence") or []
+            if evidence.get("evidence_id")
+        }
+        raw_evidence_ids = (
+            item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+        )
+        evidence_ids = list(dict.fromkeys(
+            str(value).strip()
+            for value in raw_evidence_ids
+            if str(value).strip() in allowed_evidence_ids
+        ))[:4]
+        reason = " ".join(str(item.get("reason") or "").split())[:240]
+        if not item:
+            reason = "verifier_omitted_claim"
+        elif status == "supported" and not evidence_ids:
+            status = "uncertain"
+            reason = "supported_without_authorized_evidence"
+        verdicts.append({
+            "claim_id": claim_id,
+            "status": status,
+            "reason": reason,
+            "evidence_ids": evidence_ids,
+        })
+    return verdicts
+
+
+async def critique_evidence_claims(
+    claims: list[dict[str, Any]],
+    *,
+    api_key: str,
+    model: str,
+    provider: str = "openai",
+    endpoint: str = "",
+    timeout: float = 18.0,
+) -> Optional[dict[str, Any]]:
+    """Independently check a small set of already-bound high-value claims.
+
+    This is a diagnostic side pass.  It returns verdicts only and has no API
+    for rewriting the summary that produced the claims.
+    """
+    candidates = _normalize_claim_verifier_candidates(claims)
+    if (
+        not candidates
+        or (not api_key and str(provider or "").lower() not in {"local", "ollama"})
+    ):
+        return None
+
+    system_prompt = (
+        "You are an independent academic claim verifier. Check each claim only against "
+        "the evidence excerpts attached to that same claim. Preserve subjects, comparison "
+        "direction, numbers, scope, uncertainty, negation, and limitation conditions. "
+        "Do not use outside knowledge and do not rewrite any claim. Output ONLY JSON: "
+        '{"verdicts":[{"claim_id":"...","status":"supported|unsupported|uncertain",'
+        '"reason":"short reason","evidence_ids":["IDs actually used"]}]}. '
+        "Return one verdict for every input claim. A supported verdict must cite at least "
+        "one evidence_id supplied with that claim."
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": "Verify these claims:\n" + json.dumps(candidates, ensure_ascii=False),
+        },
+    ]
+
+    try:
+        from services.chat_service import call_ai_api
+
+        parsed: Optional[dict] = None
+        for attempt in range(1, _MAX_PARSE_ATTEMPTS + 1):
+            response = await asyncio.wait_for(
+                call_ai_api(
+                    messages=messages,
+                    api_key=api_key,
+                    model=model,
+                    provider=provider,
+                    endpoint=endpoint,
+                    max_tokens=900,
+                    temperature=0.0,
+                    purpose="reading_outline_claim_verifier",
+                ),
+                timeout=timeout,
+            )
+            try:
+                parsed = _parse_critic_json(_extract_response_text(response))
+                break
+            except _CriticResponseError:
+                if attempt >= _MAX_PARSE_ATTEMPTS:
+                    raise
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+
+        if not isinstance(parsed, dict):
+            raise _CriticResponseError("invalid_payload", "结论核验 JSON 根节点不是对象")
+        verdicts = _normalize_claim_verdicts(parsed.get("verdicts"), candidates)
+        counts = {
+            status: sum(1 for verdict in verdicts if verdict["status"] == status)
+            for status in _CLAIM_VERDICTS
+        }
+        return {
+            "status": "completed",
+            "candidate_count": len(candidates),
+            "supported_count": counts["supported"],
+            "unsupported_count": counts["unsupported"],
+            "uncertain_count": counts["uncertain"],
+            "verdicts": verdicts,
+        }
+    except asyncio.TimeoutError:
+        logger.warning("[ClaimVerifier] 关键结论核验超时(%ss)", timeout)
+    except _CriticResponseError as exc:
+        logger.warning(
+            "[ClaimVerifier] 关键结论核验响应无效: code=%s detail=%s",
+            exc.code,
+            exc.detail,
+        )
+    except Exception as exc:
+        logger.warning("[ClaimVerifier] 关键结论核验失败: %s", exc)
+    return None
+
+
 async def critique_answer(
     question: str,
     answer: str,
@@ -273,6 +477,10 @@ async def critique_answer(
         "- Factual claims (numbers, methods, comparisons, causal statements) should end with [n] citations.\n"
         "- If the answer correctly refuses with insufficient evidence, that is NOT a hallucination.\n"
         "- Invented numbers, methods, or paper claims not supported by context ARE hallucinations.\n"
+        "- For structure, architecture, interaction, or mechanism questions, distinguish high-level topology from missing layer-level implementation parameters. "
+        "Flag an answer as overreach if it says the paper gives no structure while the context gives a topology or pipeline.\n"
+        "- A local retrieval miss is not evidence that the whole paper lacks something; require an explicit source statement and citation for document-wide absence claims.\n"
+        "- For multi-part questions, flag omitted required subquestions and vague absence claims; any statement that something is not provided must name the concrete missing field.\n"
         "Output ONLY a JSON object with these fields:\n"
         "- score: integer 0-10 (10=perfectly grounded, 0=completely hallucinated)\n"
         "- has_hallucination: boolean\n"
@@ -417,3 +625,156 @@ async def critique_answer(
             },
         )
         return None
+
+
+def _repair_issue_payload(critic: object) -> list[dict[str, Any]]:
+    if not isinstance(critic, dict):
+        return []
+    details = critic.get("issue_details")
+    if not isinstance(details, list):
+        details = []
+    payload: list[dict[str, Any]] = []
+    for item in details[:5]:
+        if not isinstance(item, dict):
+            continue
+        issue_type = str(item.get("issue_type") or "other").strip().lower()
+        if issue_type not in _REPAIRABLE_ISSUE_TYPES:
+            continue
+        payload.append({
+            "issue_type": issue_type,
+            "text": str(item.get("text") or "")[:200],
+            "claim_span": str(item.get("claim_span") or "")[:160],
+            "evidence_refs": _normalize_evidence_refs(item.get("evidence_refs")),
+        })
+    return payload
+
+
+def _numbers_without_citations(text: str) -> set[str]:
+    without_refs = _ANSWER_CITATION_RE.sub("", str(text or ""))
+    return {match.group(0) for match in _ANSWER_NUMBER_RE.finditer(without_refs)}
+
+
+async def repair_answer_once(
+    *,
+    question: str,
+    answer: str,
+    context: str,
+    critic: dict,
+    allowed_citation_refs: list[int],
+    api_key: str,
+    model: str,
+    provider: str = "openai",
+    endpoint: str = "",
+    timeout: float = 14.0,
+) -> tuple[str, dict[str, Any]]:
+    """Attempt one evidence-locked answer repair without any retrieval access."""
+    original = str(answer or "").strip()
+    evidence = str(context or "").strip()[:7000]
+    issues = _repair_issue_payload(critic)
+    allowed_refs = sorted({int(value) for value in allowed_citation_refs if int(value) > 0})[:64]
+    diagnostics: dict[str, Any] = {
+        "attempted": False,
+        "accepted": False,
+        "attempt_count": 0,
+        "retrieval_call_count": 0,
+        "validation": "not_started",
+        "allowed_citation_refs": allowed_refs,
+        "evidence_hash": hashlib.sha256(evidence.encode("utf-8")).hexdigest()[:20]
+        if evidence
+        else "",
+    }
+    if not original or not evidence or not issues:
+        diagnostics["validation"] = "missing_repair_input"
+        return original, diagnostics
+    if not api_key and str(provider or "").strip().lower() not in {"local", "ollama"}:
+        diagnostics["validation"] = "missing_api_key"
+        return original, diagnostics
+
+    diagnostics["attempted"] = True
+    diagnostics["attempt_count"] = 1
+    system_prompt = (
+        "You repair one academic PDF answer using ONLY the supplied evidence. "
+        "You have no tools and must not use outside knowledge. Remove or weaken unsupported "
+        "claims, preserve the user's language and requested scope, and keep supported details. "
+        "Use citation markers only from ALLOWED_REFS and place them after supported factual claims. "
+        "If evidence is insufficient, say that the current evidence is insufficient instead of "
+        "inventing an answer. Output only the repaired answer, with no analysis or JSON."
+    )
+    user_prompt = (
+        f"QUESTION:\n{str(question or '')[:1200]}\n\n"
+        f"ALLOWED_REFS: {allowed_refs}\n\n"
+        f"CRITIC_ISSUES:\n{json.dumps(issues, ensure_ascii=False)}\n\n"
+        f"AUTHORIZED_EVIDENCE:\n{evidence}\n\n"
+        f"ORIGINAL_ANSWER:\n{original[:3500]}\n\n"
+        "Return the repaired answer only."
+    )
+    try:
+        from services.chat_service import call_ai_api
+
+        response = await asyncio.wait_for(
+            call_ai_api(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+                max_tokens=1400,
+                temperature=0.0,
+                purpose="answer_critic_repair",
+            ),
+            timeout=timeout,
+        )
+        candidate = _extract_response_text(response).strip()
+    except asyncio.TimeoutError:
+        diagnostics["validation"] = "timeout"
+        return original, diagnostics
+    except Exception as exc:
+        diagnostics["validation"] = "request_failed"
+        diagnostics["error"] = str(exc)[:160]
+        return original, diagnostics
+
+    if not candidate:
+        diagnostics["validation"] = "empty_answer"
+        return original, diagnostics
+    if len(candidate) > max(1200, int(len(original) * 1.35) + 300):
+        diagnostics["validation"] = "answer_expanded"
+        return original, diagnostics
+    allowed_ref_set = set(allowed_refs)
+    unauthorized_refs = sorted({
+        int(value)
+        for value in _ANSWER_CITATION_RE.findall(candidate)
+        if int(value) not in allowed_ref_set
+    })
+    if unauthorized_refs:
+        diagnostics["validation"] = "unauthorized_citation"
+        diagnostics["unauthorized_citation_refs"] = unauthorized_refs
+        return original, diagnostics
+    introduced_numbers = sorted(
+        _numbers_without_citations(candidate) - _numbers_without_citations(evidence)
+    )
+    if introduced_numbers:
+        diagnostics["validation"] = "number_not_in_evidence"
+        diagnostics["introduced_numbers"] = introduced_numbers[:12]
+        return original, diagnostics
+    retained_spans = [
+        item["claim_span"]
+        for item in issues
+        if item.get("claim_span")
+        and item.get("issue_type") in {"hallucination", "unsupported_number", "wrong_citation", "overreach"}
+        and item["claim_span"] in candidate
+    ]
+    if retained_spans:
+        diagnostics["validation"] = "flagged_claim_retained"
+        diagnostics["retained_claim_spans"] = retained_spans[:5]
+        return original, diagnostics
+    if candidate == original:
+        diagnostics["validation"] = "unchanged"
+        return original, diagnostics
+
+    diagnostics["accepted"] = True
+    diagnostics["validation"] = "passed"
+    diagnostics["answer_hash"] = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:20]
+    return candidate, diagnostics

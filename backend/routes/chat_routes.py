@@ -22,6 +22,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
+from services.citation_authorization import (
+    filter_authorized_citations,
+    filter_authorized_context_segments,
+)
 from services.usage_tracker import build_usage_meta, get_recent_usage, record_usage
 from services.vector_service import vector_context
 from services.selected_text_locator import locate_selected_text, selected_page_is_resolved
@@ -29,7 +33,7 @@ from services.agent_retrieval_service import (
     AgentRetrievalDependencies,
     run_agent_retrieval_for_context as _run_agent_retrieval_service,
 )
-from services.retrieval_tools import DocContext, execute_tool
+from services.retrieval_tools import DocContext, execute_async_tool, execute_tool
 from services.glossary_service import glossary_service, build_glossary_prompt
 from services.table_service import protect_markdown_tables, restore_markdown_tables
 from services.query_analyzer import get_retrieval_strategy
@@ -71,11 +75,17 @@ from services.context_builder import ContextBuilder
 from services.web_search_service import SearchManager, format_search_results
 # 联网三态策略的唯一实现在 services/web_search_policy.py。route 与
 # agent_retrieval_service 都转发到它，避免两份实现漂移。
-from services.web_search_policy import resolve_web_search_mode as _resolve_web_search_mode
+from services.web_search_policy import (
+    is_command_only_explicit_web_search_request,
+    is_explicit_web_search_request,
+    resolve_effective_web_search_mode as _resolve_effective_web_search_mode,
+    resolve_web_search_mode as _resolve_web_search_mode,
+)
 from services.web_search_reranker import rerank_web_results
 from services.query_rewriter import QueryRewriter
 from services.memory_quality import (
     is_unusable_automatic_answer,
+    is_unsafe_automatic_document_answer,
     normalize_retry_control_question,
 )
 from services.followup_service import generate_followup_questions
@@ -103,9 +113,12 @@ from services.block_inventory_service import (
 )
 from services.modal_asset_service import (
     build_modal_asset_index,
+    detect_query_modalities,
+    looks_like_figure_query,
     looks_like_visual_query,
 )
 from services.modal_visual_evidence_service import analyze_modal_visual_evidence
+from services.chat_visual_attachment_service import build_chat_visual_attachments
 from services.document_parse_state import (
     artifact_parse_identity,
     is_parse_prepared,
@@ -1622,6 +1635,7 @@ def _load_agent_modal_asset_index(
     parse_manifest: dict,
     visual_evidence: list[dict],
     block_index: dict | None = None,
+    document_data: dict | None = None,
 ) -> dict:
     """仅加载绑定到当前解析身份的请求级模态资产。"""
     if not isinstance(parse_manifest, dict):
@@ -1684,10 +1698,26 @@ def _load_agent_modal_asset_index(
                 )
             ]
 
+    mineru_visual_assets = None
+    try:
+        from services.mineru_visual_asset_service import resolve_mineru_visual_asset_envelope
+
+        mineru_visual_assets = resolve_mineru_visual_asset_envelope(
+            document_data,
+            block_index=block_index,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[AgentDoc] 读取 MinerU 视觉资产失败，回退基础图表块: doc_id=%s error=%s",
+            doc_id,
+            exc,
+        )
+
     try:
         modal_asset_index = build_modal_asset_index(
             block_index=block_index,
             visual_evidence=safe_visual_evidence,
+            mineru_visual_assets=mineru_visual_assets,
         )
     except Exception as exc:
         logger.warning("[AgentDoc] 构建模态资产索引失败: doc_id=%s error=%s", doc_id, exc)
@@ -1807,6 +1837,7 @@ def _build_agent_doc_context(
         parse_manifest=parse_manifest,
         visual_evidence=visual_evidence,
         block_index=block_index,
+        document_data=data,
     )
     semantic_groups = _load_doc_semantic_groups_for_agent(
         doc_id,
@@ -2526,6 +2557,48 @@ def _select_diverse_agent_detail_citations(
     return [scored[idx] for idx in ordered_indices[:max_citations]]
 
 
+def _visual_asset_citation_id(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    return str(record.get("asset_id") or record.get("analyzed_asset_id") or "").strip()
+
+
+def _is_agent_visual_asset_record(record: dict | None) -> bool:
+    if not _visual_asset_citation_id(record):
+        return False
+    record = record or {}
+    return bool(
+        str(record.get("retrieval_type") or "").strip() == "agent_visual_search"
+        or str(record.get("chunk_type") or "").strip() == "visual_asset"
+        or record.get("runtime_visual_analysis")
+    )
+
+
+def _visual_asset_citation_kind(record: dict | None) -> str:
+    """Return the canonical modality carried by a retrieved visual record."""
+    if not isinstance(record, dict):
+        return ""
+    kind = str(record.get("asset_kind") or record.get("kind") or "").strip().lower()
+    if kind in {"figure", "table", "formula", "visual_enrichment"}:
+        return kind
+    asset_id = _visual_asset_citation_id(record).lower()
+    match = re.match(r"^asset:(figure|table|formula|visual_enrichment):", asset_id)
+    return match.group(1) if match else ""
+
+
+def _preferred_visual_asset_citation_kinds(query: str) -> list[str]:
+    """Resolve explicit figure/table/formula intent in stable modality order."""
+    return [
+        kind
+        for kind in detect_query_modalities(query)
+        if kind in {"figure", "table", "formula"}
+    ]
+
+
+def _is_explicit_visual_citation_query(query: str) -> bool:
+    return bool(looks_like_visual_query(query) or looks_like_figure_query(query))
+
+
 def _build_agent_detail_citations(
     agent_detail: list[dict],
     *,
@@ -2645,6 +2718,53 @@ def _build_agent_detail_citations(
 
     scored.sort(key=lambda item: (-item[0], item[1]))
     selected_scored = _select_diverse_agent_detail_citations(scored, query_text, max_citations)
+    if _is_explicit_visual_citation_query(query_text):
+        visual_candidates = [
+            item
+            for item in scored
+            if _is_agent_visual_asset_record(item[2])
+        ]
+        reserved_visuals: list[tuple[float, int, dict]] = []
+        reserved_ids: set[str] = set()
+        for preferred_kind in _preferred_visual_asset_citation_kinds(query_text):
+            matched = next(
+                (
+                    item
+                    for item in visual_candidates
+                    if _visual_asset_citation_kind(item[2]) == preferred_kind
+                    and _visual_asset_citation_id(item[2]) not in reserved_ids
+                ),
+                None,
+            )
+            if matched is not None:
+                reserved_visuals.append(matched)
+                reserved_ids.add(_visual_asset_citation_id(matched[2]))
+
+        if not reserved_visuals:
+            fallback_visual = next(
+                (
+                    item
+                    for item in selected_scored
+                    if _is_agent_visual_asset_record(item[2])
+                ),
+                visual_candidates[0] if visual_candidates else None,
+            )
+            if fallback_visual is not None:
+                reserved_visuals.append(fallback_visual)
+                reserved_ids.add(_visual_asset_citation_id(fallback_visual[2]))
+
+        if reserved_visuals:
+            # 显式看图请求必须让实际命中的视觉资产进入编号上下文，否则后续
+            # 引用对齐和附件服务都看不到它。图/表/公式按问句模态各保留一个，
+            # 避免文本分更高的其他资产抢占；附件层仍会复核解析身份、PDF 哈希和 bbox。
+            selected_scored = [
+                *reserved_visuals,
+                *[
+                    item
+                    for item in selected_scored
+                    if _visual_asset_citation_id(item[2]) not in reserved_ids
+                ],
+            ][:max_citations]
     citations: list[dict] = []
     for score, _idx, detail in selected_scored:
         text = detail["_agent_detail_text"]
@@ -2685,6 +2805,8 @@ def _build_agent_detail_citations(
                 "visual_evidence_id",
                 "asset_id",
                 "analyzed_asset_id",
+                "asset_kind",
+                "kind",
                 "visual_enhancement",
                 "visual_source",
                 "visual_supplement_revision",
@@ -2785,7 +2907,19 @@ def _is_failed_history_assistant(message: dict) -> bool:
     ).strip().lower()
     if turn_status in _CHAT_HISTORY_EXCLUDED_TURN_STATUSES:
         return True
-    return is_unusable_automatic_answer(str(message.get("content") or ""))
+    critic = message.get("answer_critic") or message.get("answerCritic")
+    if isinstance(critic, dict):
+        if bool(critic.get("has_hallucination")):
+            return True
+        if str(critic.get("citation_risk_level") or "").strip().lower() == "high":
+            return True
+
+
+    content = str(message.get("content") or "")
+    return (
+        is_unusable_automatic_answer(content)
+        or is_unsafe_automatic_document_answer(content)
+    )
 
 
 def _chat_history_message_matches_parse_identity(
@@ -2894,10 +3028,17 @@ def _resolve_normal_continuation(
     question: str,
     safe_chat_history: list[dict] | None,
 ) -> dict:
-    """Bind a plain continue request to the immediately preceding valid turn."""
+    """Bind a command-only follow-up to the immediately preceding valid user turn."""
     normalized = str(question or "").strip()
-    if not is_continuation_request(normalized):
-        return {"effective_question": normalized, "unresolved": False, "ref": None}
+    is_plain_continuation = is_continuation_request(normalized)
+    is_web_search_continuation = is_command_only_explicit_web_search_request(normalized)
+    if not is_plain_continuation and not is_web_search_continuation:
+        return {
+            "effective_question": normalized,
+            "unresolved": False,
+            "ref": None,
+            "command_only_web_search": False,
+        }
     history = [item for item in (safe_chat_history or []) if isinstance(item, dict)]
     for assistant_index in range(len(history) - 1, -1, -1):
         assistant = history[assistant_index]
@@ -2911,26 +3052,37 @@ def _resolve_normal_continuation(
             if role != "user":
                 continue
             source_question = str(candidate.get("content") or "").strip()
-            if not source_question or is_continuation_request(source_question):
+            if (
+                not source_question
+                or is_continuation_request(source_question)
+                or is_command_only_explicit_web_search_request(source_question)
+            ):
                 break
             source_hash = hashlib.sha256(
                 source_question.encode("utf-8")
             ).hexdigest()[:16]
+            if is_web_search_continuation:
+                effective_question = f"请联网检索并回答上一轮用户问题：{source_question}"
+                ref_kind = "web_search"
+            else:
+                effective_question = f"请继续围绕上一轮问题补充更深入的内容：{source_question}"
+                ref_kind = "continue"
             return {
-                "effective_question": (
-                    f"请继续围绕上一轮问题补充更深入的内容：{source_question}"
-                ),
+                "effective_question": effective_question,
                 "retrieval_question": source_question,
                 "unresolved": False,
+                "command_only_web_search": is_web_search_continuation,
                 "ref": {
                     "source_question_hash": source_hash,
                     "source_question": source_question,
+                    "kind": ref_kind,
                 },
             }
     return {
         "effective_question": normalized,
         "unresolved": True,
         "ref": None,
+        "command_only_web_search": is_web_search_continuation,
     }
 
 
@@ -3107,6 +3259,10 @@ class ChatRequest(BaseModel):
     parse_generation: Optional[str] = None
     document_source_hash: Optional[str] = None
     clarification_ticket: Optional[ClarificationTicket] = None
+    # A ticket is deliberately inert unless the client explicitly marks this
+    # message as a response to a clarification. Hint-mode answers otherwise
+    # hijack the next independent user question.
+    clarification_response: bool = False
     question: str = Field(..., min_length=1, max_length=16_000)
     api_key: Optional[str] = None
     model: str
@@ -3296,7 +3452,12 @@ def _resolve_pending_clarification(
     """Resume an ambiguous turn only when its parse-bound ticket still matches."""
     ticket = _ticket_to_dict(request.clarification_ticket)
     answer = str(request.question or "").strip()
-    if not ticket or not answer or _looks_like_new_question(answer):
+    if (
+        not request.clarification_response
+        or not ticket
+        or not answer
+        or _looks_like_new_question(answer)
+    ):
         return {"effective_question": answer, "resumed": False}
     generation, source_hash = _parse_identity_fields(parse_identity)
     original_question = str(ticket.get("original_question") or "").strip()
@@ -3562,6 +3723,29 @@ async def _run_memory_read_for_stream(label: str, reader, fallback):
         return fallback
 
 
+def _build_memory_context_from_raw_memories(memories: list[dict] | None) -> str:
+    """Render the one canonical retrieval result for legacy fallback use.
+
+    ContextInjector consumes the structured list. The string is retained only
+    for the personal-mode fallback, so it must be derived from that same list
+    rather than trigger a second retriever pass with its own hit side effects.
+    """
+    lines: list[str] = []
+    for memory in memories or []:
+        if not isinstance(memory, dict):
+            continue
+        content = str(memory.get("content") or memory.get("text") or "").strip()
+        if not content:
+            continue
+        source = str(
+            memory.get("source_type")
+            or memory.get("memory_kind")
+            or "memory"
+        ).strip()
+        lines.append(f"- [{source}] {content}")
+    return "用户历史记忆：\n" + "\n".join(lines) if lines else ""
+
+
 async def _retrieve_memory_for_stream(
     question: str,
     api_key: str = None,
@@ -3578,19 +3762,11 @@ async def _retrieve_memory_for_stream(
     if memory_service is None:
         return "", []
 
-    memory_context = await _run_memory_read_for_stream(
-        "上下文",
-        lambda: _retrieve_memory_context(
-            question,
-            api_key=api_key,
-            doc_id=doc_id,
-            parse_identity=parse_identity,
-            top_k=top_k,
-        ),
-        "",
-    )
+    # The old implementation retrieved once for formatted text and again for
+    # raw evidence. Both passes incremented hit counters and could trigger
+    # promotion, making one user question count as multiple memory uses.
     raw_memories = await _run_memory_read_for_stream(
-        "原始列表",
+        "检索",
         lambda: _retrieve_raw_memories(
             question,
             api_key=api_key,
@@ -3601,7 +3777,8 @@ async def _retrieve_memory_for_stream(
         ),
         [],
     )
-    return str(memory_context or ""), list(raw_memories or [])
+    raw_memories = list(raw_memories or [])
+    return _build_memory_context_from_raw_memories(raw_memories), raw_memories
 
 
 def _smart_inject_memory(system_prompt: str, memory_context: str, raw_memories: list[dict] = None) -> tuple[str, list[dict], dict]:
@@ -3634,6 +3811,7 @@ def _async_memory_write(
     answer: str = "",
     turn_status: str = _CHAT_TURN_STATUS_COMPLETED,
     write_generation: int | None = None,
+    answer_critic: dict | None = None,
 ):
     try:
         if turn_status not in _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES:
@@ -3645,7 +3823,12 @@ def _async_memory_write(
             return
         if request.doc_id:
             final_answer = str(answer or "").strip()
-            if is_unusable_automatic_answer(final_answer):
+            critic = answer_critic if isinstance(answer_critic, dict) else {}
+            if bool(critic.get("has_hallucination")) or str(critic.get("citation_risk_level") or "").lower() == "high":
+                logger.info("[Memory] skip unreliable answer: doc_id=%s", request.doc_id)
+                return
+
+            if is_unsafe_automatic_document_answer(final_answer):
                 logger.info("[Memory] 跳过故障回答的自动记忆写入: doc_id=%s", request.doc_id)
                 return
             if not _memory_write_matches_current_parse(request, parse_identity):
@@ -3802,7 +3985,7 @@ def _maybe_flush_memory(
     if not doc_id or identity is None:
         return
     if write_generation is None:
-        write_generation = memory_service.capture_write_generation()
+        write_generation = memory_service.capture_write_generation(doc_id)
     session_key = (
         doc_id,
         identity["parse_generation"],
@@ -3892,6 +4075,26 @@ def _resolve_allowed_memory_kinds(privacy_mode: str | None) -> set[str] | None:
     return set(allowed) or {"working", "doc_fact", "consolidated", "graph"}
 
 
+def _filter_memories_for_privacy(
+    memories: list[dict] | None,
+    allowed_kinds: set[str] | None,
+) -> list[dict]:
+    """Return only memory records permitted for the request privacy scope.
+
+    ``memory_context`` is a legacy rendered string and no longer carries enough
+    provenance to filter safely.  Shared mode must therefore make decisions from
+    the structured records, then fail closed when that structure is unavailable.
+    """
+    records = [item for item in (memories or []) if isinstance(item, dict)]
+    if allowed_kinds is None:
+        return records
+    return [
+        item
+        for item in records
+        if str(item.get("memory_kind") or "episodic").strip() in allowed_kinds
+    ]
+
+
 def _resolve_memory_budget_plan(
     *,
     configured_budget: int | None,
@@ -3937,19 +4140,25 @@ def _prepare_memory_evidence(
     glossary_context: str = "",
 ) -> tuple[str, list[dict], dict]:
     """Select and render memory as evidence without granting it system authority."""
+    allowed_kinds = _resolve_allowed_memory_kinds(privacy_mode)
+    privacy_mode_name = "shared" if allowed_kinds is not None else "personal"
+    privacy_safe_memories = _filter_memories_for_privacy(raw_memories, allowed_kinds)
     empty_meta = {
         "enabled": bool(memory_context or raw_memories),
         "strategy": "simple",
         "retrieved_count": len(raw_memories or []),
-        "selected_count": len(raw_memories or []),
+        "selected_count": len(privacy_safe_memories),
         "truncated": False,
         "token_budget": None,
         "budget_ceiling": None,
         "budget_others_used": None,
         "budget_total": None,
         "used_tokens": None,
-        "privacy_mode": "shared" if _resolve_allowed_memory_kinds(privacy_mode) is not None else "personal",
-        "selected_kinds": [],
+        "privacy_mode": privacy_mode_name,
+        "selected_kinds": [
+            str(mem.get("memory_kind") or "episodic")
+            for mem in privacy_safe_memories
+        ],
     }
     if raw_memories and memory_service and hasattr(memory_service, "context_injector"):
         injector = memory_service.context_injector
@@ -3963,9 +4172,10 @@ def _prepare_memory_evidence(
                     glossary_context=glossary_context,
                 )
                 effective_budget = plan["resolved"]
-                allowed_kinds = _resolve_allowed_memory_kinds(privacy_mode)
                 selected_memories = injector.prepare_memories(
-                    raw_memories, token_budget=effective_budget, allowed_kinds=allowed_kinds
+                    privacy_safe_memories,
+                    token_budget=effective_budget,
+                    allowed_kinds=allowed_kinds,
                 )
                 # 只报预算不报用量的话，没人看得出记忆到底占了多少上下文。
                 try:
@@ -3978,7 +4188,10 @@ def _prepare_memory_evidence(
                 # so keep only the actual memory blocks.
                 rendered = str(rendered or "").removeprefix("\n\n---\n").strip()
                 return (
-                    rendered or str(memory_context or "").strip(),
+                    # In shared mode the legacy string may contain records the
+                    # allow-list intentionally removed. Never revive it as a
+                    # fallback, even when selection/rendering yields no text.
+                    rendered if allowed_kinds is not None else (rendered or str(memory_context or "").strip()),
                     selected_memories,
                     {
                         "enabled": True,
@@ -3998,7 +4211,15 @@ def _prepare_memory_evidence(
                     },
                 )
             except Exception as exc:
-                logger.warning("ContextInjector 选择记忆失败，降级为原始记忆上下文: %s", type(exc).__name__)
+                logger.warning("ContextInjector 选择记忆失败，降级处理: %s", type(exc).__name__)
+                if allowed_kinds is not None:
+                    # Shared mode is a privacy boundary, not a best-effort UI
+                    # preference. The unfiltered legacy rendering is unsafe.
+                    return "", [], {**empty_meta, "strategy": "privacy_fail_closed"}
+    if allowed_kinds is not None:
+        # Structured memory was unavailable, so there is no way to prove the
+        # legacy rendered string complies with the allow-list.
+        return "", [], {**empty_meta, "strategy": "privacy_fail_closed"}
     return str(memory_context or "").strip(), list(raw_memories or []), empty_meta
 
 
@@ -4578,7 +4799,7 @@ async def _maybe_add_explicit_figure_visual_enrichment(
                 or ""
             ),
         }
-    elif str(result.get("route") or "").lower() == "local":
+    elif str(result.get("route") or "").lower() in {"local", "mineru"}:
         try:
             from routes.document_routes import publish_visual_supplements
 
@@ -4874,6 +5095,87 @@ def _build_agent_visual_evidence_analyzer(
         )
 
     return analyzer
+
+
+async def _build_answer_visual_attachments_for_response(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    parse_manifest: dict,
+    chat_parse_identity: dict[str, str],
+    retrieval_meta: dict,
+    answer: str,
+) -> list[dict]:
+    """Materialize only trusted visual evidence used by the final answer."""
+    citations = retrieval_meta.get("citations") if isinstance(retrieval_meta, dict) else None
+    if not isinstance(citations, list) or not any(
+        isinstance(citation, dict)
+        and any(
+            citation.get(key) not in (None, "", [], {})
+            for key in (
+                "asset_id",
+                "analyzed_asset_id",
+                "figure_id",
+                "figure_bbox",
+                "table_id",
+                "runtime_visual_analysis",
+            )
+        )
+        for citation in citations
+    ):
+        return []
+    try:
+        visual_evidence = committed_visual_evidence_for_document(doc)
+        block_index = _load_agent_read_block_index(
+            request.doc_id,
+            parse_manifest=parse_manifest,
+            visual_evidence=visual_evidence,
+        )
+        modal_asset_index = _load_agent_modal_asset_index(
+            request.doc_id,
+            parse_manifest=parse_manifest,
+            visual_evidence=visual_evidence,
+            block_index=block_index,
+            document_data=doc.get("data") if isinstance(doc.get("data"), dict) else None,
+        )
+        expected_generation = str(chat_parse_identity.get("parse_generation") or "").strip()
+        expected_source_hash = str(chat_parse_identity.get("document_source_hash") or "").strip().lower()
+        index_generation = str(
+            modal_asset_index.get("generation") or modal_asset_index.get("parse_generation") or ""
+        ).strip()
+        index_source_hash = str(
+            modal_asset_index.get("source_hash") or modal_asset_index.get("document_source_hash") or ""
+        ).strip().lower()
+        if not all((expected_generation, expected_source_hash)) or (
+            index_generation,
+            index_source_hash,
+        ) != (
+            expected_generation,
+            expected_source_hash,
+        ):
+            return []
+        pdf_path = _resolve_chat_document_pdf_path(doc)
+        if not pdf_path:
+            return []
+        return await asyncio.to_thread(
+            build_chat_visual_attachments,
+            data_dir=Path(runtime.data_dir),
+            doc_id=request.doc_id,
+            pdf_path=pdf_path,
+            modal_asset_index=modal_asset_index,
+            citations=citations,
+            question=request.question,
+            answer=answer,
+        )
+    except Exception as exc:
+        # Inline figures are additive. A crop/cache failure must never discard a
+        # fully generated and cited answer.
+        logger.warning(
+            "[ChatVisualAttachment] materialization skipped doc=%s error=%s",
+            request.doc_id,
+            type(exc).__name__,
+        )
+        return []
 
 
 def _should_background_numeric_table_visual_verification(request: ChatRequest) -> bool:
@@ -6944,6 +7246,10 @@ def _build_context_segments_from_citations(citations: list[dict], *, query: str 
         segments.append(_copy_visual_provenance(c, {
             "ref": ref,
             "text": text,
+            "doc_id": c.get("doc_id", ""),
+            "doc_name": c.get("doc_name", ""),
+            "citation_namespace": c.get("citation_namespace", ""),
+            "original_evidence_id": c.get("original_evidence_id", ""),
             "page_range": c.get("page_range") or [],
             "group_id": c.get("group_id", ""),
             "context_id": c.get("context_id", ""),
@@ -9745,6 +10051,104 @@ _EVIDENCE_RAW_LIMITS = {
     "chunks": 16,
     "text_chars": 1200,
 }
+_CITATION_AUDIT_SCHEMA_VERSION = 1
+
+
+def _citation_audit_evidence_id(citation: dict, ref: int) -> str:
+    """Choose the most concrete stable evidence identity available to a citation."""
+    for key in (
+        "evidence_id",
+        "evidence_unit_id",
+        "block_id",
+        "evidence_block_id",
+        "child_chunk_id",
+        "chunk_id",
+        "context_id",
+        "group_id",
+    ):
+        value = str(citation.get(key) or "").strip()
+        if value:
+            return value[:240]
+    return f"citation-ref:{max(0, int(ref or 0))}"
+
+
+def _citation_audit_context_pack_id(citations: list[dict], context_segments: list[dict]) -> str:
+    """Hash only provenance fields, never document content, into a pack id."""
+    parts: list[dict] = []
+    for source, records in (("citation", citations), ("segment", context_segments)):
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            parts.append({
+                "source": source,
+                "ref": item.get("ref"),
+                "evidence_id": _citation_audit_evidence_id(item, _debug_int(item.get("ref"))),
+                "page": item.get("page"),
+                "page_range": item.get("page_range"),
+                "parse_generation": item.get("parse_generation"),
+            })
+    encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"ctx-{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _build_citation_audit_provenance(
+    retrieval_meta: dict,
+    citations: list[dict],
+    context_segments: list[dict],
+) -> dict:
+    """Build a public, non-secret provenance ledger for final citations.
+
+    This is intentionally derived after citation filtering/alignment.  It
+    records evidence that actually reached the answer rather than every search
+    candidate considered along the way.
+    """
+    meta = retrieval_meta if isinstance(retrieval_meta, dict) else {}
+    retrieval_run_id = str(meta.get("retrieval_run_id") or "").strip()
+    if not retrieval_run_id:
+        retrieval_run_id = f"retrieval-{uuid.uuid4().hex}"
+        meta["retrieval_run_id"] = retrieval_run_id
+    context_pack_id = _citation_audit_context_pack_id(citations, context_segments)
+
+    tool_sequences: dict[str, list[int]] = {}
+    for position, item in enumerate(meta.get("agent_search_history") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "").strip().lower()
+        if tool:
+            tool_sequences.setdefault(tool, []).append(position)
+
+    records = []
+    for ordinal, citation in enumerate(citations or [], start=1):
+        if not isinstance(citation, dict):
+            continue
+        ref = _debug_int(citation.get("ref"))
+        tool_name = str(
+            citation.get("tool_name")
+            or citation.get("tool")
+            or citation.get("retrieval_tool")
+            or citation.get("retrieval_type")
+            or "context_retrieval"
+        ).strip().lower()[:80]
+        explicit_sequence = _debug_optional_positive_int(
+            citation.get("tool_call_seq") or citation.get("tool_call_index")
+        )
+        known_sequences = tool_sequences.get(tool_name, [])
+        tool_call_seq = explicit_sequence or (known_sequences[0] if known_sequences else ordinal)
+        records.append({
+            "ref": ref,
+            "retrieval_run_id": retrieval_run_id,
+            "context_pack_id": context_pack_id,
+            "tool_name": tool_name,
+            "tool_call_seq": tool_call_seq,
+            "evidence_id": _citation_audit_evidence_id(citation, ref),
+        })
+
+    return {
+        "schema_version": _CITATION_AUDIT_SCHEMA_VERSION,
+        "retrieval_run_id": retrieval_run_id,
+        "context_pack_id": context_pack_id,
+        "records": records,
+    }
 
 
 def _build_evidence_raw_debug(retrieval_meta: dict, context_segments: list[dict]) -> dict:
@@ -10067,6 +10471,15 @@ def _build_public_retrieval_meta(
     task_status = _sanitize_public_task_status(retrieval_meta.get("task_status"))
     if task_status:
         public["task_status"] = task_status
+    citation_audit = _build_citation_audit_provenance(
+        retrieval_meta,
+        [citation for citation in (retrieval_meta.get("citations") or []) if isinstance(citation, dict)],
+        [segment for segment in (context_segments or []) if isinstance(segment, dict)],
+    )
+    if citation_audit.get("records"):
+        public["citation_audit"] = citation_audit
+        public["retrieval_run_id"] = citation_audit["retrieval_run_id"]
+        public["context_pack_id"] = citation_audit["context_pack_id"]
     if include_evidence_raw:
         public["evidence_raw"] = _build_evidence_raw_debug(retrieval_meta, context_segments or [])
     if extra:
@@ -11085,7 +11498,11 @@ def _build_fast_overview_context(
         page_text = (page.get("text") or page.get("content") or "").strip()
         if not page_text:
             continue
-        page_records.append((idx + 1, page_text))
+        # ``pages`` may already be narrowed to a requested range.  Retaining
+        # the original document page number is essential: relabelling a
+        # one-item scope such as page 12 as "page 1" makes otherwise correct
+        # evidence look like it came from a different page.
+        page_records.append((_document_page_number(page, idx + 1), page_text))
     if not page_records:
         return sample_document_text(full_text, max_chars=max_total_chars)
 
@@ -11161,7 +11578,7 @@ def _turn_page_ranges(turn_context: ChatTurnContext | None) -> tuple[tuple[int, 
 
 
 def _document_page_number(page: dict, fallback: int) -> int:
-    for key in ("page", "page_number", "number"):
+    for key in ("page", "page_number", "page_num", "number"):
         try:
             value = int(page.get(key) or 0)
         except (AttributeError, TypeError, ValueError):
@@ -11373,9 +11790,8 @@ def _build_agent_retrieval_gate(
     `{"query_type", "evidence_needs", "force_user", "denied"}`，用于在诊断
     输出中标识本次放行/拒绝的原因维度。
 
-    TODO(intent-single-source): `looks_like_visual_query` 是本函数残留的最后
-    一处问句再分析。IntentDecision 目前没有 `visual_intent` 字段，补上该字段后
-    这里应改成 `intent.visual_intent`，gate 即可完全不接触原始问句。
+    ``visual_intent`` is derived by ``prepare_chat_intent`` and frozen in the
+    decision. This gate must not inspect or classify the raw question again.
     """
     # 从 settings 读取白名单（每次调用都重新读取，便于运行期热更新）
     qtypes_whitelist = set(settings.agent_trigger_query_types or [])
@@ -11399,7 +11815,7 @@ def _build_agent_retrieval_gate(
 
     matched_modalities = list(intent.modalities or ())
     matched_visual_intent = bool(
-        looks_like_visual_query(intent.intent_question)
+        intent.visual_intent
         and not (
             set(matched_modalities) == {"table"}
             and "numeric_table" in normalized_needs
@@ -11558,6 +11974,17 @@ async def _prepare_chat_routing(
     routing_question = str(
         continuation_state.get("effective_question") or question_after_clarification
     ).strip()
+    effective_web_mode = _resolve_effective_web_search_mode(
+        request,
+        request.question,
+    )
+    # “联网搜索一下”没有可绑定的上一轮用户问题时不能把这句命令本身送出站。
+    # 该状态仍会写进 audit，供界面明确提示用户补充主题。
+    if (
+        continuation_state.get("command_only_web_search")
+        and continuation_state.get("unresolved")
+    ):
+        effective_web_mode = "off"
     cheap_model, cheap_provider, cheap_endpoint = _get_cheap_model_params(request)
     target_key = _primary_key_for_target(
         request,
@@ -11581,8 +12008,8 @@ async def _prepare_chat_routing(
         retry_resolved=retry_resolved,
         enable_agent=request.enable_agent_retrieval,
         force_agent=request.force_agent_retrieval,
-        enable_web=request.enable_web_search,
-        web_policy=request.web_search_mode,
+        enable_web=effective_web_mode != "off",
+        web_policy=effective_web_mode,
         clarification_resolved=bool(clarification_state.get("resumed")),
         unresolved_continuation=bool(continuation_state.get("unresolved")),
         continuation_ref=continuation_state.get("ref"),
@@ -11680,6 +12107,20 @@ async def _prepare_chat_routing(
         intent=intent,
         parse_identity=parse_identity,
     )
+    # auto 过去由直接 RAG 与 Agent 分支各自决定。此处冻结一次执行决定，
+    # 避免同一个工具栏状态在一条路径搜索、另一条路径却静默跳过。
+    web_search_execution_mode = "off"
+    auto_web_search_qualified = False
+    if effective_web_mode == "force":
+        web_search_execution_mode = "force"
+    elif effective_web_mode == "auto":
+        auto_web_search_qualified = await _should_execute_web_search(
+            request,
+            retrieval_query,
+            intent=intent,
+        )
+        if auto_web_search_qualified:
+            web_search_execution_mode = "force"
     return {
         "turn_context": turn_context,
         "strategy": strategy,
@@ -11691,6 +12132,18 @@ async def _prepare_chat_routing(
         "query_expansion_api_key": target_key or None,
         "clarification_resumed": bool(clarification_state.get("resumed")),
         "continuation_bound": bool(continuation_state.get("ref")),
+        "web_search": {
+            "mode": effective_web_mode,
+            "explicit": is_explicit_web_search_request(request.question),
+            "command_only": bool(continuation_state.get("command_only_web_search")),
+            "missing_topic": bool(
+                continuation_state.get("command_only_web_search")
+                and continuation_state.get("unresolved")
+            ),
+            "execution_mode": web_search_execution_mode,
+            "should_execute": web_search_execution_mode == "force",
+            "auto_qualified": auto_web_search_qualified,
+        },
         "clarification_llm": clarification_llm_meta,
         "decomposition": decomposition_signals,
     }
@@ -11719,16 +12172,20 @@ def _clarification_turn_payload(
 ) -> dict:
     """Shared clarification fields for the stream and non-stream chat paths.
 
-    Attaches the parse-bound resume ticket and returns the response fragment
-    both paths splat into their terminal payload. ``clarification_required``
-    now means "a clarifying question is attached", not "the turn stopped".
+    A resume ticket is issued only for interrupt mode. Hint mode still exposes
+    the clarification text, but a normal answer must not cause the frontend to
+    auto-bind the next independent question to this turn.
     """
-    intent_payload = _attach_clarification_ticket(
-        retrieval_meta,
-        request=request,
-        turn_context=turn_context,
-        parse_identity=parse_identity,
-    )
+    if _intent_clarification_mode() == "interrupt":
+        intent_payload = _attach_clarification_ticket(
+            retrieval_meta,
+            request=request,
+            turn_context=turn_context,
+            parse_identity=parse_identity,
+        )
+    else:
+        intent_payload = turn_context.intent.to_dict()
+        retrieval_meta["intent_decision"] = intent_payload
     hint = str(turn_context.intent.clarification_question or "")
     retrieval_meta["clarification_required"] = True
     retrieval_meta["clarification_hint"] = hint
@@ -11771,7 +12228,9 @@ def _apply_turn_intent_meta(
         "agent_policy": turn_context.intent.agent_policy,
         "web_policy": turn_context.intent.web_policy,
         "is_ambiguous": bool(turn_context.intent.is_ambiguous),
-        "confidence": float(turn_context.intent.confidence or 0.0),
+        "intent_id": turn_context.intent.intent_id,
+        "intent_version": turn_context.intent.version,
+        "decision_strength": float(turn_context.intent.decision_strength or 0.0),
         "matched_rules": list(turn_context.intent.matched_rules)[:12],
         "page_ranges": [list(item) for item in (turn_context.intent.page_ranges or ())],
     }
@@ -11881,6 +12340,7 @@ def _build_structural_inventory_context(
     citations: list[dict] = []
     per_kind: list[dict] = []
     total = 0
+    included = 0
     omitted = 0
     has_more = False
     coverage_complete = True
@@ -11894,6 +12354,7 @@ def _build_structural_inventory_context(
         )
         context, diagnostics = build_inventory_context(inventory, max_chars=32_000)
         included_count = int(diagnostics.get("context_included_count") or 0)
+        included += included_count
         citation_inventory = dict(inventory)
         citation_inventory["items"] = list(inventory.get("items") or [])[:included_count]
         citations.extend(
@@ -11931,6 +12392,7 @@ def _build_structural_inventory_context(
         "kinds": list(kinds),
         "label": "、".join(labels.get(kind, kind) for kind in kinds),
         "total": total,
+        "context_included_count": included,
         "has_more": has_more,
         "coverage_complete": bool(coverage_complete and not omitted),
         "context_omitted_count": omitted,
@@ -12201,15 +12663,11 @@ async def _augment_context_with_multi_doc_fanout(
     retrieval_meta: dict,
     use_agent: bool = False,
 ) -> str:
-    """Append companion-document samples when the request lists multiple doc_ids.
-
-    Agent mode stays single-document. Companion docs use bounded full-text samples
-    so the answer side can compare across the session without a unified index.
-    """
-    from services.document_context_sampling import sample_document_text
+    """Append independently retrieved companion evidence for multi-paper turns."""
     from services.multi_doc_fanout_service import (
         DocFanoutInput,
-        DocFanoutResult,
+        canonical_work_id,
+        document_version_rank,
         fanout_retrieve,
         normalize_request_doc_ids,
         prefix_context_with_doc,
@@ -12218,10 +12676,10 @@ async def _augment_context_with_multi_doc_fanout(
     extra_ids = list(getattr(request, "doc_ids", None) or [])
     doc_ids = normalize_request_doc_ids(getattr(request, "doc_id", ""), extra_ids, max_docs=5)
     retrieval_meta["multi_doc_ids"] = list(doc_ids)
-    if len(doc_ids) <= 1 or use_agent:
+    if len(doc_ids) <= 1:
         retrieval_meta["multi_doc_fanout"] = {
             "applied": False,
-            "reason": "single_doc" if len(doc_ids) <= 1 else "agent_single_doc_lock",
+            "reason": "single_doc",
             "doc_count": len(doc_ids),
         }
         return context
@@ -12244,41 +12702,107 @@ async def _augment_context_with_multi_doc_fanout(
         ).strip()
 
     async def _retrieve(doc_id: str, doc_name: str, query: str) -> dict:
-        del query
         other = store.get(doc_id) if isinstance(store, dict) else None
         if not isinstance(other, dict):
             return {"context": "", "error": "doc_not_found"}
+        manifest = read_parse_manifest(other, doc_id=doc_id)
+        if not is_parse_prepared(manifest):
+            return {"context": "", "error": "parse_not_ready"}
         name = str(
             other.get("filename")
             or (other.get("data") or {}).get("filename")
             or doc_name
             or doc_id
         ).strip()
-        full_text = str((other.get("data") or {}).get("text") or "").strip()
-        if not full_text:
-            pages = (other.get("data") or {}).get("pages") or []
-            full_text = "\n".join(
-                str(page.get("text") or "")
-                for page in pages
-                if isinstance(page, dict)
+        doc_ctx = _build_agent_doc_context(
+            doc_id,
+            other,
+            getattr(router, "vector_store_dir", ""),
+            request.embedding_api_key or "",
+            use_rerank=bool(request.use_rerank),
+            reranker_model=request.reranker_model or "",
+            rerank_provider=request.rerank_provider or "",
+            rerank_api_key=request.rerank_api_key or "",
+            rerank_endpoint=request.rerank_endpoint or "",
+            embedding_model=request.embedding_model or "",
+            embedding_provider=request.embedding_provider or "",
+            embedding_api_host=request.embedding_api_host or "",
+        )
+        payload = await execute_async_tool(
+            "search_document",
+            {
+                "query": query,
+                "strategy": "hybrid" if request.enable_vector_search else "lexical",
+                "limit": max(4, min(int(request.top_k or 8), 10)),
+            },
+            doc_ctx,
+        )
+        results = list(payload.get("results") or [])
+        metadata = list(payload.get("chunk_meta") or [])
+        citations: list[dict] = []
+        detail: list[dict] = []
+        for index, raw in enumerate(results):
+            item_meta = metadata[index] if index < len(metadata) and isinstance(metadata[index], dict) else {}
+            text = re.sub(
+                r"\s+",
+                " ",
+                str(raw.get("text") or raw.get("chunk") or "")
+                if isinstance(raw, dict)
+                else str(raw or ""),
             ).strip()
-        sample = sample_document_text(full_text, max_chars=3500, max_segments=6)
-        return {
-            "context": sample,
-            "detail": [{
+            if not text:
+                continue
+            citation = {
+                **item_meta,
+                "source_text": text,
+                "display_text": text,
+                "highlight_text": text,
+                "context_segment_text": text,
+                "retrieval_type": "multi_doc_hybrid",
+            }
+            citations.append(citation)
+            detail.append({
+                **item_meta,
                 "doc_id": doc_id,
                 "doc_name": name,
-                "retrieval_type": "multi_doc_sample",
-                "text": sample[:1400],
-                "char_count": len(sample),
-            }] if sample else [],
-            "citations": [],
-            "error": "" if sample else "empty_text",
+                "retrieval_type": "multi_doc_hybrid",
+                "text": text[:1600],
+            })
+        return {
+            "context": "\n\n".join(item["text"] for item in detail),
+            "detail": detail,
+            "citations": citations,
+            "citation_authorization": doc_ctx.citation_authorization_snapshot(),
+            "error": str(payload.get("error") or "") if citations else (
+                str(payload.get("error") or "no_relevant_evidence")
+            ),
         }
 
-    documents = [
-        DocFanoutInput(doc_id=doc_id, doc_name=doc_id)
-        for doc_id in companion_ids
+    documents = []
+    for doc_id in companion_ids:
+        other = store.get(doc_id) if isinstance(store, dict) else None
+        if not isinstance(other, dict):
+            documents.append(DocFanoutInput(doc_id=doc_id, doc_name=doc_id))
+            continue
+        name = str(
+            other.get("filename")
+            or (other.get("data") or {}).get("filename")
+            or doc_id
+        ).strip()
+        try:
+            metadata = ensure_paper_metadata(other) or {}
+        except Exception:
+            metadata = other.get("paper_metadata") if isinstance(other.get("paper_metadata"), dict) else {}
+        documents.append(DocFanoutInput(
+            doc_id=doc_id,
+            doc_name=name,
+            work_id=canonical_work_id(metadata, fallback=doc_id),
+            version_rank=document_version_rank(name, metadata),
+        ))
+    existing_refs = [
+        int(item.get("ref"))
+        for item in (retrieval_meta.get("citations") or [])
+        if isinstance(item, dict) and str(item.get("ref") or "").isdigit()
     ]
     try:
         merged = await fanout_retrieve(
@@ -12287,7 +12811,8 @@ async def _augment_context_with_multi_doc_fanout(
             retriever=_retrieve,
             max_concurrency=3,
             max_total_chars=12000,
-            per_doc_chars=3500,
+            per_doc_chars=4000,
+            citation_ref_start=(max(existing_refs, default=0) + 1),
         )
     except Exception as exc:
         logger.warning("[Chat] multi-doc fanout failed: %s", exc)
@@ -12301,11 +12826,13 @@ async def _augment_context_with_multi_doc_fanout(
     companion_context = str(merged.get("context") or "").strip()
     retrieval_meta["multi_doc_fanout"] = {
         "applied": bool(companion_context),
-        "reason": "sampled_companions" if companion_context else "empty_companions",
+        "reason": "retrieved_companions" if companion_context else "empty_companions",
         "doc_count": len(doc_ids),
         "successful_doc_count": int(merged.get("successful_doc_count") or 0),
         "diagnostics": list(merged.get("diagnostics") or [])[:8],
         "primary_doc_name": primary_name or request.doc_id,
+        "version_deduplication": list(merged.get("version_deduplication") or [])[:8],
+        "conflict_group_count": len(merged.get("conflict_groups") or []),
     }
     if not companion_context:
         return context
@@ -12317,6 +12844,44 @@ async def _augment_context_with_multi_doc_fanout(
         primary_block = prefix_context_with_doc(request.doc_id, primary_block)
 
     combined = "\n\n".join(part for part in (primary_block, companion_context) if part)
+    conflicts = [
+        dict(item)
+        for item in (merged.get("conflict_groups") or [])
+        if isinstance(item, dict)
+    ]
+    if conflicts:
+        conflict_lines = []
+        for conflict in conflicts[:6]:
+            refs = [
+                str(item.get("ref"))
+                for item in (conflict.get("evidence") or [])
+                if isinstance(item, dict) and item.get("ref")
+            ]
+            if refs:
+                conflict_lines.append(
+                    f"- 引用 {', '.join(f'[{ref}]' for ref in refs)} 的数值陈述可能不一致；"
+                    "回答时分别归属到对应文档，不要静默合并。"
+                )
+        if conflict_lines:
+            combined += "\n\n【跨文档潜在冲突】\n" + "\n".join(conflict_lines)
+    companion_citations = [
+        dict(item)
+        for item in (merged.get("citations") or [])
+        if isinstance(item, dict)
+    ]
+    if companion_citations:
+        retrieval_meta.setdefault("citations", []).extend(companion_citations)
+    companion_authorization = merged.get("citation_authorization")
+    if isinstance(companion_authorization, dict) and companion_authorization.get("authorized"):
+        current_authorization = retrieval_meta.get("_citation_authorization")
+        if not isinstance(current_authorization, dict):
+            current_authorization = {"enforced": True, "authorized": {}}
+            retrieval_meta["_citation_authorization"] = current_authorization
+        authorized = current_authorization.setdefault("authorized", {})
+        for field, values in (companion_authorization.get("authorized") or {}).items():
+            target = authorized.setdefault(str(field), [])
+            target.extend(value for value in values if value not in target)
+    retrieval_meta["multi_doc_conflict_groups"] = conflicts
     for item in merged.get("detail") or []:
         if isinstance(item, dict):
             retrieval_meta.setdefault("multi_doc_detail", []).append(dict(item))
@@ -12337,6 +12902,8 @@ async def _run_agent_retrieval_for_context(
     trace_id: str | None = None,
     trace_started_at: float | None = None,
     decomposition_signals: dict | None = None,
+    web_search_audit: dict | None = None,
+    web_search_execution_mode: str | None = None,
 ) -> tuple[str, dict]:
     """路由兼容入口：实际 Agent 检索执行下沉到 service。"""
 
@@ -12356,6 +12923,8 @@ async def _run_agent_retrieval_for_context(
         emit_progress=emit_progress,
         trace=_trace,
         decomposition_signals=decomposition_signals,
+        web_search_audit=web_search_audit,
+        web_search_execution_mode=web_search_execution_mode,
         vector_store_dir=getattr(router, "vector_store_dir", ""),
         deps=AgentRetrievalDependencies(
             get_cheap_model_params=_get_cheap_model_params,
@@ -13375,6 +13944,88 @@ def _critic_answer_text(display_answer: str, raw_output: str = "") -> str:
     return str(extract_final_answer(fallback) or fallback).strip()
 
 
+def _ensure_explicit_visual_answer_citation(
+    answer: str,
+    citations: list[dict],
+    *,
+    query: str = "",
+) -> tuple[str, dict]:
+    """Keep one relevant, actually retrieved visual in an explicit visual answer."""
+    if not answer or not citations or not _is_explicit_visual_citation_query(query):
+        return answer, {}
+
+    normalized = _normalize_citation_records(citations)
+    citation_map = {int(item["ref"]): item for item in normalized}
+    cited_refs = _extract_inline_citation_refs(answer)
+    if any(
+        ref in citation_map and _is_agent_visual_asset_record(citation_map[ref])
+        for ref in cited_refs
+    ):
+        return answer, {"applied": False, "reason": "visual_already_cited"}
+
+    visual_candidates = [
+        item for item in normalized if _is_agent_visual_asset_record(item)
+    ]
+    if not visual_candidates:
+        return answer, {"applied": False, "reason": "no_retrieved_visual_candidate"}
+
+    query_scores = {
+        int(item["ref"]): _calc_citation_support_score(query, item)
+        for item in visual_candidates
+    }
+    lines = str(answer).split("\n")
+    best: tuple[float, float, int, int, int] | None = None
+    in_code_fence = False
+    for line_index, line in enumerate(lines):
+        if re.match(r"^\s*```", line):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        sentences = re.split(r"(?<=[。！？!?；;])", line)
+        for sentence_index, sentence in enumerate(sentences):
+            core_sentence = _strip_inline_citations(sentence)
+            if len(core_sentence) < 8:
+                continue
+            for citation in visual_candidates:
+                ref = int(citation["ref"])
+                answer_score = _calc_citation_support_score(core_sentence, citation)
+                candidate = (
+                    answer_score,
+                    query_scores.get(ref, 0.0),
+                    -line_index,
+                    -sentence_index,
+                    -ref,
+                )
+                if best is None or candidate > best:
+                    best = candidate
+
+    if best is None or best[0] < 0.06 or best[1] < 0.02:
+        return answer, {
+            "applied": False,
+            "reason": "visual_candidate_not_answer_aligned",
+            "best_answer_score": round(best[0], 4) if best else 0.0,
+            "best_query_score": round(best[1], 4) if best else 0.0,
+        }
+
+    line_index = -best[2]
+    sentence_index = -best[3]
+    ref = -best[4]
+    sentences = re.split(r"(?<=[。！？!?；;])", lines[line_index])
+    sentences[sentence_index] = _attach_refs_to_sentence(
+        sentences[sentence_index],
+        [ref],
+    )
+    lines[line_index] = "".join(sentences)
+    return "\n".join(lines), {
+        "applied": True,
+        "source_ref": ref,
+        "asset_id": _visual_asset_citation_id(citation_map.get(ref)),
+        "answer_score": round(best[0], 4),
+        "query_score": round(best[1], 4),
+    }
+
+
 def _prepare_answer_and_citations_for_display(
     answer: str,
     citations: list[dict],
@@ -13383,6 +14034,7 @@ def _prepare_answer_and_citations_for_display(
     answer_guard: Optional[dict] = None,
     query: str = "",
     context_segments: Optional[list[dict]] = None,
+    citation_authorization: Optional[dict] = None,
 ) -> tuple[str, list[dict]]:
     evidence_need_set = {
         str(item).strip()
@@ -13390,12 +14042,27 @@ def _prepare_answer_and_citations_for_display(
         if str(item).strip()
     }
     is_numeric_table_request = "numeric_table" in evidence_need_set
-    normalized_citations = _filter_synthetic_citations_when_original_exists(citations)
+    authorized_citations, authorization_diag = filter_authorized_citations(
+        citations,
+        citation_authorization,
+        rebase_refs=False,
+    )
+    authorized_context_segments, context_authorization_diag = filter_authorized_context_segments(
+        context_segments or [],
+        citation_authorization,
+    )
+    if answer_guard is not None and authorization_diag["enforced"]:
+        answer_guard["citation_authorization"] = {
+            "enforced": True,
+            "initial_filtered_count": authorization_diag["filtered_count"],
+            "context_filtered_count": context_authorization_diag["filtered_count"],
+        }
+    normalized_citations = _filter_synthetic_citations_when_original_exists(authorized_citations)
     if is_numeric_table_request:
         normalized_citations = _normalize_numeric_metric_bundle_citations(normalized_citations, query)
     base_citation_refs = {int(citation["ref"]) for citation in normalized_citations}
     context_recovery_citations = _context_segments_to_recovery_citations(
-        context_segments,
+        authorized_context_segments,
         start_ref=len(normalized_citations) + 1,
         query=query,
         reserved_refs={int(citation["ref"]) for citation in normalized_citations},
@@ -13451,7 +14118,7 @@ def _prepare_answer_and_citations_for_display(
             if not numeric_cost_recovery and is_numeric_table_request:
                 recovered_answer, recovered_citations, numeric_recovery_diag = _recover_numeric_table_metric_citation_from_context(
                     repaired_answer,
-                    context_segments,
+                    authorized_context_segments,
                     query=query,
                     start_ref=max((int(citation.get("ref") or 0) for citation in normalized_citation_candidates), default=0) + 1,
                 )
@@ -13472,6 +14139,14 @@ def _prepare_answer_and_citations_for_display(
             )
             if answer_guard is not None and numeric_alignment_diag.get("applied"):
                 answer_guard["numeric_table_inline_ref_alignment"] = numeric_alignment_diag
+    if not is_numeric_table_request:
+        repaired_answer, visual_citation_diag = _ensure_explicit_visual_answer_citation(
+            repaired_answer,
+            normalized_citations,
+            query=query,
+        )
+        if answer_guard is not None and visual_citation_diag.get("applied"):
+            answer_guard["explicit_visual_citation_fill"] = visual_citation_diag
     aligned = _align_citations_with_answer(repaired_answer, normalized_citations)
     if is_numeric_table_request:
         aligned = _supplement_numeric_table_citations(
@@ -13506,7 +14181,7 @@ def _prepare_answer_and_citations_for_display(
     if not aligned and is_numeric_table_request:
         recovered_answer, recovered_citations, numeric_context_recovery_diag = _recover_numeric_table_metric_citation_from_context(
             repaired_answer,
-            context_segments,
+            authorized_context_segments,
             query=query,
             start_ref=max((int(citation.get("ref") or 0) for citation in normalized_citation_candidates), default=0) + 1,
         )
@@ -13517,6 +14192,19 @@ def _prepare_answer_and_citations_for_display(
                 answer_guard["numeric_table_context_citation_recovery"] = numeric_context_recovery_diag
         elif answer_guard is not None and numeric_context_recovery_diag:
             answer_guard["numeric_table_context_citation_recovery"] = numeric_context_recovery_diag
+    aligned, final_authorization_diag = filter_authorized_citations(
+        aligned,
+        citation_authorization,
+        rebase_refs=False,
+    )
+    if answer_guard is not None and final_authorization_diag["enforced"]:
+        authorization_guard = answer_guard.setdefault("citation_authorization", {"enforced": True})
+        authorization_guard["final_filtered_count"] = final_authorization_diag["filtered_count"]
+    if final_authorization_diag["enforced"]:
+        repaired_answer = _remove_invalid_inline_citation_refs(
+            repaired_answer,
+            {int(citation.get("ref") or 0) for citation in aligned},
+        )
     if not aligned:
         return repaired_answer, []
 
@@ -13672,6 +14360,109 @@ def _normalize_web_search_max_results(value: Optional[int]) -> int:
     return max(1, min(int(value), _MAX_WEB_SEARCH_RESULTS))
 
 
+_WEB_SEARCH_AUDIT_FINAL_STATUSES = frozenset({
+    "not_requested",
+    "completed",
+    "empty",
+    "failed",
+    "skipped",
+})
+
+
+def _new_web_search_audit(
+    request: ChatRequest,
+    *,
+    mode: str | None = None,
+    explicit: bool | None = None,
+    missing_topic: bool = False,
+) -> dict:
+    """Create a query-free, client-safe record for this turn's web attempt."""
+    explicit_request = (
+        is_explicit_web_search_request(request.question)
+        if explicit is None
+        else bool(explicit)
+    )
+    resolved_mode = str(
+        mode or _resolve_effective_web_search_mode(request, request.question)
+    ).strip().lower()
+    if resolved_mode not in {"off", "auto", "force"}:
+        resolved_mode = "off"
+    requested = bool(explicit_request or resolved_mode != "off")
+    audit = {
+        "requested": requested,
+        "explicit": explicit_request,
+        "mode": resolved_mode,
+        "executed": False,
+        "status": "pending" if requested else "not_requested",
+        "provider": str(request.web_search_provider or "auto").strip().lower()[:80] or "auto",
+        "result_count": 0,
+        "reason": "",
+    }
+    if missing_topic:
+        _update_web_search_audit(audit, status="skipped", reason="missing_topic")
+    return audit
+
+
+def _update_web_search_audit(
+    audit: dict | None,
+    *,
+    status: str,
+    executed: bool | None = None,
+    result_count: int | None = None,
+    reason: str = "",
+) -> None:
+    """Mutate a request-local audit using only stable, non-sensitive fields."""
+    if not isinstance(audit, dict):
+        return
+    normalized_status = status if status in _WEB_SEARCH_AUDIT_FINAL_STATUSES else "failed"
+    audit["status"] = normalized_status
+    if executed is not None:
+        audit["executed"] = bool(executed)
+    if result_count is not None:
+        audit["result_count"] = max(0, int(result_count))
+    if reason:
+        audit["reason"] = reason[:80]
+
+
+def _finalize_unattempted_web_search_audit(
+    audit: dict | None,
+    *,
+    reason: str,
+) -> None:
+    """Close an authorized request when a route did not invoke the search tool."""
+    if not isinstance(audit, dict):
+        return
+    if audit.get("status") == "pending" and not audit.get("executed"):
+        _update_web_search_audit(audit, status="skipped", reason=reason)
+
+
+def _append_web_search_outcome_instruction(
+    system_prompt: str,
+    audit: dict | None,
+    sources: list[dict] | None,
+) -> str:
+    """Prevent an answer from claiming a web result that was never obtained."""
+    if not isinstance(audit, dict):
+        return system_prompt
+    status = str(audit.get("status") or "").strip().lower()
+    attempted_without_sources = bool(audit.get("executed")) and not bool(sources)
+    explicit_without_sources = bool(audit.get("explicit")) and status != "completed"
+    if not attempted_without_sources and not explicit_without_sources:
+        return system_prompt
+    if status == "skipped" and audit.get("reason") == "missing_topic":
+        instruction = (
+            "联网检索状态：用户要求联网，但没有可绑定的检索主题。"
+            "请直接请用户说明要查询的具体问题；不得假装已执行搜索。"
+        )
+    else:
+        instruction = (
+            "联网检索状态：本轮没有获得可用的外部来源。"
+            "不得声称“根据联网搜索结果”、不得编造链接或外部事实；"
+            "如需要说明外部信息，请如实说明联网检索未返回可用来源。"
+        )
+    return f"{system_prompt}\n\n{instruction}"
+
+
 _WEB_SEARCH_INTENT_CACHE: dict[str, bool] = {}
 _WEB_SEARCH_INTENT_CACHE_MAX = 256
 
@@ -13772,7 +14563,7 @@ async def _should_execute_web_search(
     mode = (
         frozen_policy
         if frozen_policy in {"off", "auto", "force"}
-        else _resolve_web_search_mode(request)
+        else _resolve_effective_web_search_mode(request, request.question or question)
     )
     if mode == "off":
         return False
@@ -13866,6 +14657,23 @@ def _attach_paper_identity_to_prompt(
                 "arxiv_id": paper_meta.get("arxiv_id"),
                 "short_citation": meta_obj.short_citation() if meta_obj else "",
             }
+        hydration = doc.get("paper_metadata_hydration") if isinstance(doc, dict) else None
+        if isinstance(hydration, dict):
+            retraction = hydration.get("retraction") if isinstance(hydration.get("retraction"), dict) else {}
+            source_status = {
+                "hydration_status": str(hydration.get("status") or ""),
+                "retraction_status": str(retraction.get("status") or "unknown"),
+                "checked_providers": list(retraction.get("checked_providers") or []),
+                "notice": str(hydration.get("notice") or ""),
+            }
+            if isinstance(retrieval_meta, dict):
+                retrieval_meta["paper_source_status"] = source_status
+            if source_status["retraction_status"] == "retracted":
+                system_prompt += (
+                    "\n\n【来源风险提示】外部元数据检测到该论文可能已撤稿。"
+                    "回答文档内容时仍须忠实引用原文，并明确区分‘文档声称’与‘当前学术共识’；"
+                    "该信号本身不能替代对具体事实的证据核验。"
+                )
     except Exception:
         logger.debug("[Chat] paper identity prompt skipped", exc_info=True)
     return system_prompt
@@ -14174,6 +14982,15 @@ def _build_operation_execution_prompt(intent_decision) -> str:
         item for item in operations
         if isinstance(item, dict) and item.get("polarity") == "prohibited"
     ]
+    # A later positive operation may narrow an earlier prohibition (for
+    # example, "不要总结全文，只总结第3页"). The frozen task still retains
+    # both records for diagnostics, but presenting both as absolute commands
+    # would make the answer model see an impossible contract.
+    requested_kinds = {str(item.get("kind") or "") for item in requested}
+    prohibited = [
+        item for item in prohibited
+        if str(item.get("kind") or "") not in requested_kinds
+    ]
     if len(requested) <= 1 and not prohibited:
         return ""
 
@@ -14350,11 +15167,18 @@ async def _maybe_perform_web_search(
     selected_text: str = "",
     doc_id: str = "",
     vector_store_dir: str = "",
+    audit: dict | None = None,
 ) -> tuple[list[dict], str]:
-    """按请求开关执行联网搜索，返回 (sources, formatted_context)。"""
-    if _resolve_web_search_mode(request) == "off":
+    """按请求开关执行联网搜索，返回 (sources, formatted_context)。
+
+    ``audit`` 是调用方持有的请求内对象，绝不写入原始 query，因而可以安全地
+    透传至 SSE 终止事件和会话记录。
+    """
+    if _resolve_effective_web_search_mode(request, request.question) == "off":
+        _finalize_unattempted_web_search_audit(audit, reason="disabled")
         return [], ""
     if not request.question or not request.question.strip():
+        _finalize_unattempted_web_search_audit(audit, reason="empty_question")
         return [], ""
 
     provider = request.web_search_provider or "auto"
@@ -14367,10 +15191,13 @@ async def _maybe_perform_web_search(
         include_document_context=bool(request.web_search_include_document_context),
     )
     if not search_query:
+        _finalize_unattempted_web_search_audit(audit, reason="empty_query")
         return [], ""
 
     blacklist = [b.strip() for b in (request.web_search_blacklist or []) if b.strip()]
     try:
+        if isinstance(audit, dict):
+            audit["executed"] = True
         query_digest = hashlib.sha256(search_query.encode("utf-8")).hexdigest()[:12]
         logger.info(
             "联网搜索开始: provider=%s query_chars=%s query_hash=%s",
@@ -14386,6 +15213,13 @@ async def _maybe_perform_web_search(
             blacklist=blacklist or None,
         )
         if not sources:
+            _update_web_search_audit(
+                audit,
+                status="empty",
+                executed=True,
+                result_count=0,
+                reason="provider_returned_no_results",
+            )
             return [], ""
 
         # 向量语义重排（提升相关性），降级时返回词法重排结果
@@ -14410,13 +15244,33 @@ async def _maybe_perform_web_search(
                 rerank_diagnostic.get("message") or rerank_diagnostic.get("reason") or "unknown",
             )
         if not sources:
+            _update_web_search_audit(
+                audit,
+                status="empty",
+                executed=True,
+                result_count=0,
+                reason="rerank_removed_results",
+            )
             return [], ""
 
+        _update_web_search_audit(
+            audit,
+            status="completed",
+            executed=True,
+            result_count=len(sources),
+        )
         return sources, format_search_results(sources)
     except Exception as exc:
         logger.warning(
             "联网搜索失败，已降级为仅文档检索: %s",
             type(exc).__name__,
+        )
+        _update_web_search_audit(
+            audit,
+            status="failed",
+            executed=True,
+            result_count=0,
+            reason=f"search_error:{type(exc).__name__}",
         )
         return [], ""
 
@@ -14681,6 +15535,7 @@ async def _retry_generation_after_stream_error(
         answer_guard=answer_guard,
         query=_citation_question_for_turn(retrieval_meta, request.question),
         context_segments=retrieval_meta.get("_context_segments", []),
+        citation_authorization=retrieval_meta.get("_citation_authorization"),
     )
     if answer_guard:
         retrieval_meta["answer_guard"] = answer_guard
@@ -14717,7 +15572,8 @@ async def _chat_with_pdf_impl(request: ChatRequest):
     chat_parse_identity = _bind_chat_request_parse_identity(request, parse_manifest)
     memory_parse_identity = chat_parse_identity
     context = ""
-    retrieval_meta = {}
+    web_search_audit = _new_web_search_audit(request)
+    retrieval_meta = {"web_search_audit": web_search_audit}
     citations: list[dict] = []
     web_search_sources: list[dict] = []
     web_search_context = ""
@@ -14735,7 +15591,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
     )
     use_memory = _should_use_memory(request)
     memory_write_generation = (
-        memory_service.capture_write_generation() if use_memory else None
+        memory_service.capture_write_generation(request.doc_id) if use_memory else None
     )
     if use_memory:
         _maybe_flush_memory(
@@ -14799,6 +15655,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
         )
         turn_context = image_turn_context
         _apply_turn_intent_meta(retrieval_meta, image_turn_context)
+        _finalize_unattempted_web_search_audit(
+            web_search_audit,
+            reason="image_mode_not_supported",
+        )
         include_document_evidence = _intent_requests_document_evidence(image_intent)
         answer_style_instruction = _build_answer_style_instruction(request.answer_detail)
         system_prompt = _build_image_mode_system_prompt(
@@ -14853,6 +15713,24 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             parse_identity=chat_parse_identity,
         )
         turn_context: ChatTurnContext = routing["turn_context"]
+        web_route = routing.get("web_search") or {}
+        web_search_audit = _new_web_search_audit(
+            request,
+            mode=str(web_route.get("mode") or turn_context.intent.web_policy),
+            explicit=bool(web_route.get("explicit")),
+            missing_topic=bool(web_route.get("missing_topic")),
+        )
+        retrieval_meta["web_search_audit"] = web_search_audit
+        web_search_execution_mode = str(
+            web_route.get("execution_mode") or "off"
+        ).strip().lower()
+        if web_search_execution_mode not in {"off", "force"}:
+            web_search_execution_mode = "off"
+        retrieval_meta["web_search_plan"] = {
+            "requested_mode": str(web_route.get("mode") or "off"),
+            "execution_mode": web_search_execution_mode,
+            "auto_qualified": bool(web_route.get("auto_qualified")),
+        }
         strategy = routing["strategy"]
         agent_gate = routing["agent_gate"]
         use_agent = bool(routing["use_agent"])
@@ -14900,6 +15778,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             )
             if clarification_mode == "interrupt":
                 _require_chat_parse_identity_current(request, chat_parse_identity)
+                _finalize_unattempted_web_search_audit(
+                    web_search_audit,
+                    reason="clarification_required",
+                )
                 return {
                     "answer": turn_context.intent.clarification_question,
                     "reasoning_content": "",
@@ -14913,27 +15795,41 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     "usage_meta": None,
                     "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
                     "web_search_sources": [],
+                    "web_search_audit": dict(web_search_audit),
                     "memory_hits": [],
                     "memory_meta": memory_meta,
                     **clarification_extra,
                     **_chat_terminal_fields(_CHAT_TURN_STATUS_COMPLETED, chat_parse_identity),
                 }
-        if (
-            not use_agent
-            and not detect_inventory_kind(turn_context.resolved_question)
-            and await _should_execute_web_search(
-                request,
-                turn_context.intent_question,
-                intent=turn_context.intent,
+        web_search_allowed_for_inventory = (
+            not detect_inventory_kind(turn_context.resolved_question)
+            or turn_context.intent.web_policy == "force"
+        )
+        if not use_agent and web_search_allowed_for_inventory:
+            if web_search_execution_mode == "force":
+                web_search_sources, web_search_context = await _maybe_perform_web_search(
+                    request,
+                    query_override=search_query,
+                    doc_title=doc.get("filename", ""),
+                    selected_text=request.selected_text or "",
+                    doc_id=request.doc_id,
+                    vector_store_dir=getattr(router, "vector_store_dir", ""),
+                    audit=web_search_audit,
+                )
+            else:
+                _finalize_unattempted_web_search_audit(
+                    web_search_audit,
+                    reason="auto_policy_not_selected",
+                )
+        elif not use_agent:
+            _finalize_unattempted_web_search_audit(
+                web_search_audit,
+                reason="inventory_route",
             )
-        ):
-            web_search_sources, web_search_context = await _maybe_perform_web_search(
-                request,
-                query_override=search_query,
-                doc_title=doc.get("filename", ""),
-                selected_text=request.selected_text or "",
-                doc_id=request.doc_id,
-                vector_store_dir=getattr(router, "vector_store_dir", ""),
+        elif web_search_execution_mode != "force":
+            _finalize_unattempted_web_search_audit(
+                web_search_audit,
+                reason="auto_policy_not_selected",
             )
         retrieval_meta["agent_gate"] = _annotate_agent_gate(
             agent_gate,
@@ -14963,6 +15859,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             )
             retrieval_meta["retrieval_mode"] = "structural_inventory_unavailable"
             _require_chat_parse_identity_current(request, chat_parse_identity)
+            _finalize_unattempted_web_search_audit(
+                web_search_audit,
+                reason="inventory_route",
+            )
             return {
                 "answer": _structural_inventory_unavailable_message(inventory_meta),
                 "reasoning_content": "",
@@ -14976,6 +15876,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 "usage_meta": None,
                 "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
                 "web_search_sources": [],
+                "web_search_audit": dict(web_search_audit),
                 "memory_hits": [],
                 "memory_meta": memory_meta,
                 "intent_decision": turn_context.intent.to_dict(),
@@ -14991,6 +15892,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             )
             retrieval_meta["retrieval_mode"] = "structural_inventory_partial"
             _require_chat_parse_identity_current(request, chat_parse_identity)
+            _finalize_unattempted_web_search_audit(
+                web_search_audit,
+                reason="inventory_route",
+            )
             return {
                 "answer": _structural_inventory_partial_message(inventory_meta),
                 "reasoning_content": "",
@@ -15004,6 +15909,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 "usage_meta": None,
                 "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
                 "web_search_sources": [],
+                "web_search_audit": dict(web_search_audit),
                 "memory_hits": [],
                 "memory_meta": memory_meta,
                 "intent_decision": turn_context.intent.to_dict(),
@@ -15124,6 +16030,8 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 intent_question=turn_context.intent_question,
                 retrieval_meta=retrieval_meta,
                 decomposition_signals=_decomposition_signals,
+                web_search_audit=web_search_audit,
+                web_search_execution_mode=web_search_execution_mode,
             )
             web_search_sources = [
                 dict(item)
@@ -15382,6 +16290,12 @@ async def _chat_with_pdf_impl(request: ChatRequest):
         )
         retrieval_meta["citations"] = citations
 
+    retrieval_meta["web_search_audit"] = dict(web_search_audit)
+    system_prompt = _append_web_search_outcome_instruction(
+        system_prompt,
+        web_search_audit,
+        web_search_sources,
+    )
     messages = _build_chat_messages(
         system_prompt,
         safe_chat_history,
@@ -15486,6 +16400,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             answer_guard=answer_guard,
             query=_citation_question_for_turn(retrieval_meta, request.question),
             context_segments=retrieval_meta.get("_context_segments", []),
+            citation_authorization=retrieval_meta.get("_citation_authorization"),
         )
         if answer_guard:
             retrieval_meta["answer_guard"] = answer_guard
@@ -15529,9 +16444,9 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     logger.debug("[Chat] non-stream citation enhancer skipped: %s", enhance_exc)
 
         answer_critic_payload = None
+        non_stream_critic = None
         critic_answer_ns = _critic_answer_text(answer)
         try:
-            non_stream_critic = None
             if should_enable_answer_critic() and critic_answer_ns and context:
                 from services.answer_critic_service import critique_answer as _critique_answer
                 _cm_ns, _cp_ns, _ce_ns = _get_cheap_model_params(request)
@@ -15570,6 +16485,113 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 logger.warning("[Chat] non-stream critic fallback failed: %s", fallback_exc)
                 answer_critic_payload = None
 
+        repair_issue_types = {
+            str(item.get("issue_type") or "").strip().lower()
+            for item in ((answer_critic_payload or {}).get("issue_details") or [])
+            if isinstance(item, dict)
+        }
+        repair_risk = bool(
+            isinstance(non_stream_critic, dict)
+            and isinstance(answer_critic_payload, dict)
+            and (
+                answer_critic_payload.get("has_hallucination")
+                or str(answer_critic_payload.get("citation_risk_level") or "").lower() == "high"
+                or repair_issue_types
+                & {"hallucination", "unsupported_number", "wrong_citation", "overreach"}
+            )
+        )
+        if (
+            repair_risk
+            and bool(getattr(settings, "enable_answer_critic_repair", True))
+            and str(answer or "").strip()
+            and str(context or "").strip()
+        ):
+            try:
+                from services.answer_critic_service import repair_answer_once
+
+                _rm_ns, _rp_ns, _re_ns = _get_cheap_model_params(request)
+                allowed_refs = []
+                for citation in retrieval_meta.get("citations") or []:
+                    if not isinstance(citation, dict):
+                        continue
+                    try:
+                        ref = int(citation.get("ref") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ref > 0 and ref not in allowed_refs:
+                        allowed_refs.append(ref)
+                repaired_answer, repair_diag = await repair_answer_once(
+                    question=effective_question if "effective_question" in locals() else request.question,
+                    answer=critic_answer_ns,
+                    context=str(context or "")[:7000],
+                    critic=answer_critic_payload,
+                    allowed_citation_refs=allowed_refs,
+                    api_key=_primary_key_for_target(request, _rp_ns, _re_ns),
+                    model=_rm_ns,
+                    provider=_rp_ns,
+                    endpoint=_re_ns,
+                )
+                retrieval_meta["answer_repair"] = repair_diag
+                if repair_diag.get("accepted") and repaired_answer:
+                    repair_guard: dict = {}
+                    answer, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
+                        repaired_answer,
+                        retrieval_meta.get("citations", []),
+                        evidence_need=retrieval_meta.get("evidence_need", []),
+                        answer_guard=repair_guard,
+                        query=_citation_question_for_turn(retrieval_meta, request.question),
+                        context_segments=retrieval_meta.get("_context_segments", []),
+                        citation_authorization=retrieval_meta.get("_citation_authorization"),
+                    )
+                    if repair_guard:
+                        retrieval_meta["answer_repair_guard"] = repair_guard
+                    if retrieval_meta.get("citations"):
+                        retrieval_meta["_context_segments"] = _build_context_segments_from_citations(
+                            retrieval_meta.get("citations", []),
+                            query=_citation_question_for_turn(retrieval_meta, request.question),
+                        )
+                    response_context_segments = _build_response_context_segments(retrieval_meta)
+                    repaired_critic = postprocess_critic_result(
+                        None,
+                        answer=_critic_answer_text(answer),
+                        retrieval_meta=retrieval_meta,
+                    )
+                    repaired_critic["repair"] = dict(repair_diag)
+                    repaired_critic["pre_repair"] = {
+                        "has_hallucination": bool(answer_critic_payload.get("has_hallucination")),
+                        "citation_risk_level": str(answer_critic_payload.get("citation_risk_level") or "none"),
+                        "issue_types": sorted(repair_issue_types),
+                    }
+                    answer_critic_payload = repaired_critic
+                    retrieval_meta["answer_certainty"] = repaired_critic.get("certainty")
+                    retrieval_meta["answer_citation_coverage"] = repaired_critic.get("citation_coverage")
+                elif isinstance(answer_critic_payload, dict):
+                    answer_critic_payload["repair"] = dict(repair_diag)
+            except Exception as repair_exc:
+                logger.warning("[Chat] non-stream controlled repair failed: %s", repair_exc)
+                repair_diag = {
+                    "attempted": True,
+                    "accepted": False,
+                    "attempt_count": 1,
+                    "retrieval_call_count": 0,
+                    "validation": "route_exception",
+                    "error": str(repair_exc)[:160],
+                }
+                retrieval_meta["answer_repair"] = repair_diag
+                if isinstance(answer_critic_payload, dict):
+                    answer_critic_payload["repair"] = dict(repair_diag)
+
+        _require_chat_parse_identity_current(request, chat_parse_identity)
+        visual_attachments = await _build_answer_visual_attachments_for_response(
+            request=request,
+            doc=doc,
+            parse_manifest=parse_manifest,
+            chat_parse_identity=chat_parse_identity,
+            retrieval_meta=retrieval_meta,
+            answer=answer,
+        )
+        _require_chat_parse_identity_current(request, chat_parse_identity)
+
         if use_memory and turn_status in _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES:
             _start_memory_background_task(
                 "write",
@@ -15581,6 +16603,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     answer,
                     turn_status,
                     memory_write_generation,
+                    answer_critic_payload,
                 ),
             )
         return {
@@ -15596,8 +16619,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 include_evidence_raw=_should_include_evidence_raw(request),
             ),
             "web_search_sources": web_search_sources,
+            "web_search_audit": dict(web_search_audit),
             "memory_hits": memory_hits,
             "memory_meta": memory_meta,
+            "visual_attachments": visual_attachments,
             "answer_critic": answer_critic_payload,
             "answer_certainty": (answer_critic_payload or {}).get("certainty"),
             **clarification_extra,
@@ -15626,7 +16651,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
     chat_parse_identity = _bind_chat_request_parse_identity(request, parse_manifest)
     memory_parse_identity = chat_parse_identity
     memory_write_generation = (
-        memory_service.capture_write_generation()
+        memory_service.capture_write_generation(request.doc_id)
         if _should_use_memory(request)
         else None
     )
@@ -15656,13 +16681,16 @@ async def chat_with_pdf_stream(request: ChatRequest):
             yield "data: [DONE]\n\n"
             return
         yield f"data: {json.dumps({'type': 'retrieval_progress', 'phase': 'start', 'message': '正在检索...', **chat_parse_identity}, ensure_ascii=False)}\n\n"
+        web_search_audit = _new_web_search_audit(request)
         try:
             context = ""
-            retrieval_meta = {}
+            web_search_audit = _new_web_search_audit(request)
+            retrieval_meta = {"web_search_audit": web_search_audit}
             has_structured_citations = False
             inventory_mode = False
             web_search_sources: list[dict] = []
             web_search_context = ""
+            web_search_execution_mode = "off"
             use_agent = False
             use_memory = _should_use_memory(request)
             effective_question = (
@@ -15739,6 +16767,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 )
                 turn_context = image_turn_context
                 _apply_turn_intent_meta(retrieval_meta, image_turn_context)
+                _finalize_unattempted_web_search_audit(
+                    web_search_audit,
+                    reason="image_mode_not_supported",
+                )
                 include_document_evidence = _intent_requests_document_evidence(image_intent)
                 _log_chat_trace(
                     trace_id,
@@ -15810,6 +16842,24 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     parse_identity=chat_parse_identity,
                 )
                 turn_context: ChatTurnContext = routing["turn_context"]
+                web_route = routing.get("web_search") or {}
+                web_search_audit = _new_web_search_audit(
+                    request,
+                    mode=str(web_route.get("mode") or turn_context.intent.web_policy),
+                    explicit=bool(web_route.get("explicit")),
+                    missing_topic=bool(web_route.get("missing_topic")),
+                )
+                retrieval_meta["web_search_audit"] = web_search_audit
+                web_search_execution_mode = str(
+                    web_route.get("execution_mode") or "off"
+                ).strip().lower()
+                if web_search_execution_mode not in {"off", "force"}:
+                    web_search_execution_mode = "off"
+                retrieval_meta["web_search_plan"] = {
+                    "requested_mode": str(web_route.get("mode") or "off"),
+                    "execution_mode": web_search_execution_mode,
+                    "auto_qualified": bool(web_route.get("auto_qualified")),
+                }
                 strategy = routing["strategy"]
                 agent_gate = routing["agent_gate"]
                 use_agent = bool(routing["use_agent"])
@@ -15857,6 +16907,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     if clarification_mode == "interrupt":
                         _require_chat_parse_identity_current(request, chat_parse_identity)
+                        _finalize_unattempted_web_search_audit(
+                            web_search_audit,
+                            reason="clarification_required",
+                        )
                         send_meta = _build_public_retrieval_meta(retrieval_meta, [])
                         yield _sse_json({
                             "content": "",
@@ -15865,6 +16919,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             "final_content": turn_context.intent.clarification_question,
                             "retrieval_meta": send_meta,
                             "web_search_sources": [],
+                            "web_search_audit": dict(web_search_audit),
                             "memory_hits": [],
                             "memory_meta": memory_meta,
                             **clarification_extra,
@@ -15889,6 +16944,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     retrieval_meta["retrieval_mode"] = "structural_inventory_unavailable"
                     _require_chat_parse_identity_current(request, chat_parse_identity)
+                    _finalize_unattempted_web_search_audit(
+                        web_search_audit,
+                        reason="inventory_route",
+                    )
                     yield _sse_json({
                         "content": "",
                         "reasoning_content": "",
@@ -15896,6 +16955,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         "final_content": _structural_inventory_unavailable_message(inventory_meta),
                         "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
                         "web_search_sources": [],
+                        "web_search_audit": dict(web_search_audit),
                         "memory_hits": [],
                         "memory_meta": memory_meta,
                         "intent_decision": turn_context.intent.to_dict(),
@@ -15913,6 +16973,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     retrieval_meta["retrieval_mode"] = "structural_inventory_partial"
                     _require_chat_parse_identity_current(request, chat_parse_identity)
+                    _finalize_unattempted_web_search_audit(
+                        web_search_audit,
+                        reason="inventory_route",
+                    )
                     yield _sse_json({
                         "content": "",
                         "reasoning_content": "",
@@ -15920,6 +16984,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         "final_content": _structural_inventory_partial_message(inventory_meta),
                         "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
                         "web_search_sources": [],
+                        "web_search_audit": dict(web_search_audit),
                         "memory_hits": [],
                         "memory_meta": memory_meta,
                         "intent_decision": turn_context.intent.to_dict(),
@@ -15937,6 +17002,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     retrieval_meta["retrieval_mode"] = "structural_inventory"
                     retrieval_meta["citations"] = inventory_citations_for_turn
+                if use_agent and web_search_execution_mode != "force":
+                    _finalize_unattempted_web_search_audit(
+                        web_search_audit,
+                        reason="auto_policy_not_selected",
+                    )
                 _log_chat_trace(
                     trace_id,
                     trace_started_at,
@@ -16164,6 +17234,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         trace_id=trace_id,
                         trace_started_at=trace_started_at,
                         decomposition_signals=_decomposition_signals,
+                        web_search_audit=web_search_audit,
+                        web_search_execution_mode=web_search_execution_mode,
                     ))
 
                     async for agent_event in _yield_task_progress(
@@ -16550,17 +17622,12 @@ async def chat_with_pdf_stream(request: ChatRequest):
             # SSE 进度，前端面板看不到第二轮过程，反而覆盖掉第一次的 agent_search_history/task_status。
 
             # 联网搜索（在此处执行以便向客户端实时发送状态事件）
-            if (
-                _resolve_web_search_mode(request) != "off"
-                and not image_list
-                and not use_agent
-                and not inventory_mode
-            ):
-                _do_web_search = await _should_execute_web_search(
-                    request,
-                    turn_context.intent_question,
-                    intent=turn_context.intent,
-                )
+            web_search_allowed_for_inventory = (
+                not inventory_mode
+                or str(getattr(turn_context.intent, "web_policy", "")) == "force"
+            )
+            if not image_list and not use_agent and web_search_allowed_for_inventory:
+                _do_web_search = web_search_execution_mode == "force"
                 if _do_web_search:
                     yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'searching'}, ensure_ascii=False)}\n\n"
                     try:
@@ -16571,13 +17638,37 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             selected_text=request.selected_text or "",
                             doc_id=request.doc_id,
                             vector_store_dir=getattr(router, "vector_store_dir", ""),
+                            audit=web_search_audit,
                         )
                     except Exception as _ws_err:
                         logger.warning(f"联网搜索（generator 内）失败: {_ws_err}")
                         web_search_sources, web_search_context = [], ""
+                        _update_web_search_audit(
+                            web_search_audit,
+                            status="failed",
+                            executed=True,
+                            result_count=0,
+                            reason=f"stream_search_error:{type(_ws_err).__name__}",
+                        )
 
-                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources)}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources), 'audit': web_search_audit}, ensure_ascii=False)}\n\n"
+                else:
+                    _finalize_unattempted_web_search_audit(
+                        web_search_audit,
+                        reason="auto_policy_not_selected",
+                    )
+            elif not image_list and not use_agent:
+                _finalize_unattempted_web_search_audit(
+                    web_search_audit,
+                    reason="inventory_route",
+                )
 
+            retrieval_meta["web_search_audit"] = dict(web_search_audit)
+            system_prompt = _append_web_search_outcome_instruction(
+                system_prompt,
+                web_search_audit,
+                web_search_sources,
+            )
             messages = _build_chat_messages(
                 system_prompt,
                 safe_chat_history,
@@ -16754,12 +17845,43 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             error=retry_error[:160],
                         )
                     if retry_answer:
+                        # Stream recovery bypasses normal post-processing; validate it before
+                        # allowing the answer into history or automatic memory.
+                        retry_critic = None
+                        try:
+                            retry_critic = postprocess_critic_result(
+                                None,
+                                answer=_critic_answer_text(retry_answer),
+                                retrieval_meta=(
+                                    retrieval_meta
+                                    if isinstance(retrieval_meta, dict)
+                                    else {}
+                                ),
+                            )
+                            if isinstance(retrieval_meta, dict):
+                                retrieval_meta["answer_certainty"] = retry_critic.get("certainty")
+                                retrieval_meta["answer_citation_coverage"] = retry_critic.get("citation_coverage")
+                        except Exception as retry_critic_exc:
+                            logger.debug("[Chat] stream retry rules-only critic skipped: %s", retry_critic_exc)
                         response_context_segments = _build_response_context_segments(retrieval_meta)
                         send_meta = _build_public_retrieval_meta(
                             retrieval_meta,
                             response_context_segments,
                             include_evidence_raw=_should_include_evidence_raw(request),
                             extra={"stream_fallback_reason": "llm_stream_error"},
+                        )
+                        stale_terminal = _stale_chat_stream_terminal(request, chat_parse_identity)
+                        if stale_terminal:
+                            yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            break
+                        retry_visual_attachments = await _build_answer_visual_attachments_for_response(
+                            request=request,
+                            doc=doc,
+                            parse_manifest=parse_manifest,
+                            chat_parse_identity=chat_parse_identity,
+                            retrieval_meta=retrieval_meta,
+                            answer=retry_answer,
                         )
                         stale_terminal = _stale_chat_stream_terminal(request, chat_parse_identity)
                         if stale_terminal:
@@ -16776,7 +17898,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         )
                         if not content_progress_sent:
                             yield f"data: {json.dumps({'content': retry_answer, 'reasoning_content': retry_reasoning, 'done': False}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'warning': error_message, 'recovered': retry_turn_status == _CHAT_TURN_STATUS_RECOVERED_RETRY, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'web_search_sources': web_search_sources, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True, 'usage': retry_response.get('usage'), 'usage_meta': retry_response.get('_usage_meta'), **_chat_terminal_fields(retry_turn_status, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'warning': error_message, 'recovered': retry_turn_status == _CHAT_TURN_STATUS_RECOVERED_RETRY, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'visual_attachments': retry_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True, 'usage': retry_response.get('usage'), 'usage_meta': retry_response.get('_usage_meta'), **_chat_terminal_fields(retry_turn_status, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+                        if retry_critic is not None:
+                            yield _sse_json({
+                                "type": "answer_critic",
+                                "critic": retry_critic,
+                                "certainty": retry_critic.get("certainty"),
+                            })
                         if use_memory and retry_turn_status in _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES:
                             _start_memory_background_task(
                                 "write",
@@ -16788,6 +17916,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                     retry_answer,
                                     retry_turn_status,
                                     memory_write_generation,
+                                    retry_critic,
                                 ),
                             )
                         yield "data: [DONE]\n\n"
@@ -16805,6 +17934,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         answer_guard=fallback_guard,
                         query=_citation_question_for_turn(retrieval_meta, request.question),
                         context_segments=retrieval_meta.get("_context_segments", []),
+                        citation_authorization=retrieval_meta.get("_citation_authorization"),
                     )
                     if fallback_guard:
                         retrieval_meta["answer_guard"] = fallback_guard
@@ -16826,9 +17956,22 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         yield "data: [DONE]\n\n"
                         break
                     if fallback_answer:
+                        fallback_visual_attachments = await _build_answer_visual_attachments_for_response(
+                            request=request,
+                            doc=doc,
+                            parse_manifest=parse_manifest,
+                            chat_parse_identity=chat_parse_identity,
+                            retrieval_meta=retrieval_meta,
+                            answer=fallback_answer,
+                        )
+                        stale_terminal = _stale_chat_stream_terminal(request, chat_parse_identity)
+                        if stale_terminal:
+                            yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            break
                         if not content_progress_sent:
                             yield f"data: {json.dumps({'content': fallback_answer, 'reasoning_content': '', 'done': False}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'warning': error_message, 'recovered': False, 'done': True, 'final_content': fallback_answer, 'retrieval_meta': send_meta, 'web_search_sources': web_search_sources, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_EVIDENCE_FALLBACK, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'warning': error_message, 'recovered': False, 'done': True, 'final_content': fallback_answer, 'retrieval_meta': send_meta, 'visual_attachments': fallback_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_EVIDENCE_FALLBACK, chat_parse_identity)}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                     else:
                         yield f"data: {json.dumps({'error': error_message, 'error_code': chunk.get('error_code') or 'llm_stream_error', 'done': True, 'retrieval_meta': send_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_FAILED, chat_parse_identity)}, ensure_ascii=False)}\n\n"
@@ -16936,6 +18079,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         answer_guard=answer_guard,
                         query=_citation_question_for_turn(retrieval_meta, request.question),
                         context_segments=retrieval_meta.get("_context_segments", []),
+                        citation_authorization=retrieval_meta.get("_citation_authorization"),
                     )
                     if answer_guard:
                         retrieval_meta["answer_guard"] = answer_guard
@@ -16985,13 +18129,28 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         response_context_segments,
                         include_evidence_raw=_should_include_evidence_raw(request),
                     )
+                    visual_attachments = await _build_answer_visual_attachments_for_response(
+                        request=request,
+                        doc=doc,
+                        parse_manifest=parse_manifest,
+                        chat_parse_identity=chat_parse_identity,
+                        retrieval_meta=retrieval_meta,
+                        answer=final_answer_text,
+                    )
+                    stale_terminal = _stale_chat_stream_terminal(request, chat_parse_identity)
+                    if stale_terminal:
+                        yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        break
                     chunk_data = {
                         'content': '', 'reasoning_content': reasoning,
                         'done': True, 'used_provider': chunk.get('used_provider'),
                         'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used'),
                         'final_content': final_answer_text,
                         'retrieval_meta': send_meta,
+                        'visual_attachments': visual_attachments,
                         'web_search_sources': web_search_sources,
+                        'web_search_audit': dict(web_search_audit),
                         'memory_hits': memory_hits,
                         'memory_meta': memory_meta,
                         'usage': {
@@ -17017,19 +18176,6 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     yield f"data: {json.dumps(chunk_data)}\n\n"
 
-                    if use_memory and turn_status in _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES:
-                        _start_memory_background_task(
-                            "write",
-                            _async_memory_write,
-                            (
-                                memory_service,
-                                request,
-                                memory_parse_identity,
-                                final_answer_text,
-                                turn_status,
-                                memory_write_generation,
-                            ),
-                        )
 
                     # P1.5 优化：4 个后处理任务（followup/critic/conv_name/mindmap）改为并行执行
                     # 总耗时从 sum(各任务) → max(各任务)，按完成顺序 yield SSE 事件
@@ -17220,8 +18366,25 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     # 让同一轮回答在落库前后不一致。正文引用只在主生成路径处理，
                     # 后台任务不再改写 terminal answer。
                     _post_coros = [_task_followup(), _task_critic(), _task_conv_name(), _task_mindmap()]
+                    stream_memory_critic: dict | None = None
                     async for _ev_type, _ev_data in _yield_postprocess_events(_post_coros):
+                        if _ev_type == "answer_critic" and isinstance(_ev_data.get("critic"), dict):
+                            stream_memory_critic = _ev_data["critic"]
                         yield f"data: {json.dumps({'type': _ev_type, **_ev_data}, ensure_ascii=False)}\n\n"
+                    if use_memory and turn_status in _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES:
+                        _start_memory_background_task(
+                            "write",
+                            _async_memory_write,
+                            (
+                                memory_service,
+                                request,
+                                memory_parse_identity,
+                                final_answer_text,
+                                turn_status,
+                                memory_write_generation,
+                                stream_memory_critic,
+                            ),
+                        )
 
                     yield "data: [DONE]\n\n"
                     break
@@ -17340,6 +18503,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     answer_guard=answer_guard,
                     query=_citation_question_for_turn(retrieval_meta, request.question),
                     context_segments=retrieval_meta.get("_context_segments", []),
+                    citation_authorization=retrieval_meta.get("_citation_authorization"),
                 )
                 if answer_guard:
                     retrieval_meta["answer_guard"] = answer_guard
@@ -17378,6 +18542,19 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     include_evidence_raw=_should_include_evidence_raw(request),
                     extra={"stream_fallback_reason": "missing_llm_done_event"},
                 )
+                tail_visual_attachments = await _build_answer_visual_attachments_for_response(
+                    request=request,
+                    doc=doc,
+                    parse_manifest=parse_manifest,
+                    chat_parse_identity=chat_parse_identity,
+                    retrieval_meta=retrieval_meta,
+                    answer=final_answer_text,
+                )
+                stale_terminal = _stale_chat_stream_terminal(request, chat_parse_identity)
+                if stale_terminal:
+                    yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 tail_turn_status = (
                     _CHAT_TURN_STATUS_DEGRADED
                     if str(final_answer_text or "").strip()
@@ -17392,7 +18569,9 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     'fallback_used': last_stream_chunk.get('fallback_used'),
                     'final_content': final_answer_text,
                     'retrieval_meta': send_meta,
+                    'visual_attachments': tail_visual_attachments,
                     'web_search_sources': web_search_sources,
+                    'web_search_audit': dict(web_search_audit),
                     'memory_hits': memory_hits,
                     'memory_meta': memory_meta,
                     'usage': {
@@ -17419,7 +18598,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 "stream_exception",
                 error=str(e),
             )
-            yield f"data: {json.dumps({'error': str(e), 'error_code': 'chat_stream_exception', 'done': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_FAILED, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': str(e), 'error_code': 'chat_stream_exception', 'done': True, 'web_search_audit': dict(web_search_audit), **_chat_terminal_fields(_CHAT_TURN_STATUS_FAILED, chat_parse_identity)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
     async def scoped_event_generator():

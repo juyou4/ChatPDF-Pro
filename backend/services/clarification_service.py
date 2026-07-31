@@ -28,6 +28,7 @@ import logging
 import re
 from typing import Any, Callable, Iterable, Optional, Sequence
 
+from services.intent_constraints import IntentConstraintSet
 from services.structured_json import parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -380,6 +381,18 @@ _LATIN_SCAFFOLD_TOKENS = frozenset({
     "paper", "document", "author", "accord", "according",
 })
 
+# These are task-language artifacts, not document entities. Requiring them to
+# survive every split would reject a sound parallel decomposition solely because
+# "Compare ... as described" becomes two evidence lookups that omit those
+# boilerplate verbs.
+_TASK_LANGUAGE_TOKENS = frozenset({
+    "compare", "comparison", "contrast", "versus", "vs", "pro", "con",
+    "advantage", "disadvantage", "explain", "describe", "describ", "analy",
+    "discuss", "why", "reason", "cause", "mechanism", "summarize", "summary",
+    "overview", "list", "enumerate", "catalogue", "translate", "translation",
+    "limitation", "drawback", "weakness",
+})
+
 # 拆分时允许新引入的中文脚手架字（疑问 / 系词 / 助词 / 指示 / 量词）。
 # 刻意**不含任何实体性字，也不含任务动词**：任务动词本来就写在原问句里，
 # 把它们加进白名单只会给扩写留口子。
@@ -387,6 +400,50 @@ _CJK_SCAFFOLD_CHARS = frozenset(
     "是不否有无的地得了着过吗呢吧呀啊么什哪些多少几个种"
     "怎样如何为何请和与及跟同在中对于把被这那此该其它他她们"
 )
+
+_REQUIRED_TASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("compare", re.compile(r"比较|对比|区别|差异|异同|\b(?:compare|contrast|versus|vs\.?)\b", re.IGNORECASE)),
+    ("explain", re.compile(r"解释|说明|分析|\b(?:explain|describe|analy[sz]e|discuss)\b", re.IGNORECASE)),
+    ("reason", re.compile(r"原因|为什么|为何|机制|\b(?:why|reason|cause|mechanism)\b", re.IGNORECASE)),
+    ("summarize", re.compile(r"总结|概述|摘要|\b(?:summari[sz]e|overview)\b", re.IGNORECASE)),
+    ("list", re.compile(r"列出|清单|列表|哪些|\b(?:list|enumerate|catalogue?)\b", re.IGNORECASE)),
+    ("translate", re.compile(r"翻译|\btranslate\b", re.IGNORECASE)),
+    ("limitations", re.compile(r"局限|不足|缺点|\b(?:limitation|drawback|weakness|con)\b", re.IGNORECASE)),
+)
+
+# A valid comparison decomposition often turns one relation into parallel
+# entity-specific lookups ("pros and cons of A" + "pros and cons of B").
+# It need not repeat the literal word "compare", but it must retain a shared
+# comparison dimension. This deliberately excludes plain definition questions
+# such as "What is A? / What is B?".
+_COMPARISON_DIMENSION_RE = re.compile(
+    r"(?:优点|缺点|优势|劣势|异同|差异|区别|表现|效果|结果|指标|准确率|性能|"
+    r"优缺点|利弊|pros?|cons?|advantage|disadvantage|trade[ -]?off|"
+    r"difference|similarit(?:y|ies)|performance|result|metric|accuracy)",
+    re.IGNORECASE,
+)
+
+
+def _required_task_labels(text: str) -> set[str]:
+    return {
+        label for label, pattern in _REQUIRED_TASK_PATTERNS
+        if pattern.search(str(text or ""))
+    }
+
+
+def _coerce_llm_bool(value: Any, *, default: bool) -> bool:
+    """Parse LLM booleans without treating the string ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0", ""}:
+            return False
+    return default
 
 
 def _norm_latin_token(token: str) -> str:
@@ -465,14 +522,43 @@ def subquestions_preserve_semantics(source: str, subs: Sequence[str]) -> bool:
         return False
 
     source_latin = _latin_tokens(source_text)
-    if _latin_tokens(candidate) - source_latin - _LATIN_SCAFFOLD_TOKENS:
+    candidate_latin = _latin_tokens(candidate)
+    if candidate_latin - source_latin - _LATIN_SCAFFOLD_TOKENS:
         return False
 
     source_cjk = set(_CJK_CHAR_RE.findall(source_text))
     if set(_CJK_CHAR_RE.findall(candidate)) - source_cjk - _CJK_SCAFFOLD_CHARS:
         return False
 
-    return True
+    # The final answer still receives the root question and executes its task;
+    # subquestions exist only to retrieve evidence. Do not reject a faithful
+    # "summarize X and explain Y" split merely because each evidence lookup is
+    # phrased as a direct question. Preserve only constraints that would be
+    # impossible to reconstruct from independent definitions: comparison,
+    # causality and explicitly requested limitations.
+    source_tasks = _required_task_labels(source_text)
+    candidate_tasks = _required_task_labels(candidate)
+    if "compare" in source_tasks and (
+        "compare" not in candidate_tasks
+        and not _COMPARISON_DIMENSION_RE.search(candidate)
+    ):
+        return False
+    if "reason" in source_tasks and "reason" not in candidate_tasks:
+        return False
+    if "limitations" in source_tasks and "limitations" not in candidate_tasks:
+        return False
+
+    # Proper nouns/acronyms are the most reliable cross-language entity signal.
+    # They must survive a split; otherwise an LLM could replace a comparison of
+    # BM25 and dense retrieval with two generic definition questions.
+    source_entities = source_latin - _LATIN_SCAFFOLD_TOKENS - _TASK_LANGUAGE_TOKENS
+    if source_entities - candidate_latin:
+        return False
+
+    # Final authority shared with the standalone decompose call and Planner.
+    # Keep the mature lexical checks above, then require the canonical intent
+    # contract as a second independent boundary.
+    return IntentConstraintSet.from_text(source_text).validate_subquestions(items).allowed
 
 
 def _blank_result(source: str) -> dict[str, Any]:
@@ -500,9 +586,9 @@ async def assess_question_clarity(
 ) -> dict[str, Any]:
     """Return {is_clear, clarification_question, sub_questions, source, ...}.
 
-    ``sub_questions`` 最多 3 条；空列表表示"这一句不用拆"或"信号不可用"，
-    区分靠 ``decompose_decided``：只有 True 时消费端才可以把空列表当成
-    LLM 的权威判定（从而省掉那次独立 decompose 调用）；False 一律回落规则。
+    ``sub_questions`` 最多 3 条；只有一组经结构与语义校验的子问题才会设置
+    ``decompose_decided=True``。空列表、畸形输出和语义拒绝都必须回落规则分解，
+    不能把一次不可靠的 LLM 输出误当成"权威地无需拆分"。
 
     Fail-open: on any error, is_clear=True and sub_questions=[] so retrieval continues.
     """
@@ -560,7 +646,7 @@ async def assess_question_clarity(
             out["sub_questions_source"] = "unparsed"
             return out
 
-        is_clear = bool(parsed.get("is_clear", True))
+        is_clear = _coerce_llm_bool(parsed.get("is_clear", True), default=True)
         clarify = str(parsed.get("clarification_question") or "").strip()
         if not is_clear and len(clarify) < 4:
             clarify = "你的问题还不够具体。可以补充指代对象、章节、页码或比较目标吗？"
@@ -572,7 +658,6 @@ async def assess_question_clarity(
         if not decompose_enabled:
             sub_source = skip_reason or "skipped_disabled"
         else:
-            decompose_decided = True
             candidates = normalize_sub_questions(
                 parsed.get("sub_questions"),
                 source_question=text,
@@ -587,6 +672,9 @@ async def assess_question_clarity(
                 sub_source = "rejected_semantics"
             else:
                 sub_questions = candidates
+                # Only a structurally valid and semantically complete group
+                # can suppress the independent decomposition fallback.
+                decompose_decided = True
                 sub_source = parse_source
 
         return {

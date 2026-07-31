@@ -1,7 +1,7 @@
 """
 检索工具 JSON Schema 定义模块。
 
-导出 TOOL_SCHEMAS：13 条 OpenAI 标准 function 格式的工具描述，
+导出 TOOL_SCHEMAS：15 条 OpenAI 标准 function 格式的工具描述，
 供 Planner_LLM 原生函数调用（Native Tool Calls）使用。
 
 工具实现可以保留底层检索细节，但 Planner 默认只看到少量高层能力。
@@ -276,6 +276,80 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "read_section",
+            "description": (
+                "按当前解析版本的稳定 sectionId 分页读取完整章节。章节可包含其子章节；"
+                "长章节使用返回的 next_cursor 继续读取，不要改用页码猜测范围。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sectionId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240,
+                        "description": "来自文档大纲或先前工具结果的稳定 section_id",
+                    },
+                    "cursor": {
+                        "type": "integer",
+                        "default": 0,
+                        "minimum": 0,
+                        "maximum": 2000000,
+                        "description": "上一次返回的 next_cursor；首次读取传 0",
+                    },
+                    "maxChars": {
+                        "type": "integer",
+                        "default": 6000,
+                        "minimum": 256,
+                        "maximum": 12000,
+                        "description": "本次最多读取的字符数",
+                    },
+                },
+                "required": ["sectionId"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_around",
+            "description": (
+                "围绕先前检索得到的稳定 blockId 读取相邻阅读块，用于补足命中上下文。"
+                "不得猜测 blockId；返回结果保留原始块级证据身份。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blockId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240,
+                        "description": "来自先前工具结果的稳定 block_id",
+                    },
+                    "before": {
+                        "type": "integer",
+                        "default": 2,
+                        "minimum": 0,
+                        "maximum": 12,
+                        "description": "读取锚点前的相邻块数",
+                    },
+                    "after": {
+                        "type": "integer",
+                        "default": 2,
+                        "minimum": 0,
+                        "maximum": 12,
+                        "description": "读取锚点后的相邻块数",
+                    },
+                },
+                "required": ["blockId"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "map",
             "description": "返回文档语义组地图，可包含结构线索",
             "parameters": {
@@ -329,6 +403,20 @@ TOOL_SPECS: dict[str, dict] = {
         "planner_default": False,
     },
     "read_blocks": {
+        "concurrency_safe": True,
+        "cost_class": "local",
+        "timeout_s": 6.0,
+        "source_family": "block_index",
+        "planner_default": True,
+    },
+    "read_section": {
+        "concurrency_safe": True,
+        "cost_class": "local",
+        "timeout_s": 8.0,
+        "source_family": "block_index",
+        "planner_default": True,
+    },
+    "read_around": {
         "concurrency_safe": True,
         "cost_class": "local",
         "timeout_s": 6.0,

@@ -21,10 +21,18 @@ from config import settings
 from services.clarification_service import read_decomposition_signals
 from services.decompose_service import decompose_question, should_decompose
 from services.document_context_sampling import sample_document_text
+from services.citation_authorization import (
+    citation_authorization_summary,
+    filter_authorized_citations,
+    filter_authorized_context_segments,
+)
 from services.retrieval_agent import RetrievalAgent
 # 联网三态策略的唯一实现在 services/web_search_policy.py。此处只做转发，
 # 保证 route 层与 Agent 层永远看到同一个 mode。
-from services.web_search_policy import resolve_web_search_mode as _resolve_web_search_mode
+from services.web_search_policy import (
+    resolve_effective_web_search_mode as _resolve_effective_web_search_mode,
+    resolve_web_search_mode as _resolve_web_search_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +102,40 @@ class AgentRetrievalDependencies:
     build_visual_evidence_analyzer: Callable[..., Any] | None = None
     perform_web_search: Callable[..., Any] | None = None
     primary_key_for_target: Callable[[Any, str, str], str] | None = None
+
+
+def _agent_citation_authorization(agent_result: Any, agent_doc_ctx: Any) -> dict:
+    """Resolve the request-local ledger, including partial Agent failures."""
+    if isinstance(agent_result, dict):
+        value = agent_result.get("citation_authorization")
+        if isinstance(value, dict):
+            return dict(value)
+    snapshot = getattr(agent_doc_ctx, "citation_authorization_snapshot", None)
+    if callable(snapshot):
+        value = snapshot()
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _merge_agent_citation_candidates(
+    detail_citations: list[dict],
+    fallback_citations: list[dict],
+) -> list[dict]:
+    """Keep the existing provenance dedupe while deferring ref rebasing to one place."""
+    detail_keys = {
+        _citation_provenance_dedupe_key(citation)
+        for citation in detail_citations
+        if isinstance(citation, dict)
+    }
+    merged = [dict(citation) for citation in detail_citations if isinstance(citation, dict)]
+    for citation in fallback_citations:
+        if not isinstance(citation, dict):
+            continue
+        if _citation_provenance_dedupe_key(citation) in detail_keys:
+            continue
+        merged.append(dict(citation))
+    return merged
 
 
 def _build_context_from_citation_candidates(citations: list[dict], fallback_context: str = "") -> str:
@@ -478,6 +520,8 @@ async def run_agent_retrieval_for_context(
     vector_store_dir: str = "",
     deps: AgentRetrievalDependencies | None = None,
     decomposition_signals: dict | None = None,
+    web_search_audit: dict | None = None,
+    web_search_execution_mode: str | None = None,
 ) -> tuple[str, dict]:
     """执行 Agentic RAG 并返回上下文与检索元数据。
 
@@ -559,7 +603,20 @@ async def run_agent_retrieval_for_context(
         "sub_questions": len(sub_questions or []),
     }
 
-    web_search_mode = _resolve_web_search_mode(request)
+    # 路由层在检索前已完成一次 auto 判定。Agent 只接收冻结后的执行模式，
+    # 不再通过规划器启发式规则重复解释同一个请求。
+    resolved_execution_mode = str(web_search_execution_mode or "").strip().lower()
+    if resolved_execution_mode in {"off", "force"}:
+        web_search_mode = resolved_execution_mode
+    else:
+        frozen_web_mode = str(
+            _intent_field(intent_decision, "web_policy", "") or ""
+        ).strip().lower()
+        web_search_mode = (
+            frozen_web_mode
+            if frozen_web_mode in {"off", "auto", "force"}
+            else _resolve_effective_web_search_mode(request, request.question)
+        )
     web_search_executor = None
     if web_search_mode != "off" and deps.perform_web_search is not None:
         # Freeze the network query before the planner sees any untrusted PDF
@@ -568,14 +625,21 @@ async def run_agent_retrieval_for_context(
         frozen_web_query = citation_query or str(search_query or request.question or "").strip()
 
         async def _agent_web_search():
-            return await deps.perform_web_search(
-                request,
-                query_override=frozen_web_query,
-                doc_title=doc.get("filename", ""),
-                selected_text=request.selected_text or "",
-                doc_id=request.doc_id,
-                vector_store_dir=vector_store_dir,
-            )
+            kwargs = {
+                "query_override": frozen_web_query,
+                "doc_title": doc.get("filename", ""),
+                "selected_text": request.selected_text or "",
+                "doc_id": request.doc_id,
+                "vector_store_dir": vector_store_dir,
+            }
+            # Keep test and third-party dependency shims source-compatible while
+            # allowing the route-owned audit record to observe the real call.
+            if (
+                isinstance(web_search_audit, dict)
+                and _callable_accepts_keyword(deps.perform_web_search, "audit")
+            ):
+                kwargs["audit"] = web_search_audit
+            return await deps.perform_web_search(request, **kwargs)
 
         web_search_executor = _agent_web_search
 
@@ -722,6 +786,11 @@ async def run_agent_retrieval_for_context(
             last_error="agent_no_retrieval_complete_event",
         )
 
+    citation_authorization = _agent_citation_authorization(agent_result, agent_doc_ctx)
+    citation_authorization_summary_value = citation_authorization_summary(citation_authorization)
+    retrieval_meta["_citation_authorization"] = citation_authorization
+    retrieval_meta["agent_citation_authorization"] = citation_authorization_summary_value
+
     agent_context = agent_result.get("context", "") if isinstance(agent_result, dict) else ""
     agent_detail = agent_result.get("detail", []) if isinstance(agent_result, dict) else []
     if isinstance(agent_result, dict):
@@ -755,7 +824,29 @@ async def run_agent_retrieval_for_context(
                 retrieval_meta["agent_error"] = agent_diagnostics.get("last_error")
             if agent_diagnostics.get("fallback_reason"):
                 retrieval_meta["agent_fallback_reason"] = agent_diagnostics.get("fallback_reason")
-        # 让降级对调用方可见，而不是只埋在 diagnostics 里。
+
+    if isinstance(web_search_audit, dict):
+        web_sources = retrieval_meta.get("web_search_sources") or []
+        if web_sources and not web_search_audit.get("executed"):
+            web_search_audit.update({
+                "executed": True,
+                "status": "completed",
+                "result_count": len(web_sources),
+                "reason": "",
+            })
+        elif web_search_audit.get("status") == "pending":
+            web_search_audit.update({
+                "status": "skipped",
+                "reason": (
+                    "agent_web_tool_not_called"
+                    if web_search_mode == "force"
+                    else "agent_policy_not_selected"
+                ),
+            })
+        retrieval_meta["web_search_audit"] = dict(web_search_audit)
+
+    # 让降级对调用方可见，而不是只埋在 diagnostics 里。
+    if isinstance(agent_result, dict):
         if agent_result.get("status"):
             retrieval_meta["agent_status"] = str(agent_result.get("status") or "")
         if agent_result.get("error_kind"):
@@ -795,52 +886,63 @@ async def run_agent_retrieval_for_context(
     pages = doc.get("data", {}).get("pages", [])
     if agent_context:
         agent_citation_limit = deps.resolve_citation_candidate_limit(agent_mode=True)
-        detail_cits = deps.build_agent_detail_citations(
+        raw_detail_cits = deps.build_agent_detail_citations(
             agent_detail,
             query=citation_query,
             sub_questions=sub_questions or None,
             start_ref=1,
             max_citations=agent_citation_limit,
         )
+        detail_cits, detail_authorization_diag = filter_authorized_citations(
+            raw_detail_cits,
+            citation_authorization,
+            rebase_refs=False,
+        )
         fallback_limit = max(0, agent_citation_limit - len(detail_cits or []))
         if fallback_limit > 0:
-            numbered_ctx, fb_cits = deps.build_numbered_context_and_citations(
+            _numbered_ctx, raw_fb_cits = deps.build_numbered_context_and_citations(
                 pages,
                 agent_context,
                 query=citation_query,
                 max_citations=fallback_limit,
             )
         else:
-            numbered_ctx = _build_context_from_citation_candidates(detail_cits, agent_context)
-            fb_cits = []
-        if detail_cits:
-            detail_keys = {
-                _citation_provenance_dedupe_key(citation)
-                for citation in (detail_cits or [])
-                if isinstance(citation, dict)
-            }
-            rebased_fallback: list[dict] = []
-            for citation in (fb_cits or []):
-                key = _citation_provenance_dedupe_key(citation)
-                if key in detail_keys:
-                    continue
-                rebased = dict(citation)
-                rebased["ref"] = len(detail_cits) + len(rebased_fallback) + 1
-                rebased_fallback.append(rebased)
-                if len(detail_cits) + len(rebased_fallback) >= agent_citation_limit:
-                    break
-            fb_cits = [*detail_cits, *rebased_fallback]
-            numbered_ctx = _build_context_from_citation_candidates(fb_cits, numbered_ctx or agent_context)
-            retrieval_meta["agent_detail_citation_count"] = len(detail_cits)
-        context = numbered_ctx or agent_context
-        agent_citations = fb_cits or deps.generate_page_level_citations(
-            pages,
-            agent_context,
-            query=citation_query,
-            max_citations=agent_citation_limit,
+            raw_fb_cits = []
+        fallback_cits, fallback_authorization_diag = filter_authorized_citations(
+            raw_fb_cits,
+            citation_authorization,
+            rebase_refs=False,
         )
+        candidate_citations = _merge_agent_citation_candidates(detail_cits, fallback_cits)
+        candidate_citations = candidate_citations[:agent_citation_limit]
+        agent_citations, combined_authorization_diag = filter_authorized_citations(
+            candidate_citations,
+            citation_authorization,
+            rebase_refs=True,
+        )
+        # When the ledger is active, generated page-level fallbacks are never
+        # allowed to silently cite sampled/expanded text.  The prompt can still
+        # use the bounded Agent context, but its citations remain evidence-only.
+        if not citation_authorization_summary_value["enforced"] and not agent_citations:
+            agent_citations = deps.generate_page_level_citations(
+                pages,
+                agent_context,
+                query=citation_query,
+                max_citations=agent_citation_limit,
+            )
+        context = _build_context_from_citation_candidates(agent_citations, agent_context)
+        retrieval_meta["agent_detail_citation_count"] = len(detail_cits)
+        retrieval_meta["agent_citation_authorization"].update({
+            "detail_filtered_count": detail_authorization_diag["filtered_count"],
+            "fallback_filtered_count": fallback_authorization_diag["filtered_count"],
+            "final_filtered_count": combined_authorization_diag["filtered_count"],
+        })
         retrieval_meta["citations"] = agent_citations
         context_segments = _build_context_segments_from_agent_citations(agent_citations)
+        context_segments, _context_authorization_diag = filter_authorized_context_segments(
+            context_segments,
+            citation_authorization,
+        )
         if context_segments:
             retrieval_meta["_context_segments"] = context_segments
         retrieval_meta["agent_citation_candidate_limit"] = agent_citation_limit
@@ -857,18 +959,30 @@ async def run_agent_retrieval_for_context(
     # planner 结束或异常为空。此时优先用 detail 证据恢复编号上下文，避免退回全文前缀。
     if agent_detail:
         agent_citation_limit = deps.resolve_citation_candidate_limit(agent_mode=True)
-        detail_cits = deps.build_agent_detail_citations(
+        raw_detail_cits = deps.build_agent_detail_citations(
             agent_detail,
             query=citation_query,
             sub_questions=sub_questions or None,
             start_ref=1,
             max_citations=agent_citation_limit,
         )
+        detail_cits, detail_authorization_diag = filter_authorized_citations(
+            raw_detail_cits,
+            citation_authorization,
+            rebase_refs=True,
+        )
+        retrieval_meta["agent_citation_authorization"].update({
+            "detail_filtered_count": detail_authorization_diag["filtered_count"],
+        })
         if detail_cits:
             context = _build_context_from_citation_candidates(detail_cits, "")
             if context:
                 retrieval_meta["citations"] = detail_cits
                 context_segments = _build_context_segments_from_agent_citations(detail_cits)
+                context_segments, _context_authorization_diag = filter_authorized_context_segments(
+                    context_segments,
+                    citation_authorization,
+                )
                 if context_segments:
                     retrieval_meta["_context_segments"] = context_segments
                 retrieval_meta["agent_fallback"] = True
@@ -906,7 +1020,25 @@ async def run_agent_retrieval_for_context(
         query=citation_query,
     )
     context = numbered_ctx or fallback_text
-    retrieval_meta["citations"] = fb_cits
+    authorized_fallback_cits, fallback_authorization_diag = filter_authorized_citations(
+        fb_cits,
+        citation_authorization,
+        rebase_refs=True,
+    )
+    if citation_authorization_summary_value["enforced"]:
+        # The fallback text is a resilience aid, not a tool result.  Do not
+        # manufacture page citations for it when this request read no evidence.
+        retrieval_meta["citations"] = authorized_fallback_cits
+        if authorized_fallback_cits:
+            context = _build_context_from_citation_candidates(authorized_fallback_cits, context)
+            context_segments = _build_context_segments_from_agent_citations(authorized_fallback_cits)
+            if context_segments:
+                retrieval_meta["_context_segments"] = context_segments
+    else:
+        retrieval_meta["citations"] = fb_cits
+    retrieval_meta["agent_citation_authorization"].update({
+        "fallback_filtered_count": fallback_authorization_diag["filtered_count"],
+    })
     retrieval_meta["agent_fallback"] = True
     retrieval_meta["agent_fallback_reason"] = retrieval_meta.get("agent_fallback_reason") or "empty_agent_context"
     # 这条上下文来自全文取样而非检索命中，必须显式标注，避免静默降级。

@@ -8,6 +8,8 @@ import re
 import logging
 from typing import Optional
 
+from services.intent_constraints import IntentConstraintSet
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,8 +46,8 @@ def _semantic_tags(text: str) -> set[str]:
     return {name for name, pattern in _REWRITE_SEMANTIC_TAGS if pattern.search(sample)}
 
 
-def _llm_rewrite_preserves_semantics(source: str, candidate: str) -> bool:
-    """Reject contextual rewrites that change an already stated task or modality."""
+def _rewrite_tags_preserve_semantics(source: str, candidate: str) -> bool:
+    """Keep the legacy task/modality guard beside the canonical constraint set."""
     source_text = str(source or "").strip()
     candidate_text = str(candidate or "").strip()
     if not source_text or not candidate_text:
@@ -75,6 +77,15 @@ def _llm_rewrite_preserves_semantics(source: str, candidate: str) -> bool:
         item.lower() for item in _REWRITE_IDENTIFIER_RE.findall(candidate_text)
     }
     return source_identifiers.issubset(candidate_identifiers)
+
+
+def _llm_rewrite_preserves_semantics(source: str, candidate: str) -> bool:
+    """Reject contextual rewrites that change any frozen intent constraint."""
+    constraints = IntentConstraintSet.from_text(source)
+    return bool(
+        constraints.validate_rewrite(candidate).allowed
+        and _rewrite_tags_preserve_semantics(source, candidate)
+    )
 
 
 class QueryRewriter:
@@ -174,6 +185,10 @@ class QueryRewriter:
             return query
 
         try:
+            constraints = IntentConstraintSet.from_text(
+                query,
+                allowed_context=[selected_text] if selected_text and selected_text.strip() else (),
+            )
             rewritten = query
 
             # 第一步：如果有选中文本，尝试解析指示代词
@@ -194,6 +209,14 @@ class QueryRewriter:
                 evidence_need=evidence_need,
             )
 
+            validation = constraints.validate_enrichment(rewritten)
+            if not validation.allowed:
+                logger.warning(
+                    "查询改写违反意图约束，回退原始查询 constraint_id=%s violations=%s",
+                    constraints.constraint_id,
+                    list(validation.violations),
+                )
+                return query
             return rewritten
         except Exception as e:
             # 改写失败时返回原始查询，记录警告日志
@@ -778,12 +801,27 @@ class QueryRewriter:
         if not intent_only and selected_text and selected_text.strip():
             selected_hint = f"\n用户选中的文本：{selected_text[:200]}"
 
+        allowed_context = [
+            str(msg.get("content") or "")[:400]
+            for msg in (chat_history or [])[-6:]
+            if isinstance(msg, dict) and str(msg.get("content") or "").strip()
+        ]
+        if selected_text and selected_text.strip():
+            allowed_context.append(selected_text[:400])
+        constraints = IntentConstraintSet.from_text(
+            rewritten,
+            allowed_context=allowed_context,
+        )
+
         prompt = f"""请将以下用户查询改写为一个独立的、适合检索文档的查询语句。
 要求：
 - 消解代词和指代（如"它"、"这个方法"等），使查询独立可理解
 - 保持原始意图不变
+- 必须保留下面列出的实体、比较对象、页码、数字、图表编号、否定和范围，不得新增未出现的对象
 - 直接输出改写后的查询，不要加任何前缀或解释
 - 如果查询已经足够清晰，直接返回原文
+
+约束：{constraints.prompt_guard()}
 
 {f'对话历史：{chr(10)}{history_text}' if history_text else ''}
 {selected_hint}
@@ -827,11 +865,16 @@ class QueryRewriter:
 
             content = content.strip()
             if content and len(content) > 3 and content != query:
-                if not _llm_rewrite_preserves_semantics(rewritten, content):
+                validation = constraints.validate_rewrite(content)
+                if (
+                    not validation.allowed
+                    or not _rewrite_tags_preserve_semantics(rewritten, content)
+                ):
                     logger.warning(
-                        "[LLM QueryRewrite] 拒绝语义漂移的改写: %r → %r",
+                        "[LLM QueryRewrite] 拒绝语义漂移的改写: %r → %r violations=%s",
                         query,
                         content,
+                        list(validation.violations),
                     )
                     return rewritten
                 logger.info(f"[LLM QueryRewrite] '{query}' → '{content}'")

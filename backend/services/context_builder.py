@@ -54,6 +54,7 @@ class ContextBuilder:
         selections: List[dict],
         group_best_chunks: dict = None,
         group_best_chunk_meta: dict = None,
+        direct_evidence_by_group: dict[str, str] | None = None,
         query: str = "",
         selected_text: str = "",
     ) -> Tuple[str, List[dict]]:
@@ -120,6 +121,15 @@ class ContextBuilder:
             # 获取对应粒度的文本内容
             text_attr = GRANULARITY_TEXT_ATTR.get(granularity, "full_text")
             text = getattr(group, text_attr, "")
+            direct_evidence = str(
+                (direct_evidence_by_group or {}).get(group_id) or ""
+            ).strip()
+            if (
+                direct_evidence
+                and granularity != "full"
+                and direct_evidence not in text
+            ):
+                text = f"{text}\n\n直接命中原文（补足摘要/精要）：\n{direct_evidence}"
 
             # 获取关键词列表
             keywords = group.keywords if group.keywords else []

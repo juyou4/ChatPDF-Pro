@@ -39,16 +39,43 @@ def make_cache_key(
     evidence_id: str,
     doc_id: str = "",
     parse_generation: str = "",
+    document_source_hash: str = "",
+    block_index_hash: str = "",
+    evidence_text: str = "",
+    provider: str = "",
+    model: str = "",
+    endpoint: str = "",
+    prompt_version: str = "",
 ) -> str:
-    """缓存键含解析身份：文档重新解析后旧摘要必须失效。"""
+    """Build a cache key for one immutable scoring input.
+
+    ``evidence_id`` is a locator, not a content revision. A block-index repair
+    may deliberately keep its id while changing its text, and a provider/model
+    switch can change the score even with identical evidence. Include both the
+    published parse revision and a content fingerprint so a cache hit can only
+    reuse a score produced for the same actual prompt input.
+    """
     normalized = normalize_question(question)
     if not normalized or not evidence_id:
         return ""
+    normalized_evidence = re.sub(r"\s+", " ", str(evidence_text or "")).strip()
+    evidence_hash = (
+        hashlib.sha256(normalized_evidence.encode("utf-8")).hexdigest()
+        if normalized_evidence
+        else ""
+    )
     raw = " ".join([
         str(doc_id or ""),
         str(parse_generation or ""),
+        str(document_source_hash or ""),
+        str(block_index_hash or ""),
         normalized,
         str(evidence_id),
+        evidence_hash,
+        str(provider or "").strip().casefold(),
+        str(model or "").strip(),
+        str(endpoint or "").strip(),
+        str(prompt_version or "").strip(),
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 

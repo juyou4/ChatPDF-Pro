@@ -204,3 +204,7 @@ class ActivePool:
     def clear(self) -> None:
         """Drop all in-memory copies after a user requests a full erase."""
         self._pool.clear()
+
+    def remove_entry(self, entry_id: str) -> None:
+        """Remove one document-owned entry without flushing unrelated hot data."""
+        self._pool.pop(entry_id, None)

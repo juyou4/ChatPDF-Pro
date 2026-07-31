@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional, Sequence
 
+from services.memory_quality import find_unscoped_document_absence_claims
 # paper-qa 哨兵；中文产品默认用中文句，英文问句可匹配英文。
 CANNOT_ANSWER_PHRASE_ZH = "根据文档内容无法回答此问题"
 CANNOT_ANSWER_PHRASE_EN = "I cannot answer"
@@ -329,11 +330,26 @@ def build_academic_style_prompt(
     elif qtype == "extraction":
         task_lines += "\n- 本题偏精确抽取：优先短答，禁止综述腔。"
 
+    architecture_coverage_rule = (
+        "- 遇到结构、架构、交互或机制类问题：先陈述证据已明确给出的架构级拓扑或流程，"
+        "再单列尚未公开的逐层实现参数；不得把“层数、通道、投影、超参等细节未给出”"
+        "推导成“整体结构未给出”。\n"
+        "- 复合问题要逐项回答。任何“文档未给出/未说明”的判断必须限定到具体字段，"
+        "不能用一个缺失细节否定已有的架构级证据。"
+    )
+    absence_evidence_rule = (
+        "- For any document-wide absence claim, distinguish the supplied evidence from the whole paper. "
+        "A local retrieval miss is not proof of absence; assert it only when an explicit source statement supports it and cite [n]. "
+        "Otherwise state that the current evidence does not cover the field or use the refusal sentence."
+
+    )
     return (
         "【学术论文回答文体（Scientific Answer Contract）】\n"
         "- 用科研论文式简洁书面语：短句、连贯段落，避免口语客套与营销措辞。\n"
         f"- {length_hint}。\n"
         f"{task_lines}\n"
+        f"{absence_evidence_rule}\n"
+        f"{architecture_coverage_rule}\n"
         f"- 若证据不足，使用固定拒答句：「{CANNOT_ANSWER_PHRASE_ZH}」，并简要说明缺什么；"
         f"英文场景可用 “{CANNOT_ANSWER_PHRASE_EN}”。\n"
         "- 禁止用预训练知识补全文档未给出的数值、超参、作者主张或实验设置。\n"
@@ -352,6 +368,10 @@ def build_compact_academic_contract_prompt(*, agent_mode: bool = False) -> str:
     return (
         "【学术忠实性合同 · 精简版】\n"
         f"- {focus}\n"
+        "- 结构/架构/机制题先回答证据已给出的架构级拓扑或流程，再列缺失的逐层参数；"
+        "不得把“层数、通道、投影或超参未给出”说成“没有结构”。\n"
+        "- 复合问题逐项覆盖；任何“未给出”都要明确限定到具体字段。\n"
+        "- Do not turn a missing local retrieval hit into a whole-document absence claim; use a current-evidence scope unless an explicit cited statement supports the absence.\n"
         f"- 证据不足时只输出：「{CANNOT_ANSWER_PHRASE_ZH}」+ 一句原因"
         f"（或英文 “{CANNOT_ANSWER_PHRASE_EN}”）。\n"
         "- 数值、方法名、数据集、指标名必须照抄证据，不得估算或改写。\n"
@@ -594,6 +614,20 @@ def postprocess_critic_result(
             if str(item).strip()
         ]
     issue_details = issue_details[:5]
+    unscoped_absence_claims = find_unscoped_document_absence_claims(answer)
+    if unscoped_absence_claims:
+        claim_span = unscoped_absence_claims[0][:160]
+        msg = (
+            "\u7b54\u6848\u5c06\u5c40\u90e8\u68c0\u7d22\u4e0d\u8db3\u5916\u63a8\u4e3a\u6574\u7bc7\u6587\u6863\u7f3a\u5931\u7ed3\u8bba\uff1b"
+            "\u5e94\u6539\u4e3a\u201c\u5f53\u524d\u8bc1\u636e\u672a\u8986\u76d6\u8be5\u5b57\u6bb5\u201d\uff0c\u6216\u63d0\u4f9b\u539f\u6587\u660e\u786e\u58f0\u660e\u7684\u5f15\u7528"
+        )
+        if all(item.get("claim_span") != claim_span for item in issue_details):
+            issue_details.append({
+                "text": msg,
+                "issue_type": "overreach",
+                "claim_span": claim_span,
+                "evidence_refs": [],
+            })
 
     uncited = int(coverage.get("uncited_factual_count") or 0)
     if uncited > 0 and not coverage.get("refused"):
@@ -611,7 +645,7 @@ def postprocess_critic_result(
                 "evidence_refs": [],
             })
 
-    if is_cannot_answer(answer):
+    if is_cannot_answer(answer) and not unscoped_absence_claims:
         # Refused answers are not hallucinations.
         base["has_hallucination"] = False
         if not issue_details:
@@ -623,7 +657,7 @@ def postprocess_critic_result(
     # has_hallucination 只表示「LLM 判定答案含无据内容」；引用覆盖不足是另一回事，
     # 单独用 citation_risk 表达。此前把 uncited >= 3 直接升级为幻觉，长答案（事实句
     # 天然更多）会被系统性误报为幻觉。
-    has_hallucination = bool(base.get("has_hallucination", False))
+    has_hallucination = bool(base.get("has_hallucination", False) or unscoped_absence_claims)
 
     # 引用覆盖风险按比例判定，并要求最小样本量，避免一两句话的短答案被过度惩罚。
     refused = bool(coverage.get("refused"))
@@ -649,9 +683,13 @@ def postprocess_critic_result(
     elif citation_risk_level == "high":
         score = min(score, 5)
     score = max(0, min(10, score))
+    if unscoped_absence_claims:
+        score = min(score, 4)
 
     suggestion = str(base.get("suggestion") or "").strip()
-    if uncited > 0 and not suggestion:
+    if unscoped_absence_claims and not suggestion:
+        suggestion = "\u8bf7\u5c06\u6574\u7bc7\u6587\u6863\u7684\u7f3a\u5931\u65ad\u8a00\u6539\u4e3a\u5f53\u524d\u8bc1\u636e\u8303\u56f4\uff0c\u6216\u8865\u5145\u660e\u786e\u7684\u539f\u6587\u5f15\u7528\u3002"
+    elif uncited > 0 and not suggestion:
         suggestion = "请为关键数值与结论句补充 [n] 引用，或改为拒答。"
 
     certainty = derive_answer_certainty(

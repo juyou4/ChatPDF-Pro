@@ -741,9 +741,28 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
         1 for term in ('many', 'medium', 'few')
         if _contains_terms(query_lower, [term])
     ) >= 2
+    # 论文结果表常用 "数据集 + backbone + 子集/数值" 这样的限定，未必会
+    # 显式写出 Table 或 Accuracy。例如 "CIFAR100-LT 上 ResNet-32 的
+    # Few-shot 子集中哪个方法最好，数值是多少"。这类问题仍必须走数值表
+    # 格的精确证据链，否则会被普通语义检索带到叙述段落。
+    benchmark_scope = bool(re.search(
+        r"\b(?:cifar|imagenet|places|coco|voc|cityscapes|ade20k|"
+        r"kinetics|nus[-_]?wide|inaturalist)[a-z0-9_.-]*\b",
+        query_lower,
+        re.IGNORECASE,
+    ))
+    backbone_scope = bool(re.search(
+        r"\b(?:resnet|resnext|wide[-_]?resnet|wrn|vgg|densenet|"
+        r"mobilenet|efficientnet|convnext|swin|deit|vit|regnet|hrnet)"
+        r"[a-z0-9_.-]*\b",
+        query_lower,
+        re.IGNORECASE,
+    ))
+    benchmark_backbone_scope = benchmark_scope and backbone_scope
     numeric_table_hit = (
         (cost_query and quantitative_request)
         or (fewshot_columns and (quantitative_request or explicit_table_scope or metric_signal))
+        or (benchmark_backbone_scope and quantitative_request)
         or (explicit_table_scope and (quantitative_request or metric_signal))
         or (metric_signal and quantitative_request)
     )

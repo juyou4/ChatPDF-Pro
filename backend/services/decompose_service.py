@@ -13,6 +13,8 @@ import logging
 import re
 from typing import Optional
 
+from services.intent_constraints import IntentConstraintSet
+
 logger = logging.getLogger(__name__)
 
 DECOMPOSE_PROMPT = """You split a user question about ONE document into independently retrievable sub-questions.
@@ -37,6 +39,10 @@ Hard constraints — violating ANY ONE means return [] instead:
    as written. Do not translate, expand or normalize them.
 5. Write every item in the SAME LANGUAGE as the user's question.
 6. If you are not confident, return []. Returning [] is always safe.
+
+Frozen intent constraints (all sub-questions together must preserve these and
+must not introduce new entities, numbers, locators or scope):
+{constraints}
 
 Output ONLY JSON, no markdown fences and no explanation:
 {{"needs_decompose": true, "sub_questions": ["...", "..."]}}
@@ -296,7 +302,14 @@ def _normalize_decompose_payload(parsed: object) -> tuple[bool, list[str]]:
             if "needs_decompose" in parsed
             else parsed.get("needsDecompose")
         )
-        needs_decompose = bool(subs) if needs_value is None else bool(needs_value)
+        if needs_value is None:
+            needs_decompose = bool(subs)
+        elif isinstance(needs_value, bool):
+            needs_decompose = needs_value
+        elif isinstance(needs_value, str):
+            needs_decompose = needs_value.strip().lower() in {"true", "yes", "1"}
+        else:
+            needs_decompose = bool(needs_value)
     else:
         return False, []
 
@@ -339,7 +352,11 @@ async def decompose_question(
     try:
         from services.chat_service import call_ai_api
 
-        prompt = DECOMPOSE_PROMPT.format(question=question)
+        constraints = IntentConstraintSet.from_text(question)
+        prompt = DECOMPOSE_PROMPT.format(
+            question=question,
+            constraints=constraints.prompt_guard(),
+        )
 
         response = await call_ai_api(
             messages=[{"role": "user", "content": prompt}],
@@ -372,6 +389,14 @@ async def decompose_question(
             return []
 
         if subs:
+            validation = constraints.validate_subquestions(subs)
+            if not validation.allowed:
+                logger.warning(
+                    "[Decompose] 拒绝违反意图约束的分解 constraint_id=%s violations=%s",
+                    constraints.constraint_id,
+                    list(validation.violations),
+                )
+                return []
             logger.info(f"[Decompose] 问题分解为 {len(subs)} 个子问题: {subs}")
             return subs
 
