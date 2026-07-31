@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { VALID_PARSE_ROUTES } from '../utils/parseRouteUtils';
+import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
 
-const VALID_PAGE_OCR_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral'];
-const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'doc2x'];
+const VALID_PAGE_OCR_BACKENDS = ['auto', 'tesseract', 'paddleocr'];
+const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'mistral', 'doc2x'];
 const DEFAULT_OCR_SETTINGS = {
   mode: 'auto',
   backend: 'auto',
@@ -149,6 +150,14 @@ const normalizeRestoredSessionMessages = (session, documentInfo) => {
     const staleIdentity = hasCompleteParseIdentity(currentIdentity) && !messageMatchesCurrent;
     const next = {
       ...message,
+      ...(message?.notice?.type === 'document_upload'
+        ? {
+          notice: {
+            ...message.notice,
+            docId: message.notice.docId || session?.docId || session?.id || '',
+          },
+        }
+        : {}),
       ...(messageMatchesCurrent
         ? {
           parse_generation: currentIdentity.generation,
@@ -165,8 +174,15 @@ const normalizeRestoredSessionMessages = (session, documentInfo) => {
       || message.isStreaming === true
       || ['streaming', 'cancelled', 'aborted'].includes(turnStatus)
       || !CHAT_RELIABLE_TERMINAL_STATES.has(turnStatus);
+    const restoredVisualAttachments = hasMessageIdentity
+      ? normalizeChatVisualAttachments(
+        message.visualAttachments || message.visual_attachments,
+        messageIdentity,
+      )
+      : [];
     return {
       ...next,
+      visualAttachments: restoredVisualAttachments,
       isStreaming: false,
       turnStatus: interrupted ? 'interrupted' : turnStatus,
     };
@@ -432,7 +448,7 @@ export function useDocumentState({
       } else if (embeddingConfig?.reason === 'provider_missing') {
         reasonHint = `当前默认模型对应的 Provider 不存在：${embeddingConfig.providerId || 'unknown'}。\n请在模型服务中重新配置。`;
       }
-      alert(`${reasonHint}\n\n路径：右上角设置 → 模型服务 → EMBEDDING`);
+      alert(`${reasonHint}\n\n路径：设置中心 → 常用 → 模型服务 → EMBEDDING`);
       setIsUploading(false);
       setUploadFileInfo(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -530,13 +546,15 @@ export function useDocumentState({
       setUploadStatus(isMinerUAccepted ? 'accepted' : 'ready');
       setUploadProgress(100);
 
-      // 构建上传成功消息
-      let uploadMsg = `✅ 文档《${data.filename}》上传成功！共 ${data.total_pages} 页。`;
-      if (uploadedManifest?.resolved_route === 'mineru' && uploadedManifest?.status !== 'ready') {
-        uploadMsg += '\n⏳ 已选择 MinerU 全程解析，正文、阅读、大纲、翻译、速览和问答索引会在同一解析结果发布后可用。';
-      }
-      if (data.ocr_used) {
-        uploadMsg += `\n🔍 已使用 OCR（${data.ocr_backend || '自动'}）处理部分页面。`;
+      // 上传状态使用结构化数据渲染，纯文本仅作为历史兼容和无障碍回退。
+      const uploadStatusItems = [];
+      if (isMinerUAccepted) {
+        uploadStatusItems.push({
+          id: 'mineru_parse',
+          status: 'processing',
+          title: 'MinerU 全程解析中',
+          description: 'PDF 可先阅读；正文、速览、大纲、翻译和问答将在同一解析结果发布后启用。',
+        });
       }
       const ocrStatus = String(data.ocr_status || '').trim().toLowerCase();
       if (data.ocr_warning || ['partial_success', 'failed', 'unavailable'].includes(ocrStatus)) {
@@ -546,12 +564,43 @@ export function useDocumentState({
         const fallbackWarning = ocrStatus === 'partial_success'
           ? `OCR 部分完成${failedPageCount > 0 ? `，${failedPageCount} 页未识别` : ''}`
           : 'OCR 未完成，已保留原始提取文本';
-        uploadMsg += `\n⚠️ ${data.ocr_warning || fallbackWarning}`;
+        uploadStatusItems.push({
+          id: 'ocr',
+          status: 'warning',
+          title: 'OCR 需要注意',
+          description: data.ocr_warning || fallbackWarning,
+        });
+      } else if (data.ocr_used) {
+        uploadStatusItems.push({
+          id: 'ocr',
+          status: 'complete',
+          title: 'OCR 处理完成',
+          description: `使用 ${data.ocr_backend || '自动模式'} 处理了需要识别的页面。`,
+        });
       }
-      if (data.indexing_status && data.indexing_status !== 'ready') {
-        uploadMsg += '\n⏳ 检索索引正在后台准备中，PDF 阅读可先使用；首次问答可能需要稍等。';
+      if (!isMinerUAccepted && data.indexing_status && data.indexing_status !== 'ready') {
+        uploadStatusItems.push({
+          id: 'rag_index',
+          status: 'processing',
+          title: '问答索引准备中',
+          description: 'PDF 与正文阅读可先使用；首次问答可能需要稍等。',
+        });
       }
-      setMessages?.([{ type: 'system', content: uploadMsg }]);
+      const uploadMsg = [
+        `文档《${data.filename}》已上传，共 ${data.total_pages} 页。`,
+        ...uploadStatusItems.map((item) => `${item.title}：${item.description}`),
+      ].join('\n');
+      setMessages?.([{
+        type: 'system',
+        content: uploadMsg,
+        notice: {
+          type: 'document_upload',
+          docId: data.doc_id,
+          filename: data.filename,
+          pageCount: data.total_pages,
+          items: uploadStatusItems,
+        },
+      }]);
     } catch (error) {
       alert(`上传失败: ${error.message}`);
     } finally {

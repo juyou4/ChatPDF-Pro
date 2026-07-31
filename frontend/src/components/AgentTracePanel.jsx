@@ -3,55 +3,59 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  FileText,
   Globe,
-  ScanSearch,
-  Search,
   Hash,
-  Wrench,
   Layers,
   Loader2,
   Map,
+  ScanSearch,
+  Search,
   Sparkles,
-  CheckCircle2,
-  Circle,
+  ThumbsDown,
+  ThumbsUp,
+  Wrench,
 } from 'lucide-react';
 
-// 工具到 icon / 中文标签的映射，与后端 retrieval_agent / retrieval_tools 保持一致
+const PlanningThoughtIcon = ({ className = '' }) => (
+  <svg
+    className={className}
+    viewBox="0 0 64 64"
+    fill="none"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <path
+      fill="currentColor"
+      d="M25.5 44.2c-4.9 0-9.6-2.5-12.4-6.6C8 35 4.8 29.8 4.8 24.2c0-8.3 6.8-15.1 15.1-15.2c.7 0 1.4 0 2.1.1C24.5 4 29.7.7 35.5.7c6.7 0 12.6 4.5 14.4 10.9c5.6 2.3 9.3 7.7 9.3 13.9c0 8.3-6.7 15-15 15c-2.5 0-4.9-.6-7.1-1.8c-2.9 3.4-7.1 5.4-11.6 5.5m-5.6-30.7c-5.8.1-10.6 4.8-10.6 10.7c0 4.1 2.5 7.9 6.2 9.6c.4.2.7.5 1 .9c1.9 3.1 5.3 5 8.9 5c3.7-.1 7.1-2 9.1-5.1c.3-.5.9-.9 1.5-1s1.3 0 1.8.4c1.9 1.4 4.1 2.2 6.4 2.2c5.8 0 10.5-4.7 10.5-10.5c0-4.7-3-8.7-7.4-10.1c-.8-.2-1.4-.9-1.5-1.7c-1-4.9-5.3-8.5-10.3-8.5c-4.5 0-8.5 2.9-10 7.2c-.4 1.1-1.6 1.8-2.7 1.5c-1-.5-2-.6-2.9-.6M40.7 56c-3.6 0-6.6-3-6.6-6.6s3-6.6 6.6-6.6s6.6 3 6.6 6.6s-2.9 6.6-6.6 6.6m0-8.7c-1.2 0-2.1.9-2.1 2.1s.9 2.1 2.1 2.1s2.1-.9 2.1-2.1c.1-1.2-.9-2.1-2.1-2.1m11.9 16c-3 0-5.4-2.4-5.4-5.4s2.4-5.4 5.4-5.4c1.5 0 2.9.6 3.9 1.6S58 56.5 58 58v.2c-.2 2.8-2.5 5.1-5.4 5.1m0-6.3c-.5 0-.9.4-.9.9s.4.9.9.9s.8-.4.9-.9c0-.3-.1-.4-.2-.5c-.1-.2-.4-.4-.7-.4"
+    />
+  </svg>
+);
+
 const TOOL_META = {
-  search_document: { label: '统一检索', icon: ScanSearch },
-  web_search: { label: '联网检索', icon: Globe },
-  read_blocks: { label: '读取原文块', icon: Layers },
-  visual_search: { label: '定位视觉证据', icon: ScanSearch },
-  analyze_visual_evidence: { label: '分析图表证据', icon: Sparkles },
-  complete: { label: '结束检索', icon: Check },
-  vector_search: { label: '向量搜索', icon: Sparkles },
-  keyword_search: { label: 'BM25 关键词', icon: Hash },
-  grep: { label: 'GREP 字面', icon: Search },
-  regex_search: { label: '正则匹配', icon: Search },
-  boolean_search: { label: '布尔逻辑', icon: Wrench },
-  fetch: { label: '获取意群', icon: Layers },
-  map: { label: '文档地图', icon: Map },
+  search_document: { label: '统一检索', icon: ScanSearch, family: 'search' },
+  web_search: { label: '联网检索', icon: Globe, family: 'search' },
+  vector_search: { label: '向量搜索', icon: Sparkles, family: 'search' },
+  keyword_search: { label: 'BM25 关键词', icon: Hash, family: 'search' },
+  grep: { label: 'GREP 字面', icon: Search, family: 'search' },
+  regex_search: { label: '正则匹配', icon: Search, family: 'search' },
+  boolean_search: { label: '布尔逻辑', icon: Search, family: 'search' },
+  visual_search: { label: '定位视觉证据', icon: ScanSearch, family: 'search' },
+  read_blocks: { label: '读取原文块', icon: Layers, family: 'read' },
+  read_section: { label: '读取章节', icon: FileText, family: 'read' },
+  read_around: { label: '展开上下文', icon: FileText, family: 'read' },
+  fetch: { label: '获取意群', icon: Layers, family: 'read' },
+  map: { label: '查看文档地图', icon: Map, family: 'read' },
+  analyze_visual_evidence: { label: '分析图表证据', icon: Sparkles, family: 'visual' },
+  complete: { label: '结束检索', icon: Check, family: 'complete' },
 };
 
-const getToolMeta = (tool) =>
-  TOOL_META[tool] || {
-    label: tool || '工具',
-    icon: Wrench,
-  };
-
-const formatDuration = (startedAt, endedAt) => {
-  if (!startedAt || !endedAt || endedAt < startedAt) return '';
-  const ms = endedAt - startedAt;
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
-};
-
-const formatElapsedMs = (value) => {
-  const ms = Number(value);
-  if (!Number.isFinite(ms)) return '';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+const FAMILY_META = {
+  search: { icon: Search, done: (count) => `执行了 ${count} 次搜索`, running: '正在搜索证据' },
+  read: { icon: FileText, done: (count) => `读取了 ${count} 处文档内容`, running: '正在读取文档内容' },
+  visual: { icon: Sparkles, done: (count) => `分析了 ${count} 个视觉证据`, running: '正在分析视觉证据' },
+  complete: { icon: Check, done: () => '证据收集完成', running: '正在结束检索' },
+  other: { icon: Wrench, done: (count) => `执行了 ${count} 次工具调用`, running: '正在调用工具' },
 };
 
 const AGENT_GATE_REASON_LABELS = {
@@ -96,614 +100,615 @@ const EVIDENCE_STATUS_LABELS = {
   gathering: '正在收集证据',
 };
 
-/**
- * 检索代理执行轨迹面板。
- * embedded=true 时作为思考面板内的子区域显示，避免完成后跳到回答下方。
- */
-const BouncingDots = ({ className = 'bg-[#D97A5D]' }) => (
-  <span className="ml-1 inline-flex items-center gap-0.5" aria-hidden="true">
-    {[0, 1, 2].map((i) => (
-      <span
-        key={i}
-        className={`h-1 w-1 rounded-full ${className} animate-bounce`}
-        style={{ animationDelay: `${i * 0.15}s` }}
-      />
-    ))}
+const formatDecisionStrength = (value) => {
+  const strength = Number(value);
+  if (!Number.isFinite(strength)) return '';
+  if (strength >= 0.85) return '高';
+  if (strength >= 0.55) return '中';
+  return '低';
+};
+
+const normalizeText = (value, limit = 360) => String(value || '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, limit);
+
+const getToolMeta = (tool) => TOOL_META[tool] || {
+  label: normalizeText(tool, 80) || '工具',
+  icon: Wrench,
+  family: 'other',
+};
+
+const formatDuration = (startedAt, endedAt) => {
+  if (!startedAt || !endedAt || endedAt < startedAt) return '';
+  const ms = endedAt - startedAt;
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+};
+
+const formatElapsedMs = (value) => {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+};
+
+const normalizePlanningLabel = (round, message) => {
+  const text = normalizeText(message, 180);
+  if (!text || /LLM\s*规划中/i.test(text)) return `规划第 ${round} 轮检索`;
+  return text;
+};
+
+const operationDetailText = (operation) => {
+  const query = normalizeText(operation.query, 280);
+  if (query) {
+    if (operation.tool === 'web_search') return `已搜索网络：${query}`;
+    if (operation.tool === 'read_section') return `已读取章节：${query}`;
+    if (operation.tool === 'read_around') return `已展开上下文：${query}`;
+    if (operation.tool === 'map') return `已查看文档地图：${query}`;
+    if (operation.tool === 'visual_search') return `已定位视觉证据：${query}`;
+    if (getToolMeta(operation.tool).family === 'read') return `已读取文档：${query}`;
+    if (getToolMeta(operation.tool).family === 'visual') return `已分析视觉证据：${query}`;
+    return `已检索文档：${query}`;
+  }
+  return normalizeText(operation.resultMessage || operation.message, 280) || getToolMeta(operation.tool).label;
+};
+
+const buildActivities = (rounds, searchHistory) => {
+  const history = Array.isArray(searchHistory) ? searchHistory.filter((item) => item && typeof item === 'object') : [];
+  let historyCursor = 0;
+
+  const consumeHistory = (tool) => {
+    for (let index = historyCursor; index < history.length; index += 1) {
+      if (!tool || history[index]?.tool === tool) {
+        historyCursor = index + 1;
+        return history[index];
+      }
+    }
+    return null;
+  };
+
+  const activities = [];
+  rounds.forEach((roundData, roundIndex) => {
+    const round = roundData.round;
+    const operations = (Array.isArray(roundData.operations) ? roundData.operations : []).map((operation) => {
+      const historyItem = consumeHistory(operation?.tool);
+      return {
+        ...operation,
+        query: operation?.query || historyItem?.query || '',
+        resultCount: Number.isFinite(Number(operation?.resultCount))
+          ? Number(operation.resultCount)
+          : Number.isFinite(Number(historyItem?.resultCount))
+            ? Number(historyItem.resultCount)
+            : null,
+      };
+    });
+
+    if (roundData.planningMessage || roundData.message || operations.length === 0) {
+      activities.push({
+        id: `round-${round}-plan`,
+        kind: 'planning',
+        round,
+        label: normalizePlanningLabel(round, roundData.planningMessage || roundData.message),
+        isLastRound: roundIndex === rounds.length - 1,
+      });
+    }
+
+    let currentGroup = null;
+    operations.forEach((operation, operationIndex) => {
+      const family = getToolMeta(operation?.tool).family;
+      if (!currentGroup || currentGroup.family !== family) {
+        currentGroup = {
+          id: `round-${round}-${family}-${operationIndex}`,
+          kind: 'operations',
+          family,
+          round,
+          operations: [],
+        };
+        activities.push(currentGroup);
+      }
+      currentGroup.operations.push(operation);
+    });
+  });
+  return activities;
+};
+
+const buildDiagnosticItems = (trace) => {
+  const items = [];
+  const gate = trace.agentGate || null;
+  const route = trace.routeDiagnosis || null;
+  const diagnostics = trace.diagnostics || null;
+  const evidenceState = trace.evidenceState || diagnostics?.evidence_state || null;
+  const contextBudget = diagnostics?.context_budget || null;
+
+  if (gate) {
+    const enabled = gate.enabled || gate.use_agent || gate.agent_mode;
+    items.push(`Agent ${enabled ? '启用' : '未启用'}：${AGENT_GATE_REASON_LABELS[gate.reason] || gate.reason || '未知'}`);
+    if (Array.isArray(gate.matched_evidence_need) && gate.matched_evidence_need.length > 0) {
+      items.push(`证据需求：${gate.matched_evidence_need.join('、')}`);
+    }
+    if (gate.query_type) items.push(`题型：${QUERY_TYPE_LABELS[gate.query_type] || gate.query_type}`);
+  }
+
+  if (route && typeof route === 'object') {
+    const taskLabel = TASK_LABELS[route.task] || route.task;
+    if (taskLabel) items.push(`意图：${taskLabel}${route.scope ? ` · ${route.scope}` : ''}`);
+    if (route.is_ambiguous) items.push('澄清：需要用户补充');
+    const strengthLabel = formatDecisionStrength(route.decision_strength ?? route.confidence);
+    if (strengthLabel) items.push(`判定强度：${strengthLabel}`);
+  }
+
+  if (Number.isFinite(trace.contextChars) && trace.contextChars > 0) items.push(`上下文：${trace.contextChars} 字`);
+  if (contextBudget) {
+    items.push(`上下文预算：${contextBudget.after_tokens || 0}/${contextBudget.limit_tokens || 0} tokens${contextBudget.truncated ? '（已截断）' : ''}`);
+  }
+
+  const scoring = diagnostics?.evidence_scoring || trace.evidenceScoring || null;
+  if (scoring?.applied) {
+    items.push(`证据评分：高 ${scoring.high_score_count || 0} · 中 ${scoring.mid_score_count || 0} · 丢弃 ${scoring.dropped_count || 0}`);
+  }
+  if (evidenceState && typeof evidenceState === 'object') {
+    const state = EVIDENCE_STATUS_LABELS[String(evidenceState.status || 'gathering')] || evidenceState.status;
+    const pieces = [state];
+    if (Number(evidenceState.tool_call_count) > 0) pieces.push(`${Number(evidenceState.tool_call_count)} 次工具`);
+    if (Number(evidenceState.independent_evidence_count) > 0) pieces.push(`${Number(evidenceState.independent_evidence_count)} 路证据`);
+    items.push(`证据状态：${pieces.join(' · ')}`);
+  }
+  const evidenceDeltas = Array.isArray(diagnostics?.evidence_delta)
+    ? diagnostics.evidence_delta
+    : [];
+  const latestDelta = evidenceDeltas[evidenceDeltas.length - 1];
+  if (latestDelta && typeof latestDelta === 'object') {
+    items.push(
+      `本轮证据：新增 ${Number(latestDelta.unique_delta) || 0} · 重复 ${Number(latestDelta.duplicate_delta) || 0} · 覆盖 +${Number(latestDelta.coverage_delta) || 0}`
+    );
+    if (latestDelta.state_hash) items.push(`状态哈希：${String(latestDelta.state_hash).slice(0, 12)}`);
+  }
+  if (diagnostics?.evidence_saturation_stop) {
+    items.push('停止原因：连续两轮无证据增量');
+  }
+  if (trace.fallbackReason) items.push(`降级原因：${trace.fallbackReason}`);
+  if (trace.error) items.push(`错误：${trace.error}`);
+  return items;
+};
+
+const TimelineIcon = ({ children, active = false, complete = false, darkMode = false }) => (
+  <span
+    className={`absolute -left-[31px] top-[9px] z-[1] grid h-[22px] w-[22px] place-items-center rounded-full border ring-[3px] ${
+      active
+        ? darkMode
+          ? 'border-[#FFA07A] bg-[#FFA07A] text-[#24272d] ring-[#2b2e34]'
+          : 'border-[#a8624e] bg-[#a8624e] text-white ring-[#faf8f6]'
+        : complete
+          ? darkMode
+            ? 'border-gray-100 bg-gray-100 text-[#27292d] ring-[#2b2e34]'
+            : 'border-[#303238] bg-[#303238] text-white ring-[#faf8f6]'
+        : darkMode
+          ? 'border-white/15 bg-[#444850] text-gray-100 ring-[#2b2e34]'
+          : 'border-[#d8cec7] bg-[#f2ece7] text-[#5c5049] ring-[#faf8f6]'
+    } ${active ? 'agent-timeline-node-active' : complete ? 'agent-timeline-node-complete' : ''}`}
+    aria-hidden="true"
+  >
+    {children}
   </span>
 );
 
-export default function AgentTracePanel({ trace, embedded = false }) {
-  const isRunning = Boolean(trace && trace.enabled && trace.startedAt && !trace.endedAt);
+const AgentProgress = ({ taskStatus, operationCount, darkMode }) => {
+  const completedTasks = Array.isArray(taskStatus?.completed) ? taskStatus.completed : [];
+  const pendingTasks = Array.isArray(taskStatus?.pending) ? taskStatus.pending : [];
+  const hasCurrentTask = Boolean(normalizeText(taskStatus?.current, 180));
+  const totalTasks = completedTasks.length + pendingTasks.length + (hasCurrentTask ? 1 : 0);
+  const hasKnownTotal = totalTasks > 1 || pendingTasks.length > 0;
+  const completedCount = Math.min(completedTasks.length, totalTasks);
+  const progress = hasKnownTotal && totalTasks > 0
+    ? Math.round((completedCount / totalTasks) * 100)
+    : 0;
+  const progressText = hasKnownTotal
+    ? `${completedCount} / ${totalTasks} 项`
+    : operationCount > 0
+      ? `${operationCount} 次工具`
+      : '准备中';
+
+  return (
+    <div className="agent-progress-enter mb-2.5 ml-1 mr-1 pt-1" data-testid="agent-progress">
+      <div className={`mb-1.5 flex items-center justify-between gap-3 px-1 text-[12.5px] leading-5 ${
+        darkMode ? 'text-gray-300' : 'text-[#5f5a56]'
+      }`}>
+        <span className="font-medium">检索进度</span>
+        <span className={`flex-shrink-0 tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#8b817b]'}`}>
+          {progressText}
+        </span>
+      </div>
+      <div
+        className={`agent-progress-track h-[5px] w-full rounded-full ${
+          darkMode ? 'bg-white/10' : 'bg-[#e8e3df]'
+        }`}
+        role="progressbar"
+        aria-label="检索进度"
+        aria-valuemin={hasKnownTotal ? 0 : undefined}
+        aria-valuemax={hasKnownTotal ? totalTasks : undefined}
+        aria-valuenow={hasKnownTotal ? completedCount : undefined}
+        aria-valuetext={hasKnownTotal ? undefined : '正在检索与整理证据'}
+      >
+        {hasKnownTotal && (
+          <span
+            className={`agent-progress-fill block h-full rounded-full ${darkMode ? 'bg-[#FFA07A]' : 'bg-[#B56B55]'}`}
+            style={{ width: `${progress}%` }}
+          />
+        )}
+        <span className="agent-progress-sweep" aria-hidden="true" />
+      </div>
+    </div>
+  );
+};
+
+export default function AgentTracePanel({ trace, embedded = false, darkMode = false }) {
+  const isRunning = Boolean(trace?.enabled && trace?.startedAt && !trace?.endedAt);
   const rounds = useMemo(() => {
-    const sourceRounds = Array.isArray(trace?.rounds) ? trace.rounds : [];
-    return sourceRounds
+    const source = Array.isArray(trace?.rounds) ? trace.rounds : [];
+    return source
       .map((round) => ({ ...round, round: Number(round?.round) }))
       .filter((round) => Number.isInteger(round.round) && round.round > 0)
       .sort((left, right) => left.round - right.round);
   }, [trace?.rounds]);
-  const [collapsed, setCollapsed] = useState(() => !isRunning);
-  const [expandedRounds, setExpandedRounds] = useState(() => new Set(isRunning ? [1] : []));
+  const activities = useMemo(
+    () => buildActivities(rounds, trace?.searchHistory),
+    [rounds, trace?.searchHistory]
+  );
+  const activeActivityIds = useMemo(() => new Set(
+    activities
+      .filter((activity) => activity.kind === 'operations' && activity.operations.some((operation) => operation.status !== 'done'))
+      .map((activity) => activity.id)
+  ), [activities]);
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set(activeActivityIds));
+  const [panelExpanded, setPanelExpanded] = useState(() => isRunning);
   const wasRunningRef = useRef(isRunning);
-
-  // 运行中每 500ms 触发一次重绘，让头部计时器实时走动
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const intentId = String(trace?.routeDiagnosis?.intent_id || '');
+  const [intentFeedback, setIntentFeedback] = useState('');
+  const [intentFeedbackPending, setIntentFeedbackPending] = useState(false);
+
   useEffect(() => {
     if (!isRunning) return undefined;
-    const id = setInterval(() => setNowTick(Date.now()), 500);
-    return () => clearInterval(id);
+    const timer = setInterval(() => setNowTick(Date.now()), 500);
+    return () => clearInterval(timer);
   }, [isRunning]);
 
-  // 新一轮开始时展示最新进展；用户仍可在当前轮手动收起。
-  const latestRound = rounds[rounds.length - 1]?.round;
   useEffect(() => {
-    if (!isRunning || latestRound == null) return;
-    setCollapsed(false);
-    setExpandedRounds((prev) => {
-      if (prev.has(latestRound)) return prev;
-      const next = new Set(prev);
-      next.add(latestRound);
-      return next;
-    });
-  }, [isRunning, latestRound]);
+    setIntentFeedback('');
+    setIntentFeedbackPending(false);
+  }, [intentId]);
 
-  // 检索开始自动展开，结束后压缩成一行摘要，避免历史过程长期占满对话区。
   useEffect(() => {
-    if (!wasRunningRef.current && isRunning) {
-      setCollapsed(false);
-    } else if (wasRunningRef.current && !isRunning) {
-      setCollapsed(true);
-      setExpandedRounds(new Set());
-    }
+    if (activeActivityIds.size === 0) return;
+    setExpandedGroups((current) => new Set([...current, ...activeActivityIds]));
+  }, [activeActivityIds]);
+
+  useEffect(() => {
+    if (!wasRunningRef.current && isRunning) setPanelExpanded(true);
+    if (wasRunningRef.current && !isRunning) setPanelExpanded(false);
     wasRunningRef.current = isRunning;
   }, [isRunning]);
 
-  const stats = useMemo(() => {
-    if (!trace) return null;
-    const opCount = rounds.reduce(
-      (sum, round) => sum + (Array.isArray(round.operations) ? round.operations.length : 0),
-      0
-    );
-    const totalResults = rounds.reduce((sum, round) => {
-      if (!Array.isArray(round.operations)) return sum;
-      return sum + round.operations.reduce((inner, op) => inner + (Number(op.resultCount) || 0), 0);
-    }, 0);
-    return { roundCount: rounds.length, opCount, totalResults };
-  }, [rounds, trace]);
+  if (!trace?.enabled) return null;
 
-  if (!trace || !trace.enabled) return null;
+  const operationCount = activities.reduce(
+    (count, activity) => count + (activity.kind === 'operations' ? activity.operations.length : 0),
+    0
+  );
+  const totalResults = activities.reduce(
+    (count, activity) => count + (activity.kind === 'operations'
+      ? activity.operations.reduce((sum, operation) => sum + (Number(operation.resultCount) || 0), 0)
+      : 0),
+    0
+  );
+  const duration = isRunning
+    ? formatElapsedMs(Math.max(0, nowTick - trace.startedAt))
+    : formatDuration(trace.startedAt, trace.endedAt);
+  const diagnosticItems = buildDiagnosticItems(trace);
+  const subQuestions = Array.isArray(trace.subQuestions)
+    ? trace.subQuestions
+    : Array.isArray(trace.diagnostics?.sub_questions)
+      ? trace.diagnostics.sub_questions
+      : [];
+  const coverage = Array.isArray(trace.taskStatus?.sub_question_coverage)
+    ? trace.taskStatus.sub_question_coverage
+    : [];
 
-  const taskStatus = trace.taskStatus || { completed: [], current: '', pending: [] };
-  const gate = trace.agentGate || null;
-  const diagnostics = trace.diagnostics || null;
-  const evidenceState = trace.evidenceState || diagnostics?.evidence_state || null;
-  const contextBudget = diagnostics?.context_budget || null;
-  const subQuestions = trace.subQuestions || trace.diagnostics?.sub_questions || [];
-  const coverage = trace.taskStatus?.sub_question_coverage || [];
-  const duration = formatDuration(trace.startedAt, trace.endedAt);
-  const liveDuration = isRunning ? formatElapsedMs(Math.max(0, nowTick - trace.startedAt)) : '';
-  const hasTaskStatus =
-    (taskStatus.completed && taskStatus.completed.length > 0) ||
-    Boolean(taskStatus.current) ||
-    (taskStatus.pending && taskStatus.pending.length > 0);
-
-  const toggleRound = (round) => {
-    setExpandedRounds((prev) => {
-      const next = new Set(prev);
-      if (next.has(round)) next.delete(round);
-      else next.add(round);
+  const toggleGroup = (groupId) => {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
       return next;
     });
   };
 
-  const renderMetaSummary = () => {
-    const items = [];
-    const route = trace.routeDiagnosis || null;
-    if (gate) {
-      const enabledLabel = gate.enabled || gate.use_agent || gate.agent_mode ? '启用' : '未启用';
-      items.push(
-        `Agent ${enabledLabel}: ${AGENT_GATE_REASON_LABELS[gate.reason] || gate.reason || '未知'}${
-          gate.agent_gate_source ? ` · ${gate.agent_gate_source}` : ''
-        }${
-          gate.requested_reason
-            ? `（原始: ${AGENT_GATE_REASON_LABELS[gate.requested_reason] || gate.requested_reason}）`
-            : ''
-        }`
-      );
-      if (Array.isArray(gate.matched_evidence_need) && gate.matched_evidence_need.length > 0) {
-        items.push(`证据需求: ${gate.matched_evidence_need.join(', ')}`);
-      }
-      if (gate.query_type) {
-        items.push(`题型: ${QUERY_TYPE_LABELS[gate.query_type] || gate.query_type}`);
-      }
+  const submitIntentFeedback = async (verdict) => {
+    if (!intentId || intentFeedbackPending || intentFeedback) return;
+    const route = trace?.routeDiagnosis || {};
+    setIntentFeedbackPending(true);
+    try {
+      const response = await fetch('/intent/corrections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          intent_id: intentId,
+          intent_version: route.intent_version || '',
+          verdict,
+          predicted_task: route.task || '',
+          predicted_scope: route.scope || '',
+          predicted_is_ambiguous: Boolean(route.is_ambiguous),
+          decision_strength: Number(route.decision_strength ?? route.confidence) || 0,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setIntentFeedback(verdict);
+    } catch (_error) {
+      setIntentFeedback('error');
+    } finally {
+      setIntentFeedbackPending(false);
     }
-    if (route && typeof route === 'object') {
-      const taskLabel = TASK_LABELS[route.task] || route.task;
-      const scopeLabel = route.scope || '';
-      if (taskLabel) {
-        items.push(`意图: ${taskLabel}${scopeLabel ? ` · ${scopeLabel}` : ''}`);
-      }
-      if (route.is_ambiguous) {
-        items.push('澄清: 需要用户补充');
-      } else if (route.clarification_llm?.attempted) {
-        items.push(
-          route.clarification_llm.is_clear === false
-            ? '澄清: LLM 判定不清晰'
-            : '澄清: LLM 判定清晰'
-        );
-      }
-      if (Number.isFinite(Number(route.confidence))) {
-        items.push(`置信度: ${Number(route.confidence).toFixed(2)}`);
-      }
-    }
-    if (Number.isFinite(trace.contextChars) && trace.contextChars > 0) {
-      items.push(`上下文: ${trace.contextChars}字`);
-    }
-    if (contextBudget) {
-      items.push(
-        `预算: ${contextBudget.after_tokens || 0}/${contextBudget.limit_tokens || 0} tokens${
-          contextBudget.truncated ? '（已截断）' : ''
-        }`
-      );
-    }
-    const evidenceScoring = diagnostics?.evidence_scoring || trace.evidenceScoring || null;
-    if (evidenceScoring && typeof evidenceScoring === 'object') {
-      if (evidenceScoring.applied) {
-        items.push(
-          `评分: 高${evidenceScoring.high_score_count || 0}/中${evidenceScoring.mid_score_count || 0}/丢${evidenceScoring.dropped_count || 0}`
-        );
-      } else if (evidenceScoring.reason) {
-        items.push(`评分: 跳过(${evidenceScoring.reason})`);
-      }
-    }
-    const academicStatus = diagnostics?.planner_academic_status || trace.academicStatus || '';
-    if (typeof academicStatus === 'string' && academicStatus.includes('HighScore=')) {
-      const high = academicStatus.match(/HighScore=(\d+)/)?.[1];
-      const table = academicStatus.match(/TableHits=(\d+)/)?.[1];
-      const formula = academicStatus.match(/FormulaHits=(\d+)/)?.[1];
-      const uncovered = academicStatus.match(/UncoveredSubQ=(\d+)/)?.[1];
-      const bits = [];
-      if (high != null) bits.push(`高分${high}`);
-      if (table != null) bits.push(`表${table}`);
-      if (formula != null) bits.push(`公式${formula}`);
-      if (uncovered != null) bits.push(`缺口${uncovered}`);
-      if (bits.length) items.push(`取证: ${bits.join(' · ')}`);
-    }
-    if (evidenceState && typeof evidenceState === 'object') {
-      const status = String(evidenceState.status || 'gathering');
-      const pieces = [EVIDENCE_STATUS_LABELS[status] || status];
-      const toolCalls = Number(evidenceState.tool_call_count);
-      const independentEvidence = Number(evidenceState.independent_evidence_count);
-      const selectedBlocks = Number(evidenceState.selected_block_count);
-      if (Number.isFinite(toolCalls) && toolCalls > 0) pieces.push(`${toolCalls} 次工具`);
-      if (Number.isFinite(independentEvidence) && independentEvidence > 0) {
-        pieces.push(`${independentEvidence} 路证据`);
-      } else if (Number.isFinite(selectedBlocks) && selectedBlocks > 0) {
-        pieces.push(`${selectedBlocks} 个原文块`);
-      }
-      items.push(`证据: ${pieces.join(' · ')}`);
-    }
-    if (trace.fallbackReason) items.push(`降级原因: ${trace.fallbackReason}`);
-    if (trace.error) items.push(`错误: ${trace.error}`);
-    if (items.length === 0) return null;
-
-    return (
-      <div className="ml-[9.5px] flex flex-wrap gap-x-3 gap-y-1 border-l border-[#ddd8d4] py-1 pl-[21px] text-[11px] text-gray-500 dark:border-white/10 dark:text-gray-400">
-        {items.map((item, index) => (
-          <span key={index} className={item.startsWith('错误') ? 'text-rose-600 dark:text-rose-400' : ''}>
-            {item}
-          </span>
-        ))}
-      </div>
-    );
   };
 
-  const renderProgressMeter = (doneCount, totalCount, unitLabel) => {
-    const hasKnownTotal = totalCount > 0;
-    const safeDoneCount = hasKnownTotal ? Math.min(Math.max(doneCount, 0), totalCount) : 0;
-    const pct = hasKnownTotal ? (safeDoneCount / totalCount) * 100 : 0;
-
+  const renderPlanningActivity = (activity) => {
+    const roundHasActiveOperation = activities.some((item) => (
+      item.kind === 'operations'
+      && item.round === activity.round
+      && item.operations.some((operation) => operation.status !== 'done')
+    ));
+    const active = isRunning && activity.isLastRound && !roundHasActiveOperation;
     return (
-      <>
-        <div className="mb-2.5 text-[11px] font-medium tabular-nums text-gray-600 dark:text-gray-300">
-          {hasKnownTotal ? `${safeDoneCount} / ${totalCount} ${unitLabel}完成` : '正在准备检索'}
-        </div>
-        <div
-          className="agent-progress-track h-[5px] w-full rounded-full bg-[#e8e6e3] dark:bg-white/10"
-          role="progressbar"
-          aria-label="检索进度"
-          aria-valuemin={hasKnownTotal ? 0 : undefined}
-          aria-valuemax={hasKnownTotal ? totalCount : undefined}
-          aria-valuenow={hasKnownTotal ? safeDoneCount : undefined}
-          aria-valuetext={hasKnownTotal ? undefined : '正在准备检索'}
-        >
-          {hasKnownTotal ? (
-            <span
-              className="block h-full rounded-full bg-[#242629] transition-[width] duration-500 ease-out motion-reduce:transition-none dark:bg-gray-200"
-              style={{ width: `${pct}%` }}
-            />
+      <div key={activity.id} className="agent-op-enter relative min-h-10 py-1 pl-1">
+        <TimelineIcon active={active} darkMode={darkMode}>
+          {active ? (
+            <Loader2 className="h-[15px] w-[15px] animate-spin motion-reduce:animate-none" strokeWidth={2.35} />
           ) : (
-            <span className="agent-progress-sweep" />
+            <PlanningThoughtIcon className="h-[15px] w-[15px]" />
           )}
-        </div>
-      </>
-    );
-  };
-
-  // 任务清单：参考纵向步骤轴，当前步骤直接承载检索轮次，形成一条连续流程。
-  const renderTaskStatus = (renderCurrentRounds) => {
-    const completedTasks = Array.isArray(taskStatus.completed) ? taskStatus.completed : [];
-    const pendingTasks = Array.isArray(taskStatus.pending) ? taskStatus.pending : [];
-    const doneCount = completedTasks.length;
-    const totalCount = doneCount + (taskStatus.current ? 1 : 0) + pendingTasks.length;
-    const steps = [
-      ...completedTasks.map((label, index) => ({ key: `done-${index}`, label, status: 'done' })),
-      ...(taskStatus.current
-        ? [{ key: 'current', label: taskStatus.current, status: 'active' }]
-        : []),
-      ...pendingTasks.map((label, index) => ({ key: `pending-${index}`, label, status: 'pending' })),
-    ];
-    const roundHostKey = taskStatus.current
-      ? 'current'
-      : completedTasks.length > 0
-        ? `done-${completedTasks.length - 1}`
-        : pendingTasks.length > 0
-          ? 'pending-0'
-          : '';
-
-    return (
-      <div className="rounded-[12px] bg-[#f8f7f5] px-4 pb-4 pt-3.5 text-xs dark:bg-white/[0.035]">
-        {renderProgressMeter(doneCount, totalCount, '项')}
-        <div className="mt-4">
-          {steps.map((step, index) => {
-            const isLast = index === steps.length - 1;
-            const isActive = step.status === 'active';
-            return (
-              <div
-                key={step.key}
-                className={`agent-op-enter relative flex gap-3 ${isLast ? '' : 'min-h-[44px] pb-3'}`}
-              >
-                {!isLast && (
-                  <span
-                    className="absolute bottom-[-1px] left-[9.5px] top-5 w-px bg-[#dedbd8] dark:bg-white/10"
-                    aria-hidden="true"
-                  />
-                )}
-                {step.status === 'done' ? (
-                  <span className="relative z-[1] flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#242629] text-white shadow-[0_2px_5px_rgba(0,0,0,0.16)] dark:bg-gray-200 dark:text-gray-900">
-                    <Check className="h-3 w-3" strokeWidth={3} aria-hidden="true" />
-                  </span>
-                ) : isActive ? (
-                  <span className="relative z-[1] flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[#d8d5d2] bg-white dark:border-white/15 dark:bg-[#292c32]">
-                    {isRunning ? (
-                      <Loader2
-                        className="h-4 w-4 animate-spin text-[#242629] motion-reduce:animate-none dark:text-gray-200"
-                        strokeWidth={2.2}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <span className="h-1.5 w-1.5 rounded-full bg-gray-500 dark:bg-gray-400" aria-hidden="true" />
-                    )}
-                  </span>
-                ) : (
-                  <span
-                    className="relative z-[1] h-5 w-5 flex-shrink-0 rounded-full border border-[#dedbd8] bg-[#f8f7f5] dark:border-white/15 dark:bg-[#30333a]"
-                    aria-hidden="true"
-                  />
-                )}
-                <div className="min-w-0 flex-1 pt-px">
-                  <div
-                    className={`line-clamp-2 leading-[19px] ${
-                      step.status === 'done'
-                        ? 'text-gray-500 dark:text-gray-400'
-                        : isActive
-                          ? 'font-medium text-gray-800 dark:text-gray-100'
-                          : 'text-gray-400 dark:text-gray-500'
-                    }`}
-                  >
-                    {step.label}
-                  </div>
-                  {step.key === roundHostKey && renderCurrentRounds && (
-                    <div className="mt-2.5 overflow-hidden">
-                      {renderCurrentRounds()}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+        </TimelineIcon>
+        <div className={`min-h-8 rounded-[7px] px-2.5 py-1.5 text-[13.5px] leading-5 ${
+          active
+            ? darkMode ? 'font-medium text-gray-200' : 'font-medium text-[#4f4a46]'
+            : darkMode ? 'text-gray-300' : 'text-[#5c554f]'
+        }`}>
+          {activity.label}
         </div>
       </div>
     );
   };
 
-  const renderOperation = (op, index) => {
-    const meta = getToolMeta(op.tool);
-    const Icon = meta.icon;
-    const isDone = op.status === 'done' || Number.isFinite(op.resultCount);
-    const isExecuting = !isDone;
-    const elapsed = formatElapsedMs(op.elapsedMs);
+  const renderOperationGroup = (activity) => {
+    const familyMeta = FAMILY_META[activity.family] || FAMILY_META.other;
+    const Icon = familyMeta.icon;
+    const active = activity.operations.some((operation) => operation.status !== 'done');
+    const resultCount = activity.operations.reduce((sum, operation) => sum + (Number(operation.resultCount) || 0), 0);
+    const expanded = expandedGroups.has(activity.id);
+    const hasDetails = activity.operations.some((operation) => (
+      normalizeText(operation.query)
+      || normalizeText(operation.resultMessage || operation.message)
+      || Number.isFinite(Number(operation.resultCount))
+      || Number.isFinite(Number(operation.elapsedMs))
+    ));
+    const summary = active ? familyMeta.running : familyMeta.done(activity.operations.length);
 
     return (
-      <div
-        key={index}
-        className="agent-op-enter flex items-start gap-2.5 px-1.5 py-2 text-[11px]"
-      >
-        <span
-          className={`mt-px flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full ${
-            isExecuting
-              ? 'bg-[#e8e6e3] text-gray-600 dark:bg-white/10 dark:text-gray-300'
-              : 'bg-white/75 text-gray-400 dark:bg-white/[0.055] dark:text-gray-500'
+      <div key={activity.id} className="agent-op-enter relative min-h-10 py-0.5 pl-1">
+        <TimelineIcon active={active} darkMode={darkMode}>
+          {active ? (
+            <Loader2 className="h-[15px] w-[15px] animate-spin motion-reduce:animate-none" strokeWidth={2.35} />
+          ) : (
+            <Icon className="h-[15px] w-[15px]" strokeWidth={2.15} />
+          )}
+        </TimelineIcon>
+        <button
+          type="button"
+          onClick={() => hasDetails && toggleGroup(activity.id)}
+          aria-expanded={hasDetails ? expanded : undefined}
+          className={`flex min-h-9 w-full items-center gap-2.5 rounded-[8px] px-2.5 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
+            darkMode
+              ? 'hover:bg-white/[0.035] focus-visible:ring-[#FFA07A]/35'
+              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/35'
           }`}
-          aria-hidden="true"
         >
-          <Icon className="h-3 w-3" strokeWidth={1.9} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-h-5 flex-wrap items-center gap-x-1.5 gap-y-0.5 leading-5">
-            <span className="font-medium text-gray-700 dark:text-gray-200">{meta.label}</span>
-            {Number.isFinite(op.resultCount) && (
-              <span className="agent-op-enter tabular-nums text-gray-500 dark:text-gray-400">
-                → {op.resultCount} 个结果
-              </span>
-            )}
-            {elapsed && <span className="tabular-nums text-gray-400 dark:text-gray-500">· {elapsed}</span>}
-            {isExecuting && (
-              <span className="inline-flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-500 motion-reduce:animate-none dark:bg-gray-400" aria-hidden="true" />
-                执行中
-              </span>
-            )}
-          </div>
-          {(op.resultMessage || op.message) && (
-            <div className="mt-0.5 line-clamp-2 break-words leading-[18px] text-gray-500 dark:text-gray-400">
-              {op.resultMessage || op.message}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderRound = (roundData, roundIndex) => {
-    const round = roundData.round;
-    const operations = Array.isArray(roundData.operations) ? roundData.operations : [];
-    const isExpanded = expandedRounds.has(round);
-    const opCount = operations.length;
-    const successCount = operations.filter((op) => Number(op.resultCount) > 0).length;
-    const invocationMode = trace.diagnostics?.planner_invocation_mode?.[roundIndex];
-    const isCurrentRound = isRunning && roundIndex === rounds.length - 1;
-
-    const isLast = roundIndex === rounds.length - 1;
-
-    return (
-      <div key={round} className={`agent-op-enter relative flex gap-3 ${isLast ? '' : 'pb-2'}`}>
-        {/* 连接竖线：与任务步骤轴同款，贯穿相邻状态圆 */}
-        {!isLast && (
-          <span
-            className="absolute bottom-[-1px] left-[9.5px] top-6 w-px bg-[#dedbd8] dark:bg-white/10"
-            aria-hidden="true"
-          />
-        )}
-        {/* 状态圆：完成 = 深色对勾圆，进行中 = 白底旋转环 */}
-        {isCurrentRound ? (
-          <span
-            className="relative z-[1] mt-1.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[#d8d5d2] bg-white dark:border-white/15 dark:bg-[#292c32]"
-            aria-hidden="true"
-          >
-            <Loader2 className="h-4 w-4 animate-spin text-[#242629] motion-reduce:animate-none dark:text-gray-200" strokeWidth={2.2} />
+          <span className={`min-w-0 flex-1 truncate text-[13.5px] ${
+            active
+              ? darkMode ? 'font-medium text-gray-200' : 'font-medium text-[#4f4a46]'
+              : darkMode ? 'text-gray-200' : 'text-[#514a45]'
+          }`}>
+            {summary}
           </span>
-        ) : (
-          <span
-            className="relative z-[1] mt-1.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#242629] text-white shadow-[0_2px_5px_rgba(0,0,0,0.16)] dark:bg-gray-200 dark:text-gray-900"
-            aria-hidden="true"
-          >
-            <Check className="h-3 w-3" strokeWidth={3} />
-          </span>
-        )}
-
-        <div className="min-w-0 flex-1">
-          <button
-            type="button"
-            onClick={() => toggleRound(round)}
-            aria-expanded={isExpanded}
-            className="flex w-full items-center gap-2 rounded-[8px] px-2 py-2 text-left text-xs transition-colors duration-200 hover:bg-black/[0.025] active:bg-black/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-gray-400/35 dark:hover:bg-white/[0.035] dark:active:bg-white/[0.055]"
-          >
-            <span
-              className={`min-w-0 flex-1 truncate ${
-                isCurrentRound
-                  ? 'font-medium text-gray-800 dark:text-gray-100'
-                  : 'text-gray-700 dark:text-gray-200'
-              }`}
-            >
-              第 {round} 轮 · {opCount} 个工具{successCount > 0 ? ` · ${successCount} 命中` : ''}
+          {resultCount > 0 && (
+            <span className={`flex-shrink-0 text-[12.5px] tabular-nums ${darkMode ? 'text-gray-300' : 'text-[#7c7069]'}`}>
+              {resultCount} 个结果
             </span>
-            {invocationMode === 'native_tools' && (
-              <span className="text-[10px] text-gray-400 dark:text-gray-500">原生工具</span>
-            )}
-            {invocationMode === 'json_fallback' && (
-              <span className="text-[10px] font-medium text-orange-600 dark:text-orange-300">JSON 兜底</span>
-            )}
-            {roundData.planningMessage && !operations.length && (
-              <span className="inline-flex items-center text-[10px] text-gray-500 dark:text-gray-400">
-                规划中
-                {isCurrentRound && <BouncingDots className="bg-gray-500 dark:bg-gray-400" />}
-              </span>
-            )}
+          )}
+          {hasDetails && (
             <ChevronDown
-              className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform duration-300 ${
-                isExpanded ? 'rotate-0' : '-rotate-90'
-              }`}
+              className={`h-4 w-4 flex-shrink-0 transition-transform duration-300 ${
+                darkMode ? 'text-gray-300' : 'text-[#7c7069]'
+              } ${expanded ? 'rotate-180' : ''}`}
+              strokeWidth={1.9}
+              aria-hidden="true"
             />
-          </button>
-          {/* 轮次明细：与外层收合同款的 grid-rows 展开动画，消灭瞬时跳变 */}
+          )}
+        </button>
+
+        {hasDetails && (
           <div
-            className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none ${
-              isExpanded ? 'grid-rows-[1fr] opacity-100' : 'pointer-events-none grid-rows-[0fr] opacity-0'
+            className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
+              expanded ? 'grid-rows-[1fr] opacity-100' : 'pointer-events-none grid-rows-[0fr] opacity-0'
             }`}
-            aria-hidden={!isExpanded}
+            aria-hidden={!expanded}
           >
             <div className="min-h-0 overflow-hidden">
-              <div className="pb-2 pl-1 pr-0.5 pt-0.5">
-                {roundData.planningMessage && (
-                  <div className="flex items-center gap-1.5 px-1.5 pb-1 pt-0.5 text-[11px] italic text-gray-500 dark:text-gray-400">
-                    <Sparkles className="h-3 w-3 flex-shrink-0 text-gray-400 dark:text-gray-500" strokeWidth={1.8} />
-                    <span className="line-clamp-2">{roundData.planningMessage}</span>
-                  </div>
-                )}
-                {operations.length === 0 ? (
-                  <div className="px-1.5 py-1 text-[11px] italic text-gray-400">该轮未执行任何工具</div>
-                ) : (
-                  <div className="space-y-0.5">
-                    {operations.map((op, opIndex) => renderOperation(op, opIndex))}
-                  </div>
-                )}
+              <div className="pb-1.5 pl-1 pr-1 pt-0.5">
+                {activity.operations.map((operation, index) => {
+                  const meta = getToolMeta(operation.tool);
+                  const OperationIcon = meta.icon;
+                  const elapsed = formatElapsedMs(operation.elapsedMs);
+                  return (
+                    <div key={`${operation.tool || 'tool'}-${index}`} className="agent-detail-enter flex items-start gap-2.5 rounded-[7px] px-2.5 py-2">
+                      <OperationIcon className={`mt-[2px] h-4 w-4 flex-shrink-0 ${darkMode ? 'text-gray-300' : 'text-[#756a63]'}`} strokeWidth={2} aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <div className={`break-words text-[13px] leading-5 ${darkMode ? 'text-gray-200' : 'text-[#58514d]'}`}>
+                          {operationDetailText(operation)}
+                        </div>
+                        <div className={`mt-0.5 flex flex-wrap gap-x-2 text-[12px] tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#7f746d]'}`}>
+                          <span>{meta.label}</span>
+                          {Number.isFinite(Number(operation.resultCount)) && <span>{Number(operation.resultCount)} 个结果</span>}
+                          {elapsed && <span>{elapsed}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   };
 
-  const renderRoundProgress = () => {
-    const completedRounds = isRunning ? Math.max(0, rounds.length - 1) : rounds.length;
+  const currentTask = normalizeText(trace.taskStatus?.current, 180);
+  const hasActivities = activities.length > 0;
+  const timeline = (
+    <div data-testid="agent-trace-timeline">
+      {isRunning && (
+        <AgentProgress
+          taskStatus={trace.taskStatus}
+          operationCount={operationCount}
+          darkMode={darkMode}
+        />
+      )}
 
-    return (
-      <div className="rounded-[12px] bg-[#f8f7f5] px-4 pb-4 pt-3.5 text-xs dark:bg-white/[0.035]">
-        {renderProgressMeter(completedRounds, rounds.length, '轮')}
-        <div className="mt-4">
-          {rounds.length > 0 ? (
-            rounds.map((roundData, index) => renderRound(roundData, index))
-          ) : (
-            <div className="agent-op-enter flex items-center gap-3 text-gray-600 dark:text-gray-300">
-              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[#d8d5d2] bg-white dark:border-white/15 dark:bg-[#292c32]">
-                <Loader2
-                  className="h-4 w-4 animate-spin text-[#242629] motion-reduce:animate-none dark:text-gray-200"
-                  strokeWidth={2.2}
-                  aria-hidden="true"
-                />
-              </span>
-              <span className="font-medium">正在生成检索计划</span>
-            </div>
-          )}
+      {!hasActivities && isRunning && (
+        <div className="agent-op-enter relative min-h-10 py-1 pl-1">
+          <TimelineIcon active darkMode={darkMode}>
+            <Loader2 className="h-[15px] w-[15px] animate-spin motion-reduce:animate-none" strokeWidth={2.35} />
+          </TimelineIcon>
+          <div className={`px-2.5 py-1.5 text-[13.5px] leading-5 ${darkMode ? 'text-gray-200' : 'text-[#514a45]'}`}>
+            {currentTask || '正在生成检索计划'}
+          </div>
         </div>
-      </div>
-    );
-  };
+      )}
 
-  const rootClass = embedded
-    ? 'mt-3 border-t border-[#eee5e0] pt-2 dark:border-white/[0.07]'
-    : 'mt-2 ml-2 max-w-2xl rounded-[16px] border border-[#eadfd8] bg-white p-2 shadow-[0_14px_30px_-23px_rgba(91,65,52,0.5)] dark:border-white/[0.09] dark:bg-[#25282f]';
+      {activities.map((activity) => (
+        activity.kind === 'planning'
+          ? renderPlanningActivity(activity)
+          : renderOperationGroup(activity)
+      ))}
 
+      {!isRunning && operationCount > 0 && (
+        <div className="agent-op-enter relative min-h-10 py-1 pl-1">
+          <TimelineIcon complete darkMode={darkMode}>
+            <Check className="h-[15px] w-[15px]" strokeWidth={2.8} />
+          </TimelineIcon>
+          <div className={`flex min-h-8 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-[7px] px-2.5 py-1.5 text-[13.5px] leading-5 ${darkMode ? 'text-gray-200' : 'text-[#4d4946]'}`}>
+            <span className="font-medium">证据收集完成</span>
+            <span className={`text-[12px] tabular-nums ${darkMode ? 'text-gray-300' : 'text-[#776d66]'}`}>
+              {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{duration ? ` · ${duration}` : ''}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {(diagnosticItems.length > 0 || subQuestions.length > 0 || trace.agentDetail?.length > 0) && (
+        <details className={`agent-diagnostics ml-1 mt-1 rounded-[8px] px-2 py-1 text-[12.5px] ${darkMode ? 'text-gray-300' : 'text-[#746a63]'}`}>
+          <summary className={`flex min-h-7 cursor-pointer select-none items-center gap-1.5 rounded-[6px] px-1 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+            darkMode ? 'hover:text-gray-300 focus-visible:ring-[#FFA07A]/30' : 'hover:text-gray-600 focus-visible:ring-[#D99178]/30'
+          }`}>
+            <ChevronRight className="agent-diagnostics-chevron h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} aria-hidden="true" />
+            <span>检索诊断</span>
+          </summary>
+          <div className={`mt-1.5 space-y-1 border-l pl-3 ${darkMode ? 'border-white/[0.08]' : 'border-[#e5e0dc]'}`}>
+            {diagnosticItems.map((item, index) => (
+              <div key={index} className={item.startsWith('错误') ? 'text-rose-600 dark:text-rose-400' : ''}>{item}</div>
+            ))}
+            {subQuestions.map((question, index) => (
+              <div key={`question-${index}`} className="flex items-start gap-1.5">
+                <Check className={`mt-0.5 h-3 w-3 flex-shrink-0 ${coverage[index] ? 'opacity-100' : 'opacity-25'}`} strokeWidth={2} />
+                <span>{normalizeText(question, 240)}</span>
+              </div>
+            ))}
+            {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
+              <div>已纳入 {trace.agentDetail.length} 个语义组</div>
+            )}
+            {intentId && (
+              <div className="flex items-center gap-1.5 pt-1" aria-label="意图判定反馈">
+                {intentFeedback === 'correct' || intentFeedback === 'incorrect' ? (
+                  <span>已记录判定反馈</span>
+                ) : intentFeedback === 'error' ? (
+                  <button type="button" onClick={() => setIntentFeedback('')} className="rounded-md px-1.5 py-1 hover:bg-black/5 dark:hover:bg-white/5">
+                    记录失败，重试
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => submitIntentFeedback('correct')}
+                      disabled={intentFeedbackPending}
+                      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/5"
+                    >
+                      <ThumbsUp className="h-3 w-3" aria-hidden="true" />
+                      判定准确
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => submitIntentFeedback('incorrect')}
+                      disabled={intentFeedbackPending}
+                      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/5"
+                    >
+                      <ThumbsDown className="h-3 w-3" aria-hidden="true" />
+                      判定有误
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+
+  if (embedded) return timeline;
+
+  const headerLabel = isRunning ? '正在检索证据' : '检索过程';
   return (
-    <div className={rootClass}>
+    <section className={`mt-2 w-full max-w-[46rem] text-[13.5px] ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
       <button
         type="button"
-        onClick={() => setCollapsed((prev) => !prev)}
-        className="group flex w-full items-center gap-2 rounded-[8px] px-1.5 py-2 text-left text-xs text-gray-600 transition-colors duration-200 hover:bg-[#faf9f7] hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400/35 dark:text-gray-300 dark:hover:bg-white/[0.03] dark:hover:text-gray-100"
-        aria-expanded={!collapsed}
-      >
-        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-gray-500 dark:text-gray-400" aria-hidden="true">
-          <ScanSearch className="h-4 w-4" strokeWidth={1.8} />
-        </span>
-        <span className="flex-shrink-0 font-medium">{isRunning ? '检索轨迹' : '检索完成'}</span>
-        {isRunning && (
-          <span className="inline-flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium tabular-nums text-gray-500 dark:text-gray-400">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-600 motion-reduce:animate-none dark:bg-gray-300" aria-hidden="true" />
-            检索中{liveDuration ? ` ${liveDuration}` : ''}
-          </span>
-        )}
-        {stats && (
-          <span className="min-w-0 truncate text-gray-400 dark:text-gray-500">
-            {stats.roundCount} 轮 · {stats.opCount} 次工具
-            {stats.totalResults > 0 ? ` · ${stats.totalResults} 个结果` : ''}
-            {!isRunning && duration ? ` · ${duration}` : ''}
-          </span>
-        )}
-        {trace.fallback && (
-          <span className="ml-auto flex-shrink-0 rounded-[5px] border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-            已降级
-          </span>
-        )}
-        <ChevronDown
-          className={`ml-auto h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform duration-300 ${
-            collapsed ? '-rotate-90' : 'rotate-0'
-          }`}
-        />
-      </button>
-
-      <div
-        className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
-          collapsed ? 'invisible grid-rows-[0fr] opacity-0' : 'visible grid-rows-[1fr] opacity-100'
+        onClick={() => setPanelExpanded((current) => !current)}
+        aria-expanded={panelExpanded}
+        className={`-ml-1 flex min-h-9 max-w-full items-center gap-2.5 rounded-[9px] px-2 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
+          darkMode
+            ? 'hover:bg-white/[0.04] focus-visible:ring-[#FFA07A]/40'
+            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/40'
         }`}
-        aria-hidden={collapsed}
       >
+        {isRunning ? (
+          <Loader2 className="h-[18px] w-[18px] animate-spin motion-reduce:animate-none" strokeWidth={1.9} aria-hidden="true" />
+        ) : (
+          <ScanSearch className="h-[18px] w-[18px]" strokeWidth={1.9} aria-hidden="true" />
+        )}
+        <span className="font-medium">{headerLabel}</span>
+        <span className={`truncate text-[12px] tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#8b817b]'}`}>
+          {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{duration ? ` · ${duration}` : ''}
+        </span>
+        <ChevronDown className={`h-4 w-4 transition-transform duration-300 ${panelExpanded ? 'rotate-180' : ''}`} strokeWidth={1.9} aria-hidden="true" />
+      </button>
+      <div className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ${
+        panelExpanded ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0'
+      }`} aria-hidden={!panelExpanded}>
         <div className="min-h-0 overflow-hidden">
-          <div className="flex flex-col gap-1.5 px-1.5 pb-1 pt-1">
-            {renderMetaSummary()}
-
-            {hasTaskStatus &&
-              renderTaskStatus(
-                rounds.length > 0
-                  ? () => rounds.map((roundData, index) => renderRound(roundData, index))
-                  : null
-              )}
-
-            {!hasTaskStatus && (rounds.length > 0 || isRunning) && renderRoundProgress()}
-
-            {subQuestions.length > 0 && (
-              <div className="border-t border-[#eee8e4] px-1 py-2 text-xs dark:border-white/[0.07]">
-                <div className="mb-2 flex items-center gap-1.5 font-medium text-gray-700 dark:text-gray-200">
-                  <Search className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
-                  <span>子问题分解</span>
-                  <span className="text-gray-400">({subQuestions.length})</span>
-                </div>
-                <div className="space-y-1.5">
-                  {subQuestions.map((question, index) => (
-                    <div key={index} className="flex items-start gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
-                      {coverage[index] ? (
-                        <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-500" />
-                      ) : (
-                        <Circle className="mt-0.5 h-3 w-3 flex-shrink-0 text-gray-400" />
-                      )}
-                      <span className="line-clamp-2 flex-1">{question}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {trace.finalMessage && (
-              <div className="agent-op-enter ml-[9.5px] border-l border-[#ddd8d4] py-1 pl-[21px] text-[11px] italic text-gray-500 dark:border-white/10 dark:text-gray-400">
-                {trace.finalMessage}
-              </div>
-            )}
-
-            {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
-              <details className="ml-[9.5px] border-l border-[#ddd8d4] py-1.5 pl-[21px] text-[11px] text-gray-500 dark:border-white/10 dark:text-gray-400">
-                <summary className="cursor-pointer select-none font-medium text-gray-600 dark:text-gray-300">
-                  已纳入意群 <span className="font-normal text-gray-400">({trace.agentDetail.length})</span>
-                </summary>
-                <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
-                  {trace.agentDetail.map((detail, index) => (
-                    <span
-                      key={index}
-                      className="inline-flex items-center gap-1 rounded-[6px] bg-[#f4f1ee] px-1.5 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
-                    >
-                      <Layers className="h-3 w-3 text-gray-400" />
-                      {detail.group_id}
-                      {detail.granularity && <span className="text-gray-400">· {detail.granularity}</span>}
-                      {Number.isFinite(detail.char_count) && (
-                        <span className="text-gray-400">· {detail.char_count}字</span>
-                      )}
-                    </span>
-                  ))}
-                </div>
-              </details>
-            )}
+          <div className={`relative ml-[9px] border-l pb-1 pl-5 pt-1.5 ${darkMode ? 'border-white/[0.14]' : 'border-[#d4ccc6]'}`}>
+            {timeline}
           </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

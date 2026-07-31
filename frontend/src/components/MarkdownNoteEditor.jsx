@@ -197,9 +197,9 @@ function MarkdownNoteEditor({
   const showCounter = remaining <= Math.max(200, Math.round(maxLength * 0.05));
 
   return (
-    <div className={`flex min-w-0 flex-col ${fill ? 'min-h-0 flex-1' : ''}`}>
+    <div className={`markdown-note-editor flex min-w-0 flex-col ${fill ? 'min-h-0 flex-1' : ''}`}>
       <div
-        className={`flex shrink-0 flex-wrap items-center gap-0.5 pb-1.5 ${darkMode ? 'text-gray-400' : 'text-[#82766a]'}`}
+        className={`note-writing-toolbar flex shrink-0 flex-wrap items-center gap-0.5 border-b pb-1.5 ${darkMode ? 'border-white/[0.07] text-gray-400' : 'border-[#ece6e0] text-[#82766a]'}`}
         role="toolbar"
         aria-label="Markdown 格式工具栏"
       >
@@ -227,12 +227,8 @@ function MarkdownNoteEditor({
       <div
         ref={hostRef}
         data-testid="markdown-note-editor"
-        className={`markdown-note-surface custom-scrollbar overflow-hidden rounded-[14px] px-3.5 py-3 transition-[background-color,box-shadow] duration-200 ${
-          fill ? 'markdown-note-surface--fill min-h-0 flex-1' : 'min-h-[104px] max-h-[300px]'
-        } ${
-          darkMode
-            ? 'bg-black/20 focus-within:bg-black/25 focus-within:ring-[3px] focus-within:ring-[#F0653A]/25'
-            : 'bg-[#f7f4f1] focus-within:bg-white focus-within:ring-[3px] focus-within:ring-[#F0653A]/18'
+        className={`markdown-note-surface custom-scrollbar min-w-0 overflow-hidden ${
+          fill ? 'markdown-note-surface--fill min-h-0 flex-1' : 'min-h-[120px] max-h-[300px]'
         }`}
       />
 

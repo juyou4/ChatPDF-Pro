@@ -7,6 +7,7 @@ import {
   replaceInlineCitationRefs,
 } from '../utils/citationUtils';
 import { buildChatHistory, isFailedChatHistoryAssistant } from '../utils/chatContextUsageUtils';
+import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -19,6 +20,7 @@ const API_BASE_URL = (() => {
   return '';
 })();
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
+export const CHAT_PARSE_IDENTITY_UPDATED_MESSAGE = '文档解析结果已更新，请重新提问。';
 const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
 const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
 
@@ -266,22 +268,6 @@ const formatThinkingStageEvent = (payload) => {
       key: stablePhaseKey || `retrieval:${keyParts.join(':')}`,
       text: message,
     };
-  }
-
-  if (payload.type === 'web_search_status') {
-    switch (payload.phase) {
-      case 'searching':
-        return { key: 'web_search:searching', text: '正在联网搜索补充资料...' };
-      case 'fetch_complete':
-        return {
-          key: `web_search:fetch_complete:${payload.count ?? 0}`,
-          text: payload.count
-            ? `已抓取 ${payload.count} 个网页，正在提取关键信息...`
-            : '已完成网页抓取，正在提取关键信息...',
-        };
-      default:
-        return null;
-    }
   }
 
   return null;
@@ -772,7 +758,9 @@ export const mergeAgentMetaIntoTrace = (trace, meta) => {
       agent_policy: intent.agent_policy,
       web_policy: intent.web_policy,
       is_ambiguous: Boolean(intent.is_ambiguous),
-      confidence: intent.confidence,
+      intent_id: intent.intent_id,
+      intent_version: intent.version,
+      decision_strength: intent.decision_strength ?? intent.confidence,
       matched_rules: intent.matched_rules,
       clarification_llm: meta.clarification_llm || null,
     };
@@ -831,6 +819,7 @@ export const finalizeThinkingDurationMs = ({
  *
  * @param {Object} options - 配置选项
  * @param {string|null} options.docId - 当前文档 ID
+ * @param {boolean} options.parseIdentityReady - 当前文档解析身份是否已完成初始化
  * @param {Array} options.screenshots - 截图列表
  * @param {Function} options.setScreenshots - 设置截图列表
  * @param {string} options.selectedText - 当前选中的文本
@@ -848,6 +837,7 @@ export function useMessageState({
   docId = null,
   parseGeneration = '',
   documentSourceHash = '',
+  parseIdentityReady = true,
   screenshots = [],
   setScreenshots,
   selectedText = '',
@@ -921,6 +911,7 @@ export function useMessageState({
   const streamAnswerCriticRef = useRef(null);
   const streamAnswerCertaintyRef = useRef(null);
   const streamWebSearchRef = useRef(null);
+  const streamWebSearchAuditRef = useRef(null);
   const streamWebSearchStatusRef = useRef(null);
   const streamMemoryHitsRef = useRef(null);
   const streamMemoryMetaRef = useRef(null);
@@ -929,8 +920,8 @@ export function useMessageState({
   const streamCallInfoRef = useRef(null);
   const streamVisualVerificationRef = useRef(null);
   const streamIntentDecisionRef = useRef(null);
+  const streamVisualAttachmentsRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
-  const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const visualVerificationPollersRef = useRef(new Map());
   const visualVerificationEpochRef = useRef(0);
@@ -1005,16 +996,20 @@ export function useMessageState({
 
     if (targetMessageId) {
       setMessages((previous) => previous.map((message) => (
-        message.id === targetMessageId
-          ? {
+        message.id !== targetMessageId
+          ? message
+          : {
             ...message,
-            ...(renderedContent.trim() ? { content: renderedContent } : {}),
+            ...(renderedContent.trim()
+              ? { content: renderedContent }
+              : !String(message.content || '').trim() && staleIdentity
+                ? { content: CHAT_PARSE_IDENTITY_UPDATED_MESSAGE }
+                : {}),
             ...(renderedThinking.trim() ? { thinking: renderedThinking } : {}),
             isStreaming: false,
             turnStatus: 'interrupted',
             ...(staleIdentity ? { parseIdentityStale: true } : {}),
           }
-          : message
       )));
     }
 
@@ -1048,11 +1043,6 @@ export function useMessageState({
     }
     visualVerificationPollersRef.current.clear();
   }, [docId, normalizedDocumentSourceHash, normalizedParseGeneration]);
-
-  // 消息变化时自动滚动到底部
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
 
   // ========== 方法 ==========
 
@@ -1202,10 +1192,25 @@ export function useMessageState({
     const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
     const visualCredentials = getVisualCredentials?.() || null;
     if (!docId) { alert('请先上传文档'); return; }
+    if (!parseIdentityReady) {
+      alert('正在同步文档解析状态，请稍后再试');
+      return;
+    }
     if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
       alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
       return;
     }
+
+    // Companion documents are always explicit user choices. Keep the current
+    // document as the primary route and bound extras to the backend fan-out
+    // contract. Agent mode is intentionally single-document, so requesting
+    // companions switches this turn to the deterministic multi-doc retriever.
+    const requestedDocIds = [...new Set(
+      (Array.isArray(overrides?.docIds) ? overrides.docIds : [])
+        .map((value) => String(value || '').trim())
+        .filter((value) => value && value !== String(docId))
+    )].slice(0, 4);
+    const isMultiDocumentRequest = requestedDocIds.length > 0;
 
     if (abortControllerRef.current || activeStreamMsgIdRef.current || streamingMessageId) {
       interruptActiveRequest();
@@ -1227,7 +1232,11 @@ export function useMessageState({
       currentInput,
       identityBoundHistory,
     );
-    const clarificationTicket = retryControlQuestion
+    // A normal follow-up may be a new question even when the previous answer
+    // carried a clarification hint. Resume only through an explicit UI/API
+    // action, never by silently attaching the latest ticket.
+    const clarificationResponse = Boolean(overrides?.clarificationResponse);
+    const clarificationTicket = retryControlQuestion || !clarificationResponse
       ? null
       : resolveClarificationTicket(identityBoundHistory);
     const requestedInteractionMode = String(overrides?.interactionMode || '').trim();
@@ -1324,9 +1333,11 @@ export function useMessageState({
     // 构建请求体
     const requestBody = {
       doc_id: docId,
+      doc_ids: requestedDocIds.length > 0 ? requestedDocIds : null,
       parse_generation: requestParseIdentity.parseGeneration || null,
       document_source_hash: requestParseIdentity.documentSourceHash || null,
       clarification_ticket: clarificationTicket,
+      clarification_response: Boolean(clarificationTicket && clarificationResponse),
       question: requestQuestion,
       api_key: chatApiKey,
       model: chatModel,
@@ -1348,8 +1359,8 @@ export function useMessageState({
       embedding_provider: embeddingProviderId || null,
       embedding_api_host: embeddingApiHost || null,
       enable_graphrag: enableGraphRAG,
-      enable_agent_retrieval: enableAgentRetrieval,
-      force_agent_retrieval: forceAgentRetrieval,
+      enable_agent_retrieval: isMultiDocumentRequest ? false : enableAgentRetrieval,
+      force_agent_retrieval: isMultiDocumentRequest ? false : forceAgentRetrieval,
       interaction_mode: interactionMode,
       enable_jieba_bm25: enableJiebaBM25,
       num_expand_context_chunk: numExpandContextChunk,
@@ -1393,6 +1404,7 @@ export function useMessageState({
     streamAnswerCriticRef.current = null;
     streamAnswerCertaintyRef.current = null;
     streamWebSearchRef.current = null;
+    streamWebSearchAuditRef.current = null;
     streamWebSearchStatusRef.current = null;
     streamMemoryHitsRef.current = null;
     streamMemoryMetaRef.current = null;
@@ -1401,14 +1413,16 @@ export function useMessageState({
     streamCallInfoRef.current = null;
     streamVisualVerificationRef.current = null;
     streamIntentDecisionRef.current = null;
+    streamVisualAttachmentsRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
     setStreamingMessageId(tempMsgId);
     activeStreamMsgIdRef.current = tempMsgId;
     setMessages(prev => [...prev, {
-      id: tempMsgId, type: 'assistant', content: '', model: chatModel,
+      id: tempMsgId, type: 'assistant', content: '', model: chatModel, provider: chatProvider,
       isStreaming: true, thinking: '', thinkingMs: 0, turnStatus: 'streaming',
+      webSearchQuery: String(requestQuestion || '').replace(/\s+/g, ' ').trim().slice(0, 240),
       ...requestIdentityFields,
     }]);
 
@@ -1698,16 +1712,28 @@ export function useMessageState({
               return;
             }
             if (p.type === 'web_search_status') {
+              if (p.audit && typeof p.audit === 'object') {
+                streamWebSearchAuditRef.current = p.audit;
+              }
               streamWebSearchStatusRef.current = { phase: p.phase, count: p.count ?? null };
               setMessages(prev => prev.map(m =>
                 m.id === tempMsgId
-                  ? { ...m, webSearchStatus: streamWebSearchStatusRef.current }
+                  ? {
+                    ...m,
+                    webSearchStatus: streamWebSearchStatusRef.current,
+                    webSearchAudit: streamWebSearchAuditRef.current,
+                  }
                   : m
               ));
               return;
             }
             if (p.type === 'web_search') {
               streamWebSearchRef.current = p.sources || [];
+              setMessages(prev => prev.map(m =>
+                m.id === tempMsgId
+                  ? { ...m, webSearchSources: streamWebSearchRef.current }
+                  : m
+              ));
               return;
             }
             if (p.type === 'followup_questions') {
@@ -1785,6 +1811,12 @@ export function useMessageState({
                 appendAnswerContent(cc);
               }
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
+              if (Object.prototype.hasOwnProperty.call(p, 'visual_attachments')) {
+                streamVisualAttachmentsRef.current = normalizeChatVisualAttachments(
+                  p.visual_attachments,
+                  requestParseIdentity,
+                );
+              }
               if (p.retrieval_meta?.max_relevance_score !== undefined) streamMaxRelevanceRef.current = p.retrieval_meta.max_relevance_score;
               if (p.retrieval_meta && (p.retrieval_meta.agent_mode || p.retrieval_meta.agent_search_history)) {
                 if (!streamAgentTraceRef.current) {
@@ -1795,16 +1827,36 @@ export function useMessageState({
               }
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
+              if (Object.prototype.hasOwnProperty.call(p, 'web_search_audit')) {
+                streamWebSearchAuditRef.current = p.web_search_audit || null;
+              } else if (p.retrieval_meta?.web_search_audit) {
+                streamWebSearchAuditRef.current = p.retrieval_meta.web_search_audit;
+              }
               if (Object.prototype.hasOwnProperty.call(p, 'memory_hits')) streamMemoryHitsRef.current = p.memory_hits;
               if (Object.prototype.hasOwnProperty.call(p, 'memory_meta')) streamMemoryMetaRef.current = p.memory_meta;
               if (p.usage_meta || p.usage) streamUsageRef.current = p.usage_meta || p.usage;
               if (p.used_provider || p.used_model || p.fallback_used !== undefined) {
+                const previousCallInfo = streamCallInfoRef.current;
                 streamCallInfoRef.current = {
-                  provider: p.used_provider,
-                  model: p.used_model,
-                  fallback: p.fallback_used,
+                  provider: p.used_provider || previousCallInfo?.provider || chatProvider,
+                  model: p.used_model || previousCallInfo?.model || chatModel,
+                  fallback: p.fallback_used ?? previousCallInfo?.fallback,
                   usage: p.usage_meta || p.usage || streamUsageRef.current || null,
                 };
+                if (
+                  streamCallInfoRef.current.provider !== previousCallInfo?.provider
+                  || streamCallInfoRef.current.model !== previousCallInfo?.model
+                ) {
+                  setMessages(prev => prev.map(m => (
+                    m.id === tempMsgId
+                      ? {
+                        ...m,
+                        provider: streamCallInfoRef.current.provider,
+                        model: streamCallInfoRef.current.model,
+                      }
+                      : m
+                  )));
+                }
               }
               if (ct) {
                 appendRealThinking(ct);
@@ -1849,7 +1901,7 @@ export function useMessageState({
             message.id === tempMsgId
               ? {
                 ...message,
-                content: '',
+                content: CHAT_PARSE_IDENTITY_UPDATED_MESSAGE,
                 isStreaming: false,
                 turnStatus: 'interrupted',
                 parseIdentityStale: true,
@@ -1932,7 +1984,7 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchAudit: streamWebSearchAuditRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -1997,6 +2049,10 @@ export function useMessageState({
             : null
         );
         const nonStreamIntentDecision = data.retrieval_meta?.intent_decision || data.intent_decision || null;
+        const nonStreamVisualAttachments = normalizeChatVisualAttachments(
+          data.visual_attachments,
+          requestParseIdentity,
+        );
         let nonStreamAgentTrace = null;
         if (data.retrieval_meta && (data.retrieval_meta.agent_mode || data.retrieval_meta.agent_gate)) {
           nonStreamAgentTrace = createInitialAgentTrace();
@@ -2010,7 +2066,7 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, webSearchSources: data.web_search_sources || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
+            ? { ...m, provider: data.used_provider || m.provider || chatProvider, model: data.used_model || m.model || chatModel, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, visualAttachments: nonStreamVisualAttachments, webSearchSources: data.web_search_sources || null, webSearchAudit: data.web_search_audit || data.retrieval_meta?.web_search_audit || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -2066,7 +2122,7 @@ export function useMessageState({
       if (isRequestCurrent()) setIsLoading(false);
     }
   }, [
-    docId, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
+    docId, parseIdentityReady, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
     enableGraphRAG, enableAgentRetrieval, forceAgentRetrieval,
     enableJiebaBM25, numExpandContextChunk,
     getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
@@ -2175,7 +2231,6 @@ export function useMessageState({
 
     // Refs
     abortControllerRef,
-    messagesEndRef,
     textareaRef,
 
     // 方法

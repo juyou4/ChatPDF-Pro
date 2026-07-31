@@ -293,15 +293,14 @@ const DeferredPdfPage = ({
             data-pdf-active-page={isActive ? 'true' : undefined}
             data-pdf-source-width={isActive ? renderedWidth : undefined}
             data-pdf-source-height={isActive ? renderedHeight : undefined}
-            className={`relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_2px_15px_rgba(0,0,0,0.06)] transition-shadow duration-200 ${
+            className={`pdf-page-frame relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_2px_15px_rgba(0,0,0,0.06)] transition-shadow duration-200 ${
                 onActivate ? 'cursor-pointer hover:shadow-[0_8px_24px_rgba(62,42,30,0.14)] focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/45' : ''
-            } ${darkMode ? 'shadow-none !bg-transparent' : ''}`}
+            } ${darkMode ? 'pdf-page-frame--dark' : ''}`}
             style={{
                 width: `${stageWidth}px`,
                 height: `${stageHeight}px`,
                 contentVisibility: deferRender && !isActive ? 'auto' : undefined,
                 containIntrinsicSize: deferRender && !isActive ? `${stageHeight}px ${stageWidth}px` : undefined,
-                filter: darkMode ? 'grayscale(1) invert(1)' : 'none',
             }}
             role={onActivate ? 'button' : undefined}
             tabIndex={onActivate ? 0 : undefined}
@@ -316,7 +315,7 @@ const DeferredPdfPage = ({
             {shouldRender ? (
                 <div
                     ref={isActive ? viewerRef : undefined}
-                    className="relative bg-white"
+                    className={`pdf-page-stage relative ${darkMode ? 'pdf-page-stage--dark' : 'bg-white'}`}
                     style={{
                         width: renderedWidth,
                         minHeight: renderedHeight,
@@ -324,10 +323,13 @@ const DeferredPdfPage = ({
                         transformOrigin: 'top left',
                     }}
                 >
-                    <div style={liveScaleRatio !== 1 ? {
-                        transform: `scale(${liveScaleRatio})`,
-                        transformOrigin: 'top left',
-                    } : undefined}>
+                    <div
+                        className={`pdf-page-render-layer ${darkMode ? 'pdf-page-render-layer--dimmed' : ''}`}
+                        style={liveScaleRatio !== 1 ? {
+                            transform: `scale(${liveScaleRatio})`,
+                            transformOrigin: 'top left',
+                        } : undefined}
+                    >
                         {cachedImage && (
                             <img
                                 src={cachedImage}
@@ -357,7 +359,7 @@ const DeferredPdfPage = ({
     );
 };
 
-const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, savedHighlights = EMPTY_SAVED_HIGHLIGHTS, onSavedHighlightClick, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [], hasDockedSelectionToolbar = false, selectionToolbar = null, translationSurface = 'panel', onTranslationSurfaceChange }, ref) => {
+const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo = null, savedHighlights = EMPTY_SAVED_HIGHLIGHTS, onSavedHighlightClick, page = 1, onPageChange, isSelecting = false, onAreaSelected, onSelectionCancel, darkMode = false, onToggleSidebar, blockIndex = null, activeBlockId = null, focusedBlockIds = [], focusPulseToken = 0, navigationRequest = null, visitedBlockIds = [], inlineTranslationBlockIds = [], onBlockHover, onBlockClick, blockTranslations = {}, translatingBlockIds = [], hasDockedSelectionToolbar = false, selectionToolbar = null, translationSurface = 'panel', onTranslationSurfaceChange }, ref) => {
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
@@ -407,6 +409,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const pageRef = useRef(null);
     const pageLayoutMenuRef = useRef(null);
     const pdfScrollRef = useRef(null);
+    const handledNavigationRevisionRef = useRef(null);
     const loadedPdfUrlRef = useRef('');
     const hasAutoFitRef = useRef(false);
     const backgroundDelayRef = useRef(null);
@@ -512,7 +515,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const pdfCacheKey = fullPdfUrl || pdfUrl || '';
     const renderPixelRatio = useMemo(() => {
         if (typeof window === 'undefined') return 1;
-        return Math.min(Math.max(window.devicePixelRatio || 1, 1), 1.5);
+        return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
     }, []);
     const normalizedPageRotation = normalizePdfReaderRotation(pageRotation);
     const pageRenderedSize = useMemo(() => ({
@@ -692,6 +695,96 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         const target = pdfScrollRef.current?.querySelector?.(`[data-pdf-page-number="${targetPage}"]`);
         target?.scrollIntoView?.({ block: 'start', inline: 'center', behavior });
     }, []);
+
+    const scrollToReaderTarget = useCallback((targetPage, blockId, behavior = 'smooth') => {
+        const scroller = pdfScrollRef.current;
+        const pageElement = scroller?.querySelector?.(`[data-pdf-page-number="${targetPage}"]`);
+        if (!scroller || !pageElement) return false;
+
+        const pageData = getPageBlockData(blockIndex, targetPage);
+        const block = blockId
+            ? pageData?.blocks?.find((item) => item?.block_id === blockId)
+            : null;
+        const bbox = normalizeBlockBBox(block?.bbox);
+        if (!bbox) {
+            pageElement.scrollIntoView?.({ block: 'start', inline: 'center', behavior });
+            return true;
+        }
+
+        const sourceWidth = Math.max(1, Number(pageData?.width_pts) || Number(pageBaseSize.width) || 612);
+        const sourceHeight = Math.max(1, Number(pageData?.height_pts) || Number(pageBaseSize.height) || 792);
+        const renderedWidth = sourceWidth * scale;
+        const renderedHeight = sourceHeight * scale;
+        const displayRect = mapPdfReaderPageRectToDisplay({
+            left: bbox[0] * scale,
+            top: bbox[1] * scale,
+            width: (bbox[2] - bbox[0]) * scale,
+            height: (bbox[3] - bbox[1]) * scale,
+            pageWidth: renderedWidth,
+            pageHeight: renderedHeight,
+            rotation: normalizedPageRotation,
+        });
+        const pageBounds = pageElement.getBoundingClientRect();
+        const viewportBounds = scroller.getBoundingClientRect();
+        const targetTop = scroller.scrollTop + pageBounds.top - viewportBounds.top + displayRect.top;
+        const targetLeft = scroller.scrollLeft + pageBounds.left - viewportBounds.left
+            + displayRect.left + displayRect.width / 2;
+        const contextOffset = Math.min(140, Math.max(48, scroller.clientHeight * 0.16));
+        const nextTop = clampNumber(
+            targetTop - contextOffset,
+            0,
+            Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        );
+        const nextLeft = clampNumber(
+            targetLeft - scroller.clientWidth / 2,
+            0,
+            Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+        );
+
+        if (typeof scroller.scrollTo === 'function') {
+            scroller.scrollTo({ top: nextTop, left: nextLeft, behavior });
+        } else {
+            scroller.scrollTop = nextTop;
+            scroller.scrollLeft = nextLeft;
+        }
+        return true;
+    }, [blockIndex, normalizedPageRotation, pageBaseSize.height, pageBaseSize.width, scale]);
+
+    useEffect(() => {
+        const revision = navigationRequest?.revision;
+        if (revision == null || revision === handledNavigationRevisionRef.current) return;
+        if (!isContinuousReading || typeof window === 'undefined') {
+            handledNavigationRevisionRef.current = revision;
+            return;
+        }
+
+        const requestedPage = Math.max(1, Number(navigationRequest.page) || 1);
+        const totalPages = Math.max(1, Number(numPages) || requestedPage);
+        const targetPage = Math.min(totalPages, requestedPage);
+        const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+        const cancelScheduled = window.cancelAnimationFrame || window.clearTimeout;
+        let cancelled = false;
+        let frameId = null;
+        let attempts = 0;
+
+        const navigate = () => {
+            if (cancelled) return;
+            if (scrollToReaderTarget(targetPage, navigationRequest.blockId, 'smooth')) {
+                handledNavigationRevisionRef.current = revision;
+                return;
+            }
+            attempts += 1;
+            if (attempts < 12) {
+                frameId = schedule(navigate);
+            }
+        };
+
+        frameId = schedule(navigate);
+        return () => {
+            cancelled = true;
+            if (frameId != null) cancelScheduled(frameId);
+        };
+    }, [isContinuousReading, navigationRequest, numPages, scrollToReaderTarget]);
 
     const updateReaderPage = useCallback((nextPage, { scroll = false, behavior = 'smooth' } = {}) => {
         const total = Math.max(1, Number(numPages) || 1);
@@ -2188,7 +2281,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     className="absolute inset-0 z-[9] pointer-events-none"
                                     aria-hidden="true"
                                     style={{
-                                        mixBlendMode: darkMode ? 'screen' : 'multiply',
+                                        mixBlendMode: 'multiply',
                                     }}
                                 >
                                     <div
@@ -2242,7 +2335,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                                     width: rect.width,
                                                     height: underlineHeight,
                                                     background: normalized,
-                                                    boxShadow: darkMode ? `0 0 5px ${normalized}` : undefined,
                                                 }}
                                             />
                                         );

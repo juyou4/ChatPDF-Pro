@@ -16,13 +16,13 @@ const ChatSettings = ({ isOpen, onClose }) => {
         thoughtAutoCollapse, answerDetailLevel, sendShortcut,
         confirmDeleteMessage, confirmRegenerateMessage,
         codeCollapsible, codeWrappable, codeShowLineNumbers,
-        mathEngine, mathEnableSingleDollar, messageStyle, messageFontSize,
+        mathEngine, mathEnableSingleDollar, messageStyle,
         setMaxTokens, setTemperature, setTopP, setContextCount, setStreamOutput,
         setEnableTemperature, setEnableTopP, setEnableMaxTokens, setCustomParams,
         setThoughtAutoCollapse, setAnswerDetailLevel, setSendShortcut,
         setConfirmDeleteMessage, setConfirmRegenerateMessage,
         setCodeCollapsible, setCodeWrappable, setCodeShowLineNumbers,
-        setMathEngine, setMathEnableSingleDollar, setMessageStyle, setMessageFontSize,
+        setMathEngine, setMathEnableSingleDollar, setMessageStyle,
     } = useChatParams();
 
     const DEFAULT_SETTINGS = CHAT_PARAMS_DEFAULT_SETTINGS;
@@ -38,7 +38,6 @@ const ChatSettings = ({ isOpen, onClose }) => {
         setCodeCollapsible(DEFAULT_SETTINGS.codeCollapsible); setCodeWrappable(DEFAULT_SETTINGS.codeWrappable);
         setCodeShowLineNumbers(DEFAULT_SETTINGS.codeShowLineNumbers); setMathEngine(DEFAULT_SETTINGS.mathEngine);
         setMathEnableSingleDollar(DEFAULT_SETTINGS.mathEnableSingleDollar); setMessageStyle(DEFAULT_SETTINGS.messageStyle);
-        setMessageFontSize(DEFAULT_SETTINGS.messageFontSize);
     };
 
     const addCustomParam = () => setCustomParams([...customParams, { name: '', type: 'string', value: '' }]);
@@ -260,12 +259,6 @@ const ChatSettings = ({ isOpen, onClose }) => {
                                 <div className="flex items-center justify-between">
                                     <span className="text-[13px] font-medium text-gray-700">单$行内数学</span>
                                     <ToggleSwitch checked={mathEnableSingleDollar} onChange={setMathEnableSingleDollar} />
-                                </div>
-                                <div className="flex items-center justify-between">
-                                    <span className="text-[13px] font-medium text-gray-700">字体大小</span>
-                                    <div className="w-16">
-                                        <NumberInput value={messageFontSize} onChange={setMessageFontSize} min={12} max={22} step={1} precision={0} />
-                                    </div>
                                 </div>
                             </div>
                         </div>

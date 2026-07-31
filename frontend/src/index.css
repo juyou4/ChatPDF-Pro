@@ -129,15 +129,15 @@
 
 .ld-cells {
     display: grid;
-    grid-template-columns: repeat(3, 4px);
+    grid-template-columns: repeat(3, 4.5px);
     gap: 2px;
 }
 
 .ld-cells i {
     display: block;
-    width: 4px;
-    height: 4px;
-    border-radius: 1.5px;
+    width: 4.5px;
+    height: 4.5px;
+    border-radius: 1.75px;
     background: currentColor;
     opacity: 0.55;
     transform: scale(1);
@@ -170,6 +170,8 @@
     --body-font: var(--global-font-family);
     --heading-font: var(--global-font-family);
     --global-scale: 1;
+    --content-font-size: 14px;
+    --content-font-scale: 1;
 
     /* --- 2. Material Neutrality --- */
     --color-bg-base: #F2F4F7;
@@ -246,6 +248,65 @@
     --blur-duration: 0.3s;
 }
 
+/* 固定像素字号也跟随“界面字号”。这里只缩放文字，不改变按钮、图标和间距。 */
+#root :where(.text-\[9px\]) { font-size: calc(9px * var(--global-scale)); }
+#root :where(.text-\[9\.5px\]) { font-size: calc(9.5px * var(--global-scale)); }
+#root :where(.text-\[10px\]) { font-size: calc(10px * var(--global-scale)); }
+#root :where(.text-\[10\.5px\]) { font-size: calc(10.5px * var(--global-scale)); }
+#root :where(.text-\[11px\]) { font-size: calc(11px * var(--global-scale)); }
+#root :where(.text-\[11\.5px\]) { font-size: calc(11.5px * var(--global-scale)); }
+#root :where(.text-\[12px\]) { font-size: calc(12px * var(--global-scale)); }
+#root :where(.text-\[12\.5px\]) { font-size: calc(12.5px * var(--global-scale)); }
+#root :where(.text-\[13px\]) { font-size: calc(13px * var(--global-scale)); }
+#root :where(.text-\[13\.5px\]) { font-size: calc(13.5px * var(--global-scale)); }
+#root :where(.text-\[14px\]) { font-size: calc(14px * var(--global-scale)); }
+#root :where(.text-\[14\.5px\]) { font-size: calc(14.5px * var(--global-scale)); }
+#root :where(.text-\[15px\]) { font-size: calc(15px * var(--global-scale)); }
+#root :where(.text-\[16px\]) { font-size: calc(16px * var(--global-scale)); }
+#root :where(.text-\[17px\]) { font-size: calc(17px * var(--global-scale)); }
+#root :where(.text-\[18px\]) { font-size: calc(18px * var(--global-scale)); }
+#root :where(.text-\[20px\]) { font-size: calc(20px * var(--global-scale)); }
+#root :where(.text-\[32px\]) { font-size: calc(32px * var(--global-scale)); }
+
+/* 阅读和对话内容拥有独立字号，覆盖上面的界面字号映射。 */
+#root .content-typography :where(.text-\[9px\]) { font-size: calc(9px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[9\.5px\]) { font-size: calc(9.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[10px\]) { font-size: calc(10px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[10\.5px\]) { font-size: calc(10.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[11px\]) { font-size: calc(11px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[11\.5px\]) { font-size: calc(11.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[12px\], .text-xs) { font-size: calc(12px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[12\.5px\]) { font-size: calc(12.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[13px\]) { font-size: calc(13px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[13\.5px\]) { font-size: calc(13.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[14px\], .text-sm) { font-size: calc(14px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[14\.5px\]) { font-size: calc(14.5px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[15px\]) { font-size: calc(15px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[16px\], .text-base) { font-size: calc(16px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[17px\]) { font-size: calc(17px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[18px\], .text-lg) { font-size: calc(18px * var(--content-font-scale)); }
+#root .content-typography :where(.text-\[20px\], .text-xl) { font-size: calc(20px * var(--content-font-scale)); }
+#root .content-typography .message-content,
+#root .content-typography .prose-sm {
+    font-size: var(--content-font-size);
+}
+
+#root .content-typography :where(.leading-5) { line-height: calc(20px * var(--content-font-scale)); }
+#root .content-typography :where(.leading-6) { line-height: calc(24px * var(--content-font-scale)); }
+#root .content-typography :where(.leading-7) { line-height: calc(28px * var(--content-font-scale)); }
+#root .content-typography :where(.leading-8) { line-height: calc(32px * var(--content-font-scale)); }
+
+#root .content-typography .note-markdown {
+    font-size: calc(12.5px * var(--content-font-scale));
+}
+
+#root .content-typography .note-markdown h1 { font-size: 1.44em; }
+#root .content-typography .note-markdown h2 { font-size: 1.28em; }
+#root .content-typography .note-markdown h3 { font-size: 1.15em; }
+#root .content-typography .note-markdown h4,
+#root .content-typography .note-markdown h5,
+#root .content-typography .note-markdown h6 { font-size: 1.03em; }
+
 body,
 #root {
     font-family: var(--body-font);
@@ -293,7 +354,19 @@ body,
 }
 
 .chatpdf-shell--dark {
-    background-color: #0f1115;
+    --dark-canvas: #111318;
+    --dark-shell: #181b20;
+    --dark-workspace: #171a20;
+    --dark-pane: #20242b;
+    --dark-surface: #272b33;
+    --dark-surface-hover: #2d323b;
+    --dark-border: rgba(255, 255, 255, 0.085);
+    --dark-border-strong: rgba(255, 255, 255, 0.13);
+    --dark-text: #edf0f4;
+    --dark-text-sub: #b5bbc5;
+    --dark-text-muted: #8e96a2;
+    color-scheme: dark;
+    background-color: var(--dark-canvas);
     background-image: none;
 }
 
@@ -311,13 +384,13 @@ body,
 }
 
 .workspace-surface-dark {
-    background-color: #16181d;
-    border-color: rgba(255, 255, 255, 0.08);
+    background-color: var(--dark-workspace, #171a20);
+    border-color: var(--dark-border, rgba(255, 255, 255, 0.085));
     box-shadow:
-        0 0 0 1px rgba(255, 255, 255, 0.035),
+        0 0 0 1px rgba(255, 255, 255, 0.025),
         0 2px 6px rgba(0, 0, 0, 0.30),
-        0 28px 70px -34px rgba(0, 0, 0, 0.74),
-        inset 0 1px 0 rgba(255, 255, 255, 0.035);
+        0 28px 70px -34px rgba(0, 0, 0, 0.78),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 /* 阅读工作区内部是平面分区，层级由底色和细边界表达，不再重复悬浮。 */
@@ -336,11 +409,14 @@ body,
 
 .workspace-pane-chat {
     background-color: #fffdfb;
+    /* overflow:hidden 仍是可被 focus/scrollIntoView 改写 scrollTop 的滚动容器。
+       长会话只允许内部 VirtualMessageList 滚动，外层必须保持在工作区原位。 */
+    overflow: clip;
 }
 
 .workspace-pane-dark {
-    background-color: #20232a;
-    border-color: rgba(255, 255, 255, 0.08);
+    background-color: var(--dark-pane, #20242b);
+    border-color: var(--dark-border, rgba(255, 255, 255, 0.085));
 }
 
 /* 首页上传卡片使用稳定的语义阴影，避免 Tailwind 忽略 CSS 变量型 arbitrary shadow。 */
@@ -349,7 +425,9 @@ body,
 }
 
 .chatpdf-shell--dark .upload-document-card {
-    box-shadow: 0 12px 28px -20px rgba(0, 0, 0, 0.65);
+    box-shadow:
+        0 12px 28px -20px rgba(0, 0, 0, 0.72),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 /* 页面缩放由 JS 控制 document.body.style.zoom，此处不设置 */
@@ -412,6 +490,18 @@ body,
     background: rgba(125, 125, 135, 0.55);
 }
 
+.chatpdf-shell--dark .custom-scrollbar {
+    scrollbar-color: rgba(190, 197, 207, 0.22) transparent;
+}
+
+.chatpdf-shell--dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(190, 197, 207, 0.18);
+}
+
+.chatpdf-shell--dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(190, 197, 207, 0.32);
+}
+
 /* 阅读组件按面板自身宽度排版，避免窗口宽度与实际可用空间不一致。 */
 .reading-widget-board-shell {
     container-name: reading-widget-board;
@@ -435,7 +525,7 @@ body,
 
 .chatpdf-shell--dark .reading-widget-board {
     /* 深色同理：叠在面板 #20232a 上要比工作台底板 #16181d 浅，否则边界一样看不见 */
-    background-color: rgba(0, 0, 0, 0.12);
+    background-color: rgba(0, 0, 0, 0.14);
 }
 
 .reading-widget-board > [data-reading-widget-id] {
@@ -538,9 +628,15 @@ body,
         grid-row: var(--widget-row, auto);
     }
 
-    /* 只剩一张卡在列区时让它横跨整行，右边不留空洞，中缝也没意义了 */
-    .reading-widget-board[data-columns='1'] > [data-widget-slot='main'] {
+    /* 只剩一张卡在列区时让它横跨整行，右边不留空洞，中缝也没意义了。
+       例外是正拖着通栏组件回列区：此时右列必须完整留给投放引导，
+       不能让主卡片和虚线落点落进同一格子再靠层级硬压。 */
+    .reading-widget-board[data-columns='1']:not([data-column-drop-active='true']) > [data-widget-slot='main'] {
         grid-column: 1 / -1;
+    }
+
+    .reading-widget-board[data-columns='1'][data-column-drop-active='true'] > [data-widget-slot='main'] {
+        grid-column: 1;
     }
 
     .reading-widget-board[data-columns='1'] .reading-col-resize,
@@ -563,6 +659,8 @@ body,
     .reading-drop-zone--column {
         grid-column: 3;
         grid-row: 1;
+        position: relative;
+        z-index: 2;
     }
 
     .reading-drop-zone--foot {
@@ -639,13 +737,50 @@ body,
     }
 }
 
-/* CodeMirror 笔记编辑器：外层容器决定高度，滚动交给 CM 自己的 scroller，避免双层滚动。 */
-.markdown-note-surface .cm-editor {
-    max-height: 100%;
+/* 笔记采用就地 Markdown 预览：编辑器本身是无边框的写作画布，
+   不再套一层表单输入框；滚动仍只交给 CodeMirror，避免双层滚动。 */
+.markdown-note-editor {
+    min-width: 0;
 }
 
-.markdown-note-surface--fill .cm-editor {
+.markdown-note-surface .cm-editor {
+    max-height: 100%;
+    background: transparent;
+}
+
+.markdown-note-surface--fill .cm-editor,
+.markdown-note-surface--fill .cm-scroller {
     height: 100%;
+}
+
+.markdown-note-surface .cm-scroller {
+    padding-right: 0.2rem;
+    scrollbar-color: #d8cec6 transparent;
+}
+
+.markdown-note-surface .cm-scroller::-webkit-scrollbar {
+    width: 5px;
+}
+
+.markdown-note-surface .cm-scroller::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: #d8cec6;
+}
+
+.markdown-note-editor:focus-within .note-writing-toolbar {
+    border-color: #dfd4cb;
+}
+
+.chatpdf-shell--dark .markdown-note-surface .cm-scroller {
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.chatpdf-shell--dark .markdown-note-surface .cm-scroller::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.chatpdf-shell--dark .markdown-note-editor:focus-within .note-writing-toolbar {
+    border-color: rgba(255, 255, 255, 0.15);
 }
 
 /* 笔记 Markdown：面向侧栏阅读的紧凑排版，不依赖 typography 插件。 */
@@ -893,6 +1028,148 @@ body,
     overflow-y: hidden;
 }
 
+/* 阅读翻译里的结构化表格：保留当前卡片的克制层级，窄栏通过横向滚动
+   展示完整列，不再把 HTML 标签或挤成一团的管道文本交给用户。 */
+.translation-markdown {
+    color: inherit;
+    font-size: 0.8125rem;
+    line-height: 1.68;
+}
+
+.translation-markdown--source {
+    color: #6f6459;
+    font-size: 0.75rem;
+}
+
+.translation-markdown--target {
+    color: #332d28;
+    font-size: 0.8125rem;
+}
+
+.note-markdown--dark.translation-markdown--source {
+    color: #9ca3af;
+}
+
+.note-markdown--dark.translation-markdown--target {
+    color: #f3f4f6;
+}
+
+.translation-markdown .note-markdown-table-wrap {
+    margin: 0.4rem 0 0;
+    border-color: #ece5de;
+    border-radius: 0.5rem;
+    background: #fff;
+    box-shadow: 0 1px 0 rgba(86, 69, 56, 0.03);
+}
+
+.note-markdown--dark.translation-markdown .note-markdown-table-wrap {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.025);
+    box-shadow: none;
+}
+
+.translation-markdown table {
+    width: max-content;
+    min-width: 100%;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.translation-markdown th,
+.translation-markdown td {
+    min-width: 4.75rem;
+    max-width: 13rem;
+    padding: 0.5rem 0.62rem;
+    line-height: 1.5;
+}
+
+.translation-markdown th {
+    background: #f7f4f1;
+    color: #443c35;
+    font-weight: 600;
+}
+
+.translation-markdown td:first-child,
+.translation-markdown th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #fff;
+}
+
+.translation-markdown th:first-child {
+    background: #f7f4f1;
+}
+
+.note-markdown--dark.translation-markdown th,
+.note-markdown--dark.translation-markdown th:first-child {
+    background: #2a2d33;
+    color: #f3f4f6;
+}
+
+.note-markdown--dark.translation-markdown td:first-child {
+    background: #23262c;
+}
+
+/* 公式不按普通正文换行：展示公式独立成一条克制的阅读底板，超宽部分横向滚动，
+   行内公式继续跟随段落基线，避免把数学符号拆到下一行。 */
+.translation-markdown--math {
+    min-width: 0;
+}
+
+.translation-markdown--math p {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.translation-markdown--math .katex {
+    line-height: 1.45;
+}
+
+.translation-markdown--math .katex-display {
+    display: block;
+    max-width: 100%;
+    margin: 0.7rem 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border: 1px solid #ece5de;
+    border-radius: 0.5rem;
+    background: #faf8f5;
+    padding: 0.65rem 0.8rem;
+    text-align: center;
+    scrollbar-color: #d8cec6 transparent;
+}
+
+.translation-markdown--math .katex-display > .katex {
+    display: inline-block;
+    min-width: max-content;
+    white-space: nowrap;
+}
+
+.translation-markdown--math .katex-display::-webkit-scrollbar {
+    height: 5px;
+}
+
+.translation-markdown--math .katex-display::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: #d8cec6;
+}
+
+.translation-markdown--source.translation-markdown--math .katex-display {
+    background: #fcfaf8;
+}
+
+.note-markdown--dark.translation-markdown--math .katex-display {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.045);
+    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.note-markdown--dark.translation-markdown--math .katex-display::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
+}
+
 /* --- Component Classes --- */
 .soft-card {
     background-color: #ffffff;
@@ -988,16 +1265,139 @@ body,
 }
 
 .settings-shell-dark {
-    background-color: #1d2026;
-    border-color: #353941;
+    background-color: #1c2026;
+    border-color: #353b44;
     box-shadow:
         0 3px 12px rgba(0, 0, 0, 0.26),
         0 36px 90px -26px rgba(0, 0, 0, 0.72);
 }
 
 .settings-shell-dark .settings-chrome {
-    background-color: #1d2026;
-    border-color: #353941;
+    background-color: #1c2026;
+    border-color: #353b44;
+}
+
+.model-service-cta {
+    position: relative;
+    isolation: isolate;
+    width: 6.5rem;
+    height: 2rem;
+    flex: 0 0 auto;
+    overflow: hidden;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #2b2e38;
+    cursor: pointer;
+    transition:
+        transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 180ms ease;
+}
+
+.model-service-cta__fill {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: #2b2e38;
+    transform: translateX(calc(-100% + 2rem));
+    transition: transform 450ms cubic-bezier(0.65, 0, 0.076, 1);
+}
+
+.model-service-cta__icon {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 2;
+    display: grid;
+    width: 2rem;
+    place-items: center;
+    border-radius: 999px;
+    background: #2b2e38;
+    color: #ffffff;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.12),
+        0 4px 10px -7px rgba(28, 31, 39, 0.75);
+}
+
+.model-service-cta__icon svg {
+    transform: translateX(-1px);
+    transition: transform 450ms cubic-bezier(0.65, 0, 0.076, 1);
+}
+
+.model-service-cta__label {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-left: 1.35rem;
+    font-size: 0.75rem;
+    font-weight: 650;
+    line-height: 1;
+    white-space: nowrap;
+    transition:
+        color 320ms ease,
+        transform 450ms cubic-bezier(0.65, 0, 0.076, 1);
+}
+
+@media (hover: hover) {
+    .model-service-cta:hover .model-service-cta__fill {
+        transform: translateX(0);
+    }
+
+    .model-service-cta:hover .model-service-cta__icon svg {
+        transform: translateX(0.3rem);
+    }
+
+    .model-service-cta:hover .model-service-cta__label {
+        color: #ffffff;
+        transform: translateX(0.1rem);
+    }
+}
+
+.model-service-cta:focus-visible {
+    outline: none;
+    box-shadow:
+        0 0 0 3px var(--settings-canvas),
+        0 0 0 5px rgba(217, 122, 93, 0.48);
+}
+
+.model-service-cta:focus-visible .model-service-cta__fill {
+    transform: translateX(0);
+}
+
+.model-service-cta:focus-visible .model-service-cta__icon svg {
+    transform: translateX(0.3rem);
+}
+
+.model-service-cta:focus-visible .model-service-cta__label {
+    color: #ffffff;
+}
+
+.model-service-cta:active {
+    transform: translateY(1px) scale(0.985);
+}
+
+.settings-shell-dark .model-service-cta {
+    color: #e7e9ed;
+}
+
+.settings-shell-dark .model-service-cta__fill {
+    background: #3b414b;
+}
+
+.settings-shell-dark .model-service-cta__icon {
+    background: #3b414b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .model-service-cta,
+    .model-service-cta__fill,
+    .model-service-cta__icon svg,
+    .model-service-cta__label {
+        transition-duration: 0.01ms;
+    }
 }
 
 .settings-card {
@@ -1309,8 +1709,8 @@ body,
 }
 
 .settings-card-dark {
-    background-color: #25282f;
-    border-color: #3a3f48;
+    background-color: #252a31;
+    border-color: #3a414b;
     box-shadow:
         0 2px 6px rgba(0, 0, 0, 0.18),
         0 14px 30px -16px rgba(0, 0, 0, 0.55);
@@ -1833,14 +2233,16 @@ body,
     background: rgba(255, 255, 255, 0.15);
 }
 
-/* 流式输出柔和淡入：不使用 blur，保证正文始终清晰且降低 GPU 合成开销。 */
+/* 流式输出模糊渐显。字符动画结束后会移除 class，避免长期占用合成层。 */
 
 @keyframes blur-reveal-first {
     0% {
-        opacity: 0.45;
+        filter: blur(var(--blur-distance, 3px));
+        opacity: 0.15;
         transform: translateY(1px);
     }
     100% {
+        filter: blur(0);
         opacity: 1;
         transform: translateY(0);
     }
@@ -1867,15 +2269,117 @@ body,
 
 .blur-reveal-animate {
     animation: blur-reveal-smooth var(--blur-duration, 0.25s) ease-out forwards;
-    will-change: transform, opacity;
+    will-change: filter, opacity;
+}
+
+.settings-config-status {
+    display: inline-flex;
+    min-height: 18px;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    border: 0;
+    padding: 0 1px;
+    color: #89919a;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.settings-config-status::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background-color: #b4bbc3;
+    box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.08);
+}
+
+.settings-config-status[data-state="ready"] {
+    color: #747d85;
+}
+
+.settings-config-status[data-state="ready"]::before {
+    background-color: #929ba3;
+    box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.08);
+}
+
+.settings-config-status[data-state="local"] {
+    color: #68798a;
+}
+
+.settings-config-status[data-state="local"]::before {
+    background-color: #8798a9;
+    box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.08);
+}
+
+.settings-config-status[data-state="needs_setup"] {
+    color: #a65b45;
+}
+
+.settings-config-status[data-state="needs_setup"]::before {
+    background-color: #c97961;
+    box-shadow: 0 0 0 3px rgba(184, 95, 71, 0.1);
+}
+
+.settings-config-status[data-state="missing"]::before {
+    border: 1px solid #aeb6bf;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.settings-shell-dark .settings-config-status {
+    color: #aeb4bd;
+}
+
+.settings-shell-dark .settings-config-status::before {
+    background-color: #737b85;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.045);
+}
+
+.settings-shell-dark .settings-config-status[data-state="ready"] {
+    color: #b7bdc4;
+}
+
+.settings-shell-dark .settings-config-status[data-state="ready"]::before {
+    background-color: #9099a2;
+}
+
+.settings-shell-dark .settings-config-status[data-state="local"] {
+    color: #aab8c6;
+}
+
+.settings-shell-dark .settings-config-status[data-state="local"]::before {
+    background-color: #8193a5;
+}
+
+.settings-shell-dark .settings-config-status[data-state="needs_setup"] {
+    color: #f0ad96;
+}
+
+.settings-shell-dark .settings-config-status[data-state="needs_setup"]::before {
+    background-color: #d7876e;
+    box-shadow: 0 0 0 3px rgba(240, 173, 150, 0.08);
+}
+
+.settings-shell-dark .settings-config-status[data-state="missing"]::before {
+    border-color: #747c86;
+    background-color: transparent;
+    box-shadow: none;
 }
 
 @keyframes blur-reveal-smooth {
     0% {
-        opacity: 0.45;
+        filter: blur(var(--blur-distance, 3px));
+        opacity: 0.15;
         transform: translateY(1px);
     }
     100% {
+        filter: blur(0);
         opacity: 1;
         transform: translateY(0);
     }
@@ -1977,10 +2481,12 @@ body,
 
 @keyframes blur-reveal {
     0% {
-        opacity: 0.45;
+        filter: blur(var(--blur-distance, 3px));
+        opacity: 0.15;
         transform: translateY(1px);
     }
     100% {
+        filter: blur(0);
         opacity: 1;
         transform: translateY(0);
     }
@@ -2014,20 +2520,32 @@ body,
     animation: none;
 }
 
-/* 流式输出期间禁用所有 blur-reveal 逐字动画，避免频繁触发 filter/opacity 导致掉帧 */
+/* 用户关闭模糊渐显时，禁用逐字动画并保持正文清晰。 */
 .streaming-active:not(.blur-reveal-enabled) .blur-reveal-animate {
     animation: none !important;
+    filter: none !important;
     opacity: 1 !important;
 }
 
 .streaming-active:not(.blur-reveal-enabled) .animate-blur-reveal {
     animation: none !important;
+    filter: none !important;
     opacity: 1 !important;
 }
 
 .streaming-active:not(.blur-reveal-enabled) .blur-reveal-char {
     filter: none !important;
     opacity: 1 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .blur-reveal-animate,
+    .animate-blur-reveal {
+        animation: none !important;
+        filter: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+    }
 }
 
 /* 流式输出时，新增内容的淡入效果 */
@@ -2245,6 +2763,37 @@ body,
     box-shadow:
         inset 0 2px 15px rgba(207, 209, 217, 0.3),
         0 10px 30px -10px rgba(180, 185, 200, 0.6);
+}
+
+.chatpdf-shell--dark .tanya-btn {
+    color: var(--dark-text-sub, #b5bbc5);
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 10px 24px -18px rgba(0, 0, 0, 0.82);
+}
+
+.chatpdf-shell--dark .tanya-btn::before {
+    padding: 1px;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.025));
+    filter: none;
+}
+
+.chatpdf-shell--dark .tanya-btn:hover {
+    color: #f0f2f5;
+    background: rgba(255, 255, 255, 0.085);
+    border-color: rgba(255, 160, 122, 0.2);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.075),
+        0 13px 28px -18px rgba(0, 0, 0, 0.86);
+}
+
+.chatpdf-shell--dark .tanya-btn:active {
+    background: rgba(255, 255, 255, 0.07);
+    box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.22);
 }
 
 /* ============================================================
@@ -2499,13 +3048,34 @@ body,
     background: transparent;
 }
 
-/* PDF 夜间模式通过反色滤镜实现，预先使用黑色半透明层，反色后得到柔和浅灰高亮。 */
+/* 夜间 PDF 保留原始图像色彩，选区继续使用低饱和暖色，避免图表被反色。 */
 .chatpdf-shell--dark .pdf-scroll .textLayer span::-moz-selection {
-    background: rgba(0, 0, 0, 0.34);
+    background: rgba(226, 116, 82, 0.38);
 }
 
 .chatpdf-shell--dark .pdf-scroll .textLayer span::selection {
-    background: rgba(0, 0, 0, 0.34);
+    background: rgba(226, 116, 82, 0.38);
+}
+
+/* PDF 页面使用柔和纸张调暗而非整页反色。
+   滤镜只作用于 PDF.js 的基础渲染层，引用框、批注和翻译浮层保持真实颜色。 */
+.pdf-page-frame--dark {
+    background: #cfcdc8 !important;
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.055),
+        0 18px 42px -22px rgba(0, 0, 0, 0.72) !important;
+}
+
+.pdf-page-stage--dark {
+    background: #cfcdc8;
+}
+
+.pdf-page-render-layer {
+    transition: filter 220ms ease;
+}
+
+.pdf-page-render-layer--dimmed {
+    filter: brightness(0.82) contrast(1.08) saturate(0.92);
 }
 
 @media (forced-colors: active) {
@@ -2610,9 +3180,9 @@ body,
 }
 
 .pdf-note-jump-highlight--dark {
-    background: rgba(0, 0, 0, 0.3);
-    box-shadow: none;
-    mix-blend-mode: normal;
+    background: rgba(226, 116, 82, 0.3);
+    box-shadow: inset 0 -1px 0 rgba(184, 95, 71, 0.18);
+    mix-blend-mode: multiply;
 }
 
 @keyframes pdfReadingJumpFrame {
@@ -2722,12 +3292,50 @@ body,
 
 /* ==================== Agent 检索轨迹动画 ==================== */
 @keyframes agentFadeSlideIn {
-    from { opacity: 0; transform: translateY(4px); }
+    from { opacity: 0; transform: translateY(6px) scale(0.992); }
     to { opacity: 1; transform: none; }
 }
 
 .agent-op-enter {
-    animation: agentFadeSlideIn 0.28s ease-out both;
+    animation: agentFadeSlideIn 0.36s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes agentDetailEnter {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+}
+
+.agent-detail-enter {
+    animation: agentDetailEnter 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes agentProgressEnter {
+    from { opacity: 0; transform: scaleX(0.97); }
+    to { opacity: 1; transform: scaleX(1); }
+}
+
+.agent-progress-enter {
+    transform-origin: left center;
+    animation: agentProgressEnter 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes agentTimelineNodePulse {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(181, 107, 85, 0.16); }
+    50% { transform: scale(1.08); box-shadow: 0 0 0 5px rgba(181, 107, 85, 0); }
+}
+
+.agent-timeline-node-active {
+    animation: agentTimelineNodePulse 1.8s ease-in-out infinite;
+}
+
+@keyframes agentTimelineNodeComplete {
+    0% { opacity: 0; transform: scale(0.65); }
+    65% { opacity: 1; transform: scale(1.12); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+.agent-timeline-node-complete {
+    animation: agentTimelineNodeComplete 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @keyframes agentShimmerSweep {
@@ -2736,8 +3344,34 @@ body,
 }
 
 .agent-progress-track {
+    --agent-progress-sweep-color: rgba(181, 107, 85, 0.48);
     position: relative;
     overflow: hidden;
+}
+
+.dark .agent-progress-track {
+    --agent-progress-sweep-color: rgba(255, 160, 122, 0.56);
+}
+
+.agent-progress-fill {
+    transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.agent-diagnostics > summary {
+    list-style: none;
+}
+
+.agent-diagnostics > summary::-webkit-details-marker {
+    display: none;
+}
+
+.agent-diagnostics-chevron {
+    transform: rotate(0deg);
+    transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.agent-diagnostics[open] .agent-diagnostics-chevron {
+    transform: rotate(90deg);
 }
 
 .agent-progress-sweep {
@@ -2746,8 +3380,27 @@ body,
     bottom: 0;
     width: 38%;
     border-radius: 9999px;
-    background: linear-gradient(90deg, transparent, rgba(65, 68, 73, 0.58), transparent);
+    background: linear-gradient(90deg, transparent, var(--agent-progress-sweep-color), transparent);
     animation: agentShimmerSweep 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-op-enter,
+    .agent-detail-enter,
+    .agent-progress-enter,
+    .agent-timeline-node-active,
+    .agent-timeline-node-complete,
+    .agent-progress-sweep {
+        animation: none;
+    }
+
+    .agent-progress-fill {
+        transition: none;
+    }
+
+    .agent-diagnostics-chevron {
+        transition: none;
+    }
 }
 
 /* ==================== MinerU 解析扫描动画 ==================== */

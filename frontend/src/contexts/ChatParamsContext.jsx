@@ -5,6 +5,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 // 避免对话参数变更触发字体设置消费者的重渲染（需求 2.1, 2.3）
 
 const ChatParamsContext = createContext();
+const CHAT_PARAMS_STORAGE_KEY = 'chatParamsSettings';
 
 const normalizeMathEngine = (value) => {
     if (typeof value !== 'string') return CHAT_PARAMS_DEFAULT_SETTINGS.mathEngine;
@@ -131,22 +132,75 @@ export const ChatParamsProvider = ({ children }) => {
     const [overrideLLMQueryRewrite, setOverrideLLMQueryRewrite] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideLLMQueryRewrite);
     const [overrideBM25Synonyms, setOverrideBM25Synonyms] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
     const [numericTableVisualVerification, setNumericTableVisualVerificationState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
-    const [visualModelKey, setVisualModelKey] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
+    const [visualModelKey, setVisualModelKeyState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
     const [visualStrategy, setVisualStrategyState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy);
-    const [localVisualModelKey, setLocalVisualModelKey] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
+    const [localVisualModelKey, setLocalVisualModelKeyState] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
     // 辅助模型
     const [cheapModel, setCheapModel] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
     const [cheapModelProvider, setCheapModelProvider] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
     const [cheapModelEndpoint, setCheapModelEndpoint] = useState(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelEndpoint);
 
+    // 内容字号覆盖对话正文、思考/检索过程和阅读工作区。保留 messageFontSize
+    // 字段名以兼容旧设置，但通过 CSS 变量统一下发，不再由单个消息组件独占。
+    useEffect(() => {
+        const parsed = Number(messageFontSize);
+        const normalized = Number.isFinite(parsed)
+            ? Math.min(22, Math.max(12, parsed))
+            : CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize;
+        document.documentElement.style.setProperty('--content-font-size', `${normalized}px`);
+        document.documentElement.style.setProperty('--content-font-scale', String(normalized / CHAT_PARAMS_DEFAULT_SETTINGS.messageFontSize));
+    }, [messageFontSize]);
+
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
     const pendingSettingsRef = useRef(null);
+    const [settingsHydrated, setSettingsHydrated] = useState(false);
+
+    // 图表理解会在文档解析和对话中长期使用。不能只依赖整组设置的防抖保存，
+    // 否则用户选择后立即刷新/关闭时，旧的 pending 快照可能把选择写回默认值。
+    const persistVisualSettingsNow = useCallback((changes) => {
+        try {
+            let stored = {};
+            const raw = localStorage.getItem(CHAT_PARAMS_STORAGE_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    stored = parsed;
+                }
+            }
+            localStorage.setItem(CHAT_PARAMS_STORAGE_KEY, JSON.stringify({ ...stored, ...changes }));
+        } catch (error) {
+            console.error('保存视觉模型设置失败:', error);
+        }
+
+        // 保证已经排队的整组设置保存不会在稍后反向覆盖最新选择。
+        if (pendingSettingsRef.current && typeof pendingSettingsRef.current === 'object') {
+            pendingSettingsRef.current = { ...pendingSettingsRef.current, ...changes };
+        }
+    }, []);
+
+    const setVisualModelKey = useCallback((value) => {
+        const nextValue = String(value || CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
+        setVisualModelKeyState(nextValue);
+        persistVisualSettingsNow({ visualModelKey: nextValue });
+    }, [persistVisualSettingsNow]);
+
+    const setVisualStrategy = useCallback((value) => {
+        const nextValue = normalizeVisualStrategy(value);
+        setVisualStrategyState(nextValue);
+        persistVisualSettingsNow({ visualStrategy: nextValue });
+    }, [persistVisualSettingsNow]);
+
+    const setLocalVisualModelKey = useCallback((value) => {
+        const nextValue = String(value || CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
+        setLocalVisualModelKeyState(nextValue);
+        persistVisualSettingsNow({ localVisualModelKey: nextValue });
+    }, [persistVisualSettingsNow]);
 
     // 从 localStorage 加载对话参数设置
     useEffect(() => {
         try {
-            const saved = localStorage.getItem('chatParamsSettings');
+            const saved = localStorage.getItem(CHAT_PARAMS_STORAGE_KEY);
             if (saved) {
                 const settings = JSON.parse(saved);
                 if (settings.maxTokens !== undefined) setMaxTokens(settings.maxTokens);
@@ -180,9 +234,9 @@ export const ChatParamsProvider = ({ children }) => {
                 if (settings.overrideLLMQueryRewrite !== undefined) setOverrideLLMQueryRewrite(settings.overrideLLMQueryRewrite);
                 if (settings.overrideBM25Synonyms !== undefined) setOverrideBM25Synonyms(settings.overrideBM25Synonyms);
                 if (settings.numericTableVisualVerification !== undefined) setNumericTableVisualVerificationState(normalizeVisualVerificationMode(settings.numericTableVisualVerification));
-                if (settings.visualModelKey !== undefined) setVisualModelKey(String(settings.visualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey));
+                if (settings.visualModelKey !== undefined) setVisualModelKeyState(String(settings.visualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey));
                 if (settings.visualStrategy !== undefined) setVisualStrategyState(normalizeVisualStrategy(settings.visualStrategy));
-                if (settings.localVisualModelKey !== undefined) setLocalVisualModelKey(String(settings.localVisualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey));
+                if (settings.localVisualModelKey !== undefined) setLocalVisualModelKeyState(String(settings.localVisualModelKey || CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey));
                 if (settings.cheapModel !== undefined) setCheapModel(settings.cheapModel);
                 if (settings.cheapModelProvider !== undefined) setCheapModelProvider(settings.cheapModelProvider);
                 if (settings.cheapModelEndpoint !== undefined) setCheapModelEndpoint(settings.cheapModelEndpoint);
@@ -218,6 +272,10 @@ export const ChatParamsProvider = ({ children }) => {
             }
         } catch (error) {
             console.error('加载对话参数设置失败:', error);
+        } finally {
+            // React StrictMode 会在开发环境模拟一次 effect 卸载。只有完成
+            // localStorage 恢复后才允许排队保存，避免清理阶段把默认值写回。
+            setSettingsHydrated(true);
         }
     }, []);
 
@@ -225,7 +283,7 @@ export const ChatParamsProvider = ({ children }) => {
     const flushSave = useCallback(() => {
         if (pendingSettingsRef.current !== null) {
             try {
-                localStorage.setItem('chatParamsSettings', JSON.stringify(pendingSettingsRef.current));
+                localStorage.setItem(CHAT_PARAMS_STORAGE_KEY, JSON.stringify(pendingSettingsRef.current));
             } catch (error) {
                 console.error('保存对话参数设置失败:', error);
             }
@@ -246,6 +304,7 @@ export const ChatParamsProvider = ({ children }) => {
 
     // 监听对话参数变更，触发防抖保存
     useEffect(() => {
+        if (!settingsHydrated) return;
         const settings = {
             maxTokens,
             temperature,
@@ -286,7 +345,7 @@ export const ChatParamsProvider = ({ children }) => {
             cheapModelEndpoint,
         };
         debouncedSave(settings);
-    }, [maxTokens, temperature, topP, contextCount, streamOutput,
+    }, [settingsHydrated, maxTokens, temperature, topP, contextCount, streamOutput,
         enableTemperature, enableTopP, enableMaxTokens, customParams,
         reasoningEffort, answerDetailLevel, enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
         thoughtAutoCollapse, sendShortcut,
@@ -346,7 +405,7 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideBM25Synonyms(CHAT_PARAMS_DEFAULT_SETTINGS.overrideBM25Synonyms);
         setNumericTableVisualVerificationState(CHAT_PARAMS_DEFAULT_SETTINGS.numericTableVisualVerification);
         setVisualModelKey(CHAT_PARAMS_DEFAULT_SETTINGS.visualModelKey);
-        setVisualStrategyState(CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy);
+        setVisualStrategy(CHAT_PARAMS_DEFAULT_SETTINGS.visualStrategy);
         setLocalVisualModelKey(CHAT_PARAMS_DEFAULT_SETTINGS.localVisualModelKey);
         setCheapModel(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModel);
         setCheapModelProvider(CHAT_PARAMS_DEFAULT_SETTINGS.cheapModelProvider);
@@ -426,7 +485,7 @@ export const ChatParamsProvider = ({ children }) => {
         setOverrideBM25Synonyms,
         setNumericTableVisualVerification: (value) => setNumericTableVisualVerificationState(normalizeVisualVerificationMode(value)),
         setVisualModelKey,
-        setVisualStrategy: (value) => setVisualStrategyState(normalizeVisualStrategy(value)),
+        setVisualStrategy,
         setLocalVisualModelKey,
         setCheapModel,
         setCheapModelProvider,

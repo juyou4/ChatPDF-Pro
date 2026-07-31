@@ -252,7 +252,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
       {/* 触发按钮 - 显示当前模型信息和展开指示器 */}
       <button
         onClick={() => setIsOpen(prev => !prev)}
-        className="flex items-center gap-1 text-[11px] text-gray-700 bg-white border border-gray-100 shadow-sm hover:bg-gray-50 px-2.5 py-1.5 rounded-full transition-colors whitespace-nowrap overflow-hidden shrink"
+        className="flex items-center gap-1 overflow-hidden whitespace-nowrap rounded-full border border-gray-100 bg-white px-2.5 py-1.5 text-[11px] text-gray-700 shadow-sm transition-[background-color,border-color,color] hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFA07A]/30 dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-gray-200 dark:shadow-none dark:hover:border-white/[0.15] dark:hover:bg-white/[0.09]"
       >
         {/* 当前模型的 Provider 图标 */}
         {currentProvider && (
@@ -275,10 +275,10 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
             exit={{ opacity: 0, y: 8, scale: 0.95 }}
             transition={{ type: 'spring', damping: 20, stiffness: 300 }}
             style={{ transformOrigin: 'bottom' }}
-            className="absolute bottom-full mb-2 left-0 min-w-[240px] rounded-xl shadow-lg border border-gray-100 bg-white p-1.5 text-xs z-50"
+            className="absolute bottom-full left-0 z-50 mb-2 min-w-[240px] rounded-xl border border-gray-100 bg-white p-1.5 text-xs shadow-lg dark:border-white/[0.10] dark:bg-[#282b31] dark:shadow-[0_18px_42px_-18px_rgba(0,0,0,0.78)]"
           >
             {/* 搜索输入框 */}
-            <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-gray-100">
+            <div className="flex items-center gap-1.5 border-b border-gray-100 px-2 py-1.5 dark:border-white/[0.08]">
               <Search className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
               <input
                 ref={searchInputRef}
@@ -286,14 +286,14 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="搜索模型..."
-                className="flex-1 bg-transparent text-xs text-gray-700 placeholder-gray-400 outline-none"
+                className="flex-1 bg-transparent text-xs text-gray-700 placeholder-gray-400 outline-none dark:text-gray-200 dark:placeholder-gray-500"
               />
             </div>
             {/* 可滚动的内容区域 */}
             <div className="max-h-[300px] overflow-y-auto overscroll-contain">
               {groupedModels.length === 0 ? (
                 /* 空状态提示：根据是否有搜索词显示不同文案 */
-                <div className="text-gray-400 text-center py-6">
+                <div className="py-6 text-center text-gray-400 dark:text-gray-500">
                   {searchQuery.trim() ? '无匹配模型' : '没有可用的模型'}
                 </div>
               ) : (
@@ -302,7 +302,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                     {/* Provider 分组标题 - 可点击折叠/展开 */}
                     <button
                       onClick={() => toggleProvider(provider.id)}
-                      className="w-full flex items-center gap-1.5 px-2 py-1.5 text-gray-500 font-medium select-none hover:bg-gray-50/60 rounded-lg transition-colors"
+                      className="flex w-full select-none items-center gap-1.5 rounded-lg px-2 py-1.5 font-medium text-gray-500 transition-colors hover:bg-gray-50/60 dark:text-gray-400 dark:hover:bg-white/[0.055] dark:hover:text-gray-200"
                     >
                       <ChevronRight className={`w-3 h-3 transition-transform ${
                         (isSearching || expandedProviders.has(provider.id)) ? 'rotate-90' : ''
@@ -330,15 +330,15 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                             onClick={() => handleSelectModel(provider.id, model.id)}
                             className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg transition-colors ${
                               isSelected
-                                ? 'bg-purple-50/80 text-purple-600 font-medium'
-                                : 'text-gray-700 hover:bg-gray-100/60'
+                                ? 'bg-purple-50/80 text-purple-600 font-medium dark:bg-[#FFA07A]/12 dark:text-[#FFD1C1]'
+                                : 'text-gray-700 hover:bg-gray-100/60 dark:text-gray-300 dark:hover:bg-white/[0.055]'
                             }`}
                           >
                             {/* 模型名称 */}
                             <span className="truncate">{model.name}</span>
                             {/* 选中状态的勾选图标 */}
                             {isSelected && (
-                              <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600" />
+                              <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600 dark:text-[#FFA07A]" />
                             )}
                           </button>
                         )
@@ -366,15 +366,15 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
           }
           className={`flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-full whitespace-nowrap overflow-hidden shrink transition-colors border outline-none ${
             isAlwaysThinking
-              ? 'bg-[#e4e5ee] text-gray-700 border-transparent cursor-default'
+              ? 'bg-[#e4e5ee] text-gray-700 border-transparent cursor-default dark:border-white/[0.08] dark:bg-white/[0.08] dark:text-gray-200'
               : isThinkingActive
-                ? 'bg-[#e4e5ee] text-gray-700 border-transparent hover:bg-[#d8d9e4]'
-                : 'bg-white text-gray-500 border-gray-100 shadow-sm hover:bg-gray-50'
+                ? 'bg-[#e4e5ee] text-gray-700 border-transparent hover:bg-[#d8d9e4] dark:border-[#FFA07A]/20 dark:bg-[#FFA07A]/12 dark:text-[#FFD1C1] dark:hover:bg-[#FFA07A]/18'
+                : 'bg-white text-gray-500 border-gray-100 shadow-sm hover:bg-gray-50 dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-gray-300 dark:shadow-none dark:hover:border-white/[0.15] dark:hover:bg-white/[0.09]'
           }`}
         >
           <span className="truncate">{isAlwaysThinking ? '推理模型' : 'Thinking Mode'}</span>
-          <Brain size={13} className={isThinkingActive ? "text-gray-500 shrink-0" : "text-gray-400 shrink-0"} />
-          {isThinkingActive && !isAlwaysThinking && <span className="font-medium text-gray-700 shrink-0">{currentEffort.label}</span>}
+          <Brain size={13} className={isThinkingActive ? "shrink-0 text-gray-500 dark:text-[#FFB79F]" : "shrink-0 text-gray-400 dark:text-gray-500"} />
+          {isThinkingActive && !isAlwaysThinking && <span className="shrink-0 font-medium text-gray-700 dark:text-[#FFD1C1]">{currentEffort.label}</span>}
         </button>
 
         {/* 力度选择弹出菜单 — 向上弹出（原生推理模型不弹出） */}
@@ -386,7 +386,7 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
               exit={{ opacity: 0, y: 6, scale: 0.95 }}
               transition={{ type: 'spring', damping: 22, stiffness: 350 }}
               style={{ transformOrigin: 'bottom' }}
-              className="absolute bottom-full mb-2 left-0 min-w-[120px] rounded-xl shadow-lg border border-gray-100 bg-white p-1 text-xs z-50"
+              className="absolute bottom-full left-0 z-50 mb-2 min-w-[120px] rounded-xl border border-gray-100 bg-white p-1 text-xs shadow-lg dark:border-white/[0.10] dark:bg-[#282b31] dark:shadow-[0_18px_42px_-18px_rgba(0,0,0,0.78)]"
             >
               {EFFORT_OPTIONS.map(option => {
                 const isSelected = reasoningEffort === option.value
@@ -396,13 +396,13 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
                     onClick={() => handleSelectEffort(option.value)}
                     className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg transition-colors ${
                       isSelected
-                        ? 'bg-purple-50/80 text-purple-600 font-medium'
-                        : 'text-gray-700 hover:bg-gray-100/60'
+                        ? 'bg-purple-50/80 text-purple-600 font-medium dark:bg-[#FFA07A]/12 dark:text-[#FFD1C1]'
+                        : 'text-gray-700 hover:bg-gray-100/60 dark:text-gray-300 dark:hover:bg-white/[0.055]'
                     }`}
                   >
                     <span>{option.label}</span>
                     {isSelected && (
-                      <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600" />
+                      <Check className="w-3.5 h-3.5 flex-shrink-0 text-purple-600 dark:text-[#FFA07A]" />
                     )}
                   </button>
                 )

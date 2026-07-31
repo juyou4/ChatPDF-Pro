@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronLeft, Type, ZoomIn, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key } from 'lucide-react';
+import { ChevronLeft, Type, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
@@ -12,7 +12,7 @@ import SettingsRange from './SettingsRange';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
     const {
-        fontFamily, customFont, globalScale, setFontFamily, setCustomFont, setGlobalScale, resetFontSettings
+        fontFamily, customFont, setFontFamily, setCustomFont, resetFontSettings
     } = useFontSettings();
     // 检索增强调优已上移到设置中心一级「检索」tab；此处仅保留重置能力
     const {
@@ -45,11 +45,6 @@ const GlobalSettings = ({ isOpen, onClose }) => {
     const needsApiKey = currentSearchProvider.requiresApiKey;
     const blacklistText = (webSearchBlacklist || []).join('\n');
     const handleBlacklistChange = (e) => setWebSearchBlacklist(e.target.value.split('\n').map(l => l.trim()).filter(Boolean));
-
-    const scalePresets = [
-        { label: '75%', value: 0.75 }, { label: '100%', value: 1.0 },
-        { label: '125%', value: 1.25 }, { label: '150%', value: 1.5 },
-    ];
 
     const handleExport = () => {
         const json = exportSettings();
@@ -223,35 +218,6 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 </div>
                             </div>
 
-                            {/* Scale/Zoom Settings */}
-                            <div className="settings-card bg-white p-5 border border-gray-200/90">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-2">
-                                        <ZoomIn className="w-4 h-4 text-gray-400" />
-                                        <span className="text-[14px] font-medium text-gray-800">界面缩放倍率</span>
-                                    </div>
-                                    <div className="px-3 py-1 bg-gray-50 rounded-[12px] border border-gray-100 text-[13px] font-bold text-gray-700">
-                                        {Math.round(globalScale * 100)}%
-                                    </div>
-                                </div>
-                                <div className="space-y-4">
-                                    <div className="px-1 py-1">
-                                        <SettingsRange
-                                            ariaLabel="界面缩放倍率"
-                                            min="0.5" max="2.0" step="0.05" value={globalScale}
-                                            onChange={setGlobalScale}
-                                        />
-                                    </div>
-                                    <SettingsSegmentedControl
-                                        ariaLabel="界面缩放预设"
-                                        value={scalePresets.find((preset) => Math.abs(globalScale - preset.value) < 0.01)?.value ?? null}
-                                        onChange={setGlobalScale}
-                                        options={scalePresets}
-                                        buttonClassName="py-1.5 text-[12px] font-medium text-center rounded-[9px]"
-                                        indicatorClassName="rounded-[9px]"
-                                    />
-                                </div>
-                            </div>
                             </>
                             )}
 

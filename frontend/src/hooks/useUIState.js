@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 
 const OVERVIEW_DEPTHS = new Set(['brief', 'standard', 'detailed']);
+const THEME_STORAGE_KEY = 'chatpdf-theme';
 export const NARROW_DESKTOP_MEDIA_QUERY = '(max-width: 1239px)';
 
 const getIsNarrowDesktop = () => (
@@ -8,6 +9,21 @@ const getIsNarrowDesktop = () => (
   && typeof window.matchMedia === 'function'
   && window.matchMedia(NARROW_DESKTOP_MEDIA_QUERY).matches
 );
+
+const getInitialDarkMode = () => {
+  if (typeof window === 'undefined') return false;
+
+  try {
+    const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (savedTheme === 'dark') return true;
+    if (savedTheme === 'light') return false;
+  } catch {
+    // 存储不可用时继续读取系统主题。
+  }
+
+  return typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-color-scheme: dark)').matches;
+};
 
 /**
  * UI 展示状态管理 Hook
@@ -40,7 +56,20 @@ export function useUIState() {
   }, []);
 
   // ========== 暗色模式 ==========
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(getInitialDarkMode);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('dark', darkMode);
+      document.documentElement.style.colorScheme = darkMode ? 'dark' : 'light';
+    }
+
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, darkMode ? 'dark' : 'light');
+    } catch {
+      // 无痕模式或存储配额异常不影响主题切换。
+    }
+  }, [darkMode]);
 
   // ========== 设置面板弹窗 ==========
   const [showSettings, setShowSettings] = useState(false);

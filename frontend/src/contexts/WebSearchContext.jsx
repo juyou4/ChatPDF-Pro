@@ -185,7 +185,9 @@ export const WebSearchProvider = ({ children }) => {
 
     // 切换联网搜索开关
     const toggleWebSearch = useCallback(() => {
-        setWebSearchMode(prev => prev === 'off' ? 'auto' : 'off');
+        // 顶部地球按钮是用户当前的直接操作，打开后必须实际发起搜索。
+        // “自动”仍可在设置中心选择，保留给希望节省请求的用户。
+        setWebSearchMode(prev => prev === 'off' ? 'force' : 'off');
     }, []);
 
     // 重置设置

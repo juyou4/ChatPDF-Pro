@@ -1,12 +1,18 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   AlertCircle,
   CheckCircle2,
   Copy,
   Highlighter,
   Loader2,
-  MessageSquare,
-  Sparkles,
   Globe,
   Search,
   Share2,
@@ -29,6 +35,50 @@ import {
 // CodeMirror 只在打开笔记编辑器时才需要，懒加载避免拖慢首屏。
 const MarkdownNoteEditor = lazy(() => import('./MarkdownNoteEditor'));
 
+const NOTE_EDITOR_MAX_WIDTH = 620;
+const NOTE_EDITOR_GUTTER = 12;
+const NOTE_EDITOR_FALLBACK_HEIGHT = 320;
+
+const NoteIcon = ({ className = '' }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    className={className}
+    fill="none"
+    aria-hidden="true"
+    focusable="false"
+    data-note-icon="true"
+  >
+    <path
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeWidth="1.5"
+      d="m16.652 3.455.649-.649A2.753 2.753 0 0 1 21.194 6.7l-.65.649m-3.892-3.893s.081 1.379 1.298 2.595c1.216 1.217 2.595 1.298 2.595 1.298m-3.893-3.893L10.687 9.42c-.404.404-.606.606-.78.829q-.308.395-.524.848c-.121.255-.211.526-.392 1.068L8.412 13.9m12.133-6.552-2.983 2.982m-2.982 2.983c-.404.404-.606.606-.829.78a4.6 4.6 0 0 1-.848.524c-.255.121-.526.211-1.068.392l-1.735.579m0 0-1.123.374a.742.742 0 0 1-.939-.94l.374-1.122m1.688 1.688L8.412 13.9"
+    />
+    <path
+      fill="currentColor"
+      d="M22.75 12a.75.75 0 0 0-1.5 0zM12 2.75a.75.75 0 0 0 0-1.5zM7.376 20.013a.75.75 0 1 0-.752 1.298zm-4.687-2.638a.75.75 0 1 0 1.298-.75zM21.25 12A9.25 9.25 0 0 1 12 21.25v1.5c5.937 0 10.75-4.813 10.75-10.75zM12 1.25C6.063 1.25 1.25 6.063 1.25 12h1.5A9.25 9.25 0 0 1 12 2.75zM6.624 21.311A10.7 10.7 0 0 0 12 22.75v-1.5a9.2 9.2 0 0 1-4.624-1.237zM1.25 12a10.7 10.7 0 0 0 1.439 5.375l1.298-.75A9.2 9.2 0 0 1 2.75 12z"
+    />
+  </svg>
+);
+
+const AIExplainIcon = ({ className = '' }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 14 14"
+    className={className}
+    fill="none"
+    aria-hidden="true"
+    focusable="false"
+    data-ai-explain-icon="true"
+  >
+    <g stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8.406 7.97c-.386.44-.856.8-1.385 1.061v1.5a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1.5A4.5 4.5 0 0 1 6.875.9M3.021 13.5h4" />
+      <path d="M7.395 3.934c-.351-.061-.351-.565 0-.626A3.18 3.18 0 0 0 9.953.858L9.974.76c.076-.347.57-.349.649-.003l.026.113a3.19 3.19 0 0 0 2.565 2.435c.353.062.353.568 0 .63A3.19 3.19 0 0 0 10.65 6.37l-.026.113c-.079.346-.573.344-.649-.003l-.02-.097a3.18 3.18 0 0 0-2.56-2.45" />
+    </g>
+  </svg>
+);
+
 const TextSelectionToolbar = ({
   selectedText,
   position = { x: 0, y: 0 },
@@ -48,10 +98,15 @@ const TextSelectionToolbar = ({
   darkMode = false,
 }) => {
   const toolbarRef = useRef(null);
+  const toolbarCapsuleRef = useRef(null);
   const noteEditorRef = useRef(null);
   const feedbackTimerRef = useRef(null);
   const [noteEditorOpen, setNoteEditorOpen] = useState(false);
   const [noteEditorPlacement, setNoteEditorPlacement] = useState('bottom');
+  const [noteEditorLayout, setNoteEditorLayout] = useState({
+    width: NOTE_EDITOR_MAX_WIDTH,
+    offsetX: 0,
+  });
   const [noteDraft, setNoteDraft] = useState('');
   const [activeAction, setActiveAction] = useState('');
   const [actionFeedback, setActionFeedback] = useState(null);
@@ -68,30 +123,75 @@ const TextSelectionToolbar = ({
     setActionFeedback(null);
   }, [selectedText]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!noteEditorOpen) return undefined;
-    const updatePlacement = () => {
+
+    const surface = toolbarRef.current?.closest('[data-pdf-reader-surface]');
+    let frame = null;
+
+    const updateLayout = () => {
       const toolbarRect = toolbarRef.current?.getBoundingClientRect();
       if (!toolbarRect) return;
+
+      const measuredAnchorRect = toolbarCapsuleRef.current?.getBoundingClientRect();
+      const anchorRect = measuredAnchorRect?.width > 0 ? measuredAnchorRect : toolbarRect;
       const panelHeight = noteEditorRef.current?.getBoundingClientRect().height
-        || 320;
+        || NOTE_EDITOR_FALLBACK_HEIGHT;
       const requiredSpace = panelHeight + 16;
-      // 工具栏现在长在 PDF 面板里，可用空间以面板为准而不是整个视口，
-      // 否则会算出"下面放得下"然后被面板的 overflow 剪掉。
-      const bounds = toolbarRef.current?.closest('[data-pdf-reader-surface]')?.getBoundingClientRect();
-      const limitBottom = bounds?.bottom ?? window.innerHeight;
-      const limitTop = bounds?.top ?? 0;
+
+      const bounds = surface?.getBoundingClientRect();
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || NOTE_EDITOR_MAX_WIDTH;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const hasUsableBounds = Boolean(bounds && bounds.width > 0 && bounds.height > 0);
+      const limitLeft = Math.max(hasUsableBounds ? bounds.left : 0, 0);
+      const limitRight = Math.min(hasUsableBounds ? bounds.right : viewportWidth, viewportWidth);
+      const limitBottom = Math.min(hasUsableBounds ? bounds.bottom : viewportHeight, viewportHeight);
+      const limitTop = Math.max(hasUsableBounds ? bounds.top : 0, 0);
       const spaceBelow = limitBottom - toolbarRect.bottom;
       const spaceAbove = toolbarRect.top - limitTop;
-      setNoteEditorPlacement(spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? 'bottom' : 'top');
+      const nextPlacement = spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? 'bottom' : 'top';
+      setNoteEditorPlacement((current) => (current === nextPlacement ? current : nextPlacement));
+
+      const availableWidth = Math.max(1, limitRight - limitLeft - NOTE_EDITOR_GUTTER * 2);
+      const width = Math.min(NOTE_EDITOR_MAX_WIDTH, Math.floor(availableWidth));
+      const anchorCenter = anchorRect.left + anchorRect.width / 2;
+      const minCenter = limitLeft + NOTE_EDITOR_GUTTER + width / 2;
+      const maxCenter = limitRight - NOTE_EDITOR_GUTTER - width / 2;
+      const clampedCenter = Math.min(Math.max(anchorCenter, minCenter), maxCenter);
+      const offsetX = Math.round(clampedCenter - anchorCenter);
+
+      setNoteEditorLayout((current) => (
+        current.width === width && current.offsetX === offsetX
+          ? current
+          : { width, offsetX }
+      ));
     };
-    const frame = window.requestAnimationFrame(updatePlacement);
-    window.addEventListener('resize', updatePlacement);
+
+    const scheduleUpdate = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        updateLayout();
+      });
+    };
+
+    // 首次打开在浏览器绘制前完成约束，避免先越界再跳回阅读区。
+    updateLayout();
+    window.addEventListener('resize', scheduleUpdate);
+
+    const resizeObserver = typeof window.ResizeObserver === 'function'
+      ? new window.ResizeObserver(scheduleUpdate)
+      : null;
+    [surface, toolbarCapsuleRef.current, noteEditorRef.current].forEach((element) => {
+      if (element) resizeObserver?.observe(element);
+    });
+
     return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('resize', updatePlacement);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', scheduleUpdate);
     };
-  }, [noteEditorOpen, noteDraft]);
+  }, [noteEditorOpen]);
 
   const showFeedback = (message, tone = 'success') => {
     if (!message) return;
@@ -186,10 +286,10 @@ const TextSelectionToolbar = ({
       color: 'text-[#c96b50] hover:text-[#a64f36]'
     },
     {
-      icon: MessageSquare,
+      icon: NoteIcon,
       label: '笔记',
       kind: 'note',
-      color: 'text-purple-600 hover:text-purple-700'
+      color: 'text-rose-600 hover:text-rose-700'
     },
     ...(canDeleteAnnotation ? [{
       icon: Trash2,
@@ -198,7 +298,7 @@ const TextSelectionToolbar = ({
       color: 'text-rose-500 hover:text-rose-700',
     }] : []),
     {
-      icon: Sparkles,
+      icon: AIExplainIcon,
       label: 'AI 解读',
       action: onAIExplain,
       color: 'text-purple-600 hover:text-purple-700'
@@ -248,7 +348,7 @@ const TextSelectionToolbar = ({
         }`}
       >
         {/* 工具栏容器：两端圆润的胶囊，只占内容宽度，不再糊满整条 */}
-        <div className={`relative max-w-full rounded-full border px-1.5 shadow-[0_1px_2px_rgba(83,65,55,0.04),0_10px_24px_-14px_rgba(83,65,55,0.28)] transition-colors duration-200 ${
+        <div ref={toolbarCapsuleRef} data-testid="selection-toolbar-capsule" className={`relative max-w-full rounded-full border px-1.5 shadow-[0_1px_2px_rgba(83,65,55,0.04),0_10px_24px_-14px_rgba(83,65,55,0.28)] transition-colors duration-200 ${
           darkMode
             ? 'border-white/[0.09] bg-[#22262c]'
             : 'border-[#ebe4dd] bg-white'
@@ -364,54 +464,65 @@ const TextSelectionToolbar = ({
 
           <AnimatePresence>
             {noteEditorOpen && (
-              <motion.div
+              <div
                 ref={noteEditorRef}
-                initial={{ opacity: 0, y: -6, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -4, scale: 0.98 }}
-                transition={{ duration: 0.16, ease: 'easeOut' }}
+                data-testid="selection-note-editor"
                 data-placement={noteEditorPlacement}
-                className={`absolute left-1/2 w-[min(620px,calc(100vw-24px))] -translate-x-1/2 rounded-[16px] border border-white/70 bg-white/95 p-3.5 shadow-[0_18px_45px_rgba(45,38,34,0.18)] backdrop-blur-xl ${panelPlacementClass}`}
+                className={`absolute left-1/2 z-40 ${panelPlacementClass}`}
+                style={{
+                  width: `${noteEditorLayout.width}px`,
+                  maxWidth: 'calc(100vw - 24px)',
+                  marginLeft: `${noteEditorLayout.offsetX}px`,
+                  transform: 'translateX(-50%)',
+                }}
                 onClick={(event) => event.stopPropagation()}
               >
-                <div className="mb-2.5 flex items-center justify-between gap-3">
-                  <div className="text-[12px] font-bold text-gray-800">添加划词笔记</div>
-                  <button
-                    type="button"
-                    onClick={() => setNoteEditorOpen(false)}
-                    className="inline-flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
-                    aria-label="关闭笔记编辑器"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div className="mb-2.5 line-clamp-2 rounded-[10px] bg-[#f7f4f1] px-3 py-2 text-[11px] leading-relaxed text-gray-500">
-                  {selectedText}
-                </div>
+                <motion.div
+                  initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                  transition={{ duration: 0.16, ease: 'easeOut' }}
+                  className="w-full rounded-[16px] border border-white/70 bg-white/95 p-3.5 shadow-[0_18px_45px_rgba(45,38,34,0.18)] backdrop-blur-xl"
+                >
+                  <div className="mb-2.5 flex items-center justify-between gap-3">
+                    <div className="text-[12px] font-bold text-gray-800">添加划词笔记</div>
+                    <button
+                      type="button"
+                      onClick={() => setNoteEditorOpen(false)}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                      aria-label="关闭笔记编辑器"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="mb-2.5 line-clamp-2 rounded-[10px] bg-[#f7f4f1] px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+                    {selectedText}
+                  </div>
 
-                <Suspense fallback={<div className="h-[104px] animate-pulse rounded-[14px] bg-[#f1ece7]" />}>
-                  <MarkdownNoteEditor
-                    value={noteDraft}
-                    onChange={setNoteDraft}
-                    onSubmit={saveNote}
-                    onCancel={() => setNoteEditorOpen(false)}
-                    maxLength={20000}
-                    autoFocus
-                  />
-                </Suspense>
+                  <Suspense fallback={<div className="h-[104px] animate-pulse rounded-[14px] bg-[#f1ece7]" />}>
+                    <MarkdownNoteEditor
+                      value={noteDraft}
+                      onChange={setNoteDraft}
+                      onSubmit={saveNote}
+                      onCancel={() => setNoteEditorOpen(false)}
+                      maxLength={20000}
+                      autoFocus
+                    />
+                  </Suspense>
 
-                <div className="mt-3 flex items-center justify-end gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void saveNote()}
-                    disabled={!noteDraft.trim() || activeAction === '笔记'}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[#F0653A] px-4 text-[11px] font-semibold text-white shadow-[0_6px_16px_-8px_rgba(240,101,58,0.65)] transition-[background-color,transform] duration-200 hover:bg-[#F5713F] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none disabled:active:scale-100"
-                  >
-                    {activeAction === '笔记' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    保存笔记
-                  </button>
-                </div>
-              </motion.div>
+                  <div className="mt-3 flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void saveNote()}
+                      disabled={!noteDraft.trim() || activeAction === '笔记'}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[#F0653A] px-4 text-[11px] font-semibold text-white shadow-[0_6px_16px_-8px_rgba(240,101,58,0.65)] transition-[background-color,transform] duration-200 hover:bg-[#F5713F] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none disabled:active:scale-100"
+                    >
+                      {activeAction === '笔记' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                      保存笔记
+                    </button>
+                  </div>
+                </motion.div>
+              </div>
             )}
           </AnimatePresence>
 

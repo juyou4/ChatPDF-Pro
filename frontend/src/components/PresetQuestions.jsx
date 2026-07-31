@@ -98,8 +98,8 @@ function PresetQuestions({ onSelect, disabled = false }) {
             inline-flex items-center px-3 py-1.5 rounded-full text-[12px] font-medium
             border transition-all duration-200 ease-in-out
             ${disabled
-              ? 'opacity-50 cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400'
-              : 'border-gray-200 bg-white text-gray-600 shadow-[0_1px_3px_rgba(30,30,35,0.05)] hover:border-[#FFA07A] hover:bg-[#FFF4EF] hover:text-[#B85F47] cursor-pointer active:scale-95'
+              ? 'opacity-50 cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-500'
+              : 'border-gray-200 bg-white text-gray-600 shadow-[0_1px_3px_rgba(30,30,35,0.05)] hover:border-[#FFA07A] hover:bg-[#FFF4EF] hover:text-[#B85F47] cursor-pointer active:scale-95 dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-gray-300 dark:shadow-none dark:hover:border-[#FFA07A]/35 dark:hover:bg-[#FFA07A]/10 dark:hover:text-[#FFD1C1]'
             }
           `}
           title={preset.query}

@@ -3,7 +3,7 @@ import React from 'react';
 /**
  * CitationLink - 引文引用链接组件
  *
- * 渲染一个可点击的引用编号徽章（如 [1]、[2]），
+ * 渲染一个可点击的上标引用编号（如 1、2），
  * 点击时触发 onCitationClick 回调，用于跳转 PDF 阅读器到对应页码。
  *
  * @param {number} refNumber - 引用编号
@@ -11,6 +11,8 @@ import React from 'react';
  * @param {function} onClick - 点击回调，参数为 citation 对象
  */
 const CitationLink = React.memo(({ refNumber, citation, onClick }) => {
+  const descriptionId = React.useId();
+
   // 处理点击事件
   const handleClick = (e) => {
     e.preventDefault();
@@ -27,20 +29,24 @@ const CitationLink = React.memo(({ refNumber, citation, onClick }) => {
 
   // 构建 tooltip 提示文本
   const pageRange = citation.page_range;
+  const documentLabel = citation.doc_name || citation.document_name || '';
   const tooltipText = pageRange
-    ? `点击跳转并高亮：第 ${pageRange[0]}${pageRange[1] !== pageRange[0] ? `-${pageRange[1]}` : ''} 页`
+    ? `点击${documentLabel ? `打开 ${documentLabel} 并` : ''}跳转高亮：第 ${pageRange[0]}${pageRange[1] !== pageRange[0] ? `-${pageRange[1]}` : ''} 页`
     : `引用 [${refNumber}]`;
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      title={tooltipText}
-      className="inline-flex items-center justify-center min-w-[1.5em] px-1 py-0 mx-0.5 text-xs font-semibold text-purple-600 bg-purple-50 border border-purple-200 rounded hover:bg-purple-100 hover:text-purple-700 hover:border-purple-300 cursor-pointer transition-colors duration-150 align-baseline leading-tight no-underline dark:text-purple-300 dark:bg-purple-900/30 dark:border-purple-700/50 dark:hover:bg-purple-800/40 dark:hover:text-purple-200"
-      style={{ fontSize: '0.8em', verticalAlign: 'super' }}
-    >
-      {refNumber}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={handleClick}
+        title={tooltipText}
+        aria-describedby={descriptionId}
+        className="mx-0.5 inline-flex min-w-[0.9em] items-center justify-center align-super text-[0.68em] font-semibold leading-none tabular-nums text-stone-400 transition-colors duration-150 hover:text-[#B85F47] focus-visible:rounded-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F5B49C]/70 dark:text-stone-500 dark:hover:text-[#F2B29A]"
+      >
+        {refNumber}
+      </button>
+      <span id={descriptionId} className="sr-only">{tooltipText}</span>
+    </>
   );
 });
 

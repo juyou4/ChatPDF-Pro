@@ -1,9 +1,12 @@
-import React, { memo } from 'react';
+import React, { memo, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { processLatexBrackets } from '../utils/processLatexBrackets.js';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 
@@ -13,6 +16,23 @@ const NOTE_REMARK_PLUGINS = [
 ];
 
 const NOTE_REHYPE_PLUGINS = [
+  [rehypeKatex, { strict: false, trust: false, output: 'html' }],
+  rehypeHighlight,
+];
+
+const SAFE_MARKDOWN_HTML_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    table: [...(defaultSchema.attributes?.table || []), 'align'],
+    th: [...(defaultSchema.attributes?.th || []), 'align', 'colSpan', 'rowSpan', 'scope'],
+    td: [...(defaultSchema.attributes?.td || []), 'align', 'colSpan', 'rowSpan'],
+  },
+};
+
+const SAFE_HTML_REHYPE_PLUGINS = [
+  rehypeRaw,
+  [rehypeSanitize, SAFE_MARKDOWN_HTML_SCHEMA],
   [rehypeKatex, { strict: false, trust: false, output: 'html' }],
   rehypeHighlight,
 ];
@@ -29,12 +49,23 @@ const getSafeNoteHref = (href) => {
   }
 };
 
-function NoteMarkdown({ content = '', darkMode = false, className = '' }) {
+function NoteMarkdown({
+  content = '',
+  darkMode = false,
+  className = '',
+  allowSafeHtml = false,
+  imageAlt = '笔记图片',
+}) {
+  const normalizedContent = useMemo(
+    () => processLatexBrackets(String(content || '')),
+    [content],
+  );
+
   return (
     <div className={`note-markdown ${darkMode ? 'note-markdown--dark' : ''} ${className}`.trim()}>
       <ReactMarkdown
         remarkPlugins={NOTE_REMARK_PLUGINS}
-        rehypePlugins={NOTE_REHYPE_PLUGINS}
+        rehypePlugins={allowSafeHtml ? SAFE_HTML_REHYPE_PLUGINS : NOTE_REHYPE_PLUGINS}
         components={{
           a: ({ href, children }) => {
             const safeHref = getSafeNoteHref(href);
@@ -52,7 +83,7 @@ function NoteMarkdown({ content = '', darkMode = false, className = '' }) {
             );
           },
           img: ({ src, alt, title }) => (
-            <img src={src} alt={alt || '笔记图片'} title={title} loading="lazy" />
+            <img src={src} alt={alt || imageAlt} title={title} loading="lazy" />
           ),
           table: ({ children }) => (
             <div className="note-markdown-table-wrap">
@@ -61,7 +92,7 @@ function NoteMarkdown({ content = '', darkMode = false, className = '' }) {
           ),
         }}
       >
-        {String(content || '')}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

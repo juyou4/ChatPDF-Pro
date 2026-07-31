@@ -36,6 +36,12 @@ export const isFailedChatHistoryAssistant = (message) => {
   ) {
     return true;
   }
+  const critic = message.answerCritic || message.answer_critic;
+  if (
+    critic?.has_hallucination === true
+    || String(critic?.citation_risk_level || '').toLowerCase() === 'high'
+  ) return true;
+
   const content = String(message.content || '').trim();
   return !content
     || CHAT_HISTORY_ERROR_PREFIXES.some((prefix) => content.startsWith(prefix))

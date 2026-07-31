@@ -129,6 +129,51 @@ export const FONT_DEFAULT_SETTINGS = {
     messageFont: 'system',
 };
 
+const VALID_FONT_IDS = new Set([...PRESET_FONTS.map((font) => font.id), 'custom']);
+const VALID_MESSAGE_FONTS = new Set(['system', 'serif']);
+
+const normalizeFontSettings = (settings) => {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+        return null;
+    }
+
+    const fontFamily = VALID_FONT_IDS.has(settings.fontFamily)
+        ? settings.fontFamily
+        : FONT_DEFAULT_SETTINGS.fontFamily;
+    const customFont = typeof settings.customFont === 'string'
+        ? settings.customFont
+        : FONT_DEFAULT_SETTINGS.customFont;
+    const parsedScale = Number(settings.globalScale);
+    const globalScale = Number.isFinite(parsedScale) && parsedScale >= 0.5 && parsedScale <= 2
+        ? parsedScale
+        : FONT_DEFAULT_SETTINGS.globalScale;
+    const messageFont = VALID_MESSAGE_FONTS.has(settings.messageFont)
+        ? settings.messageFont
+        : FONT_DEFAULT_SETTINGS.messageFont;
+
+    return { fontFamily, customFont, globalScale, messageFont };
+};
+
+const readStoredFontSettings = () => {
+    if (typeof window === 'undefined' || !window.localStorage) {
+        return FONT_DEFAULT_SETTINGS;
+    }
+
+    for (const storageKey of ['fontSettings', 'globalSettings']) {
+        try {
+            const raw = window.localStorage.getItem(storageKey);
+            if (!raw) continue;
+
+            const normalized = normalizeFontSettings(JSON.parse(raw));
+            if (normalized) return normalized;
+        } catch (error) {
+            console.error(`加载字体设置失败 (${storageKey}):`, error);
+        }
+    }
+
+    return FONT_DEFAULT_SETTINGS;
+};
+
 /**
  * 加载 Google Font
  * @param {string} fontSpec - 字体规格，如 'Inter:wght@300;400;500' 或纯字体名称
@@ -164,40 +209,16 @@ const loadGoogleFont = (fontSpec) => {
 };
 
 export const FontSettingsProvider = ({ children }) => {
-    const [fontFamily, setFontFamily] = useState(FONT_DEFAULT_SETTINGS.fontFamily);
-    const [customFont, setCustomFont] = useState(FONT_DEFAULT_SETTINGS.customFont);
-    const [globalScale, setGlobalScale] = useState(FONT_DEFAULT_SETTINGS.globalScale);
-    const [messageFont, setMessageFont] = useState(FONT_DEFAULT_SETTINGS.messageFont);
+    // 在首次渲染前同步完成恢复，避免默认值的保存副作用覆盖用户已选字体。
+    const [initialSettings] = useState(readStoredFontSettings);
+    const [fontFamily, setFontFamily] = useState(initialSettings.fontFamily);
+    const [customFont, setCustomFont] = useState(initialSettings.customFont);
+    const [globalScale, setGlobalScale] = useState(initialSettings.globalScale);
+    const [messageFont, setMessageFont] = useState(initialSettings.messageFont);
 
     // 防抖保存相关 ref
     const debounceTimerRef = useRef(null);
     const pendingSettingsRef = useRef(null);
-
-    // 从 localStorage 加载字体设置
-    useEffect(() => {
-        try {
-            const saved = localStorage.getItem('fontSettings');
-            if (saved) {
-                const settings = JSON.parse(saved);
-                if (settings.fontFamily !== undefined) setFontFamily(settings.fontFamily);
-                if (settings.customFont !== undefined) setCustomFont(settings.customFont);
-                if (settings.globalScale !== undefined) setGlobalScale(settings.globalScale);
-                if (settings.messageFont !== undefined) setMessageFont(settings.messageFont);
-            } else {
-                // 兼容旧版：从 globalSettings 中迁移字体设置
-                const globalSaved = localStorage.getItem('globalSettings');
-                if (globalSaved) {
-                    const globalSettings = JSON.parse(globalSaved);
-                    if (globalSettings.fontFamily !== undefined) setFontFamily(globalSettings.fontFamily);
-                    if (globalSettings.customFont !== undefined) setCustomFont(globalSettings.customFont);
-                    if (globalSettings.globalScale !== undefined) setGlobalScale(globalSettings.globalScale);
-                    if (globalSettings.messageFont !== undefined) setMessageFont(globalSettings.messageFont);
-                }
-            }
-        } catch (error) {
-            console.error('加载字体设置失败:', error);
-        }
-    }, []);
 
     // 防抖保存到 localStorage
     const flushSave = useCallback(() => {
@@ -274,7 +295,7 @@ export const FontSettingsProvider = ({ children }) => {
     useEffect(() => {
         // globalScale 作为字体缩放因子，1.0 = 16px 基准
         const baseFontSize = 16;
-        const fontSize = Math.round(baseFontSize * globalScale);
+        const fontSize = baseFontSize * globalScale;
         document.documentElement.style.fontSize = `${fontSize}px`;
         document.documentElement.style.setProperty('--global-scale', globalScale.toString());
 

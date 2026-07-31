@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
-import { ChevronDown, ChevronRight, FileText, ExternalLink, Image } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { ArrowUpRight } from 'lucide-react';
 
 export const resolveEvidenceRef = (citation) => {
   const displayRef = Number(citation?.display_ref);
@@ -21,198 +21,124 @@ export const partitionEvidenceCitations = (citations = []) => {
     });
 
   return {
-    cited: sorted.filter((c) => Boolean(c?.highlight_text)),
-    uncited: sorted.filter((c) => !c?.highlight_text),
+    cited: sorted.filter((citation) => Boolean(citation?.highlight_text)),
+    uncited: sorted.filter((citation) => !citation?.highlight_text),
   };
 };
 
-/**
- * 证据面板：展示每个检索到的文档块
- * 被引用的证据排在前面，条目默认折叠并按需展开
- *
- * Props:
- *   citations: Array - 引文列表 [{ref, group_id, page_range, highlight_text}, ...]
- *   docId: string - 文档 ID，用于按需加载页面缩略图
- *   onCitationClick: Function - 点击引文跳转 PDF
- *   activeRef: number|null - 当前高亮的引文编号（双向联动）
- *   onRefHover: Function - 鼠标悬停引文编号时的回调
- */
-export default function EvidencePanel({ citations, docId, onCitationClick, activeRef, onRefHover }) {
-  const [expandedRefs, setExpandedRefs] = useState(new Set());
-  // 面板只在流式回答完成后挂载，默认折叠可避免一条长回答被引用列表打断。
-  const [panelCollapsed, setPanelCollapsed] = useState(true);
-  // thumbnail cache: page -> {url, loading, error}
-  const [thumbnails, setThumbnails] = useState({});
-  const fetchingRef = useRef(new Set());
+const compactText = (value, limit = 72) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit).trimEnd()}...` : text;
+};
 
-  const toggleRef = useCallback((ref) => {
-    setExpandedRefs(prev => {
-      if (prev.has(ref)) return new Set();
-      return new Set([ref]);
-    });
-  }, []);
+const isOpaqueCitationId = (value) => {
+  const text = String(value || '').trim();
+  return !text
+    || /^(?:g|group|chunk|semantic|block|visual)[\s:_-]*[\w-]+$/i.test(text)
+    || /^[a-f0-9]{12,}$/i.test(text);
+};
 
-  // Fetch thumbnail for a given page (lazy, cached)
-  const fetchThumbnail = useCallback((page) => {
-    if (!docId || !page || thumbnails[page] || fetchingRef.current.has(page)) return;
-    fetchingRef.current.add(page);
-    setThumbnails(prev => ({ ...prev, [page]: { loading: true } }));
-    fetch(`/api/document/${docId}/thumbnail/${page}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(data => {
-        setThumbnails(prev => ({ ...prev, [page]: { url: data.thumbnail, loading: false } }));
-      })
-      .catch(() => {
-        setThumbnails(prev => ({ ...prev, [page]: { error: true, loading: false } }));
-        fetchingRef.current.delete(page);
-      });
-  }, [docId, thumbnails]);
+export const getCitationPageLabel = (citation) => {
+  const range = Array.isArray(citation?.page_range) ? citation.page_range : [];
+  const first = Number(range[0]);
+  const last = Number(range[1] ?? range[0]);
+  if (!Number.isFinite(first) || first <= 0) return '';
+  if (!Number.isFinite(last) || last <= 0 || last === first) return `第 ${first} 页`;
+  return `第 ${first}-${last} 页`;
+};
 
-  const { cited, uncited } = useMemo(
-    () => partitionEvidenceCitations(citations || []),
-    [citations]
+export const getCitationSourceLabel = (citation) => {
+  const candidates = [
+    citation?.doc_name,
+    citation?.document_name,
+    citation?.section_title,
+    citation?.section,
+    citation?.heading,
+    citation?.title,
+    citation?.source_title,
+    citation?.filename,
+  ];
+  const namedSource = candidates
+    .map((value) => compactText(value, 88))
+    .find((value) => value && !isOpaqueCitationId(value));
+  if (namedSource) return namedSource;
+
+  const groupId = compactText(citation?.group_id, 64);
+  if (!isOpaqueCitationId(groupId)) return groupId;
+
+  const excerpt = compactText(
+    citation?.highlight_text || citation?.display_text || citation?.source_text,
+    72,
   );
+  return excerpt || '文档原文';
+};
 
-  if (!citations || citations.length === 0) return null;
+const getCitationTooltip = (citation, ref) => {
+  const source = getCitationSourceLabel(citation);
+  const page = getCitationPageLabel(citation);
+  const excerpt = compactText(citation?.highlight_text || citation?.display_text || citation?.source_text, 180);
+  return [
+    `引用 ${ref}${source ? `：${source}` : ''}`,
+    page,
+    excerpt && excerpt !== source ? excerpt : '',
+  ].filter(Boolean).join('\n');
+};
 
-  const renderCitation = (c) => {
-    const ref = resolveEvidenceRef(c);
-    const isExpanded = expandedRefs.has(ref);
-    const isActive = activeRef === ref;
-    const alignmentStatus = c.alignment_status || (c.highlight_text ? 'span_matched' : 'unmatched');
-    const statusLabel = alignmentStatus === 'span_matched'
-      ? '精确'
-      : alignmentStatus === 'fallback_window_only'
-        ? '窗口'
-        : alignmentStatus === 'candidate'
-          ? '候选'
-          : '未对齐';
-    const statusClass = alignmentStatus === 'span_matched'
-      ? 'bg-green-50 text-green-600 border-green-200'
-      : alignmentStatus === 'fallback_window_only'
-        ? 'bg-amber-50 text-amber-600 border-amber-200'
-        : 'bg-gray-50 text-gray-500 border-gray-200';
-    const pageLabel = c.page_range
-      ? c.page_range[0] === c.page_range[1]
-        ? `P${c.page_range[0]}`
-        : `P${c.page_range[0]}-${c.page_range[1]}`
-      : '';
-    // Use the first page of the citation range for thumbnail
-    const thumbPage = c.page_range?.[0];
-    const thumb = thumbPage ? thumbnails[thumbPage] : null;
+/**
+ * 回答下方的简洁引用脚注。
+ *
+ * 正文上标和这里的编号保持一一对应。点击整行仍会跳到 PDF 并高亮原文，
+ * 只去掉会打断阅读节奏的卡片、缩略图和二级展开层。
+ */
+export default function EvidencePanel({ citations, onCitationClick, activeRef, onRefHover }) {
+  const entries = useMemo(() => {
+    const { cited, uncited } = partitionEvidenceCitations(citations || []);
+    return [...cited, ...uncited];
+  }, [citations]);
 
-    return (
-      <div
-        key={ref}
-        className={`rounded-[12px] border transition-[transform,box-shadow,border-color,background-color] duration-200 ${
-          isActive
-            ? 'border-[#e8dfd9] bg-[#fffaf7] shadow-[0_10px_24px_-18px_rgba(78,64,56,0.30),0_1px_3px_rgba(78,64,56,0.08)]'
-            : 'border-[#e8dfd9] bg-white shadow-[0_8px_22px_-18px_rgba(78,64,56,0.32),0_1px_3px_rgba(78,64,56,0.07)] hover:-translate-y-0.5 hover:border-[#decfc6] hover:shadow-[0_12px_26px_-18px_rgba(78,64,56,0.34),0_2px_6px_-4px_rgba(78,64,56,0.12)]'
-        }`}
-        onMouseEnter={() => onRefHover?.(ref)}
-        onMouseLeave={() => onRefHover?.(null)}
-      >
-        {/* 头部 */}
-        <button
-          onClick={() => {
-            toggleRef(ref);
-            // Lazy-load thumbnail when expanding
-            if (!isExpanded && thumbPage) fetchThumbnail(thumbPage);
-          }}
-          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs"
-        >
-          {isExpanded
-            ? <ChevronDown className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-            : <ChevronRight className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-          }
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-[#FFF0E9] text-[#B85F47] text-[10px] font-bold flex-shrink-0">
-            {ref}
-          </span>
-          <span className="text-gray-500 truncate flex-1">
-            {c.group_id || `来源 ${ref}`}
-          </span>
-          <span className={`px-1.5 py-0.5 rounded border text-[10px] flex-shrink-0 ${statusClass}`}>
-            {statusLabel}
-          </span>
-          {pageLabel && (
-            <span className="text-[10px] text-gray-400 flex-shrink-0">{pageLabel}</span>
-          )}
-          {c.highlight_text && (
-            <FileText className="w-3 h-3 text-green-500 flex-shrink-0" title="已匹配到原文" />
-          )}
-        </button>
-
-        {/* 展开内容 */}
-        {isExpanded && (
-          <div className="px-3 pb-2.5 pt-0">
-            {/* 页面缩略图 */}
-            {thumbPage && docId && (
-              <div className="mb-2">
-                {thumb?.loading && (
-                  <div className="w-full h-20 bg-gray-100 rounded animate-pulse flex items-center justify-center">
-                    <Image className="w-4 h-4 text-gray-300" />
-                  </div>
-                )}
-                {thumb?.url && (
-                  <img
-                    src={thumb.url}
-                    alt={`页面 ${thumbPage} 预览`}
-                    className="w-full rounded border border-gray-100 cursor-pointer hover:opacity-90 transition-opacity"
-                    style={{ maxHeight: '120px', objectFit: 'contain', objectPosition: 'top' }}
-                    onClick={(e) => { e.stopPropagation(); onCitationClick?.(c); }}
-                    title={`点击跳转到 ${pageLabel}`}
-                  />
-                )}
-              </div>
-            )}
-            {c.highlight_text ? (
-              <div className="rounded-[8px] bg-[#fffdf6] px-2.5 py-2 text-xs leading-relaxed text-gray-700">
-                <mark className="rounded bg-[#fff0a6]/70 px-0.5">{c.highlight_text}</mark>
-              </div>
-            ) : (c.display_text || c.source_text) ? (
-              <div className="rounded-[8px] bg-gray-50/70 px-2.5 py-2 text-xs leading-relaxed text-gray-700">
-                {c.display_text || c.source_text}
-              </div>
-            ) : (
-              <div className="text-xs text-gray-400 italic">未匹配到精确引文</div>
-            )}
-            {c.page_range && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCitationClick?.(c);
-                }}
-                className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-[#B85F47] transition-colors hover:text-[#934934]"
-              >
-                <ExternalLink className="w-3 h-3" />
-                跳转到 {pageLabel}
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
+  if (entries.length === 0) return null;
 
   return (
-    <div className="mt-3">
-      <button
-        onClick={() => setPanelCollapsed(prev => !prev)}
-        className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors mb-1.5"
-      >
-        {panelCollapsed
-          ? <ChevronRight className="w-3.5 h-3.5" />
-          : <ChevronDown className="w-3.5 h-3.5" />
-        }
-        <span className="font-medium">引用来源</span>
-        <span className="text-gray-400">({citations.length})</span>
-      </button>
-      {!panelCollapsed && (
-        <div className="flex max-w-lg flex-col gap-2">
-          {cited.map(c => renderCitation(c))}
-          {uncited.map(c => renderCitation(c))}
-        </div>
-      )}
-    </div>
+    <section className="mt-4 max-w-[44rem]" aria-label="引用来源" data-testid="citation-footer">
+      <div className="h-px bg-stone-200/90 dark:bg-white/10" />
+      <div className="space-y-px pt-2">
+        <span className="sr-only">引用来源</span>
+        {entries.map((citation, index) => {
+          const ref = resolveEvidenceRef(citation);
+          const fallbackRef = index + 1;
+          const displayRef = Number.isFinite(ref) ? ref : fallbackRef;
+          const source = getCitationSourceLabel(citation);
+          const page = getCitationPageLabel(citation);
+          const isActive = activeRef === displayRef || activeRef === Number(citation?.ref);
+
+          return (
+            <button
+              key={`${displayRef}-${citation?.evidence_id || citation?.group_id || index}`}
+              type="button"
+              title={getCitationTooltip(citation, displayRef)}
+              onClick={() => onCitationClick?.(citation)}
+              onMouseEnter={() => onRefHover?.(displayRef)}
+              onMouseLeave={() => onRefHover?.(null)}
+              onFocus={() => onRefHover?.(displayRef)}
+              onBlur={() => onRefHover?.(null)}
+              className={`group -mx-1 flex w-full items-center gap-1.5 rounded-[6px] px-1 py-1 text-left text-[12px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F5B49C]/70 ${
+                isActive
+                  ? 'bg-[#FFF5EF] text-[#9B513C] dark:bg-[#3D2922] dark:text-[#F2B29A]'
+                  : 'text-stone-500 hover:bg-[#FFF8F4] hover:text-stone-700 dark:text-stone-400 dark:hover:bg-white/5 dark:hover:text-stone-200'
+              }`}
+              aria-label={`跳转到引用 ${displayRef}${page ? `，${page}` : ''}`}
+            >
+              <span className="w-3.5 shrink-0 text-right text-[11px] font-semibold tabular-nums text-stone-400 group-hover:text-[#B85F47] dark:text-stone-500">
+                {displayRef}
+              </span>
+              <span className="min-w-0 truncate">{source}</span>
+              {page && <span className="shrink-0 text-stone-400 dark:text-stone-500">· {page}</span>}
+              <ArrowUpRight className="h-3 w-3 shrink-0 text-stone-300 opacity-0 transition-[opacity,transform] duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:opacity-100 group-focus-visible:opacity-100 dark:text-stone-600" aria-hidden="true" />
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }

@@ -1,6 +1,7 @@
 import React, { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
+  ChevronRight,
   FileText,
   GripVertical,
   Languages,
@@ -32,12 +33,60 @@ import {
 // CodeMirror 只在打开笔记编辑器时才需要，懒加载避免拖慢首屏。
 const MarkdownNoteEditor = lazy(() => import('./MarkdownNoteEditor'));
 
+function TranslationAiIcon({ className = '' }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      className={className}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        fill="currentColor"
+        d="m19.713 8.128-.246.566a.506.506 0 0 1-.934 0l-.246-.566a4.36 4.36 0 0 0-2.22-2.25l-.759-.339a.53.53 0 0 1 0-.963l.717-.319a4.37 4.37 0 0 0 2.251-2.326l.253-.611a.506.506 0 0 1 .942 0l.253.61a4.37 4.37 0 0 0 2.25 2.327l.718.32a.53.53 0 0 1 0 .962l-.76.338a4.36 4.36 0 0 0-2.219 2.251M5 17v-2H3v2a4 4 0 0 0 4 4h3v-2H7l-.15-.006A2 2 0 0 1 5 17m17.4 4L18 10h-2l-4.399 11h2.154l1.199-3h4.09l1.201 3zm-6.647-5L17 12.885L18.245 16zM8 4V2H6v2H2v7h4v3h2v-3h4V4zM4 6h2v3H4zm4 0h2v3H8z"
+      />
+    </svg>
+  );
+}
+
 const TYPE_LABEL = {
   heading: '标题',
   paragraph: '段落',
   caption: '图注',
   figure: '图表',
   table: '表格',
+  formula: '公式',
+};
+
+const RAW_TABLE_MARKUP_RE = /<table\b|<\/?(?:thead|tbody|tfoot|tr|td|th)\b/i;
+const MARKDOWN_TABLE_RE = /^\s*\|.*\|\s*$[\s\S]*^\s*\|[\s:|-]+\|\s*$/m;
+const MATH_MARKUP_RE = /\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\(?:\[|\(|[A-Za-z]{2,})/;
+
+const isStructuredTableContent = (type, content) => (
+  type === 'table'
+  || RAW_TABLE_MARKUP_RE.test(String(content || ''))
+  || MARKDOWN_TABLE_RE.test(String(content || ''))
+);
+
+const isMathContent = (type, content) => (
+  type === 'formula' || MATH_MARKUP_RE.test(String(content || ''))
+);
+
+const formatFormulaBlockContent = (type, content) => {
+  let value = String(content || '').trim();
+  if (!value || type !== 'formula') return value;
+  if (/^\$\$[\s\S]+\$\$$/.test(value)) return value;
+
+  // 旧缓存和部分 MinerU 响应会把独立公式包成 \(...\) 或 $...$。
+  // 先拆外层，再统一成展示公式，避免 $$\n\(...\)\n$$ 这种嵌套分隔符。
+  if (/^\\\[[\s\S]+\\\]$/.test(value) || /^\\\([\s\S]+\\\)$/.test(value)) {
+    value = value.slice(2, -2).trim();
+  } else {
+    const inlineFormula = value.match(/^\$([\s\S]+)\$$/);
+    if (inlineFormula) value = inlineFormula[1].trim();
+  }
+  return value ? `$$\n${value}\n$$` : '';
 };
 
 const TRANSLATION_VIEW_STORAGE_KEY = 'chatpdf_translation_view_v1';
@@ -52,7 +101,11 @@ function TranslationViewToggle({ value, onChange, darkMode }) {
     <div
       role="group"
       aria-label="翻译显示方式"
-      className={`inline-flex shrink-0 items-center rounded-full p-0.5 ${darkMode ? 'bg-white/[0.07]' : 'bg-[#f1ece7]'}`}
+      className={`inline-flex h-8 shrink-0 items-center rounded-[12px] border p-0.5 ${
+        darkMode
+          ? 'border-white/[0.07] bg-black/[0.10]'
+          : 'border-[#e9e3dd] bg-[#f4f0ec] shadow-[inset_0_1px_1px_rgba(83,65,55,0.035)]'
+      }`}
     >
       {TRANSLATION_VIEWS.map((view) => {
         const active = value === view.id;
@@ -63,11 +116,11 @@ function TranslationViewToggle({ value, onChange, darkMode }) {
             onClick={() => onChange?.(view.id)}
             aria-pressed={active}
             title={view.title}
-            className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${
+            className={`h-6 rounded-[9px] px-2.5 text-[10px] font-medium transition-[background-color,color,box-shadow] duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${
               active
                 ? (darkMode
-                  ? 'bg-white/[0.14] text-gray-100'
-                  : 'bg-white text-[#3a332e] shadow-[0_1px_2px_rgba(83,65,55,0.09)]')
+                  ? 'bg-white/[0.12] text-gray-100 shadow-[0_1px_3px_rgba(0,0,0,0.18)]'
+                  : 'bg-white text-[#b85f47] shadow-[0_1px_3px_rgba(83,65,55,0.11)]')
                 : (darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-[#82766a] hover:text-[#5c534b]')
             }`}
           >
@@ -81,11 +134,15 @@ function TranslationViewToggle({ value, onChange, darkMode }) {
 
 function EmptyWidgetState({ icon: Icon, label, hint, action, darkMode }) {
   return (
-    <div className={`flex min-h-28 flex-col items-center justify-center gap-2 px-5 py-9 text-center ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
-      <Icon className="h-6 w-6 opacity-55" strokeWidth={1.8} />
-      <div className={`text-[12px] font-medium ${darkMode ? 'text-gray-400' : 'text-[#776b60]'}`}>{label}</div>
+    <div className={`flex min-h-44 flex-1 flex-col items-center justify-center gap-2.5 px-6 py-12 text-center ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
+      <span className={`inline-flex h-11 w-11 items-center justify-center rounded-[15px] border ${
+        darkMode ? 'border-white/[0.07] bg-white/[0.045]' : 'border-[#eee8e2] bg-[#faf8f5]'
+      }`}>
+        <Icon className="h-5 w-5 opacity-65" strokeWidth={1.8} />
+      </span>
+      <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-300' : 'text-[#5f554d]'}`}>{label}</div>
       {hint && (
-        <p className="max-w-[26ch] text-balance text-[11px] leading-[1.7]">{hint}</p>
+        <p className="max-w-[29ch] text-pretty text-[11px] leading-[1.7]">{hint}</p>
       )}
       {action}
     </div>
@@ -275,32 +332,32 @@ function ReadingWidgetCard({
     >
       <motion.div
         animate={{
-          scale: dragging ? 1.025 : 1,
+          scale: dragging ? 1.015 : 1,
           x: dragging ? dragOffset.dx : 0,
           y: dragging ? dragOffset.dy : 0,
         }}
         transition={dragging ? { duration: 0 } : WIDGET_SPRING}
-        className={`reading-widget-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[24px] border transition-[border-color,background-color,box-shadow] duration-200 ${
+        className={`reading-widget-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border transition-[border-color,background-color,box-shadow] duration-200 ${
           darkMode
-            ? 'border-white/[0.07] bg-white/[0.085] shadow-[0_1px_2px_rgba(0,0,0,0.22),0_6px_14px_-8px_rgba(0,0,0,0.5),0_18px_38px_-22px_rgba(0,0,0,0.72)]'
-            : 'border-white bg-white shadow-[0_1px_2px_rgba(83,65,55,0.05),0_6px_14px_-8px_rgba(83,65,55,0.10),0_18px_38px_-22px_rgba(83,65,55,0.26)]'
+            ? 'border-white/[0.075] bg-white/[0.07] shadow-[0_1px_2px_rgba(0,0,0,0.18),0_12px_28px_-24px_rgba(0,0,0,0.72)]'
+            : 'border-[#ebe5df] bg-white shadow-[0_1px_2px_rgba(83,65,55,0.04),0_12px_30px_-25px_rgba(83,65,55,0.26)]'
         } ${
           dragging
             ? (darkMode
-              ? 'border-[#F0653A]/40 shadow-[0_36px_70px_-26px_rgba(0,0,0,0.9)]'
-              : 'border-[#f0d2c4] shadow-[0_36px_66px_-24px_rgba(83,65,55,0.38)]')
+              ? 'border-[#F0653A]/35 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.88)]'
+              : 'border-[#eccbbb] shadow-[0_24px_48px_-24px_rgba(83,65,55,0.34)]')
             : ''
         }`}
       >
-      <div className={`flex min-h-12 shrink-0 items-center gap-2 border-b px-3.5 py-3 ${
-        darkMode ? 'border-white/[0.06]' : 'border-[#f6f2ed]'
+      <div className={`flex min-h-[58px] shrink-0 items-center gap-2 border-b px-3 py-2.5 ${
+        darkMode ? 'border-white/[0.065]' : 'border-[#eee9e4]'
       }`}>
         <button
           type="button"
           onPointerDown={onDragStart}
           onKeyDown={handleDragKeyDown}
           disabled={total < 2}
-          className={`reading-widget-drag-handle inline-flex h-8 w-7 shrink-0 touch-none select-none items-center justify-center rounded-[10px] transition-colors active:cursor-grabbing disabled:cursor-default disabled:opacity-35 ${
+          className={`reading-widget-drag-handle inline-flex h-8 w-6 shrink-0 touch-none select-none items-center justify-center rounded-[9px] transition-colors active:cursor-grabbing disabled:cursor-default disabled:opacity-35 ${
             darkMode
               ? 'cursor-grab text-gray-500 hover:bg-white/[0.07] hover:text-gray-300 focus-visible:ring-white/20'
               : 'cursor-grab text-[#a99d91] hover:bg-[#f3efeb] hover:text-[#776b60] focus-visible:ring-[#D97A5D]/25'
@@ -311,22 +368,22 @@ function ReadingWidgetCard({
           <GripVertical className="h-4 w-4" strokeWidth={2} />
         </button>
 
-        <div className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] ${
-          darkMode ? 'bg-white/[0.07]' : 'bg-[#f7f3ef]'
+        <div className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] ${
+          darkMode ? 'bg-white/[0.065]' : 'bg-[#f7f3ef]'
         } ${iconClassName}`}>
           <Icon className="h-4 w-4" strokeWidth={2} />
         </div>
 
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
-          <h3 className={`shrink-0 text-[12px] font-semibold ${darkMode ? 'text-gray-100' : 'text-[#3a332e]'}`}>{title}</h3>
-          <span className={`truncate text-[10px] font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>{meta}</span>
+          <h3 className={`shrink-0 text-[13px] font-semibold ${darkMode ? 'text-gray-100' : 'text-[#3a332e]'}`}>{title}</h3>
+          <span className={`truncate text-[10.5px] font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#8a7f74]'}`}>{meta}</span>
         </div>
 
         {headerAction}
         <button
           type="button"
           onClick={() => onToggle?.(id)}
-          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
             darkMode
               ? 'text-gray-400 hover:bg-white/[0.07] hover:text-gray-200 focus-visible:ring-white/20'
               : 'text-[#82766a] hover:bg-[#f3efeb] hover:text-[#5c534b] focus-visible:ring-[#D97A5D]/25'
@@ -501,10 +558,10 @@ function TranslationWidgetContent({
   return (
     <div className="reading-widget-flex min-h-0">
       {(error || pretranslateTotal > 0) && (
-        <div className={`shrink-0 border-b px-4 py-2.5 ${
+        <div className={`shrink-0 border-b px-4 py-3 ${
           darkMode
             ? 'border-white/[0.07] bg-white/[0.025]'
-            : 'border-[#eee9e4] bg-[#fffdfb]'
+            : 'border-[#f0ebe6] bg-[#fdfcfb]'
         }`}>
           {error && (
             <div className={`mb-2 rounded-[9px] px-3 py-2 text-[11px] font-medium ${darkMode ? 'bg-red-500/10 text-red-300' : 'bg-[#fdf1ed] text-[#b4472b]'}`}>
@@ -512,51 +569,82 @@ function TranslationWidgetContent({
             </div>
           )}
           {pretranslateTotal > 0 && (
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <span className={`shrink-0 text-[10px] font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
-                悬浮预翻译 {pretranslateDone}/{pretranslateTotal}
-              </span>
-              <div
-                className={`h-[3px] min-w-0 flex-1 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-[#efe9e3]'}`}
-                role="progressbar"
-                aria-label="悬浮预翻译缓存进度"
-                aria-valuenow={pretranslatePercent}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div
-                  className="h-full rounded-full bg-[#e0855f] transition-[width] duration-300"
-                  style={{ width: `${pretranslatePercent}%` }}
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => onPretranslate?.()}
-                disabled={pretranslateProgress.running}
-                className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors duration-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 ${
-                  darkMode
-                    ? 'text-gray-400 hover:bg-white/[0.08] hover:text-gray-100 focus-visible:ring-white/20'
-                    : 'text-[#776b60] hover:bg-[#f1ece7] hover:text-[#c96b50] focus-visible:ring-[#D97A5D]/25'
-                }`}
-              >
-                {pretranslateProgress.running ? '处理中' : pretranslateDone > 0 ? '补齐全文' : '开始缓存'}
-              </button>
-              {/* 只补要点、不重跑翻译：开关打开之前翻好的块缓存里 summary 是空的 */}
-              {onBackfillSummaries && (
-                <button
-                  type="button"
-                  onClick={() => onBackfillSummaries?.()}
-                  disabled={backfillingSummaries}
-                  title="给已翻译但没有要点的段落补上要点，不会重新翻译"
-                  className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors duration-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 ${
-                    darkMode
-                      ? 'text-gray-400 hover:bg-white/[0.08] hover:text-gray-100 focus-visible:ring-white/20'
-                      : 'text-[#776b60] hover:bg-[#f1ece7] hover:text-[#c96b50] focus-visible:ring-[#D97A5D]/25'
-                  }`}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      pretranslateProgress.running
+                        ? 'animate-pulse bg-[#e0855f]'
+                        : (darkMode ? 'bg-white/25' : 'bg-[#c8bdb4]')
+                    }`}
+                  />
+                  <span className={`truncate text-[10.5px] font-medium tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#74695f]'}`}>
+                    悬浮预翻译 {pretranslateDone}/{pretranslateTotal}
+                  </span>
+                </div>
+                <span
+                  className={`shrink-0 text-[10px] font-semibold tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#9a8d82]'}`}
+                  aria-live="polite"
                 >
-                  {backfillingSummaries ? '补要点中' : '补齐要点'}
-                </button>
-              )}
+                  {pretranslatePercent}%
+                </span>
+              </div>
+
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div
+                  className={`h-1 min-w-[3rem] flex-1 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-[#eee8e2]'}`}
+                  role="progressbar"
+                  aria-label="悬浮预翻译缓存进度"
+                  aria-valuenow={pretranslatePercent}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full rounded-full bg-[#df8664] transition-[width] duration-300"
+                    style={{ width: `${pretranslatePercent}%` }}
+                  />
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onPretranslate?.()}
+                    disabled={pretranslateProgress.running}
+                    title="补齐尚未缓存的全文翻译"
+                    className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-semibold transition-[background-color,border-color,color,transform] duration-200 hover:-translate-y-px active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 ${
+                      darkMode
+                        ? 'border-white/[0.09] bg-white/[0.07] text-gray-300 hover:border-white/[0.14] hover:bg-white/[0.11] hover:text-gray-100 focus-visible:ring-white/20'
+                        : 'border-[#e8e1da] bg-white text-[#685e55] hover:border-[#e6c2b3] hover:bg-[#fff7f3] hover:text-[#b85f47] focus-visible:ring-[#D97A5D]/25'
+                    }`}
+                  >
+                    {pretranslateProgress.running
+                      ? <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                      : <RefreshCw className="h-3 w-3" strokeWidth={2} />}
+                    {pretranslateProgress.running ? '处理中' : pretranslateDone > 0 ? '补齐全文' : '开始缓存'}
+                  </button>
+                  {/* 只补要点、不重跑翻译：开关打开之前翻好的块缓存里 summary 是空的 */}
+                  {onBackfillSummaries && (
+                    <button
+                      type="button"
+                      onClick={() => onBackfillSummaries?.()}
+                      disabled={backfillingSummaries}
+                      title="给已翻译但没有要点的段落补上要点，不会重新翻译"
+                      className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-semibold transition-[background-color,border-color,color,transform] duration-200 hover:-translate-y-px active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 ${
+                        darkMode
+                          ? 'border-white/[0.09] bg-white/[0.07] text-gray-300 hover:border-white/[0.14] hover:bg-white/[0.11] hover:text-gray-100 focus-visible:ring-white/20'
+                          : 'border-[#e8e1da] bg-white text-[#685e55] hover:border-[#e6c2b3] hover:bg-[#fff7f3] hover:text-[#b85f47] focus-visible:ring-[#D97A5D]/25'
+                      }`}
+                    >
+                      {backfillingSummaries
+                        ? <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                        : <FileText className="h-3 w-3" strokeWidth={2} />}
+                      {backfillingSummaries ? '补要点中' : '补齐要点'}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           {notice && !error && (
@@ -570,7 +658,7 @@ function TranslationWidgetContent({
       <div
         data-testid="translation-block-list"
         data-view={viewMode}
-        className="translation-block-list reading-widget-scroll custom-scrollbar max-h-[min(62vh,720px)] overflow-y-auto overscroll-contain"
+        className={`translation-block-list reading-widget-scroll custom-scrollbar max-h-[min(62vh,720px)] overflow-y-auto overscroll-contain ${darkMode ? '' : 'bg-white'}`}
       >
         {blocks.length === 0 ? (
           <EmptyWidgetState icon={FileText} label="本页暂无可翻译文本" darkMode={darkMode} />
@@ -582,6 +670,19 @@ function TranslationWidgetContent({
               const isTranslatingBlock = translatingSet.has(block.block_id);
               const isHeading = block.type === 'heading';
               const isCompare = viewMode !== 'target';
+              const isTableSource = isStructuredTableContent(block.type, block.text);
+              const isTableTarget = isStructuredTableContent(block.type, item?.translation);
+              const isMathSource = isMathContent(block.type, block.text);
+              const isMathTarget = isMathContent(block.type, item?.translation);
+              const isFormulaBlock = block.type === 'formula';
+              const sourceContent = formatFormulaBlockContent(block.type, block.text);
+              const targetContent = formatFormulaBlockContent(block.type, item?.translation);
+              const formulaPreserved = isFormulaBlock
+                && item?.translation_mode === 'preserve'
+                && String(item.translation || '').trim() === String(block.text || '').trim();
+              const hasVisibleTarget = Boolean(item) && !formulaPreserved;
+              const isRichSource = isTableSource || isMathSource;
+              const isRichTarget = isTableTarget || isMathTarget;
               // 「译文」模式下未翻译的块折成一行原文，既保持模式差异明显，
               // 又不会因为整页没翻译就变成一片空白。
               const collapseSource = !isCompare && !item;
@@ -594,74 +695,99 @@ function TranslationWidgetContent({
                   {typeLabel}
                 </span>
               ) : null;
+              // 状态线只表达「当前定位 / 正在处理」，不再给每个普通段落常驻一根竖线。
+              const showStatusBar = isActive || isTranslatingBlock;
               const statusBarClass = isTranslatingBlock
                 ? 'bg-[#e0855f] animate-pulse'
-                : item
-                  ? 'bg-transparent'
-                  : (darkMode ? 'bg-white/[0.10]' : 'bg-[#e3ddd6]');
+                : (darkMode ? 'bg-amber-300/55' : 'bg-[#e8a185]');
               return (
                 <article
                   key={block.block_id}
                   data-block-id={block.block_id}
-                  data-compare={isCompare && item ? 'true' : undefined}
+                  data-compare={isCompare && hasVisibleTarget ? 'true' : undefined}
                   onMouseEnter={() => onBlockHover?.(block)}
                   onMouseLeave={() => onBlockHover?.(null)}
                   onClick={() => onBlockClick?.(block)}
                   aria-current={isActive ? 'true' : undefined}
-                  className={`translation-block group relative cursor-pointer py-3 pl-5 pr-4 transition-colors duration-200 ${
+                  className={`translation-block group relative cursor-pointer px-4 py-3.5 transition-colors duration-200 ${
                     isActive
                       ? (darkMode ? 'bg-amber-300/[0.07]' : 'bg-[#fff8f3]')
                       : (darkMode ? 'hover:bg-white/[0.03]' : 'hover:bg-[#fbf9f7]')
                   }`}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute inset-y-3 left-2 w-[2px] rounded-full transition-colors duration-200 ${statusBarClass}`}
-                  />
+                  {showStatusBar && (
+                    <span
+                      aria-hidden="true"
+                      className={`absolute inset-y-3.5 left-1.5 w-[2px] rounded-full transition-colors duration-200 ${statusBarClass}`}
+                    />
+                  )}
                   <span className="sr-only">
                     {isTranslatingBlock ? '正在翻译' : item ? '已翻译' : '未翻译'}
                   </span>
 
-                  {/* 重译按钮浮在右上角，不再单独占一行把译文往下推 */}
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onRetranslateBlock?.(block);
-                    }}
-                    disabled={isTranslatingBlock}
-                    className={`absolute right-2.5 top-2 z-10 inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium transition-[opacity,color,background-color] duration-200 disabled:cursor-not-allowed disabled:opacity-100 ${
-                      isTranslatingBlock ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
-                    } ${
-                      darkMode
-                        ? 'bg-white/[0.10] text-gray-200 hover:bg-white/[0.16]'
-                        : 'bg-white text-[#776b60] ring-1 ring-[#ebe6e1] hover:text-[#c96b50] hover:ring-[#efc9bb]'
-                    }`}
-                  >
-                    {isTranslatingBlock ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                    {isTranslatingBlock ? '翻译中' : item ? '重译' : '翻译本段'}
-                  </button>
+                  {/* 纯公式不是可翻译的自然语言，保留一份完整表达即可。 */}
+                  {!isFormulaBlock && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRetranslateBlock?.(block);
+                      }}
+                      disabled={isTranslatingBlock}
+                      className={`absolute right-2.5 top-2.5 z-10 inline-flex shrink-0 items-center gap-1 rounded-[9px] px-2 py-1 text-[10px] font-medium transition-[opacity,color,background-color] duration-200 disabled:cursor-not-allowed disabled:opacity-100 ${
+                        isTranslatingBlock ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
+                      } ${
+                        darkMode
+                          ? 'bg-white/[0.10] text-gray-200 hover:bg-white/[0.16]'
+                          : 'bg-[#f6f2ee] text-[#776b60] hover:bg-[#f1e9e4] hover:text-[#c96b50]'
+                      }`}
+                    >
+                      {isTranslatingBlock ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                      {isTranslatingBlock ? '翻译中' : item ? '重译' : isTableSource ? '翻译表格' : '翻译本段'}
+                    </button>
+                  )}
 
                   {/* 对照模式够宽时由 CSS 变成左右两列，窄时自动回退成上下 */}
                   <div className="translation-pair">
                     {/* 译文模式下已翻译的块不再重复原文；未翻译的折成一行，避免整段留白 */}
-                    {(isCompare || !item) && (
-                      <p className={`translation-source break-words text-[12.5px] leading-[1.72] ${
-                        collapseSource ? 'line-clamp-1' : ''
-                      } ${darkMode ? 'text-gray-500' : 'text-[#6f6459]'}`}>
-                        {typeChip}
-                        {block.text}
-                      </p>
+                    {(isCompare || !item || formulaPreserved) && (
+                      isRichSource ? (
+                        <div className={`translation-source min-w-0 ${darkMode ? 'text-gray-400' : 'text-[#5f564e]'}`}>
+                          {typeChip && <div className="mb-2">{typeChip}</div>}
+                          <NoteMarkdown
+                            content={sourceContent}
+                            darkMode={darkMode}
+                            allowSafeHtml={isTableSource}
+                            imageAlt={isTableSource ? '表格内容图片' : '公式内容图片'}
+                            className={`translation-markdown translation-markdown--source${isMathSource ? ' translation-markdown--math' : ''}`}
+                          />
+                        </div>
+                      ) : (
+                        <p className={`translation-source break-words text-[12.5px] leading-[1.72] ${
+                          collapseSource ? 'line-clamp-1' : ''
+                        } ${darkMode ? 'text-gray-500' : 'text-[#6f6459]'}`}>
+                          {typeChip}
+                          {block.text}
+                        </p>
+                      )
                     )}
 
-                    {(item || isTranslatingBlock) && (
+                    {(hasVisibleTarget || isTranslatingBlock) && (
                       <div className={`translation-target ${item && !isCompare ? '' : 'mt-2'}`}>
                         {item?.summary && (
                           <p className={`mb-1.5 text-pretty break-words text-[12px] font-medium leading-[1.7] ${darkMode ? 'text-amber-200' : 'text-[#a86a2e]'}`}>
                             {item.summary}
                           </p>
                         )}
-                        {item ? (
+                        {hasVisibleTarget ? (isRichTarget ? (
+                          <NoteMarkdown
+                            content={targetContent}
+                            darkMode={darkMode}
+                            allowSafeHtml={isTableTarget}
+                            imageAlt={isTableTarget ? '表格译文图片' : '公式译文图片'}
+                            className={`translation-markdown translation-markdown--target${isMathTarget ? ' translation-markdown--math' : ''}`}
+                          />
+                        ) : (
                           <p className={`text-pretty break-words ${
                             isHeading
                               ? 'text-[15px] font-semibold leading-[1.6]'
@@ -669,7 +795,7 @@ function TranslationWidgetContent({
                           } ${darkMode ? 'text-gray-100' : 'text-[#332d28]'}`}>
                             {item.translation}
                           </p>
-                        ) : (
+                        )) : (
                           <div className="space-y-2" aria-hidden="true">
                             <div className={`h-3.5 w-full animate-pulse rounded-full ${darkMode ? 'bg-white/[0.07]' : 'bg-[#f1ece7]'}`} />
                             <div className={`h-3.5 w-4/5 animate-pulse rounded-full ${darkMode ? 'bg-white/[0.07]' : 'bg-[#f1ece7]'}`} />
@@ -715,37 +841,48 @@ function UserNotesWidgetContent({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -5 }}
             transition={{ duration: 0.16, ease: 'easeOut' }}
-            className={`border-b p-4 ${
+            className={`px-4 pb-3 pt-3 ${
               editorFillsColumn ? 'flex min-h-0 flex-1 flex-col' : 'shrink-0'
-            } ${darkMode ? 'border-white/[0.06] bg-white/[0.02]' : 'border-[#f3eee9] bg-[#fbf9f7]'}`}
+            }`}
           >
-            <div className="mb-2.5 flex items-center justify-between gap-3">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <span className={`shrink-0 text-[12px] font-semibold ${darkMode ? 'text-gray-100' : 'text-[#3a332e]'}`}>
-                  {editor.noteId ? '编辑笔记' : '新建笔记'}
-                </span>
-                <span className={`truncate text-[10px] tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
-                  第 {editor.page} 页
-                </span>
+            <div className="mb-1.5 flex items-center justify-between gap-3">
+              <span className={`truncate text-[10px] font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
+                第 {editor.page} 页
+              </span>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={onEditorSave}
+                  disabled={editorSaving || !editor.value.trim()}
+                  className={`inline-flex h-7 w-7 items-center justify-center rounded-[8px] transition-[color,background-color,transform] duration-200 active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-35 disabled:active:scale-100 ${
+                    darkMode
+                      ? 'bg-[#F0653A]/14 text-[#ffb39d] hover:bg-[#F0653A]/22 focus-visible:ring-[#F0653A]/30'
+                      : 'bg-[#fff0ea] text-[#c76549] hover:bg-[#ffe6dc] hover:text-[#a94d35] focus-visible:ring-[#D97A5D]/25'
+                  }`}
+                  aria-label={editor.noteId ? '保存修改' : '保存笔记'}
+                  title={editor.noteId ? '保存修改' : '保存笔记'}
+                >
+                  {editorSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={onEditorCancel}
+                  disabled={editorSaving}
+                  className={`inline-flex h-7 w-7 items-center justify-center rounded-[8px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+                    darkMode
+                      ? 'text-gray-500 hover:bg-white/[0.08] hover:text-gray-200 focus-visible:ring-white/20'
+                      : 'text-[#82766a] hover:bg-[#f1ece7] hover:text-[#5c534b] focus-visible:ring-[#D97A5D]/25'
+                  }`}
+                  aria-label="关闭笔记编辑器"
+                  title="关闭"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={onEditorCancel}
-                disabled={editorSaving}
-                className={`inline-flex h-7 w-7 items-center justify-center rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
-                  darkMode
-                    ? 'text-gray-500 hover:bg-white/[0.08] hover:text-gray-200 focus-visible:ring-white/20'
-                    : 'text-[#82766a] hover:bg-[#eee9e4] hover:text-[#5c534b] focus-visible:ring-[#D97A5D]/25'
-                }`}
-                aria-label="关闭笔记编辑器"
-                title="关闭"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
             </div>
 
             <Suspense fallback={
-              <div className={`h-[104px] animate-pulse rounded-[14px] ${darkMode ? 'bg-white/[0.06]' : 'bg-[#f1ece7]'}`} />
+              <div className={`h-24 animate-pulse ${darkMode ? 'bg-white/[0.035]' : 'bg-[#f8f5f2]'}`} />
             }>
               <MarkdownNoteEditor
                 value={editor.value}
@@ -759,32 +896,10 @@ function UserNotesWidgetContent({
             </Suspense>
 
             {editorError && (
-              <div className={`mt-2 text-[11px] font-medium ${darkMode ? 'text-rose-300' : 'text-rose-600'}`} role="alert">
+              <div className={`mt-1.5 text-[11px] font-medium ${darkMode ? 'text-rose-300' : 'text-rose-600'}`} role="alert">
                 {editorError}
               </div>
             )}
-
-            <div className="mt-3 flex items-center justify-end gap-1">
-              <button
-                type="button"
-                onClick={onEditorCancel}
-                disabled={editorSaving}
-                className={`h-8 rounded-full px-3 text-[11px] font-medium transition-colors duration-200 disabled:opacity-50 ${
-                  darkMode ? 'text-gray-400 hover:bg-white/[0.07] hover:text-gray-200' : 'text-[#776b60] hover:bg-[#f1ece7] hover:text-[#3a332e]'
-                }`}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={onEditorSave}
-                disabled={editorSaving || !editor.value.trim()}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[#F0653A] px-4 text-[11px] font-semibold text-white shadow-[0_6px_16px_-8px_rgba(240,101,58,0.65)] transition-[background-color,transform] duration-200 hover:bg-[#F5713F] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none disabled:active:scale-100"
-              >
-                {editorSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                {editor.noteId ? '保存修改' : '保存笔记'}
-              </button>
-            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -803,10 +918,10 @@ function UserNotesWidgetContent({
               <button
                 type="button"
                 onClick={onStartUserNote}
-                className={`mt-1 inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 ${
+                className={`mt-1 inline-flex h-8 items-center gap-1.5 rounded-[11px] px-3.5 text-[11px] font-medium transition-[color,background-color,transform] duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 ${
                   darkMode
-                    ? 'border-white/[0.12] text-gray-300 hover:bg-white/[0.07] hover:text-gray-100 focus-visible:ring-white/20'
-                    : 'border-[#e3ddd6] bg-[#fffdfb] text-[#776b60] hover:border-[#e9c3b3] hover:text-[#c96b50] focus-visible:ring-[#D97A5D]/25'
+                    ? 'bg-white/[0.065] text-gray-300 hover:bg-white/[0.10] hover:text-gray-100 focus-visible:ring-white/20'
+                    : 'bg-[#f4efeb] text-[#6f6459] hover:bg-[#eee5df] hover:text-[#b85f47] focus-visible:ring-[#D97A5D]/25'
                 }`}
               >
                 <Plus className="h-3.5 w-3.5" strokeWidth={2} />
@@ -823,12 +938,12 @@ function UserNotesWidgetContent({
             <article
               key={note.id}
               className={`group relative border-b px-4 py-4 pr-28 transition-colors last:border-b-0 ${
-                darkMode ? 'border-white/[0.06] hover:bg-amber-200/[0.025]' : 'border-[#f3eee9] hover:bg-[#fffcf8]'
+                darkMode ? 'border-white/[0.05] hover:bg-white/[0.025]' : 'border-[#f4efeb] hover:bg-[#fbf9f7]'
               }`}
             >
               <div className="flex items-start gap-2.5">
                 <span className={`mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[8px] ${
-                  darkMode ? 'bg-amber-300/[0.12] text-amber-300/80' : 'bg-[#fdf2e8] text-[#c98a3f]'
+                  darkMode ? 'text-amber-300/70' : 'text-[#c98a3f]'
                 }`}>
                   <StickyNote className="h-3.5 w-3.5" strokeWidth={1.9} />
                 </span>
@@ -899,7 +1014,7 @@ function UserNotesWidgetContent({
   );
 }
 
-// 「本页对应」面包屑：原来是第三张卡片，但它只有 0-2 条、和左侧「总结」共享同一份
+// 「大纲位置」面包屑：原来是第三张卡片，但它只有 0-2 条、和左侧「总结」共享同一份
 // 大纲和同一个跳转函数，撑不起一个和翻译、笔记平级的卡片位。收进头部后它变成
 // 翻页就自动更新的定位信息，回答「我这一页在全文论证结构的哪个位置」。
 const OUTLINE_TRAIL_LIMIT = 3;
@@ -912,30 +1027,37 @@ function OutlineTrail({ notes, activeNodeId, visitedSet, onNoteClick, darkMode }
   return (
     <nav
       aria-label="本页对应的大纲位置"
-      className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1"
+      className={`mt-2 flex w-fit max-w-full min-w-0 flex-wrap items-center gap-x-1 gap-y-1 rounded-[11px] border px-2.5 py-1.5 ${
+        darkMode
+          ? 'border-white/[0.07] bg-white/[0.04]'
+          : 'border-[#eee3dc] bg-[#fbf6f2]'
+      }`}
     >
-      <span className={`shrink-0 text-[10px] font-medium ${darkMode ? 'text-gray-600' : 'text-[#9c9186]'}`}>
-        本页对应
+      <span className={`inline-flex shrink-0 items-center gap-1 text-[10px] font-semibold ${darkMode ? 'text-[#fdc4af]' : 'text-[#b8644b]'}`}>
+        <MapPin className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
+        大纲位置
       </span>
-      {shown.map((note, index) => {
+      {shown.map((note) => {
         const isActive = activeNodeId === note.id;
         const isVisited = !isActive && visitedSet.has(note.id);
         return (
           <React.Fragment key={note.id}>
-            {index > 0 && (
-              <span aria-hidden="true" className={darkMode ? 'text-gray-700' : 'text-[#c4b9ad]'}>›</span>
-            )}
+            <ChevronRight
+              aria-hidden="true"
+              className={`h-3 w-3 shrink-0 ${darkMode ? 'text-gray-600' : 'text-[#c2b4a8]'}`}
+              strokeWidth={1.8}
+            />
             <button
               type="button"
               onClick={() => onNoteClick?.(note)}
               title={note.summary || note.title}
               aria-current={isActive ? 'true' : undefined}
-              className={`max-w-[18em] truncate rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${
+              className={`max-w-[18em] truncate rounded-[7px] px-1.5 py-0.5 text-[11px] font-medium transition-[background-color,color,transform] duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${
                 isActive
-                  ? (darkMode ? 'bg-[#F0653A]/20 text-[#fdc4af]' : 'bg-[#fdece4] text-[#b85f47]')
+                  ? (darkMode ? 'bg-[#F0653A]/20 text-[#fdc4af]' : 'bg-white text-[#ad543e] shadow-[0_1px_2px_rgba(83,65,55,0.08)]')
                   : isVisited
-                    ? (darkMode ? 'text-gray-400 hover:bg-white/[0.07]' : 'text-[#82766a] hover:bg-[#f1ece7]')
-                    : (darkMode ? 'text-gray-300 hover:bg-white/[0.07]' : 'text-[#5c534b] hover:bg-[#f1ece7]')
+                    ? (darkMode ? 'text-gray-400 hover:bg-white/[0.07]' : 'text-[#74685e] hover:bg-white hover:text-[#ad543e]')
+                    : (darkMode ? 'text-gray-200 hover:bg-white/[0.07]' : 'text-[#4f463f] hover:bg-white hover:text-[#ad543e]')
               }`}
             >
               {note.title}
@@ -1080,6 +1202,10 @@ function ReadingAnalysisPanel({
     onSwap: handleSwapWidgets,
     onDropSlot: handleDropOnSlot,
   });
+  // 通栏组件拖回列区时，右列需要完全留给落点提示；不能让仅剩的主卡片继续横跨它。
+  const isColumnDropActive = Boolean(
+    drag.id && columnCount < 2 && layout.fullWidth[drag.id]
+  );
 
   // 双栏下 main/side 由行高决定，手动高度只对通栏的 foot 生效，
   // 所以要知道当前实际是几栏——容器查询 CSS 拿不到，只能自己量。
@@ -1302,7 +1428,7 @@ function ReadingAnalysisPanel({
       meta: pendingCount > 0
         ? `${translatableCount} 块 · ${pendingCount} 待译`
         : `${translatableCount} 块 · 已全部翻译`,
-      icon: Languages,
+      icon: TranslationAiIcon,
       iconClassName: darkMode ? 'text-[#fdc4af]' : 'text-[#c96b50]',
       headerAction: (
         <TranslationViewToggle
@@ -1341,7 +1467,7 @@ function ReadingAnalysisPanel({
         <button
           type="button"
           onClick={handleStartNewUserNote}
-          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
             darkMode
               ? 'text-gray-400 hover:bg-white/[0.08] hover:text-gray-100 focus-visible:ring-white/20'
               : 'text-[#82766a] hover:bg-[#f3efeb] hover:text-[#b85f47] focus-visible:ring-[#D97A5D]/25'
@@ -1373,10 +1499,10 @@ function ReadingAnalysisPanel({
   };
 
   return (
-    <div className={`flex h-full flex-col ${darkMode ? 'text-gray-200' : 'text-[#3a332e]'}`}>
+    <div className={`content-typography flex h-full flex-col ${darkMode ? 'text-gray-200' : 'text-[#3a332e]'}`}>
       <header className={`shrink-0 border-b px-5 py-3 ${darkMode ? 'border-white/10' : 'border-[#f0ebe6]'}`}>
         <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-baseline gap-2.5">
               <h2 className="shrink-0 text-[15px] font-semibold tracking-[-0.01em]">第 {currentPage} 页</h2>
               <p className={`truncate text-[11px] font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-[#82766a]'}`}>
@@ -1446,6 +1572,7 @@ function ReadingAnalysisPanel({
           data-col-resizing={liveSplit != null ? 'true' : undefined}
           data-columns={columnCount}
           data-columns-open={columnRegionOpen ? 'true' : 'false'}
+          data-column-drop-active={isColumnDropActive ? 'true' : undefined}
           className="reading-widget-board custom-scrollbar h-full overflow-y-auto overscroll-contain px-4 py-4"
           style={{
             '--reading-col-main': `${liveSplit ?? layout.split}fr`,
@@ -1531,7 +1658,7 @@ function ReadingAnalysisPanel({
 
           {/* 拖拽中才出现的落点：空着的列 和 底部通栏。
               有了它们，卡片的位置才是用户选的，而不是按排序下标硬推出来的。 */}
-          {drag.id && columnCount < 2 && layout.fullWidth[drag.id] && (
+          {isColumnDropActive && (
             <div
               data-drop-slot="column"
               className={`reading-drop-zone reading-drop-zone--column flex items-center justify-center rounded-[24px] border-2 border-dashed text-[11px] font-medium ${

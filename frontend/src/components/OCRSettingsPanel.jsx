@@ -17,8 +17,8 @@ import {
   RefreshCw,
   Save,
   ScanText,
+  SlidersHorizontal,
   Wifi,
-  WifiOff,
   ChevronLeft,
   XCircle,
 } from 'lucide-react'
@@ -78,9 +78,9 @@ const PARSE_ROUTE_OPTIONS = SHARED_PARSE_ROUTE_OPTIONS.map((option) => ({
  * 面板分区导航定义
  */
 const PANEL_TABS = [
-  { id: 'local', label: '扫描 OCR', icon: ScanText },
-  { id: 'cloud', label: '云端解析', icon: Globe },
-  { id: 'figure', label: '图表定位', icon: Crop },
+  { id: 'basic', label: '常用设置', icon: FileSearch },
+  { id: 'services', label: 'MinerU 服务', icon: Globe },
+  { id: 'advanced', label: '高级选项', icon: SlidersHorizontal },
 ]
 
 /**
@@ -89,9 +89,6 @@ const PANEL_TABS = [
 const BACKEND_LABELS = {
   tesseract: 'Tesseract',
   paddleocr: 'PaddleOCR',
-  mistral: 'Mistral OCR',
-  mineru: 'MinerU 深度解析',
-  doc2x: 'Doc2X OCR',
 }
 
 /**
@@ -114,11 +111,6 @@ const BACKEND_OPTIONS = [
     label: 'PaddleOCR',
     description: '本地 OCR 引擎，需安装 PaddleOCR',
   },
-  {
-    value: 'mistral',
-    label: 'Mistral OCR',
-    description: '在线 OCR 服务，需配置 API Key',
-  },
 ]
 
 /**
@@ -134,12 +126,12 @@ const VALID_MODES = ['auto', 'always', 'never']
 /**
  * 合法的 OCR 引擎后端值
  */
-const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr', 'mistral']
+const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr']
 
 /**
  * 合法的主解析路线值
  */
-const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'doc2x']
+const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'mistral', 'doc2x']
 
 const DEFAULT_OCR_SETTINGS = {
   mode: 'auto',
@@ -170,7 +162,7 @@ export function loadOCRSettings() {
       if (VALID_BACKENDS.includes(parsed.backend)) {
         result.backend = parsed.backend
       }
-      // 旧版本曾把 MinerU/Doc2X 当作逐页 OCR；读取时统一迁回自动 OCR。
+      // 已下线的云 OCR 与旧版 MinerU 逐页 OCR 统一迁回自动本地 OCR。
       const migratedLegacyPageOcr = LEGACY_PAGE_OCR_BACKENDS.includes(parsed.backend)
       const migratedLegacyParseRoute = parsed.parseRoute === 'auto'
       // 校验上传主解析路线
@@ -235,8 +227,8 @@ const getApiErrorMessage = async (res, fallback) => {
  * @param {function} props.onClose - 关闭面板的回调
  */
 export default function OCRSettingsPanel({ isOpen, onClose }) {
-  // 面板分区导航：local=扫描 OCR，cloud=云端解析，figure=图表兜底资源
-  const [activePanelTab, setActivePanelTab] = useState('local')
+  // 首屏只展示上传前必须理解的主路线；服务与解析细节按需进入。
+  const [activePanelTab, setActivePanelTab] = useState('basic')
   // OCR 模式状态
   const [mode, setMode] = useState('auto')
   // OCR 引擎后端选择状态
@@ -250,25 +242,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   // 错误信息
   const [error, setError] = useState(null)
 
-  // ---- 在线 OCR 配置状态 ----
-  // Mistral API Key
-  const [mistralApiKey, setMistralApiKey] = useState('')
-  // Mistral Base URL
-  const [mistralBaseUrl, setMistralBaseUrl] = useState('https://api.mistral.ai')
-  // 是否显示 API Key 明文
-  const [showApiKey, setShowApiKey] = useState(false)
-  // 测试连接状态：null=未测试, 'loading'=测试中, 'success'=成功, 'error'=失败
-  const [validateStatus, setValidateStatus] = useState(null)
-  // 测试连接结果消息
-  const [validateMessage, setValidateMessage] = useState('')
-  // 保存配置中
-  const [saving, setSaving] = useState(false)
-  // 保存结果消息
-  const [saveMessage, setSaveMessage] = useState('')
-  // 已加载的在线 OCR 配置
+  // 已加载的 MinerU 配置
   const [onlineConfig, setOnlineConfig] = useState(null)
-  // Mistral 配置卡片展开/折叠状态（与 MinerU/Doc2X 卡片保持一致）
-  const [mistralExpanded, setMistralExpanded] = useState(false)
 
   // ---- MinerU OCR 配置状态 ----
   // MinerU 接入模式：worker（代理）或 direct（官方 API 直连）
@@ -312,30 +287,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const [yoloBusy, setYoloBusy] = useState(false)
   const [yoloMessage, setYoloMessage] = useState('')
   const [yoloMessageType, setYoloMessageType] = useState(null)
-
-  // ---- Doc2X OCR 配置状态 ----
-  // Doc2X Worker URL
-  const [doc2xWorkerUrl, setDoc2xWorkerUrl] = useState('')
-  // Doc2X Auth Key
-  const [doc2xAuthKey, setDoc2xAuthKey] = useState('')
-  // Doc2X Token
-  const [doc2xToken, setDoc2xToken] = useState('')
-  // Doc2X Token 模式：'frontend'（前端透传）或 'worker'（Worker 配置）
-  const [doc2xTokenMode, setDoc2xTokenMode] = useState('frontend')
-  // 是否显示 Doc2X Auth Key 明文
-  const [showDoc2xAuthKey, setShowDoc2xAuthKey] = useState(false)
-  // 是否显示 Doc2X Token 明文
-  const [showDoc2xToken, setShowDoc2xToken] = useState(false)
-  // Doc2X 测试连接状态
-  const [doc2xValidating, setDoc2xValidating] = useState(false)
-  // Doc2X 测试连接结果
-  const [doc2xValidateStatus, setDoc2xValidateStatus] = useState(null)
-  const [doc2xValidateMessage, setDoc2xValidateMessage] = useState('')
-  // Doc2X 保存状态
-  const [doc2xSaving, setDoc2xSaving] = useState(false)
-  const [doc2xSaveMessage, setDoc2xSaveMessage] = useState('')
-  // Doc2X 配置卡片展开/折叠状态
-  const [doc2xExpanded, setDoc2xExpanded] = useState(false)
 
   /**
    * 从 localStorage 加载已保存的设置（mode 和 backend）
@@ -406,12 +357,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       if (!res.ok) return
       const data = await res.json()
       setOnlineConfig(data)
-      // 如果已有配置，填充 Base URL（API Key 不回填，仅显示脱敏预览）
-      if (data?.mistral) {
-        if (data.mistral.base_url) {
-          setMistralBaseUrl(data.mistral.base_url)
-        }
-      }
       // 加载 MinerU 已保存配置（回填非敏感字段）
       if (data?.mineru) {
         if (data.mineru.access_mode) {
@@ -439,92 +384,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           setMineruModelVersion(data.mineru.model_version)
         }
       }
-      // 加载 Doc2X 已保存配置（回填非敏感字段）
-      if (data?.doc2x) {
-        if (data.doc2x.worker_url) {
-          setDoc2xWorkerUrl(data.doc2x.worker_url)
-        }
-        if (data.doc2x.token_mode) {
-          setDoc2xTokenMode(data.doc2x.token_mode)
-        }
-      }
     } catch (err) {
       console.error('获取在线 OCR 配置失败:', err)
     }
   }, [])
-
-  /**
-   * 测试连接：验证 API Key 有效性
-   */
-  const handleValidateKey = useCallback(async () => {
-    if (!mistralApiKey.trim() && !onlineConfig?.mistral?.api_key_configured) return
-    setValidateStatus('loading')
-    setValidateMessage('')
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/ocr/validate-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: 'mistral',
-          api_key: mistralApiKey.trim(),
-          base_url: mistralBaseUrl.trim() || 'https://api.mistral.ai',
-        }),
-      })
-      const data = await res.json()
-      // 处理 HTTP 错误（如 400）：FastAPI 返回 {"detail": "..."}
-      if (!res.ok) {
-        setValidateStatus('error')
-        setValidateMessage(data.detail || `请求失败 (HTTP ${res.status})`)
-        return
-      }
-      setValidateStatus(data.valid ? 'success' : 'error')
-      setValidateMessage(data.message || (data.valid ? '验证成功' : '验证失败'))
-    } catch (err) {
-      console.error('验证 API Key 失败:', err)
-      setValidateStatus('error')
-      setValidateMessage('无法连接到服务器，请检查后端服务')
-    }
-  }, [mistralApiKey, mistralBaseUrl, onlineConfig?.mistral?.api_key_configured])
-
-  /**
-   * 保存在线 OCR 配置
-   */
-  const handleSaveOnlineConfig = useCallback(async () => {
-    setSaving(true)
-    setSaveMessage('')
-    try {
-      const body = {
-        provider: 'mistral',
-        api_key: mistralApiKey.trim(),
-        base_url: mistralBaseUrl.trim() || 'https://api.mistral.ai',
-      }
-      const res = await fetch(`${API_BASE_URL}/api/ocr/online-config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setSaveMessage('配置已保存')
-        // 重新加载配置和状态
-        fetchOnlineConfig()
-        fetchOCRStatus()
-        // 清空输入的 API Key（已保存到后端）
-        setMistralApiKey('')
-        setValidateStatus(null)
-        setValidateMessage('')
-      } else {
-        setSaveMessage(data.message || '保存失败')
-      }
-    } catch (err) {
-      console.error('保存在线 OCR 配置失败:', err)
-      setSaveMessage('保存失败，请检查后端服务')
-    } finally {
-      setSaving(false)
-      // 3 秒后清除保存消息
-      setTimeout(() => setSaveMessage(''), 3000)
-    }
-  }, [mistralApiKey, mistralBaseUrl, fetchOnlineConfig, fetchOCRStatus])
 
   /**
    * MinerU 测试连接：验证 Worker 可达性
@@ -661,87 +524,6 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       setTimeout(() => setMineruSaveMessage(''), 3000)
     }
   }, [mineruAccessMode, mineruBaseUrl, mineruWorkerUrl, mineruAuthKey, mineruTokenMode, mineruToken, mineruModelVersion, mineruEnableOcr, mineruEnableFormula, mineruEnableTable, fetchOnlineConfig, fetchOCRStatus])
-
-  /**
-   * Doc2X 测试连接：验证 Worker 可达性
-   */
-  const handleDoc2xValidate = useCallback(async () => {
-    if (!doc2xWorkerUrl.trim()) return
-    setDoc2xValidating(true)
-    setDoc2xValidateStatus(null)
-    setDoc2xValidateMessage('')
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/ocr/validate-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: 'doc2x',
-          worker_url: doc2xWorkerUrl.trim(),
-          auth_key: doc2xAuthKey.trim(),
-          token: doc2xToken.trim(),
-          token_mode: doc2xTokenMode,
-        }),
-      })
-      const data = await res.json()
-      // 处理 HTTP 错误（如 400）：FastAPI 返回 {"detail": "..."}
-      if (!res.ok) {
-        setDoc2xValidateStatus('error')
-        setDoc2xValidateMessage(data.detail || `请求失败 (HTTP ${res.status})`)
-        return
-      }
-      setDoc2xValidateStatus(data.valid ? 'success' : 'error')
-      setDoc2xValidateMessage(data.message || (data.valid ? '连接成功' : '连接失败'))
-    } catch (err) {
-      console.error('Doc2X 测试连接失败:', err)
-      setDoc2xValidateStatus('error')
-      setDoc2xValidateMessage('无法连接到服务器，请检查后端服务')
-    } finally {
-      setDoc2xValidating(false)
-    }
-  }, [doc2xWorkerUrl, doc2xAuthKey])
-
-  /**
-   * 保存 Doc2X OCR 配置
-   */
-  const handleDoc2xSave = useCallback(async () => {
-    setDoc2xSaving(true)
-    setDoc2xSaveMessage('')
-    try {
-      const body = {
-        provider: 'doc2x',
-        worker_url: doc2xWorkerUrl.trim(),
-        auth_key: doc2xAuthKey.trim(),
-        token_mode: doc2xTokenMode,
-        token: doc2xToken.trim(),
-      }
-      const res = await fetch(`${API_BASE_URL}/api/ocr/online-config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setDoc2xSaveMessage('配置已保存')
-        // 重新加载配置和状态
-        fetchOnlineConfig()
-        fetchOCRStatus()
-        // 清空敏感输入（已保存到后端）
-        setDoc2xAuthKey('')
-        setDoc2xToken('')
-        setDoc2xValidateStatus(null)
-        setDoc2xValidateMessage('')
-      } else {
-        setDoc2xSaveMessage(data.message || '保存失败')
-      }
-    } catch (err) {
-      console.error('保存 Doc2X 配置失败:', err)
-      setDoc2xSaveMessage('保存失败，请检查后端服务')
-    } finally {
-      setDoc2xSaving(false)
-      // 3 秒后清除保存消息
-      setTimeout(() => setDoc2xSaveMessage(''), 3000)
-    }
-  }, [doc2xWorkerUrl, doc2xAuthKey, doc2xTokenMode, doc2xToken, fetchOnlineConfig, fetchOCRStatus])
 
   /**
    * 选择 YOLO 权重安装目录（桌面端弹系统目录选择器，Web 端保留手动输入）
@@ -911,6 +693,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       : yoloInstalled
         ? '待验证'
         : '未安装'
+  const mineruConfigured = Boolean(
+    onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured
+  )
+  const localOcrBackends = Object.entries(ocrStatus?.backends || {}).filter(
+    ([name]) => VALID_BACKENDS.includes(name) && name !== 'auto'
+  )
+  const localOcrAvailable = localOcrBackends.some(([, available]) => available)
+  const recommendedLocalBackend = BACKEND_LABELS[ocrStatus?.recommended]
 
   return (
     <AnimatePresence initial={false}>
@@ -926,7 +716,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.8 }}
-            className="settings-solid settings-shell w-full max-w-[640px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col"
+            className="settings-solid settings-shell w-full max-w-[720px] max-h-[92vh] bg-[#f6f7f9] border border-white/80 overflow-hidden flex flex-col"
           >
             {/* 顶部标题栏 */}
             <div className="settings-chrome flex items-center px-6 py-5 sticky top-0 z-10 border-b border-gray-200">
@@ -944,10 +734,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 </div>
                 <div>
                   <div className="text-[17px] font-bold text-gray-900 tracking-tight">
-                    解析设置
+                    文档解析
                   </div>
                   <div className="text-[12px] font-medium text-gray-500">
-                    配置文档识别、OCR 与 MinerU 深度解析
+                    先选择上传路线，其他能力按需配置
                   </div>
                 </div>
               </div>
@@ -1001,69 +791,122 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 })}
               </div>
 
-              {/* 上传前确定一份文档的主解析来源，避免正文、索引和阅读块混用不同路线。 */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <div className="flex items-start gap-2 mb-4">
-                  <FileSearch className="w-4 h-4 text-gray-500 mt-0.5" />
-                  <div>
-                    <span className="text-sm font-semibold text-gray-800">上传解析路线</span>
-                    <p className="text-[11px] text-gray-400 mt-0.5">
-                      仅影响下一次上传；同一份文档的正文、阅读、大纲、总结、翻译、速览和问答索引会使用同一主路线。
-                    </p>
+              <AnimatePresence mode="wait">
+              {activePanelTab === 'basic' && (
+              <motion.div
+                key="tab-basic"
+                className="space-y-4"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+              >
+                {/* 上传前确定一份文档的主解析来源，避免正文、索引和阅读块混用不同路线。 */}
+                <section className="px-1 py-1" aria-labelledby="parse-route-heading">
+                  <div className="flex items-start justify-between gap-4 mb-4">
+                    <div>
+                      <div id="parse-route-heading" className="text-sm font-semibold text-gray-800">选择上传方式</div>
+                      <p className="text-[12px] leading-5 text-gray-500 mt-1">
+                        这里只需选择一项。上传后，阅读、总结、大纲、翻译、速览和问答都会沿用同一路线。
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-lg bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-500">
+                      影响后续上传
+                    </span>
                   </div>
-                </div>
 
-                <div className="space-y-2">
-                  {PARSE_ROUTE_OPTIONS.map((option) => {
-                    const Icon = option.icon
-                    const isActive = parseRoute === option.value
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        aria-pressed={isActive}
-                        onClick={() => handleParseRouteChange(option.value)}
-                        className={`settings-inset w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all ${
-                          isActive
-                            ? 'accent-surface'
-                            : 'hover:border-[#FFDCCF] hover:bg-[#FFF4EF] text-gray-700'
-                        }`}
-                      >
-                        <div
-                          className={`p-1.5 rounded-lg ${
-                            isActive ? 'bg-[#fcede8] text-[#ed8c68]' : 'bg-gray-100 text-gray-500'
+                  <div className="grid grid-cols-2 gap-3">
+                    {PARSE_ROUTE_OPTIONS.map((option) => {
+                      const Icon = option.icon
+                      const isActive = parseRoute === option.value
+                      const isMinerU = option.value === 'mineru'
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          aria-pressed={isActive}
+                          onClick={() => handleParseRouteChange(option.value)}
+                          className={`relative min-h-[150px] rounded-[16px] border p-4 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ed8c68]/35 ${
+                            isActive
+                              ? 'border-[#ed8c68]/40 bg-[#fff8f5] shadow-[0_8px_24px_-20px_rgba(184,95,71,0.7)]'
+                              : 'border-gray-200 bg-white hover:-translate-y-0.5 hover:border-[#ed8c68]/25 hover:bg-[#fffbf9]'
                           }`}
                         >
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium">{option.label}</div>
-                          <div className={`text-xs mt-0.5 ${isActive ? 'text-[#d2633b]' : 'text-gray-400'}`}>
-                            {option.description}
+                          <div className="flex items-start justify-between gap-3">
+                            <div className={`grid h-9 w-9 place-items-center rounded-[11px] ${
+                              isActive ? 'bg-[#fcede8] text-[#d96f50]' : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              <Icon className="h-4 w-4" />
+                            </div>
+                            <span className={`rounded-md px-2 py-1 text-[10px] font-semibold ${
+                              isMinerU
+                                ? 'bg-[#fcede8] text-[#b85f47]'
+                                : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              {isMinerU ? '结构优先' : '隐私优先'}
+                            </span>
                           </div>
-                        </div>
-                        {isActive && <CheckCircle2 className="w-5 h-5 flex-shrink-0" />}
-                      </button>
-                    )
-                  })}
-                </div>
+                          <div className="mt-4 flex items-center gap-2 text-sm font-semibold text-gray-800">
+                            {option.label}
+                            {isActive && <CheckCircle2 className="h-4 w-4 text-[#d96f50]" />}
+                          </div>
+                          <p className="mt-1.5 text-[11px] leading-5 text-gray-500">
+                            {isMinerU
+                              ? '结构、公式和表格更完整，适合论文、扫描件与复杂版面。'
+                              : '文件在设备内处理，适合文字层完整的普通 PDF。'}
+                          </p>
+                        </button>
+                      )
+                    })}
+                  </div>
 
-                <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 text-[11px] text-gray-500">
-                  <Crop className="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-400" />
-                  <span>DocLayout-YOLO 只定位并裁切图表区域，不读取图片内容；MinerU 仍是独立的全程解析路线。</span>
+                  <div className="mt-4 flex items-center justify-between gap-4 rounded-[13px] border border-gray-100 bg-gray-50/80 px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-gray-700">
+                        {parseRoute === 'local' ? '当前使用本地解析' : '当前使用 MinerU 深度解析'}
+                      </div>
+                      <p className="mt-0.5 text-[11px] leading-5 text-gray-500">
+                        {parseRoute === 'local'
+                          ? '无需配置云服务；扫描页会按高级选项中的 OCR 规则补充识别。'
+                          : mineruConfigured
+                            ? 'MinerU 服务已配置，下一份文档会上传并完成结构化解析。'
+                            : '首次使用前需要在“MinerU 服务”中完成连接。'}
+                      </p>
+                    </div>
+                    {parseRoute !== 'local' && (
+                      <button
+                        type="button"
+                        onClick={() => setActivePanelTab('services')}
+                        className="shrink-0 rounded-[10px] border border-gray-200 bg-white px-3 py-2 text-[11px] font-semibold text-gray-700 transition-all hover:border-[#ed8c68]/30 hover:bg-[#fff8f5] active:translate-y-px"
+                      >
+                        {mineruConfigured ? '查看配置' : '去配置'}
+                      </button>
+                    )}
+                  </div>
+                </section>
+
+                <div className="flex items-start gap-2 px-4 py-3 text-[11px] leading-5 text-gray-500">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" />
+                  <span>已经上传的文档不会因这里的选择改变路线。OCR 和图表定位是路线内的补充能力，不是第三种解析方式。</span>
                 </div>
-              </div>
+              </motion.div>
+              )}
+              </AnimatePresence>
 
               <AnimatePresence mode="wait">
-              {activePanelTab === 'local' && (
+              {activePanelTab === 'advanced' && (
               <motion.div
-                key="tab-local-top"
+                key="tab-advanced-ocr"
                 className="space-y-5"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
+              <div className="flex items-start gap-2 px-4 py-3 rounded-[14px] border border-gray-200/80 bg-white/70 text-[11px] leading-5 text-gray-500">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" />
+                <span>通常保持“自动”即可。只有扫描页缺字、识别异常或图表定位不准时，才需要调整下面的选项。</span>
+              </div>
               {/* OCR 可用状态卡片 */}
               <div className="settings-card bg-white p-5 border border-gray-200/90">
                 <div className="flex items-center gap-2 mb-4">
@@ -1084,14 +927,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <div className="flex items-center gap-2">
                       <div
                         className={`w-2.5 h-2.5 rounded-full ${
-                          ocrStatus.available
+                          localOcrAvailable
                             ? 'bg-emerald-500'
                             : 'bg-gray-300'
                         }`}
                       />
                       <span className="text-sm text-gray-700">
                         OCR 服务：
-                        {ocrStatus.available ? (
+                        {localOcrAvailable ? (
                           <span className="text-green-600 font-medium">
                             可用
                           </span>
@@ -1101,17 +944,17 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                           </span>
                         )}
                       </span>
-                      {ocrStatus.recommended && (
+                      {recommendedLocalBackend && (
                         <span className="ml-auto text-xs text-[#ed8c68] bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
-                          推荐：{BACKEND_LABELS[ocrStatus.recommended] || ocrStatus.recommended}
+                          推荐：{recommendedLocalBackend}
                         </span>
                       )}
                     </div>
 
                     {/* 各后端可用性 */}
-                    {ocrStatus.backends && (
+                    {localOcrBackends.length > 0 && (
                       <div className="grid grid-cols-2 gap-2">
-                        {Object.entries(ocrStatus.backends).map(
+                        {localOcrBackends.map(
                           ([name, available]) => (
                             <div
                               key={name}
@@ -1275,213 +1118,22 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </AnimatePresence>
 
               <AnimatePresence mode="wait">
-              {activePanelTab === 'cloud' && (
+              {activePanelTab === 'services' && (
               <motion.div
-                key="tab-cloud"
+                key="tab-services"
                 className="space-y-5"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
-              {/* MinerU only performs document-level deep parsing. Page OCR uses
-                  local engines or the explicitly selected Mistral provider. */}
+              {/* MinerU 是唯一的云端主解析服务；逐页 OCR 仅保留本地引擎。 */}
               <div className="flex items-start gap-2 px-4 py-3 rounded-2xl bg-[#ed8c68]/5 border border-[#ed8c68]/15 text-xs text-[#d2633b]">
                 <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                <span>下方配置仅用于 MinerU 深度解析，包括阅读结构、大纲与速览图表；扫描页 OCR 请使用本地引擎或 Mistral OCR。</span>
+                <span>MinerU 是唯一的云端解析服务。配置完成后，正文、阅读结构、总结、大纲、翻译、速览和问答索引都会使用同一份解析结果。</span>
               </div>
 
-              {/* 在线 OCR 服务配置卡片（可折叠，与 MinerU/Doc2X 卡片风格一致） */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <button
-                  onClick={() => setMistralExpanded(!mistralExpanded)}
-                  className="w-full flex items-center gap-2"
-                >
-                  <Wifi className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    Mistral OCR 服务
-                  </span>
-                  {/* 已配置状态指示 */}
-                  {onlineConfig?.mistral?.api_key_configured && (
-                    <span className="ml-auto mr-2 text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      已配置
-                    </span>
-                  )}
-                  <ChevronDown
-                    className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
-                      mistralExpanded ? 'rotate-180' : ''
-                    } ${onlineConfig?.mistral?.api_key_configured ? '' : 'ml-auto'}`}
-                  />
-                </button>
-
-                {/* 已配置状态预览（折叠时显示） */}
-                {!mistralExpanded && onlineConfig?.mistral?.api_key_configured && (
-                  <div className="mt-3 space-y-1.5">
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                      <Key className="w-3 h-3 text-gray-400" />
-                      <span>API Key：</span>
-                      <code className="font-mono text-gray-700">{onlineConfig.mistral.api_key_preview}</code>
-                    </div>
-                  </div>
-                )}
-
-                <AnimatePresence initial={false}>
-                {mistralExpanded && (
-                <motion.div
-                  key="mistral-expanded"
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.22, ease: 'easeInOut' }}
-                  style={{ overflow: 'hidden' }}
-                >
-                <div className="mt-4 space-y-4">
-                  {/* 已有配置预览 */}
-                  {onlineConfig?.mistral?.api_key_configured && (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-50/60 border border-green-100">
-                      <Key className="w-3.5 h-3.5 text-green-600" />
-                      <span className="text-xs text-green-700">
-                        当前 API Key：
-                        <code className="font-mono ml-1">
-                          {onlineConfig.mistral.api_key_preview}
-                        </code>
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Mistral API Key 输入 */}
-                  <div>
-                    <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                      Mistral OCR API Key
-                    </label>
-                    <div className="relative">
-                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                        <Key className="w-4 h-4" />
-                      </div>
-                      <input
-                        type={showApiKey ? 'text' : 'password'}
-                        value={mistralApiKey}
-                        onChange={(e) => {
-                          setMistralApiKey(e.target.value)
-                          // 输入变化时重置验证状态
-                          setValidateStatus(null)
-                          setValidateMessage('')
-                        }}
-                        placeholder={
-                          onlineConfig?.mistral?.api_key_configured
-                            ? '输入新 Key 以更新（留空保持不变）'
-                            : '输入 Mistral API Key'
-                        }
-                        className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                      />
-                      {/* 显示/隐藏 API Key 切换按钮 */}
-                      <button
-                        type="button"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                      >
-                        {showApiKey ? (
-                          <EyeOff className="w-4 h-4" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Mistral Base URL 输入 */}
-                  <div>
-                    <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                      Base URL
-                    </label>
-                    <div className="relative">
-                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                        <Globe className="w-4 h-4" />
-                      </div>
-                      <input
-                        type="text"
-                        value={mistralBaseUrl}
-                        onChange={(e) => setMistralBaseUrl(e.target.value)}
-                        placeholder="https://api.mistral.ai"
-                        className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                      />
-                    </div>
-                  </div>
-
-                  {/* 测试连接结果 */}
-                  {validateStatus && validateStatus !== 'loading' && (
-                    <div
-                      className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                        validateStatus === 'success'
-                          ? 'bg-green-50/60 border border-green-100 text-green-700'
-                          : 'bg-red-50/60 border border-red-100 text-red-700'
-                      }`}
-                    >
-                      {validateStatus === 'success' ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-red-500" />
-                      )}
-                      <span>{validateMessage}</span>
-                    </div>
-                  )}
-
-                  {/* 保存结果消息 */}
-                  {saveMessage && (
-                    <div
-                      className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                        saveMessage === '配置已保存'
-                          ? 'bg-green-50/60 border border-green-100 text-green-700'
-                          : 'bg-red-50/60 border border-red-100 text-red-700'
-                      }`}
-                    >
-                      {saveMessage === '配置已保存' ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-red-500" />
-                      )}
-                      <span>{saveMessage}</span>
-                    </div>
-                  )}
-
-                  {/* 操作按钮区域 */}
-                  <div className="flex items-center gap-2">
-                    {/* 测试连接按钮 */}
-                    <button
-                      onClick={handleValidateKey}
-                      disabled={(!mistralApiKey.trim() && !onlineConfig?.mistral?.api_key_configured) || validateStatus === 'loading'}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                    >
-                      {validateStatus === 'loading' ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Wifi className="w-3.5 h-3.5" />
-                      )}
-                      测试连接
-                    </button>
-
-                    {/* 保存配置按钮 */}
-                    <button
-                      onClick={handleSaveOnlineConfig}
-                      disabled={saving || (!mistralApiKey.trim() && !onlineConfig?.mistral?.api_key_configured)}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                    >
-                      {saving ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Save className="w-3.5 h-3.5" />
-                      )}
-                      保存配置
-                    </button>
-                  </div>
-                </div>
-                </motion.div>
-                )}
-                </AnimatePresence>
-              </div>
-
-              {/* MinerU OCR 配置卡片（可折叠） */}
+              {/* MinerU 服务配置卡片（可折叠） */}
               <div className="settings-card bg-white p-5 border border-gray-200/90">
                 {/* 卡片标题栏（点击展开/折叠） */}
                 <button
@@ -1891,280 +1543,14 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 </AnimatePresence>
               </div>
 
-              {/* Doc2X OCR 配置卡片（可折叠） */}
-              {false && (
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                {/* 卡片标题栏（点击展开/折叠） */}
-                <button
-                  onClick={() => setDoc2xExpanded(!doc2xExpanded)}
-                  className="w-full flex items-center gap-2"
-                >
-                  <Globe className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    Doc2X OCR 服务
-                  </span>
-                  {/* 已配置状态指示 */}
-                  {onlineConfig?.doc2x?.worker_url && (
-                    <span className="ml-auto mr-2 text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      已配置
-                    </span>
-                  )}
-                  <ChevronDown
-                    className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
-                      doc2xExpanded ? 'rotate-180' : ''
-                    } ${onlineConfig?.doc2x?.worker_url ? '' : 'ml-auto'}`}
-                  />
-                </button>
-
-                {/* 已配置状态预览（折叠时显示） */}
-                {!doc2xExpanded && onlineConfig?.doc2x?.worker_url && (
-                  <div className="mt-3 space-y-1.5">
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                      <Globe className="w-3 h-3 text-gray-400" />
-                      <span>Worker URL：</span>
-                      <code className="font-mono text-gray-700">{onlineConfig.doc2x.worker_url}</code>
-                    </div>
-                    {onlineConfig.doc2x.auth_key_configured && (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                        <Key className="w-3 h-3 text-gray-400" />
-                        <span>Auth Key：</span>
-                        <code className="font-mono text-gray-700">{onlineConfig.doc2x.auth_key_preview}</code>
-                      </div>
-                    )}
-                    {onlineConfig.doc2x.token_configured && (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                        <Key className="w-3 h-3 text-gray-400" />
-                        <span>Token：</span>
-                        <code className="font-mono text-gray-700">{onlineConfig.doc2x.token_preview}</code>
-                        <span className="text-gray-400 ml-1">
-                          ({onlineConfig.doc2x.token_mode === 'worker' ? 'Worker 配置' : '前端透传'})
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 展开的配置表单 */}
-                <AnimatePresence initial={false}>
-                {doc2xExpanded && (
-                  <motion.div
-                    key="doc2x-expanded"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.22, ease: 'easeInOut' }}
-                    style={{ overflow: 'hidden' }}
-                  >
-                  <div className="mt-4 space-y-4">
-                    {/* 已有配置预览 */}
-                    {onlineConfig?.doc2x?.worker_url && (
-                      <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-50/60 border border-green-100">
-                        <Globe className="w-3.5 h-3.5 text-green-600" />
-                        <span className="text-xs text-green-700">
-                          当前 Worker URL：
-                          <code className="font-mono ml-1">
-                            {onlineConfig.doc2x.worker_url}
-                          </code>
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Worker URL 输入框 */}
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Worker URL
-                      </label>
-                      <div className="relative">
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                          <Globe className="w-4 h-4" />
-                        </div>
-                        <input
-                          type="text"
-                          value={doc2xWorkerUrl}
-                          onChange={(e) => setDoc2xWorkerUrl(e.target.value)}
-                          placeholder="https://your-worker.workers.dev"
-                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Auth Key 输入框（可选，带显示/隐藏切换） */}
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Auth Key（可选）
-                      </label>
-                      <div className="relative">
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                          <Key className="w-4 h-4" />
-                        </div>
-                        <input
-                          type={showDoc2xAuthKey ? 'text' : 'password'}
-                          value={doc2xAuthKey}
-                          onChange={(e) => {
-                            setDoc2xAuthKey(e.target.value)
-                            setDoc2xValidateStatus(null)
-                            setDoc2xValidateMessage('')
-                          }}
-                          placeholder={
-                            onlineConfig?.doc2x?.auth_key_configured
-                              ? '输入新 Auth Key 以更新（留空保持不变）'
-                              : '如果 Worker 启用了访问控制，填写这里'
-                          }
-                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowDoc2xAuthKey(!showDoc2xAuthKey)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          {showDoc2xAuthKey ? (
-                            <EyeOff className="w-4 h-4" />
-                          ) : (
-                            <Eye className="w-4 h-4" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Token Mode 选择 */}
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Token 模式
-                      </label>
-                      <SettingsSegmentedControl
-                        ariaLabel="Doc2X Token 模式"
-                        value={doc2xTokenMode}
-                        onChange={setDoc2xTokenMode}
-                        options={[
-                          { value: 'frontend', label: '前端透传' },
-                          { value: 'worker', label: 'Worker 配置' },
-                        ]}
-                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
-                      />
-                      <div className="text-xs text-gray-400 mt-1">
-                        {doc2xTokenMode === 'frontend'
-                          ? '由前端传递 Token 到 Worker'
-                          : 'Token 在 Worker 环境变量中配置，无需前端提供'}
-                      </div>
-                    </div>
-
-                    {/* Token 输入框（仅 frontend 模式显示，带显示/隐藏切换） */}
-                    {doc2xTokenMode === 'frontend' && (
-                      <div>
-                        <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                          Doc2X Token
-                        </label>
-                        <div className="relative">
-                          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                            <Key className="w-4 h-4" />
-                          </div>
-                          <input
-                            type={showDoc2xToken ? 'text' : 'password'}
-                            value={doc2xToken}
-                            onChange={(e) => setDoc2xToken(e.target.value)}
-                            placeholder={
-                              onlineConfig?.doc2x?.token_configured
-                                ? '输入新 Token 以更新（留空保持不变）'
-                                : '输入 Doc2X API Token'
-                            }
-                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowDoc2xToken(!showDoc2xToken)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                          >
-                            {showDoc2xToken ? (
-                              <EyeOff className="w-4 h-4" />
-                            ) : (
-                              <Eye className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Doc2X 测试连接结果 */}
-                    {doc2xValidateStatus && (
-                      <div
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          doc2xValidateStatus === 'success'
-                            ? 'bg-green-50/60 border border-green-100 text-green-700'
-                            : 'bg-red-50/60 border border-red-100 text-red-700'
-                        }`}
-                      >
-                        {doc2xValidateStatus === 'success' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                        ) : (
-                          <XCircle className="w-3.5 h-3.5 text-red-500" />
-                        )}
-                        <span>{doc2xValidateMessage}</span>
-                      </div>
-                    )}
-
-                    {/* Doc2X 保存结果消息 */}
-                    {doc2xSaveMessage && (
-                      <div
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          doc2xSaveMessage === '配置已保存'
-                            ? 'bg-green-50/60 border border-green-100 text-green-700'
-                            : 'bg-red-50/60 border border-red-100 text-red-700'
-                        }`}
-                      >
-                        {doc2xSaveMessage === '配置已保存' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                        ) : (
-                          <XCircle className="w-3.5 h-3.5 text-red-500" />
-                        )}
-                        <span>{doc2xSaveMessage}</span>
-                      </div>
-                    )}
-
-                    {/* Doc2X 操作按钮区域 */}
-                    <div className="flex items-center gap-2">
-                      {/* 测试连接按钮 */}
-                      <button
-                        onClick={handleDoc2xValidate}
-                        disabled={!doc2xWorkerUrl.trim() || doc2xValidating}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                      >
-                        {doc2xValidating ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Wifi className="w-3.5 h-3.5" />
-                        )}
-                        测试连接
-                      </button>
-
-                      {/* 保存配置按钮 */}
-                      <button
-                        onClick={handleDoc2xSave}
-                        disabled={doc2xSaving || !doc2xWorkerUrl.trim()}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                      >
-                        {doc2xSaving ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Save className="w-3.5 h-3.5" />
-                        )}
-                        保存配置
-                      </button>
-                    </div>
-                  </div>
-                  </motion.div>
-                )}
-                </AnimatePresence>
-              </div>
-              )}
               </motion.div>
               )}
               </AnimatePresence>
 
               <AnimatePresence mode="wait">
-              {activePanelTab === 'figure' && (
+              {activePanelTab === 'advanced' && (
               <motion.div
-                key="tab-figure"
+                key="tab-advanced-figure"
                 className="space-y-5"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -2345,9 +1731,9 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
               </AnimatePresence>
 
               <AnimatePresence mode="wait">
-              {activePanelTab === 'local' && (
+              {activePanelTab === 'advanced' && (
               <motion.div
-                key="tab-local-bottom"
+                key="tab-advanced-diagnostics"
                 className="space-y-5"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -2438,15 +1824,19 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 设置已自动保存到本地
               </div>
               <div className="text-xs text-gray-400">
-                当前模式：
-                <span className="font-medium text-gray-600">
-                  {OCR_MODES.find((m) => m.value === mode)?.label || mode}
-                </span>
-                {' · '}
-                引擎：
-                <span className="font-medium text-gray-600">
-                  {BACKEND_OPTIONS.find((b) => b.value === backend)?.label || backend}
-                </span>
+                {activePanelTab === 'basic' && (
+                  <>上传路线：<span className="font-medium text-gray-600">{parseRoute === 'local' ? '本地解析' : 'MinerU 深度解析'}</span></>
+                )}
+                {activePanelTab === 'services' && (
+                  <>MinerU：<span className="font-medium text-gray-600">{mineruConfigured ? '已配置' : '待配置'}</span></>
+                )}
+                {activePanelTab === 'advanced' && (
+                  <>
+                    本地 OCR：<span className="font-medium text-gray-600">{OCR_MODES.find((m) => m.value === mode)?.label || mode}</span>
+                    {' · '}
+                    <span className="font-medium text-gray-600">{BACKEND_OPTIONS.find((b) => b.value === backend)?.label || backend}</span>
+                  </>
+                )}
               </div>
             </div>
           </motion.div>

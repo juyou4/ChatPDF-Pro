@@ -1,60 +1,36 @@
-import React, { useState } from 'react';
-import { ExternalLink } from 'lucide-react';
+import React from 'react';
 
 /**
  * WebCitationLink — 联网搜索来源引用徽章
  *
- * 渲染为上标 [N]，悬浮时显示 Tooltip（标题 + URL + 摘要）。
+ * 渲染为轻量上标编号，直接打开对应的外部来源。
  */
 const WebCitationLink = React.memo(({ refNumber, source }) => {
-  const [visible, setVisible] = useState(false);
+  const descriptionId = React.useId();
 
   if (!source) {
     return <span className="text-gray-400 text-xs">[{refNumber}]</span>;
   }
 
-  const { title, url, snippet } = source;
+  const { title, url } = source;
   const displayTitle = title || url || `来源 ${refNumber}`;
   const hostname = url ? (() => { try { return new URL(url).hostname; } catch { return url; } })() : '';
 
+  const description = [displayTitle, hostname].filter(Boolean).join('，');
+
   return (
-    <span className="relative inline-block">
-      <button
-        type="button"
-        className="inline-flex items-center justify-center min-w-[1.5em] px-1 py-0 mx-0.5 text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 hover:text-blue-700 hover:border-blue-300 cursor-pointer transition-colors duration-150 align-baseline leading-tight"
-        style={{ fontSize: '0.8em', verticalAlign: 'super' }}
-        onMouseEnter={() => setVisible(true)}
-        onMouseLeave={() => setVisible(false)}
-        onFocus={() => setVisible(true)}
-        onBlur={() => setVisible(false)}
-        onClick={() => url && window.open(url, '_blank', 'noopener,noreferrer')}
+    <span className="inline-block">
+      <a
+        href={url || undefined}
+        target="_blank"
+        rel="noreferrer"
         title={displayTitle}
+        aria-describedby={descriptionId}
+        className="mx-0.5 inline-flex min-w-[0.9em] items-center justify-center align-super text-[0.68em] font-semibold leading-none tabular-nums text-stone-400 transition-colors duration-150 hover:text-[#B85F47] focus-visible:rounded-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F5B49C]/70 dark:text-stone-500 dark:hover:text-[#F2B29A]"
       >
         {refNumber}
-      </button>
-      {visible && (
-        <span
-          className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-64 rounded-lg shadow-lg bg-white border border-gray-200 p-3 text-left pointer-events-none"
-          style={{ fontSize: '12px' }}
-        >
-          <span className="block font-semibold text-gray-800 line-clamp-2 leading-tight mb-1">
-            {displayTitle}
-          </span>
-          {hostname && (
-            <span className="flex items-center gap-0.5 text-blue-500 mb-1.5 truncate">
-              <ExternalLink className="w-2.5 h-2.5 flex-shrink-0" />
-              <span className="truncate text-[11px]">{hostname}</span>
-            </span>
-          )}
-          {snippet && (
-            <span className="block text-gray-500 text-[11px] leading-snug line-clamp-3">
-              {snippet.length > 150 ? snippet.slice(0, 150) + '…' : snippet}
-            </span>
-          )}
-          {/* 向下的小三角 */}
-          <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-200" />
-        </span>
-      )}
+      </a>
+      <span id={descriptionId} className="sr-only">{description}</span>
     </span>
   );
 });

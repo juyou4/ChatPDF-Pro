@@ -143,12 +143,14 @@ export const markdownNoteTheme = (darkMode) => [
     '&.cm-focused': { outline: 'none' },
     '.cm-scroller': {
       fontFamily: 'inherit',
-      lineHeight: '1.78',
+      lineHeight: '1.82',
       padding: '0',
       overflowY: 'auto',
+      overflowX: 'hidden',
     },
-    '.cm-content': { padding: '0', caretColor: '#F0653A' },
+    '.cm-content': { minHeight: '8.5rem', padding: '0.55rem 0 1.25rem', caretColor: '#F0653A' },
     '.cm-line': { padding: '0' },
+    '.cm-activeLine': { backgroundColor: 'transparent' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#F0653A', borderLeftWidth: '2px' },
     '.cm-placeholder': { color: darkMode ? '#6b7280' : '#8f8479' },
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
