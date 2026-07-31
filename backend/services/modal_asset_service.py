@@ -208,8 +208,9 @@ def build_modal_asset_index(
     *,
     block_index: dict | None,
     visual_evidence: list[dict] | None = None,
+    mineru_visual_assets: dict | list[dict] | None = None,
 ) -> dict:
-    """从块索引和请求内视觉证据构建纯内存资产索引。"""
+    """从块索引、已发布视觉证据和 MinerU 视觉资产构建请求内索引。"""
     identity = _parse_identity(block_index)
     result = _empty_index(identity)
     if not isinstance(block_index, dict):
@@ -260,6 +261,27 @@ def build_modal_asset_index(
                 if caption:
                     captions.append(caption)
 
+    # MinerU publication creates a durable geometry view once.  Merge it before
+    # VLM supplements so a semantic supplement can still attach to the same
+    # logical figure/table rather than becoming a parallel asset.
+    for persisted in _active_mineru_visual_assets(mineru_visual_assets, identity):
+        target = _find_mineru_visual_asset_target(persisted, assets, block_to_asset)
+        if target is None:
+            asset = _asset_from_mineru_visual_asset(persisted, identity, sections)
+            if asset is None:
+                continue
+            assets.append(asset)
+            if asset["block_id"]:
+                block_to_asset.setdefault(asset["block_id"], asset)
+        else:
+            _merge_mineru_visual_asset(target, persisted)
+            _collapse_mineru_panel_members(
+                assets,
+                block_to_asset,
+                target=target,
+                persisted=persisted,
+            )
+
     for evidence in visual_evidence or []:
         supplement = _normalize_supplement(evidence, 0, identity)
         if supplement and _evidence_matches_identity(supplement, identity):
@@ -291,7 +313,17 @@ def build_modal_asset_index(
         "generation": identity["generation"],
         "source_hash": identity["source_hash"],
         "revision": identity["revision"],
-        "asset_ids": [asset["asset_id"] for asset in assets],
+        "assets": [
+            {
+                "asset_id": asset["asset_id"],
+                "text": asset.get("text"),
+                "bbox": asset.get("bbox"),
+                "panel_bboxes": asset.get("panel_bboxes"),
+                "render_ref": asset.get("render_ref"),
+                "table_html": asset.get("table_html"),
+            }
+            for asset in assets
+        ],
     })
     return result
 
@@ -687,6 +719,10 @@ def _asset_shell(
         "text": _join_text(text, caption, description),
         "caption": caption,
         "description": description,
+        "table_html": "",
+        "panel_bboxes": [],
+        "page_spans": [page] if page > 0 else [],
+        "render_ref": {},
         "source": source,
         "route": route,
         "generation": identity["generation"],
@@ -719,6 +755,204 @@ def _asset_shell(
             title=_clean_text(section.get("title"), 400),
         )
     return asset
+
+
+def _active_mineru_visual_assets(
+    value: dict | list[dict] | None,
+    identity: dict[str, str],
+) -> list[dict]:
+    """Accept only parse-identity-matched durable MinerU assets."""
+    if identity.get("route") != "mineru":
+        return []
+    if isinstance(value, dict):
+        envelope_identity = {
+            "route": _clean_text(value.get("parser_route") or value.get("route"), 32).lower(),
+            "generation": _clean_text(value.get("parse_generation") or value.get("generation"), 160),
+            "source_hash": _clean_text(
+                value.get("document_source_hash") or value.get("source_hash"), 256
+            ).lower(),
+        }
+        candidates = value.get("assets") if envelope_identity == {
+            "route": identity["route"],
+            "generation": identity["generation"],
+            "source_hash": identity["source_hash"].lower(),
+        } else []
+    else:
+        candidates = value
+    if not isinstance(candidates, list):
+        return []
+
+    active: list[dict] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        item_identity = {
+            "route": _clean_text(item.get("route") or item.get("parser_route"), 32).lower(),
+            "generation": _clean_text(item.get("generation") or item.get("parse_generation"), 160),
+            "source_hash": _clean_text(
+                item.get("source_hash") or item.get("document_source_hash"), 256
+            ).lower(),
+        }
+        if item_identity != {
+            "route": identity["route"],
+            "generation": identity["generation"],
+            "source_hash": identity["source_hash"].lower(),
+        }:
+            continue
+        if not _positive_int(item.get("page")) or not _normalize_bbox(item.get("bbox")):
+            continue
+        active.append(copy.deepcopy(item))
+    active.sort(key=lambda item: (
+        _positive_int(item.get("page")),
+        (_normalize_bbox(item.get("bbox")) or [0.0, 0.0, 0.0, 0.0])[1],
+        _clean_text(item.get("asset_id"), 240),
+    ))
+    return active
+
+
+def _find_mineru_visual_asset_target(
+    persisted: dict,
+    assets: list[dict],
+    block_to_asset: dict[str, dict],
+) -> dict | None:
+    source_block_id = _clean_text(persisted.get("source_block_id"), 240)
+    if source_block_id and source_block_id in block_to_asset:
+        return block_to_asset[source_block_id]
+
+    figure_key = _loose_key(persisted.get("figure_id"))
+    page = _positive_int(persisted.get("page"))
+    if figure_key:
+        candidates = [
+            asset for asset in assets
+            if asset.get("page") == page
+            and _loose_key(asset.get("figure_id")) == figure_key
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+
+    bbox = _normalize_bbox(persisted.get("bbox"))
+    if not bbox:
+        return None
+    candidates: list[tuple[float, dict]] = []
+    for asset in assets:
+        if asset.get("page") != page or not asset.get("bbox"):
+            continue
+        overlap = _bbox_overlap(bbox, asset["bbox"])
+        if overlap >= 0.72:
+            candidates.append((overlap, asset))
+    candidates.sort(key=lambda item: (-item[0], item[1]["asset_id"]))
+    if len(candidates) == 1 or (
+        len(candidates) > 1 and candidates[0][0] - candidates[1][0] >= 0.05
+    ):
+        return candidates[0][1]
+    return None
+
+
+def _asset_from_mineru_visual_asset(
+    persisted: dict,
+    identity: dict[str, str],
+    sections: dict[str, dict[str, Any]],
+) -> dict | None:
+    page = _positive_int(persisted.get("page"))
+    bbox = _normalize_bbox(persisted.get("bbox"))
+    asset_id = _clean_text(persisted.get("asset_id"), 240)
+    if page <= 0 or not bbox or not asset_id:
+        return None
+    kind = _normalize_kind(persisted.get("kind"))
+    if kind not in _BASE_KINDS:
+        kind = "figure"
+    source_block_id = _clean_text(persisted.get("source_block_id"), 240)
+    asset = _asset_shell(
+        asset_id=asset_id,
+        kind=kind,
+        source_kind="mineru_visual_asset",
+        page=page,
+        bbox=bbox,
+        owner_block_id=source_block_id,
+        block_id=source_block_id or asset_id,
+        figure_id=_clean_text(persisted.get("figure_id"), 240),
+        text=_first_text(persisted, ("text", "caption", "table_html"), 6000),
+        caption=_clean_text(persisted.get("caption"), 1200),
+        description="",
+        source="mineru_visual_assets",
+        route=identity["route"],
+        confidence=_normalize_confidence(persisted.get("confidence")),
+        identity=identity,
+        section_id=_clean_text(persisted.get("section_id"), 160),
+        sections=sections,
+    )
+    _merge_mineru_visual_asset(asset, persisted)
+    return asset
+
+
+def _merge_mineru_visual_asset(asset: dict, persisted: dict) -> None:
+    """Add durable render geometry without replacing primary block evidence."""
+    caption = _clean_text(persisted.get("caption"), 1200)
+    text = _first_text(persisted, ("text", "caption", "table_html"), 6000)
+    table_html = _clean_text(persisted.get("table_html"), 20000)
+    panels = _normalize_panel_bboxes(persisted.get("panel_bboxes"))
+    render_ref = persisted.get("render_ref") if isinstance(persisted.get("render_ref"), dict) else {}
+    asset["persistent_asset_id"] = _clean_text(persisted.get("asset_id"), 240)
+    asset["figure_id"] = asset["figure_id"] or _clean_text(persisted.get("figure_id"), 240)
+    asset["caption"] = asset["caption"] or caption
+    asset["text"] = _join_text(asset["text"], caption, text)
+    asset["table_html"] = asset.get("table_html") or table_html
+    asset["panel_bboxes"] = panels or asset.get("panel_bboxes") or []
+    raw_spans = persisted.get("page_spans")
+    if isinstance(raw_spans, list):
+        spans = sorted({_positive_int(value) for value in raw_spans if _positive_int(value) > 0})
+        if spans:
+            asset["page_spans"] = spans
+    if render_ref:
+        asset["render_ref"] = copy.deepcopy(render_ref)
+    asset["visual_provenance"].append({
+        "source": "mineru_visual_assets",
+        "asset_id": _clean_text(persisted.get("asset_id"), 240),
+        "source_block_id": _clean_text(persisted.get("source_block_id"), 240),
+        "render_mode": _clean_text((render_ref or {}).get("mode"), 80),
+    })
+
+
+def _collapse_mineru_panel_members(
+    assets: list[dict],
+    block_to_asset: dict[str, dict],
+    *,
+    target: dict,
+    persisted: dict,
+) -> None:
+    """Expose one logical asset for a grouped MinerU multi-panel figure."""
+    member_ids = {
+        _clean_text(value, 240)
+        for value in (persisted.get("source_block_ids") or [])
+        if _clean_text(value, 240)
+    }
+    if len(member_ids) < 2:
+        return
+    kept: list[dict] = []
+    for asset in assets:
+        if asset is target or _clean_text(asset.get("block_id"), 240) not in member_ids:
+            kept.append(asset)
+            continue
+        block_id = _clean_text(asset.get("block_id"), 240)
+        if block_id and block_to_asset.get(block_id) is asset:
+            block_to_asset.pop(block_id, None)
+    assets[:] = kept
+
+
+def _normalize_panel_bboxes(value: Any) -> list[list[float]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    panels: list[list[float]] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for raw_bbox in value:
+        bbox = _normalize_bbox(raw_bbox)
+        if not bbox:
+            continue
+        key = tuple(round(item, 3) for item in bbox)
+        if key not in seen:
+            panels.append(bbox)
+            seen.add(key)
+    return panels
 
 
 def _normalize_supplement(
@@ -1125,10 +1359,22 @@ def _extract_pages(value: Any) -> set[int]:
 
 def _search_terms(value: Any) -> set[str]:
     text = _clean_text(value, 8000).lower()
-    terms = {
-        token for token in re.findall(r"[a-z][a-z0-9_\-]*|\d+(?:\.\d+)?", text)
-        if len(token) > 1 and token not in _SEARCH_STOPWORDS
-    }
+    terms: set[str] = set()
+    for token in re.findall(r"[a-z][a-z0-9_\-]*|\d+(?:\.\d+)?", text):
+        if len(token) <= 1 or token in _SEARCH_STOPWORDS:
+            continue
+        terms.add(token)
+        # PDF 正文和用户问句经常在连字符上不一致，例如
+        # ``Detection-Adapter`` 与 ``detection adapter``。同时保留原词、
+        # 子词和无分隔符形式，避免视觉资产明明命中图注却得到零分。
+        compound_parts = [
+            part
+            for part in re.split(r"[-_]+", token)
+            if len(part) > 1 and part not in _SEARCH_STOPWORDS
+        ]
+        if len(compound_parts) > 1:
+            terms.update(compound_parts)
+            terms.add("".join(compound_parts))
     for run in re.findall(r"[\u4e00-\u9fff]+", text):
         if len(run) == 1:
             continue

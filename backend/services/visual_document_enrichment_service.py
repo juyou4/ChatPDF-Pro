@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -33,6 +32,7 @@ from services.visual_risk_service import (
 )
 from services.visual_supplement_service import (
     VISUAL_SUPPLEMENT_FIGURE_ON_DEMAND_PROMPT_VERSION as FIGURE_ON_DEMAND_PROMPT_VERSION,
+    VISUAL_SUPPLEMENT_SUMMARY_PREFLIGHT_PROMPT_VERSION as SUMMARY_PREFLIGHT_PROMPT_VERSION,
     VISUAL_SUPPLEMENT_PAGE_RECOVERY_PROMPT_VERSION as PAGE_RECOVERY_PROMPT_VERSION,
     build_visual_supplement,
     committed_visual_evidence_for_document,
@@ -41,6 +41,16 @@ from services.visual_supplement_service import (
 
 
 _PAGE_LIMITS = {"privacy": 4, "balanced": 6, "quality": 12}
+_SUMMARY_SECTION_RE = re.compile(
+    r"(?:\bmethods?\b|\bmethodology\b|\bapproach\b|\bexperiments?\b|"
+    r"\bevaluation\b|\bresults?\b|\bablation\b|方法|方法论|模型|实验|评估|结果|消融)",
+    re.IGNORECASE,
+)
+_SUMMARY_SECTION_PRIORITY = (
+    (re.compile(r"\bablation\b|消融", re.IGNORECASE), 0),
+    (re.compile(r"\bexperiments?\b|\bevaluation\b|\bresults?\b|实验|评估|结果", re.IGNORECASE), 1),
+    (re.compile(r"\bmethods?\b|\bmethodology\b|\bapproach\b|方法|方法论|模型", re.IGNORECASE), 2),
+)
 
 
 def _task_policy(policy: VisualEnrichmentPolicy) -> VisualTaskPolicy:
@@ -104,6 +114,40 @@ def _visual_evidence_model_is_current(
         if config.can_call
     }
     return item_identity in current_identities
+
+
+def _summary_section_ranges(block_index: dict[str, Any]) -> list[dict[str, Any]]:
+    outline = [item for item in (block_index.get("outline") or []) if isinstance(item, dict)]
+    ordered = sorted(
+        outline,
+        key=lambda item: (max(1, int(item.get("page") or 1)), int(item.get("level") or 1)),
+    )
+    ranges: list[dict[str, Any]] = []
+    for index, item in enumerate(ordered):
+        title = " ".join(str(item.get("title") or "").split())
+        if not title or not _SUMMARY_SECTION_RE.search(title):
+            continue
+        start = max(1, int(item.get("page") or 1))
+        following_pages = [
+            max(1, int(candidate.get("page") or 1))
+            for candidate in ordered[index + 1:]
+            if max(1, int(candidate.get("page") or 1)) > start
+            and int(candidate.get("level") or 1) <= int(item.get("level") or 1)
+        ]
+        end = following_pages[0] - 1 if following_pages else start + 12
+        priority = next(
+            (value for pattern, value in _SUMMARY_SECTION_PRIORITY if pattern.search(title)),
+            3,
+        )
+        ranges.append({"title": title, "start": start, "end": max(start, end), "priority": priority})
+    return ranges
+
+
+def _summary_section_for_page(ranges: list[dict[str, Any]], page: int) -> dict[str, Any] | None:
+    matches = [item for item in ranges if int(item["start"]) <= page <= int(item["end"])]
+    if not matches:
+        return None
+    return min(matches, key=lambda item: (int(item["priority"]), int(item["end"]) - int(item["start"])))
 
 
 def _pixmap_looks_blank(pix: Any) -> bool:
@@ -432,6 +476,194 @@ def _has_substantive_reference_evidence(text: str, label: str) -> bool:
     return False
 
 
+async def preflight_summary_visuals(
+    *,
+    doc_id: str,
+    doc: dict[str, Any],
+    block_index: dict[str, Any],
+    pdf_path: Path | None,
+    visual_policy: VisualEnrichmentPolicy,
+    max_figures: int = 3,
+) -> dict[str, Any]:
+    """Enrich a bounded set of risky figures before summary generation."""
+    manifest = read_parse_manifest(doc, doc_id=doc_id)
+    generation = str(manifest.get("generation") or "").strip()
+    source_hash = str(manifest.get("source_hash") or "").strip()
+    route = str(manifest.get("resolved_route") or "").strip().lower()
+    diagnostics: dict[str, Any] = {
+        "triggered": False,
+        "route": route,
+        "candidate_count": 0,
+        "selected_count": 0,
+        "generated_count": 0,
+        "reused_count": 0,
+        "failed": [],
+        "limit": max(1, min(int(max_figures or 3), 4)),
+    }
+    if route not in {"local", "mineru"}:
+        diagnostics["skipped_reason"] = "unsupported_parse_route"
+        return {"items": [], "diagnostics": diagnostics}
+    if not generation or not source_hash:
+        diagnostics["skipped_reason"] = "parse_identity_unavailable"
+        return {"items": [], "diagnostics": diagnostics}
+    if not pdf_path or not Path(pdf_path).exists():
+        diagnostics["skipped_reason"] = "missing_pdf"
+        return {"items": [], "diagnostics": diagnostics}
+    if not any(config.can_call for config in (visual_policy.strong_model, visual_policy.local_model)):
+        diagnostics["skipped_reason"] = "visual_model_unavailable"
+        return {"items": [], "diagnostics": diagnostics}
+
+    section_ranges = _summary_section_ranges(block_index)
+    diagnostics["target_sections"] = [dict(item) for item in section_ranges]
+    if not section_ranges:
+        diagnostics["skipped_reason"] = "no_target_sections"
+        return {"items": [], "diagnostics": diagnostics}
+
+    data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+    existing = committed_visual_evidence_for_document(doc, limit=256)
+    existing_figure_ids = {
+        str(item.get("figure_id") or "").strip()
+        for item in existing
+        if str(item.get("purpose") or "") == "figure_description"
+        and _visual_evidence_model_is_current(item, visual_policy)
+    }
+    figures = build_logical_figures_for_overview(doc_id, doc, depth="detailed")
+    candidates: list[dict[str, Any]] = []
+    for figure in figures:
+        page = int(getattr(figure, "page_idx", 0) or 0) + 1
+        section = _summary_section_for_page(section_ranges, page)
+        if section is None:
+            continue
+        figure_id = str(getattr(figure, "figure_id", "") or "").strip()
+        if figure_id and figure_id in existing_figure_ids:
+            diagnostics["reused_count"] += 1
+            continue
+        assessment = assess_figure_risk(
+            figure,
+            page_text=page_text_for_risk(data, page),
+            threshold=visual_policy.risk_threshold,
+        )
+        if not assessment.should_enrich:
+            continue
+        candidates.append({
+            "figure": figure,
+            "figure_id": figure_id,
+            "page": page,
+            "section": section,
+            "assessment": assessment,
+        })
+    diagnostics["candidate_count"] = len(candidates)
+    candidates.sort(key=lambda item: (
+        int(item["section"]["priority"]),
+        -float(item["assessment"].score),
+        int(item["page"]),
+        str(item["figure_id"]),
+    ))
+    selected = candidates[: diagnostics["limit"]]
+    diagnostics["selected_count"] = len(selected)
+    if not selected:
+        diagnostics["skipped_reason"] = "no_high_risk_figures"
+        return {"items": [], "diagnostics": diagnostics}
+
+    diagnostics["triggered"] = True
+    items: list[dict[str, Any]] = []
+    pdf_doc = fitz.open(str(pdf_path))
+    try:
+        for candidate in selected:
+            figure = candidate["figure"]
+            assessment = candidate["assessment"]
+            config = visual_policy.select(
+                risk_level=assessment.level,
+                purpose="figure_description",
+            )
+            if not config.can_call:
+                diagnostics["failed"].append({
+                    "figure_id": candidate["figure_id"],
+                    "page": candidate["page"],
+                    "reason": "visual_model_unavailable",
+                })
+                continue
+            try:
+                render_result = validate_and_fallback(
+                    figure,
+                    pdf_doc,
+                    render_figure,
+                    render_kwargs={"render_mode": "raw"},
+                )
+                if not render_result.success:
+                    raise RuntimeError("render_failed")
+                image_b64 = render_result.model_image_base64 or render_result.display_image_base64
+                image_mime = "image/jpeg" if render_result.model_image_base64 else "image/png"
+                result = await _analyze_image(
+                    image_url=f"data:{image_mime};base64,{image_b64}",
+                    prompt=(
+                        f"这张图位于论文的 {candidate['section']['title']} 章节。"
+                        f"已有图注：{getattr(figure, 'caption_text', '') or '无'}。"
+                        '输出 JSON：{"caption":"一句话图题","analysis":"2-4句对方法、实验趋势或消融结论的可核验解读",'
+                        '"confidence":0.0}。不要猜测看不清的数值。'
+                    ),
+                    system_prompt="你是谨慎的学术图表分析助手，只陈述图片中可确认的信息。",
+                    config=config,
+                    purpose="summary_figure_preflight",
+                    prompt_version=SUMMARY_PREFLIGHT_PROMPT_VERSION,
+                    document_id=doc_id,
+                    route=route,
+                    parse_generation=generation,
+                    document_source_hash=source_hash,
+                    page=candidate["page"],
+                    bbox_hash=assessment.bbox_hash,
+                    policy=visual_policy,
+                )
+                analysis = " ".join(str(result.get("analysis") or result.get("text") or "").split())
+                caption = " ".join(str(
+                    result.get("caption")
+                    or getattr(figure, "caption_text", "")
+                    or candidate["figure_id"]
+                ).split())
+                if not analysis:
+                    raise RuntimeError("empty_visual_result")
+                bbox = getattr(figure, "full_bbox_page_pts", None) or getattr(figure, "body_bbox_page_pts", None) or []
+                item = build_visual_supplement(
+                    figure_id=candidate["figure_id"] or f"page-{candidate['page']}",
+                    page=candidate["page"],
+                    bbox=bbox,
+                    caption=caption,
+                    analysis=analysis,
+                    visual_model_identity=config.identity,
+                    provider=config.provider,
+                    model=config.model,
+                    render_mode="raw",
+                    purpose="figure_description",
+                    confidence=_confidence(result.get("confidence")),
+                    prompt_version=SUMMARY_PREFLIGHT_PROMPT_VERSION,
+                    route=route,
+                )
+                if item:
+                    item["visual_risk"] = assessment.to_dict()
+                    item["summary_section"] = str(candidate["section"]["title"])
+                    items.append(item)
+            except Exception as exc:
+                diagnostics["failed"].append({
+                    "figure_id": candidate["figure_id"],
+                    "page": candidate["page"],
+                    "reason": str(exc)[:120] or type(exc).__name__,
+                })
+    finally:
+        pdf_doc.close()
+
+    diagnostics["generated_count"] = len(items)
+    if not items and not diagnostics.get("skipped_reason"):
+        diagnostics["skipped_reason"] = "all_candidates_failed"
+    return {
+        "items": items,
+        "parse_generation": generation,
+        "document_source_hash": source_hash,
+        "route": route,
+        "visual_model_identity": visual_policy.identity,
+        "diagnostics": diagnostics,
+    }
+
+
 async def enrich_referenced_figure(
     *,
     doc_id: str,
@@ -453,7 +685,7 @@ async def enrich_referenced_figure(
     data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
     envelope = data.get("visual_supplements") if isinstance(data, dict) else None
     if (
-        route == "local"
+        route in {"local", "mineru"}
         and isinstance(envelope, dict)
         and str(envelope.get("visual_model_identity") or "") == visual_policy.identity
     ):
@@ -549,44 +781,21 @@ async def enrich_referenced_figure(
         return {"item": None, "diagnostics": {"skipped_reason": "empty_visual_result", "visual_risk": assessment.to_dict()}}
 
     bbox = figure.full_bbox_page_pts or figure.body_bbox_page_pts or []
-    if route == "local":
-        item = build_visual_supplement(
-            figure_id=str(figure.figure_id or reference["label"]),
-            page=int(figure.page_idx) + 1,
-            bbox=bbox,
-            caption=caption,
-            analysis=analysis,
-            visual_model_identity=config.identity,
-            provider=config.provider,
-            model=config.model,
-            render_mode="raw",
-            purpose="figure_description",
-            confidence=_confidence(result.get("confidence")),
-            prompt_version=FIGURE_ON_DEMAND_PROMPT_VERSION,
-        )
-    else:
-        digest = hashlib.sha256(
-            f"{doc_id}:{generation}:{figure.figure_id}:{config.identity}".encode("utf-8")
-        ).hexdigest()[:18]
-        item = {
-            "id": f"visual_runtime_{digest}",
-            "figure_id": str(figure.figure_id or ""),
-            "page": int(figure.page_idx) + 1,
-            "bbox": list(bbox),
-            "bbox_hash": assessment.bbox_hash,
-            "caption": caption,
-            "analysis": analysis,
-            "text": f"{caption}. {analysis}",
-            "source": "visual_vlm",
-            "route": route or "mineru",
-            "block_type": "visual_enrichment",
-            "purpose": "figure_description",
-            "confidence": _confidence(result.get("confidence")),
-            "provider": config.provider,
-            "model": config.model,
-            "prompt_version": FIGURE_ON_DEMAND_PROMPT_VERSION,
-            "visual_model": {"identity": config.identity, **config.public_metadata()},
-        }
+    item = build_visual_supplement(
+        figure_id=str(figure.figure_id or reference["label"]),
+        page=int(figure.page_idx) + 1,
+        bbox=bbox,
+        caption=caption,
+        analysis=analysis,
+        visual_model_identity=config.identity,
+        provider=config.provider,
+        model=config.model,
+        render_mode="raw",
+        purpose="figure_description",
+        confidence=_confidence(result.get("confidence")),
+        prompt_version=FIGURE_ON_DEMAND_PROMPT_VERSION,
+        route=route,
+    )
     if item:
         item["visual_risk"] = assessment.to_dict()
     return {

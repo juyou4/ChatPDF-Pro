@@ -100,7 +100,30 @@ _EXCLUDE_TYPES = {
     "footer",
     "header_footer",
 }
+# A page that MinerU explicitly represents as an image/chart page has no text
+# to contribute to the text RAG index, but it is not a failed parse.  Keep this
+# narrowly scoped: tables and unknown blocks remain subject to the normal
+# quality gate because silently accepting either can hide lost evidence.
+_VISUAL_ONLY_TYPES = {
+    "image",
+    "figure",
+    "chart",
+    "image_body",
+    "chart_body",
+    "image_block",
+    "chart_block",
+}
+_EMPTY_VISUAL_AUXILIARY_TYPES = {
+    "image_caption",
+    "chart_caption",
+    "caption",
+    "image_footnote",
+    "chart_footnote",
+}
+_MIDDLE_PAGE_BLOCK_KEYS = ("preproc_blocks", "para_blocks", "layout_blocks", "blocks")
 _HTML_TAG_RE = re.compile(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", re.IGNORECASE)
+_HTML_TABLE_ELEMENT_RE = re.compile(r"<table\b[^>]*>.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_TABLE_CAPTION_RE = re.compile(r"<caption\b[^>]*>(.*?)</caption\s*>", re.IGNORECASE | re.DOTALL)
 
 # 剥标签必须认标签名，不能用通配的 ``<[^>]+>``。学术正文里 ``p<0.05``、
 # ``n>30``、``\alpha < 1 \text{ and } \beta > 0`` 都会被通配规则当成一个"标签"，
@@ -204,20 +227,36 @@ def build_mineru_page_ledger(
     block_page_numbers = _positive_page_numbers(block_pages)
     text_page_numbers = _positive_page_numbers(text_pages)
     consumable_pages = block_page_numbers | text_page_numbers
+    explicit_blank_pages = _explicit_blank_page_numbers(payload)
+    visual_only_pages = _visual_only_page_numbers(payload)
+    legitimate_nontext_pages = (explicit_blank_pages | visual_only_pages) - reported_failed_pages
 
     if expected_count > 0:
         expected_pages = set(range(1, expected_count + 1))
-        missing_pages = expected_pages - observed_pages - consumable_pages
-        empty_pages = (observed_pages & expected_pages) - consumable_pages - reported_failed_pages
+        missing_pages = expected_pages - observed_pages - consumable_pages - legitimate_nontext_pages
+        empty_pages = (
+            (observed_pages & expected_pages)
+            - consumable_pages
+            - legitimate_nontext_pages
+            - reported_failed_pages
+        )
         failed_pages = missing_pages | empty_pages | (reported_failed_pages & expected_pages)
-        successful_pages = (expected_pages & consumable_pages) - reported_failed_pages
+        successful_pages = (
+            expected_pages & (consumable_pages | legitimate_nontext_pages)
+        ) - reported_failed_pages
         coverage = len(successful_pages) / expected_count
-        ledger_pages = sorted(expected_pages | observed_pages | reported_failed_pages | consumable_pages)
+        ledger_pages = sorted(
+            expected_pages
+            | observed_pages
+            | reported_failed_pages
+            | consumable_pages
+            | legitimate_nontext_pages
+        )
     else:
-        expected_pages = observed_pages | reported_failed_pages | consumable_pages
-        empty_pages = observed_pages - consumable_pages - reported_failed_pages
+        expected_pages = observed_pages | reported_failed_pages | consumable_pages | legitimate_nontext_pages
+        empty_pages = observed_pages - consumable_pages - legitimate_nontext_pages - reported_failed_pages
         failed_pages = set(reported_failed_pages) | empty_pages
-        successful_pages = consumable_pages - reported_failed_pages
+        successful_pages = (consumable_pages | legitimate_nontext_pages) - reported_failed_pages
         coverage = (len(successful_pages) / len(expected_pages)) if expected_pages else 0.0
         ledger_pages = sorted(expected_pages)
 
@@ -230,13 +269,23 @@ def build_mineru_page_ledger(
             and page_num not in observed_pages
             and page_num not in consumable_pages
         )
-        empty_result = page_num in observed_pages and page_num not in consumable_pages
+        empty_result = (
+            page_num in observed_pages
+            and page_num not in consumable_pages
+            and page_num not in legitimate_nontext_pages
+        )
         if provider_failed:
             status = "failed"
             reason = "provider_reported_failure"
         elif missing:
             status = "failed"
             reason = "missing_from_result"
+        elif page_num in explicit_blank_pages:
+            status = "success"
+            reason = "explicit_blank_page"
+        elif page_num in visual_only_pages:
+            status = "success"
+            reason = "visual_only_page"
         elif empty_result:
             status = "failed"
             reason = "empty_page_result"
@@ -253,6 +302,8 @@ def build_mineru_page_ledger(
             "raw_present": page_num in observed_pages,
             "has_blocks": page_num in block_page_numbers,
             "has_text": page_num in text_page_numbers,
+            "explicit_blank": page_num in explicit_blank_pages,
+            "visual_only": page_num in visual_only_pages,
         })
 
     unexpected_pages = sorted(
@@ -271,6 +322,8 @@ def build_mineru_page_ledger(
         "covered_page_count": len(successful_pages),
         "coverage": round(float(coverage), 4),
         "failed_pages": sorted(failed_pages),
+        "explicit_blank_pages": sorted(explicit_blank_pages & expected_pages),
+        "visual_only_pages": sorted(visual_only_pages & expected_pages),
         "unexpected_pages": unexpected_pages,
         "page_ledger": page_ledger,
     }
@@ -946,15 +999,73 @@ def table_html_to_markdown(table_html: str, *, caption: str = "") -> str:
     tags. The RAG path already renders the same table as markdown; this is the
     shared entry point so both sides agree.
     """
-    if not str(table_html or "").strip():
+    raw = str(table_html or "").strip()
+    if not raw:
         return ""
     try:
-        matrix = _html_table_to_matrix(table_html)
+        matrix = _html_table_to_matrix(raw)
     except Exception:
         return ""
     if not matrix:
         return ""
-    return _matrix_to_markdown(matrix, caption=caption)
+    return _matrix_to_markdown(
+        matrix,
+        caption=_resolve_table_caption(raw, explicit_caption=caption),
+    )
+
+
+def normalize_table_text(table_text: str, *, caption: str = "") -> str:
+    """Return consumer-safe table text without leaking MinerU HTML tags.
+
+    Well-formed HTML becomes GFM markdown. Malformed or partial markup falls
+    back to conservative tag removal so reading, translation and prompts never
+    receive a wall of ``<tr>/<td>`` text.
+    """
+    raw = str(table_text or "").strip()
+    if not raw:
+        return ""
+    markdown = table_html_to_markdown(raw, caption=caption)
+    return markdown or _clean_text(raw)
+
+
+def _resolve_table_caption(table_html: str, *, explicit_caption: str = "") -> str:
+    candidates: list[str] = []
+    explicit = _clean_text(re.sub(r"^\s*\[TABLE\]\s*", "", str(explicit_caption or ""), flags=re.IGNORECASE))
+    if explicit:
+        candidates.append(explicit)
+
+    for match in _HTML_TABLE_CAPTION_RE.finditer(table_html):
+        embedded = _clean_text(match.group(1))
+        if embedded:
+            candidates.append(embedded)
+
+    # Some MinerU payloads concatenate ``</table>`` and the caption into one
+    # field. Keep that surrounding text instead of silently dropping it while
+    # parsing the cell matrix.
+    surrounding = _clean_text(_HTML_TABLE_ELEMENT_RE.sub("\n", table_html))
+    if surrounding:
+        candidates.append(surrounding)
+
+    merged: list[str] = []
+    for candidate in candidates:
+        normalized = re.sub(r"\s+", " ", candidate).strip()
+        if not normalized:
+            continue
+        # Prefer the more descriptive form when one caption contains another,
+        # e.g. ``Table 4`` plus ``Table 4. Downstream task assessment``.
+        replaced = False
+        for index, existing in enumerate(merged):
+            existing_normalized = re.sub(r"\s+", " ", existing).strip()
+            if normalized == existing_normalized or normalized in existing_normalized:
+                replaced = True
+                break
+            if existing_normalized in normalized:
+                merged[index] = candidate
+                replaced = True
+                break
+        if not replaced:
+            merged.append(candidate)
+    return "\n".join(merged)
 
 
 def _html_table_to_matrix(table_html: str) -> list[list[str]]:
@@ -1295,6 +1406,102 @@ def _quality_report(
     return report
 
 
+def _explicit_blank_page_numbers(payload: dict[str, Any]) -> set[int]:
+    """Return pages whose ``middle.json`` explicitly declares no blocks.
+
+    Presence matters here.  An absent block array can be a truncated provider
+    response, while an explicitly empty ``para_blocks``/``blocks`` array is
+    MinerU's affirmative representation of a blank page.  We do not infer
+    blankness from a sparse content list.
+    """
+    middle = payload.get("middle_json") if isinstance(payload, dict) else None
+    if not isinstance(middle, dict):
+        return set()
+    pdf_info = middle.get("pdf_info")
+    if not isinstance(pdf_info, list):
+        return set()
+
+    pages: set[int] = set()
+    for page_info in pdf_info:
+        if not isinstance(page_info, dict):
+            continue
+        page_num = _page_num(page_info)
+        declared_lists = [
+            page_info.get(key)
+            for key in _MIDDLE_PAGE_BLOCK_KEYS
+            if key in page_info and isinstance(page_info.get(key), list)
+        ]
+        if page_num > 0 and declared_lists and not any(declared_lists):
+            pages.add(page_num)
+    return pages
+
+
+def _visual_only_page_numbers(payload: dict[str, Any]) -> set[int]:
+    """Return pages whose raw MinerU result contains only visual/artifact blocks.
+
+    This is deliberately stricter than treating every empty normalized page as
+    visual.  A text/table/unknown block that disappears from normalization must
+    still fail the coverage gate; only an explicit image/chart-only source can
+    be accepted as a legitimate no-text page.
+    """
+    items_by_page: dict[int, list[dict[str, Any]]] = {}
+
+    def add_item(item: Any, *, page_hint: int = 0) -> None:
+        if not isinstance(item, dict):
+            return
+        page_num = _page_num(item) or page_hint
+        if page_num > 0:
+            items_by_page.setdefault(page_num, []).append(item)
+
+    content = payload.get("content_list_json") if isinstance(payload, dict) else None
+    if isinstance(content, list):
+        for item in content:
+            add_item(item)
+
+    middle = payload.get("middle_json") if isinstance(payload, dict) else None
+    if isinstance(middle, list):
+        for item in middle:
+            add_item(item)
+    elif isinstance(middle, dict):
+        pdf_info = middle.get("pdf_info")
+        if isinstance(pdf_info, list):
+            for page_info in pdf_info:
+                if not isinstance(page_info, dict):
+                    continue
+                page_num = _page_num(page_info)
+                for key in _MIDDLE_PAGE_BLOCK_KEYS:
+                    blocks = page_info.get(key)
+                    if isinstance(blocks, list):
+                        for block in blocks:
+                            add_item(block, page_hint=page_num)
+
+    visual_pages: set[int] = set()
+    for page_num, items in items_by_page.items():
+        has_visual = False
+        has_nonvisual_content = False
+        for item in items:
+            raw_type = _normalize_type(
+                item.get("type") or item.get("block_type") or item.get("category")
+            )
+            if raw_type in _VISUAL_ONLY_TYPES or (
+                not raw_type
+                and any(
+                    isinstance(item.get(key), str) and str(item.get(key)).strip()
+                    for key in ("img_path", "image_path", "image_url", "chart_path", "figure_path", "asset_path")
+                )
+            ):
+                has_visual = True
+                continue
+            if raw_type in _EXCLUDE_TYPES:
+                continue
+            if raw_type in _EMPTY_VISUAL_AUXILIARY_TYPES and not _extract_text(item, _NESTED_TEXT_KEYS):
+                continue
+            has_nonvisual_content = True
+        if has_visual and not has_nonvisual_content:
+            visual_pages.add(page_num)
+    return visual_pages
+
+
 def _payload_page_numbers(payload: dict[str, Any]) -> set[int]:
     pages: set[int] = set()
     content = payload.get("content_list_json")
@@ -1367,13 +1574,31 @@ def _extract_text(item: dict[str, Any], keys: tuple[str, ...], _depth: int = 0) 
     return "\n".join(_dedupe(parts)).strip()
 
 
-def _format_equation(text: str) -> str:
+def normalize_formula_markdown(text: str) -> str:
+    """Normalize a MinerU equation into a display-math Markdown fragment."""
     value = _clean_text(text)
     if not value:
         return ""
-    if value.startswith("$") or value.startswith("\\[") or value.startswith("\\("):
+    if value.startswith("$$") and value.endswith("$$") and len(value) > 4:
         return value
-    return f"$$\n{value}\n$$"
+
+    # MinerU may return a standalone equation wrapped as inline math.  The
+    # reading panel treats formula blocks as display math, so unwrap every
+    # valid outer delimiter before adding one canonical $$...$$ pair.  Keeping
+    # the original \(...\) inside a new block would create nested delimiters
+    # and make KaTeX show the source text instead of the equation.
+    if value.startswith("\\[") and value.endswith("\\]"):
+        value = value[2:-2].strip()
+    elif value.startswith("\\(") and value.endswith("\\)"):
+        value = value[2:-2].strip()
+    elif value.startswith("$") and value.endswith("$") and len(value) > 2:
+        value = value[1:-1].strip()
+
+    return f"$$\n{value}\n$$" if value else ""
+
+
+def _format_equation(text: str) -> str:
+    return normalize_formula_markdown(text)
 
 
 def _table_markdown_has_consistent_columns(markdown: str) -> bool:

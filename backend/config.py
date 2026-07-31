@@ -199,12 +199,36 @@ class AppSettings(BaseSettings):
     )
     # 意图判定 trace 落盘（只观测不干预）。关闭时不产生任何文件 IO。
     intent_trace_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices(
             "intent_trace_enabled",
             "CHATPDF_INTENT_TRACE_ENABLED",
         ),
-        description="是否把每轮意图判定的判据落成 JSONL trace",
+        description="是否把每轮意图判定的判据落成 JSONL trace（默认关闭，避免保留会话数据）",
+    )
+    intent_trace_include_question_preview: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "intent_trace_include_question_preview",
+            "CHATPDF_INTENT_TRACE_INCLUDE_QUESTION_PREVIEW",
+        ),
+        description="启用意图 trace 时是否额外保留问题前缀；默认仅保存不可逆 hash",
+    )
+    intent_trace_retention_days: int = Field(
+        default=14,
+        validation_alias=AliasChoices(
+            "intent_trace_retention_days",
+            "CHATPDF_INTENT_TRACE_RETENTION_DAYS",
+        ),
+        description="意图 trace 保留天数，0 表示不按日期清理",
+    )
+    intent_trace_max_total_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        validation_alias=AliasChoices(
+            "intent_trace_max_total_bytes",
+            "CHATPDF_INTENT_TRACE_MAX_TOTAL_BYTES",
+        ),
+        description="意图 trace 目录总容量上限，超出时优先删除最旧文件",
     )
 
     # ==================== Agent 触发白名单与增强开关 ====================
@@ -403,6 +427,70 @@ class AppSettings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("enable_answer_critic", "CHATPDF_ENABLE_ANSWER_CRITIC"),
         description="是否启用答案自审（检测幻觉，增加延迟）"
+    )
+    enable_answer_critic_repair: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_answer_critic_repair",
+            "CHATPDF_ENABLE_ANSWER_CRITIC_REPAIR",
+        ),
+        description="答案自审发现高风险时，非流式模式是否使用同一证据做一次受控修复",
+    )
+    enable_reading_outline_claim_verifier: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "enable_reading_outline_claim_verifier",
+            "CHATPDF_ENABLE_READING_OUTLINE_CLAIM_VERIFIER",
+        ),
+        description="是否对阅读总结中的关键结果、强比较和限制条件做选择性语义核验",
+    )
+    enable_reading_outline_visual_preflight: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_reading_outline_visual_preflight",
+            "CHATPDF_ENABLE_READING_OUTLINE_VISUAL_PREFLIGHT",
+        ),
+        description="生成阅读总结前是否限额补充方法、实验和消融章节中的高风险图表",
+    )
+    reading_outline_visual_preflight_limit: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "reading_outline_visual_preflight_limit",
+            "CHATPDF_READING_OUTLINE_VISUAL_PREFLIGHT_LIMIT",
+        ),
+        description="阅读总结视觉预检最多分析的高风险图表数（服务内硬限制 1-4）",
+    )
+    enable_paper_metadata_hydration: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "enable_paper_metadata_hydration",
+            "CHATPDF_ENABLE_PAPER_METADATA_HYDRATION",
+        ),
+        description="是否在文档读取后异步补全外部论文元数据；默认关闭以保护隐私",
+    )
+    paper_metadata_hydration_timeout_seconds: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices(
+            "paper_metadata_hydration_timeout_seconds",
+            "CHATPDF_PAPER_METADATA_HYDRATION_TIMEOUT_SECONDS",
+        ),
+        description="单个外部元数据请求超时秒数",
+    )
+    paper_metadata_unpaywall_email: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "paper_metadata_unpaywall_email",
+            "CHATPDF_PAPER_METADATA_UNPAYWALL_EMAIL",
+        ),
+        description="可选 Unpaywall 联系邮箱；为空时跳过该 provider",
+    )
+    paper_metadata_semantic_scholar_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "paper_metadata_semantic_scholar_api_key",
+            "CHATPDF_PAPER_METADATA_SEMANTIC_SCHOLAR_API_KEY",
+        ),
+        description="可选 Semantic Scholar API Key",
     )
 
     # ==================== P3.6 引用增强（two-pass citation injection）====================

@@ -35,9 +35,29 @@ _STAGE_ESTIMATES = {
     "resuming_result_download": 80,
     "downloading": 82,
     "retrying_download": 82,
-    "building_index": 87,
-    "building_rag_index": 93,
+    "building_index": 84,
+    "preparing_rag_index": 88,
+    "building_rag_index": 89,
+    "rebuilding_rag_index": 89,
+    "building_vector_index": 89,
+    "validating_vector_index": 93,
+    "preparing_semantic_index": 94,
+    "building_semantic_index": 95,
+    "validating_semantic_index": 97,
+    "publishing_rag_index": 98,
     "awaiting_rag_index": 96,
+}
+
+# MinerU does not expose a trustworthy end-to-end percentage for local index
+# construction. These windows move only inside the currently observed stage;
+# actual stage transitions remain the authoritative progress signal.
+_STAGE_ESTIMATE_WINDOWS = {
+    "building_index": (84, 87, 18.0),
+    "building_rag_index": (89, 92, 35.0),
+    "rebuilding_rag_index": (89, 92, 35.0),
+    "building_vector_index": (89, 92, 35.0),
+    "building_semantic_index": (95, 96, 30.0),
+    "publishing_rag_index": (98, 99, 12.0),
 }
 
 
@@ -137,6 +157,27 @@ def _elapsed_seconds(value: Any, *, now: datetime | None = None) -> int | None:
     return max(0, int((current - started).total_seconds()))
 
 
+def _estimated_stage_percent(
+    stage: str,
+    source: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> int:
+    window = _STAGE_ESTIMATE_WINDOWS.get(stage)
+    if not window:
+        return int(_STAGE_ESTIMATES.get(stage, 22))
+
+    floor, ceiling, time_constant = window
+    stage_elapsed = _elapsed_seconds(
+        source.get("stage_started_at") or source.get("updated_at"),
+        now=now,
+    )
+    if stage_elapsed is None or stage_elapsed <= 0:
+        return floor
+    estimate = floor + (ceiling - floor) * (1 - math.exp(-stage_elapsed / time_constant))
+    return min(ceiling, max(floor, round(estimate)))
+
+
 def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | None = None) -> dict[str, Any]:
     """Return a client-safe progress contract for a persisted MinerU task."""
     source = task if isinstance(task, Mapping) else {}
@@ -183,10 +224,14 @@ def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | No
         # approaches the hand-off point instead of claiming remote completion.
         percent = round(25 + 50 * (1 - math.exp(-attempt / 23)))
     else:
-        percent = _STAGE_ESTIMATES.get(stage, 22 if status == "running" else 2)
+        percent = (
+            _estimated_stage_percent(stage, source, now=now)
+            if stage in _STAGE_ESTIMATE_WINDOWS
+            else _STAGE_ESTIMATES.get(stage, 22 if status == "running" else 2)
+        )
 
     return {
-        "percent": min(96, max(0, int(percent))),
+        "percent": min(99, max(0, int(percent))),
         "estimated": True,
         "source": "estimated",
         "stage": stage,

@@ -37,6 +37,7 @@ from services.structured_json import (
 logger = logging.getLogger(__name__)
 
 SECTION_OUTLINE_VERSION = 11
+SECTION_OUTLINE_PROMPT_VERSION = "section-outline-v11"
 FAILED_GENERATION_COOLDOWN_SECONDS = 60.0
 # The published block outline no longer truncates long documents. Keep the
 # recovery budget aligned so it can repair every heading in a thesis/textbook.

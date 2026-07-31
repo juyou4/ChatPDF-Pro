@@ -37,6 +37,9 @@ READING_OUTLINE_VERSION = 4
 READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.15"
 READING_OUTLINE_CONTRACT = "thematic-quick-study-v3"
 READING_OUTLINE_DETAIL_LEVEL = "thematic-quick-study"
+READING_OUTLINE_CHECKPOINT_VERSION = 1
+READING_OUTLINE_CLAIM_VERIFIER_VERSION = "reading-outline-claim-verifier-v1"
+MAX_READING_OUTLINE_VERIFIER_CLAIMS = 8
 SECTION_BATCH_SIZE = 5
 SECTION_BATCH_CONCURRENCY = 2
 MAX_SECTION_PROMPT_BLOCKS = 8
@@ -275,6 +278,171 @@ def get_reading_outline_path(data_dir: Path | str, doc_id: str) -> Path:
     return get_reading_outline_dir(data_dir) / f"{doc_id}.json"
 
 
+def get_reading_outline_checkpoint_dir(data_dir: Path | str) -> Path:
+    path = Path(data_dir) / "reading_outline_checkpoints"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_reading_outline_checkpoint_path(data_dir: Path | str, doc_id: str) -> Path:
+    return get_reading_outline_checkpoint_dir(data_dir) / f"{doc_id}.json"
+
+
+def load_reading_outline_checkpoint(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:
+    path = get_reading_outline_checkpoint_path(data_dir, doc_id)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if data.get("version") != READING_OUTLINE_CHECKPOINT_VERSION:
+            return None
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.warning("[ReadingOutline] Failed to load checkpoint %s: %s", path, exc)
+        return None
+
+
+def save_reading_outline_checkpoint(
+    data_dir: Path | str,
+    doc_id: str,
+    checkpoint: dict[str, Any],
+) -> None:
+    """Atomically persist only completed, parse-bound chapter results."""
+    path = get_reading_outline_checkpoint_path(data_dir, doc_id)
+    temp_path: Path | None = None
+    try:
+        payload = dict(checkpoint)
+        payload["version"] = READING_OUTLINE_CHECKPOINT_VERSION
+        payload["doc_id"] = doc_id
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            json.dump(payload, temp_file, ensure_ascii=False, indent=2)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        temp_path.replace(path)
+    except Exception as exc:
+        logger.warning("[ReadingOutline] Failed to save checkpoint %s: %s", path, exc)
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def clear_reading_outline_checkpoint(data_dir: Path | str, doc_id: str) -> None:
+    path = get_reading_outline_checkpoint_path(data_dir, doc_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("[ReadingOutline] Failed to clear checkpoint %s: %s", path, exc)
+
+
+def _reading_outline_checkpoint_identity(
+    *,
+    doc_id: str,
+    doc: dict[str, Any],
+    source_hash: str,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Build the strict identity fence for resumable chapter summaries."""
+    manifest = read_parse_manifest(doc, doc_id=doc_id)
+    return {
+        "version": READING_OUTLINE_CHECKPOINT_VERSION,
+        "doc_id": doc_id,
+        "parser_route": str(
+            manifest.get("resolved_route") or manifest.get("route") or "unknown"
+        ).strip(),
+        "parse_generation": str(manifest.get("generation") or "").strip(),
+        "document_source_hash": str(manifest.get("source_hash") or "").strip(),
+        "source_hash": str(source_hash or "").strip(),
+        "prompt_version": READING_OUTLINE_PROMPT_VERSION,
+        "detail_level": READING_OUTLINE_DETAIL_LEVEL,
+        "provider": str(provider or "").strip().lower(),
+        "model": str(model or "").strip(),
+        "sections": {},
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+
+
+def _reading_outline_checkpoint_matches(
+    checkpoint: dict[str, Any] | None,
+    identity: dict[str, Any],
+) -> bool:
+    if not isinstance(checkpoint, dict):
+        return False
+    if checkpoint.get("version") != READING_OUTLINE_CHECKPOINT_VERSION:
+        return False
+    for field in (
+        "doc_id",
+        "parser_route",
+        "parse_generation",
+        "document_source_hash",
+        "source_hash",
+        "prompt_version",
+        "detail_level",
+        "provider",
+        "model",
+    ):
+        if str(checkpoint.get(field) or "").strip() != str(identity.get(field) or "").strip():
+            return False
+    return isinstance(checkpoint.get("sections"), dict)
+
+
+def _checkpoint_section_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    """Store the normalized chapter result, never an untrusted model response."""
+    return {
+        key: item.get(key)
+        for key in (
+            "source_section_id",
+            "translated_title",
+            "summary",
+            "study",
+            "evidence_block_ids",
+            "metric_claims",
+            "prose_claims",
+            "table_evidence_unit_ids",
+            "table_claim_violations",
+            "claim_binding_violations",
+            "section_hash",
+            "repair_kind",
+        )
+    }
+
+
+def _checkpoint_section_results(checkpoint: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(checkpoint, dict):
+        return {}
+    raw_sections = checkpoint.get("sections")
+    if not isinstance(raw_sections, dict):
+        return {}
+    results: dict[str, dict[str, Any]] = {}
+    for section_id, item in raw_sections.items():
+        if not isinstance(item, dict):
+            continue
+        normalized_id = str(item.get("source_section_id") or section_id or "").strip()
+        if not normalized_id or not str(item.get("section_hash") or "").strip():
+            continue
+        if not _section_result_is_usable(item):
+            continue
+        results[normalized_id] = {
+            **dict(item),
+            "source_section_id": normalized_id,
+            "section_status": "cached",
+        }
+    return results
+
+
 def load_reading_outline(data_dir: Path | str, doc_id: str) -> dict[str, Any] | None:
     path = get_reading_outline_path(data_dir, doc_id)
     if not path.exists():
@@ -345,9 +513,29 @@ async def get_or_create_reading_outline(
     parse_generation, document_source_hash = _parse_identity(doc_id, doc)
     provider_lower = (provider or "").lower()
     can_call_model = bool(api_key) or provider_lower in {"local", "ollama"}
+    checkpoint_identity = _reading_outline_checkpoint_identity(
+        doc_id=doc_id,
+        doc=doc,
+        source_hash=source_hash,
+        provider=provider,
+        model=model,
+    )
+    loaded_checkpoint = load_reading_outline_checkpoint(data_dir, doc_id)
+    checkpoint = (
+        loaded_checkpoint
+        if not force and _reading_outline_checkpoint_matches(loaded_checkpoint, checkpoint_identity)
+        else checkpoint_identity
+    )
 
     cached = load_reading_outline(data_dir, doc_id)
     healthy_cached: dict[str, Any] | None = None
+    cached_matches_current_identity = bool(
+        cached
+        and _matches_parse_identity(cached, parse_generation, document_source_hash)
+        and cached.get("source_hash") == source_hash
+        and cached.get("prompt_version") == READING_OUTLINE_PROMPT_VERSION
+        and (cached.get("meta") or {}).get("detail_level") == READING_OUTLINE_DETAIL_LEVEL
+    )
     if (
         cached
         and _matches_parse_identity(cached, parse_generation, document_source_hash)
@@ -374,6 +562,7 @@ async def get_or_create_reading_outline(
                     cached.get("model") or "",
                     "partial_cache_hit" if quality_issues else "cache_hit",
                 )
+                clear_reading_outline_checkpoint(data_dir, doc_id)
                 return cached
             logger.info(
                 "[ReadingOutline] Ignore AI cache doc=%s model_match=%s blocking_quality=%s partial_quality=%s",
@@ -413,7 +602,10 @@ async def get_or_create_reading_outline(
         )
         quality_feedback: list[str] = []
         outline: dict[str, Any] = {}
-        retry_cache = None if force else cached
+        # A stale final cache must never become a hidden per-section cache.
+        # This fence is stricter than section_hash alone because the same text
+        # can exist under two parser routes or generations.
+        retry_cache = cached if (not force and cached_matches_current_identity) else None
         for quality_attempt in range(2):
             generated = await _generate_ai_outline(
                 doc_id=doc_id,
@@ -426,6 +618,12 @@ async def get_or_create_reading_outline(
                 endpoint=endpoint,
                 quality_feedback=quality_feedback,
                 cached_outline=retry_cache,
+                checkpoint=checkpoint,
+                checkpoint_writer=lambda value: save_reading_outline_checkpoint(
+                    data_dir,
+                    doc_id,
+                    value,
+                ),
             )
             outline = _normalize_outline(
                 raw=generated,
@@ -468,6 +666,17 @@ async def get_or_create_reading_outline(
             outline_meta["generation_status"] = "completed"
             outline_meta["partial_quality_issues"] = []
             outline_meta["retryable"] = False
+        claim_verifier = await _maybe_verify_high_value_outline_claims(
+            outline=outline,
+            block_index=block_index,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+        )
+        if claim_verifier is not None:
+            # Diagnostic only: the verifier has no write path into summary text.
+            outline_meta["claim_verifier"] = claim_verifier
     except Exception as exc:
         logger.warning(
             "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=failed error=%s",
@@ -495,6 +704,9 @@ async def get_or_create_reading_outline(
     # failure handler so a stale result cannot be reported as a valid fallback.
     writer = cache_writer or (lambda value: save_reading_outline(data_dir, doc_id, value))
     writer(outline)
+    # The final parse-bound outline now contains all usable section results, so
+    # keeping a separate checkpoint would only create a stale recovery source.
+    clear_reading_outline_checkpoint(data_dir, doc_id)
     logger.info(
         "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=success",
         doc_id,
@@ -1559,19 +1771,33 @@ async def _generate_ai_outline(
     endpoint: str,
     quality_feedback: list[str] | None = None,
     cached_outline: dict[str, Any] | None = None,
+    checkpoint: dict[str, Any] | None = None,
+    checkpoint_writer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     del quality_feedback
     skeleton = _build_reading_section_skeleton(block_index)
     payloads = _prepare_section_payloads(skeleton, block_index, structured_table_bundles)
     if not skeleton or not any(payload.get("blocks") for payload in payloads.values()):
         return {}
-    cached_results = _cached_section_results(
+    finalized_cached_results = _cached_section_results(
         cached_outline,
         provider=provider,
         model=model,
     )
+    cached_results = dict(finalized_cached_results)
+    checkpoint_results = _checkpoint_section_results(checkpoint)
+    # A completed outline is the authoritative cache.  A checkpoint only fills
+    # sections absent from it, which avoids replacing a finalized result with
+    # an interrupted earlier batch.
+    for section_id, item in checkpoint_results.items():
+        cached_results.setdefault(section_id, item)
+    checkpoint_state = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+    if not isinstance(checkpoint_state.get("sections"), dict):
+        checkpoint_state["sections"] = {}
+
     results: dict[str, dict[str, Any]] = {}
     reused_count = 0
+    checkpoint_reused_count = 0
     pending: list[dict[str, Any]] = []
     for section_id, payload in payloads.items():
         if not payload.get("blocks"):
@@ -1580,8 +1806,26 @@ async def _generate_ai_outline(
         if cached and cached.get("section_hash") == payload.get("section_hash"):
             results[section_id] = {**cached, "section_status": "cached"}
             reused_count += 1
+            if section_id in checkpoint_results and section_id not in finalized_cached_results:
+                checkpoint_reused_count += 1
         else:
             pending.append(payload)
+
+    def persist_checkpoint() -> None:
+        if not callable(checkpoint_writer):
+            return
+        checkpoint_state["sections"] = {
+            section_id: _checkpoint_section_snapshot(item)
+            for section_id, item in results.items()
+            if _section_result_is_usable(item)
+            and str(item.get("section_hash") or "")
+            == str((payloads.get(section_id) or {}).get("section_hash") or "")
+        }
+        checkpoint_state["updated_at"] = time.time()
+        try:
+            checkpoint_writer(checkpoint_state)
+        except Exception as exc:
+            logger.warning("[ReadingOutline] Checkpoint callback failed: %s", exc)
 
     semaphore = asyncio.Semaphore(SECTION_BATCH_CONCURRENCY)
 
@@ -1653,13 +1897,17 @@ async def _generate_ai_outline(
             return generated, warnings
 
     batches = _pack_section_batches(pending)
-    batch_results = await asyncio.gather(*(generate_batch(batch) for batch in batches)) if batches else []
     warnings: list[str] = []
     generated_count = 0
-    for generated, batch_warnings in batch_results:
+    batch_tasks = [asyncio.create_task(generate_batch(batch)) for batch in batches]
+    for completed in asyncio.as_completed(batch_tasks):
+        generated, batch_warnings = await completed
         results.update(generated)
         generated_count += len(generated)
         warnings.extend(batch_warnings)
+        # Persist after every completed batch.  A process crash can therefore
+        # only lose the in-flight batch, never prior grounded chapter results.
+        persist_checkpoint()
 
     if pending and generated_count == 0 and reused_count == 0:
         reason = warnings[0] if warnings else "模型未返回任何可用章节总结"
@@ -1714,6 +1962,7 @@ async def _generate_ai_outline(
                     "segmented_review": segment_meta,
                 }
                 supplemental_reviewed_ids.append(section_id)
+                persist_checkpoint()
                 continue
         except Exception as exc:
             segmented_review_meta[section_id] = {
@@ -1759,6 +2008,7 @@ async def _generate_ai_outline(
             candidate["repair_kind"] = "coverage_review"
             results[section_id] = candidate
             supplemental_reviewed_ids.append(section_id)
+            persist_checkpoint()
         except Exception as exc:
             supplemental_review_failures.append(section_id)
             warnings.append(
@@ -1920,6 +2170,7 @@ async def _generate_ai_outline(
                 if _missing_flow_labels(candidate.get("summary"), expected_flow_labels):
                     continue
                 results[section_id] = candidate
+                persist_checkpoint()
                 if section_id in numeric_feedback:
                     numeric_repaired += 1
                 if section_id in table_feedback:
@@ -1975,6 +2226,7 @@ async def _generate_ai_outline(
             continue
         results[section_id] = candidate
         qualitative_repaired += 1
+        persist_checkpoint()
 
     unusable_result_ids = [
         section_id
@@ -1987,6 +2239,7 @@ async def _generate_ai_outline(
         warnings.append(
             f"最终校验：{len(unusable_result_ids)} 章未形成可用提要，已标记为局部回退"
         )
+    persist_checkpoint()
 
     raw = _build_section_outline_raw(
         skeleton=skeleton,
@@ -2021,6 +2274,10 @@ async def _generate_ai_outline(
             1 for section_id, payload in payloads.items()
             if payload.get("blocks") and section_id not in results
         ),
+    }
+    raw["checkpoint_stats"] = {
+        "reused_sections": checkpoint_reused_count,
+        "pending_sections": len(pending),
     }
     raw["sampling_stats"] = _build_section_sampling_stats(
         payloads=payloads,
@@ -4197,6 +4454,231 @@ def _select_landmark_claims(
     return selected
 
 
+def _select_high_value_verifier_claims(
+    outline: dict[str, Any],
+    block_index: dict[str, Any],
+    *,
+    limit: int = MAX_READING_OUTLINE_VERIFIER_CLAIMS,
+) -> list[dict[str, Any]]:
+    """Select only evidence-bound claims worth an independent semantic pass."""
+    if limit <= 0:
+        return []
+    block_map = _flatten_blocks(block_index)
+    section_items = outline.get("section_items")
+    if isinstance(section_items, list):
+        items = _flatten_outline_items(section_items)
+    else:
+        items = [
+            item for item in outline.get("flat_items") or []
+            if isinstance(item, dict) and item.get("source_section_id")
+        ]
+
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    seen: set[str] = set()
+
+    def add_candidate(
+        *,
+        item: dict[str, Any],
+        claim: dict[str, Any],
+        claim_kind: str,
+        category: str,
+        score: int,
+        evidence: list[dict[str, str]],
+    ) -> None:
+        claim_text = " ".join(str(claim.get("claim_text") or "").split())
+        section_id = str(item.get("source_section_id") or "").strip()
+        dedupe_key = f"{section_id}|{_normalized_match_text(claim_text)}"
+        if not section_id or not claim_text or not evidence or dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        claim_id = hashlib.sha1(
+            f"{section_id}|{claim_kind}|{claim_text}".encode("utf-8")
+        ).hexdigest()[:16]
+        candidates.append((score, {
+            "claim_id": claim_id,
+            "claim_kind": claim_kind,
+            "category": category,
+            "source_section_id": section_id,
+            "claim_text": claim_text,
+            "evidence": evidence,
+        }))
+
+    for item in items:
+        if not isinstance(item, dict) or item.get("section_status") not in {"ai", "cached"}:
+            continue
+        title = str(item.get("title") or "")
+        role = str(item.get("summary_role") or "general")
+        landmark_section = role == "experiment" or bool(
+            EXPERIMENT_SECTION_TITLE_PATTERN.search(title)
+        )
+
+        for claim in item.get("metric_claims") or []:
+            if not isinstance(claim, dict):
+                continue
+            kind = str(claim.get("claim_kind") or "value").strip().lower()
+            category = "landmark_result" if landmark_section and kind == "value" else kind
+            if kind not in {"comparison", "maximum", "minimum", "range"} and not landmark_section:
+                continue
+            evidence: list[dict[str, str]] = []
+            seen_evidence: set[str] = set()
+            for binding in claim.get("row_bindings") or []:
+                if not isinstance(binding, dict):
+                    continue
+                evidence_id = str(binding.get("table_evidence_unit_id") or "").strip()
+                text = " ".join(str(binding.get("row_text") or "").split())
+                if evidence_id and text and evidence_id not in seen_evidence:
+                    seen_evidence.add(evidence_id)
+                    evidence.append({"evidence_id": evidence_id, "text": text})
+            if not evidence:
+                for evidence_id, text in zip(
+                    claim.get("table_evidence_unit_ids") or [],
+                    claim.get("row_texts") or [],
+                ):
+                    evidence_id = str(evidence_id or "").strip()
+                    text = " ".join(str(text or "").split())
+                    if evidence_id and text and evidence_id not in seen_evidence:
+                        seen_evidence.add(evidence_id)
+                        evidence.append({"evidence_id": evidence_id, "text": text})
+            score = {
+                "comparison": 120,
+                "maximum": 112,
+                "minimum": 112,
+                "range": 108,
+                "value": 82,
+            }.get(kind, 80)
+            add_candidate(
+                item=item,
+                claim=claim,
+                claim_kind=kind,
+                category=category,
+                score=score,
+                evidence=evidence,
+            )
+
+        for claim in item.get("prose_claims") or []:
+            if not isinstance(claim, dict):
+                continue
+            kind = str(claim.get("claim_kind") or "claim").strip().lower()
+            category = "landmark_result" if landmark_section and kind == "numeric" else kind
+            if kind not in {"comparison", "causal", "limitation"} and not landmark_section:
+                continue
+            evidence_id = str(claim.get("evidence_block_id") or "").strip()
+            evidence_text = " ".join(str(claim.get("evidence_quote") or "").split())
+            if not evidence_text and evidence_id in block_map:
+                evidence_text = " ".join(str(block_map[evidence_id].get("text") or "").split())
+            score = {
+                "limitation": 125,
+                "comparison": 120,
+                "causal": 105,
+                "numeric": 88,
+            }.get(kind, 78)
+            add_candidate(
+                item=item,
+                claim=claim,
+                claim_kind=kind,
+                category=category,
+                score=score,
+                evidence=[{"evidence_id": evidence_id, "text": evidence_text}]
+                if evidence_id and evidence_text
+                else [],
+            )
+
+    candidates.sort(key=lambda entry: (-entry[0], entry[1]["source_section_id"], entry[1]["claim_id"]))
+    selected: list[dict[str, Any]] = []
+    selected_categories: set[str] = set()
+    for _score, candidate in candidates:
+        if candidate["category"] in selected_categories:
+            continue
+        selected.append(candidate)
+        selected_categories.add(str(candidate["category"]))
+        if len(selected) >= limit:
+            return selected
+    for _score, candidate in candidates:
+        if candidate in selected:
+            continue
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _reading_outline_claim_verifier_enabled() -> bool:
+    try:
+        from config import settings
+
+        return bool(getattr(settings, "enable_reading_outline_claim_verifier", False))
+    except Exception:
+        return False
+
+
+async def _maybe_verify_high_value_outline_claims(
+    *,
+    outline: dict[str, Any],
+    block_index: dict[str, Any],
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+) -> dict[str, Any] | None:
+    """Run an optional diagnostic verifier without mutating summary content."""
+    if not _reading_outline_claim_verifier_enabled():
+        return None
+    candidates = _select_high_value_verifier_claims(outline, block_index)
+    base = {
+        "version": READING_OUTLINE_CLAIM_VERIFIER_VERSION,
+        "provider": str(provider or ""),
+        "model": str(model or ""),
+        "selected_claim_ids": [str(item["claim_id"]) for item in candidates],
+        "candidate_count": len(candidates),
+    }
+    if not candidates:
+        return {**base, "status": "not_applicable", "verdicts": []}
+    if not api_key and str(provider or "").lower() not in {"local", "ollama"}:
+        return {**base, "status": "unavailable", "reason": "missing_credentials", "verdicts": []}
+
+    try:
+        from services.answer_critic_service import critique_evidence_claims
+
+        result = await critique_evidence_claims(
+            candidates,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+        )
+    except Exception as exc:
+        logger.warning("[ReadingOutline] Claim verifier side pass failed: %s", exc)
+        result = None
+    if not isinstance(result, dict):
+        return {**base, "status": "unavailable", "reason": "verifier_failed", "verdicts": []}
+
+    candidate_by_id = {str(item["claim_id"]): item for item in candidates}
+    verdicts = []
+    for verdict in result.get("verdicts") or []:
+        if not isinstance(verdict, dict):
+            continue
+        claim_id = str(verdict.get("claim_id") or "")
+        candidate = candidate_by_id.get(claim_id)
+        if not candidate:
+            continue
+        verdicts.append({
+            "claim_id": claim_id,
+            "source_section_id": str(candidate.get("source_section_id") or ""),
+            "claim_kind": str(candidate.get("claim_kind") or "claim"),
+            "status": str(verdict.get("status") or "uncertain"),
+            "reason": str(verdict.get("reason") or "")[:240],
+            "evidence_ids": [str(value) for value in verdict.get("evidence_ids") or []],
+        })
+    return {
+        **base,
+        "status": str(result.get("status") or "completed"),
+        "supported_count": int(result.get("supported_count") or 0),
+        "unsupported_count": int(result.get("unsupported_count") or 0),
+        "uncertain_count": int(result.get("uncertain_count") or 0),
+        "verdicts": verdicts,
+    }
+
+
 def _raw_overview_requirement_issues(
     overview: dict[str, Any],
     coverage_plan: dict[str, Any],
@@ -5797,6 +6279,7 @@ def _normalize_section_study_outline(
             "flow_repair": raw.get("flow_repair_stats") or {},
             "qualitative_repair": raw.get("qualitative_repair_stats") or {},
             "claim_binding_repair": raw.get("claim_binding_repair_stats") or {},
+            "checkpoint": raw.get("checkpoint_stats") or {},
             "table_claims": {
                 "valid_claim_count": valid_metric_claim_count,
                 "violations": table_claim_violations,

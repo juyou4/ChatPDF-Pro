@@ -64,6 +64,7 @@ _RE_CAPTION = re.compile(
     re.IGNORECASE,
 )
 _RE_TABLE_LABEL = re.compile(r"^\s*(table|表)\s*([0-9]+|[ivxlcdm]+)\s*[:.\-]?\s*$", re.IGNORECASE)
+_RE_RAW_TABLE_MARKUP = re.compile(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", re.IGNORECASE)
 _RE_DECIMAL_TOKEN = re.compile(r"(?<![A-Za-z])[-+]?\d+\.\d+(?![A-Za-z])")
 _RE_PUBLICATION_HEADER_CUE = re.compile(
     r"\b(vol\.?|no\.?|pp\.?|transactions?|journal|proceedings|conference|copyright|"
@@ -356,6 +357,48 @@ def _maybe_upgrade_mineru_structure_cache(
         logger.warning("[BlockIndex] MinerU structure upgrader unavailable for %s: %s", doc_id, exc)
         return cached
 
+    original_cached = cached
+    cached, repaired_table_count = _repair_legacy_mineru_table_markup(cached)
+    if repaired_table_count:
+        logger.info(
+            "[BlockIndex] repaired %s legacy MinerU table block(s) for %s",
+            repaired_table_count,
+            doc_id,
+        )
+
+    def publish_legacy_table_repair() -> dict[str, Any]:
+        """Persist a table-only repair or keep every consumer on the old revision.
+
+        Returning a request-local Markdown table while the on-disk block index
+        (and therefore the vector index identity) still contained raw HTML
+        created a split brain: reading/outline used the repaired text but chat
+        continued to retrieve the old chunks.  A successful save stamps a new
+        block revision, so the existing RAG artifact is automatically rejected
+        by the shared parse-identity gate until it is rebuilt.  If the save
+        fails, return the original cache instead of exposing an unpublishable
+        in-memory variant.
+        """
+        if not repaired_table_count:
+            return cached
+        if save_block_index(
+            data_dir,
+            doc_id,
+            cached,
+            preserve_active_source=preserve_active_source,
+            current_doc=doc,
+            include_uncommitted_visual_supplements=include_uncommitted_visual_supplements,
+        ):
+            logger.info(
+                "[BlockIndex] published legacy MinerU table repair for %s; existing RAG revision is stale",
+                doc_id,
+            )
+            return cached
+        logger.warning(
+            "[BlockIndex] legacy MinerU table repair was not persisted for %s; retaining old cache revision",
+            doc_id,
+        )
+        return original_cached
+
     mineru_meta = cached.get("mineru_meta")
     cached_structure_version = (
         mineru_meta.get("structure_version")
@@ -363,7 +406,7 @@ def _maybe_upgrade_mineru_structure_cache(
         else None
     )
     if cached_structure_version == MINERU_STRUCTURE_VERSION:
-        return cached
+        return publish_legacy_table_repair()
 
     has_parse_identity = bool(
         parse_identity.get("parse_generation")
@@ -385,13 +428,13 @@ def _maybe_upgrade_mineru_structure_cache(
             doc_id,
             exc,
         )
-        return cached
+        return publish_legacy_table_repair()
     if payload is None:
         logger.warning(
             "[BlockIndex] matching raw MinerU result unavailable; retaining old structure cache for %s",
             doc_id,
         )
-        return cached
+        return publish_legacy_table_repair()
 
     try:
         rebuilt = build_block_index_from_mineru_payload(
@@ -402,7 +445,7 @@ def _maybe_upgrade_mineru_structure_cache(
         )
     except Exception as exc:
         logger.warning("[BlockIndex] MinerU structure cache rebuild failed for %s: %s", doc_id, exc)
-        return cached
+        return publish_legacy_table_repair()
 
     if not save_block_index(
         data_dir,
@@ -421,6 +464,54 @@ def _maybe_upgrade_mineru_structure_cache(
         MINERU_STRUCTURE_VERSION,
     )
     return rebuilt
+
+
+def _repair_legacy_mineru_table_markup(cached: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Build a request-safe view when an old cache still contains table HTML.
+
+    The structure upgrader normally rebuilds from the matching raw MinerU
+    payload. Some imported/older documents no longer have that payload, so the
+    cached index still needs a non-destructive fallback. Keep its old structure
+    version so a real rebuild can happen later if the raw payload reappears.
+    """
+    pages = cached.get("pages") if isinstance(cached, dict) else None
+    if not isinstance(pages, list):
+        return cached, 0
+
+    candidates = [
+        block
+        for page in pages
+        if isinstance(page, dict)
+        for block in (page.get("blocks") or [])
+        if isinstance(block, dict)
+        and _RE_RAW_TABLE_MARKUP.search(str(block.get("text") or ""))
+    ]
+    if not candidates:
+        return cached, 0
+
+    from services.mineru_text_normalizer import normalize_table_text
+
+    repaired = deepcopy(cached)
+    repaired_count = 0
+    for page in repaired.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            source = str(block.get("text") or "")
+            if not _RE_RAW_TABLE_MARKUP.search(source):
+                continue
+            normalized = normalize_table_text(source)
+            if not normalized or normalized == source:
+                continue
+            block["text"] = normalized
+            if len(normalized) > 2400:
+                block["display_text"] = _limit_text(normalized, 2400)
+            else:
+                block.pop("display_text", None)
+            repaired_count += 1
+    return repaired, repaired_count
 
 
 def _has_uncommitted_visual_staging(doc: dict[str, Any], parse_identity: dict[str, Any]) -> bool:
@@ -509,6 +600,53 @@ def build_block_index(
         "visual_supplement_revision": str(parse_identity.get("visual_supplement_revision") or ""),
         **parse_identity,
     })
+
+
+def stage_visual_supplements_on_block_index(
+    block_index: dict[str, Any],
+    *,
+    data: dict[str, Any],
+    parse_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Add staged visual semantic blocks without rebuilding the primary index.
+
+    MinerU's index must not be regenerated through the PDF-native builder just
+    to publish a visual description. This function copies the published index,
+    adds only parse-bound supplement blocks, then restamps its revision.
+    """
+    if not isinstance(block_index, dict) or not isinstance(data, dict):
+        raise ValueError("视觉补充索引输入无效")
+    route = str(parse_identity.get("parser_route") or "").strip().lower()
+    generation = str(parse_identity.get("parse_generation") or "").strip()
+    source_hash = str(parse_identity.get("document_source_hash") or "").strip()
+    if route not in {"local", "mineru"} or not generation or not source_hash:
+        raise ValueError("视觉补充解析身份无效")
+    if (
+        str(block_index.get("parser_route") or "").strip().lower() != route
+        or str(block_index.get("parse_generation") or "").strip() != generation
+        or str(block_index.get("document_source_hash") or "").strip() != source_hash
+    ):
+        raise ValueError("视觉补充不能写入其他解析代际")
+
+    staged = deepcopy(block_index)
+    effective_identity = dict(parse_identity)
+    effective_identity["visual_supplement_revision"] = visual_supplement_revision(
+        data,
+        effective_identity,
+        require_committed=False,
+    )
+    if not effective_identity["visual_supplement_revision"]:
+        return staged
+    _inject_visual_blocks(
+        staged.get("pages") or [],
+        data,
+        effective_identity,
+        include_uncommitted_visual_supplements=True,
+    )
+    _assign_sections(staged.get("pages") or [], staged.get("outline") or [])
+    _annotate_block_roles(staged.get("pages") or [], staged.get("outline") or [])
+    staged["visual_supplement_revision"] = effective_identity["visual_supplement_revision"]
+    return stamp_block_index_revision(staged)
 
 
 def _document_parse_identity(
@@ -959,7 +1097,7 @@ def _inject_visual_blocks(
         )
 
     # VLM output is intentionally additive and only active for the current
-    # local parse generation.  It never replaces OCR/PDF text or MinerU blocks.
+    # parse generation. It never replaces local OCR/PDF text or MinerU blocks.
     for supplement in active_visual_supplements(
         data,
         parse_identity,

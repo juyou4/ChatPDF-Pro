@@ -11,11 +11,6 @@ import re
 from typing import Iterable, Sequence
 
 
-_EXPLICIT_FULL_SCOPE_RE = re.compile(
-    r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|條|条|項|项)|完整(?:列出|清单|列表)?|总数|一共|"
-    r"\b(?:all|every|full|complete|entire|enumerate)\b)",
-    re.IGNORECASE,
-)
 _LIST_SCOPE_RE = re.compile(
     r"(?:清单|列表|汇总|catalog(?:ue)?|inventory|\blist\b)",
     re.IGNORECASE,
@@ -100,6 +95,50 @@ _KIND_CONTENT_ROLES = {
     "metadata": {"author", "authors", "affiliation", "contact", "publication_header", "metadata"},
 }
 
+# ``All`` is commonly a metric column name ("All, Many, Medium, Few"), not a
+# request to enumerate every table. Full-scope terms therefore need to bind to
+# an actual inventory kind; a generic word anywhere in the sentence is too
+# broad and steals numeric-table questions from their exactness guard.
+_FULL_SCOPE_KIND_PATTERNS: dict[str, re.Pattern[str]] = {
+    "formula": re.compile(
+        r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|條|条|項|项))\s*(?:的\s*)?"
+        r"(?:公式|方程|等式)|\b(?:all|every|each)\s+(?:the\s+)?(?:formulas?|equations?|math)\b",
+        re.IGNORECASE,
+    ),
+    "table": re.compile(
+        r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|條|条|項|项))\s*(?:的\s*)?"
+        r"(?:表格|数据表|統計表|统计表|附表|表(?!\s*\d))|"
+        r"\b(?:all|every|each)\s+(?:the\s+)?(?:tables?|data\s+tables?)\b",
+        re.IGNORECASE,
+    ),
+    "figure": re.compile(
+        r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|張|张|幅|條|条|項|项))\s*(?:的\s*)?"
+        r"(?:图片|圖像|图像|图形|圖形|插图|插圖|附图|附圖|截图|截圖|图(?!\s*\d)|圖(?!\s*\d))|"
+        r"\b(?:all|every|each)\s+(?:the\s+)?(?:figures?|images?|charts?)\b",
+        re.IGNORECASE,
+    ),
+    "reference": re.compile(
+        r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|條|条|項|项))\s*(?:的\s*)?"
+        r"(?:参考文献|參考文獻|文献|文獻|引用)|"
+        r"\b(?:all|every|each)\s+(?:the\s+)?(?:references?|bibliograph(?:y|ies)|citations?)\b",
+        re.IGNORECASE,
+    ),
+    "metadata": re.compile(
+        r"(?:所有|全部|全量|逐[一個个]|每(?:一)?(?:个|條|条|項|项))\s*(?:的\s*)?"
+        r"(?:作者|机构|機構|单位|單位|邮箱|郵箱|doi)|"
+        r"\b(?:all|every|each)\s+(?:the\s+)?(?:authors?|affiliations?|contacts?)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _has_kind_bound_full_scope(question: str, kinds: Sequence[str]) -> bool:
+    return any(
+        pattern.search(question)
+        for kind, pattern in _FULL_SCOPE_KIND_PATTERNS.items()
+        if kind in kinds
+    )
+
 
 def detect_inventory_kinds(question: str) -> tuple[str, ...]:
     """Return every requested complete block kind in stable kind order.
@@ -125,7 +164,7 @@ def detect_inventory_kinds(question: str) -> tuple[str, ...]:
     )
     if not matched_kinds:
         return ()
-    if _EXPLICIT_FULL_SCOPE_RE.search(normalized):
+    if _has_kind_bound_full_scope(normalized, matched_kinds):
         return matched_kinds
     # A bare request such as "列出公式的参数" is ordinary QA, not an
     # exhaustive document scan.  List-like phrasing becomes inventory mode

@@ -27,14 +27,15 @@ from services.block_index_service import (
 )
 from services.mineru_text_normalizer import (
     build_mineru_page_ledger,
-    table_html_to_markdown,
+    normalize_formula_markdown,
+    normalize_table_text,
 )
 
 logger = logging.getLogger(__name__)
 
 MINERU_BLOCK_INDEX_SOURCE = "mineru_vlm"
 MINERU_RAW_VERSION = 1
-MINERU_STRUCTURE_VERSION = 5
+MINERU_STRUCTURE_VERSION = 7
 
 
 def get_mineru_result_dir(data_dir: Path | str) -> Path:
@@ -564,22 +565,39 @@ def _blocks_from_content_list(
 
     for page_num, page_items in items_by_page.items():
         page_spec = page_specs.get(page_num, {"width": 612.0, "height": 792.0})
-        page_source_size = (
-            _page_source_size(page_items[0])
-            or (page_source_sizes or {}).get(page_num)
-            or _infer_page_source_size(
+        item_declared_size = next(
+            (_page_source_size(item) for item in page_items if _page_source_size(item)),
+            None,
+        )
+        inferred_page_source_size = _infer_page_source_size(
             page_items,
             page_width=float(page_spec.get("width") or 612.0),
             page_height=float(page_spec.get("height") or 792.0),
-            )
+        )
+        page_source_size = (
+            item_declared_size
+            or (page_source_sizes or {}).get(page_num)
+            or inferred_page_source_size
+        )
+        # A content-list-only page may use PDF points or a 0-1000 coordinate
+        # system.  When every coordinate happens to fit inside the PDF page,
+        # magnitude alone cannot distinguish the two.  Do not silently turn
+        # that ambiguity into a crop anchor; textual structure remains usable.
+        page_geometry_uncertain = bool(
+            page_source_size is None
+            and any(_item_bbox(item) for item in page_items)
         )
         for item in page_items:
+            item_source_size = _page_source_size(item) or page_source_size
             block = _convert_mineru_item(
                 item,
                 page_num,
                 page_specs,
-                _page_source_size(item) or page_source_size,
+                item_source_size,
                 source_name=source_name,
+                geometry_uncertain=bool(
+                    page_geometry_uncertain and _page_source_size(item) is None
+                ),
             )
             if block:
                 blocks_by_page.setdefault(page_num, []).append(block)
@@ -935,6 +953,7 @@ def _convert_mineru_item(
     page_source_size: tuple[float, float] | None,
     *,
     source_name: str,
+    geometry_uncertain: bool = False,
 ) -> dict[str, Any] | None:
     raw_type = _normalize_type(item.get("type") or item.get("block_type") or item.get("category") or item.get("category_name"))
     block_type = _map_mineru_type(raw_type, item)
@@ -949,14 +968,18 @@ def _convert_mineru_item(
 
     bbox = _item_bbox(item)
     page_spec = page_specs.get(page_num, {"width": 612.0, "height": 792.0})
-    bbox_pts = _bbox_to_page_pts(
-        bbox,
-        page_width=float(page_spec.get("width") or 612.0),
-        page_height=float(page_spec.get("height") or 792.0),
-        source_size=page_source_size,
-    )
+    geometry_uncertain = bool(geometry_uncertain and bbox)
+    bbox_pts = None
+    if not geometry_uncertain:
+        bbox_pts = _bbox_to_page_pts(
+            bbox,
+            page_width=float(page_spec.get("width") or 612.0),
+            page_height=float(page_spec.get("height") or 792.0),
+            source_size=page_source_size,
+        )
     if not bbox_pts and block_type in {"figure", "table"}:
-        return None
+        if not geometry_uncertain:
+            return None
 
     block: dict[str, Any] = {
         "type": block_type,
@@ -973,14 +996,19 @@ def _convert_mineru_item(
         block["bbox"] = bbox_pts
     else:
         block["geometry_missing"] = True
+        if geometry_uncertain:
+            block["geometry_uncertain"] = True
+            block["geometry_reason"] = "content_list_coordinate_space_ambiguous"
     if len(text) > 2400:
         block["display_text"] = _limit_text(text, 2400)
-    line_anchors = _mineru_line_anchors(
-        item,
-        page_width=float(page_spec.get("width") or 612.0),
-        page_height=float(page_spec.get("height") or 792.0),
-        source_size=page_source_size,
-    )
+    line_anchors = []
+    if not geometry_uncertain:
+        line_anchors = _mineru_line_anchors(
+            item,
+            page_width=float(page_spec.get("width") or 612.0),
+            page_height=float(page_spec.get("height") or 792.0),
+            source_size=page_source_size,
+        )
     if line_anchors:
         block["line_anchors"] = line_anchors
     if block_type == "heading":
@@ -1090,9 +1118,10 @@ def _extract_item_text(item: dict[str, Any], block_type: str) -> str:
         # 大纲与速览的 prompt，再被 800/900 字的截断从标签中间切开，摘要里就
         # 出现 ``<td`` 和半截标签。渲染成 markdown 与 RAG 侧口径一致；
         # 解析不出来时退回按普通文本清洗，而不是把标签原样放出去。
-        markdown = table_html_to_markdown(text)
-        if markdown:
-            return markdown
+        caption = str(item.get("table_caption") or item.get("caption") or "").strip()
+        return normalize_table_text(text, caption=caption)
+    if block_type == "formula" and text:
+        return normalize_formula_markdown(text)
     return _clean_text(text)
 
 

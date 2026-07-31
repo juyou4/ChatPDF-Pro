@@ -2908,9 +2908,7 @@ def is_ocr_available() -> dict:
     return {
         "tesseract": available.get("tesseract", False),
         "paddleocr": available.get("paddleocr", False),
-        "mistral": available.get("mistral", False),
         "mineru": document_parsers.get("mineru", False),
-        "doc2x": False,
         "any": bool(available or document_parsers)
     }
 
@@ -3091,13 +3089,6 @@ _ocr_registry = OCRRegistry()
 _document_parser_registry = DocumentParserRegistry()
 _ocr_registry.register(TesseractAdapter())
 _ocr_registry.register(PaddleOCRAdapter())
-
-# 注册在线 OCR 适配器：加载 Mistral OCR 配置并注册
-_mistral_config = _load_online_ocr_config("mistral")
-_ocr_registry.register(MistralAdapter(
-    api_key=_mistral_config.get("api_key", ""),
-    base_url=_mistral_config.get("base_url", "https://api.mistral.ai"),
-))
 
 # 注册在线 OCR 适配器：加载 MinerU OCR 配置并注册
 _mineru_config = _load_online_ocr_config("mineru")

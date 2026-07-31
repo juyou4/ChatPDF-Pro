@@ -1,4 +1,4 @@
-"""Structured, parse-bound visual supplements for the local reading route."""
+"""Structured, parse-bound visual supplements for local and MinerU routes."""
 from __future__ import annotations
 
 import hashlib
@@ -13,11 +13,13 @@ VISUAL_SUPPLEMENT_BLOCK_TYPE = "visual_enrichment"
 VISUAL_SUPPLEMENT_DEFAULT_PURPOSE = "figure_description"
 VISUAL_SUPPLEMENT_FIGURE_ANALYSIS_PROMPT_VERSION = "figure-analysis-v1"
 VISUAL_SUPPLEMENT_FIGURE_ON_DEMAND_PROMPT_VERSION = "figure-on-demand-v1"
+VISUAL_SUPPLEMENT_SUMMARY_PREFLIGHT_PROMPT_VERSION = "summary-figure-preflight-v1"
 VISUAL_SUPPLEMENT_PAGE_RECOVERY_PROMPT_VERSION = "page-visual-recovery-v1"
 VISUAL_SUPPLEMENT_DEFAULT_PROMPT_VERSION = VISUAL_SUPPLEMENT_FIGURE_ANALYSIS_PROMPT_VERSION
 VISUAL_SUPPLEMENT_PROMPT_SUITE_IDENTITY = "|".join((
     VISUAL_SUPPLEMENT_FIGURE_ANALYSIS_PROMPT_VERSION,
     VISUAL_SUPPLEMENT_FIGURE_ON_DEMAND_PROMPT_VERSION,
+    VISUAL_SUPPLEMENT_SUMMARY_PREFLIGHT_PROMPT_VERSION,
     VISUAL_SUPPLEMENT_PAGE_RECOVERY_PROMPT_VERSION,
 ))
 VISUAL_SUPPLEMENT_COMMIT_SCHEMA_VERSION = "v2"
@@ -27,6 +29,7 @@ _ACTIVE_PROMPT_VERSIONS_BY_PURPOSE = {
     "figure_description": frozenset({
         VISUAL_SUPPLEMENT_FIGURE_ANALYSIS_PROMPT_VERSION,
         VISUAL_SUPPLEMENT_FIGURE_ON_DEMAND_PROMPT_VERSION,
+        VISUAL_SUPPLEMENT_SUMMARY_PREFLIGHT_PROMPT_VERSION,
     }),
     "scan_region_recognition": frozenset({
         VISUAL_SUPPLEMENT_PAGE_RECOVERY_PROMPT_VERSION,
@@ -99,9 +102,12 @@ def _normalized_visual_risk(value: Any) -> dict[str, Any] | None:
 
 
 def _identity_matches(envelope: dict[str, Any], parse_identity: dict[str, Any]) -> bool:
-    if str(parse_identity.get("parser_route") or "").lower() != "local":
+    route = str(parse_identity.get("parser_route") or "").strip().lower()
+    if route not in {"local", "mineru"}:
         return False
     return (
+        str(envelope.get("parser_route") or "").strip().lower() == route
+        and
         str(envelope.get("parse_generation") or "")
         == str(parse_identity.get("parse_generation") or "")
         and str(envelope.get("document_source_hash") or "")
@@ -165,7 +171,7 @@ def _commit_marker_for_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         return {}
     return {
         "schema_version": VISUAL_SUPPLEMENT_COMMIT_SCHEMA_VERSION,
-        "parser_route": "local",
+        "parser_route": str(envelope.get("parser_route") or "").strip().lower(),
         "parse_generation": str(envelope.get("parse_generation") or ""),
         "document_source_hash": str(envelope.get("document_source_hash") or ""),
         "visual_supplement_revision": revision,
@@ -183,7 +189,7 @@ def _commit_marker_matches_envelope(marker: Any, envelope: dict[str, Any]) -> bo
 def mark_visual_supplements_committed(
     data: dict[str, Any], *, parse_identity: dict[str, Any]
 ) -> tuple[bool, dict[str, Any]]:
-    """Record that the current local visual envelope was published to retrieval."""
+    """Record that the current parse-bound visual envelope reached retrieval."""
     envelope = _active_visual_supplement_envelope(data, parse_identity)
     if not envelope:
         return False, {}
@@ -309,7 +315,7 @@ def _active_visual_revision(envelope: dict[str, Any]) -> str:
         return ""
     return _stable_hash({
         "schema_version": VISUAL_SUPPLEMENT_SCHEMA_VERSION,
-        "parser_route": "local",
+        "parser_route": str(envelope.get("parser_route") or "").strip().lower(),
         "parse_generation": str(envelope.get("parse_generation") or ""),
         "document_source_hash": str(envelope.get("document_source_hash") or ""),
         "visual_model_identity": str(envelope.get("visual_model_identity") or ""),
@@ -361,7 +367,7 @@ def committed_visual_evidence_for_document(
     *,
     limit: int = DEFAULT_VISUAL_EVIDENCE_SNAPSHOT_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Read a local document's committed visual evidence without route imports."""
+    """Read a document's committed visual evidence without route imports."""
     if not isinstance(document, dict):
         return []
     data = document.get("data")
@@ -405,7 +411,7 @@ def build_visual_supplement(
         return None
     normalized_caption = _text(caption, 400)
     normalized_route = _text(route, 24).lower() or "local"
-    if normalized_route != "local":
+    if normalized_route not in {"local", "mineru"}:
         return None
     normalized_purpose = _text(purpose, 80) or VISUAL_SUPPLEMENT_DEFAULT_PURPOSE
     normalized_prompt_version = (
@@ -459,7 +465,8 @@ def upsert_visual_supplements(
     items: list[dict[str, Any]],
 ) -> tuple[bool, dict[str, Any]]:
     """Merge current-model VLM items and return whether the envelope changed."""
-    if str(parse_identity.get("parser_route") or "").lower() != "local":
+    route = str(parse_identity.get("parser_route") or "").strip().lower()
+    if route not in {"local", "mineru"}:
         return False, {}
 
     parse_generation = str(parse_identity.get("parse_generation") or "").strip()
@@ -479,7 +486,11 @@ def upsert_visual_supplements(
     by_id = {str(item.get("id") or ""): item for item in existing_items if item.get("id")}
     for item in items:
         normalized = _normalized_visual_evidence(item)
-        if normalized is None or not _visual_prompt_is_current(normalized):
+        if (
+            normalized is None
+            or normalized.get("route") != route
+            or not _visual_prompt_is_current(normalized)
+        ):
             continue
         by_id[str(normalized["id"])] = normalized
     merged_items = sorted(
@@ -492,7 +503,7 @@ def upsert_visual_supplements(
     )
     revision_payload = {
         "schema_version": VISUAL_SUPPLEMENT_SCHEMA_VERSION,
-        "parser_route": "local",
+        "parser_route": route,
         "parse_generation": parse_generation,
         "document_source_hash": document_source_hash,
         "visual_model_identity": str(visual_model_identity or ""),

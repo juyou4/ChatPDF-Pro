@@ -8,11 +8,14 @@ Figure Render - 图像裁剪与渲染服务
 - generate_display_and_model_images: 同时生成展示图和分析图
 """
 import base64
+import io
 import logging
+import math
 import threading
 from collections import OrderedDict
 from typing import Tuple, Optional, List
 import fitz  # PyMuPDF
+from PIL import Image
 
 from schemas.figure_schema import LogicalFigureSchema, RenderResult, FigureImageOutput
 
@@ -97,6 +100,133 @@ def crop_figure_image(
     return img_bytes, pix.width, pix.height
 
 
+def _valid_panel_bboxes(figure: LogicalFigureSchema) -> List[List[float]]:
+    """Return distinct, positive panel boxes in their original page coordinate space."""
+    panels: List[List[float]] = []
+    seen = set()
+    for raw_bbox in figure.panel_bboxes_page_pts or []:
+        try:
+            bbox = [float(value) for value in raw_bbox]
+        except (TypeError, ValueError):
+            continue
+        if len(bbox) != 4 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            continue
+        key = tuple(round(value, 3) for value in bbox)
+        if key not in seen:
+            panels.append(bbox)
+            seen.add(key)
+    return panels
+
+
+def render_panel_composite_image(
+    pdf_doc,
+    page_idx: int,
+    panel_bboxes_page_pts: List[List[float]],
+    dpi: int = 150,
+    output_format: str = "png",
+    jpg_quality: int = 85,
+    padding: float = 5,
+) -> Tuple[bytes, int, int]:
+    """Render several figure panels onto one sparse white canvas.
+
+    MinerU can emit a single logical figure as separate panel blocks.  Rendering
+    their union includes arbitrary page text in the gaps.  This helper renders
+    every panel from the PDF independently, then pastes it at its original
+    relative position on a white canvas.  The result preserves the figure
+    layout while deliberately leaving non-panel gap content out.
+    """
+    if not pdf_doc or page_idx < 0 or page_idx >= len(pdf_doc):
+        raise ValueError(f"Invalid page_idx: {page_idx}")
+
+    if len(panel_bboxes_page_pts or []) < 2:
+        raise ValueError("At least two panel bboxes are required for sparse rendering")
+
+    page = pdf_doc[page_idx]
+    panel_rects: List[fitz.Rect] = []
+    for bbox in panel_bboxes_page_pts:
+        if not bbox or len(bbox) != 4:
+            continue
+        rect = fitz.Rect(_add_padding(bbox, padding)).intersect(page.rect)
+        if not rect.is_empty and rect.width > 0 and rect.height > 0:
+            panel_rects.append(rect)
+
+    if len(panel_rects) < 2:
+        raise ValueError("Fewer than two valid panel regions remain after page clipping")
+
+    # Render every source crop before allocating the canvas.  PyMuPDF rounds
+    # pixel sizes, so use actual pixmap dimensions when sizing/pasting.
+    scale = float(dpi) / 72.0
+    rendered_panels: List[Tuple[fitz.Rect, Image.Image]] = []
+    union = panel_rects[0]
+    for rect in panel_rects:
+        union = union | rect
+        pix = page.get_pixmap(dpi=dpi, clip=rect, alpha=False)
+        with Image.open(io.BytesIO(pix.tobytes("png"))) as panel_image:
+            rendered_panels.append((rect, panel_image.convert("RGB").copy()))
+
+    placements: List[Tuple[int, int, Image.Image]] = []
+    canvas_width = max(1, int(math.ceil(union.width * scale)))
+    canvas_height = max(1, int(math.ceil(union.height * scale)))
+    for rect, panel_image in rendered_panels:
+        left = max(0, int(round((rect.x0 - union.x0) * scale)))
+        top = max(0, int(round((rect.y0 - union.y0) * scale)))
+        canvas_width = max(canvas_width, left + panel_image.width)
+        canvas_height = max(canvas_height, top + panel_image.height)
+        placements.append((left, top, panel_image))
+
+    composite = Image.new("RGB", (canvas_width, canvas_height), color="white")
+    for left, top, panel_image in placements:
+        composite.paste(panel_image, (left, top))
+
+    output = io.BytesIO()
+    if output_format == "jpeg":
+        composite.save(output, format="JPEG", quality=jpg_quality, optimize=True)
+    else:
+        composite.save(output, format="PNG")
+    return output.getvalue(), composite.width, composite.height
+
+
+def _render_figure_image(
+    pdf_doc,
+    figure: LogicalFigureSchema,
+    bbox_page_pts: List[float],
+    *,
+    dpi: int,
+    output_format: str,
+    jpg_quality: int,
+    padding: float,
+) -> Tuple[bytes, int, int]:
+    """Prefer sparse panel composition, and retain the union crop as a fallback."""
+    panels = _valid_panel_bboxes(figure)
+    if len(panels) >= 2:
+        try:
+            return render_panel_composite_image(
+                pdf_doc,
+                figure.page_idx,
+                panels,
+                dpi=dpi,
+                output_format=output_format,
+                jpg_quality=jpg_quality,
+                padding=padding,
+            )
+        except Exception as exc:
+            # Rendering must remain usable for malformed/stale panel geometry.
+            logger.warning(
+                "Failed to render sparse panels for %s; falling back to union crop: %s",
+                figure.figure_id,
+                exc,
+            )
+
+    return crop_figure_image(
+        pdf_doc,
+        figure.page_idx,
+        _add_padding(bbox_page_pts, padding),
+        dpi=dpi,
+        output_format=output_format,
+        jpg_quality=jpg_quality,
+    )
+
+
 def generate_display_and_model_images(
     pdf_doc,
     figure: LogicalFigureSchema,
@@ -132,17 +262,17 @@ def generate_display_and_model_images(
         if tight_bbox:
             display_bbox = tight_bbox
     
-    # 添加边距
-    padded_display_bbox = _add_padding(display_bbox, cfg["padding"])
-    
     # 渲染展示图
     try:
-        display_bytes, display_width, display_height = crop_figure_image(
+        display_bytes, display_width, display_height = _render_figure_image(
             pdf_doc,
-            page_idx,
-            padded_display_bbox,
+            figure,
+            display_bbox,
             dpi=cfg["display_dpi"],
             output_format=cfg["display_format"]
+            ,
+            jpg_quality=cfg.get("display_jpg_quality", 90),
+            padding=cfg["padding"],
         )
     except Exception as e:
         logger.warning(f"Failed to render display image for {figure.figure_id}: {e}")
@@ -152,16 +282,15 @@ def generate_display_and_model_images(
     model_bbox = figure.full_bbox_page_pts or figure.body_bbox_page_pts
     
     if model_bbox:
-        padded_model_bbox = _add_padding(model_bbox, cfg["padding"])
-        
         try:
-            model_bytes, model_width, model_height = crop_figure_image(
+            model_bytes, model_width, model_height = _render_figure_image(
                 pdf_doc,
-                page_idx,
-                padded_model_bbox,
+                figure,
+                model_bbox,
                 dpi=cfg["model_dpi"],
                 output_format=cfg["model_format"],
-                jpg_quality=cfg["model_jpg_quality"]
+                jpg_quality=cfg["model_jpg_quality"],
+                padding=cfg["padding"],
             )
         except Exception as e:
             logger.warning(f"Failed to render model image for {figure.figure_id}: {e}")
@@ -214,18 +343,16 @@ def render_figure(
         tight_bbox = _tighten_bbox_to_images(page, search_bbox, mode=render_mode)
         display_bbox = tight_bbox if tight_bbox else render_bbox
     
-    # 添加边距
-    padded_bbox = _add_padding(display_bbox, padding)
-    
     # 渲染展示图
     try:
-        display_bytes, display_width, display_height = crop_figure_image(
+        display_bytes, display_width, display_height = _render_figure_image(
             pdf_doc,
-            page_idx,
-            padded_bbox,
+            figure,
+            display_bbox,
             dpi=cfg["display_dpi"],
             output_format=cfg["display_format"],
-            jpg_quality=cfg.get("display_jpg_quality", 90)
+            jpg_quality=cfg.get("display_jpg_quality", 90),
+            padding=padding,
         )
     except Exception as e:
         return RenderResult(
@@ -238,15 +365,15 @@ def render_figure(
     model_width, model_height = 0, 0
     
     if figure.full_bbox_page_pts:
-        model_bbox = _add_padding(figure.full_bbox_page_pts, padding)
         try:
-            model_bytes, model_width, model_height = crop_figure_image(
+            model_bytes, model_width, model_height = _render_figure_image(
                 pdf_doc,
-                page_idx,
-                model_bbox,
+                figure,
+                figure.full_bbox_page_pts,
                 dpi=cfg["model_dpi"],
                 output_format=cfg["model_format"],
-                jpg_quality=cfg["model_jpg_quality"]
+                jpg_quality=cfg["model_jpg_quality"],
+                padding=padding,
             )
         except Exception as e:
             logger.warning(f"Failed to render model image: {e}")
@@ -482,6 +609,7 @@ def _add_padding(bbox: List[float], padding: float) -> List[float]:
 
 __all__ = [
     "crop_figure_image",
+    "render_panel_composite_image",
     "generate_display_and_model_images",
     "render_figure",
     "RENDER_CONFIG",

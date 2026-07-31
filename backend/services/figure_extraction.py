@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Schema 版本，用于缓存失效判断。1.4 起缓存完整 Logical Figure 集，
 # 不再把 brief/standard/detailed 的 Top-N 结果作为文档级缓存。
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 MINERU_PANEL_LABEL_BOTTOM_PADDING = 18.0
+MAX_MINERU_PANEL_GROUP_SIZE = 8
 
 
 def _cache_matches_parse_identity(meta: dict, manifest: dict) -> bool:
@@ -86,6 +87,50 @@ def build_logical_figures_for_overview(
     )
     allow_mineru_sources = is_mineru_route or allow_legacy_mineru
 
+    # A new MinerU publication persists this exact logical-figure geometry.
+    # Reusing it here keeps overview, Agent attachments and visual retrieval on
+    # the same panel grouping instead of independently rebuilding figures.
+    if is_mineru_route and not allow_legacy_mineru:
+        try:
+            from services.mineru_visual_asset_service import (
+                active_mineru_visual_asset_envelope,
+                logical_figures_from_mineru_visual_assets,
+            )
+
+            persisted_assets = active_mineru_visual_asset_envelope(
+                doc_data,
+                parse_identity=parse_manifest,
+            )
+            persisted_figures = logical_figures_from_mineru_visual_assets(persisted_assets)
+            if persisted_figures:
+                figures_dict = [figure.model_dump() for figure in persisted_figures]
+                doc_data["logical_figures"] = figures_dict
+                doc_data["logical_figures_meta"] = {
+                    "schema_version": SCHEMA_VERSION,
+                    "built_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "mineru_visual_assets",
+                    "fallback_used": False,
+                    "count": len(figures_dict),
+                    "selection_version": "dynamic-depth-v1",
+                    "parse_generation": str(parse_manifest.get("generation") or ""),
+                    "document_source_hash": str(parse_manifest.get("source_hash") or ""),
+                    "parser_route": resolved_route,
+                    "visual_asset_revision": str(persisted_assets.get("revision") or ""),
+                }
+                doc_data["logical_figures_status"] = {
+                    "state": "done",
+                    "error": None,
+                    "provider": "mineru_visual_assets",
+                }
+                if reference:
+                    return [
+                        figure for figure in persisted_figures
+                        if _logical_figure_matches_reference(figure, reference)
+                    ][:1]
+                return select_top_figures(persisted_figures, depth)
+        except Exception as exc:
+            logger.warning("[FigureExtraction] MinerU visual asset reuse failed: %s", exc)
+
     # ========== 1. 缓存命中判断 ==========
     if not force_rebuild:
         status = doc_data.get("logical_figures_status", {})
@@ -94,7 +139,11 @@ def build_logical_figures_for_overview(
         if status.get("state") == "done":
             # 检查 schema 版本
             cached_source = str(meta.get("source") or "").strip().lower()
-            cached_is_mineru = cached_source in {"mineru", "mineru_deep_parse"}
+            cached_is_mineru = cached_source in {
+                "mineru",
+                "mineru_deep_parse",
+                "mineru_visual_assets",
+            }
             cache_matches_route = (
                 cached_is_mineru
                 if is_mineru_route
@@ -437,6 +486,24 @@ def _load_deep_parse_figures(
             )
             return []
 
+    return _figure_blocks_from_mineru_block_index(block_index)
+
+
+def build_mineru_logical_figures_from_block_index(
+    block_index: dict,
+) -> List[LogicalFigureSchema]:
+    """Build canonical logical figures from an already validated MinerU index.
+
+    This is deliberately block-index-only so parser publication, overview and
+    reusable visual assets share one geometry interpretation.
+    """
+    if not isinstance(block_index, dict) or block_index.get("source") != "mineru_vlm":
+        return []
+    return build_logical_figures(_figure_blocks_from_mineru_block_index(block_index))
+
+
+def _figure_blocks_from_mineru_block_index(block_index: dict) -> List[FigureBlock]:
+    """Extract MinerU body/caption blocks after their coordinates are normalized."""
     blocks: List[FigureBlock] = []
     for page in block_index.get("pages") or []:
         page_num = int(page.get("page") or 1)
@@ -504,6 +571,10 @@ def _load_deep_parse_figures(
 
 
 _PANEL_ONLY_RE = re.compile(r"^\s*\(?\s*([a-z])\s*\)?[.)]?\s*$", re.IGNORECASE)
+_PANEL_LABEL_RE = re.compile(
+    r"^\s*\(?\s*([a-z])\s*\)?[.)]?(?:\s+.+)?$",
+    re.IGNORECASE | re.DOTALL,
+)
 _PANEL_FIGURE_CAPTION_RE = re.compile(
     r"^\s*\(?\s*[a-z]\s*\)?[.)]?\s*((?:fig(?:ure)?\.?|图)\s*\d+[a-z]?(?:\s*[:：.])?.*)$",
     re.IGNORECASE | re.DOTALL,
@@ -516,6 +587,22 @@ _FIGURE_CAPTION_RE = re.compile(
 
 def _panel_only_caption(text: str) -> bool:
     return bool(_PANEL_ONLY_RE.fullmatch(" ".join(str(text or "").split())))
+
+
+def _is_orphan_panel_caption(text: str) -> bool:
+    """Recognize a panel label without accepting a second figure caption.
+
+    MinerU frequently emits blank image blocks or labels such as ``(a) Encoder``.
+    Those can belong to a neighbouring canonical figure caption.  A block that
+    itself contains ``Figure N`` remains an anchor, never an orphan, so nearby
+    independent figures are not silently merged.
+    """
+    value = " ".join(str(text or "").split())
+    if not value:
+        return True
+    if _canonical_figure_caption(value):
+        return False
+    return bool(_PANEL_LABEL_RE.fullmatch(value))
 
 
 def _canonical_figure_caption(text: str) -> str:
@@ -535,12 +622,20 @@ def _bbox_overlap_ratio(first: list[float], second: list[float], axis: int) -> f
 def _panel_bboxes_are_neighbors(first: list[float], second: list[float]) -> bool:
     horizontal_gap = max(0.0, max(first[0], second[0]) - min(first[2], second[2]))
     vertical_gap = max(0.0, max(first[1], second[1]) - min(first[3], second[3]))
-    distance = (horizontal_gap ** 2 + vertical_gap ** 2) ** 0.5
-    aligned = (
-        _bbox_overlap_ratio(first, second, 0) >= 0.20
-        or _bbox_overlap_ratio(first, second, 1) >= 0.20
-    )
-    return aligned and distance <= 60.0
+    horizontal_aligned = _bbox_overlap_ratio(first, second, 1) >= 0.20
+    vertical_aligned = _bbox_overlap_ratio(first, second, 0) >= 0.20
+    first_width, second_width = first[2] - first[0], second[2] - second[0]
+    first_height, second_height = first[3] - first[1], second[3] - second[1]
+
+    # A fixed 60pt gap is too permissive for small diagrams.  Bound the gap by
+    # both an absolute ceiling and the adjacent panel dimensions.
+    if horizontal_aligned and vertical_gap == 0:
+        allowed_gap = min(60.0, max(18.0, min(first_width, second_width) * 0.70))
+        return horizontal_gap <= allowed_gap
+    if vertical_aligned and horizontal_gap == 0:
+        allowed_gap = min(60.0, max(18.0, min(first_height, second_height) * 0.45))
+        return vertical_gap <= allowed_gap
+    return False
 
 
 def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]:
@@ -549,6 +644,11 @@ def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]
         return figures
 
     remaining = set(range(len(figures)))
+    canonical_anchor_indexes = {
+        index
+        for index, figure in enumerate(figures)
+        if _canonical_figure_caption(figure.caption_text) and figure.body_bbox_page_pts
+    }
     grouped: List[FigureBlock] = []
     for anchor_index, anchor in enumerate(figures):
         if anchor_index not in remaining:
@@ -561,11 +661,32 @@ def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]
         changed = True
         while changed:
             changed = False
-            for candidate_index in list(remaining - member_indexes):
+            if len(member_indexes) >= MAX_MINERU_PANEL_GROUP_SIZE:
+                break
+            candidate_indexes = sorted(
+                remaining - member_indexes,
+                key=lambda index: (
+                    (figures[index].body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
+                    (figures[index].body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
+                ),
+            )
+            for candidate_index in candidate_indexes:
                 candidate = figures[candidate_index]
                 if (
                     not candidate.body_bbox_page_pts
-                    or not _panel_only_caption(candidate.caption_text)
+                    or not _is_orphan_panel_caption(candidate.caption_text)
+                ):
+                    continue
+                # Do not attach a blank/labelled block when it is also adjacent
+                # to another canonical caption.  Keeping that ambiguity split is
+                # safer than merging two independent figures into one overview.
+                if any(
+                    other_anchor_index != anchor_index
+                    and _panel_bboxes_are_neighbors(
+                        figures[other_anchor_index].body_bbox_page_pts,
+                        candidate.body_bbox_page_pts,
+                    )
+                    for other_anchor_index in canonical_anchor_indexes
                 ):
                     continue
                 if any(
@@ -578,10 +699,18 @@ def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]
                 ):
                     member_indexes.add(candidate_index)
                     changed = True
+                    if len(member_indexes) >= MAX_MINERU_PANEL_GROUP_SIZE:
+                        break
 
         if len(member_indexes) < 2:
             continue
-        members = [figures[index] for index in sorted(member_indexes)]
+        members = sorted(
+            (figures[index] for index in member_indexes),
+            key=lambda item: (
+                (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
+                (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
+            ),
+        )
         panel_bboxes = [
             list(member.body_bbox_page_pts)
             for member in members

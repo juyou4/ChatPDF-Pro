@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 import PyPDF2
 import pdfplumber
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from services.vector_service import (
     create_index as _vector_create_index,
@@ -36,6 +37,7 @@ from services.block_index_service import (
     ensure_block_index,
     load_block_index,
     save_block_index,
+    stage_visual_supplements_on_block_index,
 )
 from services.block_evidence_service import (
     EVIDENCE_SCHEMA_VERSION,
@@ -115,21 +117,38 @@ from services.block_translation_service import (
     translate_blocks,
 )
 from services.reading_outline_service import (
+    READING_OUTLINE_PROMPT_VERSION,
     get_or_create_reading_outline,
     get_reading_outline_path,
     save_reading_outline,
 )
 from services.section_outline_service import (
+    SECTION_OUTLINE_PROMPT_VERSION,
     get_or_create_section_outline,
     get_section_outline_path,
     save_section_outline,
 )
+from services.downstream_task_state import (
+    build_downstream_task_identity,
+    create_downstream_task,
+    downstream_task_identity_matches,
+    get_downstream_task,
+    transition_downstream_task,
+)
+from services.document_recall_service import list_recallable_documents
+from services.paper_metadata_hydration_service import hydrate_paper_metadata
 from services.table_visual_metadata import build_table_visual_metadata
 from services.table_visual_verifier import (
     clear_table_visual_verification_cache,
     get_table_visual_verification_status,
 )
 from services.visual_enrichment_service import reset_visual_document_state
+from services.visual_document_enrichment_service import preflight_summary_visuals
+from services.visual_model_service import resolve_visual_enrichment_policy
+from services.chat_visual_attachment_service import (
+    ChatVisualAttachmentError,
+    load_chat_visual_attachment,
+)
 from services.document_parse_adapter import (
     DocumentParseSubmission,
     MinerUQualityError,
@@ -210,6 +229,8 @@ except ValueError:
 _DOCUMENT_INDEX_ADMISSION = threading.BoundedSemaphore(_DOCUMENT_INDEX_MAX_PENDING)
 _DEEP_PARSE_LOCK = threading.Lock()
 _DEEP_PARSE_TASKS: dict[str, dict] = {}
+_PAPER_METADATA_HYDRATION_TASKS: dict[str, asyncio.Task] = {}
+_PAPER_METADATA_HYDRATION_STATUS: dict[str, dict] = {}
 _DEEP_PARSE_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _DEEP_PARSE_JOB_TYPE = "mineru_deep_parse"
 _DEEP_PARSE_TERMINAL_STATUSES = {"ready", "partial_ready", "failed", "cancelled"}
@@ -241,6 +262,15 @@ def _bounded_env_int(name: str, default: int, maximum: int) -> int:
 _MAX_UPLOAD_BYTES = _bounded_env_int("CHATPDF_MAX_UPLOAD_BYTES", 100 * 1024 * 1024, 512 * 1024 * 1024)
 _MAX_PDF_PAGES = _bounded_env_int("CHATPDF_MAX_PDF_PAGES", 1000, 10_000)
 _MAX_PRETRANSLATE_BLOCK_IDS = _bounded_env_int("CHATPDF_MAX_PRETRANSLATE_BLOCK_IDS", 2000, 10_000)
+_PDF_MIME_TYPES = {
+    "application/pdf",
+    "application/x-pdf",
+    "application/acrobat",
+    "applications/vnd.pdf",
+    "text/pdf",
+}
+_GENERIC_BINARY_MIME_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
+_PDF_HEADER_SEARCH_BYTES = 1024
 
 
 def _get_document_operation_lock(doc_id: str) -> threading.Lock:
@@ -275,6 +305,29 @@ async def _read_upload_with_limit(upload: UploadFile, *, max_bytes: int = _MAX_U
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _validate_uploaded_content(
+    *,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+) -> None:
+    """Validate PDF media declarations and magic bytes without blocking other formats.
+
+    A filename suffix alone is not a parser boundary.  Browsers may send an
+    empty or generic binary MIME type, so those remain compatible, but an
+    explicitly contradictory MIME type is rejected.  PDF allows an optional
+    binary prefix before the header; PDF readers are required to find `%PDF-`
+    near the start of the file, hence the bounded 1 KiB search.
+    """
+    if not str(filename or "").lower().endswith(".pdf"):
+        return
+    normalized_mime = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_mime not in _PDF_MIME_TYPES | _GENERIC_BINARY_MIME_TYPES:
+        raise HTTPException(status_code=415, detail="PDF 文件的 MIME 类型不匹配")
+    if bytes(content or b"")[:_PDF_HEADER_SEARCH_BYTES].find(b"%PDF-") < 0:
+        raise HTTPException(status_code=400, detail="PDF 文件头无效或文件内容损坏")
 
 
 def _safe_graphrag_working_dir(doc_id: str) -> Path:
@@ -1447,6 +1500,10 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
                 "status": str(active_lifecycle.get("status") or "queued"),
                 "stage": str(active_lifecycle.get("stage") or "queued"),
                 "error": str(active_lifecycle.get("error") or ""),
+                "created_at": str(active_lifecycle.get("created_at") or ""),
+                "started_at": str(active_lifecycle.get("started_at") or ""),
+                "stage_started_at": str(active_lifecycle.get("stage_started_at") or ""),
+                "updated_at": str(active_lifecycle.get("updated_at") or ""),
                 "ready": False,
                 "artifact_ready": index_path.exists() and chunks_path.exists(),
                 "index_version": 0,
@@ -1553,6 +1610,10 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
         "status": str(lifecycle.get("status") or "missing"),
         "stage": str(lifecycle.get("stage") or "not_started"),
         "error": str(lifecycle.get("error") or ""),
+        "created_at": str(lifecycle.get("created_at") or ""),
+        "started_at": str(lifecycle.get("started_at") or ""),
+        "stage_started_at": str(lifecycle.get("stage_started_at") or ""),
+        "updated_at": str(lifecycle.get("updated_at") or ""),
         "ready": ready and matches_active_parse and not upgrade_required,
         "artifact_ready": ready,
         "index_source": source,
@@ -1597,15 +1658,36 @@ def _set_document_index_status(
     document_source_hash: str | None = None,
 ) -> None:
     manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    timestamp = datetime.now().isoformat()
+    next_parse_generation = str(parse_generation or manifest.get("generation") or "")
+    next_document_source_hash = str(document_source_hash or manifest.get("source_hash") or "")
     with _INDEX_STATUS_LOCK:
+        current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+        if current and (
+            str(current.get("parse_generation") or "") != next_parse_generation
+            or str(current.get("document_source_hash") or "") != next_document_source_hash
+        ):
+            current = {}
+        previous_stage = str(current.get("stage") or "").strip().lower()
+        normalized_stage = str(stage or "").strip().lower()
         _DOCUMENT_INDEX_STATUS[doc_id] = {
             "doc_id": doc_id,
             "status": status,
             "stage": stage,
             "error": error,
-            "parse_generation": str(parse_generation or manifest.get("generation") or ""),
-            "document_source_hash": str(document_source_hash or manifest.get("source_hash") or ""),
-            "updated_at": datetime.now().isoformat(),
+            "parse_generation": next_parse_generation,
+            "document_source_hash": next_document_source_hash,
+            "created_at": str(current.get("created_at") or timestamp),
+            "started_at": str(
+                current.get("started_at")
+                or (timestamp if status == "running" else "")
+            ),
+            "stage_started_at": str(
+                timestamp
+                if normalized_stage and normalized_stage != previous_stage
+                else current.get("stage_started_at") or timestamp
+            ),
+            "updated_at": timestamp,
         }
 
 
@@ -2236,10 +2318,16 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
     target_doc = doc if doc is not None else documents_store.get(doc_id)
     if isinstance(target_doc, dict):
         doc_data = target_doc.get("data")
-        if isinstance(doc_data, dict) and doc_data.pop("logical_figures_status", None) is not None:
-            doc_data.pop("logical_figures_meta", None)
-            doc_data.pop("logical_figures", None)
-            removed.append("logical_figures")
+        if isinstance(doc_data, dict):
+            if doc_data.pop("logical_figures_status", None) is not None:
+                doc_data.pop("logical_figures_meta", None)
+                doc_data.pop("logical_figures", None)
+                removed.append("logical_figures")
+            # MinerU visual assets are derived from the primary block index and
+            # carry the same parse identity. A route/generation replacement
+            # must never leave the former document's panel geometry visible.
+            if doc_data.pop("mineru_visual_assets", None) is not None:
+                removed.append("mineru_visual_assets")
 
     # GraphRAG persists under doc_id, while a re-upload of the same PDF keeps
     # that id but starts a different parse generation. Remove both its in-memory
@@ -2259,6 +2347,52 @@ def _clear_block_dependent_ai_cache(doc_id: str, doc: dict | None = None) -> lis
     return removed
 
 
+def _persist_mineru_visual_assets(
+    doc_id: str,
+    block_index: dict,
+) -> bool:
+    """Persist an additive visual view after the MinerU primary index publishes.
+
+    A failed derived-asset write is logged and retried lazily by consumers; it
+    does not roll back a valid primary MinerU parse. The envelope is fenced by
+    the same route/generation/source-hash tuple as the block index.
+    """
+    try:
+        from services.mineru_visual_asset_service import (
+            MINERU_VISUAL_ASSET_KEY,
+            build_mineru_visual_asset_envelope,
+        )
+
+        envelope = build_mineru_visual_asset_envelope(block_index)
+    except Exception as exc:
+        logger.warning("[MinerUVisualAsset] build skipped doc=%s error=%s", doc_id, exc)
+        return False
+    if not envelope:
+        return False
+
+    doc = documents_store.get(doc_id)
+    if not isinstance(doc, dict) or not isinstance(doc.get("data"), dict):
+        return False
+    existing = doc["data"].get(MINERU_VISUAL_ASSET_KEY)
+    if isinstance(existing, dict) and (
+        str(existing.get("revision") or "") == str(envelope.get("revision") or "")
+        and str(existing.get("parse_generation") or "") == str(envelope.get("parse_generation") or "")
+        and str(existing.get("document_source_hash") or "") == str(envelope.get("document_source_hash") or "")
+    ):
+        return False
+
+    candidate = deepcopy(doc)
+    candidate_data = candidate.get("data")
+    if not isinstance(candidate_data, dict):
+        return False
+    candidate_data[MINERU_VISUAL_ASSET_KEY] = envelope
+    if not save_document(doc_id, candidate):
+        logger.warning("[MinerUVisualAsset] persist failed doc=%s", doc_id)
+        return False
+    documents_store[doc_id] = candidate
+    return True
+
+
 def publish_visual_supplements(
     doc_id: str,
     *,
@@ -2267,7 +2401,7 @@ def publish_visual_supplements(
     visual_model_identity: str,
     items: list[dict],
 ) -> dict:
-    """Publish local-route VLM supplements without changing the main parser route.
+    """Publish additive VLM supplements without changing the main parser route.
 
     The document lock and parse-generation fence make this a small publication
     transaction: an obsolete VLM response cannot alter a document that has
@@ -2291,8 +2425,9 @@ def publish_visual_supplements(
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
         )
-        if str(manifest.get("resolved_route") or "").strip().lower() != PARSE_ROUTE_LOCAL:
-            return {"published": False, "reason": "non_local_route", "revision": ""}
+        resolved_route = str(manifest.get("resolved_route") or "").strip().lower()
+        if resolved_route not in {PARSE_ROUTE_LOCAL, PARSE_ROUTE_MINERU}:
+            return {"published": False, "reason": "unsupported_parse_route", "revision": ""}
 
         data = doc.setdefault("data", {})
         if not isinstance(data, dict):
@@ -2318,7 +2453,7 @@ def publish_visual_supplements(
             manifest = migrated_manifest
 
         identity = {
-            "parser_route": PARSE_ROUTE_LOCAL,
+            "parser_route": resolved_route,
             "parse_generation": str(manifest.get("generation") or ""),
             "document_source_hash": str(manifest.get("source_hash") or ""),
         }
@@ -2384,12 +2519,22 @@ def publish_visual_supplements(
             # Build the pending index in memory. Writing it to the live path
             # before the document commit lets unrelated readers race and
             # overwrite the staging revision with a base index.
-            staged_block_index = build_block_index(
-                doc_id=doc_id,
-                doc=doc,
-                pdf_path=_resolve_document_pdf_path(doc),
-                include_uncommitted_visual_supplements=True,
-            )
+            if resolved_route == PARSE_ROUTE_MINERU:
+                active_block_index = load_block_index(DATA_DIR, doc_id)
+                if not isinstance(active_block_index, dict):
+                    raise RuntimeError("MinerU 阅读块索引不可用，无法发布视觉补充")
+                staged_block_index = stage_visual_supplements_on_block_index(
+                    active_block_index,
+                    data=data,
+                    parse_identity=identity,
+                )
+            else:
+                staged_block_index = build_block_index(
+                    doc_id=doc_id,
+                    doc=doc,
+                    pdf_path=_resolve_document_pdf_path(doc),
+                    include_uncommitted_visual_supplements=True,
+                )
         except Exception:
             restore_staged_document_data()
             raise
@@ -2462,6 +2607,7 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
     with _DEEP_PARSE_LOCK:
         current = dict(_DEEP_PARSE_TASKS.get(doc_id) or {})
         current_status = str(current.get("status") or "").strip().lower()
+        current_stage = str(current.get("stage") or "").strip().lower()
         current_job_id = str(current.get("job_id") or "").strip()
         incoming_job_id = str(extra.get("job_id") or "").strip()
         starts_replacement_job = bool(
@@ -2486,9 +2632,13 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
                 "remote_progress_source",
                 "remote_pages_completed",
                 "remote_pages_total",
+                "stage_started_at",
             ):
                 current.pop(key, None)
         timestamp = datetime.now().isoformat()
+        normalized_stage = str(stage or "").strip().lower()
+        if normalized_stage and normalized_stage != current_stage:
+            extra.setdefault("stage_started_at", timestamp)
         current.update({
             "doc_id": doc_id,
             "provider": "mineru",
@@ -2641,7 +2791,27 @@ def _get_deep_parse_status(doc_id: str) -> dict:
                 else (_mineru_ready_status(block_index) if active_mineru else "not_started")
             ),
             "error": "",
+            "created_at": str(parse_manifest.get("created_at") or ""),
+            "started_at": str(parse_manifest.get("started_at") or ""),
+            "stage_started_at": str(
+                parse_manifest.get("updated_at")
+                or parse_manifest.get("started_at")
+                or parse_manifest.get("created_at")
+                or ""
+            ),
         }
+
+    if not current.get("created_at"):
+        current["created_at"] = str(parse_manifest.get("created_at") or "")
+    if not current.get("started_at"):
+        current["started_at"] = str(parse_manifest.get("started_at") or "")
+    if not current.get("stage_started_at"):
+        current["stage_started_at"] = str(
+            parse_manifest.get("updated_at")
+            or parse_manifest.get("started_at")
+            or parse_manifest.get("created_at")
+            or ""
+        )
 
     current.update({
         "configured": _mineru_configured(),
@@ -2670,6 +2840,25 @@ def _get_deep_parse_status(doc_id: str) -> dict:
     current["rag_index"] = rag_index
     current["parse_manifest"] = parse_manifest
     current["parse_ready"] = parse_ready
+    if (
+        is_full_mineru_route
+        and not parse_ready
+        and str(parse_manifest.get("stage") or "").strip().lower() == "building_rag_index"
+        and str(rag_index.get("status") or "").strip().lower() in {"queued", "running"}
+    ):
+        rag_stage = str(rag_index.get("stage") or "building_rag_index").strip().lower()
+        current["status"] = "running"
+        current["stage"] = rag_stage
+        current["stage_started_at"] = str(
+            rag_index.get("stage_started_at")
+            or current.get("stage_started_at")
+            or ""
+        )
+        current["updated_at"] = str(
+            rag_index.get("updated_at")
+            or current.get("updated_at")
+            or ""
+        )
     if (
         active_mineru
         and current.get("status") not in {"queued", "running", "failed"}
@@ -3091,6 +3280,9 @@ def _run_mineru_deep_parse(
             removed = adapter.invalidate(
                 invalidator=lambda: _clear_block_dependent_ai_cache(doc_id, current_doc)
             )
+            if _persist_mineru_visual_assets(doc_id, block_index):
+                removed.append("mineru_visual_assets_published")
+            current_doc = documents_store.get(doc_id)
 
             if full_mineru_route:
                 _transition_document_parse_manifest(
@@ -4158,6 +4350,74 @@ def _replace_vector_index_from_temp(doc_id: str, temp_dir: Path) -> None:
     _index_cache.invalidate(doc_id)
 
 
+def _cleanup_fresh_mineru_rag_publication(
+    doc_id: str,
+    document_snapshot: dict | None,
+    *,
+    semantic_publication: dict | None = None,
+) -> dict:
+    """Undo a failed first-time MinerU RAG publication.
+
+    Source switches have a complete pre-existing RAG snapshot to restore.  A
+    MinerU-first upload has no such vector pair, but it can still fail after
+    the vector files and document data have been swapped.  Leaving those files
+    behind makes a failed parse look partially published after a restart.
+    """
+    result: dict[str, object] = {
+        "vectors_removed": [],
+        "semantic_groups": {},
+        "document_restored": False,
+        "errors": [],
+    }
+    for path in _vector_index_paths(doc_id):
+        try:
+            if path.exists():
+                path.unlink()
+                result["vectors_removed"].append(str(path))
+        except Exception as cleanup_exc:
+            logger.error("[RagIndex] failed to remove fresh vector artifact %s: %s", path, cleanup_exc)
+            result["errors"].append(f"vector:{path.name}:{cleanup_exc}")
+    _index_cache.invalidate(doc_id)
+
+    try:
+        result["semantic_groups"] = _remove_current_semantic_groups(doc_id)
+        # ``publish_generation`` stores its immutable files beneath a new
+        # generation directory.  After removing the active manifest, delete
+        # only the generation created by this failed publication; do not touch
+        # unrelated history from another document.
+        paths = (semantic_publication or {}).get("paths") if isinstance(semantic_publication, dict) else None
+        if isinstance(paths, dict):
+            generations_root = (DATA_DIR / "semantic_groups" / "generations").resolve()
+            generation_dirs = set()
+            for raw_path in paths.values():
+                try:
+                    path = Path(str(raw_path)).resolve()
+                    if generations_root in path.parents:
+                        generation_dirs.add(path.parent)
+                except Exception:
+                    continue
+            for generation_dir in generation_dirs:
+                shutil.rmtree(generation_dir, ignore_errors=True)
+    except Exception as cleanup_exc:
+        logger.error("[RagIndex] failed to clean fresh semantic artifacts for %s: %s", doc_id, cleanup_exc)
+        result["errors"].append(f"semantic:{cleanup_exc}")
+
+    if isinstance(document_snapshot, dict):
+        current_document = documents_store.get(doc_id)
+        restored_document = deepcopy(document_snapshot)
+        documents_store[doc_id] = restored_document
+        if save_document(doc_id, restored_document):
+            result["document_restored"] = True
+        else:
+            if current_document is None:
+                documents_store.pop(doc_id, None)
+            else:
+                documents_store[doc_id] = current_document
+            result["errors"].append("document:restore_save_failed")
+            logger.error("[RagIndex] failed to restore fresh document snapshot for %s", doc_id)
+    return result
+
+
 def _validate_temp_vector_index(
     doc_id: str,
     temp_dir: Path,
@@ -4665,6 +4925,7 @@ def _rebuild_mineru_rag_index_unlocked(
     previous_meta = _read_vector_index_meta(doc_id)
     previous_source = previous_meta.get("index_source") or "pdf_native"
     had_previous_rag = _vector_index_ready(doc_id)
+    fresh_document_snapshot = deepcopy(doc) if not had_previous_rag else None
 
     normalized, failures = _normalize_mineru_for_document(doc_id, payload, doc=doc)
     quality_report = dict(normalized.get("quality_report") or {})
@@ -4744,11 +5005,18 @@ def _rebuild_mineru_rag_index_unlocked(
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_semantic_dir.mkdir(parents=True, exist_ok=True)
 
-    _set_document_index_status(doc_id, "running", stage="rebuilding_rag_index")
+    _set_document_index_status(
+        doc_id,
+        "running",
+        stage="building_vector_index",
+        parse_generation=expected_parse_generation,
+        document_source_hash=expected_document_source_hash,
+    )
     backup = {}
     doc_backup = {}
     semantic_backup = {}
     semantic_cleanup = {}
+    fresh_cleanup = {}
     replaced_current_index = False
     try:
         mineru_index_meta = {
@@ -4791,6 +5059,13 @@ def _rebuild_mineru_rag_index_unlocked(
             embedding_api_host,
             **mineru_index_kwargs,
         )
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="validating_vector_index",
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
         temp_meta = _read_vector_index_meta(doc_id, temp_dir)
         if temp_meta.get("index_source") != MINERU_RAG_INDEX_SOURCE:
             raise RuntimeError("临时索引缺少 MinerU 来源标记")
@@ -4806,6 +5081,13 @@ def _rebuild_mineru_rag_index_unlocked(
         )
         if not temp_ok:
             raise RuntimeError(f"MinerU 问答索引质量门失败，已保留原索引: {', '.join(temp_failures)}")
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="preparing_semantic_index",
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
         semantic_rebuild = _prepare_semantic_group_rebuild(
             doc_id,
             temp_dir,
@@ -4822,6 +5104,13 @@ def _rebuild_mineru_rag_index_unlocked(
             expected_block_index_hash=block_index_hash,
             embedding_provider=embedding_provider,
         )
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="building_semantic_index",
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
         semantic_result = _build_semantic_group_index(
             doc_id, semantic_rebuild["chunks"], pages, semantic_rebuild["embed_fn"], semantic_rebuild["api_key"],
             chunk_pages=semantic_rebuild["chunk_pages"],
@@ -4830,6 +5119,13 @@ def _rebuild_mineru_rag_index_unlocked(
             model=semantic_rebuild["model"], provider=semantic_rebuild["provider"], endpoint=semantic_rebuild["endpoint"],
             output_dir=str(temp_semantic_dir), raise_on_error=True,
             semantic_identity=semantic_rebuild["semantic_identity"],
+        )
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="validating_semantic_index",
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
         )
         semantic_validation = _validate_temp_semantic_groups(
             doc_id,
@@ -4841,6 +5137,13 @@ def _rebuild_mineru_rag_index_unlocked(
         # The expensive temp build above intentionally runs without holding
         # the upload path. The irreversible swap below is short and guarded
         # by both the publication lock and the active parse identity.
+        _set_document_index_status(
+            doc_id,
+            "running",
+            stage="publishing_rag_index",
+            parse_generation=expected_parse_generation,
+            document_source_hash=expected_document_source_hash,
+        )
         with _get_document_publication_lock(doc_id):
             _require_current_parse_generation(
                 doc_id,
@@ -4858,9 +5161,9 @@ def _rebuild_mineru_rag_index_unlocked(
                     manifest_path=str(backup_manifest.get("path") or ""),
                 )
             else:
-                # A MinerU-first upload has no local vector pair to back up. It is
-                # still a transaction, but there is no previous generation to
-                # restore on failure.
+                # A MinerU-first upload has no valid vector pair to back up.
+                # Keep a document snapshot above and explicitly clean any
+                # newly published artifacts if a later publication stage fails.
                 backup_manifest = {
                     "complete": False,
                     "fresh_document": True,
@@ -4952,7 +5255,23 @@ def _rebuild_mineru_rag_index_unlocked(
                             doc_id,
                             restore_exc,
                         )
-                _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error="MinerU 问答索引重建失败，已保留原索引")
+                elif not had_previous_rag and replaced_current_index:
+                    fresh_cleanup = _cleanup_fresh_mineru_rag_publication(
+                        doc_id,
+                        fresh_document_snapshot,
+                        semantic_publication=semantic_cleanup,
+                    )
+                    logger.warning(
+                        "[RagIndex] cleaned failed first-time MinerU publication for %s: %s",
+                        doc_id,
+                        fresh_cleanup,
+                    )
+                failure_message = (
+                    "MinerU 问答索引重建失败，已清理未完成的首次发布"
+                    if not had_previous_rag and replaced_current_index
+                    else "MinerU 问答索引重建失败，已保留原索引"
+                )
+                _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error=failure_message)
             else:
                 logger.info("[RagIndex] skip rollback for superseded parse generation doc=%s", doc_id)
         raise exc
@@ -4985,6 +5304,7 @@ def _rebuild_mineru_rag_index_unlocked(
             "document": doc_backup,
             "semantic_groups": semantic_backup,
             "semantic_group_cleanup": semantic_cleanup,
+            "fresh_publication_cleanup": fresh_cleanup,
         },
         "semantic_group_rebuild": {
             "queued": False,
@@ -5322,7 +5642,7 @@ def extract_text_from_pdf(
         pdf_file: pdfplumber 使用的文件对象
         pdf_bytes: PDF 原始字节（OCR 需要）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）
-        ocr_backend: 页级 OCR 后端 - "auto"、"tesseract"、"paddleocr" 或 "mistral"
+        ocr_backend: 页级 OCR 后端 - "auto"、"tesseract" 或 "paddleocr"
         extract_images: 是否从 PDF 中提取图片
         ocr_dpi: OCR 图像转换分辨率（DPI），默认 200
         ocr_language: OCR 语言设置（Tesseract 语言代码），默认 "chi_sim+eng"
@@ -6544,7 +6864,7 @@ def extract_text_from_pdf(
     # 通过注册表获取 OCR 适配器。优先使用本次上传请求的设置，缺省时回退到后端全局配置。
     selected_ocr_backend = (ocr_backend or settings.ocr_backend or "auto").strip().lower()
     legacy_structured_ocr_warning = ""
-    if selected_ocr_backend in {"mineru", "doc2x"}:
+    if selected_ocr_backend in {"mineru", "mistral", "doc2x"}:
         # These adapters currently return whole-document Markdown and cannot
         # safely populate only the failed pages. Keep their configuration for
         # deep parsing, but never use them in the page-level replacement path.
@@ -6829,6 +7149,11 @@ async def upload_pdf(
 
     try:
         content = await _read_upload_with_limit(file)
+        _validate_uploaded_content(
+            filename=filename,
+            content_type=file.content_type,
+            content=content,
+        )
         try:
             requested_parse_route = normalize_parse_route(
                 parse_route,
@@ -7317,6 +7642,175 @@ async def import_url(
         raise HTTPException(status_code=500, detail=f"URL 导入失败: {str(e)}")
 
 
+def _paper_metadata_hydration_public_status(doc_id: str) -> dict:
+    live = _PAPER_METADATA_HYDRATION_STATUS.get(doc_id)
+    if isinstance(live, dict):
+        return deepcopy(live)
+    doc = documents_store.get(doc_id)
+    persisted = doc.get("paper_metadata_hydration") if isinstance(doc, dict) else None
+    return deepcopy(persisted) if isinstance(persisted, dict) else {
+        "status": "not_started",
+        "doc_id": doc_id,
+    }
+
+
+async def _run_paper_metadata_hydration(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    local_metadata: dict,
+) -> None:
+    _PAPER_METADATA_HYDRATION_STATUS[doc_id] = {
+        "status": "running",
+        "doc_id": doc_id,
+        "parse_generation": parse_generation,
+        "document_source_hash": document_source_hash,
+    }
+    try:
+        result = await hydrate_paper_metadata(
+            local_metadata,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+            unpaywall_email=settings.paper_metadata_unpaywall_email,
+            semantic_scholar_api_key=settings.paper_metadata_semantic_scholar_api_key,
+            timeout_seconds=settings.paper_metadata_hydration_timeout_seconds,
+        )
+    except Exception as exc:
+        logger.warning("[PaperMetadata] hydration failed open doc=%s: %s", doc_id, exc)
+        result = {
+            "status": "unavailable",
+            "doc_id": doc_id,
+            "parse_generation": parse_generation,
+            "document_source_hash": document_source_hash,
+            "providers": {},
+            "retraction": {
+                "status": "unknown",
+                "evidence": [],
+                "notice": "外部元数据暂不可用。",
+            },
+            "notice": "外部元数据补全失败，本地元数据仍可用。",
+        }
+
+    result = {**dict(result or {}), "doc_id": doc_id}
+    try:
+        with _get_document_publication_lock(doc_id):
+            _require_current_parse_generation(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
+            )
+            current = documents_store.get(doc_id)
+            if not isinstance(current, dict):
+                return
+            candidate = deepcopy(current)
+            candidate["paper_metadata_hydration"] = result
+            hydrated_metadata = result.get("metadata")
+            if isinstance(hydrated_metadata, dict) and hydrated_metadata:
+                merged_metadata = dict(candidate.get("paper_metadata") or {})
+                for field, value in hydrated_metadata.items():
+                    if value not in (None, "", [], {}):
+                        merged_metadata[field] = value
+                merged_metadata["parse_generation"] = parse_generation
+                merged_metadata["document_source_hash"] = document_source_hash
+                merged_metadata["source"] = "hydrated"
+                candidate["paper_metadata"] = merged_metadata
+            if not save_document(doc_id, candidate):
+                raise RuntimeError("metadata persistence failed")
+            documents_store[doc_id] = candidate
+            _PAPER_METADATA_HYDRATION_STATUS[doc_id] = deepcopy(result)
+    except _SupersededParseGeneration:
+        _PAPER_METADATA_HYDRATION_STATUS[doc_id] = {
+            "status": "cancelled",
+            "reason": "parse_identity_changed",
+            "doc_id": doc_id,
+        }
+    except Exception as exc:
+        logger.warning("[PaperMetadata] hydration publication failed doc=%s: %s", doc_id, exc)
+        _PAPER_METADATA_HYDRATION_STATUS[doc_id] = {
+            "status": "unavailable",
+            "reason": "persistence_failed",
+            "doc_id": doc_id,
+        }
+    finally:
+        _PAPER_METADATA_HYDRATION_TASKS.pop(doc_id, None)
+
+
+def _schedule_paper_metadata_hydration(doc_id: str, *, force: bool = False) -> dict:
+    doc = documents_store.get(doc_id)
+    if not isinstance(doc, dict):
+        raise HTTPException(status_code=404, detail="文档未找到")
+    manifest = _require_document_parse_ready(doc_id, doc)
+    generation = str(manifest.get("generation") or "").strip()
+    source_hash = str(manifest.get("source_hash") or "").strip()
+    running = _PAPER_METADATA_HYDRATION_TASKS.get(doc_id)
+    if running is not None and not running.done():
+        return _paper_metadata_hydration_public_status(doc_id)
+    persisted = doc.get("paper_metadata_hydration")
+    if (
+        not force
+        and isinstance(persisted, dict)
+        and str(persisted.get("parse_generation") or "") == generation
+        and str(persisted.get("document_source_hash") or "") == source_hash
+        and str(persisted.get("status") or "") in {"completed", "unavailable"}
+    ):
+        return deepcopy(persisted)
+    try:
+        from services.paper_metadata_service import ensure_paper_metadata
+
+        local_metadata = ensure_paper_metadata(doc) or {}
+    except Exception:
+        local_metadata = dict(doc.get("paper_metadata") or {})
+    status = {
+        "status": "queued",
+        "doc_id": doc_id,
+        "parse_generation": generation,
+        "document_source_hash": source_hash,
+    }
+    _PAPER_METADATA_HYDRATION_STATUS[doc_id] = status
+    task = asyncio.create_task(_run_paper_metadata_hydration(
+        doc_id,
+        parse_generation=generation,
+        document_source_hash=source_hash,
+        local_metadata=deepcopy(local_metadata),
+    ))
+    _PAPER_METADATA_HYDRATION_TASKS[doc_id] = task
+    return deepcopy(status)
+
+
+@router.get("/documents/{doc_id}/paper-metadata/hydration")
+async def get_paper_metadata_hydration_status(doc_id: str):
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    return _paper_metadata_hydration_public_status(doc_id)
+
+
+@router.post("/documents/{doc_id}/paper-metadata/hydration")
+async def start_paper_metadata_hydration(doc_id: str, force: bool = False):
+    return _schedule_paper_metadata_hydration(doc_id, force=force)
+
+
+@router.get("/documents/recall")
+async def recall_uploaded_documents(
+    query: str = "",
+    exclude_doc_id: str = "",
+    limit: int = 8,
+):
+    """Return explicit cross-document candidates; never auto-select an ambiguous title."""
+    normalized_limit = max(1, min(int(limit or 8), 20))
+    candidates = list_recallable_documents(
+        documents_store,
+        query=query,
+        exclude_doc_id=exclude_doc_id,
+        limit=normalized_limit,
+    )
+    return {
+        "query": str(query or "").strip(),
+        "candidates": candidates,
+        "ambiguous": len(candidates) > 1,
+    }
+
+
 @router.get("/document/{doc_id}")
 async def get_document(doc_id: str, include_content: bool = True):
     if doc_id not in documents_store:
@@ -7376,7 +7870,17 @@ async def get_document(doc_id: str, include_content: bool = True):
         "parse_ready": is_parse_prepared(parse_manifest),
         "indexing": _get_document_index_status(doc_id),
         "paper_metadata": paper_metadata or None,
+        "paper_metadata_hydration": _paper_metadata_hydration_public_status(doc_id),
     }
+    if settings.enable_paper_metadata_hydration:
+        try:
+            response["paper_metadata_hydration"] = _schedule_paper_metadata_hydration(doc_id)
+        except Exception:
+            logger.debug(
+                "[Document] metadata hydration scheduling skipped doc=%s",
+                doc_id,
+                exc_info=True,
+            )
     if include_content:
         _require_document_parse_ready(doc_id, doc)
         response["pages"] = doc["data"]["pages"]
@@ -7424,6 +7928,47 @@ async def get_document_table_visual_verification_status(doc_id: str, task_id: st
     if not status:
         raise HTTPException(status_code=404, detail="表格视觉核验任务未找到")
     return status
+
+
+@router.get("/documents/{doc_id}/visual-assets/{parse_generation}/{attachment_id}")
+async def get_document_chat_visual_asset(
+    doc_id: str,
+    parse_generation: str,
+    attachment_id: str,
+):
+    """Serve one immutable, server-selected visual attached to a chat answer.
+
+    The URL carries the parse generation and resolves a previously materialized
+    attachment. It never accepts a PDF path, page number, or bbox from the
+    browser, so localStorage or model output cannot turn it into an arbitrary
+    file/crop endpoint. Historical generations remain readable after a reparse.
+    """
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    try:
+        image_path, manifest = load_chat_visual_attachment(
+            data_dir=DATA_DIR,
+            doc_id=doc_id,
+            parse_generation=parse_generation,
+            attachment_id=attachment_id,
+        )
+    except ChatVisualAttachmentError as exc:
+        error_code = str(exc)
+        status_code = 400 if error_code.startswith("invalid_") else 404
+        raise HTTPException(status_code=status_code, detail="文献图表附件不存在或已失效") from exc
+
+    etag = str(manifest.get("image_sha256") or "")
+    headers = {
+        "Cache-Control": "private, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if etag:
+        headers["ETag"] = f'"{etag}"'
+    return FileResponse(
+        path=image_path,
+        media_type="image/jpeg",
+        headers=headers,
+    )
 
 
 def recover_pending_rag_transactions() -> list[dict]:
@@ -7869,6 +8414,262 @@ async def get_document_block_inventory(
         raise HTTPException(status_code=500, detail=f"结构清单生成失败: {exc}")
 
 
+def _start_downstream_outline_task(
+    *,
+    purpose: str,
+    doc_id: str,
+    doc: dict,
+    parse_manifest: dict,
+    block_index: dict,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    metadata: Optional[dict] = None,
+) -> dict:
+    """Persist an identity-bound task record for a long outline request."""
+    revision = str(
+        active_block_index_revision(block_index, doc)
+        or block_index.get("block_index_revision")
+        or block_index.get("block_index_hash")
+        or ""
+    ).strip()
+    return create_downstream_task(
+        DATA_DIR,
+        purpose=purpose,
+        doc_id=doc_id,
+        identity=build_downstream_task_identity(
+            doc_id=doc_id,
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            block_index_revision=revision,
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+        ),
+        metadata={"source": "document_route", **dict(metadata or {})},
+    )
+
+
+def _request_bool(value, default: bool | None = None) -> bool | None:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def _reading_outline_visual_policy(
+    body: dict,
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    api_host: str,
+):
+    visual_provider = str(body.get("visual_provider") or "").strip()
+    visual_model = str(body.get("visual_model") or "").strip()
+    visual_api_host = str(body.get("visual_api_host") or "").strip()
+    visual_api_key = str(body.get("visual_api_key") or "").strip()
+    if (visual_provider or visual_model) and not visual_api_key:
+        visual_api_key = _configured_provider_api_key_for_target(
+            visual_provider or provider,
+            visual_api_host,
+        )
+    local_provider = str(body.get("local_visual_provider") or "").strip()
+    local_model = str(body.get("local_visual_model") or "").strip()
+    local_api_host = str(body.get("local_visual_api_host") or "").strip()
+    local_api_key = str(body.get("local_visual_api_key") or "").strip()
+    strategy = str(body.get("visual_strategy") or "balanced").strip().lower()
+    if strategy not in {"privacy", "balanced", "quality"}:
+        strategy = "balanced"
+    return resolve_visual_enrichment_policy(
+        strategy=strategy,
+        primary_provider=provider,
+        primary_model=model,
+        primary_api_key=api_key,
+        primary_endpoint=_get_overview_provider_endpoint(provider, api_host),
+        visual_provider=visual_provider,
+        visual_model=visual_model,
+        visual_api_key=visual_api_key,
+        visual_endpoint=_get_overview_provider_endpoint(visual_provider, visual_api_host)
+        if visual_provider
+        else "",
+        visual_enabled=_request_bool(body.get("visual_enabled"), None),
+        local_visual_provider=local_provider,
+        local_visual_model=local_model,
+        local_visual_api_key=local_api_key,
+        local_visual_endpoint=_get_overview_provider_endpoint(local_provider, local_api_host)
+        if local_provider
+        else "",
+    )
+
+
+async def _prepare_reading_outline_visuals(
+    *,
+    doc_id: str,
+    doc: dict,
+    block_index: dict,
+    body: dict,
+    provider: str,
+    model: str,
+    api_key: str,
+    api_host: str,
+) -> dict:
+    """Run and publish bounded summary visual enrichment, failing open."""
+    outcome: dict = {
+        "enabled": bool(settings.enable_reading_outline_visual_preflight),
+        "diagnostics": {},
+        "publication": {"published": False, "reason": "disabled"},
+    }
+    if not settings.enable_reading_outline_visual_preflight:
+        return outcome
+
+    try:
+        visual_policy = _reading_outline_visual_policy(
+            body,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            api_host=api_host,
+        )
+        preflight_result = await preflight_summary_visuals(
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            pdf_path=_resolve_document_pdf_path(doc),
+            visual_policy=visual_policy,
+            max_figures=settings.reading_outline_visual_preflight_limit,
+        )
+        outcome["diagnostics"] = dict(preflight_result.get("diagnostics") or {})
+        items = [
+            item
+            for item in (preflight_result.get("items") or [])
+            if isinstance(item, dict)
+        ]
+        if items:
+            outcome["publication"] = publish_visual_supplements(
+                doc_id,
+                parse_generation=str(preflight_result.get("parse_generation") or ""),
+                document_source_hash=str(
+                    preflight_result.get("document_source_hash") or ""
+                ),
+                visual_model_identity=str(
+                    preflight_result.get("visual_model_identity") or visual_policy.identity
+                ),
+                items=items,
+            )
+        else:
+            outcome["publication"] = {
+                "published": False,
+                "reason": str(
+                    outcome["diagnostics"].get("skipped_reason") or "no_items"
+                ),
+            }
+    except _SupersededParseGeneration:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[ReadingOutline] visual preflight failed open doc=%s: %s",
+            doc_id,
+            exc,
+        )
+        outcome["diagnostics"] = {
+            "failed_open": True,
+            "error": str(exc)[:240] or type(exc).__name__,
+        }
+        outcome["publication"] = {
+            "published": False,
+            "reason": "preflight_failed_open",
+        }
+    return outcome
+
+
+def _finish_downstream_outline_task(
+    task: dict,
+    *,
+    result: dict | None = None,
+    error: str | None = None,
+) -> None:
+    """Publish the final outline state without letting persistence hide a result."""
+    if not task:
+        return
+    status = "failed"
+    if result is not None:
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+        source = str(result.get("source") or "").strip().lower()
+        generation_status = str(meta.get("generation_status") or "").strip().lower()
+        if generation_status == "partial" or source == "ai_partial":
+            status = "partial"
+        elif generation_status in {"fallback", "degraded"} or meta.get("generation_error"):
+            status = "degraded"
+        else:
+            status = "succeeded"
+    try:
+        transition_downstream_task(
+            DATA_DIR,
+            purpose=str(task.get("purpose") or ""),
+            doc_id=str(task.get("doc_id") or ""),
+            task_id=str(task.get("task_id") or ""),
+            status=status,
+            stage="completed" if result is not None else "failed",
+            error=error,
+            retryable=status not in {"succeeded", "cancelled"},
+            result=result,
+        )
+    except Exception as exc:
+        logger.warning("[DownstreamTask] failed to finish %s: %s", task.get("task_id"), exc)
+
+
+@router.get("/documents/{doc_id}/ai-tasks/{purpose}")
+async def get_document_downstream_task_status(doc_id: str, purpose: str):
+    """Expose restart-safe public status for overview and outline generation."""
+    if doc_id not in documents_store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+    normalized_purpose = str(purpose or "").strip().lower()
+    if normalized_purpose not in {"overview", "reading_outline", "section_outline"}:
+        raise HTTPException(status_code=404, detail="未知下游任务类型")
+    record = get_downstream_task(DATA_DIR, purpose=normalized_purpose, doc_id=doc_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="任务未找到")
+
+    doc = documents_store[doc_id]
+    manifest = read_parse_manifest(doc, doc_id=doc_id)
+    try:
+        current_index = load_block_index(DATA_DIR, doc_id)
+    except Exception:
+        current_index = {}
+    identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+    current_identity = build_downstream_task_identity(
+        doc_id=doc_id,
+        parse_generation=str(manifest.get("generation") or ""),
+        document_source_hash=str(manifest.get("source_hash") or ""),
+        block_index_revision=str(
+            active_block_index_revision(current_index, doc)
+            or current_index.get("block_index_revision")
+            or current_index.get("block_index_hash")
+            or ""
+        ),
+        provider=str(identity.get("provider") or ""),
+        model=str(identity.get("model") or ""),
+        prompt_version=str(identity.get("prompt_version") or ""),
+    )
+    if not downstream_task_identity_matches(record, current_identity):
+        record = transition_downstream_task(
+            DATA_DIR,
+            purpose=normalized_purpose,
+            doc_id=doc_id,
+            task_id=str(record.get("task_id") or ""),
+            status="cancelled",
+            stage="identity_changed",
+            error="文档解析或块索引已更新，请重新生成",
+            retryable=True,
+        ) or record
+
+    # The state service deliberately strips credentials and endpoints. Return
+    # only this durable public envelope rather than an internal task object.
+    return record
+
+
 @router.get("/documents/{doc_id}/reading-outline")
 async def get_document_reading_outline(doc_id: str, force: bool = False):
     """Return cached/fallback AI reading outline with evidence block bindings."""
@@ -7944,9 +8745,57 @@ async def create_document_reading_outline(
         pdf_path=_resolve_document_pdf_path(doc),
         force_rebuild=force,
     )
+    try:
+        visual_preflight = await _prepare_reading_outline_visuals(
+            doc_id=doc_id,
+            doc=doc,
+            block_index=block_index,
+            body=body,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            api_host=api_host,
+        )
+    except _SupersededParseGeneration:
+        raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成阅读总结")
+
+    # Visual supplements rotate AI caches and publish a new block-index
+    # revision. Reload both shared objects before binding the summary task so
+    # it can never consume or publish against the pre-enrichment revision.
+    doc = documents_store[doc_id]
+    parse_manifest = _require_current_parse_generation(
+        doc_id,
+        parse_generation=str(parse_manifest.get("generation") or ""),
+        document_source_hash=str(parse_manifest.get("source_hash") or ""),
+    )
+    block_index = ensure_block_index(
+        doc_id=doc_id,
+        doc=doc,
+        data_dir=DATA_DIR,
+        pdf_path=_resolve_document_pdf_path(doc),
+    )
+    task = _start_downstream_outline_task(
+        purpose="reading_outline",
+        doc_id=doc_id,
+        doc=doc,
+        parse_manifest=parse_manifest,
+        block_index=block_index,
+        provider=provider,
+        model=model,
+        prompt_version=READING_OUTLINE_PROMPT_VERSION,
+        metadata={"visual_preflight": visual_preflight},
+    )
+    transition_downstream_task(
+        DATA_DIR,
+        purpose="reading_outline",
+        doc_id=doc_id,
+        task_id=str(task.get("task_id") or ""),
+        status="running",
+        stage="generating",
+    )
 
     try:
-        return await get_or_create_reading_outline(
+        result = await get_or_create_reading_outline(
             data_dir=DATA_DIR,
             doc_id=doc_id,
             doc=doc,
@@ -7963,10 +8812,25 @@ async def create_document_reading_outline(
                 persist=lambda outline: save_reading_outline(DATA_DIR, doc_id, outline),
             ),
         )
+        transition_downstream_task(
+            DATA_DIR,
+            purpose="reading_outline",
+            doc_id=doc_id,
+            task_id=str(task.get("task_id") or ""),
+            status="verifying",
+            stage="parse_identity",
+        )
+        _finish_downstream_outline_task(task, result=result)
+        return result
     except _SupersededAICacheGeneration:
+        _finish_downstream_outline_task(task, error="AI 缓存已清理，请重新生成阅读总结")
         raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成阅读总结")
     except _SupersededParseGeneration:
+        _finish_downstream_outline_task(task, error="文档解析路线已更新，请重新生成阅读总结")
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成阅读总结")
+    except Exception as exc:
+        _finish_downstream_outline_task(task, error=str(exc))
+        raise
 
 
 @router.get("/documents/{doc_id}/section-outline")
@@ -8044,9 +8908,27 @@ async def create_document_section_outline(
         pdf_path=_resolve_document_pdf_path(doc),
         force_rebuild=force,
     )
+    task = _start_downstream_outline_task(
+        purpose="section_outline",
+        doc_id=doc_id,
+        doc=doc,
+        parse_manifest=parse_manifest,
+        block_index=block_index,
+        provider=provider,
+        model=model,
+        prompt_version=SECTION_OUTLINE_PROMPT_VERSION,
+    )
+    transition_downstream_task(
+        DATA_DIR,
+        purpose="section_outline",
+        doc_id=doc_id,
+        task_id=str(task.get("task_id") or ""),
+        status="running",
+        stage="generating",
+    )
 
     try:
-        return await get_or_create_section_outline(
+        result = await get_or_create_section_outline(
             data_dir=DATA_DIR,
             doc_id=doc_id,
             doc=doc,
@@ -8063,10 +8945,25 @@ async def create_document_section_outline(
                 persist=lambda outline: save_section_outline(DATA_DIR, doc_id, outline),
             ),
         )
+        transition_downstream_task(
+            DATA_DIR,
+            purpose="section_outline",
+            doc_id=doc_id,
+            task_id=str(task.get("task_id") or ""),
+            status="verifying",
+            stage="parse_identity",
+        )
+        _finish_downstream_outline_task(task, result=result)
+        return result
     except _SupersededAICacheGeneration:
+        _finish_downstream_outline_task(task, error="AI 缓存已清理，请重新生成章节大纲")
         raise HTTPException(status_code=409, detail="AI 缓存已清理，请重新生成章节大纲")
     except _SupersededParseGeneration:
+        _finish_downstream_outline_task(task, error="文档解析路线已更新，请重新生成章节大纲")
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成章节大纲")
+    except Exception as exc:
+        _finish_downstream_outline_task(task, error=str(exc))
+        raise
 
 
 @router.get("/document/{doc_id}/thumbnail/{page}")
@@ -8909,9 +9806,7 @@ async def get_ocr_status():
     backends = {
         "tesseract": available_backends.get("tesseract", False),
         "paddleocr": available_backends.get("paddleocr", False),
-        "mistral": available_backends.get("mistral", False),  # 在线 OCR
         "mineru": available_document_parsers.get("mineru", False),  # 文档级深度解析
-        "doc2x": False,
     }
 
     # 检测 Poppler 可用性
@@ -8984,9 +9879,10 @@ async def get_ocr_status():
     return {
         "available": status["any"],
         "backends": backends,
-        "page_ocr_backends": ["paddleocr", "tesseract", "mistral"],
-        "deprecated_page_ocr_backends": ["mineru", "doc2x"],
+        "page_ocr_backends": ["paddleocr", "tesseract"],
+        "deprecated_page_ocr_backends": ["mineru", "mistral", "doc2x"],
         "provider_sunset": {
+            "mistral": {"deprecated": True, "replacement": "local_auto", "usage": get_ocr_provider_usage("mistral")},
             "doc2x": {"deprecated": True, "replacement": "local_auto", "usage": get_ocr_provider_usage("doc2x")},
             "paddleocr": {"deprecated": True, "replacement": "paddleocr_vl", "usage": get_ocr_provider_usage("paddleocr")},
         },
@@ -9008,7 +9904,7 @@ async def get_ocr_status():
 
 
 # 支持的在线 OCR 提供商列表
-_SUPPORTED_ONLINE_OCR_PROVIDERS = {"mistral", "mineru"}
+_SUPPORTED_ONLINE_OCR_PROVIDERS = {"mineru"}
 
 
 @router.get("/api/layout/yolo/status")
@@ -10139,7 +11035,11 @@ async def clear_document_ai_cache(doc_id: str):
             cleared_data = cleared_doc.get("data")
             visual_removed = False
             if isinstance(cleared_data, dict):
-                for key in ("visual_supplements", "visual_supplement_commit"):
+                for key in (
+                    "visual_supplements",
+                    "visual_supplement_commit",
+                    "mineru_visual_assets",
+                ):
                     if key in cleared_data:
                         cleared_data.pop(key, None)
                         visual_removed = True
@@ -10271,6 +11171,7 @@ async def create_overview(
             visual_enabled=visual_enabled,
             visual_policy_params=visual_policy_params,
             figure_render_mode=figure_render_mode,
+            task_state_data_dir=DATA_DIR,
         )
     except OverviewTaskCapacityExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -10316,7 +11217,7 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         raise HTTPException(status_code=404, detail="文档未找到")
     parse_manifest = _require_document_parse_ready(doc_id, documents_store[doc_id])
 
-    task = await get_task_status(task_id)
+    task = await get_task_status(task_id, data_dir=DATA_DIR, doc_id=doc_id)
     
     if not task:
         raise HTTPException(status_code=404, detail="任务未找到")
@@ -10331,6 +11232,25 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         )
     ):
         raise HTTPException(status_code=409, detail="该速览任务属于旧的文档解析结果，已不再可用")
+
+    # A parse generation can remain stable while the published block snapshot
+    # changes (for example after a visual/table supplement is committed).  A
+    # recovered task must not expose an overview generated from the previous
+    # snapshot merely because its parse manifest still matches.
+    task_block_revision = str(task.block_index_revision or "").strip()
+    if task_block_revision:
+        try:
+            current_block_index = load_block_index(DATA_DIR, doc_id)
+            current_block_revision = str(
+                active_block_index_revision(current_block_index, documents_store[doc_id])
+                or current_block_index.get("block_index_revision")
+                or current_block_index.get("block_index_hash")
+                or ""
+            ).strip()
+        except Exception:
+            current_block_revision = ""
+        if current_block_revision != task_block_revision:
+            raise HTTPException(status_code=409, detail="该速览任务属于旧的文档结构快照，已不再可用")
     
     response = {
         "task_id": task.task_id,

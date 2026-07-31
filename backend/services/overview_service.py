@@ -32,6 +32,12 @@ from services.figure_validation import validate_and_fallback
 from schemas.figure_schema import LogicalFigureSchema, OverviewFigureItem
 from services.document_parse_state import derive_source_hash, is_parse_prepared, read_parse_manifest
 from services.ai_cache_state import load_ai_cache_generation
+from services.downstream_task_state import (
+    build_downstream_task_identity,
+    create_downstream_task,
+    get_downstream_task,
+    transition_downstream_task,
+)
 from services.chat_service import call_ai_api, extract_reasoning_content
 from services.document_block_roles import classify_front_matter_text
 from services.structured_json import (
@@ -148,6 +154,8 @@ class OverviewTask(BaseModel):
     figure_render_mode: str = "raw"
     parse_generation: str = ""
     document_source_hash: str = ""
+    block_index_revision: str = ""
+    task_state_data_dir: str = Field(default="", exclude=True, repr=False)
 
 
 # ============ 配置 ============
@@ -222,6 +230,52 @@ def _scrub_overview_task_credentials(task: OverviewTask) -> None:
 
 def _overview_task_is_active(task: OverviewTask) -> bool:
     return task.status not in _OVERVIEW_TERMINAL_TASK_STATUSES
+
+
+def _overview_task_data_dir(task: OverviewTask) -> Path:
+    value = str(getattr(task, "task_state_data_dir", "") or "").strip()
+    return Path(value) if value else CACHE_DIR.parent
+
+
+def _overview_workflow_status(status: str) -> str:
+    return {
+        "pending": "queued",
+        "processing": "running",
+        "completed": "succeeded",
+        "partial": "partial",
+        "fallback": "degraded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "invalidated": "cancelled",
+        "superseded": "cancelled",
+    }.get(str(status or "").strip().lower(), "failed")
+
+
+def _persist_overview_workflow_state(
+    task: OverviewTask,
+    status: str,
+    *,
+    stage: str = "",
+    error: str | None = None,
+    result: Any = None,
+    include_result: bool = False,
+) -> None:
+    """Best-effort durable status; a persistence issue must not discard output."""
+    try:
+        kwargs: dict[str, Any] = {
+            "purpose": "overview",
+            "doc_id": task.doc_id,
+            "task_id": task.task_id,
+            "status": status,
+            "stage": stage,
+            "error": error,
+            "retryable": status not in {"succeeded", "cancelled"},
+        }
+        if include_result:
+            kwargs["result"] = result
+        transition_downstream_task(_overview_task_data_dir(task), **kwargs)
+    except Exception as exc:
+        logger.warning("[Overview] durable task-state update failed task=%s: %s", task.task_id, exc)
 
 
 def _prune_overview_tasks(now: float | None = None) -> None:
@@ -2358,6 +2412,24 @@ async def _get_document_parse_cache_identity(doc_id: str) -> tuple[str, str]:
     return _read_document_parse_cache_identity(doc_id)
 
 
+async def _get_document_block_index_revision(doc_id: str) -> str:
+    """Read the published block snapshot revision without rebuilding it.
+
+    A task captures this alongside the parse manifest so a table/visual
+    supplement publication cannot be mistaken for the exact block snapshot it
+    originally summarized.
+    """
+    try:
+        from routes.document_routes import DATA_DIR, documents_store
+        from services.block_index_service import active_block_index_revision, load_block_index
+
+        index = load_block_index(DATA_DIR, doc_id)
+        return str(active_block_index_revision(index, documents_store.get(doc_id)) or "").strip()
+    except Exception as exc:
+        logger.debug("[Overview] block revision unavailable doc=%s: %s", doc_id, exc)
+        return ""
+
+
 async def _require_current_parse_cache_identity(
     doc_id: str,
     parse_generation: str,
@@ -2581,7 +2653,7 @@ def _cached_visual_supplement_is_active(
 ) -> bool:
     """Reject a cached VLM overview when another model owns active read blocks.
 
-    Only local-route VLM summaries publish visual blocks.  Switching from
+    Both local and MinerU routes can publish additive visual blocks. Switching
     model A to B changes those active blocks; reopening A must regenerate and
     republish A instead of showing A's overview alongside B's evidence.
     """
@@ -2616,7 +2688,7 @@ def _cached_visual_supplement_is_active(
         if (
             not raw_generation
             or not raw_source_hash
-            or raw_resolved_route != "local"
+            or raw_resolved_route not in {"local", "mineru"}
             or (
                 not migrated_from_legacy
                 and (
@@ -2632,14 +2704,14 @@ def _cached_visual_supplement_is_active(
         metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
         if (
             metadata.get("legacy_inferred")
-            or not is_parse_prepared(manifest, route="local")
-            or str(manifest.get("resolved_route") or "").strip().lower() != "local"
+            or not is_parse_prepared(manifest, route=raw_resolved_route)
+            or str(manifest.get("resolved_route") or "").strip().lower() != raw_resolved_route
             or str(manifest.get("generation") or "") != raw_generation
             or str(manifest.get("source_hash") or "") != raw_source_hash
         ):
             return cache_without_revision_is_valid
         parse_identity = {
-            "parser_route": "local",
+            "parser_route": raw_resolved_route,
             "parse_generation": raw_generation,
             "document_source_hash": raw_source_hash,
         }
@@ -3030,6 +3102,8 @@ def _build_pipeline_visual_supplement(
     item: KeyFigureItem,
     visual_config: VisualModelConfig,
     render_mode: str,
+    *,
+    route: str = "local",
 ) -> dict | None:
     figure = figure_data.get("figure") if isinstance(figure_data, dict) else None
     if not figure:
@@ -3048,7 +3122,7 @@ def _build_pipeline_visual_supplement(
         purpose="figure_description",
         confidence=item.confidence,
         prompt_version=FIGURE_ANALYSIS_PROMPT_VERSION,
-        route="local",
+        route=route,
     )
 
 
@@ -3057,6 +3131,8 @@ def _build_legacy_visual_supplement(
     item: KeyFigureItem,
     visual_config: VisualModelConfig,
     render_mode: str,
+    *,
+    route: str = "local",
 ) -> dict | None:
     if not isinstance(figure, dict):
         return None
@@ -3080,7 +3156,7 @@ def _build_legacy_visual_supplement(
         purpose="figure_description",
         confidence=item.confidence,
         prompt_version=FIGURE_ANALYSIS_PROMPT_VERSION,
-        route="local",
+        route=route,
     )
 
 
@@ -3250,11 +3326,17 @@ async def generate_overview_content(
             visual_risk_assessments: list[dict] = []
             pdf_doc = None
             doc_data: dict = {}
+            visual_asset_route = "local"
 
             if doc_id in documents_store:
                 doc = documents_store[doc_id]
                 doc_data = doc.get("data", {})
                 pdf_url = doc.get("pdf_url", "")
+                parse_manifest = doc_data.get("parse_manifest") if isinstance(doc_data, dict) else {}
+                resolved_route = str(
+                    (parse_manifest or {}).get("resolved_route") or "local"
+                ).strip().lower()
+                visual_asset_route = resolved_route if resolved_route in {"local", "mineru"} else "local"
 
                 # 检查是否需要强制重建 figure extraction 缓存
                 cache_status = get_figure_extraction_status(doc_data)
@@ -3344,6 +3426,7 @@ async def generate_overview_content(
                                     result,
                                     selected_visual_config,
                                     figure_render_mode,
+                                    route=visual_asset_route,
                                 )
                                 if supplement:
                                     visual_supplement_items.append(supplement)
@@ -3446,6 +3529,7 @@ async def generate_overview_content(
                             item,
                             selected_visual_config,
                             figure_render_mode,
+                            route=visual_asset_route,
                         )
                         if supplement:
                             visual_supplement_items.append(supplement)
@@ -3622,6 +3706,7 @@ async def create_overview_task(
     visual_policy_params: Optional[dict] = None,
     use_mineru_figures: bool = False,
     figure_render_mode: str = "raw",
+    task_state_data_dir: Path | str | None = None,
 ) -> OverviewTask:
     """创建异步任务"""
     _prune_overview_tasks()
@@ -3633,6 +3718,7 @@ async def create_overview_task(
 
     task_id = str(uuid.uuid4())
     parse_generation, document_source_hash = await _get_document_parse_cache_identity(doc_id)
+    block_index_revision = await _get_document_block_index_revision(doc_id)
     
     task = OverviewTask(
         task_id=task_id,
@@ -3655,7 +3741,32 @@ async def create_overview_task(
         figure_render_mode=_normalize_figure_render_mode(figure_render_mode),
         parse_generation=parse_generation,
         document_source_hash=document_source_hash,
+        block_index_revision=block_index_revision,
+        task_state_data_dir=str(task_state_data_dir or CACHE_DIR.parent),
     )
+
+    try:
+        create_downstream_task(
+            _overview_task_data_dir(task),
+            purpose="overview",
+            doc_id=doc_id,
+            task_id=task_id,
+            identity=build_downstream_task_identity(
+                doc_id=doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=document_source_hash,
+                block_index_revision=block_index_revision,
+                provider=provider,
+                model=model,
+                prompt_version=OVERVIEW_CACHE_VERSION,
+            ),
+            metadata={
+                "depth": depth,
+                "figure_render_mode": _normalize_figure_render_mode(figure_render_mode),
+            },
+        )
+    except Exception as exc:
+        logger.warning("[Overview] durable task-state create failed task=%s: %s", task_id, exc)
     
     overview_tasks[task_id] = task
     
@@ -3686,6 +3797,7 @@ async def _process_overview_task(task_id: str):
         # 更新状态
         task.status = "processing"
         task.updated_at = time.time()
+        _persist_overview_workflow_state(task, "running", stage="cache_lookup")
         _require_current_overview_work_epoch(task.doc_id, work_epoch)
         
         # 检查缓存
@@ -3737,6 +3849,7 @@ async def _process_overview_task(task_id: str):
                 )
                 if task.status in {"invalidated", "superseded"}:
                     raise OverviewWorkInvalidated(task.error or "速览任务已作废")
+                _persist_overview_workflow_state(task, "verifying", stage="cache_identity")
                 task.result = cached
                 task.status = overview_generation_status(cached)
                 # An invalidation can race between the pre-commit check and the
@@ -3772,6 +3885,8 @@ async def _process_overview_task(task_id: str):
         _require_current_overview_work_epoch(task.doc_id, work_epoch)
         if task.status in {"invalidated", "superseded"}:
             return
+        _persist_overview_workflow_state(task, "verifying", stage="parse_identity")
+        _persist_overview_workflow_state(task, "publishing", stage="result_publication")
         task.result = result
         task.status = overview_generation_status(result)
         _require_current_overview_work_epoch(task.doc_id, work_epoch)
@@ -3798,15 +3913,66 @@ async def _process_overview_task(task_id: str):
             logger.error(f"速览任务 {task_id} 失败: {e}")
     finally:
         task.updated_at = time.time()
+        _persist_overview_workflow_state(
+            task,
+            _overview_workflow_status(task.status),
+            stage=str(task.status or "finished"),
+            error=task.error,
+            result=task.result.model_dump() if task.result is not None else None,
+            include_result=True,
+        )
         if not _overview_task_is_active(task):
             _scrub_overview_task_credentials(task)
         _prune_overview_tasks(task.updated_at)
 
 
-async def get_task_status(task_id: str) -> Optional[OverviewTask]:
-    """获取任务状态"""
+async def get_task_status(
+    task_id: str,
+    *,
+    data_dir: Path | str | None = None,
+    doc_id: str = "",
+) -> Optional[OverviewTask]:
+    """Return in-memory state, or recover a durable state after restart."""
     _prune_overview_tasks()
-    return overview_tasks.get(task_id)
+    current = overview_tasks.get(task_id)
+    if current is not None:
+        return current
+    if data_dir is None or not str(doc_id or "").strip():
+        return None
+
+    record = get_downstream_task(data_dir, purpose="overview", doc_id=doc_id)
+    if not record or str(record.get("task_id") or "") != str(task_id or ""):
+        return None
+    stored_result = record.get("result") if isinstance(record.get("result"), dict) else None
+    try:
+        result = OverviewData(**stored_result) if stored_result else None
+    except Exception:
+        result = None
+    status = {
+        "queued": "pending",
+        "running": "processing",
+        "verifying": "processing",
+        "publishing": "processing",
+        "succeeded": "completed",
+        "degraded": "fallback",
+    }.get(str(record.get("status") or "").strip().lower(), str(record.get("status") or "failed"))
+    identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return OverviewTask(
+        task_id=str(record.get("task_id") or task_id),
+        doc_id=str(record.get("doc_id") or doc_id),
+        depth=str(metadata.get("depth") or "standard"),
+        status=status,
+        result=result,
+        error=str(record.get("error") or "") or None,
+        created_at=float(record.get("created_at") or time.time()),
+        updated_at=float(record.get("updated_at") or time.time()),
+        figure_render_mode=str(metadata.get("figure_render_mode") or "raw"),
+        parse_generation=str(identity.get("parse_generation") or ""),
+        document_source_hash=str(identity.get("document_source_hash") or ""),
+        block_index_revision=str(identity.get("block_index_revision") or ""),
+        task_state_data_dir=str(data_dir),
+    )
 
 
 # ============ 公开接口 ============

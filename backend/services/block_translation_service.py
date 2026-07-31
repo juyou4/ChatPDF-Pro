@@ -22,7 +22,7 @@ from services.glossary_service import build_glossary_prompt
 logger = logging.getLogger(__name__)
 
 TRANSLATION_CACHE_VERSION = 3
-TRANSLATION_PROMPT_VERSION = 5
+TRANSLATION_PROMPT_VERSION = 6
 MAX_BLOCKS_PER_REQUEST = 24
 MAX_BLOCK_CHARS = 1800
 TRANSLATION_CONCURRENCY = 8
@@ -46,11 +46,15 @@ def _bounded_env_int(name: str, default: int, maximum: int) -> int:
 GLOBAL_TRANSLATION_CONCURRENCY = _bounded_env_int("CHATPDF_GLOBAL_TRANSLATION_CONCURRENCY", 16, 64)
 TRANSLATION_TASK_BATCH_SIZE = _bounded_env_int("CHATPDF_TRANSLATION_TASK_BATCH_SIZE", 48, 256)
 TABLE_BLOCK_TYPES = {"table"}
+FORMULA_BLOCK_TYPES = {"formula", "equation", "interline_equation", "inline_equation"}
 
 _GLOBAL_TRANSLATION_SEMAPHORE = asyncio.Semaphore(GLOBAL_TRANSLATION_CONCURRENCY)
 
 _RE_MARKDOWN_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_MARKDOWN_TABLE_SEPARATOR = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
+_RE_TABLE_NUMBER = re.compile(
+    r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:%|‰)?(?![\w.])"
+)
 _RE_LATEX_COMMAND = re.compile(r"\\[A-Za-z]{2,}")
 _RE_EQUATION_SIGNAL = re.compile(r"(?:[_^]=?|[A-Za-z]\s*=|\\(?:frac|sum|prod|int|sqrt|begin|end)\b)")
 _RE_METADATA_DUMP_SIGNAL = re.compile(
@@ -876,14 +880,12 @@ async def _generate_single_plain_translation(
             }
         }
 
-    translated_segments: list[str] = []
-    for segment in _split_translation_source(source):
-        prefix, content, suffix = _split_outer_whitespace(segment)
-        if not content:
-            translated_segments.append(segment)
-            continue
-        translated = await _translate_source_segment(
-            source=content,
+    if translation_mode == "table_guard":
+        # A Markdown table must stay one model turn. Generic paragraph
+        # splitting can separate the header from its delimiter row and produce
+        # several individually plausible fragments that no longer form a table.
+        translation = await _translate_source_segment(
+            source=source,
             translation_mode=translation_mode,
             target_lang=target_lang,
             api_key=api_key,
@@ -891,9 +893,27 @@ async def _generate_single_plain_translation(
             provider=provider,
             endpoint=endpoint,
         )
-        translated_segments.append(f"{prefix}{translated}{suffix}")
+        if not _table_translation_preserves_structure(source, translation):
+            raise RuntimeError("表格译文未保持原始行列或数字结构")
+    else:
+        translated_segments: list[str] = []
+        for segment in _split_translation_source(source):
+            prefix, content, suffix = _split_outer_whitespace(segment)
+            if not content:
+                translated_segments.append(segment)
+                continue
+            translated = await _translate_source_segment(
+                source=content,
+                translation_mode=translation_mode,
+                target_lang=target_lang,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+            )
+            translated_segments.append(f"{prefix}{translated}{suffix}")
+        translation = "".join(translated_segments).strip()
 
-    translation = "".join(translated_segments).strip()
     if not _is_valid_translation_text(translation):
         raise RuntimeError("模型返回了无效译文")
 
@@ -1004,6 +1024,13 @@ async def _translate_source_segment(
             "当前文本包含较多公式或符号：只翻译自然语言部分，所有公式、变量、下标、上标、单位、引用编号必须原样保留。"
             "不要重排、合并或改写任何公式。"
         )
+    elif translation_mode == "table_guard":
+        system_prompt += (
+            "当前文本是 GFM Markdown 学术表格：逐单元格翻译自然语言表头、行标签、表注和说明文字。"
+            "必须原样保留 [TABLE] 标记、Markdown 管道和分隔行、行数、列数、空单元格、数字、正负号、"
+            "小数位、百分号、单位、变量名和引用编号；不得合并、拆分、排序或补写任何行列。"
+            "只输出完整表格及其原有表注，不要使用代码围栏。"
+        )
 
     response = await call_ai_api(
         messages=[
@@ -1025,7 +1052,7 @@ async def _translate_source_segment(
         model=model,
         provider=provider,
         endpoint=endpoint,
-        max_tokens=_estimate_translation_max_tokens(source),
+        max_tokens=_estimate_translation_max_tokens(source, translation_mode=translation_mode),
         temperature=0.2,
         purpose="translation",
     )
@@ -1130,21 +1157,30 @@ def _split_outer_whitespace(value: str) -> tuple[str, str, str]:
 
 def _get_translation_mode(block: dict[str, Any], text: str) -> str:
     declared_mode = str(block.get("translation_mode") or "").strip().lower()
-    if declared_mode in {"plain", "preserve", "formula_guard"}:
-        return declared_mode
     block_type = str(block.get("type") or "paragraph").lower()
-    if block_type in TABLE_BLOCK_TYPES or _looks_like_markdown_table(text):
+    if block_type in FORMULA_BLOCK_TYPES:
         return "preserve"
+    if declared_mode == "preserve" and (
+        block_type in TABLE_BLOCK_TYPES or _looks_like_markdown_table(text)
+    ):
+        # Version <=5 classified every table as preserve, so table labels and
+        # captions were never translated. Treat that declaration as legacy.
+        return "table_guard"
+    if declared_mode in {"plain", "preserve", "formula_guard", "table_guard"}:
+        return declared_mode
+    if block_type in TABLE_BLOCK_TYPES or _looks_like_markdown_table(text):
+        return "table_guard"
     if _looks_formula_dense(text):
         return "formula_guard"
     return "plain"
 
 
-def _estimate_translation_max_tokens(source: str) -> int:
+def _estimate_translation_max_tokens(source: str, *, translation_mode: str = "plain") -> int:
     text = str(source or "")
     # 英文论文翻译成中文通常不会超过原字符数对应 token 的 1.2-1.5 倍；
     # 短标题/图注不再给 600 token 的大上限，减少供应商调度延迟。
-    return max(160, min(3072, int(len(text) * 1.45) + 96))
+    maximum = 6144 if translation_mode == "table_guard" else 3072
+    return max(160, min(maximum, int(len(text) * 1.45) + 96))
 
 
 def _looks_like_markdown_table(text: str) -> bool:
@@ -1154,6 +1190,37 @@ def _looks_like_markdown_table(text: str) -> bool:
     table_rows = sum(1 for line in lines if _RE_MARKDOWN_TABLE_ROW.match(line))
     has_separator = any(_RE_MARKDOWN_TABLE_SEPARATOR.match(line) for line in lines)
     return table_rows >= 2 and has_separator
+
+
+def _table_translation_preserves_structure(source: str, translation: str) -> bool:
+    source_text = str(source or "").strip()
+    translated_text = str(translation or "").strip()
+    if not source_text or not translated_text:
+        return False
+    if re.search(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b", translated_text, re.IGNORECASE):
+        return False
+
+    source_shape = _markdown_table_shape(source_text)
+    if source_shape:
+        translated_shape = _markdown_table_shape(translated_text)
+        if translated_shape != source_shape or not _looks_like_markdown_table(translated_text):
+            return False
+
+    # Numbers are evidence, not prose. Exact order also catches a model that
+    # helpfully re-sorts result rows while retaining the same values.
+    return _RE_TABLE_NUMBER.findall(translated_text) == _RE_TABLE_NUMBER.findall(source_text)
+
+
+def _markdown_table_shape(value: str) -> list[int]:
+    shape: list[int] = []
+    for line in str(value or "").splitlines():
+        stripped = line.strip()
+        if not _RE_MARKDOWN_TABLE_ROW.match(stripped):
+            continue
+        inner = stripped[1:-1]
+        cells = re.split(r"(?<!\\)\|", inner)
+        shape.append(len(cells))
+    return shape
 
 
 def _looks_formula_dense(text: str) -> bool:
@@ -1215,7 +1282,7 @@ def _strip_markdown_fence(content: str) -> str:
         lines = lines[1:]
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
-    if lines and lines[0].strip().lower() == "json":
+    if lines and lines[0].strip().lower() in {"json", "markdown", "md", "text"}:
         lines = lines[1:]
     return "\n".join(lines).strip()
 
