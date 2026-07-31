@@ -118,6 +118,7 @@ function createWindow(): void {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webSecurity: true,
       webviewTag: false,
       preload: path.join(__dirname, 'preload.js'),
