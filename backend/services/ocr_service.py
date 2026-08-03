@@ -896,11 +896,18 @@ TESSERACT_AVAILABLE = False
 PDF2IMAGE_AVAILABLE = False
 PADDLEOCR_AVAILABLE = False
 
-# 自动检测本地 OCR 工具路径
+# 自动检测本地 OCR 工具路径。源码工作树可以独立于本机工具安装目录，
+# 例如用 CHATPDF_OCR_TOOLS_DIR 复用已有的 Poppler/Tesseract。
+def _ocr_tools_dir() -> Path:
+    configured = str(os.getenv("CHATPDF_OCR_TOOLS_DIR", "") or "").strip()
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2] / "ocr_tools"
+
+
 def _find_local_ocr_tools():
     """查找本地安装的 OCR 工具"""
-    base_dir = Path(__file__).resolve().parents[2]  # Chatpdf 根目录
-    ocr_dir = base_dir / "ocr_tools"
+    ocr_dir = _ocr_tools_dir()
     
     # Tesseract 路径
     tesseract_paths = [
@@ -932,8 +939,7 @@ def _find_poppler():
     - 搜索失败时记录所有已搜索路径到日志
     - 检测 ocr_tools/poppler/ 目录存在但无可执行文件的情况并记录警告
     """
-    base_dir = Path(__file__).resolve().parents[2]
-    ocr_dir = base_dir / "ocr_tools"
+    ocr_dir = _ocr_tools_dir()
 
     poppler_paths = [
         ocr_dir / "poppler" / "Library" / "bin",  # Windows 本地安装

@@ -923,8 +923,7 @@ def _visual_cache_dir() -> Path:
         return Path(root)
     try:
         from runtime_mode import runtime
-        if runtime.is_desktop:
-            return Path(runtime.data_dir) / "table_visual_cache"
+        return Path(runtime.data_dir) / "table_visual_cache"
     except Exception:
         pass
     return Path(__file__).resolve().parents[2] / "data" / "table_visual_cache"

@@ -762,15 +762,22 @@ def _identity_from_doc(doc: dict) -> tuple[str, str]:
     return generation, source_hash
 
 
+def _resolve_data_root(data_dir: Path | str | None = None) -> Path:
+    """Use an explicit task directory, otherwise the shared runtime data root."""
+    if data_dir:
+        return Path(data_dir)
+    try:
+        from runtime_mode import runtime
+
+        return Path(runtime.data_dir)
+    except Exception:
+        return Path(__file__).resolve().parents[2] / "data"
+
+
 def _load_outline_for_doc(doc_id: str, data_dir: Path | str | None = None) -> dict | None:
     if not doc_id:
         return None
-    try:
-        from config import settings
-
-        root = Path(data_dir or getattr(settings, "data_dir", None) or Path(__file__).resolve().parents[2] / "data")
-    except Exception:
-        root = Path(data_dir or Path(__file__).resolve().parents[2] / "data")
+    root = _resolve_data_root(data_dir)
     # Prefer reading outline, then section outline
     for sub in ("reading_outlines", "section_outlines"):
         path = root / sub / f"{doc_id}.json"
@@ -823,11 +830,9 @@ def ensure_academic_graph(
     # Try disk cache
     if resolved_id and not force:
         try:
-            from config import settings
-
-            root = Path(data_dir or getattr(settings, "data_dir", None) or Path(__file__).resolve().parents[2] / "data")
+            root = _resolve_data_root(data_dir)
         except Exception:
-            root = Path(data_dir or Path(__file__).resolve().parents[2] / "data")
+            root = _resolve_data_root()
         disk = load_academic_graph(root, resolved_id)
         disk_graph = academic_graph_from_dict(disk) if disk else None
         if (
@@ -873,9 +878,7 @@ def ensure_academic_graph(
     doc["academic_graph"] = payload
     if resolved_id:
         try:
-            from config import settings
-
-            root = Path(data_dir or getattr(settings, "data_dir", None) or Path(__file__).resolve().parents[2] / "data")
+            root = _resolve_data_root(data_dir)
             save_academic_graph(root, resolved_id, payload)
         except Exception:
             logger.debug("[AcademicGraph] disk cache save skipped", exc_info=True)

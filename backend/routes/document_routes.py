@@ -197,15 +197,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 目录策略与 app.py 保持一致：
-# - desktop: 使用 runtime.data_dir（由 Electron 传入）
-# - server: 使用项目根目录 data/
+# 目录策略与 app.py 保持一致：显式 CHATPDF_DATA_DIR 优先；未配置时
+# desktop 使用 Electron 数据目录，server 使用项目根目录 data/。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-if runtime.is_desktop:
-    DATA_DIR = Path(runtime.data_dir)
-else:
-    DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = Path(runtime.data_dir)
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
 UPLOAD_DIR = DATA_DIR / "uploads"

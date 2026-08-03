@@ -53,13 +53,9 @@ logger = logging.getLogger(__name__)
 # 应用启动时间戳
 _startup_time = time.time()
 
-# Directories
-# 桌面模式使用 runtime.data_dir（AppData），服务器模式使用项目根目录
-if runtime.is_desktop:
-    DATA_DIR = Path(runtime.data_dir)
-else:
-    BASE_DIR = Path(__file__).resolve().parent.parent
-    DATA_DIR = BASE_DIR / "data"
+# Directories. runtime.data_dir keeps the source-mode project-data default
+# while allowing CHATPDF_DATA_DIR to pin user data outside a disposable worktree.
+DATA_DIR = Path(runtime.data_dir)
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORE_DIR = DATA_DIR / "vector_stores"
 UPLOAD_DIR = DATA_DIR / "uploads"

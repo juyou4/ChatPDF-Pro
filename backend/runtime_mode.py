@@ -26,7 +26,8 @@ class RuntimeConfig(BaseSettings):
     # 运行模式：desktop | server（空字符串时自动推断）
     CHATPDF_MODE: str = ""
 
-    # Electron 传入的用户数据目录（桌面模式必需）
+    # 用户数据目录。桌面端由 Electron 传入；源码运行也可显式指定，
+    # 让代码工作树与用户数据目录彼此独立。
     CHATPDF_DATA_DIR: str = ""
 
     # 后端安全 token（桌面模式下由 Electron 生成并传入）
@@ -70,8 +71,8 @@ class RuntimeConfig(BaseSettings):
     def data_dir(self) -> str:
         """获取数据目录路径
 
-        桌面模式：使用 Electron 传入的 CHATPDF_DATA_DIR
-        服务器模式：使用项目根目录下的 data/
+        显式配置 CHATPDF_DATA_DIR 时，任何运行模式均使用该目录。
+        否则桌面模式使用用户数据目录，源码运行使用项目根目录下的 data/。
         """
         if self.CHATPDF_DATA_DIR:
             return self.CHATPDF_DATA_DIR

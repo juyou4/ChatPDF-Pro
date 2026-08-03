@@ -53,7 +53,8 @@ def _summary_data_dir() -> Path:
     vector_store_dir = str(getattr(router, "vector_store_dir", "") or "").strip()
     if vector_store_dir:
         return Path(vector_store_dir).parent
-    return Path(__file__).resolve().parents[2] / "data"
+    from runtime_mode import runtime
+    return Path(runtime.data_dir)
 
 
 def _resolve_document_pdf_path(doc: dict, data_dir: Path) -> Path | None:

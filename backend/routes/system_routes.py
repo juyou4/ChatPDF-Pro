@@ -10,14 +10,9 @@ from runtime_mode import runtime
 
 router = APIRouter()
 
-# 目录策略与 app.py/document_routes.py 保持一致：
-# - desktop: 使用 Electron 传入的 runtime.data_dir
-# - server: 使用项目根目录 data/
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if runtime.is_desktop:
-    DATA_DIR = Path(runtime.data_dir)
-else:
-    DATA_DIR = PROJECT_ROOT / "data"
+# 目录策略与 app.py/document_routes.py 保持一致：显式 CHATPDF_DATA_DIR 优先；
+# 未配置时 desktop 使用 Electron 数据目录，server 使用项目根目录 data/。
+DATA_DIR = Path(runtime.data_dir)
 UPLOADS_DIR = DATA_DIR / "uploads"
 DOCS_DIR = DATA_DIR / "docs"
 VECTOR_STORES_DIR = DATA_DIR / "vector_stores"
