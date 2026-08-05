@@ -5,7 +5,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "BASE_DIR=%~dp0"
 cd /d "%BASE_DIR%"
 
-set "APP_VERSION=3.1.0"
+set "APP_VERSION=unknown"
 for /f "tokens=2 delims=:," %%v in ('findstr /i /c:"version" version.json 2^>nul ^| findstr /v /i /c:"schema_version"') do set "APP_VERSION=%%~v"
 set "APP_VERSION=!APP_VERSION: =!"
 set "APP_VERSION=!APP_VERSION:"=!"
@@ -40,7 +40,7 @@ if errorlevel 1 (
     for /f "tokens=*" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "CURRENT_BRANCH=%%i"
     if /i "!CURRENT_BRANCH!"=="main" (
         set "HAS_TRACKED_CHANGES="
-        for /f "delims=" %%i in ('git status --porcelain --untracked-files=no 2^>nul') do set "HAS_TRACKED_CHANGES=1"
+        for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "HAS_TRACKED_CHANGES=1"
         if defined HAS_TRACKED_CHANGES (
             call :PRINT_INFO "检测到本地代码改动，为避免覆盖已跳过自动更新"
         ) else (

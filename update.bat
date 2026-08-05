@@ -26,7 +26,7 @@ if /i not "!CURRENT_BRANCH!"=="main" (
 )
 
 set "HAS_TRACKED_CHANGES="
-for /f "delims=" %%i in ('git status --porcelain --untracked-files=no 2^>nul') do set "HAS_TRACKED_CHANGES=1"
+for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "HAS_TRACKED_CHANGES=1"
 if defined HAS_TRACKED_CHANGES (
     echo [X] 检测到本地源码改动。为避免覆盖或混合版本，请先提交或暂存这些改动。
     pause

@@ -17,7 +17,7 @@
 
 ## Overview
 
-ChatPDF Pro is a local-first AI reading assistant tailored for academic papers and long technical documents. The native PDF viewer on the left and the AI chat panel on the right, combined with a retrieval pipeline built on **Semantic Groups + three-tier granularity + dual-index RRF**, lets the model handle both high-level summarisation and pinpoint lookups down to a single table row. All requests go to your own OpenAI / Anthropic / Gemini / Ollama endpoint, and **every document and chat transcript stays on your machine**.
+ChatPDF Pro is a local-first AI reading assistant tailored for academic papers and long technical documents. The native PDF viewer on the left and the AI chat panel on the right, combined with a retrieval pipeline built on **Semantic Groups + three-tier granularity + dual-index RRF**, lets the model handle both high-level summarisation and pinpoint lookups down to a single table row. Chat history and runtime data stay local by default. Choosing MinerU, a remote model, or web search sends the relevant document or request to the configured service.
 
 ---
 
@@ -64,7 +64,7 @@ A self-contained Windows desktop application built with Electron. The Python bac
 
 ---
 
-## What's New in v3.0.1
+## Release Highlights (v3.1.0)
 
 ### Desktop Architecture (Electron)
 - **Standalone Application** - Windows desktop client built on Electron 28, breaking free from browser limitations.
@@ -94,7 +94,7 @@ A self-contained Windows desktop application built with Electron. The Python bac
 - **Native Rendering** - High-fidelity document display via PDF.js with smooth zooming, pagination, and text selection.
 - **Character-level text extraction** - The primary pipeline is **PyMuPDF `get_text("dict")`** with adaptive coordinate thresholds (line-break / whitespace detection); on failure it falls back to **pdfplumber**'s chars API. A heuristic rebuild pass repairs hyphenated line breaks and zh/en punctuation artefacts.
 - **Table structuring** - `services/table_aware_service.py` uses **PyMuPDF `find_tables()`** to detect table regions and convert them into `[TABLE]`-tagged Markdown, which the chunker treats as protected regions.
-- **Optional OCR** - Scanned / low-quality pages are routed through a quality-assessment gate and can opt into **MinerU** cloud OCR, **PaddleOCR**, or Google Document AI.
+- **Two explicit parse routes** - Choose **MinerU deep parsing** or **local parsing** before upload. Local Tesseract / PaddleOCR is only a low-quality-page supplement and never silently replaces the selected route.
 
 ### Intelligent Retrieval (RAG v3.0+)
 - **Semantic Groups** - Aggregates scattered text chunks into semantically coherent units of ~5000 characters, respecting page, heading, and table boundaries.
@@ -137,7 +137,7 @@ The following writes a build identity manifest, rebuilds the frontend, freezes t
 scripts/build-all.bat
 ```
 
-The default output is in `electron/release/`. Installer filenames include the app version and Git short SHA, and the build writes `release-manifest.json` plus `.sha256` checksum files. Packaging rules exclude `data/`, `uploads/`, `logs/`, `cache/`, `history/`, `memory/`, vector and semantic indexes, `.env` files, logs, and API-key-named files at both the PyInstaller and Electron resource-copy stages. Do not manually copy a local user-data directory or development `data/` directory into the release output.
+The default output is in `electron/release/`. Installer filenames include the app version and Git short SHA, and the build writes `release-manifest.json` plus `.sha256` checksum files. Packaging rules exclude `data/`, `uploads/`, `logs/`, `cache/`, `history/`, `memory/`, vector and semantic indexes, test/course/evaluation directories, PDFs, database/serialized artifacts, `.env` files, logs, and API-key-named files at both the PyInstaller and Electron resource-copy stages. Do not manually copy a local user-data directory or development `data/` directory into the release output.
 
 `version.json` at the repository root is the single release metadata source. `/version`, `/health`, `/capabilities`, the Electron package version, and the frontend public version must match it. Before release, run:
 
@@ -154,7 +154,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-**2. Frontend Service (Node.js 18+)**
+**2. Frontend Service (Node.js 20.19+, or 22.12+)**
 ```bash
 cd frontend
 npm install
@@ -167,7 +167,7 @@ Visit `http://localhost:3000` to start using the application.
 ## Tech Stack
 
 ### Frontend
-- **Core**: React 18 + Vite 5 + Tailwind CSS
+- **Core**: React 18 + Vite 7 + Tailwind CSS
 - **PDF Rendering**: react-pdf 9.0 + PDF.js
 - **UI Animation**: Framer Motion
 - **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
@@ -179,7 +179,7 @@ Visit `http://localhost:3000` to start using the application.
 - **Vector Database**: FAISS 1.9
 - **Retrieval Architecture**: Semantic Groups + Dual-Index RRF Fusion
 - **Model SDKs**: OpenAI, Anthropic, Google Generative AI
-- **Optional OCR**: MinerU (Worker proxy) / PaddleOCR / Google Document AI
+- **Parsing and OCR**: MinerU (Worker proxy or direct API) / local Tesseract and PaddleOCR supplements
 
 ---
 

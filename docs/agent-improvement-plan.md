@@ -78,7 +78,7 @@ paper-qa 的核心竞争力就是这一层，照抄骨架即可：
 | 组件 | 位置 | 状态 |
 |------|------|------|
 | 图表定位缓存 | `figure_extraction.py:42,63`——`logical_figures` 已持久化在 doc data | ✅ 现成 |
-| 裁图渲染 | `figure_render.py::render_figure`（本次 v3.0.2 刚加了 `render_mode` 参数）+ DocLayout-YOLO 收紧 | ✅ 现成 |
+| 裁图渲染 | `figure_render.py::render_figure`（支持 `render_mode`）+ DocLayout-YOLO 收紧 | ✅ 现成 |
 | VLM 调用格式 | `overview_service.py:1284-1310`——`_generate_figure_analysis_via_pipeline` 已在用 `image_data_list=[data:image/jpeg;base64,...]` 调多模态模型 | ✅ 现成 |
 | provider 图片支持 | `gemini_provider.py:80-81` 已处理 `image_url` content | ⚠️ 仅 Gemini |
 

@@ -7,7 +7,7 @@
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
-**面向学术论文的本地 AI 阅读助手 — 沉浸式阅读 · Agentic RAG · 引用溯源 · 全程离线** · [English](README_EN.md)
+**面向学术论文的本地优先 AI 阅读助手 — 沉浸式阅读 · Agentic RAG · 引用溯源** · [English](README_EN.md)
 
 [快速开始](#快速开始) • [核心功能](#核心功能) • [评测](#ragas-评测) • [技术栈](#技术栈) • [项目结构](#项目结构)
 
@@ -17,7 +17,7 @@
 
 ## 项目简介
 
-ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅读助手。左侧原生 PDF 阅读器 + 右侧 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF** 的检索管线、**Agentic RAG 工具链**以及 **沉浸式阅读**（AI 大纲 · 章节总结 · 悬浮翻译 · 全文预翻译），让模型既能做高层次综述、也能精确定位到某张表格的某一行数值，同时提供逐块母语化阅读体验。所有请求指向用户自带的 OpenAI / Anthropic / Gemini / DeepSeek / Ollama 接口，文档与对话历史全程留在本地。
+ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地优先 AI 阅读助手。左侧原生 PDF 阅读器 + 右侧 AI 对话区的双栏布局，配合基于**语义意群 + 三层粒度 + 双索引 RRF** 的检索管线、**Agentic RAG 工具链**以及 **沉浸式阅读**（AI 大纲 · 章节总结 · 悬浮翻译 · 全文预翻译），让模型既能做高层次综述、也能精确定位到某张表格的某一行数值，同时提供逐块母语化阅读体验。对话历史与运行时数据默认保存在本地；如果选择 MinerU、联网模型或联网搜索，相关文档或请求会按配置发送到对应服务。
 
 ---
 
@@ -89,7 +89,7 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 - **原生 PDF 渲染** — 基于 PDF.js 的高保真文档显示，支持平滑缩放、翻页、划词与文本选择
 - **字符级文本提取** — 主力管线 PyMuPDF `get_text("dict")` + 自适应坐标阈值（换行 / 空格检测），失败时回退到 pdfplumber；启发式修复断行单词与中英标点
 - **表格结构化** — PyMuPDF `find_tables()` 检测表格区域并转为带 `[TABLE]` 标记的 Markdown，分块时作为受保护区域不被切割
-- **可选 OCR** — 扫描件 / 低质量页自动触发页面质量评估，可切换到 MinerU 云端 OCR、PaddleOCR 或 Google Document AI
+- **两条明确解析路线** — 上传前选择 MinerU 深度解析或本地解析；本地 Tesseract / PaddleOCR 只作为低质量页的补充，不会悄悄替换主路线
 
 ### Agentic RAG 检索
 
@@ -179,7 +179,7 @@ MinerU current 使用同一 26 题正式 manifest，不包含 4 题 smoke / prob
 scripts/build-all.bat
 ```
 
-默认产物位于 `electron/release/`。安装包文件名会包含版本号与 Git 短 SHA，并生成 `release-manifest.json` 与 `.sha256` 校验文件，便于定位用户实际安装的代码。打包规则会在 PyInstaller 和 Electron 资源复制两个阶段排除 `data/`、`uploads/`、`logs/`、`cache/`、`history/`、`memory/`、向量/语义索引、`.env`、日志和 API Key 命名文件。不要手动将本机用户数据目录或开发环境的 `data/` 复制到该目录。
+默认产物位于 `electron/release/`。安装包文件名会包含版本号与 Git 短 SHA，并生成 `release-manifest.json` 与 `.sha256` 校验文件，便于定位用户实际安装的代码。打包规则会在 PyInstaller 和 Electron 资源复制两个阶段排除 `data/`、`uploads/`、`logs/`、`cache/`、`history/`、`memory/`、向量/语义索引、测试/课程/评测目录、PDF/数据库/序列化产物、`.env`、日志和 API Key 命名文件。不要手动将本机用户数据目录或开发环境的 `data/` 复制到该目录。
 
 版本信息以仓库根目录 `version.json` 为唯一来源；`/version`、`/health`、`/capabilities`、Electron 包版本和前端静态版本都必须与它一致。发布前可运行：
 
@@ -196,7 +196,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-**2. 前端服务（Node.js 18+）**
+**2. 前端服务（Node.js 20.19+，或 22.12+）**
 ```bash
 cd frontend
 npm install
@@ -230,7 +230,7 @@ npm run dev
 ## 技术栈
 
 ### 前端
-- **核心**: React 18 + Vite 5 + Tailwind CSS
+- **核心**: React 18 + Vite 7 + Tailwind CSS
 - **PDF 渲染**: react-pdf 9.0 + PDF.js
 - **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
 - **桌面端**: Electron 28 + electron-builder
@@ -241,7 +241,7 @@ npm run dev
 - **向量数据库**: FAISS 1.9
 - **检索架构**: 语义意群 + 双索引 RRF + Agentic RAG 工具链
 - **多模型 SDK**: OpenAI, Anthropic, Google Generative AI
-- **可选 OCR**: MinerU（Worker 代理）/ PaddleOCR / Google Document AI
+- **解析与 OCR**: MinerU（Worker 代理或官方直连）/ 本地 Tesseract 与 PaddleOCR 补充
 
 ---
 

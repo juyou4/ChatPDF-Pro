@@ -5,7 +5,7 @@ cd "$BASE_DIR" || exit 1
 
 APP_VERSION="$(grep -E '"version"' version.json 2>/dev/null | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
 if [ -z "$APP_VERSION" ]; then
-    APP_VERSION="3.1.0"
+    APP_VERSION="unknown"
 fi
 
 # 颜色和样式定义；NO_COLOR 可用于关闭 ANSI 颜色。
@@ -147,7 +147,7 @@ CURRENT_BRANCH=""
 if command_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     if [ "$CURRENT_BRANCH" = "main" ]; then
-        if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
             show_info "检测到本地代码改动，为避免覆盖已跳过自动更新"
         elif git pull --ff-only origin main >/dev/null 2>&1; then
             show_success "代码已更新到 main 最新版本"

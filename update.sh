@@ -72,7 +72,7 @@ if [ "$CURRENT_BRANCH" != "main" ]; then
     exit 1
 fi
 
-if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
     echo "[X] 检测到本地源码改动。为避免覆盖或混合版本，请先提交或暂存这些改动。"
     exit 1
 fi
