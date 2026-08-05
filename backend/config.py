@@ -299,17 +299,17 @@ class AppSettings(BaseSettings):
     )
 
     # ==================== 在线 OCR 配置 ====================
-    # Mistral OCR API Key
+    # Deprecated compatibility fields. Online document parsing is MinerU-only;
+    # these values are read only when migrating an older installation.
     mistral_ocr_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("mistral_ocr_api_key", "CHATPDF_MISTRAL_OCR_API_KEY"),
-        description="Mistral OCR API Key"
+        description="旧版 Mistral OCR API Key（仅迁移兼容）"
     )
-    # Mistral OCR API Base URL
     mistral_ocr_base_url: str = Field(
         default="https://api.mistral.ai",
         validation_alias=AliasChoices("mistral_ocr_base_url", "CHATPDF_MISTRAL_OCR_BASE_URL"),
-        description="Mistral OCR API Base URL"
+        description="旧版 Mistral OCR Base URL（仅迁移兼容）"
     )
 
     # ==================== Figure Extraction 配置 ====================

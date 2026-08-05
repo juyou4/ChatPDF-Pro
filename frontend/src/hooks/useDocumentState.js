@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { VALID_PARSE_ROUTES } from '../utils/parseRouteUtils';
+import { DEFAULT_PARSE_ROUTE, VALID_PARSE_ROUTES } from '../utils/parseRouteUtils';
 import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
 
 const VALID_PAGE_OCR_BACKENDS = ['auto', 'tesseract', 'paddleocr'];
@@ -7,7 +7,7 @@ const LEGACY_PAGE_OCR_BACKENDS = ['mineru', 'mistral', 'doc2x'];
 const DEFAULT_OCR_SETTINGS = {
   mode: 'auto',
   backend: 'auto',
-  parseRoute: 'auto',
+  parseRoute: DEFAULT_PARSE_ROUTE,
   mineruFigureEnhance: true,
   figureRenderMode: 'raw',
 };
@@ -26,7 +26,9 @@ const loadOCRSettings = () => {
       const settings = {
         mode: validModes.includes(parsed.mode) ? parsed.mode : 'auto',
         backend: VALID_PAGE_OCR_BACKENDS.includes(parsed.backend) ? parsed.backend : 'auto',
-        parseRoute: VALID_PARSE_ROUTES.includes(parsed.parseRoute) ? parsed.parseRoute : 'auto',
+        parseRoute: VALID_PARSE_ROUTES.includes(parsed.parseRoute)
+          ? (parsed.parseRoute === 'local' ? 'local' : DEFAULT_PARSE_ROUTE)
+          : DEFAULT_PARSE_ROUTE,
         mineruFigureEnhance: typeof parsed.mineruFigureEnhance === 'boolean' ? parsed.mineruFigureEnhance : true,
         figureRenderMode: validFigureRenderModes.includes(parsed.figureRenderMode)
           ? parsed.figureRenderMode
@@ -479,7 +481,7 @@ export function useDocumentState({
     formData.append('ocr_backend', ocrSettings.backend || 'auto');
     const requestedParseRoute = VALID_PARSE_ROUTES.includes(options.parseRoute)
       ? options.parseRoute
-      : ocrSettings.parseRoute || 'auto';
+      : ocrSettings.parseRoute || DEFAULT_PARSE_ROUTE;
     formData.append('parse_route', requestedParseRoute);
 
     // 桌面模式显式使用后端地址；鉴权 header 由 Electron 主进程注入。

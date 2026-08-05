@@ -19,6 +19,10 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+# Prevent Ultralytics/DocLayout-YOLO from attempting network installs when the
+# optional layout model is loaded by the desktop app.
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
 import numpy as np
 from PIL import Image
 

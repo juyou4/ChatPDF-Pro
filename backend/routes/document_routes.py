@@ -9880,7 +9880,13 @@ async def get_ocr_status():
         "provider_sunset": {
             "mistral": {"deprecated": True, "replacement": "local_auto", "usage": get_ocr_provider_usage("mistral")},
             "doc2x": {"deprecated": True, "replacement": "local_auto", "usage": get_ocr_provider_usage("doc2x")},
-            "paddleocr": {"deprecated": True, "replacement": "paddleocr_vl", "usage": get_ocr_provider_usage("paddleocr")},
+        },
+        "local_page_supplements": {
+            "paddleocr": {
+                "role": "page_quality_supplement",
+                "deprecated": False,
+                "usage": get_ocr_provider_usage("paddleocr"),
+            },
         },
         "poppler_available": poppler_available,
         "recommended": recommended,
@@ -9980,15 +9986,9 @@ async def save_online_ocr_config(request: Request):
     """
     保存在线 OCR 服务配置
 
-    支持 Mistral（页级 OCR）和 MinerU（文档级解析）。
-    持久化到本地配置文件，并重新注册对应的在线 OCR 适配器。
-
-    请求体（Mistral）:
-        {
-            "provider": "mistral",
-            "api_key": "sk-xxx...",
-            "base_url": "https://api.mistral.ai"  // 可选
-        }
+    当前只接受 MinerU（文档级解析）的在线配置。Mistral/Doc2X 的旧配置
+    仍由兼容读取逻辑保留，但不再作为运行时在线入口。
+    持久化到本地配置文件，并重新注册 MinerU 文档解析适配器。
 
     请求体（MinerU）:
         {
@@ -10196,17 +10196,11 @@ async def get_online_ocr_config():
     """
     获取在线 OCR 服务配置（敏感信息脱敏显示）
 
-    返回各在线 OCR 提供商的配置状态，包括：
-    - Mistral: API Key 是否已配置、脱敏后的 API Key 预览和 Base URL
-    - MinerU: Worker/直连配置状态和脱敏后的凭据预览
+    返回当前在线解析配置状态。MinerU 是唯一可配置的在线服务；旧版
+    Mistral/Doc2X 配置不会在这里重新暴露。
 
     响应:
         {
-            "mistral": {
-                "api_key_configured": true,
-                "api_key_preview": "sk-x...xxxx",
-                "base_url": "https://api.mistral.ai"
-            },
             "mineru": {
                 "worker_url": "https://your-worker.workers.dev",
                 "auth_key_configured": true,
@@ -10245,16 +10239,15 @@ async def get_online_ocr_config():
                 "token_preview": _mask_api_key(token),
             }
 
-            # MinerU 特有选项
-            if provider == "mineru":
-                provider_result["enable_ocr"] = config.get("enable_ocr", False)
-                provider_result["enable_formula"] = config.get("enable_formula", True)
-                provider_result["enable_table"] = config.get("enable_table", True)
-                provider_result["model_version"] = config.get("model_version", "vlm")
+            provider_result["enable_ocr"] = config.get("enable_ocr", False)
+            provider_result["enable_formula"] = config.get("enable_formula", True)
+            provider_result["enable_table"] = config.get("enable_table", True)
+            provider_result["model_version"] = config.get("model_version", "vlm")
 
             result[provider] = provider_result
         else:
-            # Mistral 等直接 API 调用模式
+            # Defensive compatibility branch; the provider whitelist above
+            # currently makes this unreachable. Legacy config is not exposed.
             api_key = config.get("api_key", "")
             base_url = config.get("base_url", "")
 
@@ -10270,16 +10263,7 @@ async def get_online_ocr_config():
 @router.post("/api/ocr/validate-key")
 async def validate_ocr_key(request: Request):
     """
-    验证在线 OCR 服务的 API Key / Worker 连接有效性
-
-    - Mistral: 调用 GET /v1/files 接口验证 API Key
-    - MinerU: 向 Worker URL 发送 GET 请求测试可达性和认证
-
-    请求体（Mistral）:
-        {
-            "provider": "mistral",
-            "api_key": "sk-xxx..."
-        }
+    验证 MinerU 在线解析服务的 Token / Worker 连接有效性。
 
     请求体（MinerU）:
         {
