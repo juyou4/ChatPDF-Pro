@@ -46,6 +46,7 @@ from routes.paper_library_routes import router as paper_library_router
 from routes import paper_library_routes
 from services.memory_service import MemoryService
 from services.paper_library_service import PaperLibraryService
+from services.build_identity import get_public_build_identity
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,7 @@ async def get_capabilities():
     """
     from services.embedding_service import _HAS_SENTENCE_TRANSFORMERS
     from services.rerank_service import _HAS_CROSS_ENCODER
+    build = get_public_build_identity()
 
     # 收集可用的 embedding provider 列表
     embedding_providers = ["openai", "silicon", "aliyun", "gemini", "zhipu",
@@ -268,7 +270,10 @@ async def get_capabilities():
 
     return {
         "mode": runtime.mode_name,
-        "version": "3.0.2",
+        "version": build.get("version"),
+        "git_short_sha": build.get("git_short_sha"),
+        "build_time": build.get("build_time"),
+        "build_dirty": build.get("build_dirty"),
         "has_local_embedding": _HAS_SENTENCE_TRANSFORMERS,
         "has_local_rerank": _HAS_CROSS_ENCODER,
         "embedding_providers": embedding_providers,

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from runtime_mode import runtime
+from services.build_identity import get_public_build_identity
 
 router = APIRouter()
 
@@ -20,12 +21,19 @@ VECTOR_STORES_DIR = DATA_DIR / "vector_stores"
 
 @router.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    build = get_public_build_identity()
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": build.get("version"),
+        "git_short_sha": build.get("git_short_sha"),
+        "build_dirty": build.get("build_dirty"),
+    }
 
 
 @router.get("/version")
 async def get_version():
-    return {"version": "2.0.1", "build_time": "2025-11-25 19:30:00", "feature": "native_pdf_url"}
+    return get_public_build_identity()
 
 
 @router.get("/storage_info")

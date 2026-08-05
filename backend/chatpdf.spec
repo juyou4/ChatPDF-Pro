@@ -18,6 +18,22 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 block_cipher = None
 
 backend_dir = os.path.dirname(os.path.abspath(SPEC))
+project_dir = os.path.dirname(backend_dir)
+
+
+def _metadata_datas():
+    datas = []
+    version_file = os.path.join(project_dir, 'version.json')
+    if os.path.exists(version_file):
+        datas.append((version_file, '.'))
+    for build_info in (
+        os.path.join(project_dir, 'build-info.json'),
+        os.path.join(backend_dir, 'build-info.json'),
+    ):
+        if os.path.exists(build_info):
+            datas.append((build_info, '.'))
+            break
+    return datas
 
 project_hiddenimports = [
     # 路由入口
@@ -122,6 +138,7 @@ a = Analysis(
     pathex=[backend_dir],
     binaries=[],
     datas=[
+        *_metadata_datas(),
         # pdfminer 资源文件
         *collect_data_files('tiktoken', include_py_files=False),
         # DocLayout-YOLO 权重不内置到安装包；桌面端在设置页下载到用户数据目录或手动指定。
@@ -298,9 +315,38 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# 过滤运行时用户数据，防止打包泄露个人论文缓存
-_user_data_prefixes = ('data/overviews', 'data/cache', 'data/graphrag')
-clean_datas = [d for d in a.datas if not any(d[0].startswith(p) for p in _user_data_prefixes)]
+# 不把任何可变的运行时数据打入安装包。桌面端会在首次启动时由
+# CHATPDF_DATA_DIR 指向用户应用数据目录；这里的过滤用于阻止未来的 hook、
+# --add-data 参数或残留构建产物意外携带本地论文、对话、密钥或日志。
+_private_runtime_roots = {
+    'data',
+    'uploads',
+    'logs',
+    'cache',
+    'history',
+    'memory',
+    'vector_stores',
+    'semantic_groups',
+    'overviews',
+    'parse',
+}
+
+
+def _is_private_runtime_data(toc_entry):
+    destination = str(toc_entry[0]).replace('\\', '/').lstrip('./')
+    parts = [part.lower() for part in destination.split('/') if part]
+    filename = parts[-1] if parts else ''
+    return (
+        bool(parts and parts[0] in _private_runtime_roots)
+        or filename == '.env'
+        or filename.startswith('.env.')
+        or filename.endswith('.log')
+        or 'api_key' in filename
+        or 'apikey' in filename
+    )
+
+
+clean_datas = [d for d in a.datas if not _is_private_runtime_data(d)]
 
 coll = COLLECT(
     exe,

@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+setlocal EnableExtensions EnableDelayedExpansion
 echo.
 echo   ╔═══════════════════════════════════════╗
 echo   ║     ChatPDF OCR 依赖安装              ║
@@ -7,8 +8,14 @@ echo   ╚═══════════════════════�
 echo.
 
 :: 安装 Python OCR 库
+call :SELECT_PYTHON
+if errorlevel 1 (
+    echo   [✗] 未找到 Python 3.10+
+    pause
+    exit /b 1
+)
 echo   [▶] 安装 Python OCR 库...
-python -m pip install pdf2image pytesseract pillow
+!PYTHON_CMD! -m pip install pdf2image pytesseract pillow
 if errorlevel 1 (
     echo   [✗] Python 库安装失败
     pause
@@ -79,7 +86,7 @@ echo.
 
 :: 验证安装
 echo   [▶] 验证 OCR 安装...
-python -c "from pdf2image import convert_from_path; import pytesseract; print('  [✓] OCR 库导入成功')" 2>nul
+!PYTHON_CMD! -c "from pdf2image import convert_from_path; import pytesseract; print('  [✓] OCR 库导入成功')" 2>nul
 if errorlevel 1 (
     echo   [✗] OCR 库导入失败，请检查安装
 ) else (
@@ -88,3 +95,31 @@ if errorlevel 1 (
 
 echo.
 pause
+exit /b 0
+
+:SELECT_PYTHON
+set "PYTHON_CMD="
+if defined PYTHON (
+    %PYTHON% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_CMD=%PYTHON%"
+        exit /b 0
+    )
+)
+where python >nul 2>&1
+if not errorlevel 1 (
+    python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_CMD=python"
+        exit /b 0
+    )
+)
+where py >nul 2>&1
+if not errorlevel 1 (
+    py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_CMD=py -3"
+        exit /b 0
+    )
+)
+exit /b 1

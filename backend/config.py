@@ -60,7 +60,7 @@ class AppSettings(BaseSettings):
     enable_search_degrade: bool = Field(default=False, env="CHATPDF_SEARCH_DEGRADE")
     search_degrade_message: str = Field(default="搜索暂不可用，请稍后重试", env="CHATPDF_SEARCH_DEGRADE_MESSAGE")
     # 日志路径
-    error_log_path: str = Field(default="logs/errors.log", env="CHATPDF_ERROR_LOG_PATH")
+    error_log_path: str = Field(default="", env="CHATPDF_ERROR_LOG_PATH")
     # 超时/断路器
     chat_timeout: float = Field(default=120.0, env="CHATPDF_CHAT_TIMEOUT")
     search_timeout: float = Field(default=30.0, env="CHATPDF_SEARCH_TIMEOUT")

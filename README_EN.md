@@ -1,15 +1,15 @@
-# ChatPDF Pro v3.0.1
+# ChatPDF Pro v3.1.0
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.0.1-blue?style=for-the-badge)
+![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.1.0-blue?style=for-the-badge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
 
 **Smart Document Assistant - Chat with your PDFs** · [中文](README.md)
 
-[Quick Start](#quick-start) • [Features](#core-features) • [What's New in v3.0.1](#whats-new-in-v301) • [Tech Stack](#tech-stack) • [Architecture](#architecture)
+[Quick Start](#quick-start) • [Features](#core-features) • [Changelog](#changelog) • [Tech Stack](#tech-stack) • [Architecture](#architecture)
 
 </div>
 
@@ -58,6 +58,9 @@ Inline `[1]` `[2]` citations jump straight to the matching PDF page. Inline / bl
 ### Standalone Desktop Client
 
 A self-contained Windows desktop application built with Electron. The Python backend is fully integrated and packaged using PyInstaller, ensuring it works **out of the box without any Python or Node.js environment configuration.**
+
+- **Privacy-safe distribution** - The installer contains only the renderer, Electron main process, and frozen backend runtime. It never ships uploaded documents, chat history, generated overview/outline/summary caches, indexes, logs, `.env` files, or API keys.
+- **Separate runtime storage** - On first launch, the desktop app creates its runtime data in the operating system's user-data location. Installing or upgrading does not delete existing local data, and that data is never copied back into the installer.
 
 ---
 
@@ -126,12 +129,28 @@ A self-contained Windows desktop application built with Electron. The Python bac
 Download the latest `.exe` installer directly from the [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) page.
 Install and double-click the desktop icon to run. No environment setup required.
 
+### Build a Clean Windows Installer
+
+The following writes a build identity manifest, rebuilds the frontend, freezes the Python backend, and produces an x64 NSIS installer:
+
+```bash
+scripts/build-all.bat
+```
+
+The default output is in `electron/release/`. Installer filenames include the app version and Git short SHA, and the build writes `release-manifest.json` plus `.sha256` checksum files. Packaging rules exclude `data/`, `uploads/`, `logs/`, `cache/`, `history/`, `memory/`, vector and semantic indexes, `.env` files, logs, and API-key-named files at both the PyInstaller and Electron resource-copy stages. Do not manually copy a local user-data directory or development `data/` directory into the release output.
+
+`version.json` at the repository root is the single release metadata source. `/version`, `/health`, `/capabilities`, the Electron package version, and the frontend public version must match it. Before release, run:
+
+```bash
+python scripts/release_metadata.py --check
+```
+
 ### Option 2: Run from Source (Web Mode)
 
 **1. Backend Service (Python 3.10+)**
 ```bash
 cd backend
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python app.py
 ```
 
@@ -217,6 +236,9 @@ ChatPDF/
 **Q: The desktop client launches with a blank screen or throws an error?**
 A: Ensure no system proxy is intercepting localhost traffic, or try running as Administrator. On first launch, the app silently starts the Python engine in the background, which may take a few seconds.
 
+**Q: Why can I still see old documents or chat history after installing a new build?**
+A: The installer does not contain user history. When it is installed or upgraded under the same Windows account, the desktop app intentionally continues using that account's existing application-data directory, so locally stored records remain visible. A new operating-system account or a machine with no prior application data starts blank.
+
 **Q: PDF doesn't display in Web mode?**
 A: Verify the backend service is running (default port 8000). Check the browser console for CORS or network interception errors.
 
@@ -233,7 +255,12 @@ A: Switch between KaTeX and MathJax in the settings panel (bottom left). KaTeX i
 
 ## Changelog
 
-### v3.0.2 (Retrieval Depth · Current Dev Branch)
+### v3.1.0
+- MinerU full-route parsing identity, downstream cache invalidation, and shared visual assets.
+- Reading workspace UI refinements, persistent font settings, markdown note editing, and toolbar layout improvements.
+- Engineering identity cleanup: unified version metadata, reproducible build manifest, privacy-safe packaging checks, and runtime log directory alignment.
+
+### v3.0.2
 - **Numeric-Table Specialisation**: New retrieval branch for "Table N" / numeric-comparison queries, unified under a single feature flag.
 - **BM25 Synonym Expansion**: Built-in zh/en synonym dictionary + fine-grained tokenisation, measurably improves recall on long Chinese queries.
 - **Dual-Model Strategy (`cheap_model`)**: Query rewriting, decomposition, follow-up suggestions, and the answer critic each take an independent cheap model.

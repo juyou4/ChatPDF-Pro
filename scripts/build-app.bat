@@ -14,9 +14,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-call npm install --silent
+if exist "package-lock.json" (
+  call npm ci --silent
+) else (
+  call npm install --silent
+)
 if errorlevel 1 (
-  echo [X] npm install failed in frontend
+  echo [X] npm dependency install failed in frontend
   exit /b 1
 )
 
@@ -33,9 +37,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-call npm install --silent
+if exist "package-lock.json" (
+  call npm ci --silent
+) else (
+  call npm install --silent
+)
 if errorlevel 1 (
-  echo [X] npm install failed in electron
+  echo [X] npm dependency install failed in electron
   exit /b 1
 )
 

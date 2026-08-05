@@ -5,7 +5,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "BASE_DIR=%~dp0"
 cd /d "%BASE_DIR%"
 
-set "APP_VERSION=3.0.2"
+set "APP_VERSION=3.1.0"
 for /f "tokens=2 delims=:," %%v in ('findstr /i /c:"version" version.json 2^>nul ^| findstr /v /i /c:"schema_version"') do set "APP_VERSION=%%~v"
 set "APP_VERSION=!APP_VERSION: =!"
 set "APP_VERSION=!APP_VERSION:"=!"
@@ -121,9 +121,12 @@ call :PRINT_SUCCESS "前端依赖已就绪"
 
 :: ==================== 启动服务 ====================
 call :PRINT_STEP "启动后端服务"
+set "STARTUP_LOG_DIR=%BASE_DIR%data\logs"
+if not exist "!STARTUP_LOG_DIR!" mkdir "!STARTUP_LOG_DIR!" >nul 2>&1
+set "BACKEND_STARTUP_LOG=!STARTUP_LOG_DIR!\backend_startup.log"
+if exist "!BACKEND_STARTUP_LOG!" del /q "!BACKEND_STARTUP_LOG!" >nul 2>&1
 pushd backend
-if exist "backend_startup.log" del /q "backend_startup.log" >nul 2>&1
-start "" /B !PYTHON_CMD! app.py >backend_startup.log 2>&1
+start "" /B !PYTHON_CMD! app.py >"!BACKEND_STARTUP_LOG!" 2>&1
 popd
 
 :: 等待后端启动（最多 60 秒）；发现明确异常时立即退出。
@@ -133,8 +136,8 @@ set "WAIT_COUNT=0"
 !PYTHON_CMD! -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()" >nul 2>&1
 if not errorlevel 1 goto BACK_HEALTHY
 
-if exist "backend\backend_startup.log" (
-    findstr /C:"Traceback (most recent call last)" /C:"Application startup failed" /C:"error while attempting to bind" "backend\backend_startup.log" >nul 2>&1
+if exist "!BACKEND_STARTUP_LOG!" (
+    findstr /C:"Traceback (most recent call last)" /C:"Application startup failed" /C:"error while attempting to bind" "!BACKEND_STARTUP_LOG!" >nul 2>&1
     if not errorlevel 1 goto BACK_CHECK_DONE
 )
 
@@ -150,7 +153,7 @@ set "WAIT_OK=1"
 :BACK_CHECK_DONE
 if "!WAIT_OK!"=="0" (
     call :PRINT_ERROR "后端启动失败或超时，错误日志如下"
-    if exist "backend\backend_startup.log" type "backend\backend_startup.log"
+    if exist "!BACKEND_STARTUP_LOG!" type "!BACKEND_STARTUP_LOG!"
     goto BACKFAIL
 )
 call :PRINT_SUCCESS "后端服务启动成功"

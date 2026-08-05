@@ -5,7 +5,7 @@ cd "$BASE_DIR" || exit 1
 
 APP_VERSION="$(grep -E '"version"' version.json 2>/dev/null | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
 if [ -z "$APP_VERSION" ]; then
-    APP_VERSION="3.0.2"
+    APP_VERSION="3.1.0"
 fi
 
 # 颜色和样式定义；NO_COLOR 可用于关闭 ANSI 颜色。
@@ -135,6 +135,7 @@ cleanup_services() {
     if [ -n "${BACKEND_PID:-}" ] && ps -p "$BACKEND_PID" >/dev/null 2>&1; then
         kill "$BACKEND_PID" 2>/dev/null || true
     fi
+    rm -f "$BASE_DIR/backend.pid"
     for port in 3000 8000 8001 8002 8003 8004 8005; do
         kill_port "$port"
     done
@@ -227,9 +228,11 @@ show_success "前端依赖已就绪"
 
 # ==================== 启动服务 ====================
 show_progress "启动后端服务"
-BACKEND_LOG="$BASE_DIR/backend/backend_startup.log"
+mkdir -p "$BASE_DIR/data/logs"
+BACKEND_LOG="$BASE_DIR/data/logs/backend_startup.log"
 nohup "$PYTHON_CMD" backend/app.py >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+echo "$BACKEND_PID" > "$BASE_DIR/backend.pid"
 trap cleanup_services EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

@@ -75,9 +75,11 @@ ChatPDF Pro 是一款面向学术论文与长篇技术文档的本地化 AI 阅�
 
 基于 Electron 构建的独立桌面应用，使用 PyInstaller 将 Python 后端打包为单可执行文件，开箱即用、无需配置 Python 或 Node.js 环境。
 
-- **CPU-only 精简打包** — 自动剥离 CUDA / cuDNN 运行库（~2.5 GB），安装包仅 ~440 MB
+- **CPU-only 精简打包** — 自动剥离 CUDA / cuDNN 运行库（~2.5 GB），典型 Windows 安装包约 500 MB（随 Python 运行库版本略有变化）
 - **YOLO 按需下载** — DocLayout-YOLO 权重不内置，在 OCR 设置面板中一键下载或手动指定本地路径
 - **安全隔离** — 桌面模式通过 `X-ChatPDF-Token` 认证中间件保护所有 API，自动绑定 `127.0.0.1`
+- **隐私安全分发** — 安装包仅包含前端静态资源、Electron 主进程和冻结后的后端运行库；不会携带上传文档、聊天记录、总结/大纲/速览缓存、向量索引、日志、`.env` 或 API Key
+- **数据与程序分离** — 桌面端首次运行时在系统用户数据目录创建自己的运行时数据。安装或升级不会删除本机已有的用户数据，也不会将这些数据写回安装包
 
 ---
 
@@ -169,12 +171,28 @@ MinerU current 使用同一 26 题正式 manifest，不包含 4 题 smoke / prob
 
 从 [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) 页面下载最新 `.exe` 安装包，双击安装即可运行，无需任何环境配置。
 
+### 构建 Windows 桌面安装包
+
+以下流程会先生成构建身份清单，再分别重建前端、冻结 Python 后端，最后生成 x64 NSIS 安装包：
+
+```bash
+scripts/build-all.bat
+```
+
+默认产物位于 `electron/release/`。安装包文件名会包含版本号与 Git 短 SHA，并生成 `release-manifest.json` 与 `.sha256` 校验文件，便于定位用户实际安装的代码。打包规则会在 PyInstaller 和 Electron 资源复制两个阶段排除 `data/`、`uploads/`、`logs/`、`cache/`、`history/`、`memory/`、向量/语义索引、`.env`、日志和 API Key 命名文件。不要手动将本机用户数据目录或开发环境的 `data/` 复制到该目录。
+
+版本信息以仓库根目录 `version.json` 为唯一来源；`/version`、`/health`、`/capabilities`、Electron 包版本和前端静态版本都必须与它一致。发布前可运行：
+
+```bash
+python scripts/release_metadata.py --check
+```
+
 ### 方式二：源码运行（Web 模式）
 
 **1. 后端服务（Python 3.10+）**
 ```bash
 cd backend
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python app.py
 ```
 
@@ -292,6 +310,9 @@ ChatPDF/
 
 **Q: 桌面客户端启动白屏或报错？**
 A: 确保未开启系统代理拦截 localhost，或尝试以管理员身份运行。首次启动时应用会在后台拉起 Python 引擎，可能需要数秒。
+
+**Q: 为什么新安装后仍能看到旧的文档或聊天记录？**
+A: 安装包本身不包含任何用户历史。若在同一台电脑、同一系统账户中安装或升级，桌面端会继续使用该账户已有的应用数据目录，因此会显示该机器原先保存的数据；在新的系统账户或没有既有应用数据的机器上会从空白状态开始。
 
 **Q: Web 模式下 PDF 无法显示？**
 A: 确认后端服务正常运行（默认端口 8000），检查浏览器控制台有无 CORS 跨域错误。

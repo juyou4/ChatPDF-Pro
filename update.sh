@@ -1,7 +1,8 @@
 #!/bin/bash
+set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$BASE_DIR" || exit 1
+cd "$BASE_DIR"
 
 select_python() {
     local candidates=()
@@ -30,7 +31,6 @@ select_python() {
             resolved="$(command -v "$candidate" 2>/dev/null || true)"
             [ -n "$resolved" ] || continue
         fi
-
         if "$resolved" - <<'PY' >/dev/null 2>&1
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
@@ -43,57 +43,70 @@ PY
     return 1
 }
 
+install_npm_deps() {
+    local dir="$1"
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "[X] 未找到 npm，请先安装 Node.js"
+        exit 1
+    fi
+    if [ -f "$dir/package-lock.json" ]; then
+        (cd "$dir" && npm ci)
+    else
+        (cd "$dir" && npm install)
+    fi
+}
+
 echo "========================================"
-echo "   ChatPDF Pro - 一键升级"
+echo "   ChatPDF - 一键升级"
 echo "========================================"
 echo ""
 
-echo "正在从 GitHub 拉取最新代码..."
-if ! git pull origin main; then
-    echo "Git 拉取失败，请检查网络或手动执行 git pull"
+if ! command -v git >/dev/null 2>&1; then
+    echo "[X] 未找到 Git，无法自动升级"
     exit 1
 fi
 
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [ "$CURRENT_BRANCH" != "main" ]; then
+    echo "[X] 当前目录在分支 $CURRENT_BRANCH，一键升级只允许在 main 上执行"
+    exit 1
+fi
+
+if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    echo "[X] 检测到本地源码改动。为避免覆盖或混合版本，请先提交或暂存这些改动。"
+    exit 1
+fi
+
+echo "[1/4] 拉取 main 最新代码..."
+git fetch origin main
+git pull --ff-only origin main
+
 echo ""
-echo "正在检查 Python 环境..."
+echo "[2/4] 检查 Python 环境..."
 if ! select_python; then
-    echo "未找到 Python 3.10+，请先安装或设置 PYTHON=/path/to/python"
+    echo "[X] 未找到 Python 3.10+，请先安装或设置 PYTHON=/path/to/python"
+    exit 1
+fi
+if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
+    "$PYTHON_CMD" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
+    echo "[X] 当前 Python 缺少 pip：$PYTHON_CMD"
     exit 1
 fi
 
-if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
-    "$PYTHON_CMD" -m ensurepip --upgrade > /dev/null 2>&1
-fi
-
-if ! "$PYTHON_CMD" -m pip --version > /dev/null 2>&1; then
-    echo "当前 Python 缺少 pip：$PYTHON_CMD"
-    exit 1
-fi
-
-echo "正在更新后端依赖..."
-if ! "$PYTHON_CMD" -m pip install -r backend/requirements.txt; then
-    echo "后端依赖更新失败"
-    exit 1
-fi
+echo "[3/4] 更新后端依赖..."
+"$PYTHON_CMD" -m pip install -r backend/requirements.txt
 
 echo ""
-echo "正在更新前端依赖..."
-if ! command -v npm > /dev/null 2>&1; then
-    echo "未找到 npm，请先安装 Node.js"
-    exit 1
-fi
+echo "[4/4] 更新前端与桌面端依赖..."
+install_npm_deps frontend
+install_npm_deps electron
 
-cd frontend || exit 1
-if ! npm install; then
-    echo "前端依赖更新失败"
-    exit 1
-fi
-cd "$BASE_DIR" || exit 1
+"$PYTHON_CMD" scripts/release_metadata.py --check
 
 echo ""
 echo "========================================"
-echo "升级完成！"
+echo "升级完成"
 echo "========================================"
-echo ""
-echo "提示: 请关闭所有 ChatPDF 进程后重新运行 ./start.sh"
-echo ""
+echo "请关闭所有 ChatPDF 进程后重新运行 ./start.sh"

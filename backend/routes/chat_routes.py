@@ -14889,7 +14889,7 @@ async def _retrieve_document_context_for_image_turn(
             middlewares=[
                 *([LoggingMiddleware()] if settings.enable_chat_logging else []),
                 RetryMiddleware(retries=settings.chat_retry_retries, delay=settings.chat_retry_delay),
-                ErrorCaptureMiddleware(),
+                ErrorCaptureMiddleware(log_path=settings.error_log_path),
             ],
             answer_max_tokens=answer_max_tokens,
             query_expansion_api_key=query_expansion_api_key,
@@ -15947,7 +15947,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     middlewares=[
                         *( [LoggingMiddleware()] if settings.enable_chat_logging else [] ),
                         RetryMiddleware(retries=settings.chat_retry_retries, delay=settings.chat_retry_delay),
-                        ErrorCaptureMiddleware()
+                        ErrorCaptureMiddleware(log_path=settings.error_log_path)
                     ],
                     answer_max_tokens=_prelim_answer_tokens,
                     query_expansion_api_key=_query_expansion_api_key,
@@ -16078,7 +16078,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 middlewares=[
                     *( [LoggingMiddleware()] if settings.enable_chat_logging else [] ),
                     RetryMiddleware(retries=settings.chat_retry_retries, delay=settings.chat_retry_delay),
-                    ErrorCaptureMiddleware()
+                    ErrorCaptureMiddleware(log_path=settings.error_log_path)
                 ],
                 answer_max_tokens=_prelim_answer_tokens,
                 query_expansion_api_key=_query_expansion_api_key,

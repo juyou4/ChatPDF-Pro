@@ -3,10 +3,11 @@ from typing import Any, Dict, List
 import asyncio
 import logging
 import time
-import os
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+_ERROR_LOGGER_CACHE: dict[str, logging.Logger] = {}
 
 
 class BaseMiddleware(ABC):
@@ -39,10 +40,51 @@ class LoggingMiddleware(BaseMiddleware):
 
 
 class ErrorCaptureMiddleware(BaseMiddleware):
-    """捕获错误并包装统一格式，记录简单日志"""
+    """捕获错误并写入运行时日志目录。"""
 
-    def __init__(self, log_path: str = "logs/errors.log"):
-        self.log_path = log_path
+    def __init__(self, log_path: str = ""):
+        self.log_path = str(self._resolve_log_path(log_path))
+        self._error_logger = self._logger_for_path(self.log_path)
+
+    @staticmethod
+    def _resolve_log_path(log_path: str) -> Path:
+        raw_path = str(log_path or "").strip()
+        try:
+            from runtime_mode import runtime
+            base_dir = Path(runtime.data_dir)
+        except Exception:
+            base_dir = Path.cwd()
+
+        if not raw_path:
+            return base_dir / "logs" / "errors.log"
+
+        path = Path(raw_path)
+        if path.is_absolute():
+            return path
+        return base_dir / path
+
+    @staticmethod
+    def _logger_for_path(log_path: str) -> logging.Logger:
+        path = Path(log_path)
+        key = str(path.resolve())
+        cached = _ERROR_LOGGER_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        error_logger = logging.getLogger(f"chatpdf.errors.{len(_ERROR_LOGGER_CACHE) + 1}")
+        error_logger.setLevel(logging.INFO)
+        error_logger.propagate = False
+        handler = RotatingFileHandler(
+            key,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+        error_logger.addHandler(handler)
+        _ERROR_LOGGER_CACHE[key] = error_logger
+        return error_logger
 
     async def before_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return payload
@@ -50,11 +92,7 @@ class ErrorCaptureMiddleware(BaseMiddleware):
     async def after_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(response, dict) and response.get("error"):
             try:
-                dir_path = os.path.dirname(self.log_path)
-                if dir_path:
-                    os.makedirs(dir_path, exist_ok=True)
-                with open(self.log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.now().isoformat()} | {response.get('error')}\n")
+                self._error_logger.error("%s", response.get("error"))
             except Exception:
                 # 静默失败以避免影响主流程
                 pass

@@ -1,0 +1,31 @@
+name: Metadata Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Version and build metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate version metadata
+        run: python scripts/release_metadata.py --check
+
+      - name: Compile metadata modules
+        run: python -m py_compile backend/services/build_identity.py backend/routes/system_routes.py backend/utils/middleware.py

@@ -25,6 +25,10 @@ yarn-error.log*
 build/
 dist/
 *.egg-info/
+build-info.json
+backend/build-info.json
+frontend/public/build-info.json
+electron/release-privacy-clean/
 
 # Environment variables
 .env

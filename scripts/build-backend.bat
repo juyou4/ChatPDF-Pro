@@ -13,31 +13,32 @@ if errorlevel 1 (
 )
 
 set "PYTHON_CMD=python"
+if defined PYTHON set "PYTHON_CMD=%PYTHON%"
 
-%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+"%PYTHON_CMD%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
 if errorlevel 1 (
   echo [X] Python 3.10+ not found. Please install Python 3.10+ and ensure python is on PATH.
   exit /b 1
 )
 
-for /f "delims=" %%V in ('%PYTHON_CMD% --version 2^>^&1') do set "PYTHON_VERSION=%%V"
+for /f "delims=" %%V in ('"%PYTHON_CMD%" --version 2^>^&1') do set "PYTHON_VERSION=%%V"
 echo [i] Using %PYTHON_VERSION%
 
 echo [1/3] Install desktop dependencies...
-%PYTHON_CMD% -m pip install -r requirements-desktop.txt -q
+"%PYTHON_CMD%" -m pip install -r requirements-desktop.txt -q
 if errorlevel 1 (
   echo [X] Failed to install requirements-desktop.txt
   exit /b 1
 )
 
-%PYTHON_CMD% -m pip install pyinstaller -q
+"%PYTHON_CMD%" -m pip install pyinstaller -q
 if errorlevel 1 (
   echo [X] Failed to install pyinstaller
   exit /b 1
 )
 
 echo [2/3] Build backend...
-%PYTHON_CMD% -m PyInstaller chatpdf.spec --noconfirm --clean
+"%PYTHON_CMD%" -m PyInstaller chatpdf.spec --noconfirm --clean
 if errorlevel 1 (
   echo [X] PyInstaller build failed
   exit /b 1
