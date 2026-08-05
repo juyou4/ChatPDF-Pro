@@ -8,6 +8,7 @@ build pipeline writes `build-info.json`, which is bundled by PyInstaller.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -55,12 +56,13 @@ def _candidate_roots() -> list[Path]:
     return deduped
 
 
-def _load_first_json(env_name: str, filenames: tuple[str, ...]) -> dict[str, Any] | None:
-    env_path = os.getenv(env_name, "").strip()
-    if env_path:
-        data = _read_json(Path(env_path))
-        if data is not None:
-            return data
+def _load_first_json(env_name: str | None, filenames: tuple[str, ...]) -> dict[str, Any] | None:
+    if env_name:
+        env_path = os.getenv(env_name, "").strip()
+        if env_path:
+            data = _read_json(Path(env_path))
+            if data is not None:
+                return data
 
     for root in _candidate_roots():
         for filename in filenames:
@@ -88,7 +90,9 @@ def _git(repo_root: Path, *args: str) -> str:
 def _git_dirty(repo_root: Path) -> bool | None:
     try:
         completed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            # Ignore only files covered by .gitignore (build output and runtime
+            # data); untracked source files must make the build visibly dirty.
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
@@ -100,6 +104,55 @@ def _git_dirty(repo_root: Path) -> bool | None:
         return None
 
 
+def _git_worktree_fingerprint(repo_root: Path, head_sha: str) -> str:
+    """Hash the exact non-ignored source content in the current checkout."""
+    try:
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", "-z", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=10,
+            check=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=10,
+            check=True,
+        ).stdout
+    except Exception:
+        return ""
+
+    paths = {
+        raw.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for raw in (changed + untracked).split(b"\0")
+        if raw
+    }
+    digest = hashlib.sha256()
+    digest.update(head_sha.encode("utf-8"))
+    digest.update(b"\0")
+    for relative in sorted(paths):
+        digest.update(relative.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        source_path = repo_root / Path(relative)
+        if source_path.is_file():
+            file_digest = hashlib.sha256()
+            try:
+                with source_path.open("rb") as source_file:
+                    for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                        file_digest.update(chunk)
+            except OSError:
+                digest.update(b"unreadable\0")
+                continue
+            digest.update(b"file\0")
+            digest.update(file_digest.hexdigest().encode("ascii"))
+        else:
+            digest.update(b"deleted\0")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _source_git_identity() -> dict[str, Any]:
     repo_root = _source_root()
     sha = _git(repo_root, "rev-parse", "--verify", "HEAD")
@@ -109,6 +162,7 @@ def _source_git_identity() -> dict[str, Any]:
         "git_sha": sha,
         "git_short_sha": sha[:12],
         "git_branch": _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD") or None,
+        "source_fingerprint": _git_worktree_fingerprint(repo_root, sha),
         "build_time": _git(repo_root, "show", "-s", "--format=%cI", "HEAD") or None,
         "build_dirty": _git_dirty(repo_root),
         "build_source": "source-git",
@@ -118,12 +172,20 @@ def _source_git_identity() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def get_build_identity() -> dict[str, Any]:
     version_meta = _load_first_json("CHATPDF_VERSION_FILE", ("version.json",)) or {}
-    build_meta = _load_first_json(
-        "CHATPDF_BUILD_INFO_FILE",
-        ("build-info.json", "backend/build-info.json"),
-    ) or {}
+    explicit_build_info = os.getenv("CHATPDF_BUILD_INFO_FILE", "").strip()
+    build_meta: dict[str, Any] = {}
+    if explicit_build_info:
+        build_meta = _read_json(Path(explicit_build_info)) or {}
+    elif _bundle_root() is not None:
+        # Only a frozen backend should consume bundled build-info. A source
+        # checkout may have stale ignored manifests from an earlier package.
+        build_meta = _load_first_json(None, ("build-info.json", "backend/build-info.json")) or {}
 
+    # Source mode always reports the checkout that is actually running. If a
+    # source archive has no Git metadata, fall back to its generated manifest.
     git_meta = _source_git_identity() if not build_meta else {}
+    if not build_meta and not git_meta:
+        build_meta = _load_first_json(None, ("build-info.json", "backend/build-info.json")) or {}
 
     version = str(version_meta.get("version") or build_meta.get("version") or "0.0.0")
     git_sha = (
@@ -147,6 +209,11 @@ def get_build_identity() -> dict[str, Any]:
         "github_repo": version_meta.get("githubRepo") or "",
         "git_sha": git_sha,
         "git_short_sha": git_short_sha,
+        "source_fingerprint": (
+            build_meta.get("source_fingerprint")
+            or git_meta.get("source_fingerprint")
+            or ""
+        ),
         "git_branch": (
             os.getenv("CHATPDF_BUILD_GIT_BRANCH")
             or build_meta.get("git_branch")

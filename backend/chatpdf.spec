@@ -13,7 +13,12 @@ PyInstaller spec 文件 - ChatPDF 桌面后端打包配置
 """
 
 import os
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+# DocLayout-YOLO must never install missing dependencies during a build or at runtime.
+# The desktop artifact is intentionally reproducible and only uses bundled packages.
+os.environ.setdefault('YOLO_AUTOINSTALL', 'false')
 
 block_cipher = None
 
@@ -329,6 +334,35 @@ _private_runtime_roots = {
     'semantic_groups',
     'overviews',
     'parse',
+    # Never ship development fixtures or evaluation/course material.
+    'test',
+    'tests',
+    'fixture',
+    'fixtures',
+    'course',
+    'courses',
+    'eval',
+    'evaluation',
+    'evaluations',
+    '课程',
+}
+
+_private_runtime_extensions = {
+    '.pdf',
+    '.db',
+    '.sqlite',
+    '.sqlite3',
+    '.faiss',
+    '.pkl',
+    '.pickle',
+    '.log',
+}
+
+_private_runtime_basenames = {
+    'online_ocr_config.json',
+    'ocr_provider_usage.json',
+    'chat_history.json',
+    'history.json',
 }
 
 
@@ -337,10 +371,11 @@ def _is_private_runtime_data(toc_entry):
     parts = [part.lower() for part in destination.split('/') if part]
     filename = parts[-1] if parts else ''
     return (
-        bool(parts and parts[0] in _private_runtime_roots)
+        any(part in _private_runtime_roots for part in parts)
+        or Path(filename).suffix.lower() in _private_runtime_extensions
+        or filename in _private_runtime_basenames
         or filename == '.env'
         or filename.startswith('.env.')
-        or filename.endswith('.log')
         or 'api_key' in filename
         or 'apikey' in filename
     )

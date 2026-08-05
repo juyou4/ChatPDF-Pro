@@ -24,8 +24,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validate version metadata
-        run: python scripts/release_metadata.py --check
+      - name: Generate and validate build identity
+        run: python scripts/release_metadata.py --write-build-info --check
+
+      - name: Verify build identity fields
+        run: python -c "import json; from pathlib import Path; d=json.loads(Path('build-info.json').read_text(encoding='utf-8')); assert d.get('git_sha'), 'git_sha is missing'; assert d.get('source_fingerprint'), 'source_fingerprint is missing'"
 
       - name: Compile metadata modules
         run: python -m py_compile backend/services/build_identity.py backend/routes/system_routes.py backend/utils/middleware.py

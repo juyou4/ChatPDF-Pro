@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +19,35 @@ const forbiddenRuntimeRoots = new Set([
   'semantic_groups',
   'overviews',
   'parse',
+  // Development fixtures and evaluation material are never runtime assets.
+  'test',
+  'tests',
+  'fixture',
+  'fixtures',
+  'course',
+  'courses',
+  'eval',
+  'evaluation',
+  'evaluations',
+  '课程',
+]);
+
+const forbiddenExtensions = new Set([
+  '.pdf',
+  '.db',
+  '.sqlite',
+  '.sqlite3',
+  '.faiss',
+  '.pkl',
+  '.pickle',
+  '.log',
+]);
+
+const forbiddenBasenames = new Set([
+  'online_ocr_config.json',
+  'ocr_provider_usage.json',
+  'chat_history.json',
+  'history.json',
 ]);
 
 function fail(message) {
@@ -68,6 +99,63 @@ function compareField(label, left, right, field, required = true) {
   }
 }
 
+function currentGitState() {
+  try {
+    const sha = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
+      cwd: rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return { sha, dirty: Boolean(status.trim()) };
+  } catch {
+    return { sha: '', dirty: null };
+  }
+}
+
+function gitText(args) {
+  return execFileSync('git', args, {
+    cwd: rootDir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+}
+
+function sourceFingerprint() {
+  try {
+    const headSha = gitText(['rev-parse', '--verify', 'HEAD']).trim();
+    if (!headSha) return '';
+    const tracked = gitText(['diff', '--name-only', '-z', 'HEAD']);
+    const untracked = gitText(['ls-files', '--others', '--exclude-standard', '-z']);
+    const paths = new Set(
+      `${tracked}${untracked}`
+        .split('\0')
+        .filter(Boolean)
+        .map((value) => value.replaceAll('\\', '/')),
+    );
+    const digest = crypto.createHash('sha256');
+    digest.update(`${headSha}\0`);
+    for (const relative of [...paths].sort()) {
+      digest.update(`${relative}\0`);
+      const fullPath = path.join(rootDir, ...relative.split('/'));
+      if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+        digest.update('file\0');
+        digest.update(sha256(fullPath).toLowerCase());
+      } else {
+        digest.update('deleted\0');
+      }
+      digest.update('\0');
+    }
+    return digest.digest('hex');
+  } catch {
+    return '';
+  }
+}
+
 function scanForPrivateFiles(dirPath, label) {
   const stack = [dirPath];
   while (stack.length) {
@@ -76,16 +164,16 @@ function scanForPrivateFiles(dirPath, label) {
       const fullPath = path.join(current, entry.name);
       const rel = path.relative(dirPath, fullPath).replaceAll(path.sep, '/');
       const parts = rel.split('/').map((part) => part.toLowerCase());
-      const first = parts[0] || '';
-      const second = parts[1] || '';
       const lowerName = entry.name.toLowerCase();
+      const extension = path.extname(lowerName);
 
       if (
-        forbiddenRuntimeRoots.has(first) ||
-        (first === '_internal' && forbiddenRuntimeRoots.has(second)) ||
+        parts.some((part) => forbiddenRuntimeRoots.has(part)) ||
+        (parts[0] === '_internal' && forbiddenRuntimeRoots.has(parts[1] || '')) ||
+        forbiddenExtensions.has(extension) ||
+        forbiddenBasenames.has(lowerName) ||
         lowerName === '.env' ||
         lowerName.startsWith('.env.') ||
-        lowerName.endsWith('.log') ||
         lowerName.includes('api_key') ||
         lowerName.includes('apikey')
       ) {
@@ -115,6 +203,27 @@ if (!backendDistBuildPath) {
 
 const backendDistBuild = readJson(backendDistBuildPath);
 const electronPkg = readJson(path.join(electronDir, 'package.json'));
+const gitState = currentGitState();
+const currentSourceFingerprint = sourceFingerprint();
+
+if (gitState.sha && rootBuild.git_sha && rootBuild.git_sha !== gitState.sha) {
+  fail(
+    `root build-info was generated for ${rootBuild.git_short_sha || rootBuild.git_sha}, `
+    + `but the current checkout is ${gitState.sha.slice(0, 12)}; run scripts\\build-all.bat first`,
+  );
+}
+if (gitState.dirty !== null && typeof rootBuild.build_dirty === 'boolean' && rootBuild.build_dirty !== gitState.dirty) {
+  fail(
+    `root build-info dirty=${rootBuild.build_dirty} does not match the current checkout `
+    + `dirty=${gitState.dirty}; run scripts\\build-all.bat first`,
+  );
+}
+if (currentSourceFingerprint && rootBuild.source_fingerprint !== currentSourceFingerprint) {
+  fail(
+    `build-info source_fingerprint does not match the current checkout; `
+    + `rebuild with scripts\\build-all.bat first`,
+  );
+}
 
 compareField('version.json vs build-info', versionJson, rootBuild, 'version');
 compareField('electron/package.json vs build-info', electronPkg, rootBuild, 'version');

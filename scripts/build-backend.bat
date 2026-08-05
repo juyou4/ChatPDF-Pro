@@ -1,6 +1,9 @@
 @echo off
 setlocal
 
+rem Keep PyInstaller and the packaged desktop app offline/reproducible.
+set "YOLO_AUTOINSTALL=false"
+
 echo.
 echo [ChatPDF] Backend build (PyInstaller)
 echo.
