@@ -16,6 +16,11 @@ import logging
 import re
 from typing import Any, Optional
 
+from services.completion_outcome import (
+    IncompleteCompletionError,
+    require_publishable_completion,
+)
+
 logger = logging.getLogger(__name__)
 
 # 解析失败（模型已应答但格式不对）重试一次；超时不重试——超时说明模型慢，
@@ -394,9 +399,10 @@ async def critique_evidence_claims(
                 timeout=timeout,
             )
             try:
+                require_publishable_completion(response, operation="claim verifier")
                 parsed = _parse_critic_json(_extract_response_text(response))
                 break
-            except _CriticResponseError:
+            except (IncompleteCompletionError, _CriticResponseError):
                 if attempt >= _MAX_PARSE_ATTEMPTS:
                     raise
                 await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
@@ -532,21 +538,22 @@ async def critique_answer(
                 ),
                 timeout=timeout,
             )
-            text = _extract_response_text(result)
             try:
+                require_publishable_completion(result, operation="answer critic")
+                text = _extract_response_text(result)
                 parsed = _parse_critic_json(text)
                 break
-            except _CriticResponseError as parse_error:
+            except (IncompleteCompletionError, _CriticResponseError) as parse_error:
                 if attempt >= _MAX_PARSE_ATTEMPTS:
                     raise
                 logger.warning(
                     "[Critic] 自审响应解析失败，重试 %s/%s: %s",
                     attempt,
                     _MAX_PARSE_ATTEMPTS,
-                    parse_error.detail,
+                    getattr(parse_error, "detail", str(parse_error)),
                     extra={
-                        "critic_error_code": parse_error.code,
-                        "critic_error_detail": parse_error.detail,
+                        "critic_error_code": getattr(parse_error, "code", "incomplete_completion"),
+                        "critic_error_detail": getattr(parse_error, "detail", str(parse_error)),
                     },
                 )
                 await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
@@ -727,6 +734,7 @@ async def repair_answer_once(
             ),
             timeout=timeout,
         )
+        require_publishable_completion(response, operation="answer critic repair")
         candidate = _extract_response_text(response).strip()
     except asyncio.TimeoutError:
         diagnostics["validation"] = "timeout"

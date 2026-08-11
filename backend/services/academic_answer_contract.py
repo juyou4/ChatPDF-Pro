@@ -401,7 +401,28 @@ def strip_citation_protocol_block(answer: str) -> str:
     return text.strip()
 
 
-def analyze_citation_coverage(answer: str) -> dict[str, Any]:
+def _is_full_document_summary_mode(
+    retrieval_meta: Optional[dict] = None,
+    answer_mode: str = "",
+) -> bool:
+    if str(answer_mode or "").strip().lower() == "full_document_summary":
+        return True
+    meta = retrieval_meta if isinstance(retrieval_meta, dict) else {}
+    summary_meta = meta.get("full_document_summary")
+    return isinstance(summary_meta, dict) and bool(summary_meta)
+
+
+def _full_document_summary_coverage(retrieval_meta: Optional[dict]) -> dict[str, Any]:
+    meta = retrieval_meta if isinstance(retrieval_meta, dict) else {}
+    value = meta.get("full_document_summary")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def analyze_citation_coverage(
+    answer: str,
+    *,
+    answer_mode: str = "",
+) -> dict[str, Any]:
     """Deterministic check: factual sentences should carry [n]."""
     text = strip_citation_protocol_block(answer)
     if not text:
@@ -413,6 +434,7 @@ def analyze_citation_coverage(answer: str) -> dict[str, Any]:
             "uncited_samples": [],
             "citation_ids": [],
             "coverage": 1.0,
+            "answer_mode": answer_mode or "qa",
         }
 
     if is_cannot_answer(text):
@@ -425,6 +447,7 @@ def analyze_citation_coverage(answer: str) -> dict[str, Any]:
             "citation_ids": [],
             "coverage": 1.0,
             "refused": True,
+            "answer_mode": answer_mode or "qa",
         }
 
     parts = [p.strip() for p in split_sentences(text) if p.strip()]
@@ -467,6 +490,7 @@ def analyze_citation_coverage(answer: str) -> dict[str, Any]:
         "uncited_samples": uncited_samples,
         "citation_ids": citation_ids,
         "coverage": coverage,
+        "answer_mode": answer_mode or "qa",
     }
 
 
@@ -476,10 +500,15 @@ def derive_answer_certainty(
     retrieval_meta: Optional[dict] = None,
     critic: Optional[dict] = None,
     citation_coverage: Optional[dict] = None,
+    answer_mode: str = "",
 ) -> dict[str, Any]:
     """Derive Certain / Partial / Unsure / Refused for academic reading UX."""
     meta = retrieval_meta if isinstance(retrieval_meta, dict) else {}
-    coverage = citation_coverage or analyze_citation_coverage(answer)
+    full_document_summary = _is_full_document_summary_mode(meta, answer_mode)
+    coverage = citation_coverage or analyze_citation_coverage(
+        answer,
+        answer_mode="full_document_summary" if full_document_summary else answer_mode,
+    )
     critic = critic if isinstance(critic, dict) else {}
 
     if is_cannot_answer(answer):
@@ -491,6 +520,29 @@ def derive_answer_certainty(
 
     reasons: list[str] = []
     score = 0.72  # neutral prior for grounded academic answer
+
+    summary_coverage: dict[str, Any] = {}
+    if full_document_summary:
+        summary_coverage = _full_document_summary_coverage(meta)
+        body_expected = max(0, int(summary_coverage.get("body_expected") or 0))
+        body_summarized = max(0, int(summary_coverage.get("body_summarized") or 0))
+        appendix_expected = max(0, int(summary_coverage.get("appendix_expected") or 0))
+        appendix_summarized = max(0, int(summary_coverage.get("appendix_summarized") or 0))
+        body_complete = body_expected == 0 or body_summarized >= body_expected
+        appendix_complete = appendix_expected == 0 or appendix_summarized >= appendix_expected
+        source = str(summary_coverage.get("source") or "").strip().lower()
+        if body_complete and appendix_complete:
+            score += 0.12
+            reasons.append("full_document_section_coverage_complete")
+        elif body_expected and body_summarized:
+            score -= 0.10
+            reasons.append("full_document_section_coverage_partial")
+        else:
+            score -= 0.20
+            reasons.append("full_document_section_coverage_missing")
+        if source and not source.startswith("ai"):
+            score -= 0.08
+            reasons.append("full_document_outline_fallback")
 
     # Evidence scoring from agent path
     signals = extract_evidence_signals(meta)
@@ -573,20 +625,58 @@ def derive_answer_certainty(
         reasons.append("retrieval_degraded_or_fallback")
 
     score = max(0.0, min(1.0, round(score, 4)))
-    if score >= 0.75 and uncited == 0 and not critic.get("has_hallucination"):
+    summary_ready_for_certain = True
+    if full_document_summary:
+        summary_source = str(summary_coverage.get("source") or "").strip().lower()
+        summary_status = str(summary_coverage.get("generation_status") or "").strip().lower()
+        summary_ready_for_certain = bool(
+            summary_coverage.get("complete")
+            and summary_source.startswith("ai")
+            and summary_status not in {"partial", "failed", "unavailable"}
+        )
+        if not summary_ready_for_certain:
+            reasons.append("full_document_summary_not_ready_for_certain")
+
+    if (
+        score >= 0.75
+        and uncited == 0
+        and not critic.get("has_hallucination")
+        and summary_ready_for_certain
+    ):
         label: Certainty = "Certain"
     elif score >= 0.55:
         label = "Partial"
     else:
         label = "Unsure"
 
-    return {
+    result = {
         "label": label,
         "score": score,
         "reasons": reasons[:8],
         "citation_coverage": coverage.get("coverage"),
         "uncited_factual_count": uncited,
     }
+    if full_document_summary:
+        result["full_document_summary"] = {
+            key: summary_coverage.get(key)
+            for key in (
+                "mode",
+                "source",
+                "generation_status",
+                "body_expected",
+                "body_summarized",
+                "appendix_expected",
+                "appendix_summarized",
+                "body_complete",
+                "appendix_complete",
+                "complete",
+                "rendered_section_count",
+                "citation_count",
+                "retryable",
+            )
+            if key in summary_coverage
+        }
+    return result
 
 
 def postprocess_critic_result(
@@ -594,13 +684,18 @@ def postprocess_critic_result(
     *,
     answer: str,
     retrieval_meta: Optional[dict] = None,
+    answer_mode: str = "",
 ) -> dict[str, Any]:
     """Merge LLM critic with deterministic academic checks and certainty."""
     base = dict(critique or {}) if isinstance(critique, dict) else {}
     # critic 超时/解析失败时返回 None，此时结论完全来自本地规则。前端需要能区分
     # 两者，否则纯规则分数会被当成模型给出的置信度。
     critic_source = "llm" if isinstance(critique, dict) else "rules_only"
-    coverage = analyze_citation_coverage(answer)
+    full_document_summary = _is_full_document_summary_mode(retrieval_meta, answer_mode)
+    coverage = analyze_citation_coverage(
+        answer,
+        answer_mode="full_document_summary" if full_document_summary else answer_mode,
+    )
 
     # issue_details 是结构化形态；critic 返回纯文本时（或历史载荷）向上兼容。
     raw_details = base.get("issue_details")
@@ -633,7 +728,11 @@ def postprocess_critic_result(
     if uncited > 0 and not coverage.get("refused"):
         sample = coverage.get("uncited_samples") or []
         tip = sample[0] if sample else ""
-        msg = f"有 {uncited} 处事实陈述缺少 [n] 引用"
+        msg = (
+            f"有 {uncited} 处章节结论未绑定到阅读证据"
+            if full_document_summary
+            else f"有 {uncited} 处事实陈述缺少 [n] 引用"
+        )
         if tip:
             msg += f"：「{tip[:60]}」"
         if all(item.get("text") != msg for item in issue_details):
@@ -690,7 +789,11 @@ def postprocess_critic_result(
     if unscoped_absence_claims and not suggestion:
         suggestion = "\u8bf7\u5c06\u6574\u7bc7\u6587\u6863\u7684\u7f3a\u5931\u65ad\u8a00\u6539\u4e3a\u5f53\u524d\u8bc1\u636e\u8303\u56f4\uff0c\u6216\u8865\u5145\u660e\u786e\u7684\u539f\u6587\u5f15\u7528\u3002"
     elif uncited > 0 and not suggestion:
-        suggestion = "请为关键数值与结论句补充 [n] 引用，或改为拒答。"
+        suggestion = (
+            "请为章节结论补齐阅读大纲中的证据块绑定。"
+            if full_document_summary
+            else "请为关键数值与结论句补充 [n] 引用，或改为拒答。"
+        )
 
     certainty = derive_answer_certainty(
         answer=answer,
@@ -700,6 +803,7 @@ def postprocess_critic_result(
             "score": score,
         },
         citation_coverage=coverage,
+        answer_mode="full_document_summary" if full_document_summary else answer_mode,
     )
 
     # reason 只承载「建议」，不镜像 issues[0]。此前 has_hallucination 时把 issues[0]
@@ -721,13 +825,14 @@ def postprocess_critic_result(
         "citation_coverage": coverage,
         "certainty": certainty,
         "academic_contract": True,
+        "answer_mode": "full_document_summary" if full_document_summary else (answer_mode or "qa"),
     }
 
 
 def build_answer_certainty_event(certainty: dict[str, Any]) -> dict[str, Any]:
     """SSE/API payload for frontend badge."""
     label = str((certainty or {}).get("label") or "Unsure")
-    return {
+    payload = {
         "type": "answer_certainty",
         "certainty": {
             "label": label,
@@ -737,3 +842,7 @@ def build_answer_certainty_event(certainty: dict[str, Any]) -> dict[str, Any]:
             "uncited_factual_count": (certainty or {}).get("uncited_factual_count"),
         },
     }
+    full_document_summary = (certainty or {}).get("full_document_summary")
+    if isinstance(full_document_summary, dict):
+        payload["certainty"]["full_document_summary"] = dict(full_document_summary)
+    return payload

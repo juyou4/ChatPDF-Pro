@@ -295,6 +295,7 @@ class RerankService:
         import asyncio
         import concurrent.futures
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
 
         def _run_async_local(coro):
             try:
@@ -340,9 +341,16 @@ class RerankService:
                     max_tokens=100,
                     temperature=0.0,
                 ))
+                require_publishable_completion(response, operation="LLM rerank")
 
                 # 解析分数
-                scores_text = response.strip()
+                if isinstance(response, dict):
+                    choices = response.get("choices") or []
+                    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+                    scores_text = str(message.get("content") or "") if isinstance(message, dict) else ""
+                else:
+                    scores_text = str(response or "")
+                scores_text = scores_text.strip()
                 # 提取 JSON 数组
                 match = __import__('re').search(r'\[([\d,\s.]+)\]', scores_text)
                 if match:
@@ -350,8 +358,15 @@ class RerankService:
                 else:
                     scores = json.loads(scores_text)
 
+                if not isinstance(scores, list) or len(scores) != len(batch):
+                    raise ValueError(
+                        f"LLM rerank score count mismatch: expected={len(batch)} actual={len(scores) if isinstance(scores, list) else 0}"
+                    )
+                if any(not isinstance(score, (int, float)) or isinstance(score, bool) for score in scores):
+                    raise ValueError("LLM rerank returned a non-numeric score")
+
                 for i, item in enumerate(batch):
-                    score = float(scores[i]) if i < len(scores) else 0.0
+                    score = max(0.0, min(10.0, float(scores[i])))
                     item["rerank_score"] = score / 10.0  # 归一化到 0-1
                     item["reranked"] = True
                     item["rerank_method"] = "llm"
@@ -414,7 +429,14 @@ class RerankService:
                 return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
 
             # 云端 provider 需要 API Key，从 Key 池中随机选择一个有效 Key
-            if provider in self.CLOUD_RERANK_PROVIDERS:
+            # 动态 Provider 不应被固定白名单挡在本地回退之外。只要调用方
+            # 明确提供了 rerank endpoint 和 API Key，就按 OpenAI/Cohere
+            # 兼容的 ``query + documents`` 协议执行；local/llm 仍保持原路径。
+            remote_with_explicit_endpoint = (
+                provider not in {"local", "llm"}
+                and bool(str(endpoint or "").strip())
+            )
+            if provider in self.CLOUD_RERANK_PROVIDERS or remote_with_explicit_endpoint:
                 actual_key = select_api_key(api_key) if api_key else None
                 if not actual_key:
                     raise ValueError(f"{provider} rerank 需要提供 api_key")

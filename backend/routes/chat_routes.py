@@ -19,9 +19,14 @@ from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.chat_service import call_ai_api, call_ai_api_stream, extract_reasoning_content
+from services.completion_outcome import (
+    CompletionStatus,
+    extract_finish_reason,
+    resolve_completion_outcome,
+)
 from services.citation_authorization import (
     filter_authorized_citations,
     filter_authorized_context_segments,
@@ -73,6 +78,7 @@ from services.academic_graph_service import (
 )
 from services.context_builder import ContextBuilder
 from services.web_search_service import SearchManager, format_search_results
+from services.web_research_query_service import build_web_research_query
 # 联网三态策略的唯一实现在 services/web_search_policy.py。route 与
 # agent_retrieval_service 都转发到它，避免两份实现漂移。
 from services.web_search_policy import (
@@ -80,6 +86,11 @@ from services.web_search_policy import (
     is_explicit_web_search_request,
     resolve_effective_web_search_mode as _resolve_effective_web_search_mode,
     resolve_web_search_mode as _resolve_web_search_mode,
+)
+from services.reasoning_effort_service import (
+    is_valid_reasoning_effort,
+    normalize_reasoning_effort,
+    resolve_reasoning_request,
 )
 from services.web_search_reranker import rerank_web_results
 from services.query_rewriter import QueryRewriter
@@ -103,6 +114,8 @@ from services.visual_document_enrichment_service import enrich_referenced_figure
 from services.visual_model_service import resolve_visual_enrichment_policy
 from services.visual_supplement_service import committed_visual_evidence_for_document
 from services.block_index_service import active_block_index_revision, load_block_index
+from services.reading_outline_service import get_or_create_reading_outline, save_reading_outline
+from services.full_document_summary_service import build_full_document_summary
 from services.document_context_sampling import sample_document_text
 from services.block_inventory_service import (
     build_inventory_context,
@@ -185,6 +198,7 @@ _CHAT_TURN_STATUS_COMPLETED = "completed"
 _CHAT_TURN_STATUS_RECOVERED_RETRY = "recovered_retry"
 _CHAT_TURN_STATUS_EVIDENCE_FALLBACK = "evidence_fallback"
 _CHAT_TURN_STATUS_DEGRADED = "degraded"
+_CHAT_TURN_STATUS_TRUNCATED = "truncated"
 _CHAT_TURN_STATUS_FAILED = "failed"
 _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES = frozenset({
     _CHAT_TURN_STATUS_COMPLETED,
@@ -193,6 +207,7 @@ _CHAT_MEMORY_ELIGIBLE_TURN_STATUSES = frozenset({
 _CHAT_HISTORY_EXCLUDED_TURN_STATUSES = frozenset({
     _CHAT_TURN_STATUS_EVIDENCE_FALLBACK,
     _CHAT_TURN_STATUS_DEGRADED,
+    _CHAT_TURN_STATUS_TRUNCATED,
     _CHAT_TURN_STATUS_FAILED,
     "interrupted",
     "cancelled",
@@ -487,6 +502,29 @@ def _chat_terminal_fields(turn_status: str, parse_identity: dict | None) -> dict
     }
 
 
+def _response_completion_outcome(response: object):
+    """Resolve one provider-neutral outcome for chat and retry paths."""
+
+    return resolve_completion_outcome(response if isinstance(response, dict) else None)
+
+
+def _chat_success_status_for_response(
+    response: object,
+    *,
+    normal_status: str = _CHAT_TURN_STATUS_COMPLETED,
+) -> str:
+    outcome = _response_completion_outcome(response)
+    if outcome.status is CompletionStatus.TRUNCATED:
+        return _CHAT_TURN_STATUS_TRUNCATED
+    if outcome.status is CompletionStatus.BLOCKED:
+        return _CHAT_TURN_STATUS_FAILED
+    if isinstance(response, dict) and bool(
+        response.get("degraded") or response.get("answer_status") == "degraded"
+    ):
+        return _CHAT_TURN_STATUS_DEGRADED
+    return normal_status
+
+
 def _chat_document_store(request) -> dict:
     root_store = getattr(router, "documents_store", None)
     if not isinstance(root_store, dict):
@@ -656,23 +694,50 @@ def _log_chat_trace(trace_id: str, started_at: float, stage: str, **fields) -> N
         logger.debug(line)
 
 
+def _join_provider_endpoint(base: str, path: str) -> str:
+    """Join a provider base URL and relative path without duplicate prefixes."""
+    base_clean = str(base or "").rstrip("/")
+    path_clean = "/" + str(path or "").lstrip("/")
+    if not base_clean:
+        return path_clean
+    if not path:
+        return base_clean
+    try:
+        parsed = urlsplit(base_clean)
+    except ValueError:
+        parsed = None
+    if parsed and parsed.scheme and parsed.netloc:
+        base_path = (parsed.path or "").rstrip("/")
+        if base_path and (base_path == path_clean or base_path.endswith(path_clean)):
+            return base_clean
+        if base_path and path_clean.startswith(base_path + "/"):
+            return parsed._replace(path=path_clean).geturl().rstrip("/")
+    return f"{base_clean}{path_clean}"
+
+
 def _get_provider_endpoint(provider_id: str, api_host: str = "") -> str:
     """按优先级解析 provider 的 chat endpoint：
     1. 前端传入的 api_host（用户自定义地址）
     2. 动态 provider 存储（用户通过 UI 添加的定制 provider）
     3. 静态 PROVIDER_CONFIG（内置默认配置）
     """
-    # 1. 前端明确传入了 api_host：拼接成完整 endpoint
+    dynamic = load_dynamic_providers()
+    dynamic_config = dynamic.get(provider_id) or {}
+
+    # 1. 前端明确传入了 api_host：拼接成完整 endpoint。动态 Provider 的
+    # chat_endpoint 由后端持久化并参与解析，避免 UI 只保存 base URL 时丢失
+    # 非标准路径。
     if api_host and api_host.strip():
         host = api_host.strip().rstrip('/')
-        # 如果已包含 /chat/completions 则直接使用
         if host.endswith('/chat/completions'):
             return host
-        return f"{host}/chat/completions"
+        configured_path = str(dynamic_config.get("chat_endpoint") or "").strip()
+        return _join_provider_endpoint(host, configured_path or "/chat/completions")
     # 2. 动态 provider 存储
-    dynamic = load_dynamic_providers()
     if provider_id in dynamic:
-        return dynamic[provider_id].get("endpoint", "")
+        endpoint = str(dynamic_config.get("endpoint") or "").rstrip("/")
+        configured_path = str(dynamic_config.get("chat_endpoint") or "").strip()
+        return _join_provider_endpoint(endpoint, configured_path) if configured_path else endpoint
     # 3. 静态内置配置
     return PROVIDER_CONFIG.get(provider_id, {}).get("endpoint", "")
 
@@ -3016,9 +3081,13 @@ def _build_safe_chat_history_messages(
                 parse_identity,
             )
         ):
+            assistant_message = {"role": "assistant", "content": content}
+            reasoning_content = str(message.get("reasoning_content") or "").strip()
+            if reasoning_content:
+                assistant_message["reasoning_content"] = reasoning_content
             turns.extend([
                 {"role": "user", "content": str(pending_user.get("content") or "").strip()},
-                {"role": "assistant", "content": content},
+                assistant_message,
             ])
         pending_user = None
     return turns
@@ -3326,6 +3395,17 @@ class ChatRequest(BaseModel):
     cheap_model_provider: Optional[str] = None
     cheap_model_endpoint: Optional[str] = None
 
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not is_valid_reasoning_effort(value):
+            raise ValueError(
+                "reasoning_effort 仅支持 off、minimal、low、medium、high、xhigh、max、ultra"
+            )
+        return normalize_reasoning_effort(value)
+
     # ---- Feature flag per-request overrides ----
     # None = 跟随全局 settings；True/False = 本次请求强制开启/关闭
     override_numeric_table: Optional[bool] = None
@@ -3348,9 +3428,12 @@ def _validate_chat_request_limits(request: ChatRequest) -> None:
         if not isinstance(item, dict):
             raise HTTPException(status_code=422, detail="chat_history 必须是消息对象数组")
         content = str(item.get("content") or "")
+        reasoning_content = str(item.get("reasoning_content") or "")
         if len(content) > _MAX_CHAT_HISTORY_ITEM_CHARS:
             raise HTTPException(status_code=413, detail="单条聊天历史超过大小限制")
-        history_total += len(content)
+        if len(reasoning_content) > _MAX_CHAT_HISTORY_ITEM_CHARS:
+            raise HTTPException(status_code=413, detail="单条思考历史超过大小限制")
+        history_total += len(content) + len(reasoning_content)
         if history_total > _MAX_CHAT_HISTORY_TOTAL_CHARS:
             raise HTTPException(status_code=413, detail="聊天历史总长度超过限制")
 
@@ -3367,6 +3450,32 @@ def _validate_chat_request_limits(request: ChatRequest) -> None:
             raise HTTPException(status_code=422, detail="custom_params 必须是可序列化对象") from exc
         if len(serialized.encode("utf-8")) > _MAX_CHAT_CUSTOM_PARAMS_BYTES:
             raise HTTPException(status_code=413, detail="custom_params 超过大小限制")
+
+
+def _reasoning_resolution_for_request(request: ChatRequest) -> dict:
+    """冻结本轮请求的思考能力结果，供 UI 和诊断使用。
+
+    这不是对模型的探测调用，而是与真正构造请求体时相同的本地能力解析。
+    因此用户看到的 ``requested/effective`` 能和实际参数保持一致。
+    """
+    try:
+        return resolve_reasoning_request(
+            request.api_provider,
+            request.model,
+            enable_thinking=bool(request.enable_thinking),
+            requested_effort=request.reasoning_effort,
+        ).public()
+    except Exception as exc:
+        logger.debug("思考能力元数据解析失败: %s", exc)
+        return {
+            "requested": normalize_reasoning_effort(request.reasoning_effort),
+            "effective": "off",
+            "enabled": False,
+            "mode": "unknown",
+            "available": ["off"],
+            "fallback": bool(request.reasoning_effort and request.reasoning_effort != "off"),
+            "fallback_reason": "能力解析失败，已关闭思考参数",
+        }
 
 _NEW_QUESTION_PREFIX_RE = re.compile(
     r"^\s*(?:请|帮我|能否|可以|总结|概述|翻译|解释|比较|对比|列出|找出|计算|"
@@ -4538,6 +4647,7 @@ async def _maybe_add_numeric_table_visual_verification(
         diagnostics["numeric_table_visual_verification"] = {
             "enabled": True,
             "triggered": False,
+            "state": "skipped",
             "skipped_reason": "already_present",
         }
         return
@@ -10283,6 +10393,22 @@ def _sanitize_public_task_status(value) -> dict:
     return {key: item for key, item in public.items() if item not in ("", None, [], {})}
 
 
+def _safe_http_url(value: object) -> str:
+    """只在联网活动元数据中保留公开 HTTP(S) 链接。"""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 1200:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    if parsed.username or parsed.password or "\\" in raw or any(ord(char) < 0x20 for char in raw):
+        return ""
+    return parsed.geturl()
+
+
 def _sanitize_agent_progress_event(event) -> dict:
     if not isinstance(event, dict):
         return {}
@@ -10298,6 +10424,40 @@ def _sanitize_agent_progress_event(event) -> dict:
             event.get("elapsed_ms"), minimum=0.0, maximum=3_600_000.0
         ),
     }
+    if (
+        str(event.get("type") or "").strip() == "retrieval_progress"
+        and str(event.get("phase") or "").strip() == "tool_result"
+        and str(event.get("tool") or "").strip() == "web_search"
+    ):
+        effective_query = _compact_context_text(event.get("query") or "", limit=260)
+        if effective_query:
+            public["query"] = effective_query
+    if str(event.get("type") or "").strip() == "web_search_read":
+        reads = []
+        for item in (event.get("reads") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            read = {}
+            for key, limit in (("source_id", 120), ("evidence_id", 180), ("title", 240), ("url", 1200), ("status", 40), ("reason", 100)):
+                value = item.get(key)
+                if key == "url":
+                    value = _safe_http_url(value)
+                else:
+                    value = _safe_public_visual_metadata_text(value, limit)
+                if value:
+                    read[key] = value
+            for key in ("char_count",):
+                number = _debug_int(item.get(key))
+                if number is not None:
+                    read[key] = max(0, min(1_000_000, number))
+            if isinstance(item.get("truncated"), bool):
+                read["truncated"] = item.get("truncated")
+            if isinstance(item.get("cached"), bool):
+                read["cached"] = item.get("cached")
+            if read:
+                reads.append(read)
+        if reads:
+            public["reads"] = reads
     return {key: item for key, item in public.items() if item not in ("", None, [], {})}
 
 
@@ -11762,6 +11922,7 @@ def _should_use_fast_overview_context(
         and not selected_text
         and not image_list
         and not use_agent
+        and not bool(getattr(intent_decision, "full_document_summary", False))
         and not has_compound_or_negated_operation
     )
 
@@ -11823,6 +11984,23 @@ def _build_agent_retrieval_gate(
     )
     inventory_kinds = tuple(intent.inventory_kinds or ())
     inventory_kind = inventory_kinds[0] if inventory_kinds else None
+    if bool(getattr(intent, "full_document_summary", False)):
+        # A complete summary is not an open-ended evidence search.  It must
+        # consume the parse-bound reading outline rather than sampling a few
+        # Agent tool results, even when the user previously enabled Agent.
+        return {
+            "enabled": False,
+            "reason": "full_document_summary",
+            "query_type": normalized_query_type,
+            "evidence_need": normalized_needs,
+            "matched_query_type": matched_query_type,
+            "matched_evidence_need": matched_needs,
+            "matched_modalities": matched_modalities,
+            "matched_visual_intent": matched_visual_intent,
+            "selected_text_present": bool(selected_text),
+            "force_agent_retrieval": bool(force_agent_retrieval),
+            "agent_gate_source": "full_document_summary",
+        }
     if inventory_kind:
         # Full document enumeration has a deterministic route.  Even an
         # explicit Agent toggle must not turn a completeness request back into
@@ -12107,20 +12285,24 @@ async def _prepare_chat_routing(
         intent=intent,
         parse_identity=parse_identity,
     )
-    # auto 过去由直接 RAG 与 Agent 分支各自决定。此处冻结一次执行决定，
-    # 避免同一个工具栏状态在一条路径搜索、另一条路径却静默跳过。
+    # 显式 force 必须搜索；Agent 的 auto 则把“是否搜索”交给 Planner，
+    # 只冻结工具是否可用。非 Agent 路径没有 Planner，仍用轻量规则决定
+    # 是否直接发起一次搜索，避免普通 RAG 在 auto 下无条件出网。
     web_search_execution_mode = "off"
     auto_web_search_qualified = False
     if effective_web_mode == "force":
         web_search_execution_mode = "force"
     elif effective_web_mode == "auto":
-        auto_web_search_qualified = await _should_execute_web_search(
-            request,
-            retrieval_query,
-            intent=intent,
-        )
-        if auto_web_search_qualified:
-            web_search_execution_mode = "force"
+        if use_agent:
+            web_search_execution_mode = "auto"
+        else:
+            auto_web_search_qualified = await _should_execute_web_search(
+                request,
+                retrieval_query,
+                intent=intent,
+            )
+            if auto_web_search_qualified:
+                web_search_execution_mode = "force"
     return {
         "turn_context": turn_context,
         "strategy": strategy,
@@ -12142,6 +12324,7 @@ async def _prepare_chat_routing(
             ),
             "execution_mode": web_search_execution_mode,
             "should_execute": web_search_execution_mode == "force",
+            "planner_decides": web_search_execution_mode == "auto" and use_agent,
             "auto_qualified": auto_web_search_qualified,
         },
         "clarification_llm": clarification_llm_meta,
@@ -12468,6 +12651,134 @@ def _structural_inventory_partial_message(meta: dict | None) -> str:
         f"当前解析版本共识别到 {total} 项{label}，但其中仅有 {included} 项能放入本次回答的证据上下文。"
         "为避免遗漏被截断项目，不能在这一条回答中声称清单完整；请缩小页码或章节范围后再询问。"
     )
+
+
+def _is_full_document_summary_turn(turn_context: ChatTurnContext | None) -> bool:
+    return bool(
+        turn_context is not None
+        and getattr(turn_context.intent, "full_document_summary", False)
+    )
+
+
+def _full_document_summary_unavailable(reason: str) -> dict:
+    return {
+        "answer": (
+            "当前解析版本尚未形成可验证的全文结构化总结。"
+            "为避免把局部检索片段误当成全文总结，请等待阅读大纲就绪后再试。"
+        ),
+        "citations": [],
+        "coverage": {
+            "mode": "reading_outline_full_document",
+            "source": "unavailable",
+            "generation_status": "unavailable",
+            "complete": False,
+            "reason": reason,
+            "rendered_section_count": 0,
+            "citation_count": 0,
+            "retryable": True,
+        },
+        "outline": {},
+    }
+
+
+async def _build_full_document_summary_for_turn(
+    *,
+    request: ChatRequest,
+    doc: dict,
+    turn_context: ChatTurnContext,
+    parse_identity: dict | None,
+) -> dict:
+    """Resolve the parse-bound reading outline without falling back to Top-K.
+
+    A warm AI outline is reused regardless of the currently selected chat
+    model.  If it is absent, the current chat target may generate it once; no
+    model target change is allowed to silently replace an otherwise healthy
+    cached outline just because the user opened the chat with another model.
+    """
+    try:
+        block_index = load_block_index(runtime.data_dir, request.doc_id)
+    except Exception as exc:
+        logger.warning("[FullDocumentSummary] block index load failed doc=%s: %s", request.doc_id, exc)
+        return _full_document_summary_unavailable("block_index_load_failed")
+    if not isinstance(block_index, dict):
+        return _full_document_summary_unavailable("block_index_missing")
+
+    expected_generation = str(turn_context.parse_generation or "").strip()
+    expected_source_hash = str(turn_context.document_source_hash or "").strip()
+    actual_generation = str(block_index.get("parse_generation") or "").strip()
+    actual_source_hash = str(block_index.get("document_source_hash") or "").strip()
+    if (
+        (expected_generation and actual_generation != expected_generation)
+        or (expected_source_hash and actual_source_hash != expected_source_hash)
+    ):
+        return _full_document_summary_unavailable("parse_identity_mismatch")
+
+    try:
+        # Passing no target here makes get_or_create validate and reuse any
+        # healthy parse-bound cache, rather than needlessly regenerating it
+        # with the chat model selected for this turn.
+        outline = await get_or_create_reading_outline(
+            data_dir=runtime.data_dir,
+            doc_id=request.doc_id,
+            doc=doc,
+            block_index=block_index,
+            api_key="",
+            model="",
+            provider="",
+            endpoint="",
+        )
+        source = str((outline or {}).get("source") or "").strip().lower()
+        if not source.startswith("ai"):
+            provider = str(request.api_provider or "").strip()
+            endpoint = _request_primary_endpoint(request)
+            api_key = _primary_key_for_target(request, provider, endpoint)
+            can_generate = bool(api_key) or provider.lower() in {"local", "ollama"}
+            if can_generate:
+                def cache_writer(value: dict) -> None:
+                    # Do not publish an outline computed while MinerU/local
+                    # parsing was swapped underneath this request.
+                    if _chat_parse_identity_is_current(request, parse_identity):
+                        save_reading_outline(runtime.data_dir, request.doc_id, value)
+
+                outline = await get_or_create_reading_outline(
+                    data_dir=runtime.data_dir,
+                    doc_id=request.doc_id,
+                    doc=doc,
+                    block_index=block_index,
+                    api_key=api_key,
+                    model=str(request.model or ""),
+                    provider=provider,
+                    endpoint=endpoint,
+                    cache_writer=cache_writer,
+                )
+    except Exception as exc:
+        logger.warning("[FullDocumentSummary] outline generation failed doc=%s: %s", request.doc_id, exc)
+        return _full_document_summary_unavailable("reading_outline_failed")
+
+    if not isinstance(outline, dict):
+        return _full_document_summary_unavailable("reading_outline_missing")
+    rendered = build_full_document_summary(outline, block_index)
+    rendered["outline"] = outline
+    return rendered
+
+
+def _apply_full_document_summary_meta(
+    retrieval_meta: dict,
+    *,
+    rendered: dict,
+) -> dict:
+    citations = [
+        dict(item)
+        for item in (rendered.get("citations") or [])
+        if isinstance(item, dict)
+    ]
+    coverage = rendered.get("coverage") if isinstance(rendered.get("coverage"), dict) else {}
+    retrieval_meta["retrieval_mode"] = "reading_outline_full_document"
+    retrieval_meta["full_document_summary"] = dict(coverage)
+    retrieval_meta["citations"] = citations
+    retrieval_meta["query_type"] = "overview"
+    retrieval_meta["fast_overview"] = False
+    return retrieval_meta
 
 
 def _merge_retrieval_meta(base: dict | None, update: dict | None) -> dict:
@@ -14531,14 +14842,20 @@ async def _should_perform_web_search(
             model or "gpt-4o-mini",
             provider or "openai",
             endpoint=endpoint or "",
-            max_tokens=5,
+            max_tokens=64,
             temperature=0,
+            reasoning_effort="low",
             purpose="web_search_intent",
         )
         if result.get("error"):
             raise RuntimeError(result["error"])
+        from services.completion_outcome import require_publishable_completion
+
+        require_publishable_completion(result, operation="web search intent")
         raw = result.get("choices", [{}])[0].get("message", {}).get("content") or ""
         answer = raw.strip().lower()
+        if not (answer.startswith("yes") or answer.startswith("no")):
+            raise ValueError("web_search_intent_invalid_label")
         decision = answer.startswith("yes")
         logger.debug(f"联网意图 LLM 判断: '{answer[:20]}' → {decision}")
 
@@ -15167,6 +15484,8 @@ async def _maybe_perform_web_search(
     selected_text: str = "",
     doc_id: str = "",
     vector_store_dir: str = "",
+    document_evidence: object = None,
+    query_meta: dict | None = None,
     audit: dict | None = None,
 ) -> tuple[list[dict], str]:
     """按请求开关执行联网搜索，返回 (sources, formatted_context)。
@@ -15183,13 +15502,34 @@ async def _maybe_perform_web_search(
 
     provider = request.web_search_provider or "auto"
     max_results = _normalize_web_search_max_results(request.web_search_max_results)
-    search_query = _build_web_search_query(
+    base_query = _build_web_search_query(
         base_query=query_override or request.question,
         original_question=request.question,
         doc_title=doc_title,
         selected_text=selected_text,
         include_document_context=bool(request.web_search_include_document_context),
     )
+    # 普通聊天路径没有 Agent 的 DocContext 闸口。文档内容只在本地提供给
+    # 安全锚点提取器，绝不把原文直接拼到外发查询中；没有文档证据时保持
+    # 既有查询行为，避免改变纯联网问题的语义。
+    query_resolution = None
+    if document_evidence is not None:
+        query_resolution = build_web_research_query(
+            base_query,
+            planner_query=request.question,
+            document_evidence=document_evidence,
+        )
+        search_query = str(query_resolution.get("query") or "").strip()
+    else:
+        search_query = base_query
+    if isinstance(query_meta, dict):
+        query_meta.clear()
+        query_meta.update({
+            "effective_query": search_query[:320],
+            "target": str((query_resolution or {}).get("target") or "general"),
+            "anchor_count": int((query_resolution or {}).get("anchor_count") or 0),
+            "used_document_anchors": bool((query_resolution or {}).get("used_document_anchors")),
+        })
     if not search_query:
         _finalize_unattempted_web_search_audit(audit, reason="empty_query")
         return [], ""
@@ -15511,6 +15851,7 @@ async def _retry_generation_after_stream_error(
         endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
         middlewares=build_chat_middlewares(),
         max_tokens=max_tokens,
+        enable_thinking=request.enable_thinking,
         temperature=request.temperature,
         top_p=request.top_p,
         custom_params=_build_upstream_custom_params(request.custom_params),
@@ -15573,9 +15914,13 @@ async def _chat_with_pdf_impl(request: ChatRequest):
     memory_parse_identity = chat_parse_identity
     context = ""
     web_search_audit = _new_web_search_audit(request)
-    retrieval_meta = {"web_search_audit": web_search_audit}
+    retrieval_meta = {
+        "web_search_audit": web_search_audit,
+        "reasoning": _reasoning_resolution_for_request(request),
+    }
     citations: list[dict] = []
     web_search_sources: list[dict] = []
+    web_search_reads: list[dict] = []
     web_search_context = ""
     effective_question = (
         _resolve_retry_control_search_query(
@@ -15724,12 +16069,13 @@ async def _chat_with_pdf_impl(request: ChatRequest):
         web_search_execution_mode = str(
             web_route.get("execution_mode") or "off"
         ).strip().lower()
-        if web_search_execution_mode not in {"off", "force"}:
+        if web_search_execution_mode not in {"off", "auto", "force"}:
             web_search_execution_mode = "off"
         retrieval_meta["web_search_plan"] = {
             "requested_mode": str(web_route.get("mode") or "off"),
             "execution_mode": web_search_execution_mode,
             "auto_qualified": bool(web_route.get("auto_qualified")),
+            "planner_decides": bool(web_route.get("planner_decides")),
         }
         strategy = routing["strategy"]
         agent_gate = routing["agent_gate"]
@@ -15801,12 +16147,77 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     **clarification_extra,
                     **_chat_terminal_fields(_CHAT_TURN_STATUS_COMPLETED, chat_parse_identity),
                 }
+        if _is_full_document_summary_turn(turn_context):
+            # Do not let a broad "overview" whitelist turn this into a
+            # sampled Agent answer.  The renderer below is assembled from the
+            # current parse-bound reading outline and its persisted evidence.
+            use_agent = False
+            agent_gate = {
+                **agent_gate,
+                "enabled": False,
+                "reason": "full_document_summary",
+                "agent_gate_source": "full_document_summary",
+            }
+            retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                agent_gate,
+                use_agent=False,
+                agent_mode=False,
+                search_query_passthrough=False,
+            )
+            _finalize_unattempted_web_search_audit(
+                web_search_audit,
+                reason="full_document_summary_route",
+            )
+            summary_rendered = await _build_full_document_summary_for_turn(
+                request=request,
+                doc=doc,
+                turn_context=turn_context,
+                parse_identity=chat_parse_identity,
+            )
+            _require_chat_parse_identity_current(request, chat_parse_identity)
+            _apply_full_document_summary_meta(
+                retrieval_meta,
+                rendered=summary_rendered,
+            )
+            answer = str(summary_rendered.get("answer") or "").strip()
+            answer_critic_payload = postprocess_critic_result(
+                None,
+                answer=answer,
+                retrieval_meta=retrieval_meta,
+                answer_mode="full_document_summary",
+            )
+            retrieval_meta["answer_certainty"] = answer_critic_payload.get("certainty")
+            retrieval_meta["answer_citation_coverage"] = answer_critic_payload.get("citation_coverage")
+            outline = summary_rendered.get("outline") if isinstance(summary_rendered.get("outline"), dict) else {}
+            return {
+                "answer": answer,
+                "reasoning_content": "",
+                "doc_id": request.doc_id,
+                "question": request.question,
+                "timestamp": datetime.now().isoformat(),
+                "used_provider": outline.get("provider") or None,
+                "used_model": outline.get("model") or None,
+                "fallback_used": not str(outline.get("source") or "").lower().startswith("ai"),
+                "usage": None,
+                "usage_meta": None,
+                "retrieval_meta": _build_public_retrieval_meta(retrieval_meta, []),
+                "web_search_sources": [],
+                "web_search_audit": dict(web_search_audit),
+                "memory_hits": [],
+                "memory_meta": memory_meta,
+                "intent_decision": turn_context.intent.to_dict(),
+                "answer_critic": answer_critic_payload,
+                "answer_certainty": answer_critic_payload.get("certainty"),
+                **_chat_terminal_fields(_CHAT_TURN_STATUS_COMPLETED, chat_parse_identity),
+            }
+
         web_search_allowed_for_inventory = (
             not detect_inventory_kind(turn_context.resolved_question)
             or turn_context.intent.web_policy == "force"
         )
         if not use_agent and web_search_allowed_for_inventory:
             if web_search_execution_mode == "force":
+                direct_web_query_meta: dict = {}
                 web_search_sources, web_search_context = await _maybe_perform_web_search(
                     request,
                     query_override=search_query,
@@ -15814,8 +16225,17 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     selected_text=request.selected_text or "",
                     doc_id=request.doc_id,
                     vector_store_dir=getattr(router, "vector_store_dir", ""),
+                    document_evidence=(
+                        (doc.get("data") or {}).get("full_text")
+                        or (doc.get("data") or {}).get("pages")
+                        or None
+                    ),
+                    query_meta=direct_web_query_meta,
                     audit=web_search_audit,
                 )
+                if direct_web_query_meta.get("effective_query"):
+                    retrieval_meta["web_search_query"] = direct_web_query_meta["effective_query"]
+                    retrieval_meta["web_search_query_meta"] = dict(direct_web_query_meta)
             else:
                 _finalize_unattempted_web_search_audit(
                     web_search_audit,
@@ -15826,10 +16246,10 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 web_search_audit,
                 reason="inventory_route",
             )
-        elif web_search_execution_mode != "force":
+        elif web_search_execution_mode == "off":
             _finalize_unattempted_web_search_audit(
                 web_search_audit,
-                reason="auto_policy_not_selected",
+                reason="web_search_disabled",
             )
         retrieval_meta["agent_gate"] = _annotate_agent_gate(
             agent_gate,
@@ -16038,7 +16458,17 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 for item in (retrieval_meta.get("web_search_sources") or [])
                 if isinstance(item, dict)
             ]
+            web_search_reads = [
+                dict(item)
+                for item in (retrieval_meta.get("web_search_reads") or [])
+                if isinstance(item, dict)
+            ]
             web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
+            if web_search_execution_mode == "auto" and not web_search_audit.get("executed"):
+                _finalize_unattempted_web_search_audit(
+                    web_search_audit,
+                    reason="agent_not_selected",
+                )
         elif _should_use_fast_overview_context(
             query_type,
             enable_vector_search=request.enable_vector_search,
@@ -16316,19 +16746,20 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             messages, request.api_key, request.model, request.api_provider,
             endpoint=_get_provider_endpoint(request.api_provider, request.api_host or ""),
             middlewares=build_chat_middlewares(), max_tokens=adjusted_max_tokens,
+            enable_thinking=request.enable_thinking,
             temperature=request.temperature, top_p=request.top_p,
             custom_params=_build_upstream_custom_params(request.custom_params),
             reasoning_effort=request.reasoning_effort,
             purpose="vision" if image_list else "chat",
         )
+        if isinstance(response.get("_reasoning_resolution"), dict):
+            retrieval_meta["reasoning"] = dict(response["_reasoning_resolution"])
         message = _extract_non_stream_ai_message(response)
         raw_answer = message.get("content") or ""
         reasoning_content = extract_reasoning_content(message)
-        turn_status = (
-            _CHAT_TURN_STATUS_DEGRADED
-            if bool(response.get("degraded") or response.get("answer_status") == "degraded")
-            else _CHAT_TURN_STATUS_COMPLETED
-        )
+        completion_outcome = _response_completion_outcome(response)
+        retrieval_meta["completion"] = completion_outcome.public()
+        turn_status = _chat_success_status_for_response(response)
 
         # 结构化引文后处理（非流式）
         answer = extract_final_answer(raw_answer)
@@ -16345,13 +16776,11 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 reasoning_content = retry_reasoning or reasoning_content
                 response = retry_response
                 retrieval_meta["generation_retry_reason"] = "empty_non_stream_answer"
-                turn_status = (
-                    _CHAT_TURN_STATUS_DEGRADED
-                    if bool(
-                        retry_response.get("degraded")
-                        or retry_response.get("answer_status") == "degraded"
-                    )
-                    else _CHAT_TURN_STATUS_RECOVERED_RETRY
+                completion_outcome = _response_completion_outcome(retry_response)
+                retrieval_meta["completion"] = completion_outcome.public()
+                turn_status = _chat_success_status_for_response(
+                    retry_response,
+                    normal_status=_CHAT_TURN_STATUS_RECOVERED_RETRY,
                 )
             except Exception as retry_exc:
                 retrieval_meta["generation_retry_error"] = str(retry_exc)[:160]
@@ -16613,18 +17042,27 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             "used_model": response.get("_used_model"), "fallback_used": response.get("_fallback_used", False),
             "usage": response.get("usage"),
             "usage_meta": response.get("_usage_meta"),
+            "reasoning_resolution": response.get("_reasoning_resolution") or retrieval_meta.get("reasoning"),
             "retrieval_meta": _build_public_retrieval_meta(
                 retrieval_meta,
                 response_context_segments,
                 include_evidence_raw=_should_include_evidence_raw(request),
             ),
             "web_search_sources": web_search_sources,
+            "web_search_reads": [
+                dict(item)
+                for item in (retrieval_meta.get("web_search_reads") or [])
+                if isinstance(item, dict)
+            ],
             "web_search_audit": dict(web_search_audit),
             "memory_hits": memory_hits,
             "memory_meta": memory_meta,
             "visual_attachments": visual_attachments,
             "answer_critic": answer_critic_payload,
             "answer_certainty": (answer_critic_payload or {}).get("certainty"),
+            "finish_reason": completion_outcome.finish_reason,
+            "completion_status": completion_outcome.status.value,
+            "truncated": completion_outcome.truncated,
             **clarification_extra,
             **_chat_terminal_fields(turn_status, chat_parse_identity),
         }
@@ -16685,10 +17123,14 @@ async def chat_with_pdf_stream(request: ChatRequest):
         try:
             context = ""
             web_search_audit = _new_web_search_audit(request)
-            retrieval_meta = {"web_search_audit": web_search_audit}
+            retrieval_meta = {
+                "web_search_audit": web_search_audit,
+                "reasoning": _reasoning_resolution_for_request(request),
+            }
             has_structured_citations = False
             inventory_mode = False
             web_search_sources: list[dict] = []
+            web_search_reads: list[dict] = []
             web_search_context = ""
             web_search_execution_mode = "off"
             use_agent = False
@@ -16853,12 +17295,13 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 web_search_execution_mode = str(
                     web_route.get("execution_mode") or "off"
                 ).strip().lower()
-                if web_search_execution_mode not in {"off", "force"}:
+                if web_search_execution_mode not in {"off", "auto", "force"}:
                     web_search_execution_mode = "off"
                 retrieval_meta["web_search_plan"] = {
                     "requested_mode": str(web_route.get("mode") or "off"),
                     "execution_mode": web_search_execution_mode,
                     "auto_qualified": bool(web_route.get("auto_qualified")),
+                    "planner_decides": bool(web_route.get("planner_decides")),
                 }
                 strategy = routing["strategy"]
                 agent_gate = routing["agent_gate"]
@@ -16927,6 +17370,102 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         })
                         yield "data: [DONE]\n\n"
                         return
+                if _is_full_document_summary_turn(turn_context):
+                    # A complete-document summary has a deterministic source:
+                    # the parse-bound reading outline.  Do not silently turn it
+                    # back into a sampled retrieval/Agent answer in streaming
+                    # mode just because the stream route has its own control
+                    # flow.
+                    yield _sse_json({
+                        "type": "retrieval_progress",
+                        "phase": "full_document_summary",
+                        "message": "正在读取当前解析版本的全部章节总结...",
+                    })
+                    use_agent = False
+                    agent_gate = {
+                        **agent_gate,
+                        "enabled": False,
+                        "reason": "full_document_summary",
+                        "agent_gate_source": "full_document_summary",
+                    }
+                    retrieval_meta["agent_gate"] = _annotate_agent_gate(
+                        agent_gate,
+                        use_agent=False,
+                        agent_mode=False,
+                        search_query_passthrough=False,
+                    )
+                    _finalize_unattempted_web_search_audit(
+                        web_search_audit,
+                        reason="full_document_summary_route",
+                    )
+                    summary_rendered = await _build_full_document_summary_for_turn(
+                        request=request,
+                        doc=doc,
+                        turn_context=turn_context,
+                        parse_identity=chat_parse_identity,
+                    )
+                    _require_chat_parse_identity_current(request, chat_parse_identity)
+                    _apply_full_document_summary_meta(
+                        retrieval_meta,
+                        rendered=summary_rendered,
+                    )
+                    answer = str(summary_rendered.get("answer") or "").strip()
+                    answer_critic_payload = postprocess_critic_result(
+                        None,
+                        answer=answer,
+                        retrieval_meta=retrieval_meta,
+                        answer_mode="full_document_summary",
+                    )
+                    certainty = answer_critic_payload.get("certainty") or {}
+                    retrieval_meta["answer_certainty"] = certainty
+                    retrieval_meta["answer_citation_coverage"] = answer_critic_payload.get("citation_coverage")
+                    public_retrieval_meta = _build_public_retrieval_meta(retrieval_meta, [])
+                    outline = (
+                        summary_rendered.get("outline")
+                        if isinstance(summary_rendered.get("outline"), dict)
+                        else {}
+                    )
+
+                    # The renderer already has the complete answer.  Emit it in
+                    # bounded chunks so the existing progressive text treatment
+                    # remains active instead of making a long summary appear at
+                    # once after the outline becomes ready.
+                    for offset in range(0, len(answer), 220):
+                        yield _sse_json({
+                            "content": answer[offset:offset + 220],
+                            "reasoning_content": "",
+                            "done": False,
+                            "used_provider": outline.get("provider") or None,
+                            "used_model": outline.get("model") or None,
+                        })
+                        await asyncio.sleep(0)
+
+                    yield _sse_json({
+                        "type": "answer_critic",
+                        "critic": answer_critic_payload,
+                        "certainty": certainty,
+                    })
+                    yield _sse_json(build_answer_certainty_event(certainty))
+                    yield _sse_json({
+                        "content": "",
+                        "reasoning_content": "",
+                        "done": True,
+                        "final_content": answer,
+                        "retrieval_meta": public_retrieval_meta,
+                        "web_search_sources": [],
+                        "web_search_audit": dict(web_search_audit),
+                        "memory_hits": [],
+                        "memory_meta": memory_meta,
+                        "used_provider": outline.get("provider") or None,
+                        "used_model": outline.get("model") or None,
+                        "fallback_used": not str(outline.get("source") or "").lower().startswith("ai"),
+                        "intent_decision": turn_context.intent.to_dict(),
+                        "answer_critic": answer_critic_payload,
+                        "answer_certainty": certainty,
+                        **_chat_terminal_fields(_CHAT_TURN_STATUS_COMPLETED, chat_parse_identity),
+                    })
+                    yield "data: [DONE]\n\n"
+                    return
                 inventory_context, inventory_citations_for_turn, inventory_meta = _build_structural_inventory_context(
                     request.doc_id,
                     turn_context,
@@ -17002,10 +17541,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     retrieval_meta["retrieval_mode"] = "structural_inventory"
                     retrieval_meta["citations"] = inventory_citations_for_turn
-                if use_agent and web_search_execution_mode != "force":
+                if use_agent and web_search_execution_mode == "off":
                     _finalize_unattempted_web_search_audit(
                         web_search_audit,
-                        reason="auto_policy_not_selected",
+                        reason="web_search_disabled",
                     )
                 _log_chat_trace(
                     trace_id,
@@ -17057,6 +17596,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 # 联网搜索在此处设置查询参数
                 _web_search_query_for_stream = search_query
                 _web_search_doc_title_for_stream = doc.get("filename", "")
+                _web_search_query_meta_for_stream: dict = {}
                 # P1.3 智能 rerank：概述/对比类自动启用 local rerank（不影响用户已开启的）
                 _auto_rerank_applied = _auto_enable_rerank_if_beneficial(
                     request, evidence_need, query_type
@@ -17253,7 +17793,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         for item in (retrieval_meta.get("web_search_sources") or [])
                         if isinstance(item, dict)
                     ]
+                    web_search_reads = [
+                        dict(item)
+                        for item in (retrieval_meta.get("web_search_reads") or [])
+                        if isinstance(item, dict)
+                    ]
                     web_search_context = str(retrieval_meta.get("web_search_context") or "").strip()
+                    if web_search_execution_mode == "auto" and not web_search_audit.get("executed"):
+                        _finalize_unattempted_web_search_audit(
+                            web_search_audit,
+                            reason="agent_not_selected",
+                        )
                 elif _should_use_fast_overview_context(
                     query_type,
                     enable_vector_search=request.enable_vector_search,
@@ -17638,8 +18188,17 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             selected_text=request.selected_text or "",
                             doc_id=request.doc_id,
                             vector_store_dir=getattr(router, "vector_store_dir", ""),
+                            document_evidence=(
+                                (doc.get("data") or {}).get("full_text")
+                                or (doc.get("data") or {}).get("pages")
+                                or None
+                            ),
+                            query_meta=_web_search_query_meta_for_stream,
                             audit=web_search_audit,
                         )
+                        if _web_search_query_meta_for_stream.get("effective_query"):
+                            retrieval_meta["web_search_query"] = _web_search_query_meta_for_stream["effective_query"]
+                            retrieval_meta["web_search_query_meta"] = dict(_web_search_query_meta_for_stream)
                     except Exception as _ws_err:
                         logger.warning(f"联网搜索（generator 内）失败: {_ws_err}")
                         web_search_sources, web_search_context = [], ""
@@ -17651,7 +18210,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             reason=f"stream_search_error:{type(_ws_err).__name__}",
                         )
 
-                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources), 'audit': web_search_audit}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'web_search_status', 'phase': 'fetch_complete', 'count': len(web_search_sources), 'query': _web_search_query_meta_for_stream.get('effective_query', ''), 'audit': web_search_audit}, ensure_ascii=False)}\n\n"
                 else:
                     _finalize_unattempted_web_search_audit(
                         web_search_audit,
@@ -17781,6 +18340,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                 passthrough=True,
             ):
                 last_stream_chunk = chunk
+                if isinstance(chunk.get("reasoning_resolution"), dict):
+                    # 直连流式、非流式降级和 middleware fallback 都以实际命中
+                    # 的 provider/model 重新解析能力，覆盖请求开始时的预估值。
+                    retrieval_meta["reasoning"] = dict(chunk["reasoning_resolution"])
                 if chunk.get("type") == "llm_stream_heartbeat":
                     llm_waiting_heartbeat_step += 1
                     yield _sse_json({
@@ -17829,6 +18392,8 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             has_structured_citations=has_structured_citations,
                             max_tokens=adjusted_stream_max_tokens,
                         )
+                        if isinstance(retry_response.get("_reasoning_resolution"), dict):
+                            retrieval_meta["reasoning"] = dict(retry_response["_reasoning_resolution"])
                         _log_chat_trace(
                             trace_id,
                             trace_started_at,
@@ -17888,17 +18453,15 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
                             break
-                        retry_turn_status = (
-                            _CHAT_TURN_STATUS_DEGRADED
-                            if bool(
-                                retry_response.get("degraded")
-                                or retry_response.get("answer_status") == "degraded"
-                            )
-                            else _CHAT_TURN_STATUS_RECOVERED_RETRY
+                        retry_completion = _response_completion_outcome(retry_response)
+                        retrieval_meta["completion"] = retry_completion.public()
+                        retry_turn_status = _chat_success_status_for_response(
+                            retry_response,
+                            normal_status=_CHAT_TURN_STATUS_RECOVERED_RETRY,
                         )
                         if not content_progress_sent:
                             yield f"data: {json.dumps({'content': retry_answer, 'reasoning_content': retry_reasoning, 'done': False}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'warning': error_message, 'recovered': retry_turn_status == _CHAT_TURN_STATUS_RECOVERED_RETRY, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'visual_attachments': retry_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True, 'usage': retry_response.get('usage'), 'usage_meta': retry_response.get('_usage_meta'), **_chat_terminal_fields(retry_turn_status, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'warning': error_message, 'recovered': retry_turn_status == _CHAT_TURN_STATUS_RECOVERED_RETRY, 'done': True, 'final_content': retry_answer, 'retrieval_meta': send_meta, 'visual_attachments': retry_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_reads': web_search_reads, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': retry_response.get('_used_provider') or chunk.get('used_provider'), 'used_model': retry_response.get('_used_model') or chunk.get('used_model'), 'fallback_used': True, 'stream_retry_used': True, 'usage': retry_response.get('usage'), 'usage_meta': retry_response.get('_usage_meta'), 'finish_reason': retry_completion.finish_reason, 'completion_status': retry_completion.status.value, 'truncated': retry_completion.truncated, **_chat_terminal_fields(retry_turn_status, chat_parse_identity)}, ensure_ascii=False)}\n\n"
                         if retry_critic is not None:
                             yield _sse_json({
                                 "type": "answer_critic",
@@ -17971,7 +18534,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             break
                         if not content_progress_sent:
                             yield f"data: {json.dumps({'content': fallback_answer, 'reasoning_content': '', 'done': False}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'warning': error_message, 'recovered': False, 'done': True, 'final_content': fallback_answer, 'retrieval_meta': send_meta, 'visual_attachments': fallback_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_EVIDENCE_FALLBACK, chat_parse_identity)}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'warning': error_message, 'recovered': False, 'done': True, 'final_content': fallback_answer, 'retrieval_meta': send_meta, 'visual_attachments': fallback_visual_attachments, 'web_search_sources': web_search_sources, 'web_search_reads': web_search_reads, 'web_search_audit': web_search_audit, 'memory_hits': memory_hits, 'memory_meta': memory_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_EVIDENCE_FALLBACK, chat_parse_identity)}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                     else:
                         yield f"data: {json.dumps({'error': error_message, 'error_code': chunk.get('error_code') or 'llm_stream_error', 'done': True, 'retrieval_meta': send_meta, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': True, **_chat_terminal_fields(_CHAT_TURN_STATUS_FAILED, chat_parse_identity)}, ensure_ascii=False)}\n\n"
@@ -18094,10 +18657,18 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         yield f"data: {json.dumps(stale_terminal, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                         break
+                    completion_outcome = resolve_completion_outcome(
+                        finish_reason=chunk.get("finish_reason"),
+                    )
+                    retrieval_meta["completion"] = completion_outcome.public()
                     turn_status = (
-                        _CHAT_TURN_STATUS_DEGRADED
-                        if bool(chunk.get("degraded"))
-                        else _CHAT_TURN_STATUS_COMPLETED
+                        _CHAT_TURN_STATUS_TRUNCATED
+                        if completion_outcome.truncated
+                        else (
+                            _CHAT_TURN_STATUS_DEGRADED
+                            if bool(chunk.get("degraded"))
+                            else _CHAT_TURN_STATUS_COMPLETED
+                        )
                     )
                     usage_meta = build_usage_meta(
                         provider=chunk.get('used_provider') or request.api_provider,
@@ -18146,10 +18717,19 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         'content': '', 'reasoning_content': reasoning,
                         'done': True, 'used_provider': chunk.get('used_provider'),
                         'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used'),
+                        'reasoning_resolution': retrieval_meta.get('reasoning'),
+                        'finish_reason': completion_outcome.finish_reason,
+                        'completion_status': completion_outcome.status.value,
+                        'truncated': completion_outcome.truncated,
                         'final_content': final_answer_text,
                         'retrieval_meta': send_meta,
                         'visual_attachments': visual_attachments,
                         'web_search_sources': web_search_sources,
+                        'web_search_reads': [
+                            dict(item)
+                            for item in (retrieval_meta.get("web_search_reads") or [])
+                            if isinstance(item, dict)
+                        ],
                         'web_search_audit': dict(web_search_audit),
                         'memory_hits': memory_hits,
                         'memory_meta': memory_meta,
@@ -18571,6 +19151,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     'retrieval_meta': send_meta,
                     'visual_attachments': tail_visual_attachments,
                     'web_search_sources': web_search_sources,
+                    'web_search_reads': [
+                        dict(item)
+                        for item in (retrieval_meta.get("web_search_reads") or [])
+                        if isinstance(item, dict)
+                    ],
                     'web_search_audit': dict(web_search_audit),
                     'memory_hits': memory_hits,
                     'memory_meta': memory_meta,

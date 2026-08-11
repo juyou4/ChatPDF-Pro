@@ -102,6 +102,7 @@ async def generate_followup_questions(
 
     try:
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
 
         # 取最近 max_rounds 轮对话
         recent = chat_history[-(max_rounds * 2):]
@@ -123,6 +124,7 @@ async def generate_followup_questions(
             max_tokens=200,
             temperature=0.7,
         )
+        require_publishable_completion(response, operation="follow-up questions")
 
         # 解析响应
         content = ""

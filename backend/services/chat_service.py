@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 import asyncio
 import json as _json
 import logging
+from urllib.parse import urlsplit
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -9,6 +10,7 @@ logger = logging.getLogger(__name__)
 from providers.factory import ProviderFactory
 from providers.provider_ids import OPENAI_LIKE, ANTHROPIC, GEMINI, OPENAI_NATIVE, MINIMAX, MOONSHOT, DOUBAO
 from models.provider_registry import PROVIDER_CONFIG
+from models.dynamic_store import load_dynamic_providers
 from models.api_key_selector import select_api_key
 from utils.middleware import (
     BaseMiddleware,
@@ -18,6 +20,14 @@ from utils.middleware import (
     FallbackMiddleware,
 )
 from services.usage_tracker import attach_usage_meta
+from services.completion_outcome import resolve_completion_outcome
+from services.provider_auth import build_api_key_headers, resolve_api_key_auth
+from services.reasoning_effort_service import (
+    apply_reasoning_to_payload,
+    ensure_reasoning_output_budget,
+    merge_request_body,
+    prepare_reasoning_history_messages,
+)
 
 
 def _sanitize_api_key(api_key: Optional[str]) -> str:
@@ -35,6 +45,125 @@ def _is_reasoning_model(model: str) -> bool:
     """判断模型是否为推理/思考模型（不支持 logprobs、logit_bias 等参数）。"""
     m = (model or "").lower()
     return any(p in m for p in _REASONING_MODEL_PATTERNS)
+
+
+def _dynamic_provider_config(provider: str) -> dict:
+    try:
+        config = load_dynamic_providers().get(str(provider or "").strip())
+    except Exception:
+        config = None
+    return config if isinstance(config, dict) else {}
+
+
+def _is_openai_compatible_provider(provider: str, endpoint: str = "") -> bool:
+    """识别动态 OpenAI-compatible Provider，不能只依赖固定 ID 白名单。"""
+    pid = str(provider or "").strip().lower()
+    if pid in OPENAI_LIKE:
+        return True
+    if pid in ANTHROPIC or pid in GEMINI or pid in {"ollama"}:
+        return False
+    config = _dynamic_provider_config(provider)
+    protocol = str(config.get("type") or "").strip().lower()
+    # 未写入动态存储的历史自定义 Provider 也沿用 ProviderFactory 的
+    # OpenAI-compatible fallback，避免升级后突然退回“假流式”。
+    return bool(endpoint) and (not config or protocol in {"openai", "custom"})
+
+
+def _is_anthropic_provider(provider: str) -> bool:
+    """识别内置和动态 Anthropic Messages Provider。"""
+
+    pid = str(provider or "").strip().lower()
+    if pid in ANTHROPIC:
+        return True
+    config = _dynamic_provider_config(provider)
+    return str(config.get("type") or "").strip().lower() == "anthropic"
+
+
+def _dynamic_provider_supports_streaming(provider: str) -> bool:
+    config = _dynamic_provider_config(provider)
+    if not config:
+        return True
+    return bool(config.get("supports_streaming", True))
+
+
+def _dynamic_provider_supports_reasoning(provider: str) -> bool:
+    config = _dynamic_provider_config(provider)
+    return bool(config.get("supports_reasoning", False))
+
+
+def _dynamic_provider_auth(provider: str) -> tuple[str | None, str | None]:
+    """Return non-secret auth metadata for a persisted dynamic provider."""
+
+    config = _dynamic_provider_config(provider)
+    if not config:
+        return None, None
+    if "api_key_header" not in config and "api_key_prefix" not in config:
+        return None, None
+    header, prefix = resolve_api_key_auth(
+        provider_type=config.get("type"),
+        api_key_header=config.get("api_key_header"),
+        api_key_prefix=config.get("api_key_prefix"),
+    )
+    return header, prefix
+
+
+def _create_provider_client(provider: str, endpoint: str):
+    """Create a client while keeping legacy providers on their old path."""
+
+    config = _dynamic_provider_config(provider)
+    provider_type = str(config.get("type") or "").strip().lower() or None
+    auth_header, auth_prefix = _dynamic_provider_auth(provider)
+    if provider_type == "anthropic":
+        return ProviderFactory.create(
+            provider,
+            endpoint,
+            provider_type=provider_type,
+            api_key_header=auth_header,
+            api_key_prefix=auth_prefix,
+        )
+    if auth_header is None and auth_prefix is None:
+        return ProviderFactory.create(provider, endpoint)
+    return ProviderFactory.create(
+        provider,
+        endpoint,
+        provider_type=provider_type,
+        api_key_header=auth_header,
+        api_key_prefix=auth_prefix,
+    )
+
+
+def _join_provider_endpoint(base: str, path: str) -> str:
+    """Join a dynamic provider base URL and relative chat path safely."""
+    base_clean = str(base or "").rstrip("/")
+    path_clean = "/" + str(path or "").lstrip("/")
+    if not base_clean:
+        return path_clean
+    if not path:
+        return base_clean
+    try:
+        parsed = urlsplit(base_clean)
+    except ValueError:
+        parsed = None
+    if parsed and parsed.scheme and parsed.netloc:
+        base_path = (parsed.path or "").rstrip("/")
+        if base_path and (base_path == path_clean or base_path.endswith(path_clean)):
+            return base_clean
+        if base_path and path_clean.startswith(base_path + "/"):
+            return parsed._replace(path=path_clean).geturl().rstrip("/")
+    return f"{base_clean}{path_clean}"
+
+
+def _provider_default_endpoint(provider: str) -> str:
+    """Resolve static and persisted dynamic Provider chat endpoints."""
+    config = _dynamic_provider_config(provider)
+    if config:
+        endpoint = str(config.get("endpoint") or "").strip()
+        chat_path = str(config.get("chat_endpoint") or "").strip()
+        if endpoint and chat_path:
+            return _join_provider_endpoint(endpoint, chat_path)
+        if endpoint:
+            return endpoint
+    return PROVIDER_CONFIG.get(provider, {}).get("endpoint", "")
 
 
 def _extract_api_error_message(body: str, status_code: int) -> str:
@@ -116,6 +245,7 @@ def _stream_terminal_payload(
     fallback_used: bool = False,
     degraded: bool = False,
     qa_score: float | None = None,
+    reasoning_resolution: dict | None = None,
 ) -> dict:
     """Build one provider-neutral terminal event.
 
@@ -124,12 +254,23 @@ def _stream_terminal_payload(
     Keeping that distinction here prevents individual provider adapters from
     accidentally treating reasoning-only streams as successful answers.
     """
+    outcome = resolve_completion_outcome(finish_reason=finish_reason)
     if content_chars <= 0:
         reason_suffix = f"（finish_reason={finish_reason}）" if finish_reason else ""
-        return {
-            "error": f"模型未返回正文{reason_suffix}",
-            "error_code": "llm_stream_empty_answer",
+        payload = {
+            "error": (
+                f"模型达到输出上限但尚未返回正文{reason_suffix}"
+                if outcome.truncated
+                else f"模型未返回正文{reason_suffix}"
+            ),
+            "error_code": (
+                "llm_output_truncated_before_answer"
+                if outcome.truncated
+                else "llm_stream_empty_answer"
+            ),
             "finish_reason": finish_reason,
+            "completion_status": outcome.status.value,
+            "truncated": outcome.truncated,
             "reasoning_chars": reasoning_chars,
             "invalid_event_count": invalid_event_count,
             "done": True,
@@ -138,6 +279,9 @@ def _stream_terminal_payload(
             "fallback_used": fallback_used,
             "degraded": degraded,
         }
+        if isinstance(reasoning_resolution, dict):
+            payload["reasoning_resolution"] = reasoning_resolution
+        return payload
 
     payload = {
         "content": "",
@@ -146,11 +290,15 @@ def _stream_terminal_payload(
         "used_model": model,
         "fallback_used": fallback_used,
         "degraded": degraded,
+        "completion_status": outcome.status.value,
+        "truncated": outcome.truncated,
     }
     if finish_reason:
         payload["finish_reason"] = finish_reason
     if qa_score is not None:
         payload["qa_score"] = qa_score
+    if isinstance(reasoning_resolution, dict):
+        payload["reasoning_resolution"] = reasoning_resolution
     return payload
 
 
@@ -189,6 +337,7 @@ async def call_ai_api(
     endpoint: str = "",
     middlewares: List[BaseMiddleware] | None = None,
     stream: bool = False,
+    enable_thinking: bool = False,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
@@ -206,7 +355,7 @@ async def call_ai_api(
         "model": model,
         "provider": provider,
         # 如果未显式传入 endpoint，使用 ProviderRegistry 中的默认值（支持集成/单一服务商）
-        "endpoint": endpoint or PROVIDER_CONFIG.get(provider, {}).get("endpoint", "")
+        "endpoint": endpoint or _provider_default_endpoint(provider)
     }
 
     payload = await apply_middlewares_before(payload, middlewares or [])
@@ -220,24 +369,51 @@ async def call_ai_api(
     delay = retry_cfg.get("delay", 0.0)
     timeout = payload.get("_timeout")
 
-    client = ProviderFactory.create(payload["provider"], payload.get("endpoint", endpoint))
+    client = _create_provider_client(
+        payload["provider"],
+        payload.get("endpoint", endpoint),
+    )
 
     attempt = 0
     fallback_used = False
     fallback_payload = payload.copy()
+    provider_messages = list(payload.get("messages") or [])
     while True:
         try:
+            # Provider 适配器只接收统一的 reasoning_effort 参数和自定义请求体。
+            # 先在这里完成一次能力解析，确保非流式路径与 SSE 路径使用同一套
+            # 厂商映射；fallback 切换 provider/model 后会在下一轮重新解析。
+            effective_custom_params = dict(custom_params or {})
+            reasoning_body = dict(effective_custom_params)
+            reasoning_resolution = apply_reasoning_to_payload(
+                reasoning_body,
+                payload["provider"],
+                payload["model"],
+                enable_thinking=enable_thinking,
+                requested_effort=reasoning_effort,
+            )
+            native_reasoning_effort = reasoning_body.pop("reasoning_effort", None)
+            effective_custom_params = reasoning_body
+            effective_max_tokens = ensure_reasoning_output_budget(
+                max_tokens,
+                reasoning_resolution,
+            )
+            provider_messages = prepare_reasoning_history_messages(
+                payload.get("messages"),
+                payload["provider"],
+                payload["model"],
+            )
             response = await client.chat(
-                payload["messages"],
+                provider_messages,
                 payload["api_key"],
                 payload["model"],
                 timeout=timeout,
                 stream=stream,
-                max_tokens=max_tokens,
+                max_tokens=effective_max_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                custom_params=custom_params,
-                reasoning_effort=reasoning_effort,
+                custom_params=effective_custom_params,
+                reasoning_effort=native_reasoning_effort,
                 tools=tools,
             )
             # 如果上游返回错误结构，同样走重试逻辑
@@ -253,9 +429,12 @@ async def call_ai_api(
                 if fb and not fallback_used:
                     fallback_used = True
                     payload["provider"] = fb.get("provider") or payload["provider"]
-                    payload["endpoint"] = PROVIDER_CONFIG.get(payload["provider"], {}).get("endpoint", endpoint)
+                    payload["endpoint"] = _provider_default_endpoint(payload["provider"]) or endpoint
                     payload["model"] = fb.get("model") or payload["model"]
-                    client = ProviderFactory.create(payload["provider"], payload.get("endpoint", endpoint))
+                    client = _create_provider_client(
+                        payload["provider"],
+                        payload.get("endpoint", endpoint),
+                    )
                     attempt = 0
                     continue
                 break
@@ -267,13 +446,19 @@ async def call_ai_api(
         response["_used_provider"] = payload.get("provider")
         response["_used_model"] = payload.get("model")
         response["_fallback_used"] = fallback_used
+        response["_completion_outcome"] = resolve_completion_outcome(
+            response,
+            transport_complete=not bool(response.get("error")),
+        ).public()
         attach_usage_meta(
             response,
             provider=payload.get("provider"),
             model=payload.get("model"),
             purpose=purpose,
-            messages=payload.get("messages"),
+            messages=provider_messages,
         )
+        if isinstance(response, dict):
+            response["_reasoning_resolution"] = reasoning_resolution.public()
 
     response = await apply_middlewares_after(response, middlewares or [])
     return response
@@ -300,7 +485,7 @@ async def call_ai_api_stream(
         "api_key": api_key,
         "model": model,
         "provider": provider,
-        "endpoint": endpoint or PROVIDER_CONFIG.get(provider, {}).get("endpoint", "")
+        "endpoint": endpoint or _provider_default_endpoint(provider)
     }
 
     payload = await apply_middlewares_before(payload, middlewares or [])
@@ -308,9 +493,14 @@ async def call_ai_api_stream(
     endpoint = payload.get("endpoint") or endpoint
     provider = payload.get("provider") or provider
     model = payload.get("model") or model
+    messages = prepare_reasoning_history_messages(
+        payload.get("messages"),
+        provider,
+        model,
+    )
 
     # OpenAI 兼容流式
-    if provider.lower() in OPENAI_LIKE and endpoint:
+    if _is_openai_compatible_provider(provider, endpoint) and endpoint and _dynamic_provider_supports_streaming(provider):
         # 清理 API Key：去除首尾空白（处理复制粘贴带来的换行/空格），支持多 Key 轮换池
         sanitized_key = _sanitize_api_key(api_key)
         headers = {
@@ -318,8 +508,14 @@ async def call_ai_api_stream(
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        if sanitized_key:
-            headers["Authorization"] = f"Bearer {sanitized_key}"
+        auth_header, auth_prefix = _dynamic_provider_auth(provider)
+        headers.update(
+            build_api_key_headers(
+                sanitized_key,
+                api_key_header=auth_header,
+                api_key_prefix=auth_prefix,
+            )
+        )
         body = {
             "model": model,
             "messages": messages,
@@ -334,45 +530,40 @@ async def call_ai_api_stream(
             body["max_tokens"] = max_tokens
         if top_p is not None:
             body["top_p"] = top_p
-        # 透传 reasoning_effort 参数
-        if reasoning_effort is not None:
-            body["reasoning_effort"] = reasoning_effort
         # 合并自定义参数
         if custom_params:
-            body.update(custom_params)
-        # 深度思考模式：根据 provider 使用不同参数
-        if enable_thinking:
-            if provider.lower() in OPENAI_NATIVE:
-                # OpenAI 原生 API（GPT-5/o3/o4 系列）：使用 reasoning_effort 参数
-                # 如果前端已传入 reasoning_effort 则优先使用，否则默认 high
-                if "reasoning_effort" not in body:
-                    body["reasoning_effort"] = "high"
-            elif provider.lower() in MINIMAX:
-                # MiniMax：使用 reasoning_split 分离思考内容
-                body["reasoning_split"] = True
-            elif provider.lower() not in MOONSHOT and provider.lower() not in DOUBAO:
-                # DeepSeek / 智谱 / 通用 OpenAI 兼容：使用 thinking 参数
-                # Moonshot/Kimi 和豆包 Seed 系列自动思考，无需额外参数
-                body["thinking"] = {"type": "enabled"}
-                # DeepSeek 的 reasoning 与正文共享 completion 预算。标准回答默认的
-                # 1000/2024 tokens 可能被思考过程耗尽，最终只返回 reasoning 而没有正文。
-                if provider.lower() == "deepseek" or "deepseek" in str(model or "").lower():
-                    try:
-                        configured_max_tokens = int(body.get("max_tokens") or 0)
-                    except (TypeError, ValueError):
-                        configured_max_tokens = 0
-                    body["max_tokens"] = max(configured_max_tokens, 8192)
-                elif "max_tokens" not in body:
-                    body["max_tokens"] = 8192
+            merge_request_body(body, custom_params)
+        reasoning_resolution = apply_reasoning_to_payload(
+            body,
+            provider,
+            model,
+            enable_thinking=enable_thinking,
+            requested_effort=reasoning_effort,
+        )
+        if reasoning_resolution.enabled:
+            # DeepSeek 的 reasoning 与正文共享 completion 预算。标准回答默认的
+            # 1000/2024 tokens 可能被思考过程耗尽，最终只返回 reasoning 而没有正文。
+            if provider.lower() == "deepseek" or "deepseek" in str(model or "").lower():
+                try:
+                    configured_max_tokens = int(body.get("max_tokens") or 0)
+                except (TypeError, ValueError):
+                    configured_max_tokens = 0
+                body["max_tokens"] = max(configured_max_tokens, 8192)
+            elif reasoning_resolution.mode in {"thinking_toggle", "qwen_budget"} and "max_tokens" not in body:
+                body["max_tokens"] = 8192
             # 思考模式下不支持 temperature，移除避免报错
             body.pop("temperature", None)
 
         # 推理模型（自动思考）同样不支持 temperature
-        if not enable_thinking and _is_reasoning_model(model):
+        if not reasoning_resolution.enabled and _is_reasoning_model(model):
             body.pop("temperature", None)
 
         # 置信度评分：请求 logprobs（仅非思考模式且非推理模型，避免干扰）
-        if not enable_thinking and not _is_reasoning_model(model):
+        if (
+            not enable_thinking
+            and not _is_reasoning_model(model)
+            and provider.lower() in OPENAI_LIKE
+        ):
             body["logprobs"] = True
             body.setdefault("top_logprobs", 1)
 
@@ -424,6 +615,7 @@ async def call_ai_api_stream(
                                 finish_reason=_finish_reason,
                                 invalid_event_count=_invalid_event_count,
                                 qa_score=qa_score,
+                                reasoning_resolution=reasoning_resolution.public(),
                             )
                             return
                         try:
@@ -514,6 +706,7 @@ async def call_ai_api_stream(
                         finish_reason=_finish_reason,
                         invalid_event_count=_invalid_event_count,
                         qa_score=qa_score,
+                        reasoning_resolution=reasoning_resolution.public(),
                     )
         except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as e:
             logger.warning(f"[Stream] connection interrupted: {type(e).__name__}: {e}")
@@ -524,13 +717,18 @@ async def call_ai_api_stream(
         return
 
     # Anthropic 流式
-    if provider.lower() in ANTHROPIC:
+    if _is_anthropic_provider(provider):
         sanitized_key = _sanitize_api_key(api_key)
-        headers = {
-            "x-api-key": sanitized_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json"
-        }
+        auth_header, auth_prefix = _dynamic_provider_auth(provider)
+        headers = build_api_key_headers(
+            sanitized_key,
+            provider_type="anthropic",
+            api_key_header=auth_header,
+            api_key_prefix=auth_prefix,
+            extra_headers={
+                "anthropic-version": "2023-06-01",
+            },
+        )
         body = {
             "model": model,
             "messages": [m for m in messages if m.get("role") != "system"],
@@ -546,10 +744,18 @@ async def call_ai_api_stream(
             body["top_p"] = top_p
         # 合并自定义参数
         if custom_params:
-            body.update(custom_params)
-        # 深度思考模式：Anthropic extended thinking
-        if enable_thinking:
-            body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
+            merge_request_body(body, custom_params)
+        reasoning_resolution = apply_reasoning_to_payload(
+            body,
+            provider,
+            model,
+            provider_type="anthropic",
+            enable_thinking=enable_thinking,
+            requested_effort=reasoning_effort,
+        )
+        # Anthropic requires the total output cap to exceed the thinking
+        # budget. A normal 1k chat cap would otherwise fail before an answer.
+        if reasoning_resolution.enabled:
             # Anthropic requires the total output cap to exceed the thinking
             # budget.  A normal 1k chat cap would otherwise fail before any
             # visible answer is generated.
@@ -557,7 +763,8 @@ async def call_ai_api_stream(
                 configured_max_tokens = int(body.get("max_tokens") or 0)
             except (TypeError, ValueError):
                 configured_max_tokens = 0
-            body["max_tokens"] = max(configured_max_tokens, 9216)
+            thinking_budget = reasoning_resolution.budget_tokens or 8192
+            body["max_tokens"] = max(configured_max_tokens, thinking_budget + 1024)
         else:
             body.setdefault("max_tokens", 8192)
         _content_chars = 0
@@ -566,7 +773,7 @@ async def call_ai_api_stream(
         _invalid_event_count = 0
         try:
             async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
-                async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
+                async with client.stream("POST", endpoint or "https://api.anthropic.com/v1/messages", headers=headers, json=body) as resp:
                     if resp.status_code != 200:
                         err_text = await resp.aread()
                         err_body = err_text.decode("utf-8", errors="ignore")
@@ -590,6 +797,7 @@ async def call_ai_api_stream(
                                 reasoning_chars=_reasoning_chars,
                                 finish_reason=_finish_reason,
                                 invalid_event_count=_invalid_event_count,
+                                reasoning_resolution=reasoning_resolution.public(),
                             )
                             return
                         try:
@@ -634,6 +842,7 @@ async def call_ai_api_stream(
                         reasoning_chars=_reasoning_chars,
                         finish_reason=_finish_reason,
                         invalid_event_count=_invalid_event_count,
+                        reasoning_resolution=reasoning_resolution.public(),
                     )
         except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as exc:
             logger.warning("[AnthropicStream] connection interrupted: %s", exc)
@@ -689,12 +898,22 @@ async def call_ai_api_stream(
             payload["generationConfig"] = generation_config
         # 合并自定义参数
         if custom_params:
-            payload.update(custom_params)
-        # 深度思考模式：Gemini thinkingConfig
-        if enable_thinking:
-            if "generationConfig" not in payload:
-                payload["generationConfig"] = {}
-            payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 8192}
+            merge_request_body(payload, custom_params)
+        reasoning_resolution = apply_reasoning_to_payload(
+            payload,
+            provider,
+            model,
+            provider_type="gemini",
+            enable_thinking=enable_thinking,
+            requested_effort=reasoning_effort,
+        )
+        if reasoning_resolution.enabled and reasoning_resolution.budget_tokens:
+            generation = payload.get("generationConfig")
+            if isinstance(generation, dict):
+                generation["maxOutputTokens"] = ensure_reasoning_output_budget(
+                    generation.get("maxOutputTokens"),
+                    reasoning_resolution,
+                )
 
         _content_chars = 0
         _reasoning_chars = 0
@@ -726,6 +945,7 @@ async def call_ai_api_stream(
                                 reasoning_chars=_reasoning_chars,
                                 finish_reason=_finish_reason,
                                 invalid_event_count=_invalid_event_count,
+                                reasoning_resolution=reasoning_resolution.public(),
                             )
                             return
                         try:
@@ -787,6 +1007,7 @@ async def call_ai_api_stream(
                         reasoning_chars=_reasoning_chars,
                         finish_reason=_finish_reason,
                         invalid_event_count=_invalid_event_count,
+                        reasoning_resolution=reasoning_resolution.public(),
                     )
         except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, ConnectionError, OSError) as exc:
             logger.warning("[GeminiStream] connection interrupted: %s", exc)
@@ -811,7 +1032,7 @@ async def call_ai_api_stream(
     # 其他 provider 回退为一次性响应
     try:
         resp = await call_ai_api(messages, api_key, model, provider, endpoint=endpoint, middlewares=middlewares,
-                                max_tokens=max_tokens, temperature=temperature, top_p=top_p,
+                                enable_thinking=enable_thinking, max_tokens=max_tokens, temperature=temperature, top_p=top_p,
                                 custom_params=custom_params, reasoning_effort=reasoning_effort,
                                 purpose=purpose)
         if isinstance(resp, dict) and resp.get("error"):
@@ -851,6 +1072,7 @@ async def call_ai_api_stream(
             reasoning_chars=len(reasoning_text),
             fallback_used=fallback_used,
             degraded=degraded,
+            reasoning_resolution=resp.get("_reasoning_resolution"),
         )
     except Exception as e:
         yield {"error": str(e), "done": True, "used_provider": provider, "used_model": model, "fallback_used": False}

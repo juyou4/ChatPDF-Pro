@@ -14,6 +14,9 @@ import logging
 import re
 from typing import List, Optional
 
+from services.completion_outcome import require_publishable_completion
+from services.intent_constraints import IntentConstraintSet
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -77,6 +80,7 @@ async def generate_hyde_passage(
             max_tokens=300,
             temperature=0.5,
         )
+        require_publishable_completion(response, operation="HyDE expansion")
 
         if isinstance(response, dict):
             if response.get("error"):
@@ -163,6 +167,7 @@ async def expand_query(
             max_tokens=200,
             temperature=0.7,
         )
+        require_publishable_completion(response, operation="query expansion")
 
         if isinstance(response, dict):
             if response.get("error"):
@@ -191,7 +196,12 @@ async def expand_query(
             if line and line != query and len(line) > 3:
                 expanded.append(line)
 
-        expanded = expanded[:n]
+        constraints = IntentConstraintSet.from_text(query)
+        expanded = [
+            item
+            for item in expanded[:n]
+            if constraints.validate_rewrite(item).allowed
+        ]
         if expanded:
             logger.info(
                 f"[QueryExpansion] 查询扩展: '{query}' → {len(expanded)} 个改写"

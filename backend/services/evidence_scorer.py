@@ -51,11 +51,19 @@ SUMMARY_USER_PROMPT = (
     "Excerpt from {citation}\n\n---\n\n{text}\n\n---\n\nQuestion: {question}"
 )
 
-# The cache is intentionally invalidated when either scoring prompt changes.
-# This derives the revision from the actual prompt templates instead of relying
-# on a manually maintained version string being remembered during an edit.
+# The cache is intentionally invalidated when either scoring prompt or the
+# completion contract changes.  Before completion outcomes were enforced,
+# syntactically valid JSON produced with ``finish_reason=length`` could have
+# been cached as a normal score; keep those entries outside the new key space.
+EVIDENCE_SCORE_CACHE_CONTRACT_VERSION = "completion-outcome-v1"
 EVIDENCE_SCORE_PROMPT_VERSION = hashlib.sha256(
-    (SUMMARY_SYSTEM_PROMPT + "\n" + SUMMARY_USER_PROMPT).encode("utf-8")
+    (
+        EVIDENCE_SCORE_CACHE_CONTRACT_VERSION
+        + "\n"
+        + SUMMARY_SYSTEM_PROMPT
+        + "\n"
+        + SUMMARY_USER_PROMPT
+    ).encode("utf-8")
 ).hexdigest()[:16]
 
 DEFAULT_SUMMARY_LENGTH = "about 40"
@@ -162,13 +170,9 @@ def _parse_score_payload(content: Any) -> tuple[str, int]:
     try:
         parsed = parse_json_object(content, allow_partial=False)
     except Exception:
-        text = str(content or "")
-        score_match = re.search(r"\b([0-9]|10)\b", text)
-        score = _clamp_score(score_match.group(1) if score_match else 0)
-        summary = ""
-        if score > 0:
-            summary = re.sub(r"\s+", " ", text).strip()[:400]
-        return summary, score
+        # 不能从损坏的 JSON 里猜第一个数字。它可能来自摘要正文，而不是
+        # relevance_score；失败时返回 0，让原始检索分数承担排序职责。
+        return "", 0
 
     summary = str(parsed.get("summary") or "").strip()
     score = _clamp_score(parsed.get("relevance_score"))
@@ -223,6 +227,8 @@ async def score_single_evidence(
         {"role": "user", "content": user},
     ]
     try:
+        from services.completion_outcome import require_publishable_completion
+
         response = await call_ai_api(
             messages=messages,
             api_key=api_key,
@@ -233,6 +239,10 @@ async def score_single_evidence(
             temperature=0.0,
             purpose="evidence_score",
         )
+        try:
+            require_publishable_completion(response, operation="evidence score")
+        except Exception:
+            response = None
         summary, score = _parse_score_payload(_response_content(response))
         if summary or score > 0:
             return summary, score
@@ -256,6 +266,7 @@ async def score_single_evidence(
             temperature=0.0,
             purpose="evidence_score_retry",
         )
+        require_publishable_completion(response, operation="evidence score retry")
         return _parse_score_payload(_response_content(response))
     except Exception as exc:
         logger.debug("[EvidenceScorer] single score failed: %s", exc)

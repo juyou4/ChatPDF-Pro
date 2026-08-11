@@ -11,6 +11,8 @@ import logging
 import re
 from typing import List, Optional
 
+from services.completion_outcome import resolve_completion_outcome
+
 logger = logging.getLogger(__name__)
 
 _COMPRESS_PROMPT = """请从以下文档片段中提取与用户问题直接相关的内容。
@@ -27,6 +29,22 @@ _COMPRESS_PROMPT = """请从以下文档片段中提取与用户问题直接相�
 {chunk_text}
 
 相关内容："""
+
+
+def _normalize_extract_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _is_extractively_grounded(candidate: str, source: str) -> bool:
+    """Every returned line must be copied verbatim from the source chunk."""
+
+    normalized_source = _normalize_extract_text(source)
+    lines = [
+        _normalize_extract_text(line)
+        for line in str(candidate or "").splitlines()
+        if _normalize_extract_text(line)
+    ]
+    return bool(lines) and all(line in normalized_source for line in lines)
 
 
 async def compress_chunk(
@@ -82,6 +100,19 @@ async def compress_chunk(
             temperature=0.1,
         )
 
+        outcome = resolve_completion_outcome(
+            response,
+            transport_complete=not bool(
+                isinstance(response, dict) and response.get("error")
+            ),
+        )
+        if not outcome.publishable:
+            logger.warning(
+                "[ContextCompress] 输出不完整，保留原文: finish_reason=%s",
+                outcome.finish_reason or outcome.status.value,
+            )
+            return chunk_text
+
         if isinstance(response, dict):
             if response.get("error"):
                 logger.warning(f"[ContextCompress] LLM 调用失败: {response['error']}")
@@ -97,9 +128,14 @@ async def compress_chunk(
         content = content.strip()
 
         # 如果 LLM 判断无关，返回空
-        if content == "[无关内容]" or not content:
+        if content == "[无关内容]":
             logger.info(f"[ContextCompress] chunk 被判定为无关，长度 {len(chunk_text)}")
             return ""
+        if not content:
+            return chunk_text
+        if not _is_extractively_grounded(content, chunk_text):
+            logger.warning("[ContextCompress] 输出并非原文完整片段，保留原文")
+            return chunk_text
 
         # 压缩成功
         compression_ratio = len(content) / max(len(chunk_text), 1)

@@ -62,10 +62,15 @@ class SearchManager:
     _TECH_QUERY_HINTS = (
         "论文", "方法", "模型", "算法", "攻击", "防御", "鲁棒", "公式", "实验", "asr",
         "adversarial", "model", "method", "algorithm", "benchmark", "loss", "dataset",
+        "github", "repository", "repo", "source code", "代码仓库",
     )
     _NOISY_DOMAIN_HINTS = (
         "instagram.com", "ameblo.jp", "weibo.com", "x.com", "twitter.com", "facebook.com",
+        "hanyuguoxue.com", "zdic.net", "dict.youdao.com", "wenku.baidu.com", "zhidao.baidu.com",
     )
+    _REPOSITORY_PRIORITY_DOMAINS = {
+        "github.com", "gitlab.com", "gitee.com", "codeberg.org",
+    }
 
     # 无需 API Key 的引擎
     _PROVIDERS_NO_KEY = {
@@ -112,6 +117,17 @@ class SearchManager:
         max_results = max(1, int(max_results))
 
         try:
+            # Auto 模式不能只看上游是否返回了原始结果：某些网络环境会
+            # 把 Bing RSS 重定向到门户首页，原始列表非空但相关性全为零。
+            # 只有经过黑名单、相关性和仓库官方来源排序后仍有可用结果，
+            # 才算该引擎命中，否则继续尝试下一个引擎。
+            if provider == "auto":
+                return await SearchManager._auto_search_relevant(
+                    query,
+                    max_results=max_results,
+                    blacklist=blacklist,
+                )
+
             key_method_name = SearchManager._PROVIDERS_REQUIRING_KEY.get(provider)
             if key_method_name:
                 if not api_key:
@@ -165,6 +181,46 @@ class SearchManager:
                 return results
             logger.info(f"自动搜索 provider={name} 返回空结果，尝试下一个引擎")
         logger.warning("自动搜索未返回结果")
+        return []
+
+    @staticmethod
+    async def _auto_search_relevant(
+        query: str,
+        max_results: int = 5,
+        blacklist: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """自动搜索并以处理后的相关结果决定是否切换引擎。"""
+        providers = (
+            ("bing", SearchManager._bing_search),
+            ("duckduckgo", SearchManager._ddg_search),
+        )
+        for name, method in providers:
+            try:
+                raw_results = await method(query, max_results=max_results)
+            except Exception as exc:
+                logger.warning("自动搜索 %s 失败: %s", name, _safe_search_error(exc))
+                continue
+            processed = SearchManager._postprocess_results(
+                query,
+                raw_results,
+                max_results,
+                blacklist,
+            )
+            if processed:
+                logger.info(
+                    "自动搜索命中 provider=%s, 相关结果数=%s",
+                    name,
+                    len(processed),
+                )
+                return processed
+            if raw_results:
+                logger.info(
+                    "自动搜索 provider=%s 返回结果但相关性不足，尝试下一个引擎",
+                    name,
+                )
+            else:
+                logger.info("自动搜索 provider=%s 返回空结果，尝试下一个引擎", name)
+        logger.warning("自动搜索未返回可用相关结果")
         return []
 
     @staticmethod
@@ -249,6 +305,17 @@ class SearchManager:
         return any(h in q for h in SearchManager._TECH_QUERY_HINTS)
 
     @staticmethod
+    def _is_repository_query(query: str) -> bool:
+        q = (query or "").lower()
+        return any(
+            hint in q
+            for hint in (
+                "github", "gitlab", "gitee", "repository", "repo", "source code",
+                "代码仓库", "源码", "仓库", "代码地址",
+            )
+        )
+
+    @staticmethod
     def _score_result(query: str, item: dict) -> float:
         q_tokens = SearchManager._tokenize_for_relevance(query)
         if not q_tokens:
@@ -258,7 +325,7 @@ class SearchManager:
         snippet = item.get("snippet", "") or ""
         url = item.get("url", "") or ""
         title_tokens = SearchManager._tokenize_for_relevance(title)
-        body_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet}")
+        body_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet} {url}")
 
         overlap_title = len(q_tokens & title_tokens) / max(1, len(q_tokens))
         overlap_body = len(q_tokens & body_tokens) / max(1, len(q_tokens))
@@ -280,6 +347,19 @@ class SearchManager:
         ):
             score *= 0.5
 
+        if SearchManager._is_repository_query(query):
+            if domain in SearchManager._REPOSITORY_PRIORITY_DOMAINS or any(
+                domain.endswith("." + h) for h in SearchManager._REPOSITORY_PRIORITY_DOMAINS
+            ):
+                score += 0.4
+            elif domain.endswith(".github.io"):
+                score += 0.25
+            elif any(
+                domain == h or domain.endswith("." + h)
+                for h in SearchManager._NOISY_DOMAIN_HINTS
+            ):
+                score *= 0.08
+
         return score
 
     @staticmethod
@@ -296,6 +376,12 @@ class SearchManager:
         max_score = scored[0][0] if scored else 0.0
         if max_score <= 0.02:
             logger.debug(f"相关性重排：所有结果得分过低(max={max_score:.3f})，返回空")
+            return []
+
+        # A repository request must not degrade to a random dictionary/news
+        # page merely because it shares one generic Chinese bigram.
+        if SearchManager._is_repository_query(query) and max_score < 0.12:
+            logger.debug("相关性重排：仓库查询没有达到最低相关性阈值(max=%.3f)", max_score)
             return []
 
         # 自适应阈值：保留与最佳结果接近的项，过滤明显离题项

@@ -28,6 +28,7 @@ import logging
 import re
 from typing import Any, Callable, Iterable, Optional, Sequence
 
+from services.completion_outcome import require_publishable_completion
 from services.intent_constraints import IntentConstraintSet
 from services.structured_json import parse_json_object
 
@@ -637,6 +638,7 @@ async def assess_question_clarity(
             temperature=0.0,
             purpose="intent_clarification",
         )
+        require_publishable_completion(response, operation="intent clarification")
         content = _response_content(response)
         parsed, parse_source = _parse_clarify_payload(content)
         if not parsed:

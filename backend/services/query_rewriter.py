@@ -8,6 +8,8 @@ import re
 import logging
 from typing import Optional
 
+from services.completion_outcome import require_publishable_completion
+
 from services.intent_constraints import IntentConstraintSet
 
 logger = logging.getLogger(__name__)
@@ -855,12 +857,14 @@ class QueryRewriter:
                 if response.get("error"):
                     logger.warning(f"[LLM QueryRewrite] 调用失败: {response['error']}")
                     return rewritten
+                require_publishable_completion(response, operation="query rewrite")
                 content = response.get("content", "")
                 if not content and "choices" in response:
                     choices = response["choices"]
                     if choices and isinstance(choices, list):
                         content = choices[0].get("message", {}).get("content", "")
             else:
+                require_publishable_completion(response, operation="query rewrite")
                 content = str(response) if response else ""
 
             content = content.strip()

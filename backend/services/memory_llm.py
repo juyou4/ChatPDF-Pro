@@ -10,6 +10,8 @@ import re
 import threading
 from typing import Any, Optional
 
+from services.completion_outcome import resolve_completion_outcome
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LLM_TIMEOUT = 30.0
@@ -143,6 +145,20 @@ def call_llm_sync(
         )
 
     response = asyncio.run(_call_with_timeout())
+
+    outcome = resolve_completion_outcome(
+        response,
+        transport_complete=not bool(
+            isinstance(response, dict) and response.get("error")
+        ),
+    )
+    if not outcome.publishable:
+        logger.warning(
+            "[MemoryLLM] 拒绝未完整生成的结果: status=%s finish_reason=%s",
+            outcome.status.value,
+            outcome.finish_reason or "unknown",
+        )
+        return None
 
     return extract_response_text(response)
 

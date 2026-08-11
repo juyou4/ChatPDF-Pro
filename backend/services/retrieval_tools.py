@@ -41,6 +41,15 @@ from services.visual_retriever import (
     deterministic_ranked_assets,
     execute_visual_retriever,
 )
+from services.external_research_service import (
+    external_adapter_for_url,
+    read_external_research_source,
+    read_public_web_source,
+)
+from services.web_research_query_service import (
+    build_web_research_query,
+    extract_safe_web_anchors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +76,8 @@ _UNTRUSTED_WEB_EVIDENCE_NOTICE = (
 _MAX_WEB_SEARCH_QUERY_LENGTH = 320
 _MAX_WEB_SEARCH_RESULTS = 10
 _WEB_SEARCH_SNIPPET_LIMIT = 900
+_MAX_WEB_SOURCE_READS = 2
+_MAX_WEB_SOURCE_READ_CHARS = 12_000
 
 _SENSITIVE_VISUAL_METADATA_RE = re.compile(
     r"(?:https?://|file://|^[A-Za-z]:[\\/]|^\\\\|\b(?:bearer\s+|sk-)[A-Za-z0-9._-]{8,}|[\\/][^\s]*\.pdf(?:$|[?#]))",
@@ -173,6 +184,17 @@ class DocContext:
         self._web_search_executor = web_search_executor if callable(web_search_executor) else None
         self._web_search_lock = threading.Lock()
         self._web_search_claimed = False
+        # The outbound query is request-owned. Only bounded public anchors
+        # extracted from successful document retrieval may refine it.
+        self._web_search_request_query = ""
+        self._web_research_anchors: list[dict] = []
+        self._web_search_query_history: list[str] = []
+        # 外部来源注册表和全文缓存均为请求级内存态。Planner 只能使用前一
+        # 次 web_search 实际返回的 source_id，不能把任意 URL 传给网络层。
+        self._web_source_registry: dict[str, dict] = {}
+        self._web_read_cache: dict[str, dict] = {}
+        self._web_read_lock = threading.Lock()
+        self._web_read_count = 0
         # Citation authority is request-local.  IDs only enter this ledger after
         # a successful Agent tool result is received; no text or cache state is
         # retained here.
@@ -284,6 +306,121 @@ class DocContext:
                 return None, "web_search_limit_reached"
             self._web_search_claimed = True
             return self._web_search_executor, ""
+
+    def set_web_search_request_query(self, query: Any) -> None:
+        """Freeze the route-owned user/retrieval query before Agent planning."""
+        self._web_search_request_query = _safe_web_result_text(
+            query,
+            _MAX_WEB_SEARCH_QUERY_LENGTH,
+        )
+
+    def register_web_research_evidence(self, evidence: Any) -> int:
+        """Store only safe public anchors from a completed document search."""
+        anchors = extract_safe_web_anchors(evidence)
+        if not anchors:
+            return 0
+        existing = {
+            "|".join(
+                [
+                    str(item.get("kind") or ""),
+                    str(item.get("host") or ""),
+                    str(item.get("path") or ""),
+                    *[str(token) for token in item.get("tokens") or []],
+                ]
+            ).casefold()
+            for item in self._web_research_anchors
+            if isinstance(item, dict)
+        }
+        added = 0
+        for anchor in anchors:
+            if not isinstance(anchor, dict):
+                continue
+            key = "|".join(
+                [
+                    str(anchor.get("kind") or ""),
+                    str(anchor.get("host") or ""),
+                    str(anchor.get("path") or ""),
+                    *[str(token) for token in anchor.get("tokens") or []],
+                ]
+            ).casefold()
+            if not key or key in existing:
+                continue
+            existing.add(key)
+            self._web_research_anchors.append(dict(anchor))
+            added += 1
+            if len(self._web_research_anchors) >= 8:
+                break
+        return added
+
+    def resolve_web_search_query(self, planner_query: Any) -> dict:
+        """Build the actual outbound query from frozen intent and safe anchors."""
+        resolution = build_web_research_query(
+            self._web_search_request_query or str(planner_query or ""),
+            planner_query=str(planner_query or ""),
+            anchors=self._web_research_anchors,
+        )
+        effective_query = _safe_web_result_text(
+            resolution.get("query"),
+            _MAX_WEB_SEARCH_QUERY_LENGTH,
+        )
+        if effective_query:
+            self._web_search_query_history.append(effective_query)
+            self._web_search_query_history = self._web_search_query_history[-4:]
+        return resolution
+
+    def register_web_sources(self, sources: Any) -> int:
+        """登记本次搜索实际返回的网页来源，返回新增/更新数量。"""
+        if not isinstance(sources, list):
+            return 0
+        registered = 0
+        with self._web_read_lock:
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                source_id = str(source.get("source_id") or source.get("evidence_id") or "").strip()
+                url = str(source.get("url") or "").strip()
+                if not source_id.startswith("web:") or not url:
+                    continue
+                self._web_source_registry[source_id] = {
+                    "source_id": source_id,
+                    "evidence_id": source_id,
+                    "title": _safe_web_result_text(source.get("title"), 300),
+                    "url": url[:1200],
+                    "snippet": _safe_web_result_text(source.get("snippet"), _WEB_SEARCH_SNIPPET_LIMIT),
+                    "adapter": external_adapter_for_url(url),
+                }
+                registered += 1
+        return registered
+
+    def claim_web_source_read(self, source_id: Any, cursor: Any, max_chars: Any):
+        """检查来源授权并预留一次全文读取预算。"""
+        normalized_id = str(source_id or "").strip()
+        try:
+            normalized_cursor = max(0, min(120_000, int(cursor or 0)))
+        except (TypeError, ValueError):
+            normalized_cursor = 0
+        try:
+            normalized_chars = max(256, min(_MAX_WEB_SOURCE_READ_CHARS, int(max_chars or 6000)))
+        except (TypeError, ValueError):
+            normalized_chars = 6000
+        cache_key = f"{normalized_id}:{normalized_cursor}:{normalized_chars}"
+        with self._web_read_lock:
+            source = self._web_source_registry.get(normalized_id)
+            if source is None:
+                return None, cache_key, None, False, "source_not_authorized"
+            cached = self._web_read_cache.get(cache_key)
+            if isinstance(cached, dict):
+                return copy.deepcopy(source), cache_key, copy.deepcopy(cached), True, ""
+            if self._web_read_count >= _MAX_WEB_SOURCE_READS:
+                return copy.deepcopy(source), cache_key, None, False, "web_read_limit_reached"
+            self._web_read_count += 1
+            return copy.deepcopy(source), cache_key, None, False, ""
+
+    def store_web_source_read(self, cache_key: str, result: dict) -> None:
+        if not cache_key or not isinstance(result, dict):
+            return
+        with self._web_read_lock:
+            self._web_read_cache[str(cache_key)] = copy.deepcopy(result)
 
     def record_tool_citation_evidence(self, tool_name: str, result: Any) -> int:
         """Authorize only stable IDs returned by one successful tool execution."""
@@ -583,6 +720,8 @@ async def execute_async_tool(
         return await execute_visual_analysis_tool(args, doc_ctx)
     if tool_name == "web_search":
         return await _exec_web_search(args, doc_ctx)
+    if tool_name == "read_web_source":
+        return await _exec_read_web_source(args, doc_ctx)
     if tool_name == "search_document":
         # 与同步 execute_tool 保持同一错误码约定：0 命中 != 执行报错。
         return _mark_zero_hit_result(await _exec_search_document_async(args, doc_ctx))
@@ -635,7 +774,9 @@ def _render_web_source_evidence(source: dict, index: int) -> str:
 
 async def _exec_web_search(args: dict, ctx: DocContext) -> dict:
     """Run the request-bound web search without exposing transport configuration to the planner."""
-    query = _safe_web_result_text(args.get("query"), _MAX_WEB_SEARCH_QUERY_LENGTH)
+    planner_query = _safe_web_result_text(args.get("query"), _MAX_WEB_SEARCH_QUERY_LENGTH)
+    resolution = ctx.resolve_web_search_query(planner_query)
+    query = _safe_web_result_text(resolution.get("query"), _MAX_WEB_SEARCH_QUERY_LENGTH)
     if not query:
         return {
             "results": [],
@@ -657,10 +798,22 @@ async def _exec_web_search(args: dict, ctx: DocContext) -> dict:
         }
 
     try:
-        # The executor is deliberately zero-argument: the request entry freezes
-        # the outbound query before any untrusted document evidence reaches the
-        # planner. ``query`` remains only a bounded planner intent/trace label.
-        payload = executor()
+        # Pass the bounded, system-built query when supported. Keep zero-arg
+        # compatibility for older tests and injected executors.
+        try:
+            signature = inspect.signature(executor)
+            accepts_query = any(
+                parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.VAR_POSITIONAL,
+                )
+                for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_query = True
+        payload = executor(query) if accepts_query else executor()
         if inspect.isawaitable(payload):
             payload = await payload
     except Exception as exc:
@@ -698,6 +851,9 @@ async def _exec_web_search(args: dict, ctx: DocContext) -> dict:
         identity = source.get("url") or source.get("title") or source.get("snippet") or str(index)
         source_id = hashlib.sha1(str(identity).encode("utf-8", errors="ignore")).hexdigest()[:16]
         evidence_id = f"web:{source_id}"
+        source["source_id"] = evidence_id
+        source["evidence_id"] = evidence_id
+        source["adapter"] = external_adapter_for_url(source.get("url", ""))
         evidence_text = _render_web_source_evidence(source, index)
         item = {
             "chunk": evidence_text,
@@ -727,14 +883,235 @@ async def _exec_web_search(args: dict, ctx: DocContext) -> dict:
         candidate_meta.append(meta)
         context_parts.append(evidence_text)
 
+    ctx.register_web_sources(sources)
+    public_sources = []
+    for source in sources:
+        public_source = {
+            "title": source.get("title", ""),
+            "url": source.get("url", ""),
+            "snippet": source.get("snippet", ""),
+        }
+        adapter_name = str(source.get("adapter") or "jina_reader").strip()
+        if adapter_name in {"github_public", "youtube_transcript"}:
+            public_source["adapter"] = adapter_name
+        public_sources.append(public_source)
+
     return {
         "results": results,
         "chunk_meta": chunk_meta,
         "candidate_meta": candidate_meta,
         "result_count": len(results),
-        "web_search_sources": sources,
+        # 保持前端历史来源结构稳定；带 source_id 的注册表仅供本次 Agent 工具链使用。
+        "web_search_sources": public_sources,
+        "web_search_source_registry": sources,
         "web_search_context": "\n\n".join(context_parts),
         "summary": f"联网搜索 \"{query[:80]}\" 返回 {len(results)} 个来源",
+        "effective_query": query,
+        "web_search_query_meta": {
+            "target": str(resolution.get("target") or "general"),
+            "anchor_count": int(resolution.get("anchor_count") or 0),
+            "used_document_anchors": bool(resolution.get("used_document_anchors")),
+        },
+    }
+
+
+async def _exec_read_web_source(args: dict, ctx: DocContext) -> dict:
+    """读取先前 web_search 登记的单个公开网页来源。"""
+    source_id = str(args.get("sourceId") or args.get("source_id") or "").strip()
+    if not source_id:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "web_search_reads": [],
+            "result_count": 0,
+            "summary": "缺少已授权的网页来源 ID",
+            "error": "source_id_required",
+            "error_code": "source_id_required",
+        }
+    try:
+        cursor = max(0, min(120_000, int(args.get("cursor") or 0)))
+    except (TypeError, ValueError):
+        cursor = 0
+    try:
+        max_chars = max(256, min(_MAX_WEB_SOURCE_READ_CHARS, int(args.get("maxChars") or 6000)))
+    except (TypeError, ValueError):
+        max_chars = 6000
+
+    source, cache_key, cached, cache_hit, claim_error = ctx.claim_web_source_read(
+        source_id,
+        cursor,
+        max_chars,
+    )
+    if source is None:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "web_search_reads": [{"source_id": source_id, "status": "unauthorized"}],
+            "result_count": 0,
+            "summary": "网页来源未在本次搜索结果中登记",
+            "error": claim_error,
+            "error_code": claim_error,
+        }
+    if claim_error:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "web_search_reads": [{
+                "source_id": source_id,
+                "title": source.get("title", ""),
+                "url": source.get("url", ""),
+                "status": "skipped",
+                "reason": claim_error,
+            }],
+            "result_count": 0,
+            "summary": "网页全文读取预算已用尽",
+            "error": claim_error,
+            "error_code": claim_error,
+        }
+
+    if cache_hit and isinstance(cached, dict):
+        payload = copy.deepcopy(cached)
+    else:
+        adapter_name = str(source.get("adapter") or external_adapter_for_url(source.get("url", ""))).strip()
+        try:
+            try:
+                if adapter_name == "jina_reader":
+                    # 保留旧适配器注入点，测试和部署中的自定义 Reader 可以
+                    # 继续替换 retrieval_tools.read_public_web_source。
+                    payload = await read_public_web_source(
+                        source.get("url", ""),
+                        max_chars=max_chars,
+                        start_char=cursor,
+                    )
+                else:
+                    payload = await read_external_research_source(
+                        source.get("url", ""),
+                        max_chars=max_chars,
+                        start_char=cursor,
+                    )
+            except TypeError:
+                # 保持测试/第三方适配器兼容：旧适配器不支持 start_char 时仍读取首段。
+                if adapter_name == "jina_reader":
+                    payload = await read_public_web_source(
+                        source.get("url", ""),
+                        max_chars=max_chars,
+                    )
+                else:
+                    payload = await read_external_research_source(
+                        source.get("url", ""),
+                        max_chars=max_chars,
+                    )
+        except Exception as exc:
+            logger.warning("[RetrievalTools] 外部网页适配器异常: %s", type(exc).__name__)
+            payload = {
+                "status": "failed",
+                "error_code": "adapter_exception",
+                "error": "外部网页适配器暂时不可用",
+                "text": "",
+            }
+        if isinstance(payload, dict):
+            ctx.store_web_source_read(cache_key, payload)
+    if not isinstance(payload, dict):
+        payload = {"status": "failed", "error_code": "invalid_adapter_result", "text": ""}
+
+    full_text = str(payload.get("text") or "")
+    try:
+        payload_start = max(0, int(payload.get("content_start") or 0))
+    except (TypeError, ValueError):
+        payload_start = 0
+    window = (
+        full_text[:max_chars]
+        if payload_start == cursor
+        else full_text[cursor:cursor + max_chars]
+    )
+    truncated = bool(payload.get("truncated")) or cursor + len(window) < payload_start + len(full_text)
+    content_hash = str(payload.get("content_hash") or "")
+    if not content_hash:
+        content_hash = hashlib.sha256(window.encode("utf-8", errors="ignore")).hexdigest()
+    read_evidence_id = f"{source_id}:read:{content_hash[:16]}"
+    read_status = str(payload.get("status") or "failed").strip().lower()
+    read_record = {
+        "source_id": source_id,
+        "title": source.get("title", ""),
+        "url": source.get("url", ""),
+        "adapter": str(payload.get("adapter") or source.get("adapter") or adapter_name),
+        "content_kind": str(payload.get("content_kind") or "web_page"),
+        "status": (
+            "completed"
+            if read_status == "completed" and window
+            else ("empty" if read_status == "completed" else read_status)
+        ),
+        "char_count": len(window),
+        "truncated": truncated,
+        "cached": bool(cache_hit),
+    }
+    if read_status != "completed" or not window:
+        read_record["reason"] = str(payload.get("error_code") or "empty_content")[:80]
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "web_search_reads": [read_record],
+            "result_count": 0,
+            "summary": "网页全文读取失败，继续使用搜索摘要",
+            "error": str(payload.get("error_code") or "web_read_failed"),
+            "error_code": str(payload.get("error_code") or "web_read_failed"),
+        }
+
+    evidence_text = "\n".join((
+        _UNTRUSTED_WEB_EVIDENCE_NOTICE,
+        "[网页全文证据]",
+        f"标题: {_safe_web_result_text(source.get('title'), 300) or '未知标题'}",
+        f"URL: {_safe_web_result_text(source.get('url'), 1200)}",
+        f"内容游标: {cursor}",
+        window,
+    ))
+    rendered = _format_tool_chunk(
+        evidence_text,
+        source="web_read",
+        context_id=read_evidence_id,
+        evidence_id=read_evidence_id,
+        chunk_idx=read_evidence_id,
+        chunk_type="web_page",
+    )
+    item = {
+        "chunk": evidence_text,
+        "source": "web_read",
+        "context_id": read_evidence_id,
+        "evidence_id": read_evidence_id,
+        "chunk_id": read_evidence_id,
+        "chunk_type": "web_page",
+        "parent_id": source_id,
+        "source_id": source_id,
+        "web_url": source.get("url", ""),
+        "web_title": source.get("title", ""),
+        "web_adapter": str(payload.get("adapter") or source.get("adapter") or adapter_name),
+        "content_kind": str(payload.get("content_kind") or "web_page"),
+        "content_hash": content_hash,
+        "truncated": truncated,
+    }
+    meta = _build_tool_candidate_meta(item, ctx=ctx, chunk_idx=read_evidence_id)
+    meta.update({
+        "parent_id": source_id,
+        "source_id": source_id,
+        "web_url": source.get("url", ""),
+        "web_title": source.get("title", ""),
+        "content_hash": content_hash,
+        "truncated": truncated,
+    })
+    read_record["evidence_id"] = read_evidence_id
+    return {
+        "results": [rendered] if rendered else [],
+        "chunk_meta": [meta] if rendered else [],
+        "candidate_meta": [meta] if rendered else [],
+        "web_search_reads": [read_record],
+        "web_search_context": evidence_text if rendered else "",
+        "result_count": 1 if rendered else 0,
+        "next_cursor": cursor + len(window) if truncated and window else None,
+        "summary": f"已读取网页全文 {len(window)} 字符" + ("（内容已截断）" if truncated else ""),
     }
 
 
@@ -2739,10 +3116,12 @@ def _exec_search_document(args: dict, ctx: DocContext) -> dict:
         except Exception as exc:
             payload = _search_document_component_failure(channel, exc)
         component_results.append((channel, payload))
-    return _merge_search_document_components(
+    result = _merge_search_document_components(
         component_results,
         limit=_bounded_search_limit(args.get("limit"), 14),
     )
+    ctx.register_web_research_evidence(result)
+    return result
 
 
 async def _exec_search_document_async(args: dict, ctx: DocContext) -> dict:
@@ -2765,10 +3144,12 @@ async def _exec_search_document_async(args: dict, ctx: DocContext) -> dict:
     component_results = await asyncio.gather(
         *[_run(channel, component_args) for channel, component_args in components]
     )
-    return _merge_search_document_components(
+    result = _merge_search_document_components(
         list(component_results),
         limit=_bounded_search_limit(args.get("limit"), 14),
     )
+    ctx.register_web_research_evidence(result)
+    return result
 
 def _exec_vector_search(args: dict, ctx: DocContext) -> dict:
     """向量语义搜索"""

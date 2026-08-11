@@ -834,6 +834,7 @@ async def enhance_citations(
     try:
         import time
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
 
         started = time.perf_counter()
         response = await call_ai_api(
@@ -845,6 +846,7 @@ async def enhance_citations(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        require_publishable_completion(response, operation="citation enhancement")
         diag["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
 
         content = ""
