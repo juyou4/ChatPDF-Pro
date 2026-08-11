@@ -1,15 +1,17 @@
-# ChatPDF Pro v3.1.0
+# ChatPDF Pro
 
 <div align="center">
 
-![ChatPDF Logo](https://img.shields.io/badge/ChatPDF_Pro-3.1.0-blue?style=for-the-badge)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![React](https://img.shields.io/badge/React-18.3-61dafb?style=for-the-badge&logo=react)](https://reactjs.org)
-[![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
+[![Release](https://img.shields.io/github/v/release/juyou4/ChatPDF-Pro?style=flat-square)](https://github.com/juyou4/ChatPDF-Pro/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![React](https://img.shields.io/badge/React-18.3-61dafb?style=flat-square&logo=react)](https://react.dev)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 
-**Smart Document Assistant - Chat with your PDFs** · [中文](README.md)
+**A desktop AI reader for research papers and long documents**
 
-[Quick Start](#quick-start) • [Features](#core-features) • [Changelog](#changelog) • [Tech Stack](#tech-stack) • [Architecture](#architecture)
+Parse once. Overview, summary, outline, translation, and chat use the same document structure.
+
+[Preview](#app-preview) · [Parsing Routes](#parsing-routes) · [Core Capabilities](#core-capabilities) · [Quick Start](#quick-start) · [Evaluation](#ragas-evaluation) · [中文](README.md)
 
 </div>
 
@@ -17,108 +19,156 @@
 
 ## Overview
 
-ChatPDF Pro is a local-first AI reading assistant tailored for academic papers and long technical documents. The native PDF viewer on the left and the AI chat panel on the right, combined with a retrieval pipeline built on **Semantic Groups + three-tier granularity + dual-index RRF**, lets the model handle both high-level summarisation and pinpoint lookups down to a single table row. Chat history and runtime data stay local by default. Choosing MinerU, a remote model, or web search sends the relevant document or request to the configured service.
+ChatPDF Pro puts the PDF, structured reading tools, and citation-backed chat in one workspace. Choose MinerU or local parsing before upload. Once parsing finishes, overview, full-document summary, outline, translation, and RAG chat all read the same block index. Citations in an answer can jump back to the source page.
+
+Documents and chat history are stored locally by default. The MinerU route uploads the PDF to the configured MinerU service. Cloud chat, embedding, and vision models receive the content required for the requested task. Web search sends queries only when enabled. For the smallest external-data footprint, use local parsing, local models, and turn web search off.
 
 ---
 
 ## App Preview
 
-> The two blocks below showcase the main UI and a chat example. If you build from source, just take your own screenshots and overwrite `docs/preview_overview.png` and `docs/preview_chat.png` — no README edits required.
-
-### One-Click Overview · `docs/preview_overview.png`
+### Full-Document Overview
 
 <div align="center">
-
-<!-- Overview screenshot: right pane switched to the "速览 / Overview" tab. Ideally the frame shows both the "Speed-Read" and "Key Figure Analysis" cards. -->
-<img src="docs/preview_overview.png" alt="ChatPDF Pro one-click overview panel" width="880" />
-
+<img src="docs/preview_overview.png" alt="ChatPDF Pro PDF reading and AI overview workspace" width="880" />
+<br />
+<sub>Full-document guide, key-figure analysis, and the source PDF side by side</sub>
 </div>
 
-**Left:** the native PDF reader (PDF.js + text-selection toolbar). **Right:** a toggle between the **Overview (速览)** and **Chat (对话)** tabs. The overview is generated in the background as soon as a PDF is uploaded and is composed of five structured cards:
+The Overview panel reads the whole document and produces a summary, terminology, method and experiment notes, key-figure analysis, and conclusions. It is not a summary of the current page.
 
-- **Abstract-level summary** — one paragraph describing what the paper does and why it matters.
-- **Terminology** — core concepts lifted from the document with inline definitions.
-- **Speed-Read** — three-bullet breakdown: method / experimental design / problem solved.
-- **Key Figure Analysis** — page figures extracted automatically (**MinerU-enhanced**, **PDF-native**, or **caption-only (vector figures)** sources are supported) with AI commentary beyond the original caption.
-- **Paper Summary** — strengths / innovations plus suggested future work.
+| Depth | Best for | Scope |
+| --- | --- | --- |
+| Brief | Deciding whether a paper is worth a closer read | 3 terms and up to 2 key figures |
+| Standard | Everyday reading; the default | 5 terms and up to 3 key figures |
+| Detailed | Close reading of methods, experiments, and figures | 8 terms and up to 5 key figures; uses more context and tokens |
 
-The screenshot shows the Speed-Read and Key Figure Analysis cards for arXiv:2603.15031 *Attention Residuals*. Overview cards share the same document context with the Chat tab; tapping any term or figure reference jumps back to the matching page in the PDF.
+Completed overviews are cached by document version, parsing route, model, and depth. Switching views or reopening a document reuses the cache. Use **Regenerate** when you need a fresh result.
 
-### Chat in Action · `docs/preview_chat.png`
+### Full-Document Summary
 
 <div align="center">
-
-<!-- Chat screenshot: capture one full round-trip showing [1][2] citations, the collapsible thinking block, and follow-up suggestions. -->
-<img src="docs/preview_chat.png" alt="ChatPDF Pro chat example" width="880" />
-
+<img src="docs/summary.png" alt="ChatPDF Pro full-document AI summary" width="880" />
+<br />
+<sub>A chapter-based summary with page anchors</sub>
 </div>
 
-Inline `[1]` `[2]` citations jump straight to the matching PDF page. Inline / block math renders live, deep-thinking blocks are collapsed by default, and each reply is followed by 3-5 suggested follow-up questions plus an optional hallucination-critic banner.
+The Summary view organises the full paper by section. Page labels jump back to the source, while coverage counters show whether the main text and appendices were included. The Overview panel can remain open on the right for quick comparison with figure analysis.
 
-### Standalone Desktop Client
+### Outline Navigation
 
-A self-contained Windows desktop application built with Electron. The Python backend is fully integrated and packaged using PyInstaller, ensuring it works **out of the box without any Python or Node.js environment configuration.**
+<div align="center">
+<img src="docs/outline.png" alt="ChatPDF Pro MinerU outline navigation" width="880" />
+<br />
+<sub>Nested section structure linked to the PDF</sub>
+</div>
+
+With MinerU, the outline uses the parsed section hierarchy, numbering, and page anchors directly. Selecting a heading navigates to the matching location in both paged and continuous reading modes.
+
+### Translation and Notes
+
+<div align="center">
+<img src="docs/Floating Translation.png" alt="ChatPDF Pro translation and notes workspace" width="880" />
+<br />
+<sub>Page translation, floating translations, and free-form notes</sub>
+</div>
+
+The Reading view keeps page translation and notes in one workspace. The two widgets can be reordered by dragging, resized as columns, collapsed, or moved into a full-width row. Translations are cached per block and support full-document pretranslation, source/translation switching, and retrying failed blocks. A note can start from selected PDF text or as a blank note on the current page.
+
+### Chat with Evidence
+
+<div align="center">
+<img src="docs/preview_chat.png" alt="ChatPDF Pro document chat with evidence citations" width="880" />
+<br />
+<sub>Document Q&amp;A, collapsible reasoning, and citations linked to the PDF</sub>
+</div>
+
+Inline `[1]` and `[2]` citations refer only to evidence returned during the current run and jump back to the PDF. Reasoning is collapsed by default, and formulas, Markdown, and Mermaid render in place.
 
 - **Privacy-safe distribution** - The installer contains only the renderer, Electron main process, and frozen backend runtime. It never ships uploaded documents, chat history, generated overview/outline/summary caches, indexes, logs, `.env` files, or API keys.
 - **Separate runtime storage** - On first launch, the desktop app creates its runtime data in the operating system's user-data location. Installing or upgrading does not delete existing local data, and that data is never copied back into the installer.
 
 ---
 
-## Release Highlights (v3.1.0)
+## Parsing Routes
 
-### Desktop Architecture (Electron)
-- **Standalone Application** - Windows desktop client built on Electron 28, breaking free from browser limitations.
-- **One-Click Installation** - Provided as an NSIS installer. Just double-click to install and run.
-- **Embedded Backend** - FastAPI backend packaged with PyInstaller. The app's process manager automatically finds an available port and spawns the backend service upon startup.
+Choose a route before upload. Once parsing starts, the application does not silently switch the document to another parser.
 
-### Deep Thinking Mode
-- **Reasoning Visualization** - Real-time display of the AI's ThinkingBlock in the chat area, with manual collapse/expand support.
-- **Adjustable Intensity** - Dynamically adjust reasoning intensity (Low, Medium, High) in chat settings.
-- **Smooth Streaming** - Both thinking processes and final responses support RequestAnimationFrame-based smooth character-by-character rendering.
+| Route | Best for | Behaviour |
+| --- | --- | --- |
+| MinerU (default) | Scans, formulas, tables, and complex layouts | Uploads the PDF to the configured MinerU service; text, structure, visuals, and the RAG index all come from MinerU |
+| Local | Native-text PDFs or workflows that should stay on the machine where possible | Uses PyMuPDF, pdfplumber, OpenDataLoader, and DocLayout-YOLO; prompts for local components on first use |
 
-### Math Formula Rendering
-- **Dual Engines** - Built-in KaTeX and MathJax engines. Users can switch between them or disable rendering entirely via settings.
-- **Single Dollar Support** - Renders inline math with `$...$`, resolving conflicts between plain text and formula syntax.
-- **LaTeX Bracket Conversion** - Employs a balanced matching algorithm to automatically convert `\[...\]` and `\(...\)` into standard Markdown math syntax.
-
-### Connectivity & UI Optimization
-- **Web Search** - Allows the AI to fetch real-time internet information, displaying clear source links at the bottom of the response.
-- **Render Performance** - Implements Virtual List scrolling, maintaining 60fps performance even with extensive, text-heavy conversation histories.
-- **DOM Direct-Write** - Bypasses React state updates during streaming output by directly modifying DOM nodes via refs, significantly reducing memory and CPU footprint.
+Both routes publish the same block-index contract. Overview, summary, outline, translation, and chat accept only the currently published route and document version. OCR and YOLO are local-route helpers, not separate parsing routes.
 
 ---
 
-## Core Features
+## Core Capabilities
 
-### PDF Document Processing
-- **Native Rendering** - High-fidelity document display via PDF.js with smooth zooming, pagination, and text selection.
-- **Character-level text extraction** - The primary pipeline is **PyMuPDF `get_text("dict")`** with adaptive coordinate thresholds (line-break / whitespace detection); on failure it falls back to **pdfplumber**'s chars API. A heuristic rebuild pass repairs hyphenated line breaks and zh/en punctuation artefacts.
-- **Table structuring** - `services/table_aware_service.py` uses **PyMuPDF `find_tables()`** to detect table regions and convert them into `[TABLE]`-tagged Markdown, which the chunker treats as protected regions.
-- **Two explicit parse routes** - Choose **MinerU deep parsing** or **local parsing** before upload. Local Tesseract / PaddleOCR is only a low-quality-page supplement and never silently replaces the selected route.
+### Reading Workspace
 
-### Intelligent Retrieval (RAG v3.0+)
-- **Semantic Groups** - Aggregates scattered text chunks into semantically coherent units of ~5000 characters, respecting page, heading, and table boundaries.
-- **Three-Level Granularity** - Automatically generates Summary (80 chars), Digest (1000 chars), and Full text representations for every semantic group.
-- **Dynamic Granularity Matching** - Leverages LLMs to infer user intent (e.g., overview, extraction, specific data) during retrieval, automatically returning the optimal text granularity.
-- **Token Budget Control** - Estimates token counts accurately based on target models and character properties (Chinese vs. English). Triggers intelligent granularity degradation instead of hard truncation when approaching context limits.
-- **Dual-Index Retrieval** - Queries both chunk-level and group-level FAISS vector indexes simultaneously, combining with BM25 algorithms and RRF (Reciprocal Rank Fusion) for reranking.
-- **Numeric-Table Specialisation** - A dedicated retrieval branch for numeric comparison queries ("second-best method", "Table 7 DiffuLT"); when a table row is hit, sibling rows are back-filled as contrastive context. Toggled by a feature flag.
-- **BM25 Synonym Expansion** - Query-time expansion using a bundled zh/en synonym dictionary plus fine-grained Chinese tokenisation to boost recall.
-- **Dual-Model Strategy (`cheap_model`)** - Non-core LLM tasks (query rewriting, sub-question decomposition, follow-up suggestions, answer critic) are routed to a cheaper model, saving 40-60% tokens without touching the primary answer model.
-- **LLM Query Rewriting** - Resolves co-references across multi-turn dialogue ("it", "this method"); long queries skip rewriting entirely.
-- **Answer Critic** - After the final answer, `cheap_model` cross-checks the response against the retrieved snippets; hallucinations are surfaced as a red warning banner (flag-gated).
+- PDF.js rendering with paged or continuous reading, zoom, page navigation, text selection, and highlights.
+- Summary, outline, overview, translation, and notes can remain available in the same workspace.
+- Translation and note widgets support drag-to-reorder, split columns, full-width rows, collapsing, and height adjustment. The layout is saved locally.
+- Translations are saved incrementally per block. If a long pretranslation run stops, completed blocks remain and only missing or failed blocks need another request.
+- MinerU upload, parsing, result download, and index construction expose progress and can be cancelled or retried.
 
-### One-Click Overview Panel
-- **Five structured cards** - As soon as a PDF is uploaded, the overview pane auto-generates *Abstract Summary · Terminology · Speed-Read · Key Figure Analysis · Paper Summary*. It shares the same document context with the Chat tab.
-- **Figure-extraction adapter chain** - The default path is **PDF-native** (PyMuPDF image objects + Figure caption spatial matching, with 1a/1b sub-figure grouping); vector-figure PDFs fall onto a **caption-only** path that crops the figure from caption coordinates; if **MinerU cloud OCR** (via a Cloudflare Worker proxy) is enabled, its `middle.json` layout analysis is used first — ideal for scanned / image-based PDFs.
-- **AI figure commentary** - Every extracted figure is run through a vision model to produce an explanation that goes beyond the original caption, instead of just showing the raw picture.
-- **Adjustable depth** - The `depth` switch accepts `brief` / `standard` / `detailed`, which drive per-card character caps (150/400/600), term counts (3/5/8) and figure counts (2/3/5).
+### Notes
 
-### AI Chat Capabilities
-- **Multi-Model Support** - Native integration with OpenAI, Anthropic, Google Gemini, Grok, and local Ollama models.
-- **Precise Citations** - Automatically generates [1], [2] inline citations. Clicking a citation highlights the source in the PDF view and scrolls smoothly to the exact page.
-- **Text Selection Toolbar** - Selecting text in the PDF triggers a floating toolbar for instant AI explanation, translation, or inclusion as context for the next query.
-- **Visual Diagrams** - Automatically parses and renders Mermaid code blocks generated by the AI, perfect for flowcharts and mind maps.
+- Write a free-form note on the current page, or select text in the PDF first to create a quotation note with the source excerpt attached.
+- Quotation notes retain the page number and selection coordinates. **Locate source** returns to the page and highlights the original text range.
+- The editor uses in-place Markdown preview: the active line shows its Markdown marks, while other lines are typeset as headings, lists, emphasis, quotations, and other formatted content.
+- Notes support headings, lists, task lists, bold, italics, strikethrough, blockquotes, links, code blocks, GFM tables, and LaTeX. Saved notes render syntax-highlighted code and KaTeX formulas.
+- The panel follows the current PDF page and shows that page's notes. Saved notes are stored locally per document and remain editable or removable; they are not sent to the backend or synchronised to a cloud service.
+
+### Retrieval and Citations
+
+- BM25, chunk vectors, and semantic-group vectors are fused with RRF to cover exact terms, semantic matches, and section context.
+- The Agent can search the document, read a complete section, expand around a hit, and stop when another round adds no evidence.
+- Table retrieval keeps headers, target rows, and comparison rows together. Formula queries normalise LaTeX and OCR variants before retrieval.
+- Final citations must come from evidence actually returned by tools in the current run. Unknown or mismatched evidence IDs are removed.
+- The Trace panel shows retrieval steps, tool calls, and the stopping reason. Answer-risk checks appear separately.
+
+### Figures and Vision
+
+- MinerU figures, tables, and formulas are published as visual assets with page coordinates and document-version identity.
+- Overview, document chat, and visual search reuse those assets instead of cropping the same figure independently.
+- If the main parse lacks a figure region, the local route can use DocLayout-YOLO to locate it. A vision model is called only for regions that need interpretation or verification.
+- Optional numeric-table verification reports confirmed, conflict, or indeterminate; it never overwrites extracted text.
+
+### Models and Web Research
+
+- Supports OpenAI, Anthropic, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM, MiniMax, Ollama, and OpenAI-compatible endpoints.
+- Chat, embedding, reranking, and vision models are configured independently. A text-only model is not silently used for vision.
+- Reasoning controls follow each model's capabilities, such as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Unsupported levels are not sent to the provider.
+- Web search has Off, Auto, and Force modes. In Auto mode, the Agent decides whether to search and plans the query instead of submitting the full user message verbatim.
+- Web evidence is labelled separately from document evidence. Authorised public pages, GitHub content, and public YouTube transcripts can be read after search.
+
+### Cache and Security
+
+- Artifacts are bound to the parsing route, parse generation, and source-file hash. Reparse or route changes invalidate stale overview, summary, translation, and RAG caches.
+- The desktop backend binds to `127.0.0.1` and protects APIs with a session token.
+- External pages and model output are treated as untrusted content and cannot redefine system instructions or forge document citations.
+
+---
+
+## RAGAS Evaluation
+
+The project uses a fixed 26-question, multi-paper set for development regression testing. This is not a public leaderboard. Results are directly comparable only when the question set and `index_source` match.
+
+| Index | Faithfulness | Answer Relevancy | Context Precision | Context Recall | Answer Correctness |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A1 `pdf_native` | 0.8173 | 0.4268 | 0.7033 | 0.8077 | 0.7211 |
+| Current `mineru` | **0.9695** | 0.3399 | **0.8765** | **0.9615** | **0.7528** |
+
+Results for the 17-question `numeric_table` subset:
+
+| Index | Faithfulness | Context Precision | Context Recall | Answer Correctness |
+| --- | ---: | ---: | ---: | ---: |
+| A1 `pdf_native` | 0.8300 | 0.8140 | 0.8820 | 0.7600 |
+| Current `mineru` | **0.9733** | **0.9533** | **1.0000** | **0.7986** |
+
+The current MinerU index improves faithfulness, context precision, context recall, and answer correctness over A1. Answer Relevancy falls from 0.4268 to 0.3399; the metric is sensitive to short numeric answers, so the raw regression is reported rather than hidden. See the [MinerU RAG index upgrade record](docs/mineru-rag-index-upgrade-plan.md) for the complete experiment history.
 
 ---
 
@@ -126,8 +176,7 @@ A self-contained Windows desktop application built with Electron. The Python bac
 
 ### Option 1: Download Desktop Client (Recommended)
 
-Download the latest `.exe` installer directly from the [Releases](https://github.com/juyou4/ChatPDF-Pro/releases) page.
-Install and double-click the desktop icon to run. No environment setup required.
+Download the latest Windows installer from [Releases](https://github.com/juyou4/ChatPDF-Pro/releases). The published package includes both the frontend and Python backend, so Node.js and Python are not required on the target machine.
 
 ### Build a Clean Windows Installer
 
@@ -145,145 +194,226 @@ The default output is in `electron/release/`. Installer filenames include the ap
 python scripts/release_metadata.py --check
 ```
 
-### Option 2: Run from Source (Web Mode)
 
-**1. Backend Service (Python 3.10+)**
+### Option 2: Run from Source
+
+Requirements:
+
+- Python 3.10+
+- Node.js `^20.19.0` or `>=22.12.0`
+- npm
+
+Windows:
+
+```powershell
+git clone https://github.com/juyou4/ChatPDF-Pro.git
+cd ChatPDF-Pro
+.\start.bat
+```
+
+Linux / macOS:
+
+```bash
+git clone https://github.com/juyou4/ChatPDF-Pro.git
+cd ChatPDF-Pro
+chmod +x start.sh
+./start.sh
+```
+
+The launcher installs the base runtime and opens `http://localhost:3000`. On `main`, it first attempts to pull the latest code. Local-parser components are installed only when the local route is selected for the first time.
+
+### Manual Start
+
+Backend:
+
 ```bash
 cd backend
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-core.txt
 python app.py
 ```
 
-**2. Frontend Service (Node.js 20.19+, or 22.12+)**
+In another terminal, start the frontend:
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-Visit `http://localhost:3000` to start using the application.
+
+The frontend uses `http://localhost:3000`; the backend uses `http://127.0.0.1:8000`.
 
 ---
 
-## Tech Stack
+## First-Time Configuration
 
-### Frontend
-- **Core**: React 18 + Vite 7 + Tailwind CSS
-- **PDF Rendering**: react-pdf 9.0 + PDF.js
-- **UI Animation**: Framer Motion
-- **Markdown**: ReactMarkdown + rehype-katex / rehype-mathjax
-- **Desktop Environment**: Electron 28 + electron-builder
+All configuration lives in **Settings Center** at the bottom left.
 
-### Backend
-- **Framework**: FastAPI 0.115 (Uvicorn async driven)
-- **PDF Processing**: PyMuPDF 1.24 (primary) + pdfplumber 0.11 (fallback)
-- **Vector Database**: FAISS 1.9
-- **Retrieval Architecture**: Semantic Groups + Dual-Index RRF Fusion
-- **Model SDKs**: OpenAI, Anthropic, Google Generative AI
-- **Parsing and OCR**: MinerU (Worker proxy or direct API) / local Tesseract and PaddleOCR supplements
+| Setting | Required | Purpose |
+| --- | --- | --- |
+| Chat model | Yes | Chat, summary, overview, and translation |
+| Embedding model | Yes | Build and query the document vector index |
+| MinerU service | Required for the default route | Upload PDFs and obtain structured text, sections, and visual assets |
+| Vision model | Optional | Figure interpretation and visual table verification |
+| Web search | Optional | Retrieve current information outside the document with public source links |
+
+Recommended first run:
+
+1. Configure a chat model and an embedding model.
+2. Choose MinerU or Local next to the upload button.
+3. Upload a PDF and wait for parsing and indexing to finish in the task panel.
+4. Start with Overview or Outline, then move to Reading or Chat.
+
+When an answer looks uncertain, open its citations in the PDF and inspect the Trace panel for the tools and evidence used. Regenerate overview, summary, or outline explicitly; switching views is not a regeneration trigger.
 
 ---
 
-## Architecture
+## Development
+
+### Stack
+
+| Layer | Main technologies |
+| --- | --- |
+| Frontend | React 18.3, Vite 7.3, Tailwind CSS 3.4, Motion 12 |
+| PDF and content rendering | react-pdf 9, PDF.js 4.8, React Markdown, KaTeX / MathJax, Mermaid |
+| Backend | Python 3.10+, FastAPI 0.115, Uvicorn, Pydantic 2 |
+| Documents and retrieval | PyMuPDF 1.24, pdfplumber 0.11, FAISS 1.9, LangChain 0.3, jieba |
+| Local parser extensions | OpenDataLoader, DocLayout-YOLO, Tesseract |
+| Desktop | Electron 28, electron-builder 24, PyInstaller |
+
+### Common Checks
+
+Frontend:
+
+```bash
+cd frontend
+npm run lint
+npm run test
+npm run check:streaming
+```
+
+Backend:
+
+```bash
+cd backend
+python -m pytest
+```
+
+Windows desktop package:
+
+```bash
+cd electron
+npm run package:win
+```
+
+---
+
+## Project Layout
+
+<details>
+<summary>Expand directory tree</summary>
 
 ```text
 ChatPDF/
-├── frontend/                    # React frontend
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ChatPDF.jsx          # Main application component
-│   │   │   ├── PDFViewer.jsx        # PDF rendering core
-│   │   │   ├── StreamingMarkdown.jsx # Markdown + Math + Mermaid rendering
-│   │   │   ├── ThinkingBlock.jsx    # Deep thinking visualizer
-│   │   │   ├── ChatSettings.jsx     # Chat parameter configuration
-│   │   │   ├── VirtualMessageList.jsx # Virtualized scroll list
-│   │   │   ├── PresetQuestions.jsx   # Quick action buttons
-│   │   │   └── CitationLink.jsx     # Interactive citation links
-│   │   ├── contexts/
-│   │   │   ├── ChatParamsContext.jsx # Chat parameters (incl. Math Engine)
-│   │   │   ├── GlobalSettingsContext.jsx
-│   │   │   └── WebSearchContext.jsx  # Web search state
-│   │   ├── hooks/
-│   │   │   ├── useMessageState.js    # Message state & streaming requests
-│   │   │   └── useSmoothStream.js    # Smooth streaming orchestrator
-│   │   └── utils/
-│   │       └── processLatexBrackets.js # Balanced LaTeX bracket parser
-│   ├── package.json
-│   └── vite.config.js
-├── backend/                     # FastAPI backend
-│   ├── app.py                   # Main application entry
-│   ├── desktop_entry.py         # PyInstaller frozen entry point
-│   ├── routes/                  # API routing layer
-│   ├── services/
-│   │   ├── semantic_group_service.py  # Semantic group chunking
-│   │   ├── hybrid_search.py           # Hybrid retrieval + RRF fusion
-│   │   ├── context_builder.py         # Prompt assembly & citation generation
-│   │   ├── chat_service.py            # AI chat logic & thinking stream handler
-│   │   ├── web_search_service.py      # Internet search engine integration
-│   │   ├── embedding_service.py       # Embedding calculation & FAISS indexing
-│   │   └── rerank_service.py          # Cross-encoder reranking
-│   └── requirements.txt
-├── electron/                    # Electron desktop environment
-│   ├── src/main.ts              # Main process: Window mgmt, Backend spawner
-│   └── package.json
-├── scripts/                     # Cross-platform build scripts
-└── README.md
+├── frontend/
+│   └── src/
+│       ├── components/    # PDF, overview, reading, chat, and settings UI
+│       ├── hooks/         # Document, message, streaming, and UI state
+│       ├── contexts/      # Model, reading, font, and global settings
+│       └── config/        # Provider and system-model definitions
+├── backend/
+│   ├── app.py             # FastAPI entry point
+│   ├── routes/            # Document, chat, search, and model APIs
+│   ├── services/          # Parsing, indexing, Agent, vision, translation, cache
+│   ├── tests/             # Backend regression and property tests
+│   └── requirements*.txt
+├── electron/              # Desktop process, preload bridge, packaging
+├── docs/                  # Design notes, evaluation records, README images
+├── scripts/               # Launch, build, and diagnostic scripts
+├── start.bat
+└── start.sh
 ```
+
+</details>
 
 ---
 
 ## FAQ
 
-**Q: The desktop client launches with a blank screen or throws an error?**
-A: Ensure no system proxy is intercepting localhost traffic, or try running as Administrator. On first launch, the app silently starts the Python engine in the background, which may take a few seconds.
+### Is MinerU required?
 
-**Q: Why can I still see old documents or chat history after installing a new build?**
-A: The installer does not contain user history. When it is installed or upgraded under the same Windows account, the desktop app intentionally continues using that account's existing application-data directory, so locally stored records remain visible. A new operating-system account or a machine with no prior application data starts blank.
+No. MinerU is the default and is recommended for scans and complex layouts. Native-text PDFs can use the local route. On first use, the local route prompts for its layout model and OCR runtime. Java 11+ is only needed for optional OpenDataLoader cleanup.
 
-**Q: PDF doesn't display in Web mode?**
-A: Verify the backend service is running (default port 8000). Check the browser console for CORS or network interception errors.
+### Why can I still see old documents or chat history after updating?
 
-**Q: API calls fail or timeout?**
-A: Check if your API Key format is correct. Ensure your network environment can reach the provider's endpoint (e.g., OpenAI may require specific network routing or a custom base URL proxy).
+The installer contains no user history. When installed or upgraded under the same Windows account, the desktop app intentionally keeps using that account's existing application-data directory, so previously saved local records remain visible. A new OS account or a device with no prior app data starts with an empty library.
 
-**Q: Connection refused when using local models (Ollama)?**
-A: Ensure the Ollama background service is running and you have set the system environment variable `OLLAMA_ORIGINS="*"` to allow Cross-Origin requests.
+### The PDF does not display in Web mode. What should I check?
 
-**Q: Math formulas are rendering as garbage text?**
-A: Switch between KaTeX and MathJax in the settings panel (bottom left). KaTeX is faster, while MathJax offers better compatibility for complex nested LaTeX.
+Confirm that the backend is running on the default `8000` port, then check the browser console for CORS or network-interception errors.
+
+### MinerU upload or parsing never starts. What should I check?
+
+Run the connection test in **Settings Center → Parsing → MinerU Service**. Official direct mode ignores normal HTTP proxy environment variables, but a system-level virtual network adapter can still change the public exit IP. If MinerU rejects that exit, disable the adapter or route `mineru.net` directly. Worker mode also requires the matching upload, polling, and download endpoints.
+
+### Why does reopening a document not regenerate Overview?
+
+That is expected. A completed overview is cached by document version, route, model, and depth. Use **Regenerate** for a fresh result. Reparse, route changes, or relevant model changes invalidate the old cache automatically.
+
+### Why are Overview, Summary, or Chat temporarily unavailable?
+
+They open only after the main parse and RAG index are published together. The task panel shows upload, parse, download, and indexing progress. If parsing fails or is cancelled, retry parsing rather than generating downstream content against an older index.
+
+### What data leaves the machine?
+
+The local document library and chat history stay on the machine by default. MinerU receives the PDF. Cloud models receive the text or images needed for the selected task. Web search sends a query and includes document context only with explicit permission. Use local parsing, local chat and embedding models, and disable web search to minimise external transmission.
+
+### Ollama refuses the connection. What should I do?
+
+Check that Ollama is running and allows requests from ChatPDF's origin. If Web mode is blocked by CORS, configure `OLLAMA_ORIGINS` according to Ollama's documentation. Desktop mode should use a local endpoint.
+
+### Formulas do not render correctly. What should I do?
+
+Switch between KaTeX and MathJax in Settings Center. KaTeX is faster; MathJax handles more complex LaTeX.
 
 ---
 
-## Changelog
+## Recent Work
 
 ### v3.1.0
 - MinerU full-route parsing identity, downstream cache invalidation, and shared visual assets.
 - Reading workspace UI refinements, persistent font settings, markdown note editing, and toolbar layout improvements.
 - Engineering identity cleanup: unified version metadata, reproducible build manifest, privacy-safe packaging checks, and runtime log directory alignment.
 
-### v3.0.2
-- **Numeric-Table Specialisation**: New retrieval branch for "Table N" / numeric-comparison queries, unified under a single feature flag.
-- **BM25 Synonym Expansion**: Built-in zh/en synonym dictionary + fine-grained tokenisation, measurably improves recall on long Chinese queries.
-- **Dual-Model Strategy (`cheap_model`)**: Query rewriting, decomposition, follow-up suggestions, and the answer critic each take an independent cheap model.
-- **LLM Query Rewriting + Answer Critic**: Multi-turn co-reference resolution; post-hoc hallucination detection with a red warning banner.
-- **Per-Request Feature-Flag Overrides**: New "Retrieval Tuning" panel in GlobalSettings with tri-state switches (Auto / On / Off) — no backend restart required.
 
-### v3.0.1
-- **Desktop Client Release**: Full Windows standalone application packaged via Electron 28 and PyInstaller.
-- **Deep Thinking Enhancements**: Introduced `ThinkingBlock` for multi-tier reasoning visualization and smooth collapsing.
-- **Math Engine Iteration**: Support for hot-swapping between KaTeX and MathJax, resolving rendering crashes on complex LaTeX.
-- **Render Optimization**: Rewrote `StreamingMarkdown`'s underlying logic to use DOM Ref direct-writes, bypassing React reconciliation overhead. Added virtual lists to eliminate lag in extensive histories.
+- The MinerU or Local primary route is fixed before upload, and every downstream feature uses the same parse identity.
+- MinerU sections, figures, and tables publish into one block index shared by overview, reading, and chat.
+- The retrieval Agent can read full sections, expand around evidence, authorise citations, and stop when evidence is saturated.
+- Web research uses Agent-planned queries and can continue reading authorised public sources.
+- Summary, outline, translation, notes, task progress, and answer streaming have been revised together.
+- Cache invalidation, cancellation, stale-generation write guards, and desktop release-data filtering have been tightened.
 
-### v3.0.0
-- **RAG Architecture Rewrite**: Introduced Semantic Groups and a three-tier granularity (Full/Digest/Summary) degradation strategy.
-- **Precise Token Accounting**: Dynamic budget system based on language character properties.
-- **Dual-Track Retrieval**: Combined group-level and chunk-level FAISS vector retrieval with RRF fusion.
+The current version is [v3.1.0](https://github.com/juyou4/ChatPDF-Pro/releases/tag/v3.1.0). See the [commit history](https://github.com/juyou4/ChatPDF-Pro/commits/main/) and Releases for complete changes.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Reproduce the problem first, then run the checks relevant to the changed area before submitting.
+
+1. Fork the repository.
+2. Create a branch: `git checkout -b feature/my-change`.
+3. Commit: `git commit -m "feat: describe the change"`.
+4. Push: `git push origin feature/my-change`.
+5. Open a pull request.
 
 ---
 
 ## Acknowledgments
 
-The RAG retrieval pipeline in this project, specifically the concepts of "Semantic Groups" and "Multi-level Granularity Auto-degradation," was inspired by the design philosophy of [Paper Burner X](https://github.com/Feather-2/paper-burner-x). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
+The semantic-group and multi-granularity retrieval design was informed by [Paper Burner X](https://github.com/Feather-2/paper-burner-x). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and attribution details.
+
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
