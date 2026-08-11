@@ -39,6 +39,7 @@ from services.downstream_task_state import (
     transition_downstream_task,
 )
 from services.chat_service import call_ai_api, extract_reasoning_content
+from services.completion_outcome import require_publishable_completion
 from services.document_block_roles import classify_front_matter_text
 from services.structured_json import (
     StructuredJSONError,
@@ -168,7 +169,7 @@ try:
 except Exception:
     pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v21"
+OVERVIEW_CACHE_VERSION = "v22"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}
@@ -2156,7 +2157,7 @@ def _overview_response_diagnostic(response: Any, content: str, max_tokens: int) 
 
 def _parse_overview_payload(content: Any) -> dict[str, Any]:
     """解析 JSON，并强制校验速览最低可用字段。"""
-    payload = parse_json_object(content)
+    payload = parse_json_object(content, allow_partial=False)
     if not str(payload.get("full_text_summary") or "").strip():
         raise StructuredJSONError("模型返回的速览核心字段为空")
     return payload
@@ -2188,8 +2189,9 @@ async def _call_structured_overview_model(
         raise RuntimeError(response.get("error"))
     content = _extract_content_from_response(response)
     try:
+        require_publishable_completion(response, operation="overview")
         return _parse_overview_payload(content)
-    except StructuredJSONError:
+    except (StructuredJSONError, RuntimeError):
         initial_diagnostic = _overview_response_diagnostic(response, content, max_tokens)
         logger.warning(
             "[Overview] invalid structured response provider=%s model=%s diagnostic=%s",
@@ -2221,8 +2223,9 @@ async def _call_structured_overview_model(
         raise RuntimeError(retry.get("error"))
     retry_content = _extract_content_from_response(retry)
     try:
+        require_publishable_completion(retry, operation="overview retry")
         return _parse_overview_payload(retry_content)
-    except StructuredJSONError as retry_error:
+    except (StructuredJSONError, RuntimeError) as retry_error:
         retry_diagnostic = _overview_response_diagnostic(retry, retry_content, retry_max_tokens)
         logger.warning(
             "[Overview] structured retry failed provider=%s model=%s diagnostic=%s",

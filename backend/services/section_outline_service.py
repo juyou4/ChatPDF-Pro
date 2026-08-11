@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from services.chat_service import call_ai_api
+from services.completion_outcome import (
+    IncompleteCompletionError,
+    require_publishable_completion,
+)
 from services.document_block_roles import (
     FRONT_MATTER_ROLES,
     ROLE_PUBLICATION_HEADER,
@@ -36,8 +40,8 @@ from services.structured_json import (
 
 logger = logging.getLogger(__name__)
 
-SECTION_OUTLINE_VERSION = 11
-SECTION_OUTLINE_PROMPT_VERSION = "section-outline-v11"
+SECTION_OUTLINE_VERSION = 12
+SECTION_OUTLINE_PROMPT_VERSION = "section-outline-v12"
 FAILED_GENERATION_COOLDOWN_SECONDS = 60.0
 # The published block outline no longer truncates long documents. Keep the
 # recovery budget aligned so it can repair every heading in a thesis/textbook.
@@ -738,8 +742,9 @@ async def _generate_ai_section_outline(
         raise RuntimeError(response.get("error"))
     content = _extract_content(response)
     try:
+        require_publishable_completion(response, operation="section outline")
         return parse_json_object(content, allow_partial=False)
-    except StructuredJSONError:
+    except (StructuredJSONError, IncompleteCompletionError):
         logger.info("[SectionOutline] Invalid JSON from %s/%s; retrying once", provider, model)
 
     retry_response = await call_ai_api(
@@ -765,8 +770,9 @@ async def _generate_ai_section_outline(
     if isinstance(retry_response, dict) and retry_response.get("error"):
         raise RuntimeError(retry_response.get("error"))
     try:
+        require_publishable_completion(retry_response, operation="section outline retry")
         return parse_json_object(_extract_content(retry_response), allow_partial=False)
-    except StructuredJSONError as exc:
+    except (StructuredJSONError, IncompleteCompletionError) as exc:
         raise StructuredJSONError("模型两次返回的章节结构格式均不完整") from exc
 
 

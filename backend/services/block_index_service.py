@@ -260,6 +260,28 @@ def ensure_block_index(
         # blocks after its MinerU cache has been removed or corrupted.
         raise RuntimeError("MinerU 全程解析的阅读块尚未发布")
     if cached:
+        primary_identity_matches = _block_index_matches_primary_parse_identity(
+            cached,
+            parse_identity,
+        )
+        visual_revision_changed = (
+            primary_identity_matches
+            and str(cached.get("visual_supplement_revision") or "")
+            != str(parse_identity.get("visual_supplement_revision") or "")
+        )
+        if visual_revision_changed and not has_uncommitted_visual_staging:
+            cached = _reconcile_cached_visual_blocks(
+                cached,
+                doc=doc,
+                parse_identity=parse_identity,
+            )
+            if not save_block_index(
+                data_dir,
+                doc_id,
+                cached,
+                current_doc=doc,
+            ):
+                raise RuntimeError("过期视觉补充索引迁移失败")
         cached_matches_parse = _block_index_matches_parse_identity(cached, parse_identity)
         cached = _maybe_upgrade_mineru_structure_cache(
             cached=cached,
@@ -543,6 +565,34 @@ def _without_uncommitted_visual_blocks(index: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _reconcile_cached_visual_blocks(
+    index: dict[str, Any],
+    *,
+    doc: dict[str, Any],
+    parse_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace only the additive visual layer while preserving parser output.
+
+    Prompt or completion-contract upgrades can invalidate committed visual
+    supplements without changing the primary MinerU/local generation. Treating
+    that as a parser mismatch makes a full-route MinerU document unreadable.
+    Remove the obsolete additive blocks, then attach only currently publishable
+    visual evidence.
+    """
+    reconciled = _without_uncommitted_visual_blocks(index)
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if (
+        str(parse_identity.get("visual_supplement_revision") or "").strip()
+        and isinstance(data, dict)
+    ):
+        return stage_visual_supplements_on_block_index(
+            reconciled,
+            data=data,
+            parse_identity=parse_identity,
+        )
+    return stamp_block_index_revision(reconciled)
+
+
 def build_block_index(
     *,
     doc_id: str,
@@ -684,7 +734,10 @@ def _document_parse_identity(
     return identity
 
 
-def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[str, Any]) -> bool:
+def _block_index_matches_primary_parse_identity(
+    index: dict[str, Any],
+    identity: dict[str, Any],
+) -> bool:
     if not identity:
         # Existing documents predate parse generations. Keep their cached block
         # index usable until they are explicitly reparsed.
@@ -692,8 +745,6 @@ def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[st
     if (
         str(index.get("parse_generation") or "") != str(identity.get("parse_generation") or "")
         or str(index.get("document_source_hash") or "") != str(identity.get("document_source_hash") or "")
-        or str(index.get("visual_supplement_revision") or "")
-        != str(identity.get("visual_supplement_revision") or "")
     ):
         return False
     route = str(identity.get("parser_route") or "")
@@ -703,6 +754,17 @@ def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[st
     if route == "local":
         return source != "mineru_vlm"
     return True
+
+
+def _block_index_matches_parse_identity(index: dict[str, Any], identity: dict[str, Any]) -> bool:
+    if not _block_index_matches_primary_parse_identity(index, identity):
+        return False
+    if not identity:
+        return True
+    return (
+        str(index.get("visual_supplement_revision") or "")
+        == str(identity.get("visual_supplement_revision") or "")
+    )
 
 
 def active_block_index_revision(
