@@ -42,7 +42,9 @@ function splitChunk(chunk) {
  * @param {string} [options.blurIntensity='medium'] - Blur Reveal 强度（light|medium|strong）
  * @param {number} [options.frameChars=2] - 流式阶段每帧最多渲染字符数
  * @param {number} [options.flushChars=80] - 结束冲刷阶段每帧最多渲染字符数
- * @returns {{ addChunk: Function, reset: Function, replace: Function, flushNow: Function, contentRef: React.RefObject, getFinalText: Function, isFlushComplete: Function, waitForRevealComplete: Function }}
+ * @param {boolean} [options.sequencedReveal=false] - 以逐字、逐段的顺序展示内容
+ * @param {number} [options.paragraphPauseMs=180] - 两个段落之间的停顿时间
+ * @returns {{ addChunk: Function, reset: Function, replace: Function, flushNow: Function, contentRef: React.RefObject, getFinalText: Function, isFlushComplete: Function, getPendingChars: Function, waitForRevealComplete: Function }}
  */
 export { splitChunk }
 
@@ -138,6 +140,8 @@ export const useSmoothStream = ({
   frameChars = 2,
   flushChars = 80,
   smoothFlush = false,
+  sequencedReveal = false,
+  paragraphPauseMs = 180,
 }) => {
   /** @type {React.MutableRefObject<Array<{chars: string[], offset: number}>>} 待渲染字符块队列 */
   const chunkQueueRef = useRef([])
@@ -162,6 +166,8 @@ export const useSmoothStream = ({
   // 时间戳比单纯统计 DOM span 更可靠：后台标签页可能暂停 animationend，
   // 但我们仍然要在切回最终 Markdown 前给前台动画一个完整尾巴。
   const revealTailUntilRef = useRef(0)
+  /** @type {React.MutableRefObject<number>} 段落结束后的短暂停顿截止时间 */
+  const paragraphPauseUntilRef = useRef(0)
 
   const clearQueue = useCallback(() => {
     chunkQueueRef.current = []
@@ -227,6 +233,12 @@ export const useSmoothStream = ({
   const appendMissingText = useCallback((container, targetText, intensity) => {
     if (!container) return
     const currentText = container.textContent || ''
+    // 严格序列模式下，已在前一个 DOM 中展示过的内容无需再次按整段动画补写。
+    // 首次挂载由渲染循环等待 contentRef 后再开始，因此这里不会吞掉首段动画。
+    if (sequencedReveal && currentText !== targetText) {
+      container.textContent = targetText
+      return
+    }
     if (
       enableBlurReveal
       && targetText.startsWith(currentText)
@@ -245,7 +257,7 @@ export const useSmoothStream = ({
     if (currentText !== targetText) {
       container.textContent = targetText
     }
-  }, [enableBlurReveal])
+  }, [enableBlurReveal, sequencedReveal])
 
   /**
    * 将新文本块加入字符队列
@@ -272,6 +284,7 @@ export const useSmoothStream = ({
       displayedTextRef.current = newText
       finalTextRef.current = newText
       revealTailUntilRef.current = 0
+      paragraphPauseUntilRef.current = 0
       lastUpdateTimeRef.current = 0
       // 重置 DOM 元素内容
       if (contentRef.current) {
@@ -301,6 +314,7 @@ export const useSmoothStream = ({
       displayedTextRef.current = newText
       finalTextRef.current = newText
       revealTailUntilRef.current = 0
+      paragraphPauseUntilRef.current = 0
       lastUpdateTimeRef.current = 0
       if (contentRef.current) {
         contentRef.current.textContent = newText
@@ -331,6 +345,7 @@ export const useSmoothStream = ({
       displayedTextRef.current = nextText
       finalTextRef.current = nextText
       revealTailUntilRef.current = 0
+      paragraphPauseUntilRef.current = 0
       lastUpdateTimeRef.current = 0
       if (contentRef.current) {
         contentRef.current.textContent = nextText
@@ -369,6 +384,13 @@ export const useSmoothStream = ({
   const renderLoop = useCallback(
     (currentTime) => {
       try {
+        // 新助手消息的内容节点可能在首个 SSE chunk 之后才挂载。普通模式可以
+        // 先累计再补写；严格序列模式必须等节点就绪，避免首次把整段一起显现。
+        if (sequencedReveal && !contentRef.current) {
+          animationFrameRef.current = requestAnimationFrame(renderLoop)
+          return
+        }
+
         // 1. 队列为空时的处理
         if (pendingCharsRef.current === 0) {
           // 兼容 ref 延迟挂载：如果文本已渲染到内存但 DOM 还未绑定，
@@ -394,6 +416,11 @@ export const useSmoothStream = ({
           return
         }
 
+        if (sequencedReveal && currentTime < paragraphPauseUntilRef.current) {
+          animationFrameRef.current = requestAnimationFrame(renderLoop)
+          return
+        }
+
         // 2. 最小延迟控制
         if (currentTime - lastUpdateTimeRef.current < minDelay) {
           animationFrameRef.current = requestAnimationFrame(renderLoop)
@@ -404,15 +431,19 @@ export const useSmoothStream = ({
         // 3. 小队列遵守用户选择的逐字速度；积压时渐进追赶，防止长 reasoning
         //    让可见输出永久落后并持续占用主线程。
         const pendingChars = pendingCharsRef.current
+        const effectiveFrameChars = sequencedReveal ? 1 : frameChars
         let charsToRenderCount = resolveAdaptiveFrameChars(
           pendingChars,
-          frameChars,
-          enableBlurReveal ? 64 : 256,
+          effectiveFrameChars,
+          sequencedReveal ? 1 : (enableBlurReveal ? 64 : 256),
         )
 
         // 4. 流已结束时的渲染策略
         if (streamDone) {
-          if (smoothFlush) {
+          if (sequencedReveal) {
+            // 传输结束不等于视觉结束。继续一帧一个字符，避免最终段落跳出。
+            charsToRenderCount = 1
+          } else if (smoothFlush) {
             // 最多约 48 个渲染帧平滑排空：比正常逐字稍快，但仍保留连续渐显。
             charsToRenderCount = Math.max(
               charsToRenderCount,
@@ -430,6 +461,16 @@ export const useSmoothStream = ({
         const previousText = displayedTextRef.current
         const renderedText = charsToRender.join('')
         displayedTextRef.current += renderedText
+
+        if (
+          sequencedReveal
+          && /\n\s*\n$/u.test(displayedTextRef.current)
+        ) {
+          paragraphPauseUntilRef.current = Math.max(
+            paragraphPauseUntilRef.current,
+            currentTime + Math.max(0, Number(paragraphPauseMs) || 0),
+          )
+        }
 
         // 6. 直接更新 DOM 元素（ref 直写模式，避免 React setState）
         if (contentRef.current) {
@@ -496,6 +537,8 @@ export const useSmoothStream = ({
       frameChars,
       flushChars,
       smoothFlush,
+      sequencedReveal,
+      paragraphPauseMs,
       takeQueuedChars,
     ]
   )
@@ -512,6 +555,7 @@ export const useSmoothStream = ({
   }, [renderLoop])
 
   const isFlushComplete = useCallback(() => pendingCharsRef.current === 0, [])
+  const getPendingChars = useCallback(() => pendingCharsRef.current, [])
 
   // 在流结束后等待最后一批字符的 CSS 动画完成。调用方可提供
   // shouldContinue，在用户停止/切换文档时立即放弃等待。
@@ -532,6 +576,7 @@ export const useSmoothStream = ({
     contentRef,
     getFinalText,
     isFlushComplete,
+    getPendingChars,
     waitForRevealComplete,
   }
 }

@@ -26,6 +26,7 @@ import {
   DOCUMENT_HIGHLIGHT_COLORS,
   normalizeDocumentHighlightColor,
 } from '../utils/documentHighlightUtils';
+import { FloatingDock, FloatingDockItem } from './ui/FloatingDock';
 
 /**
  * 划词交互工具箱
@@ -244,21 +245,24 @@ const TextSelectionToolbar = ({
   const sizeConfig = {
     compact: {
       iconSize: 'w-4 h-4',
-      padding: 'p-1.5',
       gap: 'gap-0.5',
-      containerPadding: 'px-2 py-1'
+      containerPadding: 'px-2 py-1',
+      dockSlot: 'h-7 w-7',
+      dockButton: 'h-6 w-6 rounded-[8px]',
     },
     normal: {
       iconSize: 'w-[18px] h-[18px]',
-      padding: 'p-2',
       gap: 'gap-0.5',
-      containerPadding: 'px-2.5 py-1.5'
+      containerPadding: 'px-2.5 py-1.5',
+      dockSlot: 'h-8 w-8',
+      dockButton: 'h-7 w-7 rounded-[9px]',
     },
     large: {
       iconSize: 'w-5 h-5',
-      padding: 'p-2.5',
       gap: 'gap-1',
-      containerPadding: 'px-3 py-2'
+      containerPadding: 'px-3 py-2',
+      dockSlot: 'h-9 w-9',
+      dockButton: 'h-8 w-8 rounded-[10px]',
     }
   };
 
@@ -347,15 +351,20 @@ const TextSelectionToolbar = ({
           darkMode ? 'text-gray-200' : 'text-gray-600'
         }`}
       >
-        {/* 工具栏容器：两端圆润的胶囊，只占内容宽度，不再糊满整条 */}
-        <div ref={toolbarCapsuleRef} data-testid="selection-toolbar-capsule" className={`relative max-w-full rounded-full border px-1.5 shadow-[0_1px_2px_rgba(83,65,55,0.04),0_10px_24px_-14px_rgba(83,65,55,0.28)] transition-colors duration-200 ${
-          darkMode
-            ? 'border-white/[0.09] bg-[#22262c]'
-            : 'border-[#ebe4dd] bg-white'
-        }`}>
+        {/* 批注操作是离散动作，保留胶囊的稳定边界，只让图标本身跟随鼠标做弹簧反馈。 */}
+        <div ref={toolbarCapsuleRef} data-testid="selection-toolbar-capsule" className="relative inline-flex max-w-full">
+          <FloatingDock
+            darkMode={darkMode}
+            ariaLabel="文档批注与笔记工具栏"
+            className={`h-auto min-h-[42px] max-w-full rounded-full p-0 shadow-[0_1px_2px_rgba(83,65,55,0.04),0_10px_24px_-14px_rgba(83,65,55,0.28)] ${
+              darkMode
+                ? 'border-white/[0.09] bg-[#22262c]'
+                : 'border-[#ebe4dd] bg-white'
+            }`}
+          >
           {/* 工具按钮组 */}
           <div className={`${config.containerPadding} flex items-center ${config.gap}`}>
-            {tools.map((tool, index) => {
+            {tools.map((tool) => {
               const Icon = tool.icon;
               const isHighlight = tool.kind === 'highlight';
               const isUnderline = tool.kind === 'underline';
@@ -368,7 +377,9 @@ const TextSelectionToolbar = ({
                   : tool.label;
               return (
                 <React.Fragment key={tool.label}>
-                  <motion.button
+                  <FloatingDockItem
+                    label={isAnnotationTool ? annotationToolTitle : (hasSelection ? tool.label : `选择文字后使用${tool.label}`)}
+                    active={isToolActive}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (isAnnotationTool) {
@@ -380,18 +391,15 @@ const TextSelectionToolbar = ({
                       void runToolAction(tool);
                     }}
                     disabled={!isAnnotationTool && (!hasSelection || Boolean(activeAction))}
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: index * 0.03 }}
-                    className={`group relative ${config.padding} rounded-xl transition-all disabled:cursor-not-allowed disabled:opacity-35 ${
+                    slotClassName={config.dockSlot}
+                    className={`${config.dockButton} ${
                       isToolActive
                         ? (darkMode
                           ? 'bg-[#d97a5d]/20 text-[#ffb09a] shadow-[inset_0_0_0_1px_rgba(255,176,154,0.18)]'
                           : 'bg-[#f7ded5] text-[#a94d34] shadow-[inset_0_0_0_1px_rgba(201,107,80,0.16)]')
-                        : `hover:bg-[var(--color-bg-subtle)]/80 ${tool.color}`
+                        : tool.color
                     }`}
                     title={isAnnotationTool ? annotationToolTitle : (hasSelection ? tool.label : `选择文字后使用${tool.label}`)}
-                    aria-label={tool.label}
                     aria-pressed={isAnnotationTool ? isToolActive : undefined}
                     aria-expanded={tool.kind === 'note' ? noteEditorOpen : undefined}
                   >
@@ -410,13 +418,7 @@ const TextSelectionToolbar = ({
                       </span>
                     )}
 
-                    {/* 提示气泡朝下弹：工具栏紧贴在阅读器工具栏(z-30)下方，
-                        往上弹会被压在它后面，正好是看不见字的原因。下方是 PDF 区，空间充足。 */}
-                    <div className="absolute top-full left-1/2 z-10 -translate-x-1/2 mt-2 px-2 py-1 bg-gray-900 text-white text-xs rounded-lg whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 -mb-1 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-gray-900" />
-                      {isAnnotationTool ? annotationToolTitle : tool.label}
-                    </div>
-                  </motion.button>
+                  </FloatingDockItem>
 
                   {isHighlight && (
                     <div
@@ -461,6 +463,7 @@ const TextSelectionToolbar = ({
             })}
 
           </div>
+          </FloatingDock>
 
           <AnimatePresence>
             {noteEditorOpen && (

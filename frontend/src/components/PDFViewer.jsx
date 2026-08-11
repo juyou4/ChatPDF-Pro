@@ -22,11 +22,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import BreatheLoader from './BreatheLoader';
 import SelectionOverlay from './SelectionOverlay';
 import StreamingMarkdown from './StreamingMarkdown';
-import {
-    FloatingDock,
-    FloatingDockDivider,
-    FloatingDockItem,
-} from './ui/FloatingDock';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import pdfPageCache from '../utils/pdfPageCache';
 import {
@@ -2020,61 +2015,80 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             {/* relative 是必须的：原来只写 z-10 挂在 static 元素上，z-index 直接失效，
                 里面的页面转换下拉只能靠 DOM 顺序绘制，被后面的划词工具栏压住。
                 这里显式抬到 z-30，高于划词工具栏(z-20)和吸附翻译栏(z-20)。 */}
-            <div data-pdf-reader-toolbar className={`relative z-30 flex-shrink-0 border-b px-2 py-2 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
-                <div className="flex min-w-0 items-center justify-center">
-                    <FloatingDock
-                        darkMode={darkMode}
-                        ariaLabel="PDF 阅读工具栏"
-                        className="mx-auto"
-                    >
+            <div data-pdf-reader-toolbar className={`relative z-30 flex-shrink-0 border-b px-3 py-2.5 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
+                <div className="flex items-center justify-between px-1 py-1">
+                    <div className="flex items-center gap-1">
                         {onToggleSidebar && (
-                            <FloatingDockItem label="切换侧边栏" onClick={onToggleSidebar}>
-                                <Sidebar className="h-[18px] w-[18px]" strokeWidth={2} />
-                            </FloatingDockItem>
+                            <button
+                                type="button"
+                                onClick={onToggleSidebar}
+                                className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'}`}
+                                title="切换侧边栏"
+                                aria-label="切换侧边栏"
+                            >
+                                <Sidebar size={18} strokeWidth={2} />
+                            </button>
                         )}
-                        <FloatingDockDivider darkMode={darkMode} />
+                        <span aria-hidden="true" className={`mx-1 h-4 w-px ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`} />
+                        <button
+                            type="button"
+                            className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'}`}
+                            title="文档信息"
+                            aria-label="文档信息"
+                        >
+                            <FileText size={18} strokeWidth={2} />
+                        </button>
+                    </div>
 
-                        <FloatingDockItem
-                            label="上一页"
+                    <div className="flex items-center gap-2" role="toolbar" aria-label="页码导航">
+                        <button
+                            type="button"
                             onClick={() => changePage(-1)}
                             disabled={previousPageTarget === pageNumber}
+                            className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-50 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600'}`}
+                            title="上一页"
+                            aria-label="上一页"
                         >
                             <ChevronLeft className="h-5 w-5" />
-                        </FloatingDockItem>
+                        </button>
                         <div
-                            className={`flex h-7 min-w-[70px] shrink-0 items-center justify-center rounded-[9px] border px-2 text-[11px] font-semibold tabular-nums ${
-                                darkMode
-                                    ? 'border-white/[0.08] bg-black/20 text-gray-300'
-                                    : 'border-[#e7ded7] bg-[#faf7f4] text-[#5f554e]'
-                            }`}
+                            className={`flex items-center rounded-md border px-2 py-1 text-sm ${darkMode ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50'}`}
                             aria-label={`当前第 ${pageIndicator} 页，共 ${numPages || '--'} 页`}
                             aria-live="polite"
                         >
-                            <span>{pageIndicator}</span>
-                            <span className={`mx-1.5 ${darkMode ? 'text-gray-600' : 'text-[#b5aaa2]'}`}>/</span>
-                            <span className={darkMode ? 'text-gray-500' : 'text-[#91857d]'}>{numPages || '--'}</span>
+                            <span className="min-w-[1.5rem] text-center font-medium tabular-nums">{pageIndicator}</span>
                         </div>
-                        <FloatingDockItem
-                            label="下一页"
+                        <span className={`text-sm font-medium tabular-nums ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>/ {numPages || '--'}</span>
+                        <button
+                            type="button"
                             onClick={() => changePage(1)}
                             disabled={nextPageTarget === pageNumber}
+                            className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-50 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'}`}
+                            title="下一页"
+                            aria-label="下一页"
                         >
                             <ChevronRight className="h-5 w-5" />
-                        </FloatingDockItem>
+                        </button>
+                    </div>
 
-                        <FloatingDockDivider darkMode={darkMode} />
-
+                    <div className="flex items-center gap-1" role="toolbar" aria-label="阅读布局与缩放">
                         <div ref={pageLayoutMenuRef} className="relative">
-                            <FloatingDockItem
-                                label="页面转换"
-                                active={isPageLayoutMenuOpen}
-                                showTooltip={!isPageLayoutMenuOpen}
+                            <button
+                                type="button"
                                 onClick={() => setIsPageLayoutMenuOpen((open) => !open)}
+                                className={`inline-flex h-8 items-center gap-1.5 rounded-xl px-2 transition-[background-color,color,transform] duration-200 active:scale-95 focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/35 ${
+                                    isPageLayoutMenuOpen
+                                        ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f3ddd5] text-[#a4533d]')
+                                        : (darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-[#f0ebe7] hover:text-[#9f5541]')
+                                }`}
+                                title="页面转换"
+                                aria-label="页面转换"
                                 aria-expanded={isPageLayoutMenuOpen}
                                 aria-controls="pdf-reader-layout-menu"
                             >
-                                <BookOpen className="h-[17px] w-[17px]" />
-                            </FloatingDockItem>
+                                <BookOpen className="h-4 w-4" />
+                                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${isPageLayoutMenuOpen ? 'rotate-180' : ''}`} />
+                            </button>
                             <AnimatePresence>
                                 {isPageLayoutMenuOpen && (
                                     <motion.div
@@ -2084,7 +2098,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         animate={{ opacity: 1, y: 0, scale: 1 }}
                                         exit={{ opacity: 0, y: -4, scale: 0.98 }}
                                         transition={{ duration: 0.16, ease: 'easeOut' }}
-                                        className={`absolute right-0 top-[calc(100%+12px)] z-50 w-[196px] overflow-hidden rounded-2xl border p-2 shadow-[0_18px_46px_rgba(72,47,35,0.18)] ${
+                                        className={`absolute right-0 top-[calc(100%+10px)] z-50 w-[196px] overflow-hidden rounded-2xl border p-2 shadow-[0_18px_46px_rgba(72,47,35,0.18)] ${
                                             darkMode
                                                 ? 'border-white/10 bg-[#25292f] text-gray-100 shadow-black/35'
                                                 : 'border-[#ebe4dd] bg-[#fffdfb] text-[#3c342f]'
@@ -2174,22 +2188,32 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 )}
                             </AnimatePresence>
                         </div>
-                        <FloatingDockItem label="缩小" onClick={zoomOut} disabled={scale <= 0.5}>
-                            <ZoomOut className="h-[17px] w-[17px]" />
-                        </FloatingDockItem>
-                        <div
-                            className={`flex h-7 w-9 shrink-0 items-center justify-center rounded-[9px] text-[11px] font-semibold tabular-nums ${
-                                darkMode ? 'text-gray-400' : 'text-[#6f625a]'
-                            }`}
-                            aria-label={`当前缩放 ${Math.round(scale * 100)}%`}
-                            aria-live="polite"
-                        >
-                            {Math.round(scale * 100)}%
+                        <div className={`ml-1 flex items-center rounded-lg border p-0.5 ${darkMode ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50'}`}>
+                            <button
+                                type="button"
+                                onClick={zoomOut}
+                                disabled={scale <= 0.5}
+                                className={`rounded-md p-1 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-gray-700 hover:text-gray-100' : 'text-gray-500 hover:bg-white hover:text-gray-700'}`}
+                                title="缩小"
+                                aria-label="缩小"
+                            >
+                                <ZoomOut className="h-4 w-4" />
+                            </button>
+                            <span className={`w-14 px-2 text-center text-sm font-medium tabular-nums ${darkMode ? 'text-gray-300' : 'text-gray-600'}`} aria-live="polite">
+                                {Math.round(scale * 100)}%
+                            </span>
+                            <button
+                                type="button"
+                                onClick={zoomIn}
+                                disabled={scale >= 3}
+                                className={`rounded-md p-1 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-gray-700 hover:text-gray-100' : 'text-gray-500 hover:bg-white hover:text-gray-700'}`}
+                                title="放大"
+                                aria-label="放大"
+                            >
+                                <ZoomIn className="h-4 w-4" />
+                            </button>
                         </div>
-                        <FloatingDockItem label="放大" onClick={zoomIn} disabled={scale >= 3}>
-                            <ZoomIn className="h-[17px] w-[17px]" />
-                        </FloatingDockItem>
-                    </FloatingDock>
+                    </div>
                 </div>
             </div>
 

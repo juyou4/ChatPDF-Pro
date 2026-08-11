@@ -372,6 +372,7 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
       .map((activity) => activity.id)
   ), [activities]);
   const [expandedGroups, setExpandedGroups] = useState(() => new Set(activeActivityIds));
+  const previousActiveActivityIdsRef = useRef(new Set(activeActivityIds));
   const [panelExpanded, setPanelExpanded] = useState(() => isRunning);
   const wasRunningRef = useRef(isRunning);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -391,8 +392,32 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
   }, [intentId]);
 
   useEffect(() => {
-    if (activeActivityIds.size === 0) return;
-    setExpandedGroups((current) => new Set([...current, ...activeActivityIds]));
+    const previousActiveActivityIds = previousActiveActivityIdsRef.current;
+    previousActiveActivityIdsRef.current = new Set(activeActivityIds);
+
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      let changed = false;
+
+      // 工具开始执行时自动展开，让用户能看到当前检索的参数和中间结果。
+      activeActivityIds.forEach((groupId) => {
+        if (!next.has(groupId)) {
+          next.add(groupId);
+          changed = true;
+        }
+      });
+
+      // 自动展开的组在最后一个工具完成时收起，避免完成后的时间线被长结果卡片撑开。
+      // 历史组仍可由用户点击标题重新展开查看。
+      previousActiveActivityIds.forEach((groupId) => {
+        if (!activeActivityIds.has(groupId) && next.has(groupId)) {
+          next.delete(groupId);
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
   }, [activeActivityIds]);
 
   useEffect(() => {

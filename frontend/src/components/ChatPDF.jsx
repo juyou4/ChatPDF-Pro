@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, ArrowRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical, Files } from 'lucide-react';
+import { Upload, Send, Settings, ChevronLeft, ChevronRight, ChevronDown, ZoomIn, ZoomOut, Copy, X, Crop, Image as ImageIcon, History, Moon, Sun, Plus, MessageSquare, Trash2, Menu, Type, Loader2, Server, Database, ListFilter, ArrowUpRight, ArrowRight, SlidersHorizontal, Paperclip, ScanText, Scan, Brain, MessageCircle, ArrowUpDown, Globe, Check, Sparkles, GripVertical, Files, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
@@ -11,7 +11,6 @@ import 'highlight.js/styles/github.css';
 import PDFViewer from './PDFViewer';
 import StreamingMarkdown from './StreamingMarkdown';
 import BlurText from './BlurText';
-import { FloatingDock, FloatingDockDivider, FloatingDockItem } from './ui/FloatingDock';
 import { DocumentVisualAttachments } from './DocumentFigure';
 import TextSelectionToolbar from './TextSelectionToolbar';
 import { useProvider } from '../contexts/ProviderContext';
@@ -51,6 +50,7 @@ import SettingsSegmentedControl from './SettingsSegmentedControl';
 import SettingsRange from './SettingsRange';
 import ParseRouteSelect from './ParseRouteSelect';
 import LocalParserInstallDialog from './LocalParserInstallDialog';
+import SessionDeleteDialog from './SessionDeleteDialog';
 import DocumentUploadNotice, { resolveDocumentUploadNotice } from './DocumentUploadNotice';
 import BackgroundTaskPanel, {
   getBackgroundTaskSummary,
@@ -1133,6 +1133,10 @@ const ChatPDF = () => {
   const [ragIndexBusy, setRagIndexBusy] = useState(false);
   const [ragIndexNotice, setRagIndexNotice] = useState('');
   const [ragIndexError, setRagIndexError] = useState('');
+  const [embeddingConflictRecovery, setEmbeddingConflictRecovery] = useState({
+    messageId: null,
+    status: 'idle',
+  });
   const [selectedParseRoute, setSelectedParseRoute] = useState(loadStoredParseRoute);
   const [isLocalParserInstallOpen, setIsLocalParserInstallOpen] = useState(false);
   const [hoveredReadingBlockId, setHoveredReadingBlockId] = useState(null);
@@ -1735,6 +1739,24 @@ const ChatPDF = () => {
     saveCurrentSession, fetchStorageInfo,
     overview, overviewLoading, overviewError, fetchOverview, clearOverviewCache,
   } = documentState;
+  const [pendingSessionDelete, setPendingSessionDelete] = useState(null);
+  const requestSessionDelete = useCallback((session) => {
+    const sessionId = String(session?.id || '').trim();
+    if (!sessionId) return;
+    if (!confirmDeleteMessage) {
+      deleteSession(sessionId);
+      return;
+    }
+    setPendingSessionDelete({
+      id: sessionId,
+      filename: session?.filename || '未命名文档',
+    });
+  }, [confirmDeleteMessage, deleteSession]);
+  const confirmSessionDelete = useCallback(() => {
+    const sessionId = String(pendingSessionDelete?.id || '').trim();
+    if (sessionId) deleteSession(sessionId);
+    setPendingSessionDelete(null);
+  }, [deleteSession, pendingSessionDelete]);
 
   const [crossDocumentIds, setCrossDocumentIds] = useState([]);
   const [crossDocumentMenuOpen, setCrossDocumentMenuOpen] = useState(false);
@@ -2109,6 +2131,7 @@ const ChatPDF = () => {
     setRagIndexNotice('');
     setRagIndexError('');
     setRagIndexBusy(false);
+    setEmbeddingConflictRecovery({ messageId: null, status: 'idle' });
     setHoveredReadingBlockId(null);
     setPinnedReadingBlockId(null);
     pretranslateRunRef.current += 1;
@@ -2381,32 +2404,10 @@ const ChatPDF = () => {
   }, [clearOverviewCache, docId]);
 
   const refreshReadingBlocksAfterVisualSupplement = useCallback(() => {
-    // A local VLM supplement adds parse-bound caption blocks.  Existing
-    // translation/outline state may be keyed to the prior block collection,
-    // but the current overview itself remains valid and must not be cleared.
-    blockTranslationEpochRef.current += 1;
-    pretranslateRunRef.current += 1;
-    pretranslateAbortRef.current?.abort();
-    pretranslateAbortRef.current = null;
-    pretranslateStartedDocRef.current = null;
-    setBlockTranslations({});
-    setBlockTranslationsLoaded(false);
-    setBlockTranslationsLoadedIdentity('');
-    setFailedTranslationBlockIds(new Set());
-    setTranslatingBlockIds(new Set());
-    setBlockTranslateError('');
-    setBlockTranslateLoading(false);
-    setPretranslateNotice('');
-    setPretranslateError('');
-    setPretranslateProgress({ running: false, done: 0, total: 0 });
-    setReadingOutline(null);
-    setSectionOutline(null);
-    readingOutlineCacheRef.current.clear();
-    sectionOutlineCacheRef.current.clear();
-    setReadingOutlineFallbackNotice('');
-    setSectionOutlineFallbackNotice('');
-    setReadingOutlineReloadKey((value) => value + 1);
-    setSectionOutlineReloadKey((value) => value + 1);
+    // A visual supplement is additive: it appends figure evidence but keeps
+    // the parser identity and existing text block ids intact. Reload the index
+    // so the new evidence is visible, while allowing any page/full-document
+    // translation already in progress to finish and stay recoverable.
     setBlockIndexReloadKey((value) => value + 1);
   }, []);
 
@@ -2617,22 +2618,25 @@ const ChatPDF = () => {
     isCurrentParseContext,
   ]);
 
-  const handleRebuildMinerURagIndex = useCallback(async () => {
+  const handleRebuildMinerURagIndex = useCallback(async (options = {}) => {
+    const forceEmbeddingRebuild = options?.forceEmbeddingRebuild === true;
+    const conflictMessageId = options?.conflictMessageId ?? null;
     const rebuildLocalIndex = Boolean(
-      !requiresMinerURagSource
-      && ragIndexStatus?.upgrade_required
-      && ragIndexStatus?.index_source !== 'mineru'
+      !requiresMinerURagSource && (
+        (forceEmbeddingRebuild && primaryParseRoute !== 'mineru')
+        || (ragIndexStatus?.upgrade_required && ragIndexStatus?.index_source !== 'mineru')
+      )
     );
     if (isNewLocalPrimaryRoute && !rebuildLocalIndex) {
       setRagIndexNotice('当前文档已固定为本地解析路线，不能单独切换到 MinerU 问答索引');
       return;
     }
-    if (isNewMinerUPrimaryRoute && !canPublishPendingMinerURag) {
+    if (isNewMinerUPrimaryRoute && !canPublishPendingMinerURag && !forceEmbeddingRebuild && !ragIndexStatus?.upgrade_required) {
       setRagIndexNotice('当前 MinerU 全程解析会统一管理问答索引，无需单独重建');
       return;
     }
     if (!docId || ragIndexBusy) return;
-    if (!rebuildLocalIndex && !canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru) {
+    if (!rebuildLocalIndex && !canPublishPendingMinerURag && !currentDeepParseStatus?.active_mineru && !forceEmbeddingRebuild) {
       const message = '请先完成 MinerU 深度解析';
       setRagIndexNotice(message);
       setRagIndexError(message);
@@ -2658,8 +2662,13 @@ const ChatPDF = () => {
     const embeddingApiHost = embeddingCredentials.apiHost || '';
 
     setRagIndexBusy(true);
+    if (conflictMessageId !== null) {
+      setEmbeddingConflictRecovery({ messageId: conflictMessageId, status: 'rebuilding' });
+    }
     setRagIndexError('');
-    setRagIndexNotice(rebuildLocalIndex ? '正在评估本地问答索引升级成本...' : '正在评估 MinerU 问答索引重建成本...');
+    setRagIndexNotice(forceEmbeddingRebuild
+      ? '正在评估按当前 Embedding 配置同步问答索引的成本...'
+      : rebuildLocalIndex ? '正在评估本地问答索引升级成本...' : '正在评估 MinerU 问答索引重建成本...');
     try {
       const estimateRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
         method: 'POST',
@@ -2677,7 +2686,9 @@ const ChatPDF = () => {
       }
       const estimate = estimateData.estimate || {};
       const confirmed = window.confirm(
-        `${rebuildLocalIndex ? '将使用当前解析路线的正文阅读块升级问答索引。' : '将使用 MinerU 结构化结果重建问答索引。'}\n\n`
+        `${forceEmbeddingRebuild
+          ? '当前文档的问答索引曾被错误地使用其他 Embedding 身份构建。将保留 MinerU 解析结果，并仅按当前配置重建问答向量索引。'
+          : rebuildLocalIndex ? '将使用当前解析路线的正文阅读块升级问答索引。' : '将使用 MinerU 结构化结果重建问答索引。'}\n\n`
         + `预计重新嵌入约 ${estimate.estimated_embedding_tokens || 0} tokens，约 ${estimate.estimated_chunk_count || 0} 个分块，表格 ${estimate.structured_table_count || 0} 个，耗时约 1-3 分钟。\n`
         + `历史对话中的引用可能发生偏移；阅读侧翻译、大纲和速览不受影响。\n`
         + `重建期间旧问答索引会继续可用。是否继续？`
@@ -2685,9 +2696,14 @@ const ChatPDF = () => {
       if (!confirmed) {
         setRagIndexNotice('问答索引尚未发布，可稍后继续');
         setRagIndexError('');
+        if (conflictMessageId !== null) {
+          setEmbeddingConflictRecovery({ messageId: conflictMessageId, status: 'idle' });
+        }
         return;
       }
-      setRagIndexNotice(rebuildLocalIndex ? '正在升级本地问答索引...' : '正在重建 MinerU 问答索引...');
+      setRagIndexNotice(forceEmbeddingRebuild
+        ? '正在按当前 Embedding 配置同步问答索引...'
+        : rebuildLocalIndex ? '正在升级本地问答索引...' : '正在重建 MinerU 问答索引...');
       const rebuildRes = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rebuild`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2707,11 +2723,16 @@ const ChatPDF = () => {
       setRagIndexStatus(rebuildData.rag_index || null);
       setRagIndexError('');
       setRagIndexNotice(
-        rebuildLocalIndex
+        forceEmbeddingRebuild
+          ? '问答索引已按当前 Embedding 配置同步，可重新提问'
+          : rebuildLocalIndex
           ? '本地问答索引已升级，正文、表格与页码检索已按当前阅读结构重建'
           : 'MinerU 问答索引已重建，表格问答会优先使用结构化证据'
       );
-      if (!rebuildLocalIndex) {
+      if (conflictMessageId !== null) {
+        setEmbeddingConflictRecovery({ messageId: conflictMessageId, status: 'completed' });
+      }
+      if (!rebuildLocalIndex && !forceEmbeddingRebuild) {
         const status = await refreshDeepParseStatus();
         if (status?.active_mineru && status?.parse_ready === true) {
           setDeepParseNotice('MinerU 问答索引已发布，阅读结构、大纲、翻译、速览和问答现已同步切换');
@@ -2722,6 +2743,9 @@ const ChatPDF = () => {
       const message = error.message || '问答索引重建失败，已保留原索引';
       setRagIndexNotice(message);
       setRagIndexError(message);
+      if (conflictMessageId !== null) {
+        setEmbeddingConflictRecovery({ messageId: conflictMessageId, status: 'failed' });
+      }
     } finally {
       setRagIndexBusy(false);
     }
@@ -2734,6 +2758,7 @@ const ChatPDF = () => {
     getMissingEmbeddingCredential,
     isNewLocalPrimaryRoute,
     isNewMinerUPrimaryRoute,
+    primaryParseRoute,
     ragIndexBusy,
     ragIndexStatus?.index_source,
     ragIndexStatus?.upgrade_required,
@@ -4993,6 +5018,7 @@ const ChatPDF = () => {
       );
     }
     const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
+    const hasRetrievalProgress = Array.isArray(msg.retrievalProgress) && msg.retrievalProgress.length > 0;
     const hasAgentTrace = msg.type === 'assistant' && msg.agentTrace && msg.agentTrace.enabled;
     const isStreamingCurrentMessage = shouldStreamAssistantContent(msg, streamingMessageId);
     const blurTextStatusProfile = BLUR_TEXT_STATUS_PROFILES[blurIntensity]
@@ -5005,7 +5031,7 @@ const ChatPDF = () => {
     );
     // 只要当前消息还在生成，且正文还没开始出现，就先展示思考/生成阶段块。
     // 这样即使 reasoningEffort 关闭，用户也不会只看到三个等待点。
-    const shouldShowThinking = hasThinking || hasAgentTrace || hasWebSearchActivity || (
+    const shouldShowThinking = hasThinking || hasRetrievalProgress || hasAgentTrace || hasWebSearchActivity || (
       isStreamingCurrentMessage && (
         reasoningEffort !== 'off'
         || !msg.content
@@ -5013,6 +5039,19 @@ const ChatPDF = () => {
       )
     );
     const shouldStreamContent = isStreamingCurrentMessage;
+    const isEmbeddingIdentityConflict = msg.type === 'assistant' && msg.embeddingIdentityConflict === true;
+    const conflictRecoveryStatus = (
+      isEmbeddingIdentityConflict && embeddingConflictRecovery.messageId === msg.id
+        ? embeddingConflictRecovery.status
+        : 'idle'
+    );
+    const selectedEmbeddingConfig = isEmbeddingIdentityConflict
+      ? (getEmbeddingConfig?.() || {})
+      : null;
+    const currentEmbeddingLabel = selectedEmbeddingConfig?.isValid
+      ? `${selectedEmbeddingConfig.modelId || selectedEmbeddingConfig.compositeKey || '当前模型'} · ${selectedEmbeddingConfig.provider?.name || selectedEmbeddingConfig.providerId || '当前 Provider'}`
+      : '当前设置不可用';
+    const indexedEmbeddingLabel = `${ragIndexStatus?.embedding_model || '未知模型'} · ${ragIndexStatus?.embedding_provider || '未知 Provider'}`;
     const criticDetailLines = buildCriticDetailLines(msg.answerCritic);
     const criticAnswerScopeId = `critic-answer-${msg.id ?? idx}`;
     const handleLocateClaim = (claimSpan) => {
@@ -5049,6 +5088,7 @@ const ChatPDF = () => {
               darkMode={darkMode}
               thinkingMs={msg.thinkingMs || 0}
               streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
+              retrievalProgress={msg.retrievalProgress || []}
               agentTrace={msg.agentTrace || null}
               reasoningResolution={msg.reasoningResolution || null}
               webSearchActivity={hasWebSearchActivity ? {
@@ -5109,24 +5149,82 @@ const ChatPDF = () => {
               </div>
             )
           )}
-          {/* data-critic-answer 供自审提示的「定位原句」按钮反查这条回答的正文容器 */}
-          <div data-critic-answer={criticAnswerScopeId}>
-            <StreamingMarkdown
-              content={msg.content}
-              isStreaming={shouldStreamContent}
-              enableBlurReveal={enableBlurReveal}
-              blurIntensity={blurIntensity}
-              citations={msg.citations || null}
-              onCitationClick={handleDocumentAwareCitationClick}
-              streamingRef={shouldStreamContent ? streamingContentRef : undefined}
-              webSearchSources={msg.webSearchSources || null}
-              suppressInitialDots={
-                // 思考结束后进入“生成中”时不再用三个点占位，改用明确文案。
-                Boolean(msg.answerGenerating)
-                || (shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim()) && !msg.answerStarted)
-              }
-            />
-          </div>
+          {isEmbeddingIdentityConflict ? (
+            <section className={`mt-1 rounded-[16px] border px-4 py-3.5 ${
+              conflictRecoveryStatus === 'completed'
+                ? (darkMode ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-100' : 'border-emerald-200 bg-emerald-50/70 text-emerald-900')
+                : (darkMode ? 'border-amber-300/20 bg-amber-300/[0.08] text-amber-50' : 'border-amber-200 bg-amber-50/75 text-amber-950')
+            }`}>
+              <div className="flex min-w-0 items-start gap-3">
+                <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] ${
+                  conflictRecoveryStatus === 'completed'
+                    ? (darkMode ? 'bg-emerald-300/15 text-emerald-200' : 'bg-emerald-100 text-emerald-700')
+                    : (darkMode ? 'bg-amber-200/15 text-amber-100' : 'bg-amber-100 text-amber-700')
+                }`}>
+                  {conflictRecoveryStatus === 'completed' ? <Check className="h-4 w-4" /> : <Database className="h-4 w-4" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold">
+                    {conflictRecoveryStatus === 'completed' ? '问答索引已同步' : '问答索引需要同步'}
+                  </p>
+                  <p className={`mt-1 text-[12px] leading-5 ${darkMode ? 'text-gray-300' : 'text-amber-900/75'}`}>
+                    {conflictRecoveryStatus === 'completed'
+                      ? '已按当前 Embedding 配置重建问答索引，可重新提问。MinerU 的解析结果、阅读结构和速览内容没有被改动。'
+                      : 'MinerU 解析结果仍然有效。后端曾以不同的 Embedding 身份重建问答索引，保护校验因此停止了本次检索。'}
+                  </p>
+                </div>
+              </div>
+              {conflictRecoveryStatus !== 'completed' && (
+                <>
+                  <div className={`mt-3 grid gap-1.5 border-t pt-3 text-[11px] ${darkMode ? 'border-white/10 text-gray-400' : 'border-amber-200/80 text-amber-900/65'}`}>
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <span className="shrink-0">当前索引</span>
+                      <span className="min-w-0 truncate text-right font-medium" title={indexedEmbeddingLabel}>{indexedEmbeddingLabel}</span>
+                    </div>
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <span className="shrink-0">当前设置</span>
+                      <span className="min-w-0 truncate text-right font-medium" title={currentEmbeddingLabel}>{currentEmbeddingLabel}</span>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <span className={`text-[11px] ${darkMode ? 'text-gray-400' : 'text-amber-900/60'}`}>只重建问答索引，不会重新上传 PDF</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRebuildMinerURagIndex({ forceEmbeddingRebuild: true, conflictMessageId: msg.id })}
+                      disabled={ragIndexBusy || conflictRecoveryStatus === 'rebuilding'}
+                      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                        darkMode
+                          ? 'bg-white/10 text-white hover:bg-white/15 focus-visible:ring-amber-200/50'
+                          : 'bg-[#3b3a38] text-white shadow-[0_3px_8px_rgba(41,37,36,0.18)] hover:bg-[#262523] focus-visible:ring-amber-500/35'
+                      }`}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${conflictRecoveryStatus === 'rebuilding' ? 'animate-spin' : ''}`} />
+                      {conflictRecoveryStatus === 'rebuilding' ? '同步中' : conflictRecoveryStatus === 'failed' ? '重新尝试' : '按当前配置重建'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          ) : (
+            /* data-critic-answer 供自审提示的「定位原句」按钮反查这条回答的正文容器 */
+            <div data-critic-answer={criticAnswerScopeId}>
+              <StreamingMarkdown
+                content={msg.content}
+                isStreaming={shouldStreamContent}
+                enableBlurReveal={enableBlurReveal}
+                blurIntensity={blurIntensity}
+                citations={msg.citations || null}
+                onCitationClick={handleDocumentAwareCitationClick}
+                streamingRef={shouldStreamContent ? streamingContentRef : undefined}
+                webSearchSources={msg.webSearchSources || null}
+                suppressInitialDots={
+                  // 思考结束后进入“生成中”时不再用三个点占位，改用明确文案。
+                  Boolean(msg.answerGenerating)
+                  || (shouldShowThinking && isStreamingCurrentMessage && (!msg.content || !msg.content.trim()) && !msg.answerStarted)
+                }
+              />
+            </div>
+          )}
           {msg.type === 'assistant' && !msg.isStreaming && msg.visualAttachments?.length > 0 && (
             <DocumentVisualAttachments
               attachments={msg.visualAttachments}
@@ -5135,7 +5233,7 @@ const ChatPDF = () => {
               onLocate={handleCitationClick}
             />
           )}
-          {msg.type === 'assistant' && !msg.isStreaming && (
+          {msg.type === 'assistant' && !msg.isStreaming && !isEmbeddingIdentityConflict && (
             <ChatTurnStatusNotice
               status={msg.turnStatus || msg.turn_status || msg.answerStatus || msg.answer_status}
               stale={msg.parseIdentityStale === true}
@@ -5262,7 +5360,9 @@ const ChatPDF = () => {
     dislikedMessages, setFeedbackTarget,
     docId, docInfo?.data?.total_pages, docInfo?.filename, docInfo?.total_pages,
     documentUploadParseStatus,
-    apiProvider,
+    apiProvider, embeddingConflictRecovery, getEmbeddingConfig,
+    handleRebuildMinerURagIndex, ragIndexBusy, ragIndexStatus?.embedding_model,
+    ragIndexStatus?.embedding_provider,
   ]);
 
   // ========== 反馈提交 ==========
@@ -5395,9 +5495,7 @@ const ChatPDF = () => {
     const canRetryFullRoute = isNewMinerUPrimaryRoute && deepParseFailed;
     const ragIndexSource = ragIndexStatus?.index_source || (ragIndexStatus?.ready ? 'pdf_native' : '');
     const ragIndexIsMinerU = ragIndexSource === 'mineru';
-    const ragIndexUpgradeRequired = Boolean(
-      !requiresMinerURagSource && ragIndexStatus?.upgrade_required
-    );
+    const ragIndexUpgradeRequired = Boolean(ragIndexStatus?.upgrade_required);
     const ragIndexRecommended = Boolean(
       ragIndexUpgradeRequired || canPublishPendingMinerURag || (
         isLegacyParseManifest
@@ -5749,6 +5847,12 @@ const ChatPDF = () => {
         onClose={handleLocalParserInstallClose}
         onReady={handleLocalParserReady}
       />
+      <SessionDeleteDialog
+        session={pendingSessionDelete}
+        darkMode={darkMode}
+        onClose={() => setPendingSessionDelete(null)}
+        onConfirm={confirmSessionDelete}
+      />
 
       {/* 统一应用外壳：2K 屏基本铺满，超宽屏保留上限；阅读态继续使用紧凑间距。 */}
       <div className={`relative mx-auto flex h-full w-full max-w-[2400px] ${docId ? 'px-3 py-3' : 'px-3 py-4 sm:px-4 sm:py-5'}`}>
@@ -5883,7 +5987,7 @@ const ChatPDF = () => {
                             <span className="text-[13px] truncate">{item.filename}</span>
                           </div>
                           <button
-                            onClick={(e) => { e.stopPropagation(); if (!confirmDeleteMessage || confirm('确定要删除这条对话记录吗？')) deleteSession(item.id); }}
+                            onClick={(e) => { e.stopPropagation(); requestSessionDelete(item); }}
                             aria-label={`删除会话 ${item.filename}`}
                             title="删除会话"
                             className={`relative z-10 opacity-0 group-hover:opacity-100 p-1 rounded-full text-gray-400 transition-all flex-shrink-0 ${darkMode ? 'hover:bg-red-500/15 hover:text-red-400' : 'hover:bg-red-50 hover:text-red-500'}`}
@@ -6033,46 +6137,57 @@ const ChatPDF = () => {
                   />
                 ) : (docInfo?.pages || docInfo?.data?.pages) ? (
                   <>
-                    <div data-pdf-reader-toolbar className={`relative z-30 flex h-14 items-center justify-center border-b px-2 backdrop-blur-sm ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-black/5 bg-white/30 text-gray-600'}`}>
-                      <FloatingDock darkMode={darkMode} ariaLabel="PDF 阅读工具栏" className="mx-auto">
-                        <FloatingDockItem
-                          label="上一页"
+                    <div data-pdf-reader-toolbar className={`relative z-30 flex h-14 items-center justify-between border-b px-6 backdrop-blur-sm ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-black/5 bg-white/30 text-gray-600'}`}>
+                      <div className="flex items-center gap-2" role="toolbar" aria-label="页码导航">
+                        <button
+                          type="button"
                           onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                           disabled={currentPage <= 1}
+                          className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-black/5 hover:text-gray-800'}`}
+                          title="上一页"
+                          aria-label="上一页"
                         >
                           <ChevronLeft className="h-5 w-5" />
-                        </FloatingDockItem>
-                        <div
-                          className={`flex h-7 min-w-[70px] shrink-0 items-center justify-center rounded-[9px] border px-2 text-[11px] font-semibold tabular-nums ${darkMode ? 'border-white/[0.08] bg-black/20 text-gray-300' : 'border-[#e7ded7] bg-[#faf7f4] text-[#5f554e]'}`}
-                          aria-label={`当前第 ${currentPage} 页，共 ${docInfo?.total_pages || docInfo?.data?.total_pages || 1} 页`}
-                          aria-live="polite"
-                        >
-                          <span>{currentPage}</span>
-                          <span className={`mx-1.5 ${darkMode ? 'text-gray-600' : 'text-[#b5aaa2]'}`}>/</span>
-                          <span className={darkMode ? 'text-gray-500' : 'text-[#91857d]'}>{docInfo?.total_pages || docInfo?.data?.total_pages || 1}</span>
-                        </div>
-                        <FloatingDockItem
-                          label="下一页"
+                        </button>
+                        <span className={`w-16 text-center text-sm font-medium tabular-nums ${darkMode ? 'text-gray-300' : 'text-gray-700'}`} aria-live="polite">
+                          {currentPage} / {docInfo?.total_pages || docInfo?.data?.total_pages || 1}
+                        </span>
+                        <button
+                          type="button"
                           onClick={() => setCurrentPage(Math.min(docInfo?.total_pages || docInfo?.data?.total_pages || 1, currentPage + 1))}
                           disabled={currentPage >= (docInfo?.total_pages || docInfo?.data?.total_pages || 1)}
+                          className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-black/5 hover:text-gray-800'}`}
+                          title="下一页"
+                          aria-label="下一页"
                         >
                           <ChevronRight className="h-5 w-5" />
-                        </FloatingDockItem>
-                        <FloatingDockDivider darkMode={darkMode} />
-                        <FloatingDockItem label="缩小" onClick={() => setPdfScale(s => Math.max(0.5, s - 0.1))} disabled={pdfScale <= 0.5}>
-                          <ZoomOut className="h-[17px] w-[17px]" />
-                        </FloatingDockItem>
-                        <div
-                          className={`flex h-7 w-12 shrink-0 items-center justify-center rounded-[9px] text-[11px] font-semibold tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#6f625a]'}`}
-                          aria-label={`当前缩放 ${Math.round(pdfScale * 100)}%`}
-                          aria-live="polite"
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2" role="toolbar" aria-label="缩放控制">
+                        <button
+                          type="button"
+                          onClick={() => setPdfScale(s => Math.max(0.5, s - 0.1))}
+                          disabled={pdfScale <= 0.5}
+                          className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-black/5 hover:text-gray-800'}`}
+                          title="缩小"
+                          aria-label="缩小"
                         >
+                          <ZoomOut className="h-5 w-5" />
+                        </button>
+                        <span className={`w-12 text-center text-sm font-medium tabular-nums ${darkMode ? 'text-gray-300' : 'text-gray-700'}`} aria-live="polite">
                           {Math.round(pdfScale * 100)}%
-                        </div>
-                        <FloatingDockItem label="放大" onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))} disabled={pdfScale >= 2.0}>
-                          <ZoomIn className="h-[17px] w-[17px]" />
-                        </FloatingDockItem>
-                      </FloatingDock>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))}
+                          disabled={pdfScale >= 2.0}
+                          className={`rounded-lg p-1.5 transition-[background-color,color,transform] duration-200 active:scale-95 disabled:cursor-default disabled:opacity-45 disabled:active:scale-100 ${darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-black/5 hover:text-gray-800'}`}
+                          title="放大"
+                          aria-label="放大"
+                        >
+                          <ZoomIn className="h-5 w-5" />
+                        </button>
+                      </div>
                     </div>
                     {selectionToolbarNode}
                     <div ref={pdfContainerRef} className="h-full overflow-auto bg-gray-50/50">

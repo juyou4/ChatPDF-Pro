@@ -91,6 +91,7 @@ const ThinkingBlock = ({
   darkMode,
   thinkingMs,
   streamingRef,
+  retrievalProgress = [],
   agentTrace,
   webSearchActivity = null,
   reasoningResolution = null,
@@ -102,6 +103,20 @@ const ThinkingBlock = ({
   const { thoughtAutoCollapse } = useChatParams()
   const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
   const hasWebSearchActivity = Boolean(webSearchActivity)
+  const visibleRetrievalProgress = useMemo(() => {
+    const seen = new Set()
+    return (Array.isArray(retrievalProgress) ? retrievalProgress : [])
+      .map((entry, index) => ({
+        key: String(entry?.key || `retrieval-${index}`),
+        text: String(entry?.text || '').trim(),
+      }))
+      .filter((entry) => {
+        if (!entry.text || seen.has(entry.key)) return false
+        seen.add(entry.key)
+        return true
+      })
+  }, [retrievalProgress])
+  const hasRetrievalProgress = visibleRetrievalProgress.length > 0
   const reasoningFallbackText = useMemo(
     () => getReasoningFallbackText(reasoningResolution),
     [reasoningResolution]
@@ -112,7 +127,7 @@ const ThinkingBlock = ({
     hasAgentTrace && isLegacyAgentStageOnlyContent(content) ? '' : String(content || '')
   ), [content, hasAgentTrace])
   const hasThinkingContent = Boolean(visibleThinkingContent.trim())
-  const hasProcessDetails = hasThinkingContent || hasAgentTrace || hasWebSearchActivity || Boolean(reasoningFallbackText)
+  const hasProcessDetails = hasThinkingContent || hasRetrievalProgress || hasAgentTrace || hasWebSearchActivity || Boolean(reasoningFallbackText)
   const agentRunning = Boolean(agentTrace?.enabled && agentTrace?.startedAt && !agentTrace?.endedAt)
   const webSearchRunning = Boolean(
     isStreaming && String(webSearchActivity?.status?.phase || '').toLowerCase() === 'searching'
@@ -136,8 +151,11 @@ const ThinkingBlock = ({
       if (newlineIndex < 0) break
       lineEnd = newlineIndex
     }
+    if (hasRetrievalProgress) {
+      return visibleRetrievalProgress[visibleRetrievalProgress.length - 1]?.text || '正在检索文档...'
+    }
     return '正在等待模型响应...'
-  }, [agentRunning, agentTrace?.taskStatus?.current, answerStarted, isStreaming, visibleThinkingContent, webSearchRunning])
+  }, [agentRunning, agentTrace?.taskStatus?.current, answerStarted, hasRetrievalProgress, isStreaming, visibleRetrievalProgress, visibleThinkingContent, webSearchRunning])
 
   // 思考阶段是否已结束：流式中以「正文首 token 到达」为准（answerStarted），
   // 兜底用整条消息结束（!isStreaming），不必等回答全部生成完
@@ -193,6 +211,7 @@ const ThinkingBlock = ({
   const shouldShowStreamingHint = isThinkingPhase
     && !hasThinkingContent
     && !hasStreamingText
+    && !hasRetrievalProgress
     && !hasAgentTrace
     && !hasWebSearchActivity
   const shouldShowTimeline = shouldShowStreamingHint || hasThinkingContent || hasStreamingText
@@ -229,7 +248,7 @@ const ThinkingBlock = ({
         <ThinkingTimer
           isThinking={isProcessRunning}
           thinkingMs={thinkingMs || 0}
-          activityOnly={!hasThinkingContent && (hasAgentTrace || hasWebSearchActivity)}
+          activityOnly={!hasThinkingContent && (hasRetrievalProgress || hasAgentTrace || hasWebSearchActivity)}
         />
         {reasoningFallbackText && (
           <span
@@ -294,8 +313,32 @@ const ThinkingBlock = ({
               </button>
             )}
 
-            {shouldShowTimeline && (
+            {hasRetrievalProgress && (
               <div className="relative pr-8">
+                <span
+                  className={`absolute -left-[31px] top-[2px] z-[1] grid h-[22px] w-[22px] place-items-center rounded-full border ring-[3px] ${
+                    isProcessRunning
+                      ? darkMode
+                        ? 'border-[#806052] bg-[#513f38] text-[#ffc5ae] ring-[#2b2e34]'
+                        : 'border-[#d8bdb2] bg-[#f6ece7] text-[#98563f] ring-[#faf8f6]'
+                      : darkMode
+                        ? 'border-white/15 bg-[#444850] text-gray-100 ring-[#2b2e34]'
+                        : 'border-[#d8cec7] bg-[#f2ece7] text-[#5c5049] ring-[#faf8f6]'
+                  }`}
+                  aria-hidden="true"
+                >
+                  <Lightbulb className="h-[15px] w-[15px]" strokeWidth={2.15} />
+                </span>
+                <div className={`space-y-1 py-0.5 text-[13px] leading-5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  {visibleRetrievalProgress.map((entry) => (
+                    <p key={entry.key}>{entry.text}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {shouldShowTimeline && (
+              <div className={`relative pr-8 ${hasRetrievalProgress ? 'mt-2.5' : ''}`}>
                 <span
                   className={`absolute -left-[31px] top-[2px] z-[1] grid h-[22px] w-[22px] place-items-center rounded-full border ring-[3px] ${
                     isProcessRunning

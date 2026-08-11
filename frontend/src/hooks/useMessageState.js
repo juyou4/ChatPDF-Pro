@@ -22,6 +22,7 @@ const API_BASE_URL = (() => {
 })();
 export const STREAM_FIRST_EVENT_TIMEOUT_MS = 60000;
 export const CHAT_PARSE_IDENTITY_UPDATED_MESSAGE = '文档解析结果已更新，请重新提问。';
+export const EMBEDDING_IDENTITY_CONFLICT_MESSAGE = '当前 Embedding 配置与文档索引不一致';
 const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
 const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
 
@@ -133,6 +134,18 @@ const isChatParseIdentityConflict = (response, payload, expectedIdentity, messag
     return !chatParseIdentitiesMatch(responseIdentity, expectedIdentity);
   }
   return false;
+};
+
+export const isEmbeddingIdentityConflictDetail = (detail) => {
+  const text = String(detail || '');
+  return /当前\s*Embedding\s*配置与文档索引不一致|vector_embedding_identity_conflict/i.test(text);
+};
+
+const createEmbeddingIdentityConflictError = (detail = '') => {
+  const error = new Error(EMBEDDING_IDENTITY_CONFLICT_MESSAGE);
+  error.name = 'EmbeddingIdentityConflictError';
+  error.detail = String(detail || '');
+  return error;
 };
 
 const resolveRetryControlQuestion = (input, messages = []) => {
@@ -248,8 +261,8 @@ const STREAM_RENDER_PROFILES = {
   slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
 
-// 终态包可能携带一整段正文。给平滑队列足够的时间完成可见渲染，
-// 只有浏览器没有继续调度动画帧时才退回一次性提交，避免“思考完后整段跳出”。
+// 终态包可能携带一整段正文。仅当平滑队列连续一段时间没有任何渲染进展时
+// 才退回一次性提交；前台逐字动画会持续排空，不能被固定总时长打断。
 export const STREAM_FINAL_FLUSH_GRACE_MS = 3000;
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
@@ -279,6 +292,52 @@ const AGENT_ONLY_PHASES = new Set([
   'tool_skipped',
   'agent_mode',
 ]);
+
+// 部分 OpenAI 兼容服务会在真正思考内容前短暂输出聊天角色标记。该标记是
+// 协议元数据而非可展示的思考；若把它当作首个 token，会清空检索过程并让
+// 界面只剩“用户”。
+const REASONING_ROLE_LABELS = new Set([
+  'user',
+  'assistant',
+  'system',
+  'developer',
+  'tool',
+  '用户',
+  '助手',
+  '系统',
+  '开发者',
+  '工具',
+]);
+
+const normalizeReasoningRoleLabel = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[：:，,、\-—\s]+$/g, '');
+
+const consumeDisplayableReasoningDelta = (delta, pendingRoleLabel = '') => {
+  const incoming = String(delta || '');
+  const combined = `${pendingRoleLabel}${incoming}`;
+  const normalizedCombined = normalizeReasoningRoleLabel(combined);
+
+  // 暂存完整角色标记及其分片（例如“用”+“户”），直到收到真正的思考 token，
+  // 既不暴露协议字段，也不会丢掉紧随其后的思考正文。
+  if (
+    normalizedCombined
+    && [...REASONING_ROLE_LABELS].some((label) => label.startsWith(normalizedCombined))
+  ) {
+    return { text: '', pendingRoleLabel: combined.slice(-32) };
+  }
+
+  if (REASONING_ROLE_LABELS.has(normalizeReasoningRoleLabel(pendingRoleLabel))) {
+    const text = incoming.replace(/^\s*[：:，,、\-—]*\s*/, '');
+    if (!text.trim()) {
+      return { text: '', pendingRoleLabel: combined.slice(-32) };
+    }
+    return { text, pendingRoleLabel: '' };
+  }
+
+  return { text: combined, pendingRoleLabel: '' };
+};
 
 const isAgentTraceProgressEvent = (payload, { agentTraceEnabled = false } = {}) => {
   if (payload?.type !== 'retrieval_progress') return false;
@@ -320,6 +379,7 @@ export const formatThinkingStageEvent = (payload, options = {}) => {
     return {
       key: stablePhaseKey || `retrieval:${keyParts.join(':')}`,
       text: message,
+      phase: String(payload.phase || ''),
     };
   }
 
@@ -1038,6 +1098,8 @@ export function useMessageState({
     enableBlurReveal,
     blurIntensity,
     smoothFlush: true,
+    sequencedReveal: enableBlurReveal,
+    paragraphPauseMs: 180,
   });
 
   const thinkingStream = useSmoothStream({
@@ -1512,6 +1574,7 @@ export function useMessageState({
     setMessages(prev => [...prev, {
       id: tempMsgId, type: 'assistant', content: '', model: chatModel, provider: chatProvider,
       isStreaming: true, thinking: '', thinkingMs: 0, turnStatus: 'streaming',
+      retrievalProgress: [],
       webSearchQuery: String(requestQuestion || '').replace(/\s+/g, ' ').trim().slice(0, 240),
       ...requestIdentityFields,
     }]);
@@ -1571,6 +1634,9 @@ export function useMessageState({
             identityError.name = 'ChatParseIdentityError';
             throw identityError;
           }
+          if (response.status === 409 && isEmbeddingIdentityConflictDetail(ed)) {
+            throw createEmbeddingIdentityConflictError(ed);
+          }
           throw new Error(ed);
         }
         // 跨域浏览器会隐藏未显式暴露的响应头；两个身份头都不可读时，
@@ -1588,9 +1654,11 @@ export function useMessageState({
         const decoder = new TextDecoder();
         let currentText = '';
         let currentThinking = '';
+        let currentRetrievalProgress = [];
         let hasRealThinking = false;
         let hasPublishedRealThinking = false;
         let lastThinkingStageKey = null;
+        let pendingReasoningRoleLabel = '';
         let thinkingStartTime = null;
         let thinkingLastUpdateTime = null;
         let contentStartTime = null;
@@ -1603,12 +1671,34 @@ export function useMessageState({
         let streamCompletionStatus = '';
         let streamWasTruncated = false;
         let streamResponseIdentityMismatch = false;
+        let streamEmbeddingIdentityConflict = false;
         let streamTerminalIdentityVerified = !hasCompleteChatParseIdentity(requestParseIdentity);
 
         const markThinkingActivity = () => {
           const now = Date.now();
           if (!thinkingStartTime) thinkingStartTime = now;
           thinkingLastUpdateTime = now;
+        };
+
+        const appendRetrievalProgress = (stage) => {
+          if (!stage?.text || !isRequestCurrent()) return;
+          const key = String(stage.key || stage.text);
+          if (currentRetrievalProgress.some((entry) => entry.key === key)) return;
+
+          currentRetrievalProgress = [
+            ...currentRetrievalProgress,
+            {
+              key,
+              text: String(stage.text).trim(),
+              phase: String(stage.phase || ''),
+            },
+          ].slice(-32);
+          markThinkingActivity();
+          setMessages(prev => prev.map(m => (
+            m.id === tempMsgId
+              ? { ...m, retrievalProgress: currentRetrievalProgress }
+              : m
+          )));
         };
 
         const appendThinkingStage = (text, key) => {
@@ -1643,11 +1733,13 @@ export function useMessageState({
 
         const appendRealThinking = (text) => {
           if (!text || !isRequestCurrent()) return;
-          if (!hasRealThinking && !text.trim()) return;
+          const normalized = consumeDisplayableReasoningDelta(text, pendingReasoningRoleLabel);
+          pendingReasoningRoleLabel = normalized.pendingRoleLabel;
+          if (!normalized.text || (!hasRealThinking && !normalized.text.trim())) return false;
           beginRealThinking();
           markThinkingActivity();
-          currentThinking += text;
-          thinkingStream.addChunk(text);
+          currentThinking += normalized.text;
+          thinkingStream.addChunk(normalized.text);
           // 流式阶段由 ref 增量写入 DOM；完整文本只在终态一次性同步到 React。
           // 避免每个 reasoning token 都覆盖整段 DOM 并重渲染完整消息列表。
           if (!hasPublishedRealThinking) {
@@ -1658,6 +1750,7 @@ export function useMessageState({
                 : m
             ));
           }
+          return true;
         };
 
         const markAnswerStarted = ({ generating = false } = {}) => {
@@ -1779,6 +1872,16 @@ export function useMessageState({
               ? p.final_content.trim()
               : '';
             if (p.error && p.type !== 'retrieval_progress' && !recoveredFinalContent) {
+              if (isEmbeddingIdentityConflictDetail(p.error)) {
+                streamEmbeddingIdentityConflict = true;
+                currentText = '';
+                contentStream.replace('');
+                streamTerminalFailed = true;
+                streamTerminalReceived = true;
+                streamServerTurnStatus = 'failed';
+                sseDone = true;
+                return;
+              }
               const em = `❌ ${p.error}`;
               currentText = em;
               contentStream.replace(em);
@@ -1811,7 +1914,7 @@ export function useMessageState({
               const agentTraceEnabled = Boolean(streamAgentTraceRef.current.enabled);
               const thinkingStageEvent = formatThinkingStageEvent(p, { agentTraceEnabled });
               if (thinkingStageEvent) {
-                appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
+                appendRetrievalProgress(thinkingStageEvent);
               }
               // 思考已结束、正文可能仍在结构化引文阶段：立刻结束“思考中”UI。
               if (
@@ -1946,7 +2049,9 @@ export function useMessageState({
                 appendAnswerContent(cc);
               }
               if (ct) {
-                appendRealThinking(ct);
+                if (!appendRealThinking(ct)) {
+                  appendThinkingStage('模型正在准备思考内容...', 'model:preparing_reasoning');
+                }
               } else if (!cc) {
                 appendThinkingStage('正在等待模型输出思考内容...', 'model:waiting_reasoning');
               }
@@ -2018,7 +2123,9 @@ export function useMessageState({
                 }
               }
               if (ct) {
-                appendRealThinking(ct);
+                if (!appendRealThinking(ct)) {
+                  appendThinkingStage('模型正在准备思考内容...', 'model:preparing_reasoning');
+                }
               }
               // ``done`` 表示主答案已完成；后端还会继续发送追问、会话名、
               // 答案自审等收尾事件。传输层只由 [DONE] 或 reader EOF 结束。
@@ -2071,6 +2178,25 @@ export function useMessageState({
           setStreamingMessageId(null);
           return;
         }
+        if (streamEmbeddingIdentityConflict) {
+          setContentStreamDone(true);
+          setThinkingStreamDone(true);
+          setMessages((previous) => previous.map((message) => (
+            message.id === tempMsgId
+              ? {
+                ...message,
+                content: '',
+                isStreaming: false,
+                turnStatus: 'failed',
+                embeddingIdentityConflict: true,
+                embeddingIdentityConflictDetail: EMBEDDING_IDENTITY_CONFLICT_MESSAGE,
+              }
+              : message
+          )));
+          activeStreamMsgIdRef.current = null;
+          setStreamingMessageId(null);
+          return;
+        }
 
         // 流结束，标记 streamDone 触发短暂的自适应冲刷。
         setContentStreamDone(true);
@@ -2100,17 +2226,27 @@ export function useMessageState({
           });
         });
 
-        // 在切换到最终 Markdown 渲染前，先让 ref 直写队列排空。这样模型若
-        // 仅在终态事件给出整段正文，仍会按用户选定的速度渐进显示，而不是被
-        // React 的最终状态一次性替换。计时器仅保护后台节流等无动画帧场景。
+        // 在切换到最终 Markdown 渲染前，先让 ref 直写队列排空。模型若只在
+        // 终态事件给出整段正文，也会按段落与字符逐步显现。只有队列连续无进展
+        // 时才强制收尾，避免后台标签页/异常 rAF 让消息永久停在流式状态。
         {
-          const flushStart = Date.now();
+          const getPendingStreamChars = () => (
+            Math.max(0, Number(contentStream.getPendingChars?.()) || 0)
+            + Math.max(0, Number(thinkingStream.getPendingChars?.()) || 0)
+          );
+          let previousPendingChars = getPendingStreamChars();
+          let lastProgressAt = Date.now();
           while (
             isRequestCurrent() &&
-            (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete()) &&
-            Date.now() - flushStart < STREAM_FINAL_FLUSH_GRACE_MS
+            (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete())
           ) {
             await waitForNextPaint();
+            const pendingChars = getPendingStreamChars();
+            if (pendingChars < previousPendingChars) {
+              lastProgressAt = Date.now();
+            }
+            previousPendingChars = pendingChars;
+            if (Date.now() - lastProgressAt >= STREAM_FINAL_FLUSH_GRACE_MS) break;
           }
         }
         if (!isRequestCurrent()) return;
@@ -2151,7 +2287,7 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
            m.id === tempMsgId
-             ? { ...m, content: finalContent, thinking: currentThinking, reasoningContent: hasRealThinking ? currentThinking : '', isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+             ? { ...m, content: finalContent, thinking: currentThinking, reasoningContent: hasRealThinking ? currentThinking : '', retrievalProgress: currentRetrievalProgress, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -2183,6 +2319,9 @@ export function useMessageState({
             const identityError = new Error(ed || '文档解析结果已更新，本次回答已停止，请重新提问');
             identityError.name = 'ChatParseIdentityError';
             throw identityError;
+          }
+          if (response.status === 409 && isEmbeddingIdentityConflictDetail(ed)) {
+            throw createEmbeddingIdentityConflictError(ed);
           }
           throw new Error(ed);
         }
@@ -2249,6 +2388,25 @@ export function useMessageState({
       }
     } catch (error) {
       if (!isRequestCurrent()) return;
+      if (error.name === 'EmbeddingIdentityConflictError' || isEmbeddingIdentityConflictDetail(error.message)) {
+        setContentStreamDone(true);
+        setThinkingStreamDone(true);
+        setMessages((previous) => previous.map((message) => (
+          message.id === tempMsgId
+            ? {
+              ...message,
+              content: '',
+              isStreaming: false,
+              turnStatus: 'failed',
+              embeddingIdentityConflict: true,
+              embeddingIdentityConflictDetail: String(error.detail || error.message || ''),
+            }
+            : message
+        )));
+        activeStreamMsgIdRef.current = null;
+        setStreamingMessageId(null);
+        return;
+      }
       if (error.name === 'ChatParseIdentityError') {
         setMessages((previous) => previous.map((message) => (
           message.id === tempMsgId

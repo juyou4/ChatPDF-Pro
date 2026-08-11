@@ -138,6 +138,20 @@ const getMessageTurnStatus = (message) => String(
   || ''
 ).trim().toLowerCase();
 
+// Sessions created before the recoverable Embedding-conflict UI stored the
+// backend's raw 409 as an ordinary assistant message. Normalize that exact
+// terminal error at restore time so a refresh does not strand the user behind
+// an obsolete instruction to "switch back" even when their settings are right.
+const isPersistedEmbeddingIdentityConflict = (message) => (
+  message?.type === 'assistant'
+  && (
+    message?.embeddingIdentityConflict === true
+    || /当前\s*Embedding\s*配置与文档索引不一致|vector_embedding_identity_conflict/i.test(
+      String(message?.embeddingIdentityConflictDetail || message?.content || '')
+    )
+  )
+);
+
 const normalizeRestoredSessionMessages = (session, documentInfo) => {
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   const currentIdentity = getDocumentParseIdentity(documentInfo);
@@ -173,6 +187,7 @@ const normalizeRestoredSessionMessages = (session, documentInfo) => {
     if (message.type !== 'assistant') return next;
 
     const turnStatus = getMessageTurnStatus(message);
+    const embeddingIdentityConflict = isPersistedEmbeddingIdentityConflict(message);
     const interrupted = staleIdentity
       || message.isStreaming === true
       || ['streaming', 'cancelled', 'aborted'].includes(turnStatus)
@@ -187,7 +202,18 @@ const normalizeRestoredSessionMessages = (session, documentInfo) => {
       ...next,
       visualAttachments: restoredVisualAttachments,
       isStreaming: false,
-      turnStatus: interrupted ? 'interrupted' : turnStatus,
+      ...(embeddingIdentityConflict
+        ? {
+          content: '',
+          turnStatus: 'failed',
+          embeddingIdentityConflict: true,
+          embeddingIdentityConflictDetail: String(
+            message?.embeddingIdentityConflictDetail || message?.content || ''
+          ),
+        }
+        : {
+          turnStatus: interrupted ? 'interrupted' : turnStatus,
+        }),
     };
   });
 };
@@ -678,7 +704,6 @@ export function useDocumentState({
    * 删除历史会话
    */
   const deleteSession = useCallback((sid) => {
-    if (!window.confirm('确定要删除这个对话吗？')) return;
     const h = JSON.parse(localStorage.getItem('chatHistory') || '[]');
     const next = h.filter(x => x.id !== sid);
     localStorage.setItem('chatHistory', JSON.stringify(next));
