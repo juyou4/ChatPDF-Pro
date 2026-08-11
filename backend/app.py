@@ -156,7 +156,7 @@ async def startup_event():
     index_upgrade = queue_stale_document_index_upgrades()
     if index_upgrade.get("documents"):
         logger.info(
-            "Queued %s stale document indexes for sequential upgrade.",
+            "Detected %s document indexes that require an explicit rebuild; no startup embedding migration was run.",
             len(index_upgrade["documents"]),
         )
     # 启动记忆文件监听器

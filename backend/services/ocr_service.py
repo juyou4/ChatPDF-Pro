@@ -241,7 +241,40 @@ def _allow_private_ocr_urls() -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _resolve_external_ocr_host(host: str, port: int | None, *, service_name: str) -> None:
+_PROXY_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+)
+_MINERU_OFFICIAL_API_HOSTS = frozenset({"mineru.net"})
+
+
+def _is_proxy_fake_ip(address: Any) -> bool:
+    """Return whether an address belongs to a transparent-proxy Fake-IP pool."""
+    return isinstance(address, ipaddress.IPv4Address) and any(
+        address in network for network in _PROXY_FAKE_IP_NETWORKS
+    )
+
+
+def _uses_official_mineru_api_host(url: str) -> bool:
+    """Only the documented MinerU API host may opt into Fake-IP DNS handling."""
+    try:
+        parsed = urlparse((url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").strip().lower().rstrip(".") in _MINERU_OFFICIAL_API_HOSTS
+        and port in {None, 443}
+    )
+
+
+def _resolve_external_ocr_host(
+    host: str,
+    port: int | None,
+    *,
+    service_name: str,
+    allow_proxy_fake_ip: bool = False,
+) -> None:
     """Resolve a hostname before connecting and reject non-public addresses."""
     try:
         records = socket.getaddrinfo(
@@ -260,7 +293,13 @@ def _resolve_external_ocr_host(host: str, port: int | None, *, service_name: str
             continue
     if not resolved_ips:
         raise ValueError(f"{service_name} URL 主机名未解析到有效 IP 地址")
-    if any(not address.is_global for address in resolved_ips):
+    blocked_addresses = [
+        address
+        for address in resolved_ips
+        if not address.is_global
+        and not (allow_proxy_fake_ip and _is_proxy_fake_ip(address))
+    ]
+    if blocked_addresses:
         raise ValueError(f"{service_name} URL 不允许解析到私网、保留或本机地址")
 
 
@@ -269,11 +308,14 @@ def validate_external_ocr_service_url(
     *,
     service_name: str = "在线 OCR 服务",
     allow_private: Optional[bool] = None,
+    allow_proxy_fake_ip: bool = False,
 ) -> str:
     """校验在线 OCR 上游地址，降低误连内网/本机的风险。
 
     默认仅允许 HTTPS 公网地址。确需本地 Worker 的桌面或开发环境，可设置
-    CHATPDF_ALLOW_PRIVATE_OCR_URLS=true 放行 HTTP 和私网地址。
+    CHATPDF_ALLOW_PRIVATE_OCR_URLS=true 放行 HTTP 和私网地址。allow_proxy_fake_ip
+    只用于已验证的远端服务在透明代理的 Fake-IP DNS 环境中返回的 URL；它仅
+    放行 RFC 2544 的 198.18.0.0/15 地址段，不能放行真实私网或本机地址。
     """
     cleaned = (url or "").strip().rstrip("/")
     if not cleaned:
@@ -307,17 +349,31 @@ def validate_external_ocr_service_url(
         ip = None
 
     if ip is not None and not private_allowed:
-        if not ip.is_global:
+        if not ip.is_global and not (allow_proxy_fake_ip and _is_proxy_fake_ip(ip)):
             raise ValueError(f"{service_name} URL 不允许指向私网、保留或本机地址")
     elif not private_allowed:
         try:
-            _resolve_external_ocr_host(host, port, service_name=service_name)
+            _resolve_external_ocr_host(
+                host,
+                port,
+                service_name=service_name,
+                allow_proxy_fake_ip=allow_proxy_fake_ip,
+            )
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError(f"{service_name} URL 主机名校验失败") from exc
 
     return cleaned
+
+
+def validate_mineru_direct_api_base_url(url: str) -> str:
+    """Validate the direct MinerU endpoint without mistaking proxy Fake-IP for SSRF."""
+    return validate_external_ocr_service_url(
+        url,
+        service_name="MinerU API Base URL",
+        allow_proxy_fake_ip=_uses_official_mineru_api_host(url),
+    )
 
 
 def _read_positive_env_limit(name: str, default: int, *, maximum: int) -> int:
@@ -388,10 +444,21 @@ def create_mineru_direct_http_client(
     return httpx.Client(**options)
 
 
-def _download_limited_zip(client, zip_url: str, *, headers: Optional[dict] = None, service_name: str) -> bytes:
+def _download_limited_zip(
+    client,
+    zip_url: str,
+    *,
+    headers: Optional[dict] = None,
+    service_name: str,
+    allow_proxy_fake_ip: bool = False,
+) -> bytes:
     """Download a verified OCR archive without buffering an unbounded response."""
     try:
-        safe_url = validate_external_ocr_service_url(zip_url, service_name=service_name)
+        safe_url = validate_external_ocr_service_url(
+            zip_url,
+            service_name=service_name,
+            allow_proxy_fake_ip=allow_proxy_fake_ip,
+        )
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -1961,10 +2028,7 @@ class MinerUDirectAdapter(MinerUAdapter):
         self._base_url = ""
         if base_url:
             try:
-                self._base_url = validate_external_ocr_service_url(
-                    base_url,
-                    service_name="MinerU API Base URL",
-                ).rstrip("/")
+                self._base_url = validate_mineru_direct_api_base_url(base_url).rstrip("/")
             except ValueError as exc:
                 logger.warning("MinerU API Base URL 已被拒绝: %s", exc)
         super().__init__(
@@ -2013,6 +2077,11 @@ class MinerUDirectAdapter(MinerUAdapter):
             logger.info("MinerU Direct: 开始申请上传链接...")
             data_id = f"chatpdf_{uuid.uuid4().hex}"
             batch_id, upload_url = self._create_upload_url(client, data_id=data_id)
+            upload_url = validate_external_ocr_service_url(
+                upload_url,
+                service_name="MinerU 上传 URL",
+                allow_proxy_fake_ip=True,
+            )
 
             if progress_callback:
                 progress_callback({"stage": "uploading", "message": "上传 PDF 到 MinerU", "batch_id": batch_id, "data_id": data_id})
@@ -2248,6 +2317,7 @@ class MinerUDirectAdapter(MinerUAdapter):
                         current_zip_url,
                         headers={"Connection": "close"},
                         service_name="MinerU ZIP",
+                        allow_proxy_fake_ip=True,
                     )
                 try:
                     return self._extract_direct_zip_payload(zip_bytes)

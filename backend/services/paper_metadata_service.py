@@ -434,10 +434,12 @@ def paper_metadata_from_dict(raw: Any) -> Optional[PaperMetadata]:
 
 def _parse_identity_from_doc(doc: dict) -> tuple[str, str]:
     data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+    data_manifest = data.get("parse_manifest") if isinstance(data.get("parse_manifest"), dict) else {}
     # Prefer explicit fields; fall back to parse_manifest-like nests.
     generation = str(
         doc.get("parse_generation")
         or data.get("parse_generation")
+        or data_manifest.get("generation")
         or (doc.get("parse_manifest") or {}).get("generation")
         or ""
     ).strip()
@@ -445,6 +447,7 @@ def _parse_identity_from_doc(doc: dict) -> tuple[str, str]:
         doc.get("document_source_hash")
         or data.get("document_source_hash")
         or data.get("source_hash")
+        or data_manifest.get("source_hash")
         or (doc.get("parse_manifest") or {}).get("source_hash")
         or ""
     ).strip()

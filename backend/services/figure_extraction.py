@@ -360,8 +360,7 @@ def build_logical_figures_for_overview(
     # 否则先生成 brief 会永久把 detailed 锁成两张图。
     figures_dict = [fig.model_dump() for fig in logical_figures]
 
-    doc_data["logical_figures"] = figures_dict
-    doc_data["logical_figures_meta"] = {
+    figures_meta = {
         "schema_version": SCHEMA_VERSION,
         "built_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
@@ -372,19 +371,39 @@ def build_logical_figures_for_overview(
         "document_source_hash": str(parse_manifest.get("source_hash") or ""),
         "parser_route": resolved_route,
     }
-    doc_data["logical_figures_status"] = {
+    figures_status = {
         "state": "done",
         "error": None,
         "provider": source,
     }
 
-    # 同步更新到 documents_store（如果可用）
+    # 发布到当前代际的内存缓存。服务层不能将开始时拿到的 doc_data
+    # 快照整块写回 documents_store，否则晚到的旧速览任务会覆盖新解析。
+    published = False
+    active_doc_is_input = False
     try:
-        from routes.document_routes import documents_store
-        if doc_id in documents_store:
-            documents_store[doc_id]["data"] = doc_data
+        from routes.document_routes import documents_store, publish_logical_figure_cache
+
+        active_doc_is_input = documents_store.get(doc_id) is doc_record
+        published = publish_logical_figure_cache(
+            doc_id,
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            parser_route=resolved_route,
+            figures=figures_dict,
+            metadata=figures_meta,
+            status=figures_status,
+        )
     except Exception as e:
-        logger.warning(f"[FigureExtraction] Failed to update documents_store: {e}")
+        logger.warning(f"[FigureExtraction] Failed to publish logical figure cache: {e}")
+
+    # Direct service callers and unit tests may intentionally supply a detached
+    # record. Preserve that local result, but never mutate an active record
+    # after a guarded publication was rejected.
+    if published or not active_doc_is_input:
+        doc_data["logical_figures"] = figures_dict
+        doc_data["logical_figures_meta"] = figures_meta
+        doc_data["logical_figures_status"] = figures_status
 
     logger.info(
         f"[FigureExtraction] Built {len(figures_dict)} complete figures for doc {doc_id}, "

@@ -239,8 +239,8 @@ def _translation_cache_identity(
     if parser_route not in {"local", "mineru"}:
         parser_route = "mineru" if source == "mineru_vlm" else "local"
     # Pre-manifest documents retain a deterministic legacy identity. This keeps
-    # their cache usable while still making it impossible to reuse it after the
-    # block structure changes or a modern parse identity is published.
+    # their cache usable until a modern parse identity is published; individual
+    # block signatures decide whether a changed block may reuse a record.
     return {
         "parser_route": parser_route,
         "parse_generation": str(block_index.get("parse_generation") or f"legacy-{block_index_hash[:24]}"),
@@ -266,13 +266,18 @@ def _cache_identity_from_envelope(cache: dict[str, Any]) -> dict[str, str]:
 def _cache_matches_identity(cache: dict[str, Any], identity: dict[str, str]) -> bool:
     if not isinstance(cache, dict):
         return False
+    # ``block_index_hash`` is deliberately not a cache fence. Visual enrichment
+    # appends evidence blocks to an otherwise unchanged parse generation, which
+    # changes the whole-index hash but must not discard translations already
+    # verified against their own block signatures. Each record is checked again
+    # by ``_record_matches_block`` before it is returned, so a changed source
+    # block still cannot reuse an old translation.
     return all(
         str(cache.get(key) or "") == str(identity.get(key) or "")
         for key in (
             "parser_route",
             "parse_generation",
             "document_source_hash",
-            "block_index_hash",
             "ai_cache_generation",
         )
     )

@@ -97,6 +97,7 @@ from services.task_event_ledger import (
     sanitize_task_shortfall,
 )
 from services.embedding_service import (
+    KEYLESS_EMBEDDING_PROVIDERS,
     RAG_INDEX_VERSION,
     _canonicalize_embedding_identity,
     _extract_vector_semantic_identity,
@@ -185,6 +186,7 @@ from services.ocr_service import (
     normalize_mineru_model_version,
     create_mineru_direct_http_client,
     validate_external_ocr_service_url,
+    validate_mineru_direct_api_base_url,
     MistralAdapter,
     MinerUAdapter,
     WorkerOCRAdapter,
@@ -227,8 +229,6 @@ LEGACY_PROJECT_UPLOAD_DIR = PROJECT_ROOT / "uploads"
 documents_store = {}
 _INDEX_STATUS_LOCK = threading.Lock()
 _DOCUMENT_INDEX_STATUS: dict[str, dict] = {}
-_INDEX_UPGRADE_WORKER_LOCK = threading.Lock()
-_INDEX_UPGRADE_WORKER: threading.Thread | None = None
 try:
     _DOCUMENT_INDEX_MAX_PENDING = max(1, min(32, int(os.getenv("CHATPDF_DOCUMENT_INDEX_MAX_PENDING", "6"))))
 except ValueError:
@@ -515,6 +515,69 @@ def _resolve_graphrag_embedding_identity_or_400(
         )
     identity["dimension"] = dimension
     return identity
+
+
+def _require_explicit_rag_embedding_identity_or_400(
+    *,
+    embedding_model: Optional[str],
+    embedding_provider: Optional[str],
+    embedding_api_host: Optional[str],
+    embedding_api_key: Optional[str],
+    operation: str,
+) -> dict:
+    """Validate the complete, user-selected embedding identity for a RAG build.
+
+    An index is only meaningful in the vector space it was built with.  In
+    particular, a recovery or startup path must never guess ``local-minilm``
+    after a document was previously indexed with a remote provider.
+    """
+    requested_model = str(embedding_model or "").strip()
+    requested_provider = _normalize_optional_provider_id(embedding_provider)
+    requested_host = str(embedding_api_host or "").strip()
+    requested_key = str(embedding_api_key or "").strip()
+
+    if not requested_model:
+        raise HTTPException(status_code=400, detail=f"{operation}需要显式 embedding_model")
+    if not requested_provider:
+        raise HTTPException(status_code=400, detail=f"{operation}需要显式 embedding_provider")
+
+    normalized_model = normalize_embedding_model_id(requested_model)
+    if not normalized_model:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{operation}使用的 Embedding 模型未配置或已下线",
+        )
+
+    try:
+        identity = _canonicalize_embedding_identity(
+            normalized_model,
+            embedding_provider=requested_provider,
+            base_url=requested_host or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{operation}的 Embedding 配置无效：{exc}",
+        ) from exc
+
+    provider = str(identity.get("provider") or "").strip()
+    if provider != "local" and not requested_host:
+        raise HTTPException(
+            status_code=400,
+            detail=f"远程 {operation}需要显式 embedding_api_host",
+        )
+    if provider not in KEYLESS_EMBEDDING_PROVIDERS and not requested_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"远程 {operation}需要显式 embedding_api_key",
+        )
+
+    return {
+        "model": str(identity.get("model") or "").strip(),
+        "provider": provider,
+        "api_host": str(identity.get("api_host") or "").strip(),
+        "api_key": requested_key or None,
+    }
 
 
 def _embedding_provider_from_model(embedding_model: Optional[str]) -> Optional[str]:
@@ -1095,6 +1158,7 @@ def _transition_current_full_mineru_manifest(
     stage: str,
     error: str | None = None,
     expected_statuses: set[str] | None = None,
+    metadata: dict | None = None,
 ) -> dict | None:
     """Transition only the active full-route MinerU generation under its publication lock."""
     if not parse_generation or not document_source_hash:
@@ -1118,6 +1182,7 @@ def _transition_current_full_mineru_manifest(
             stage=stage,
             error=error,
             doc=doc,
+            metadata=metadata,
         )
 
 
@@ -1164,6 +1229,19 @@ def _parse_manifest_index_matches(
         manifest,
         block_index=load_block_index(DATA_DIR, doc_id),
     )
+
+
+def _active_rag_index_matches_current_parse(doc_id: str, manifest: dict | None = None) -> bool:
+    """Return whether the active vector pair is safe to preserve as a rollback point."""
+    current_manifest = manifest or _read_document_parse_manifest(
+        doc_id,
+        documents_store.get(doc_id),
+    )
+    # Documents predating parse manifests cannot prove a modern identity. Keep
+    # their historical rollback behavior until they are explicitly re-parsed.
+    if _is_legacy_parse_manifest(current_manifest):
+        return _vector_index_ready(doc_id)
+    return _parse_manifest_index_matches(doc_id, current_manifest)
 
 
 def _warm_block_index(doc_id: str) -> dict | None:
@@ -2096,64 +2174,29 @@ def _document_has_indexable_content(doc: dict) -> bool:
 
 
 def queue_stale_document_index_upgrades() -> dict:
-    """Rebuild loaded stale indexes sequentially after a schema/identity migration."""
-    global _INDEX_UPGRADE_WORKER
+    """Report stale indexes at startup without changing their embedding space.
 
-    with _INDEX_UPGRADE_WORKER_LOCK:
-        if _INDEX_UPGRADE_WORKER is not None and _INDEX_UPGRADE_WORKER.is_alive():
-            return {"status": "running", "documents": []}
+    Older code rebuilt every stale artifact with a hard-coded local model.  A
+    backend restart could therefore replace a valid remote index and make the
+    next query fail with an embedding-identity conflict.  Startup has no
+    access to the user's live credential and must only report the work that
+    needs an explicit, confirmed rebuild from the client.
+    """
+    candidates: list[str] = []
+    for doc_id, doc in sorted(documents_store.items()):
+        if not _document_has_indexable_content(doc):
+            continue
+        manifest = _read_document_parse_manifest(doc_id, doc)
+        if not is_parse_prepared(manifest):
+            continue
+        status = _get_document_index_status(doc_id)
+        if status.get("status") not in {"ready", "queued", "running"}:
+            candidates.append(doc_id)
 
-        candidates: list[str] = []
-        for doc_id, doc in sorted(documents_store.items()):
-            if not _document_has_indexable_content(doc):
-                continue
-            manifest = _read_document_parse_manifest(doc_id, doc)
-            if not is_parse_prepared(manifest):
-                continue
-            status = _get_document_index_status(doc_id)
-            if status.get("status") not in {"ready", "queued", "running"}:
-                candidates.append(doc_id)
-
-        if not candidates:
-            return {"status": "ready", "documents": []}
-
-        for doc_id in candidates:
-            _set_document_index_status(doc_id, "queued", stage="startup_index_upgrade_queued")
-
-        def _upgrade_worker() -> None:
-            global _INDEX_UPGRADE_WORKER
-            try:
-                for candidate_doc_id in candidates:
-                    try:
-                        current = _get_document_index_status(candidate_doc_id)
-                        if current.get("status") == "ready":
-                            continue
-                        _build_document_indexes(
-                            candidate_doc_id,
-                            "local-minilm",
-                            None,
-                            None,
-                            None,
-                        )
-                    except Exception as exc:
-                        # _build_document_indexes records its own terminal status;
-                        # keep migrating the remaining documents.
-                        logger.warning(
-                            "[IndexMigration] upgrade failed doc=%s error=%s",
-                            candidate_doc_id,
-                            exc,
-                        )
-            finally:
-                with _INDEX_UPGRADE_WORKER_LOCK:
-                    _INDEX_UPGRADE_WORKER = None
-
-        _INDEX_UPGRADE_WORKER = threading.Thread(
-            target=_upgrade_worker,
-            name="chatpdf-index-migration",
-            daemon=True,
-        )
-        _INDEX_UPGRADE_WORKER.start()
-        return {"status": "queued", "documents": candidates}
+    return {
+        "status": "explicit_rebuild_required" if candidates else "ready",
+        "documents": candidates,
+    }
 
 
 def _mineru_configuration_error(config: dict | None = None) -> str:
@@ -2189,10 +2232,7 @@ def _validate_mineru_access(config: dict) -> tuple[bool, str]:
             return False, "直连模式下必须提供 MinerU Token"
         base_url = str(config.get("base_url") or "https://mineru.net/api/v4").strip()
         try:
-            base_url = validate_external_ocr_service_url(
-                base_url,
-                service_name="MinerU API Base URL",
-            ).rstrip("/")
+            base_url = validate_mineru_direct_api_base_url(base_url).rstrip("/")
         except ValueError as exc:
             return False, str(exc)
         try:
@@ -2411,6 +2451,64 @@ def _persist_mineru_visual_assets(
     return True
 
 
+def publish_logical_figure_cache(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    parser_route: str,
+    figures: list[dict],
+    metadata: dict,
+    status: dict,
+) -> bool:
+    """Publish an in-memory logical-figure cache only for the active parse run.
+
+    Figure extraction can finish after a document was re-uploaded or switched
+    from local parsing to MinerU.  The cache is deliberately ephemeral, but a
+    stale task must still never replace the current document's ``data`` map.
+    """
+    expected_route = str(parser_route or "").strip().lower()
+    expected_generation = str(parse_generation or "").strip()
+    expected_source_hash = str(document_source_hash or "").strip()
+    with _get_document_publication_lock(doc_id):
+        current = documents_store.get(doc_id)
+        if not isinstance(current, dict):
+            return False
+        manifest = _read_document_parse_manifest(doc_id, current)
+        if not matches_parse_generation(
+            manifest,
+            generation=expected_generation,
+            source_hash=expected_source_hash or None,
+        ):
+            logger.info(
+                "[FigureExtraction] discard stale cache doc=%s generation=%s",
+                doc_id,
+                expected_generation,
+            )
+            return False
+        current_route = str(manifest.get("resolved_route") or "").strip().lower()
+        if expected_route and current_route and current_route != expected_route:
+            logger.info(
+                "[FigureExtraction] discard route-mismatched cache doc=%s expected=%s current=%s",
+                doc_id,
+                expected_route,
+                current_route,
+            )
+            return False
+
+        candidate = deepcopy(current)
+        candidate_data = candidate.get("data")
+        if not isinstance(candidate_data, dict):
+            return False
+        candidate_data["logical_figures"] = deepcopy(figures)
+        candidate_data["logical_figures_meta"] = deepcopy(metadata)
+        candidate_data["logical_figures_status"] = deepcopy(status)
+        # Logical figures are an in-memory overview cache. Keep the existing
+        # no-disk-write policy while atomically replacing only the live record.
+        documents_store[doc_id] = candidate
+        return True
+
+
 def publish_visual_supplements(
     doc_id: str,
     *,
@@ -2597,17 +2695,23 @@ def publish_visual_supplements(
         # 请求只会看到 uncommitted staging，新的请求才会看到 commit marker。
         documents_store[doc_id] = committed_doc
 
-        # Existing summaries, outlines and translations may refer to an older
-        # block set.  Rotate their fence before deleting cache files so an
-        # in-flight writer cannot republish an old result after this point.
-        rotate_ai_cache_generation(DATA_DIR, doc_id)
-        removed = _clear_block_bound_reading_cache(doc_id)
+        # Visual supplements only append evidence blocks. They do not replace
+        # the parser route, generation, source text, or existing block ids, so
+        # invalidating every block-bound artifact here throws away valid work
+        # (notably page/full-document translations) when a background figure
+        # analysis finishes. Translation records retain their own source and
+        # block-signature checks; newly appended visual blocks simply miss the
+        # cache and can be translated independently. A real parse publication
+        # still goes through ``_clear_block_dependent_ai_cache`` above and
+        # keeps the strict route/generation write fence.
+        removed: list[str] = []
         result = {
             "published": True,
             "revision": revision,
             "committed": committed,
             "block_count": sum(len(page.get("blocks") or []) for page in staged_block_index.get("pages") or []),
             "removed": removed,
+            "cache_policy": "preserved_additive",
         }
         if not changed:
             result["reason"] = "recovered_publication"
@@ -3166,11 +3270,13 @@ def _run_mineru_deep_parse(
             or _is_full_mineru_parse_manifest(initial_manifest)
         )
         if full_mineru_route and initial_manifest.get("status") in {PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED}:
-            _transition_document_parse_manifest(
+            _transition_current_full_mineru_manifest(
                 doc_id,
                 PARSE_STATUS_RUNNING,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
                 stage="mineru_parsing",
-                doc=initial_doc,
+                expected_statuses={PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED},
                 metadata={"full_route": True},
             )
         if acquire_slot:
@@ -3290,11 +3396,18 @@ def _run_mineru_deep_parse(
                 parser_outcome_recorded = True
             if full_mineru_route and _worker_matches_current_generation():
                 try:
-                    _transition_document_parse_manifest(
+                    _transition_current_full_mineru_manifest(
                         doc_id,
                         PARSE_STATUS_FAILED,
+                        parse_generation=parse_generation,
+                        document_source_hash=parse_source_hash,
                         stage="failed",
                         error=quality_message,
+                        expected_statuses={
+                            PARSE_STATUS_PENDING,
+                            PARSE_STATUS_QUEUED,
+                            PARSE_STATUS_RUNNING,
+                        },
                     )
                 except Exception:
                     logger.debug("[DeepParse] failed to mark quality-gated parse failed for %s", doc_id)
@@ -3405,12 +3518,19 @@ def _run_mineru_deep_parse(
                     page_ledger=mineru_quality.get("page_ledger") or [],
                 )
                 return
+            embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+                embedding_model=full_route_options.get("embedding_model"),
+                embedding_provider=full_route_options.get("embedding_provider"),
+                embedding_api_host=full_route_options.get("embedding_api_host"),
+                embedding_api_key=full_route_options.get("embedding_api_key"),
+                operation="MinerU 问答索引发布",
+            )
             _rebuild_mineru_rag_index_unlocked(
                 doc_id,
-                embedding_model=str(full_route_options.get("embedding_model") or "local-minilm"),
-                embedding_api_key=full_route_options.get("embedding_api_key"),
-                embedding_api_host=full_route_options.get("embedding_api_host"),
-                embedding_provider=full_route_options.get("embedding_provider"),
+                embedding_model=embedding_identity["model"],
+                embedding_api_key=embedding_identity["api_key"],
+                embedding_api_host=embedding_identity["api_host"],
+                embedding_provider=embedding_identity["provider"],
                 summary_api_key=full_route_options.get("summary_api_key"),
                 summary_model=str(full_route_options.get("summary_model") or "gpt-4o-mini"),
                 summary_provider=str(full_route_options.get("summary_provider") or "openai"),
@@ -3456,11 +3576,18 @@ def _run_mineru_deep_parse(
         logger.warning("[DeepParse] MinerU quality gate failed for %s: %s", doc_id, exc)
         if full_mineru_route and _worker_matches_current_generation():
             try:
-                _transition_document_parse_manifest(
+                _transition_current_full_mineru_manifest(
                     doc_id,
                     PARSE_STATUS_FAILED,
+                    parse_generation=parse_generation,
+                    document_source_hash=parse_source_hash,
                     stage="failed",
                     error=str(exc),
+                    expected_statuses={
+                        PARSE_STATUS_PENDING,
+                        PARSE_STATUS_QUEUED,
+                        PARSE_STATUS_RUNNING,
+                    },
                     metadata=quality_meta,
                 )
             except Exception:
@@ -3496,11 +3623,18 @@ def _run_mineru_deep_parse(
         logger.exception("[DeepParse] MinerU deep parse failed for %s: %s", doc_id, exc)
         if full_mineru_route and _worker_matches_current_generation():
             try:
-                _transition_document_parse_manifest(
+                _transition_current_full_mineru_manifest(
                     doc_id,
                     PARSE_STATUS_FAILED,
+                    parse_generation=parse_generation,
+                    document_source_hash=parse_source_hash,
                     stage="failed",
                     error=str(exc),
+                    expected_statuses={
+                        PARSE_STATUS_PENDING,
+                        PARSE_STATUS_QUEUED,
+                        PARSE_STATUS_RUNNING,
+                    },
                 )
             except Exception:
                 logger.debug("[DeepParse] failed to mark parse manifest failed for %s", doc_id)
@@ -3659,6 +3793,46 @@ def resume_pending_mineru_deep_parse_jobs() -> list[dict]:
                 or record.get("status") not in {"queued", "running"}
                 or not record.get("batch_id")
             ):
+                continue
+            current_manifest = _read_document_parse_manifest(
+                doc_id,
+                documents_store.get(doc_id),
+            )
+            record_generation = str(record.get("parse_generation") or "").strip()
+            record_source_hash = str(record.get("document_source_hash") or "").strip()
+            if (
+                not _is_legacy_parse_manifest(current_manifest)
+                and (
+                    not record_generation
+                    or not matches_parse_generation(
+                        current_manifest,
+                        generation=record_generation,
+                        source_hash=record_source_hash or None,
+                    )
+                )
+            ):
+                stale_record = dict(record)
+                stale_record.update({
+                    "status": "cancelled",
+                    "stage": "superseded",
+                    "error": "",
+                    "message": "文档已重新解析，重启时拒绝恢复旧 MinerU 任务",
+                    "superseded": True,
+                    "updated_at": datetime.now().isoformat(),
+                })
+                try:
+                    persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, stale_record)
+                except Exception as persist_exc:
+                    logger.warning(
+                        "[DeepParse] failed to persist superseded restart job for %s: %s",
+                        doc_id,
+                        persist_exc,
+                    )
+                logger.info(
+                    "[DeepParse] skip stale restart job doc=%s generation=%s",
+                    doc_id,
+                    record_generation or "legacy",
+                )
                 continue
             cancel_event = threading.Event()
             with _DEEP_PARSE_LOCK:
@@ -3951,12 +4125,15 @@ def _rag_transaction_journal_path(doc_id: str) -> Path:
 def _write_rag_transaction_journal(doc_id: str, state: str, *, source: str, manifest_path: str, error: str = "") -> dict:
     """Persist the source-switch phase before moving to the next artifact."""
     path = _rag_transaction_journal_path(doc_id)
+    current_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "doc_id": doc_id,
         "source": _safe_index_source_name(source),
         "state": state,
         "manifest_path": manifest_path,
+        "parse_generation": str(current_manifest.get("generation") or ""),
+        "document_source_hash": str(current_manifest.get("source_hash") or ""),
         "updated_at": utc_now_iso(),
     }
     if error:
@@ -3970,6 +4147,20 @@ def _write_rag_transaction_journal(doc_id: str, state: str, *, source: str, mani
 
 def _backup_current_rag_state(doc_id: str, source: str) -> dict:
     """Snapshot all active artifacts before a source switch."""
+    current_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    if not _active_rag_index_matches_current_parse(doc_id, current_manifest):
+        return {
+            "schema_version": 1,
+            "doc_id": doc_id,
+            "source": _safe_index_source_name(source),
+            "complete": False,
+            "parse_generation": str(current_manifest.get("generation") or ""),
+            "document_source_hash": str(current_manifest.get("source_hash") or ""),
+            "reason": "active_vector_parse_identity_mismatch",
+            "vector": {"backed_up": False},
+            "document": {"backed_up": False},
+            "semantic_groups": {"backed_up": False},
+        }
     vector = _backup_current_vector_index(doc_id, source)
     document = _backup_current_document_data(doc_id, source)
     semantic = _backup_current_semantic_groups(doc_id, source)
@@ -3980,6 +4171,8 @@ def _backup_current_rag_state(doc_id: str, source: str) -> dict:
         "source": _safe_index_source_name(source),
         "created_at": utc_now_iso(),
         "complete": complete,
+        "parse_generation": str(current_manifest.get("generation") or ""),
+        "document_source_hash": str(current_manifest.get("source_hash") or ""),
         "vector": vector,
         "document": document,
         "semantic_groups": semantic,
@@ -4006,6 +4199,55 @@ def _load_complete_rag_backup_manifest(doc_id: str, source: str) -> dict:
     if not (Path(str(vector.get("index_path") or "")).exists() and Path(str(vector.get("pkl_path") or "")).exists() and Path(str(document.get("path") or "")).exists()):
         return {}
     return manifest
+
+
+def _rag_backup_matches_current_parse(
+    doc_id: str,
+    backup_manifest: dict,
+    current_manifest: dict,
+) -> bool:
+    """Return whether a rollback snapshot belongs to the active parse run."""
+    expected_generation = str(backup_manifest.get("parse_generation") or "").strip()
+    expected_source_hash = str(backup_manifest.get("document_source_hash") or "").strip()
+
+    # Backups created before the identity fields were added can still be
+    # validated from their saved document record. Refuse the rollback when the
+    # legacy snapshot is incomplete instead of restoring it speculatively.
+    if not expected_generation:
+        document_meta = backup_manifest.get("document") or {}
+        backup_path = Path(str(document_meta.get("path") or ""))
+        try:
+            backup_document = json.loads(backup_path.read_text(encoding="utf-8"))
+            backup_parse_manifest = _read_document_parse_manifest(doc_id, backup_document)
+            expected_generation = str(backup_parse_manifest.get("generation") or "").strip()
+            expected_source_hash = str(backup_parse_manifest.get("source_hash") or "").strip()
+        except Exception:
+            return False
+
+    if not matches_parse_generation(
+        current_manifest,
+        generation=expected_generation,
+        source_hash=expected_source_hash or None,
+    ):
+        return False
+
+    if _is_legacy_parse_manifest(current_manifest):
+        return True
+
+    vector_meta = backup_manifest.get("vector") or {}
+    backup_pkl_path = Path(str(vector_meta.get("pkl_path") or ""))
+    try:
+        with open(backup_pkl_path, "rb") as handle:
+            backup_index_data = pickle.load(handle)
+    except Exception:
+        return False
+    if not isinstance(backup_index_data, dict):
+        return False
+    return parse_identity_matches(
+        backup_index_data.get("index_meta") or {},
+        current_manifest,
+        block_index=load_block_index(DATA_DIR, doc_id),
+    )
 
 
 def _is_full_mineru_parse_manifest(manifest: dict) -> bool:
@@ -4722,6 +4964,57 @@ def _document_pdf_page_sizes(doc_id: str) -> dict[int, list[float]]:
         return {}
 
 
+def _rollback_local_rag_index_if_current(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    previous_source: str,
+    replaced_current_index: bool,
+    error: str,
+) -> bool:
+    """Restore a failed local RAG build only while it still owns the document."""
+    with _get_document_publication_lock(doc_id):
+        if not _parse_generation_matches_current_document(
+            doc_id,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+        ):
+            logger.info(
+                "[RagIndex] discard stale local rebuild rollback doc=%s generation=%s",
+                doc_id,
+                parse_generation,
+            )
+            return False
+
+        backup_manifest = _load_complete_rag_backup_manifest(doc_id, previous_source)
+        current_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        backup_matches_current = (
+            _is_legacy_parse_manifest(current_manifest)
+            or _rag_backup_matches_current_parse(doc_id, backup_manifest, current_manifest)
+        )
+        if replaced_current_index and backup_manifest and backup_matches_current:
+            try:
+                _restore_vector_index_backup(doc_id, previous_source)
+            except Exception as restore_exc:
+                logger.error("[RagIndex] 本地索引升级回滚失败 doc=%s: %s", doc_id, restore_exc)
+        elif replaced_current_index and backup_manifest:
+            logger.warning(
+                "[RagIndex] skip mismatched local rollback snapshot doc=%s generation=%s",
+                doc_id,
+                parse_generation,
+            )
+        _set_document_index_status(
+            doc_id,
+            "failed",
+            stage="local_rag_index_upgrade_failed",
+            error=error,
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+        )
+        return True
+
+
 def _rebuild_local_rag_index(
     doc_id: str,
     *,
@@ -4743,6 +5036,8 @@ def _rebuild_local_rag_index(
     temp_semantic_dir = DATA_DIR / "semantic_groups" / "_tmp" / f"{doc_id}.local.{uuid.uuid4().hex}"
     replaced_current_index = False
     previous_source = "pdf_native"
+    parse_generation = ""
+    document_source_hash = ""
     try:
         doc = documents_store.get(doc_id)
         if not isinstance(doc, dict):
@@ -4873,8 +5168,13 @@ def _rebuild_local_rag_index(
                 parse_generation=parse_generation,
                 document_source_hash=document_source_hash,
             )
-            backup_manifest = _backup_current_rag_state(doc_id, previous_source)
-            if _vector_index_ready(doc_id) and not backup_manifest.get("complete"):
+            had_previous_rag = _active_rag_index_matches_current_parse(doc_id, parse_manifest)
+            backup_manifest = (
+                _backup_current_rag_state(doc_id, previous_source)
+                if had_previous_rag
+                else {"complete": False, "reason": "active_vector_parse_identity_mismatch"}
+            )
+            if had_previous_rag and not backup_manifest.get("complete"):
                 raise RuntimeError("无法创建完整的当前 RAG 快照，已取消升级")
             _replace_vector_index_from_temp(doc_id, temp_dir)
             replaced_current_index = True
@@ -4908,15 +5208,12 @@ def _rebuild_local_rag_index(
             },
         }
     except Exception as exc:
-        if replaced_current_index and _load_complete_rag_backup_manifest(doc_id, previous_source):
-            try:
-                _restore_vector_index_backup(doc_id, previous_source)
-            except Exception as restore_exc:
-                logger.error("[RagIndex] 本地索引升级回滚失败 doc=%s: %s", doc_id, restore_exc)
-        _set_document_index_status(
+        _rollback_local_rag_index_if_current(
             doc_id,
-            "failed",
-            stage="local_rag_index_upgrade_failed",
+            parse_generation=parse_generation,
+            document_source_hash=document_source_hash,
+            previous_source=previous_source,
+            replaced_current_index=replaced_current_index,
             error=str(exc),
         )
         raise
@@ -4998,8 +5295,6 @@ def _rebuild_mineru_rag_index_unlocked(
 
     previous_meta = _read_vector_index_meta(doc_id)
     previous_source = previous_meta.get("index_source") or "pdf_native"
-    had_previous_rag = _vector_index_ready(doc_id)
-    fresh_document_snapshot = deepcopy(doc) if not had_previous_rag else None
 
     normalized, failures = _normalize_mineru_for_document(doc_id, payload, doc=doc)
     quality_report = dict(normalized.get("quality_report") or {})
@@ -5029,6 +5324,9 @@ def _rebuild_mineru_rag_index_unlocked(
     ).strip()
     if not block_index_hash:
         raise RuntimeError("当前 MinerU 阅读块索引缺少内容修订，拒绝构建问答索引")
+
+    had_previous_rag = _active_rag_index_matches_current_parse(doc_id, parse_manifest)
+    fresh_document_snapshot = deepcopy(doc) if not had_previous_rag else None
 
     artifact = build_document_parse_artifact(
         doc_id=doc_id,
@@ -5497,6 +5795,14 @@ def _start_mineru_full_route_upload(
             detail=f"已选择 MinerU 全程解析，但{mineru_config_error}",
         )
 
+    embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_api_host=embedding_api_host,
+        embedding_api_key=embedding_api_key,
+        operation="MinerU 问答索引发布",
+    )
+
     pending_data = _build_pending_mineru_document_data(pdf_bytes)
     pending_data["parse_manifest"] = _build_upload_parse_manifest(
         doc_id,
@@ -5512,6 +5818,14 @@ def _start_mineru_full_route_upload(
             "block_source": "pending",
             "rag_source": "pending",
             "figure_source": "pending",
+            # Deliberately persist only the non-secret identity.  It makes an
+            # interrupted or mismatched index diagnosable without ever writing
+            # an API key into the document manifest.
+            "rag_embedding_identity": {
+                "model": embedding_identity["model"],
+                "provider": embedding_identity["provider"],
+                "api_host": embedding_identity["api_host"],
+            },
         },
     )
     pdf_filename = f"{doc_id}.pdf"
@@ -5544,10 +5858,10 @@ def _start_mineru_full_route_upload(
     deep_status = _queue_mineru_deep_parse(
         doc_id,
         full_route_options={
-            "embedding_model": embedding_model,
-            "embedding_api_key": embedding_api_key,
-            "embedding_api_host": embedding_api_host,
-            "embedding_provider": embedding_provider,
+            "embedding_model": embedding_identity["model"],
+            "embedding_api_key": embedding_identity["api_key"],
+            "embedding_api_host": embedding_identity["api_host"],
+            "embedding_provider": embedding_identity["provider"],
             "summary_api_key": summary_api_key,
         },
     )
@@ -7190,7 +7504,7 @@ def extract_text_from_pdf(
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
-    embedding_model: str = Form("local-minilm"),
+    embedding_model: Optional[str] = Form(None),
     embedding_api_key: Optional[str] = Form(None),
     embedding_api_host: Optional[str] = Form(None),
     api_key: Optional[str] = Form(None),
@@ -7204,9 +7518,10 @@ async def upload_pdf(
     
     Args:
         file: 要上传的 PDF 文件
-        embedding_model: 文本嵌入模型
-        embedding_api_key: 云端嵌入模型的 API 密钥
-        embedding_api_host: 自定义 API 地址
+        embedding_model: 必填的文本嵌入模型
+        embedding_provider: 必填的 Embedding 提供商
+        embedding_api_key: 远程 Embedding 服务必填的 API 密钥
+        embedding_api_host: 远程 Embedding 服务必填的 API 地址
         api_key: 语义意群摘要使用的 LLM API 密钥（可选）
         enable_ocr: OCR 模式 - "auto"（自动检测）、"always"（始终启用）或 "never"（禁用）。
                     缺失时使用后端配置中的 ocr_default_mode 默认值。
@@ -7238,6 +7553,18 @@ async def upload_pdf(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_api_key=embedding_api_key,
+            embedding_api_host=embedding_api_host,
+            operation="文档上传索引构建",
+        )
+        embedding_model = embedding_identity["model"]
+        embedding_provider = embedding_identity["provider"]
+        embedding_api_key = embedding_identity["api_key"]
+        embedding_api_host = embedding_identity["api_host"]
+
         # 多格式文档处理（非 PDF）
         if is_multi_format and not is_pdf:
             if requested_parse_route == PARSE_ROUTE_MINERU:
@@ -7249,11 +7576,6 @@ async def upload_pdf(
                 tmp_path = tmp.name
 
             try:
-                normalized_model = normalize_embedding_model_id(embedding_model)
-                if not normalized_model:
-                    raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置")
-                embedding_model = normalized_model
-
                 extracted_data = extract_from_file(tmp_path, filename)
                 doc_id = generate_doc_id(extracted_data["full_text"])
                 extracted_data["parse_manifest"] = build_parse_manifest(
@@ -7323,11 +7645,6 @@ async def upload_pdf(
         except Exception:
             # Keep the existing parser's detailed invalid-PDF response path.
             pass
-
-        normalized_model = normalize_embedding_model_id(embedding_model)
-        if not normalized_model:
-            raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置或格式不正确（建议使用 provider:model 格式）")
-        embedding_model = normalized_model
 
         # 桌面模式下本地模型不可用，提前拦截
         if runtime.is_desktop and ('local' in embedding_model.lower().split(':')[0] or embedding_model in ('local-minilm',)):
@@ -7604,28 +7921,35 @@ async def import_url(
 
     请求体 JSON:
         url: 目标网页 URL
-        embedding_model: 文本嵌入模型
-        embedding_provider: Embedding 提供商（可选）
-        embedding_api_key: 云端嵌入模型的 API 密钥（可选）
-        embedding_api_host: 自定义 API 地址（可选）
+        embedding_model: 必填的文本嵌入模型
+        embedding_provider: 必填的 Embedding 提供商
+        embedding_api_key: 远程 Embedding 服务必填的 API 密钥
+        embedding_api_host: 远程 Embedding 服务必填的 API 地址
         api_key: 语义意群摘要使用的 LLM API 密钥（可选）
     """
     try:
         body = await request.json()
         url = body.get("url", "").strip()
-        embedding_model = body.get("embedding_model", "local-minilm")
-        embedding_provider = (body.get("embedding_provider") or "").strip() or None
-        embedding_api_key = (body.get("embedding_api_key") or "").strip() or None
+        embedding_model = body.get("embedding_model")
+        embedding_provider = body.get("embedding_provider")
+        embedding_api_key = body.get("embedding_api_key")
         embedding_api_host = body.get("embedding_api_host")
         api_key = (body.get("api_key") or "").strip() or None
 
         if not url:
             raise HTTPException(status_code=400, detail="URL 不能为空")
 
-        normalized_model = normalize_embedding_model_id(embedding_model)
-        if not normalized_model:
-            raise HTTPException(status_code=400, detail=f"Embedding模型 '{embedding_model}' 未配置")
-        embedding_model = normalized_model
+        embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_api_key=embedding_api_key,
+            embedding_api_host=embedding_api_host,
+            operation="URL 导入索引构建",
+        )
+        embedding_model = embedding_identity["model"]
+        embedding_provider = embedding_identity["provider"]
+        embedding_api_key = embedding_identity["api_key"]
+        embedding_api_host = embedding_identity["api_host"]
 
         # 抓取网页内容
         result = await fetch_url_content(url)
@@ -7908,30 +8232,33 @@ async def get_document(doc_id: str, include_content: bool = True):
 
     doc = documents_store[doc_id]
     parse_manifest = _read_document_parse_manifest(doc_id, doc)
-    # Lazily attach academic DocDetails for older uploads; best-effort only.
+    # Lazily attach academic DocDetails for older uploads. This remains a
+    # read endpoint from the caller's perspective, so any persistence must
+    # publish a fresh document snapshot under the same lock as parse swaps.
     paper_metadata = {}
     try:
         from services.paper_metadata_service import ensure_paper_metadata
 
-        # Bind parse identity so reparse invalidates stale metadata.
-        if isinstance(parse_manifest, dict):
-            if parse_manifest.get("generation") and not doc.get("parse_generation"):
-                doc["parse_generation"] = str(parse_manifest.get("generation") or "")
-            if parse_manifest.get("source_hash") and not doc.get("document_source_hash"):
-                doc["document_source_hash"] = str(parse_manifest.get("source_hash") or "")
-        before = doc.get("paper_metadata")
-        paper_metadata = ensure_paper_metadata(doc) or {}
-        if paper_metadata and paper_metadata != before:
-            try:
-                # Opportunistic metadata refresh on a read path: a failed write
-                # must not fail the request, but it must not be invisible either
-                # — the next read will silently redo the same work.
-                if not save_document(doc_id, doc):
+        with _get_document_publication_lock(doc_id):
+            current = documents_store.get(doc_id)
+            if not isinstance(current, dict):
+                raise RuntimeError("文档记录不存在")
+            candidate = deepcopy(current)
+            before = candidate.get("paper_metadata")
+            paper_metadata = ensure_paper_metadata(candidate) or {}
+            if paper_metadata and paper_metadata != before:
+                # A parser publication can only begin after this lock is
+                # released. Persist the copied current record, never a stale
+                # object captured before a MinerU/local generation swap.
+                if not save_document(doc_id, candidate):
                     logger.warning(
                         "[Document] paper_metadata refresh was not persisted doc=%s", doc_id
                     )
-            except Exception:
-                logger.debug("[Document] persist paper_metadata failed doc=%s", doc_id, exc_info=True)
+                else:
+                    documents_store[doc_id] = candidate
+                    current = candidate
+            doc = current
+            parse_manifest = _read_document_parse_manifest(doc_id, doc)
     except Exception:
         logger.debug("[Document] paper_metadata ensure failed doc=%s", doc_id, exc_info=True)
         paper_metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else {}
@@ -8067,7 +8394,7 @@ def recover_pending_rag_transactions() -> list[dict]:
     if not pending_dir.exists():
         return []
     recovered: list[dict] = []
-    terminal_states = {"committed", "rolled_back"}
+    terminal_states = {"committed", "rolled_back", "superseded"}
     for journal_path in pending_dir.glob("*.json"):
         try:
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
@@ -8075,32 +8402,75 @@ def recover_pending_rag_transactions() -> list[dict]:
             source = str(journal.get("source") or "pdf_native")
             if not doc_id or journal.get("state") in terminal_states:
                 continue
-            if not _load_complete_rag_backup_manifest(doc_id, source):
+            backup_manifest = _load_complete_rag_backup_manifest(doc_id, source)
+            if not backup_manifest:
                 logger.error("[RagIndex] pending transaction lacks a complete backup: %s", journal_path)
                 continue
-            snapshot = _restore_vector_index_backup(doc_id, source)
-            document = snapshot.get("document_restore") or {}
-            semantic_groups = snapshot.get("semantic_group_restore") or {}
-            if not snapshot.get("restored"):
-                raise RuntimeError(
-                    "RAG transaction recovery incomplete: "
-                    f"snapshot={snapshot.get('restored')}, "
-                    f"document={document.get('restored')}, "
-                    f"semantic={semantic_groups.get('restored')}"
+            with _get_document_publication_lock(doc_id):
+                current_manifest = _read_document_parse_manifest(
+                    doc_id,
+                    documents_store.get(doc_id),
                 )
-            _write_rag_transaction_journal(
-                doc_id,
-                "rolled_back",
-                source=source,
-                manifest_path=str(journal.get("manifest_path") or ""),
-            )
-            recovered.append({
-                "doc_id": doc_id,
-                "state": "rolled_back",
-                "vector": snapshot,
-                "document": document,
-                "semantic_groups": semantic_groups,
-            })
+                journal_generation = str(journal.get("parse_generation") or "").strip()
+                journal_source_hash = str(journal.get("document_source_hash") or "").strip()
+                journal_matches_current = (
+                    not journal_generation
+                    or matches_parse_generation(
+                        current_manifest,
+                        generation=journal_generation,
+                        source_hash=journal_source_hash or None,
+                    )
+                )
+                backup_matches_current = _rag_backup_matches_current_parse(
+                    doc_id,
+                    backup_manifest,
+                    current_manifest,
+                )
+                if not journal_matches_current or not backup_matches_current:
+                    reason = "pending_rag_transaction_parse_generation_mismatch"
+                    logger.warning(
+                        "[RagIndex] skip stale startup rollback doc=%s journal_generation=%s current_generation=%s",
+                        doc_id,
+                        journal_generation or "legacy",
+                        str(current_manifest.get("generation") or ""),
+                    )
+                    _write_rag_transaction_journal(
+                        doc_id,
+                        "superseded",
+                        source=source,
+                        manifest_path=str(journal.get("manifest_path") or ""),
+                        error=reason,
+                    )
+                    recovered.append({
+                        "doc_id": doc_id,
+                        "state": "superseded",
+                        "reason": reason,
+                    })
+                    continue
+
+                snapshot = _restore_vector_index_backup(doc_id, source)
+                document = snapshot.get("document_restore") or {}
+                semantic_groups = snapshot.get("semantic_group_restore") or {}
+                if not snapshot.get("restored"):
+                    raise RuntimeError(
+                        "RAG transaction recovery incomplete: "
+                        f"snapshot={snapshot.get('restored')}, "
+                        f"document={document.get('restored')}, "
+                        f"semantic={semantic_groups.get('restored')}"
+                    )
+                _write_rag_transaction_journal(
+                    doc_id,
+                    "rolled_back",
+                    source=source,
+                    manifest_path=str(journal.get("manifest_path") or ""),
+                )
+                recovered.append({
+                    "doc_id": doc_id,
+                    "state": "rolled_back",
+                    "vector": snapshot,
+                    "document": document,
+                    "semantic_groups": semantic_groups,
+                })
         except Exception as exc:
             logger.error("[RagIndex] failed to recover pending transaction %s: %s", journal_path, exc)
     return recovered
@@ -8309,10 +8679,13 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
                 "rag_index": _get_rag_index_status(doc_id),
             }
 
-        embedding_model = str(body.get("embedding_model") or "local-minilm").strip() or "local-minilm"
-        embedding_provider = (body.get("embedding_provider") or "").strip() or None
-        embedding_api_key = (body.get("embedding_api_key") or "").strip() or None
-        embedding_api_host = (body.get("embedding_api_host") or "").strip() or None
+        embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+            embedding_model=body.get("embedding_model"),
+            embedding_provider=body.get("embedding_provider"),
+            embedding_api_key=body.get("embedding_api_key"),
+            embedding_api_host=body.get("embedding_api_host"),
+            operation="本地问答索引重建",
+        )
         summary_api_key = (body.get("summary_api_key") or "").strip() or None
         summary_model = str(body.get("summary_model") or body.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
         summary_provider = str(body.get("summary_provider") or body.get("provider") or "openai").strip() or "openai"
@@ -8321,14 +8694,14 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
             return await asyncio.to_thread(
                 _rebuild_local_rag_index,
                 doc_id,
-                embedding_model=embedding_model,
-                embedding_api_key=embedding_api_key,
-                embedding_api_host=embedding_api_host,
+                embedding_model=embedding_identity["model"],
+                embedding_api_key=embedding_identity["api_key"],
+                embedding_api_host=embedding_identity["api_host"],
                 summary_api_key=summary_api_key,
                 summary_model=summary_model,
                 summary_provider=summary_provider,
                 summary_api_host=summary_api_host,
-                embedding_provider=embedding_provider,
+                embedding_provider=embedding_identity["provider"],
             )
         except _SupersededParseGeneration:
             raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新发起本地索引升级")
@@ -8379,10 +8752,13 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
             },
         )
 
-    embedding_model = str(body.get("embedding_model") or "local-minilm").strip() or "local-minilm"
-    embedding_provider = (body.get("embedding_provider") or "").strip() or None
-    embedding_api_key = (body.get("embedding_api_key") or "").strip() or None
-    embedding_api_host = (body.get("embedding_api_host") or "").strip() or None
+    embedding_identity = _require_explicit_rag_embedding_identity_or_400(
+        embedding_model=body.get("embedding_model"),
+        embedding_provider=body.get("embedding_provider"),
+        embedding_api_key=body.get("embedding_api_key"),
+        embedding_api_host=body.get("embedding_api_host"),
+        operation="MinerU 问答索引重建",
+    )
     summary_api_key = (body.get("summary_api_key") or "").strip() or None
     summary_model = str(body.get("summary_model") or body.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
     summary_provider = str(body.get("summary_provider") or body.get("provider") or "openai").strip() or "openai"
@@ -8392,16 +8768,16 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
         return await asyncio.to_thread(
             _rebuild_mineru_rag_index,
             doc_id,
-            embedding_model=embedding_model,
-            embedding_api_key=embedding_api_key,
-            embedding_api_host=embedding_api_host,
+            embedding_model=embedding_identity["model"],
+            embedding_api_key=embedding_identity["api_key"],
+            embedding_api_host=embedding_identity["api_host"],
             summary_api_key=summary_api_key,
             summary_model=summary_model,
             summary_provider=summary_provider,
             summary_api_host=summary_api_host,
             expected_parse_generation=str(parse_manifest.get("generation") or ""),
             expected_document_source_hash=str(parse_manifest.get("source_hash") or ""),
-            embedding_provider=embedding_provider,
+            embedding_provider=embedding_identity["provider"],
         )
     except _SupersededParseGeneration:
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新发起 MinerU 索引重建")
@@ -8416,17 +8792,26 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
 async def rollback_document_rag_index(doc_id: str):
     if doc_id not in documents_store:
         raise HTTPException(status_code=404, detail="文档未找到")
-    parse_manifest = _read_document_parse_manifest(doc_id, documents_store[doc_id])
-    if _is_full_mineru_parse_manifest(parse_manifest):
-        raise HTTPException(
-            status_code=409,
-            detail="MinerU 全程解析不支持只回退问答索引；请重新选择本地路线并重新解析整份文档",
-        )
     try:
-        manifest = _load_complete_rag_backup_manifest(doc_id, "pdf_native")
-        if not manifest:
-            raise HTTPException(status_code=409, detail="没有完整的本地 RAG 回滚快照")
-        snapshot = _restore_vector_index_backup(doc_id, "pdf_native")
+        with _get_document_publication_lock(doc_id):
+            current = documents_store.get(doc_id)
+            if not isinstance(current, dict):
+                raise HTTPException(status_code=404, detail="文档未找到")
+            parse_manifest = _read_document_parse_manifest(doc_id, current)
+            if _is_full_mineru_parse_manifest(parse_manifest):
+                raise HTTPException(
+                    status_code=409,
+                    detail="MinerU 全程解析不支持只回退问答索引；请重新选择本地路线并重新解析整份文档",
+                )
+            manifest = _load_complete_rag_backup_manifest(doc_id, "pdf_native")
+            if not manifest:
+                raise HTTPException(status_code=409, detail="没有完整的本地 RAG 回滚快照")
+            if not _rag_backup_matches_current_parse(doc_id, manifest, parse_manifest):
+                raise HTTPException(
+                    status_code=409,
+                    detail="RAG 回滚快照不属于当前文档解析代际，已拒绝覆盖当前文档",
+                )
+            snapshot = _restore_vector_index_backup(doc_id, "pdf_native")
         document = snapshot.get("document_restore") or {}
         semantic_groups = snapshot.get("semantic_group_restore") or {}
         if not snapshot.get("restored"):
@@ -10219,10 +10604,7 @@ async def save_online_ocr_config(request: Request):
         if provider == "mineru":
             base_url = body.get("base_url", "").strip() or existing_base_url or "https://mineru.net/api/v4"
             try:
-                base_url = validate_external_ocr_service_url(
-                    base_url,
-                    service_name="MinerU API Base URL",
-                ).rstrip("/")
+                base_url = validate_mineru_direct_api_base_url(base_url).rstrip("/")
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             if access_mode == "direct":
@@ -10525,10 +10907,7 @@ async def validate_ocr_key(request: Request):
 
         if access_mode == "direct":
             try:
-                base_url_clean = validate_external_ocr_service_url(
-                    base_url,
-                    service_name="MinerU API Base URL",
-                ).rstrip("/")
+                base_url_clean = validate_mineru_direct_api_base_url(base_url).rstrip("/")
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             token = _credential_for_service_origin(
