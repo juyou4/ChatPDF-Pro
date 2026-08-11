@@ -137,6 +137,16 @@ backend/requirements-eval.txt
 /exports/
 /Problems/
 
+# Local workbench material. These files can contain personal coursework,
+# handoff notes, or regenerated evaluation output and are never product source.
+/course_design/
+/docs/inbox/
+/backend/tests/.eval_out/
+/_audit_intent_goal.py
+/_patch_intent_routes.py
+/_patch_stream_citations.py
+/_try_import_chat_routes.py
+
 # Orphan backup files at repo root
 tmp_backup.*
 /tmp_*.jsx
