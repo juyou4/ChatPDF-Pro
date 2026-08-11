@@ -3,13 +3,21 @@ from fastapi import HTTPException
 from typing import Dict, List, Optional
 
 from .base import BaseProvider
+from services.provider_auth import build_api_key_headers
 
 
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI 兼容格式的 Provider（包括官方 openai 及兼容供应商）"""
 
-    def __init__(self, endpoint: Optional[str] = None):
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        api_key_header: Optional[str] = None,
+        api_key_prefix: Optional[str] = None,
+    ):
         self.endpoint = endpoint or "https://api.openai.com/v1/chat/completions"
+        self.api_key_header = api_key_header
+        self.api_key_prefix = api_key_prefix
 
     async def chat(
         self,
@@ -47,11 +55,11 @@ class OpenAICompatibleProvider(BaseProvider):
         if custom_params:
             body.update(custom_params)
 
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = build_api_key_headers(
+            api_key,
+            api_key_header=self.api_key_header,
+            api_key_prefix=self.api_key_prefix,
+        )
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             response = await client.post(
@@ -60,7 +68,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 json=body,
             )
 
-            if response.status_code != 200:
+            if response.status_code < 200 or response.status_code >= 300:
                 raise HTTPException(
                     status_code=response.status_code,
                     detail=f"OpenAI兼容API错误: {response.text}"

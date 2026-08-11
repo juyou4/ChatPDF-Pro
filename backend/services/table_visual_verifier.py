@@ -52,9 +52,9 @@ call_ai_api = _default_call_ai_api
 _VALID_MODES = {"off", "auto", "always"}
 _TERMINAL_STATES = {"confirmed", "conflict", "indeterminate", "failed", "stale"}
 _TASK_STATES = {"queued", "running", *_TERMINAL_STATES}
-_CACHE_SCHEMA_VERSION = 6
+_CACHE_SCHEMA_VERSION = 7
 _TASK_STORE_VERSION = 1
-_VISUAL_PROMPT_VERSION = 3
+_VISUAL_PROMPT_VERSION = 4
 _VISUAL_CROP_VERSION = 2
 _VISUAL_PURPOSE = "numeric_table_verification"
 _DEFAULT_CONCURRENCY = 2
@@ -203,7 +203,7 @@ _VISION_CAPABLE_MODEL_RULES: dict[str, re.Pattern[str]] = {
     "xai": re.compile(r"^(grok-vision|grok-4)", re.IGNORECASE),
     "minimax": re.compile(r"^(minimax-m3|abab6\.5)", re.IGNORECASE),
     "doubao": re.compile(r"^(doubao-1\.5-pro|doubao-seed)", re.IGNORECASE),
-    "moonshot": re.compile(r"^(moonshot-v1|kimi-k2)", re.IGNORECASE),
+    "moonshot": re.compile(r"^(moonshot-v1|kimi-k[23])", re.IGNORECASE),
 }
 
 

@@ -652,8 +652,12 @@ function ModelDetails({ model, provider, isAdded, onAddModel, onRemoveModel }) {
                     apiKey: provider.apiKey || '',
                     apiHost: provider.apiHost || '',
                     modelType: model.type,
+                    providerType: provider.apiConfig?.protocol,
+                    chatEndpoint: provider.apiConfig?.chatEndpoint,
                     embeddingEndpoint: provider.apiConfig?.embeddingEndpoint,
-                    rerankEndpoint: provider.apiConfig?.rerankEndpoint
+                    rerankEndpoint: provider.apiConfig?.rerankEndpoint,
+                    apiKeyHeader: provider.apiConfig?.apiKeyHeader,
+                    apiKeyPrefix: provider.apiConfig?.apiKeyPrefix
                 })
             })
 

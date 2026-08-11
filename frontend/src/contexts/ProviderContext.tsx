@@ -9,18 +9,20 @@ import { useCapabilities } from './CapabilitiesContext'
  */
 interface ProviderContextType {
     providers: Provider[]
-    addProvider: (provider: Provider) => void
+    addProvider: (provider: Provider) => Promise<void>
+    deleteProvider: (id: string) => Promise<void>
     updateProvider: (id: string, updates: ProviderUpdate) => void
-    testConnection: (id: string) => Promise<ProviderTestResult>
+    testConnection: (id: string, options?: { modelId?: string }) => Promise<ProviderTestResult>
     getProviderById: (id: string) => Provider | null
     getEnabledProviders: () => Provider[]
 }
 
 const ProviderContext = createContext<ProviderContextType | undefined>(undefined)
 
-const CONFIG_VERSION = '4.2'
+const CONFIG_VERSION = '4.3'
 const STORAGE_KEY = 'providers'
 const VERSION_KEY = 'providersVersion'
+const CUSTOM_PROVIDER_SAVE_TIMEOUT_MS = 10_000
 
 // 旧架构的localStorage键名（需要清理）
 const OLD_KEYS = [
@@ -53,8 +55,14 @@ export function migrateProviders(oldData: string): Provider[] | null {
                 })
             }
         }
+        const systemIds = new Set(SYSTEM_PROVIDERS.map(provider => provider.id))
+        const customProviders = parsed
+            .filter(p => p && typeof p === 'object' && p.id && !systemIds.has(p.id))
+            .map(p => ({ ...p, isSystem: false }))
 
-        if (userConfigs.size === 0) return null
+        // 只有系统 Provider 且没有任何用户配置时才回退默认值。自定义
+        // Provider 可能在填写 API Key 之前就已经保存，不能因 Key 为空而丢失。
+        if (userConfigs.size === 0 && customProviders.length === 0) return null
 
         // 将用户配置合并到新版本的系统 Provider 中
         const newProviders = SYSTEM_PROVIDERS.map(sp => {
@@ -70,7 +78,9 @@ export function migrateProviders(oldData: string): Provider[] | null {
             return sp
         })
 
-        return newProviders
+        // 旧版本已经允许用户添加自定义 Provider，迁移时不能把它们
+        // 静默丢掉；后续启动会再尝试同步到后端动态存储。
+        return [...newProviders, ...customProviders]
     } catch {
         return null
     }
@@ -134,25 +144,157 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(providers))
     }, [providers])
 
+    const persistCustomProvider = async (provider: Provider): Promise<void> => {
+        const controller = new AbortController()
+        const timeoutId = window.setTimeout(() => controller.abort(), CUSTOM_PROVIDER_SAVE_TIMEOUT_MS)
+        try {
+            const response = await fetch('/api/providers/custom', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+                body: JSON.stringify({
+                    providerId: provider.id,
+                    name: provider.name,
+                    endpoint: provider.apiHost,
+                    type: provider.apiConfig?.protocol || 'custom',
+                    fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint || '/models',
+                    chatEndpoint: provider.apiConfig?.chatEndpoint || '/chat/completions',
+                    embeddingEndpoint: provider.apiConfig?.embeddingEndpoint || '/embeddings',
+                    rerankEndpoint: provider.apiConfig?.rerankEndpoint || null,
+                    supportsStreaming: provider.apiConfig?.supportsStreaming !== false,
+                    supportsReasoning: provider.apiConfig?.supportsReasoning === true,
+                    reasoningMode: provider.apiConfig?.reasoningMode || null,
+                    reasoningOptions: provider.apiConfig?.reasoningOptions || null,
+                    reasoningDefault: provider.apiConfig?.reasoningDefault || null,
+                    reasoningAlwaysEnabled: provider.apiConfig?.reasoningAlwaysEnabled ?? null,
+                    reasoningOffControl: provider.apiConfig?.reasoningOffControl || null,
+                    reasoningOnControl: provider.apiConfig?.reasoningOnControl || null,
+                    apiKeyHeader: provider.apiConfig?.apiKeyHeader || null,
+                    apiKeyPrefix: provider.apiConfig?.apiKeyPrefix ?? null,
+                    capabilities: provider.capabilities || {},
+                })
+            })
+            if (!response.ok) {
+                let message = '保存自定义 Provider 失败'
+                try {
+                    const payload = await response.json()
+                    message = payload.detail || payload.message || message
+                } catch {
+                    // 保留默认错误
+                }
+                throw new Error(message)
+            }
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                throw new Error('保存超时，请确认后端服务可用后重试')
+            }
+            throw error
+        } finally {
+            window.clearTimeout(timeoutId)
+        }
+    }
+
+    // 动态 Provider 的权威配置保存在后端（不包含 API Key）。启动时回灌
+    // 非敏感 endpoint/protocol，API Key 仍只从当前桌面的 localStorage 读取。
+    useEffect(() => {
+        let cancelled = false
+        fetch('/api/providers/custom')
+            .then(async response => {
+                if (!response.ok) return null
+                return response.json()
+            })
+            .then(async (dynamic: Record<string, any> | null) => {
+                if (cancelled || !dynamic || typeof dynamic !== 'object') return
+                setProviders(prev => {
+                    const byId = new Map(prev.map(provider => [provider.id, provider]))
+                    Object.entries(dynamic).forEach(([id, config]) => {
+                        if (!config || typeof config !== 'object') return
+                        const previous = byId.get(id)
+                        const apiConfig = {
+                            ...(previous?.apiConfig || {}),
+                            protocol: config.type || previous?.apiConfig?.protocol || 'custom',
+                            fetchModelsEndpoint: config.fetch_models_endpoint || previous?.apiConfig?.fetchModelsEndpoint || '/models',
+                            chatEndpoint: config.chat_endpoint || previous?.apiConfig?.chatEndpoint || '/chat/completions',
+                            embeddingEndpoint: config.embedding_endpoint || previous?.apiConfig?.embeddingEndpoint || '/embeddings',
+                            rerankEndpoint: config.rerank_endpoint || previous?.apiConfig?.rerankEndpoint || '',
+                            supportsStreaming: config.supports_streaming !== false,
+                            supportsReasoning: config.supports_reasoning === true,
+                            reasoningMode: config.reasoning_mode || undefined,
+                            reasoningOptions: Array.isArray(config.reasoning_options) ? config.reasoning_options : undefined,
+                            reasoningDefault: config.reasoning_default || undefined,
+                            reasoningAlwaysEnabled: typeof config.reasoning_always_enabled === 'boolean'
+                                ? config.reasoning_always_enabled
+                                : undefined,
+                            reasoningOffControl: config.reasoning_off_control || undefined,
+                            reasoningOnControl: config.reasoning_on_control || undefined,
+                            // 后端保存的是动态 Provider 的权威非敏感配置。
+                            // 使用 nullish 判断而不是 ``||``，这样用户清空认证头后
+                            // 刷新不会又被旧的 localStorage 值覆盖。
+                            apiKeyHeader: config.api_key_header ?? '',
+                            apiKeyPrefix: config.api_key_prefix ?? '',
+                        }
+                        byId.set(id, {
+                            ...(previous || {
+                                id,
+                                name: config.name || id,
+                                apiKey: '',
+                                enabled: true,
+                                isSystem: false,
+                                capabilities: { chat: true },
+                            }),
+                            name: config.name || previous?.name || id,
+                            apiHost: config.endpoint || previous?.apiHost || '',
+                            enabled: previous?.enabled ?? true,
+                            isSystem: false,
+                            capabilities: config.capabilities || previous?.capabilities || { chat: true },
+                            apiConfig,
+                        })
+                    })
+                    return Array.from(byId.values())
+                })
+
+                // 旧版本可能只把自定义 Provider 留在 localStorage。补写
+                // 非敏感配置后，后端的 endpoint 元数据与前端状态保持一致；
+                // API Key 仍不会离开当前桌面。
+                const dynamicIds = new Set(Object.keys(dynamic))
+                const missing = providers.filter(provider =>
+                    !provider.isSystem &&
+                    !dynamicIds.has(provider.id) &&
+                    Boolean(provider.apiHost?.trim())
+                )
+                await Promise.all(
+                    missing.map(provider =>
+                        persistCustomProvider(provider).catch(error => {
+                            console.warn('[Provider] 补写历史自定义 Provider 失败:', error)
+                        })
+                    )
+                )
+            })
+            .catch(() => {
+                // 后端不可达时继续使用本地缓存，桌面应用稍后可再次保存。
+            })
+        return () => { cancelled = true }
+    }, [])
+
     /**
      * 更新Provider配置
      */
     const updateProvider = (id: string, updates: ProviderUpdate) => {
-        setProviders(prev =>
-            prev.map(p => {
-                if (p.id === id) {
-                    return { ...p, ...updates }
-                }
-                return p
+        const current = providers.find(provider => provider.id === id)
+        const next = current ? { ...current, ...updates } : null
+        setProviders(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p))
+        if (next && !next.isSystem) {
+            persistCustomProvider(next).catch(error => {
+                console.warn('[Provider] 保存自定义 Provider 失败:', error)
             })
-        )
+        }
     }
 
     /**
      * 测试Provider连接
      * 调用后端API验证provider配置是否正确
      */
-    const testConnection = async (id: string): Promise<ProviderTestResult> => {
+    const testConnection = async (id: string, options?: { modelId?: string }): Promise<ProviderTestResult> => {
         const provider = providers.find(p => p.id === id)
 
         if (!provider) {
@@ -188,7 +330,13 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
                     providerId: provider.id,
                     apiKey: provider.apiKey,
                     apiHost: provider.apiHost,
-                    fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint
+                    fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint,
+                    modelId: options?.modelId || undefined,
+                    modelType: 'chat',
+                    chatEndpoint: provider.apiConfig?.chatEndpoint,
+                    providerType: provider.apiConfig?.protocol,
+                    apiKeyHeader: provider.apiConfig?.apiKeyHeader,
+                    apiKeyPrefix: provider.apiConfig?.apiKeyPrefix
                 })
             })
 
@@ -202,10 +350,13 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
 
             const result = await response.json()
             return {
-                success: true,
-                message: '连接成功',
+                success: result.success !== false,
+                message: result.message || '连接成功',
+                error: result.success === false ? (result.message || '连接失败') : undefined,
                 availableModels: result.availableModels,
-                latency: result.latency  // 传递后端返回的延迟毫秒数（可选字段）
+                latency: result.latency,
+                verifiedModel: result.verifiedModel,
+                chatEndpoint: result.chatEndpoint
             }
         } catch (error) {
             return {
@@ -238,12 +389,42 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
     /**
      * 新增自定义 Provider（OpenAI 兼容或自建网关）
      */
-    const addProvider = (provider: Provider) => {
+    const addProvider = async (provider: Provider): Promise<void> => {
+        const normalized = { ...provider, isSystem: false }
+        await persistCustomProvider(normalized)
         setProviders(prev => {
             const exists = prev.some(p => p.id === provider.id)
-            if (exists) return prev
-            return [...prev, { ...provider, isSystem: false }]
+            if (exists) return prev.map(p => p.id === provider.id ? { ...p, ...normalized } : p)
+            return [...prev, normalized]
         })
+    }
+
+    /**
+     * 删除用户新增的 Provider。
+     * 内置 Provider 不能通过设置界面删除，后端也会再次校验这一约束。
+     */
+    const deleteProvider = async (id: string): Promise<void> => {
+        const provider = providers.find(item => item.id === id)
+        if (!provider) return
+        if (provider.isSystem) {
+            throw new Error('内置模型服务不能删除')
+        }
+
+        const response = await fetch(`/api/providers/custom/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+        })
+        if (!response.ok) {
+            let message = '删除自定义模型服务失败'
+            try {
+                const payload = await response.json()
+                message = payload.detail || payload.message || message
+            } catch {
+                // 保留默认错误
+            }
+            throw new Error(message)
+        }
+
+        setProviders(prev => prev.filter(item => item.id !== id))
     }
 
     return (
@@ -251,6 +432,7 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
             value={{
                 providers: filteredProviders,
                 addProvider,
+                deleteProvider,
                 updateProvider,
                 testConnection,
                 getProviderById,

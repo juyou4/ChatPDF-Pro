@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from typing import Dict, List, Optional
 
 from .base import BaseProvider
+from services.provider_auth import build_api_key_headers
 
 
 def _convert_tools_to_anthropic(tools: List[dict]) -> List[dict]:
@@ -25,6 +26,18 @@ def _convert_tools_to_anthropic(tools: List[dict]) -> List[dict]:
 
 class AnthropicProvider(BaseProvider):
     """Anthropic Claude Provider"""
+
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        api_key_header: Optional[str] = None,
+        api_key_prefix: Optional[str] = None,
+    ):
+        # 官方 Provider 使用固定默认地址；动态 Provider 可以传入自定义
+        # Anthropic Messages 网关，但仍复用同一套原生请求格式。
+        self.endpoint = endpoint or "https://api.anthropic.com/v1/messages"
+        self.api_key_header = api_key_header
+        self.api_key_prefix = api_key_prefix
 
     async def chat(
         self,
@@ -71,14 +84,17 @@ class AnthropicProvider(BaseProvider):
         if custom_params:
             body.update(custom_params)
 
+        headers = build_api_key_headers(
+            api_key,
+            provider_type="anthropic",
+            api_key_header=self.api_key_header,
+            api_key_prefix=self.api_key_prefix,
+            extra_headers={"anthropic-version": "2023-06-01"},
+        )
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json"
-                },
+                self.endpoint,
+                headers=headers,
                 json=body,
             )
 
@@ -125,7 +141,11 @@ class AnthropicProvider(BaseProvider):
         if tool_calls:
             message["tool_calls"] = tool_calls
 
-        normalized = {"choices": [{"message": message}]}
+        choice = {
+            "message": message,
+            "finish_reason": str(result.get("stop_reason") or ""),
+        }
+        normalized = {"choices": [choice]}
         if result.get("usage"):
             normalized["usage"] = result.get("usage")
         return normalized
