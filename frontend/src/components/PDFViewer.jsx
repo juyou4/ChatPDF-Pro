@@ -22,6 +22,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 import BreatheLoader from './BreatheLoader';
 import SelectionOverlay from './SelectionOverlay';
 import StreamingMarkdown from './StreamingMarkdown';
+import {
+    FloatingDock,
+    FloatingDockDivider,
+    FloatingDockItem,
+} from './ui/FloatingDock';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import pdfPageCache from '../utils/pdfPageCache';
 import {
@@ -400,6 +405,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const popupHoveredRef = useRef(false);
     const hoverClearTimerRef = useRef(null);
     const hoverSwitchTimerRef = useRef(null);
+    const programmaticHighlightScrollRef = useRef(false);
+    const programmaticHighlightScrollTimerRef = useRef(null);
     const hoverSwitchPointRef = useRef({ x: 0, y: 0 });
     const hoverSwitchTargetRef = useRef(null);
     const translationPanelDragRef = useRef({ dragging: false, start: { x: 0, y: 0 }, origin: null });
@@ -1133,6 +1140,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const handlePdfScroll = useCallback((event) => {
         updateThumbs();
         if (!isContinuousReading) return;
+        // 引用定位的平滑滚动会经过若干中间页。沿途页不能反向覆盖目标页，
+        // 否则高亮 effect 会被反复取消并重新定位。
+        if (programmaticHighlightScrollRef.current) return;
 
         const scroller = event.currentTarget || pdfScrollRef.current;
         if (!scroller) return;
@@ -1251,6 +1261,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             0,
             Math.max(0, scroller.scrollWidth - scroller.clientWidth)
         );
+        programmaticHighlightScrollRef.current = true;
+        if (programmaticHighlightScrollTimerRef.current) {
+            window.clearTimeout(programmaticHighlightScrollTimerRef.current);
+        }
+        programmaticHighlightScrollTimerRef.current = window.setTimeout(() => {
+            programmaticHighlightScrollRef.current = false;
+            programmaticHighlightScrollTimerRef.current = null;
+        }, 700);
         if (typeof scroller.scrollTo === 'function') {
             scroller.scrollTo({ top: nextTop, left: nextLeft, behavior: 'smooth' });
         } else {
@@ -1259,11 +1277,17 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         }
     }, [getCurrentPageMetrics, normalizedPageRotation]);
 
+    useEffect(() => () => {
+        if (programmaticHighlightScrollTimerRef.current) {
+            window.clearTimeout(programmaticHighlightScrollTimerRef.current);
+        }
+    }, []);
+
     useEffect(() => {
         let isMounted = true;
         let retryTimer = null;
         let retryCount = 0;
-        const MAX_RETRIES = 15; // 最多重试 15 次（约 1.5 秒）
+        const MAX_RETRIES = 12; // 最多等待约 1.2 秒，随后才使用块坐标兜底
 
         const citationAnchor = highlightInfo?.citationAnchor || {};
         const hasCitationAnchor = Boolean(
@@ -1324,6 +1348,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 rects: citationAnchor.rects,
                 coordinateSpace: citationAnchor.coordinateSpace,
                 pageSize: citationAnchor.pageSize,
+                padding: { x: 2, y: 0 },
                 ...renderOptions,
             })
             : [];
@@ -1346,12 +1371,26 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 ...renderOptions,
             })
             : [];
-        setHighlightRect(spatialFallbackRects[0] || null);
-        setHighlightRects(spatialFallbackRects);
-        if (spatialFallbackRects.length > 0) {
-            scrollHighlightIntoView(spatialFallbackRects);
+        let fallbackApplied = false;
+        const applySpatialFallback = () => {
+            if (!isMounted || fallbackApplied) return;
+            fallbackApplied = true;
+            setHighlightRect(spatialFallbackRects[0] || null);
+            setHighlightRects(spatialFallbackRects);
+            if (spatialFallbackRects.length > 0) {
+                scrollHighlightIntoView(spatialFallbackRects);
+            }
+        };
+
+        if (!highlightInfo.text) {
+            applySpatialFallback();
+            return;
         }
-        if (!highlightInfo.text) return;
+
+        // 有文本时先等待精确文字矩形。块 bbox 只在匹配失败后兜底，
+        // 避免先滚到段落框、再滚到引用句的两段式跳转。
+        setHighlightRect(null);
+        setHighlightRects([]);
 
         const findHighlight = () => {
             if (!isMounted) return;
@@ -1361,6 +1400,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 if (retryCount < MAX_RETRIES) {
                     retryCount++;
                     retryTimer = setTimeout(findHighlight, 100);
+                } else {
+                    applySpatialFallback();
                 }
                 return;
             }
@@ -1371,6 +1412,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                 if (retryCount < MAX_RETRIES) {
                     retryCount++;
                     retryTimer = setTimeout(findHighlight, 100);
+                } else {
+                    applySpatialFallback();
                 }
                 return;
             }
@@ -1424,26 +1467,36 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         endPhrase: highlightInfo.endPhrase,
                     });
                 }
-                if (!matchedRange) return;
+                if (!matchedRange) {
+                    applySpatialFallback();
+                    return;
+                }
                 const { startIndex, endIndex } = matchedRange;
 
                 const clientRects = collectTextRangeClientRects(
                     spans,
                     { startIndex, endIndex }
                 );
-                const resultRects = clientRectsToPageLocal(clientRects, pageElement, 3);
+                const resultRects = clientRectsToPageLocal(
+                    clientRects,
+                    pageElement,
+                    { x: 3, y: 0 }
+                );
                 if (resultRects.length > 0 && isMounted) {
                     setHighlightRect(resultRects[0]);
                     setHighlightRects(resultRects);
                     scrollHighlightIntoView(resultRects);
+                } else {
+                    applySpatialFallback();
                 }
             } catch (e) {
                 console.error('Error calculating highlight:', e);
+                applySpatialFallback();
             }
         };
 
-        // Debounce slightly to allow rendering to settle
-        const initialTimer = setTimeout(findHighlight, 300);
+        // Canvas 完成后只需给 text layer 一个短暂的布局窗口。
+        const initialTimer = setTimeout(findHighlight, 80);
 
         return () => {
             isMounted = false;
@@ -1842,6 +1895,23 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const activeHighlightSource = String(highlightInfo?.source || 'search');
     const activeHighlightIsCitation = activeHighlightSource === 'citation';
     const activeHighlightIsNote = activeHighlightSource === 'note';
+    const displayHighlightRects = useMemo(() => highlightRects.map((rect, index) => {
+        const overlapsAdjacentRow = (other, direction) => {
+            if (!other) return false;
+            const upper = direction < 0 ? other : rect;
+            const lower = direction < 0 ? rect : other;
+            const verticalGap = lower.top - (upper.top + upper.height);
+            const overlapWidth = Math.min(rect.left + rect.width, other.left + other.width)
+                - Math.max(rect.left, other.left);
+            const minimumOverlap = Math.min(rect.width, other.width) * 0.18;
+            return verticalGap >= -1 && verticalGap <= 4 && overlapWidth >= minimumOverlap;
+        };
+        return {
+            ...rect,
+            connectsPrevious: overlapsAdjacentRow(highlightRects[index - 1], -1),
+            connectsNext: overlapsAdjacentRow(highlightRects[index + 1], 1),
+        };
+    }), [highlightRects]);
 
     return (
         <div data-pdf-reader-surface className={`relative h-full flex flex-col overflow-hidden ${darkMode ? 'bg-[#1a1d21]' : 'bg-[#f3f1ee]'}`}>
@@ -1849,51 +1919,61 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             {/* relative 是必须的：原来只写 z-10 挂在 static 元素上，z-index 直接失效，
                 里面的页面转换下拉只能靠 DOM 顺序绘制，被后面的划词工具栏压住。
                 这里显式抬到 z-30，高于划词工具栏(z-20)和吸附翻译栏(z-20)。 */}
-            <div data-pdf-reader-toolbar className={`relative z-30 flex-shrink-0 border-b px-3 py-2.5 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
-                <div className="flex items-center justify-between px-1 py-1">
-                    {/* Left Controls */}
-                    <div className="flex items-center gap-1">
+            <div data-pdf-reader-toolbar className={`relative z-30 flex-shrink-0 border-b px-2 py-2 transition-colors duration-200 ${darkMode ? 'border-white/[0.08] bg-[#1a1d21] text-gray-200' : 'border-[#ded8d2]/80 bg-[#f7f5f2] text-gray-600'}`}>
+                <div className="flex min-w-0 items-center justify-center">
+                    <FloatingDock
+                        darkMode={darkMode}
+                        ariaLabel="PDF 阅读工具栏"
+                        className="mx-auto"
+                    >
                         {onToggleSidebar && (
-                            <button onClick={onToggleSidebar} className={`p-1.5 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="切换侧边栏">
-                                <Sidebar size={18} strokeWidth={2} />
-                            </button>
+                            <FloatingDockItem label="切换侧边栏" onClick={onToggleSidebar}>
+                                <Sidebar className="h-[18px] w-[18px]" strokeWidth={2} />
+                            </FloatingDockItem>
                         )}
-                        <div className={`w-[1px] h-4 mx-1 ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`}></div>
-                        <button className={`p-1.5 rounded-lg transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="文档信息">
-                            <FileText size={18} strokeWidth={2} />
-                        </button>
-                    </div>
+                        <FloatingDockDivider darkMode={darkMode} />
 
-                    <div className="flex items-center gap-2">
-                        <button onClick={() => changePage(-1)} disabled={previousPageTarget === pageNumber} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`} title="上一页">
-                            <ChevronLeft className="w-5 h-5" />
-                        </button>
-                        <div className={`flex items-center border rounded-md px-2 py-1 text-sm ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                            <span className="text-center font-medium min-w-[1.5rem] tabular-nums">{pageIndicator}</span>
+                        <FloatingDockItem
+                            label="上一页"
+                            onClick={() => changePage(-1)}
+                            disabled={previousPageTarget === pageNumber}
+                        >
+                            <ChevronLeft className="h-5 w-5" />
+                        </FloatingDockItem>
+                        <div
+                            className={`flex h-7 min-w-[70px] shrink-0 items-center justify-center rounded-[9px] border px-2 text-[11px] font-semibold tabular-nums ${
+                                darkMode
+                                    ? 'border-white/[0.08] bg-black/20 text-gray-300'
+                                    : 'border-[#e7ded7] bg-[#faf7f4] text-[#5f554e]'
+                            }`}
+                            aria-label={`当前第 ${pageIndicator} 页，共 ${numPages || '--'} 页`}
+                            aria-live="polite"
+                        >
+                            <span>{pageIndicator}</span>
+                            <span className={`mx-1.5 ${darkMode ? 'text-gray-600' : 'text-[#b5aaa2]'}`}>/</span>
+                            <span className={darkMode ? 'text-gray-500' : 'text-[#91857d]'}>{numPages || '--'}</span>
                         </div>
-                        <span className="text-sm text-gray-400 font-medium">/ {numPages || '--'}</span>
-                        <button onClick={() => changePage(1)} disabled={nextPageTarget === pageNumber} className={`p-1.5 rounded-lg disabled:opacity-50 transition-colors ${darkMode ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`} title="下一页">
-                            <ChevronRight className="w-5 h-5" />
-                        </button>
-                    </div>
-                    <div className="flex items-center gap-1">
+                        <FloatingDockItem
+                            label="下一页"
+                            onClick={() => changePage(1)}
+                            disabled={nextPageTarget === pageNumber}
+                        >
+                            <ChevronRight className="h-5 w-5" />
+                        </FloatingDockItem>
+
+                        <FloatingDockDivider darkMode={darkMode} />
+
                         <div ref={pageLayoutMenuRef} className="relative">
-                            <button
-                                type="button"
+                            <FloatingDockItem
+                                label="页面转换"
+                                active={isPageLayoutMenuOpen}
+                                showTooltip={!isPageLayoutMenuOpen}
                                 onClick={() => setIsPageLayoutMenuOpen((open) => !open)}
-                                className={`inline-flex h-8 items-center gap-1.5 rounded-xl px-2 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/35 ${
-                                    isPageLayoutMenuOpen
-                                        ? (darkMode ? 'bg-white/12 text-white' : 'bg-[#f3ddd5] text-[#a4533d]')
-                                        : (darkMode ? 'text-gray-400 hover:bg-white/10 hover:text-gray-100' : 'text-gray-500 hover:bg-[#f0ebe7] hover:text-[#9f5541]')
-                                }`}
-                                title="页面转换"
-                                aria-label="页面转换"
                                 aria-expanded={isPageLayoutMenuOpen}
                                 aria-controls="pdf-reader-layout-menu"
                             >
-                                <BookOpen className="h-4 w-4" />
-                                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${isPageLayoutMenuOpen ? 'rotate-180' : ''}`} />
-                            </button>
+                                <BookOpen className="h-[17px] w-[17px]" />
+                            </FloatingDockItem>
                             <AnimatePresence>
                                 {isPageLayoutMenuOpen && (
                                     <motion.div
@@ -1903,7 +1983,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         animate={{ opacity: 1, y: 0, scale: 1 }}
                                         exit={{ opacity: 0, y: -4, scale: 0.98 }}
                                         transition={{ duration: 0.16, ease: 'easeOut' }}
-                                        className={`absolute right-0 top-[calc(100%+10px)] z-50 w-[196px] overflow-hidden rounded-2xl border p-2 shadow-[0_18px_46px_rgba(72,47,35,0.18)] ${
+                                        className={`absolute right-0 top-[calc(100%+12px)] z-50 w-[196px] overflow-hidden rounded-2xl border p-2 shadow-[0_18px_46px_rgba(72,47,35,0.18)] ${
                                             darkMode
                                                 ? 'border-white/10 bg-[#25292f] text-gray-100 shadow-black/35'
                                                 : 'border-[#ebe4dd] bg-[#fffdfb] text-[#3c342f]'
@@ -1993,16 +2073,22 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 )}
                             </AnimatePresence>
                         </div>
-                        <div className={`flex items-center border rounded-lg p-0.5 ${darkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                            <button onClick={zoomOut} className={`p-1 rounded-md transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-white text-gray-500'}`}>
-                                <ZoomOut className="w-4 h-4" />
-                            </button>
-                            <span className="text-sm font-medium px-2 w-14 text-center">{Math.round(scale * 100)}%</span>
-                            <button onClick={zoomIn} className={`p-1 rounded-md transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-white text-gray-500'}`}>
-                                <ZoomIn className="w-4 h-4" />
-                            </button>
+                        <FloatingDockItem label="缩小" onClick={zoomOut} disabled={scale <= 0.5}>
+                            <ZoomOut className="h-[17px] w-[17px]" />
+                        </FloatingDockItem>
+                        <div
+                            className={`flex h-7 w-9 shrink-0 items-center justify-center rounded-[9px] text-[11px] font-semibold tabular-nums ${
+                                darkMode ? 'text-gray-400' : 'text-[#6f625a]'
+                            }`}
+                            aria-label={`当前缩放 ${Math.round(scale * 100)}%`}
+                            aria-live="polite"
+                        >
+                            {Math.round(scale * 100)}%
                         </div>
-                    </div>
+                        <FloatingDockItem label="放大" onClick={zoomIn} disabled={scale >= 3}>
+                            <ZoomIn className="h-[17px] w-[17px]" />
+                        </FloatingDockItem>
+                    </FloatingDock>
                 </div>
             </div>
 
@@ -2343,7 +2429,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             )}
                             {/* 多矩形高亮，避免跨越空白区域的巨大单一框 */}
                             <AnimatePresence>
-                                {highlightRects.length > 0 && highlightRects.map((rect, idx) => (
+                                {displayHighlightRects.length > 0 && displayHighlightRects.map((rect, idx) => (
                                     <motion.div
                                         key={`highlight-${idx}`}
                                         initial={activeHighlightIsNote ? false : { opacity: 0, scale: 0.9 }}
@@ -2371,28 +2457,41 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                             mass: 1
                                         }}
                                         data-note-jump-highlight={activeHighlightIsNote ? 'true' : undefined}
+                                        data-citation-highlight={activeHighlightIsCitation ? 'true' : undefined}
+                                        data-citation-connects-previous={activeHighlightIsCitation && rect.connectsPrevious ? 'true' : undefined}
+                                        data-citation-connects-next={activeHighlightIsCitation && rect.connectsNext ? 'true' : undefined}
                                         className={activeHighlightIsNote
                                             ? `pdf-note-jump-highlight absolute pointer-events-none z-10 ${darkMode ? 'pdf-note-jump-highlight--dark' : ''}`
-                                            : `absolute border-2 rounded-lg pointer-events-none z-10 ${
+                                            : `absolute pointer-events-none z-10 ${
                                                 activeHighlightIsCitation
-                                                    ? 'border-amber-500 bg-amber-500/20'
-                                                    : 'border-purple-500 bg-purple-500/20'
+                                                    ? 'rounded-[5px] border border-amber-500/70 bg-amber-300/[0.18]'
+                                                    : 'rounded-md border border-purple-500/70 bg-purple-400/[0.16]'
                                             }`
                                         }
                                         style={activeHighlightIsNote ? undefined : {
                                             boxShadow: activeHighlightIsCitation
-                                                ? '0 0 0 2px rgba(245, 158, 11, 0.15), 0 4px 12px -1px rgba(245, 158, 11, 0.2)'
-                                                : '0 0 0 2px rgba(237, 140, 104, 0.1), 0 4px 6px -1px rgba(237, 140, 104, 0.1)'
+                                                ? '0 1px 4px rgba(180, 83, 9, 0.12)'
+                                                : '0 1px 4px rgba(126, 34, 206, 0.12)',
+                                            ...(activeHighlightIsCitation && rect.connectsPrevious ? {
+                                                borderTopWidth: 0,
+                                                borderTopLeftRadius: 2,
+                                                borderTopRightRadius: 2,
+                                            } : {}),
+                                            ...(activeHighlightIsCitation && rect.connectsNext ? {
+                                                borderBottomWidth: 0,
+                                                borderBottomLeftRadius: 2,
+                                                borderBottomRightRadius: 2,
+                                            } : {}),
                                         }}
                                     >
                                         {/* 只在第一个矩形上显示标签 */}
                                         {idx === 0 && !activeHighlightIsNote && (
-                                            <div className={`absolute -top-3 -right-3 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm ${
+                                            <div className={`absolute -top-4 right-0 px-1.5 py-0.5 text-[10px] font-medium text-white rounded-md shadow-sm ${
                                                 activeHighlightIsCitation
-                                                    ? 'bg-amber-500'
+                                                    ? 'bg-amber-600/95'
                                                     : 'bg-purple-500'
                                             }`}>
-                                                {activeHighlightIsCitation ? '📎 引用' : '匹配'}
+                                                {activeHighlightIsCitation ? '引用' : '匹配'}
                                             </div>
                                         )}
                                     </motion.div>

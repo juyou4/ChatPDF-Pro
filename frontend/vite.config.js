@@ -29,7 +29,12 @@ function manualChunks(id) {
     ) {
         return 'vendor-editor';
     }
-    if (normalizedId.includes('/node_modules/framer-motion/')) return 'vendor-motion';
+    if (
+        normalizedId.includes('/node_modules/framer-motion/')
+        || normalizedId.includes('/node_modules/motion/')
+        || normalizedId.includes('/node_modules/motion-dom/')
+        || normalizedId.includes('/node_modules/motion-utils/')
+    ) return 'vendor-motion';
     if (
         normalizedId.includes('/node_modules/react/') ||
         normalizedId.includes('/node_modules/react-dom/') ||

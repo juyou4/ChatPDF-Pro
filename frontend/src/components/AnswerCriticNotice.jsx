@@ -112,16 +112,10 @@ const AnswerCriticNotice = ({ critic, variant, detailLines, onLocateClaim }) => 
         )}
       </button>
 
-      {hasDetails && (
+      {hasDetails && detailsOpen && (
         <div
           id={detailsId}
-          className={`grid transition-[grid-template-rows,opacity,visibility] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
-            detailsOpen
-              ? 'visible grid-rows-[1fr] opacity-100'
-              : 'invisible pointer-events-none grid-rows-[0fr] opacity-0'
-          }`}
-          aria-hidden={!detailsOpen}
-          inert={detailsOpen ? undefined : ''}
+          className="grid grid-rows-[1fr] opacity-100 transition-[grid-template-rows,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
         >
           <div className="min-h-0 overflow-hidden">
             <div className={`mx-2.5 border-t pb-2.5 pt-2 ${style.divider}`}>

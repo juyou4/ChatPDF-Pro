@@ -42,6 +42,10 @@ const CHATPDF_MARKDOWN_SCHEMA = {
     ...defaultSchema.attributes,
     cite: [...(defaultSchema.attributes?.cite || []), 'dataRef', 'data-ref'],
     wsource: [...(defaultSchema.attributes?.wsource || []), 'dataIdx', 'data-idx'],
+    span: [
+      ...(defaultSchema.attributes?.span || []),
+      ['className', 'blur-reveal-animate', /^blur-stagger-[0-8]$/],
+    ],
   },
 };
 
@@ -167,35 +171,63 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-const STREAM_ANIMATION_WINDOW = 600;
+const STREAM_ANIMATION_WINDOW = 160;
 
 const remarkBlurRevealAST = (options) => {
-  const { isStreaming, stableOffset, windowSize = STREAM_ANIMATION_WINDOW } = options;
+  const {
+    isStreaming,
+    animationStartOffset,
+    animationEndOffset,
+    windowSize = STREAM_ANIMATION_WINDOW,
+  } = options;
 
   return (tree) => {
     if (!isStreaming) return;
 
+    const activeStart = Math.max(
+      0,
+      Math.min(animationStartOffset, animationEndOffset),
+      animationEndOffset - windowSize,
+    );
+    let sequenceIndex = 0;
+
     visit(tree, 'text', (node, index, parent) => {
       if (!node.position) return;
 
+      const start = node.position.start.offset;
       const end = node.position.end.offset;
-      const activeStart = Math.max(0, stableOffset - windowSize);
       if (end <= activeStart) return;
 
-      const parts = node.value.split(/(\s+)/);
-      const nodes = parts.map((part, i) => {
-        if (/^\s+$/.test(part)) return { type: 'text', value: part };
-        const delay = Math.min((i / 2) * 0.03, 0.35);
-        return {
+      const localStart = Math.max(0, Math.min(node.value.length, activeStart - start));
+      const stablePrefix = node.value.slice(0, localStart);
+      const activeText = node.value.slice(localStart);
+      const nodes = stablePrefix ? [{ type: 'text', value: stablePrefix }] : [];
+
+      splitStreamingText(activeText).forEach((part) => {
+        if (/^\s+$/u.test(part)) {
+          nodes.push({ type: 'text', value: part });
+          return;
+        }
+        const staggerIndex = Math.min(sequenceIndex, 8);
+        sequenceIndex += 1;
+        nodes.push({
           type: 'html',
-          value: `<span class="blur-reveal-animate" style="animation-delay: ${delay.toFixed(2)}s;">${escapeHtml(part)}</span>`
-        };
+          value: `<span class="blur-reveal-animate blur-stagger-${staggerIndex}">${escapeHtml(part)}</span>`,
+        });
       });
 
       parent.children.splice(index, 1, ...nodes);
       return index + nodes.length;
     });
   };
+};
+
+const splitStreamingText = (text) => {
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    return Array.from(segmenter.segment(text), ({ segment }) => segment);
+  }
+  return Array.from(text);
 };
 
 export const processCitationRefs = (text, citations) => {
@@ -288,6 +320,8 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
   return (
     prevProps.content === nextProps.content &&
     prevProps.isStreaming === nextProps.isStreaming &&
+    prevProps.enableBlurReveal === nextProps.enableBlurReveal &&
+    prevProps.blurIntensity === nextProps.blurIntensity &&
     (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
     prevProps.citations === nextProps.citations &&
     prevProps.webSearchSources === nextProps.webSearchSources &&
@@ -298,6 +332,7 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
 const StreamingMarkdown = React.memo(
   ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false }) => {
     const containerRef = useRef(null);
+    const previousAnimatedLengthRef = useRef(0);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
     const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
     const [mathjaxReady, setMathjaxReady] = useState(!!_rehypeMathjaxSvg);
@@ -345,14 +380,35 @@ const StreamingMarkdown = React.memo(
       return plugins;
     }, [mathEngine, shouldUseSingleDollarMath]);
 
-    // 完整 remark 插件数组：仅在需要 blur-reveal 动画时追加动态插件，
-    // 非流式输出时直接复用稳定的基础插件数组引用
+    const animationEndOffset = processedContent.length;
+    const animationStartOffset = animationEndOffset < previousAnimatedLengthRef.current
+      ? 0
+      : previousAnimatedLengthRef.current;
+
+    useEffect(() => {
+      previousAnimatedLengthRef.current = isStreaming ? animationEndOffset : 0;
+    }, [animationEndOffset, isStreaming]);
+
+    // 非 ref 流式路径只包装本轮新增的字符，避免 Markdown 重渲染时让旧内容反复闪烁。
     const remarkPlugins = React.useMemo(() => {
       if (enableBlurReveal && isStreaming) {
-        return [...baseRemarkPlugins, [remarkBlurRevealAST, { isStreaming, stableOffset: content?.length || 0 }]];
+        return [
+          ...baseRemarkPlugins,
+          [remarkBlurRevealAST, {
+            isStreaming,
+            animationStartOffset,
+            animationEndOffset,
+          }],
+        ];
       }
       return baseRemarkPlugins;
-    }, [baseRemarkPlugins, enableBlurReveal, isStreaming, content?.length]);
+    }, [
+      animationEndOffset,
+      animationStartOffset,
+      baseRemarkPlugins,
+      enableBlurReveal,
+      isStreaming,
+    ]);
 
       const rehypePlugins = React.useMemo(() => {
       const plugins = [rehypeRaw, [rehypeSanitize, CHATPDF_MARKDOWN_SCHEMA]];
@@ -398,19 +454,22 @@ const StreamingMarkdown = React.memo(
         return;
       }
 
-      // 某些流式阶段文本会先进入 React state，再由 ref 直写同步到 DOM。
-      // 若 ref 尚未收到内容，但 content 已有文本，先回填到 ref，避免面板空白只剩等待点。
+      // 兼容只传入 React state、尚未由流队列接管的调用方。useSmoothStream
+      // 会在接管首帧做一次同步校验，避免同一首段被重复追加。
       if ((el.textContent || '').trim().length === 0 && content && content.trim().length > 0) {
         el.textContent = content;
       }
 
-      const syncHasContent = () => {
-        const text = el.textContent || '';
-        setHasDirectWriteContent(text.trim().length > 0);
+      let observer = null;
+      const detectFirstContent = () => {
+        if (!el.firstChild) return false;
+        setHasDirectWriteContent(true);
+        observer?.disconnect();
+        return true;
       };
 
-      syncHasContent();
-      const observer = new MutationObserver(syncHasContent);
+      if (detectFirstContent()) return undefined;
+      observer = new MutationObserver(detectFirstContent);
       observer.observe(el, { childList: true, subtree: true, characterData: true });
 
       return () => observer.disconnect();

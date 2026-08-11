@@ -27,6 +27,7 @@ export const isFailedChatHistoryAssistant = (message) => {
     || [
       'evidence_fallback',
       'degraded',
+      'truncated',
       'failed',
       'interrupted',
       'cancelled',
@@ -86,7 +87,11 @@ const buildEligibleChatTurns = (messages = []) => {
 /**
  * 构建每次请求会附带的聊天历史，需与接口调用保持一致。
  */
-export const buildChatHistory = (messages = [], contextCount) => {
+export const buildChatHistory = (messages = [], contextCount, {
+  preserveReasoning = false,
+  providerId = '',
+  modelId = '',
+} = {}) => {
   const normalizedCount = Math.max(0, Math.floor(Number(contextCount) || 0));
   if (normalizedCount <= 0 || !Array.isArray(messages)) return [];
 
@@ -101,6 +106,18 @@ export const buildChatHistory = (messages = [], contextCount) => {
           : message.content,
       };
       if (message.historyKind) payload.history_kind = message.historyKind;
+      const sameProvider = !message.provider || !providerId || message.provider === providerId;
+      const sameModel = !message.model || !modelId || message.model === modelId;
+      const reasoningContent = String(message.reasoningContent || message.reasoning_content || '').trim();
+      if (
+        preserveReasoning
+        && payload.role === 'assistant'
+        && sameProvider
+        && sameModel
+        && reasoningContent
+      ) {
+        payload.reasoning_content = reasoningContent;
+      }
       return payload;
     });
 };
@@ -122,7 +139,9 @@ export const getChatHistoryUsage = (messages = [], contextCount) => {
   const eligibleMessages = buildEligibleChatTurns(messages).flat();
   const history = buildChatHistory(messages, normalizedCount);
   const selectedTokens = history.reduce(
-    (total, message) => total + estimateContextTokens(message.content),
+    (total, message) => total
+      + estimateContextTokens(message.content)
+      + estimateContextTokens(message.reasoning_content),
     0,
   );
 

@@ -5,6 +5,33 @@ import { useChatParams } from '../contexts/ChatParamsContext'
 import AgentTracePanel from './AgentTracePanel'
 import CellsLoader from './CellsLoader'
 import WebSearchActivity from './WebSearchActivity'
+import { getReasoningFallbackText } from '../services/reasoningEffortService'
+
+const LEGACY_AGENT_STAGE_LINE_PATTERNS = [
+  /^正在检索(?:文档)?(?:[，,:：\s]|$)/,
+  /^正在理解问题并确定检索路线(?:[.。…]|$)/,
+  /^正在启动多轮检索代理(?:[.。…]|$)/,
+  /^正在分析问题(?:，|,)?规划(?:多轮)?检索(?:策略)?(?:[.。…]|$)/,
+  /^第\s*\d+\s*轮(?:取材|检索)(?:[.。…]|$)/,
+  /^LLM\s*规划中(?:[.。…]|$)/i,
+  /^执行\s+(?:search_document|web_search|vector_search|keyword_search|grep|regex_search|boolean_search|visual_search|read_blocks|read_section|read_around|fetch|map|analyze_visual_evidence)(?:[.。…]|$)/,
+  /^跳过重复检索\s*[:：]/,
+  /^检索完成(?:[，,:：\s]|$)/,
+  /^正在整理上下文(?:[.。…]|$)/,
+  /^正在等待模型输出思考内容(?:[.。…]|$)/,
+  /^模型仍在处理，正在等待可见输出(?:[.。…]|$)/,
+  /^(?:规划结果为空|仍有子问题未覆盖|工具调用达到上限|检索规划失败|规划失败)/,
+]
+
+const isLegacyAgentStageOnlyContent = (content) => {
+  const lines = String(content || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return lines.length > 0 && lines.every((line) => (
+    LEGACY_AGENT_STAGE_LINE_PATTERNS.some((pattern) => pattern.test(line))
+  ))
+}
 
 /**
  * 实时思考计时器组件
@@ -66,6 +93,7 @@ const ThinkingBlock = ({
   streamingRef,
   agentTrace,
   webSearchActivity = null,
+  reasoningResolution = null,
 }) => {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
@@ -74,8 +102,17 @@ const ThinkingBlock = ({
   const { thoughtAutoCollapse } = useChatParams()
   const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
   const hasWebSearchActivity = Boolean(webSearchActivity)
-  const hasThinkingContent = Boolean(content && content.trim())
-  const hasProcessDetails = hasThinkingContent || hasAgentTrace || hasWebSearchActivity
+  const reasoningFallbackText = useMemo(
+    () => getReasoningFallbackText(reasoningResolution),
+    [reasoningResolution]
+  )
+  // 历史消息可能已将 Agent 状态行写入 thinking。Agent 时间线已经承载
+  // 这些状态，因此仅当整段内容都是这类旧状态时才隐藏，真实模型思考保留。
+  const visibleThinkingContent = useMemo(() => (
+    hasAgentTrace && isLegacyAgentStageOnlyContent(content) ? '' : String(content || '')
+  ), [content, hasAgentTrace])
+  const hasThinkingContent = Boolean(visibleThinkingContent.trim())
+  const hasProcessDetails = hasThinkingContent || hasAgentTrace || hasWebSearchActivity || Boolean(reasoningFallbackText)
   const agentRunning = Boolean(agentTrace?.enabled && agentTrace?.startedAt && !agentTrace?.endedAt)
   const webSearchRunning = Boolean(
     isStreaming && String(webSearchActivity?.status?.phase || '').toLowerCase() === 'searching'
@@ -84,13 +121,19 @@ const ThinkingBlock = ({
     if ((!isStreaming || answerStarted) && !agentRunning && !webSearchRunning) return ''
     if (webSearchRunning) return '正在联网查找可核验的来源...'
     const currentTask = String(agentTrace?.taskStatus?.current || '').trim()
-    if (agentRunning && currentTask) return currentTask
-    const lines = String(content || '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-    return lines[lines.length - 1] || '正在等待模型响应...'
-  }, [agentRunning, agentTrace?.taskStatus?.current, answerStarted, content, isStreaming, webSearchRunning])
+    // Agent 的当前阶段由结构化 taskStatus 提供，不再回退到旧 thinking 文本，
+    // 否则历史“跳过重复检索”等状态会与时间线重复出现在标题栏。
+    if (agentRunning) return currentTask || '正在检索与整理证据...'
+    let lineEnd = visibleThinkingContent.length
+    while (lineEnd > 0) {
+      const newlineIndex = visibleThinkingContent.lastIndexOf('\n', lineEnd - 1)
+      const line = visibleThinkingContent.slice(newlineIndex + 1, lineEnd).trim()
+      if (line) return line
+      if (newlineIndex < 0) break
+      lineEnd = newlineIndex
+    }
+    return '正在等待模型响应...'
+  }, [agentRunning, agentTrace?.taskStatus?.current, answerStarted, isStreaming, visibleThinkingContent, webSearchRunning])
 
   // 思考阶段是否已结束：流式中以「正文首 token 到达」为准（answerStarted），
   // 兜底用整条消息结束（!isStreaming），不必等回答全部生成完
@@ -116,13 +159,16 @@ const ThinkingBlock = ({
     }
 
     const el = streamingRef.current
-    const syncHasContent = () => {
-      const text = el.textContent || ''
-      setHasStreamingText(text.trim().length > 0)
+    let observer = null
+    const detectFirstContent = () => {
+      if (!el.firstChild) return false
+      setHasStreamingText(true)
+      observer?.disconnect()
+      return true
     }
 
-    syncHasContent()
-    const observer = new MutationObserver(syncHasContent)
+    if (detectFirstContent()) return undefined
+    observer = new MutationObserver(detectFirstContent)
     observer.observe(el, { childList: true, subtree: true, characterData: true })
 
     return () => observer.disconnect()
@@ -131,12 +177,12 @@ const ThinkingBlock = ({
   // 复制思考内容
   const handleCopy = useCallback((e) => {
     e.stopPropagation()
-    if (!content) return
-    navigator.clipboard.writeText(content).then(() => {
+    if (!visibleThinkingContent) return
+    navigator.clipboard.writeText(visibleThinkingContent).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
-  }, [content])
+  }, [visibleThinkingContent])
 
   // 深度思考在首个 reasoning_content 到来前，直接给出可见的阶段提示，
   // 避免面板只有三个点、看起来像“卡住了”。
@@ -181,6 +227,14 @@ const ThinkingBlock = ({
           thinkingMs={thinkingMs || 0}
           activityOnly={!hasThinkingContent && (hasAgentTrace || hasWebSearchActivity)}
         />
+        {reasoningFallbackText && (
+          <span
+            className={`max-w-[18rem] truncate rounded-full px-2 py-0.5 text-[10.5px] font-normal ${darkMode ? 'bg-[#FFA07A]/10 text-[#ffc5ae]' : 'bg-[#fff1e9] text-[#9a5b45]'}`}
+            title={reasoningFallbackText}
+          >
+            已按兼容档位执行
+          </span>
+        )}
         {activeStageText && (
           <>
             <span className={`h-3 w-px flex-shrink-0 ${darkMode ? 'bg-white/10' : 'bg-[#dedad7]'}`} aria-hidden="true" />
@@ -213,7 +267,15 @@ const ThinkingBlock = ({
       >
         <div className="min-h-0 overflow-hidden">
           <div className={`relative ml-[9px] border-l pb-1 pl-5 pt-1.5 ${darkMode ? 'border-white/[0.14]' : 'border-[#d4ccc6]'}`}>
-            {!isStreaming && content && (
+            {reasoningFallbackText && (
+              <p
+                role="status"
+                className={`mb-2 rounded-lg px-3 py-2 text-[12px] leading-5 ${darkMode ? 'bg-[#3b2d29] text-[#ffc5ae]' : 'bg-[#fff8f3] text-[#9a5b45]'}`}
+              >
+                {reasoningFallbackText}
+              </p>
+            )}
+            {!isStreaming && visibleThinkingContent && (
               <button
                 className={`absolute right-0 top-1 z-[1] rounded-[7px] p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 ${
                   darkMode
@@ -251,7 +313,7 @@ const ThinkingBlock = ({
                 )}
                 <div className={`prose prose-sm max-w-none text-[13.5px] leading-[1.7] ${darkMode ? 'prose-invert text-gray-300' : 'text-gray-500'}`}>
                   <StreamingMarkdown
-                    content={content}
+                    content={visibleThinkingContent}
                     isStreaming={isStreaming}
                     enableBlurReveal={false}
                     blurIntensity="light"

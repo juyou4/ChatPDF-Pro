@@ -9,17 +9,17 @@ import SettingsSegmentedControl from './SettingsSegmentedControl';
  * 而这两个控件同时被设置中心「检索」tab（非懒加载）静态引用；混在一起会让整个
  * GlobalSettings.jsx 被打进主 bundle，失去代码分割的意义。
  */
-export const TriStateToggle = ({ title, desc, value, onChange }) => {
+export const TriStateToggle = ({ title, desc, value, onChange, darkMode = false }) => {
     const options = [
         { value: null, label: '自动' },
         { value: true, label: '开' },
         { value: false, label: '关' },
     ];
     return (
-        <div className="flex items-start justify-between gap-4 py-2">
+        <div className={`flex items-center justify-between gap-4 py-2.5 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
             <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-bold text-gray-800">{title}</div>
-                {desc && <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{desc}</div>}
+                <div className="text-[12px] font-semibold">{title}</div>
+                {desc && <div className={`mt-0.5 text-[10px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{desc}</div>}
             </div>
             <SettingsSegmentedControl
                 ariaLabel={`${title}切换`}
@@ -34,7 +34,12 @@ export const TriStateToggle = ({ title, desc, value, onChange }) => {
     );
 };
 
-export const VisualVerificationMode = ({ value, onChange }) => {
+export const VisualVerificationMode = ({
+    value,
+    onChange,
+    darkMode = false,
+    visualModelSummary = '',
+}) => {
     const normalized = ['auto', 'off', 'always'].includes(value) ? value : 'auto';
     const options = [
         { value: 'auto', label: '自动' },
@@ -42,12 +47,17 @@ export const VisualVerificationMode = ({ value, onChange }) => {
         { value: 'always', label: '总是' },
     ];
     return (
-        <div className="flex items-start justify-between gap-4 py-2">
+        <div className={`flex items-center justify-between gap-4 py-2.5 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
             <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-bold text-gray-800">表格视觉校验</div>
-                <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
-                    数值表格证据有风险时裁剪原 PDF 表格并让视觉模型抽取单元格；会增加一次视觉调用
+                <div className="text-[12px] font-semibold">表格视觉校验</div>
+                <div className={`mt-0.5 text-[10px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                    数值证据存在风险时复核原 PDF 表格
                 </div>
+                {visualModelSummary && (
+                    <div className={`mt-1 text-[10px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-[#9a6a58]'}`}>
+                        使用：{visualModelSummary}
+                    </div>
+                )}
             </div>
             <SettingsSegmentedControl
                 ariaLabel="表格视觉校验切换"
