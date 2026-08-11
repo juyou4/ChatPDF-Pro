@@ -38,6 +38,7 @@ from services.downstream_task_state import (
     get_downstream_task,
     transition_downstream_task,
 )
+from services.task_event_ledger import classify_error_code
 from services.chat_service import call_ai_api, extract_reasoning_content
 from services.document_block_roles import classify_front_matter_text
 from services.structured_json import (
@@ -271,6 +272,15 @@ def _persist_overview_workflow_state(
             "error": error,
             "retryable": status not in {"succeeded", "cancelled"},
         }
+        if error or status in {"partial", "degraded", "failed"}:
+            kwargs["shortfall"] = {
+                "kind": "overview",
+                "code": classify_error_code(error) if error else (
+                    "partial_result" if status == "partial" else "degraded_result"
+                ),
+                "stage": stage or "downstream_ai",
+                "retryable": status not in {"succeeded", "cancelled"},
+            }
         if include_result:
             kwargs["result"] = result
         transition_downstream_task(_overview_task_data_dir(task), **kwargs)

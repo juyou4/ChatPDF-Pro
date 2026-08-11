@@ -256,9 +256,14 @@ const formatThinkingStageEvent = (payload) => {
   if (!payload || typeof payload !== 'object') return null;
 
   if (payload.type === 'retrieval_progress') {
-    const message = typeof payload.message === 'string' && payload.message.trim()
+    const rawMessage = typeof payload.message === 'string' && payload.message.trim()
       ? payload.message.trim()
       : (payload.phase === 'complete' ? '检索完成，正在组织上下文...' : '正在检索文档...');
+    // 旧后端或第三方适配器可能仍把 total_ms 拼进 complete 文案。
+    // 耗时已经在 payload.timings 中保留，不应进入用户可见的思考阶段文本。
+    const message = payload.phase === 'complete'
+      ? '检索完成，正在整理上下文...'
+      : rawMessage;
     const stablePhaseKey = ['llm_waiting', 'llm_structuring_citations', 'answer_generating'].includes(payload.phase)
       ? `retrieval:${payload.phase}`
       : null;
@@ -902,6 +907,7 @@ export function useMessageState({
     `${docId || ''}:${normalizedParseGeneration}:${normalizedDocumentSourceHash}`
   );
   const streamCitationsRef = useRef(null);
+  const streamCitationBindingsRef = useRef(null);
   const streamMaxRelevanceRef = useRef(null);
   const streamFollowupRef = useRef(null);
   const streamFinalContentRef = useRef(null);
@@ -932,7 +938,7 @@ export function useMessageState({
     enableTemperature, enableTopP, enableMaxTokens,
     customParams, reasoningEffort, answerDetailLevel,
     enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
-    overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    overrideNumericTable, overrideAnswerCritic, overrideAnswerClaimVerifier, overrideLLMQueryRewrite, overrideBM25Synonyms,
     numericTableVisualVerification,
     cheapModel, cheapModelProvider, cheapModelEndpoint,
   } = globalSettings;
@@ -1386,6 +1392,7 @@ export function useMessageState({
       // 检索增强调优 overrides（null 表示跟随后端默认）
       override_numeric_table: overrideNumericTable ?? null,
       override_answer_critic: overrideAnswerCritic ?? null,
+      override_answer_claim_verifier: overrideAnswerClaimVerifier ?? null,
       override_llm_query_rewrite: overrideLLMQueryRewrite ?? null,
       override_bm25_synonyms: overrideBM25Synonyms ?? null,
       // 辅助模型（双模型策略；空字符串转 null 避免后端误匹配）
@@ -1395,6 +1402,7 @@ export function useMessageState({
     };
 
     streamCitationsRef.current = null;
+    streamCitationBindingsRef.current = null;
     streamMaxRelevanceRef.current = null;
     streamFollowupRef.current = null;
     streamFinalContentRef.current = null;
@@ -1715,13 +1723,21 @@ export function useMessageState({
               if (p.audit && typeof p.audit === 'object') {
                 streamWebSearchAuditRef.current = p.audit;
               }
-              streamWebSearchStatusRef.current = { phase: p.phase, count: p.count ?? null };
+              const executedWebQuery = typeof p.query === 'string'
+                ? p.query.replace(/\s+/g, ' ').trim().slice(0, 260)
+                : '';
+              streamWebSearchStatusRef.current = {
+                phase: p.phase,
+                count: p.count ?? null,
+                query: executedWebQuery,
+              };
               setMessages(prev => prev.map(m =>
                 m.id === tempMsgId
                   ? {
                     ...m,
                     webSearchStatus: streamWebSearchStatusRef.current,
                     webSearchAudit: streamWebSearchAuditRef.current,
+                    webSearchQuery: executedWebQuery || m.webSearchQuery,
                   }
                   : m
               ));
@@ -1811,6 +1827,9 @@ export function useMessageState({
                 appendAnswerContent(cc);
               }
               if (p.retrieval_meta?.citations) streamCitationsRef.current = p.retrieval_meta.citations;
+              if (Object.prototype.hasOwnProperty.call(p.retrieval_meta || {}, 'citation_bindings')) {
+                streamCitationBindingsRef.current = p.retrieval_meta.citation_bindings || null;
+              }
               if (Object.prototype.hasOwnProperty.call(p, 'visual_attachments')) {
                 streamVisualAttachmentsRef.current = normalizeChatVisualAttachments(
                   p.visual_attachments,
@@ -1984,7 +2003,7 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchAudit: streamWebSearchAuditRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchAudit: streamWebSearchAuditRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -2066,7 +2085,7 @@ export function useMessageState({
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, provider: data.used_provider || m.provider || chatProvider, model: data.used_model || m.model || chatModel, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, visualAttachments: nonStreamVisualAttachments, webSearchSources: data.web_search_sources || null, webSearchAudit: data.web_search_audit || data.retrieval_meta?.web_search_audit || null, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
+            ? { ...m, provider: data.used_provider || m.provider || chatProvider, model: data.used_model || m.model || chatModel, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, citationBindings: data.retrieval_meta?.citation_bindings || null, visualAttachments: nonStreamVisualAttachments, webSearchSources: data.web_search_sources || null, webSearchAudit: data.web_search_audit || data.retrieval_meta?.web_search_audit || null, webSearchQuery: data.web_search_query || m.webSearchQuery, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -2132,7 +2151,7 @@ export function useMessageState({
     webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
     webSearchIncludeDocumentContext, embeddingApiKey, getEmbeddingConfig,
     streamRenderProfile, shouldUseStreaming,
-    overrideNumericTable, overrideAnswerCritic, overrideLLMQueryRewrite, overrideBM25Synonyms,
+    overrideNumericTable, overrideAnswerCritic, overrideAnswerClaimVerifier, overrideLLMQueryRewrite, overrideBM25Synonyms,
     numericTableVisualVerification, cheapModel, cheapModelProvider, cheapModelEndpoint,
     interruptActiveRequest, startVisualVerificationPolling, streamingMessageId,
   ]);

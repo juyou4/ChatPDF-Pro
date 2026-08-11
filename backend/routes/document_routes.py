@@ -89,6 +89,13 @@ from services.document_job_store import (
     persist_document_job,
     recover_interrupted_document_job,
 )
+from services.task_event_ledger import (
+    append_task_event,
+    classify_error_code,
+    get_task_event_ledger,
+    normalize_diagnostic_reason,
+    sanitize_task_shortfall,
+)
 from services.embedding_service import (
     RAG_INDEX_VERSION,
     _canonicalize_embedding_identity,
@@ -132,11 +139,15 @@ from services.downstream_task_state import (
     build_downstream_task_identity,
     create_downstream_task,
     downstream_task_identity_matches,
+    get_downstream_task_events,
     get_downstream_task,
     transition_downstream_task,
 )
 from services.document_recall_service import list_recallable_documents
-from services.paper_metadata_hydration_service import hydrate_paper_metadata
+from services.paper_metadata_hydration_service import (
+    hydrate_paper_metadata,
+    hydration_cache_identity,
+)
 from services.table_visual_metadata import build_table_visual_metadata
 from services.table_visual_verifier import (
     clear_table_visual_verification_cache,
@@ -2646,6 +2657,34 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
             "updated_at": timestamp,
             **extra,
         })
+        quality_failures = current.get("quality_failures")
+        shortfall: dict[str, object] = {}
+        if isinstance(quality_failures, (list, tuple)) and quality_failures:
+            shortfall = {
+                "kind": "parse_quality",
+                "code": "quality_gate_failed",
+                "stage": stage or "normalize",
+                "retryable": True,
+                "failed_pages": current.get("failed_pages") or [],
+                "reasons": [
+                    normalize_diagnostic_reason(item)
+                    for item in list(quality_failures)[:12]
+                    if normalize_diagnostic_reason(item)
+                ],
+            }
+        elif status in {"failed", "partial_ready"}:
+            shortfall = {
+                "kind": "parse",
+                "code": classify_error_code(error) or ("partial_parse" if status == "partial_ready" else "parse_failed"),
+                "stage": stage or status,
+                "retryable": status == "failed",
+                "failed_pages": current.get("failed_pages") or [],
+            }
+        clean_shortfall = sanitize_task_shortfall(shortfall)
+        if clean_shortfall:
+            current["shortfall"] = clean_shortfall
+        elif status in {"ready", "succeeded"}:
+            current.pop("shortfall", None)
         if status == "running" and not current.get("started_at"):
             current["started_at"] = timestamp
         if status in {"ready", "partial_ready"} and not current.get("completed_at"):
@@ -2655,6 +2694,27 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
             persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, current)
         except Exception as exc:
             logger.warning("[DeepParse] failed to persist task status for %s: %s", doc_id, exc)
+        task_id = str(current.get("task_id") or current.get("job_id") or "").strip()
+        if task_id:
+            current["task_id"] = task_id
+            try:
+                append_task_event(
+                    DATA_DIR,
+                    task_id=task_id,
+                    stage=stage or status,
+                    status=status,
+                    identity={
+                        "route": "mineru",
+                        "generation": current.get("parse_generation") or "",
+                        "source_hash": current.get("document_source_hash") or "",
+                    },
+                    attempt=current.get("poll_attempt") or 0,
+                    error_code=classify_error_code(error),
+                    degraded_reason=(clean_shortfall or {}).get("code", ""),
+                    shortfall=clean_shortfall,
+                )
+            except Exception as exc:
+                logger.debug("[DeepParse] event ledger append failed task=%s: %s", task_id, exc)
         return dict(current)
 
 
@@ -2865,6 +2925,13 @@ def _get_deep_parse_status(doc_id: str) -> dict:
 
     current["progress"] = derive_mineru_progress(current)
     current.update(_assess_deep_parse_recommendation(doc_id, active_mineru, block_index, rag_index=rag_index))
+    task_id = str(current.get("task_id") or current.get("job_id") or "").strip()
+    if task_id:
+        current["task_id"] = task_id
+        ledger = get_task_event_ledger(DATA_DIR, task_id)
+        current["events"] = ledger.get("events") or []
+        if ledger.get("shortfall"):
+            current["shortfall"] = ledger["shortfall"]
     return current
 
 
@@ -7671,6 +7738,9 @@ async def _run_paper_metadata_hydration(
             unpaywall_email=settings.paper_metadata_unpaywall_email,
             semantic_scholar_api_key=settings.paper_metadata_semantic_scholar_api_key,
             timeout_seconds=settings.paper_metadata_hydration_timeout_seconds,
+            enable_openalex=bool(getattr(settings, "enable_paper_metadata_openalex", False)),
+            enable_arxiv=bool(getattr(settings, "enable_paper_metadata_arxiv", False)),
+            enable_openreview=bool(getattr(settings, "enable_paper_metadata_openreview", False)),
         )
     except Exception as exc:
         logger.warning("[PaperMetadata] hydration failed open doc=%s: %s", doc_id, exc)
@@ -7743,11 +7813,23 @@ def _schedule_paper_metadata_hydration(doc_id: str, *, force: bool = False) -> d
     if running is not None and not running.done():
         return _paper_metadata_hydration_public_status(doc_id)
     persisted = doc.get("paper_metadata_hydration")
+    expected_cache_identity = hydration_cache_identity(
+        parse_generation=generation,
+        document_source_hash=source_hash,
+        unpaywall_email=settings.paper_metadata_unpaywall_email,
+        semantic_scholar_api_key=settings.paper_metadata_semantic_scholar_api_key,
+        enable_openalex=bool(getattr(settings, "enable_paper_metadata_openalex", False)),
+        enable_arxiv=bool(getattr(settings, "enable_paper_metadata_arxiv", False)),
+        enable_openreview=bool(getattr(settings, "enable_paper_metadata_openreview", False)),
+    )
+    persisted_cache_identity = persisted.get("cache_identity") if isinstance(persisted, dict) else None
     if (
         not force
         and isinstance(persisted, dict)
         and str(persisted.get("parse_generation") or "") == generation
         and str(persisted.get("document_source_hash") or "") == source_hash
+        and isinstance(persisted_cache_identity, dict)
+        and str(persisted_cache_identity.get("key") or "") == str(expected_cache_identity.get("key") or "")
         and str(persisted.get("status") or "") in {"completed", "unavailable"}
     ):
         return deepcopy(persisted)
@@ -8600,6 +8682,43 @@ def _finish_downstream_outline_task(
             status = "degraded"
         else:
             status = "succeeded"
+    shortfall: dict[str, object] = {}
+    result_meta = result.get("meta") if isinstance(result, dict) and isinstance(result.get("meta"), dict) else {}
+    claim_verifier = result_meta.get("claim_verifier") if isinstance(result_meta.get("claim_verifier"), dict) else {}
+    claim_shortfalls = claim_verifier.get("shortfalls") if isinstance(claim_verifier.get("shortfalls"), list) else []
+    partial_issues = result_meta.get("partial_quality_issues") if isinstance(result_meta.get("partial_quality_issues"), list) else []
+    if claim_shortfalls:
+        shortfall = {
+            "kind": "claim_verifier",
+            "code": "claim_support_shortfall",
+            "stage": "downstream_ai",
+            "count": len(claim_shortfalls),
+            "unresolved_count": int(claim_verifier.get("unresolved_count") or len(claim_shortfalls)),
+            "retryable": True,
+        }
+    elif partial_issues:
+        shortfall = {
+            "kind": "summary_quality",
+            "code": "partial_quality",
+            "stage": "downstream_ai",
+            "count": len(partial_issues),
+            "reasons": partial_issues,
+            "retryable": True,
+        }
+    elif error:
+        shortfall = {
+            "kind": "downstream_ai",
+            "code": classify_error_code(error) or "generation_failed",
+            "stage": "downstream_ai",
+            "retryable": True,
+        }
+    elif status in {"partial", "degraded"}:
+        shortfall = {
+            "kind": "downstream_ai",
+            "code": "degraded_result",
+            "stage": "downstream_ai",
+            "retryable": True,
+        }
     try:
         transition_downstream_task(
             DATA_DIR,
@@ -8611,6 +8730,7 @@ def _finish_downstream_outline_task(
             error=error,
             retryable=status not in {"succeeded", "cancelled"},
             result=result,
+            shortfall=shortfall,
         )
     except Exception as exc:
         logger.warning("[DownstreamTask] failed to finish %s: %s", task.get("task_id"), exc)
@@ -8663,6 +8783,14 @@ async def get_document_downstream_task_status(doc_id: str, purpose: str):
 
     # The state service deliberately strips credentials and endpoints. Return
     # only this durable public envelope rather than an internal task object.
+    ledger = get_downstream_task_events(
+        DATA_DIR,
+        task_id=str(record.get("task_id") or ""),
+    )
+    if ledger:
+        record["events"] = ledger.get("events") or []
+        if ledger.get("shortfall"):
+            record["shortfall"] = ledger["shortfall"]
     return record
 
 
@@ -11240,6 +11368,11 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+    task_ledger = get_downstream_task_events(DATA_DIR, task_id=task.task_id)
+    if task_ledger:
+        response["events"] = task_ledger.get("events") or []
+        if task_ledger.get("shortfall"):
+            response["shortfall"] = task_ledger["shortfall"]
     
     if task.status in {"completed", "partial", "fallback"} and task.result:
         response["result"] = task.result.model_dump()

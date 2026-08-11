@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.document_job_store import load_document_job, persist_document_job
+from services.task_event_ledger import (
+    append_task_event,
+    classify_error_code,
+    get_task_event_ledger,
+    sanitize_task_shortfall,
+)
 
 
 DOWNSTREAM_TASK_SCHEMA_VERSION = 1
@@ -86,6 +92,19 @@ def create_downstream_task(
         "updated_at": now,
     }
     persist_document_job(data_dir, downstream_task_job_type(record["purpose"]), record["doc_id"], record)
+    try:
+        append_task_event(
+            data_dir,
+            task_id=record["task_id"],
+            stage="queued",
+            status="queued",
+            identity={"route": "downstream", **record["identity"]},
+            shortfall=record.get("shortfall"),
+        )
+    except Exception:
+        # The latest task state remains authoritative if event diagnostics
+        # cannot be written (for example, a read-only data directory).
+        pass
     return record
 
 
@@ -100,6 +119,7 @@ def transition_downstream_task(
     error: str | None = None,
     retryable: bool | None = None,
     result: Any = _UNSET,
+    shortfall: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically move a durable task forward if it still owns the record.
 
@@ -130,7 +150,29 @@ def transition_downstream_task(
         record["retryable"] = bool(retryable)
     if result is not _UNSET:
         record["result"] = result
+    if shortfall is not None:
+        clean_shortfall = sanitize_task_shortfall(shortfall)
+        if clean_shortfall:
+            record["shortfall"] = clean_shortfall
+        else:
+            record.pop("shortfall", None)
     persist_document_job(data_dir, downstream_task_job_type(normalized_purpose), normalized_doc_id, record)
+    try:
+        identity = record.get("identity") if isinstance(record.get("identity"), Mapping) else {}
+        append_task_event(
+            data_dir,
+            task_id=str(task_id or ""),
+            stage=stage or normalized_status,
+            status=normalized_status,
+            identity={"route": "downstream", **dict(identity)},
+            error_code=classify_error_code(error),
+            degraded_reason=(record.get("shortfall") or {}).get("code", "")
+            if isinstance(record.get("shortfall"), Mapping)
+            else "",
+            shortfall=record.get("shortfall"),
+        )
+    except Exception:
+        pass
     return record
 
 
@@ -156,7 +198,34 @@ def get_downstream_task(
         record["recovered_after_restart"] = True
         record["updated_at"] = time.time()
         persist_document_job(data_dir, downstream_task_job_type(normalized_purpose), normalized_doc_id, record)
+        try:
+            identity = record.get("identity") if isinstance(record.get("identity"), Mapping) else {}
+            append_task_event(
+                data_dir,
+                task_id=str(record.get("task_id") or ""),
+                stage="restart_recovery",
+                status="failed",
+                identity={"route": "downstream", **dict(identity)},
+                error_code="restart_recovery",
+                shortfall={
+                    "kind": "restart_recovery",
+                    "code": "worker_interrupted",
+                    "stage": "restart_recovery",
+                    "retryable": True,
+                },
+            )
+        except Exception:
+            pass
     return record
+
+
+def get_downstream_task_events(
+    data_dir: Path | str,
+    *,
+    task_id: str,
+) -> dict[str, Any]:
+    """Return only the sanitized event envelope for a public status route."""
+    return get_task_event_ledger(data_dir, task_id)
 
 
 def downstream_task_identity_matches(record: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
@@ -204,6 +273,7 @@ __all__ = [
     "build_downstream_task_identity",
     "create_downstream_task",
     "downstream_task_identity_matches",
+    "get_downstream_task_events",
     "downstream_task_job_type",
     "get_downstream_task",
     "transition_downstream_task",

@@ -625,9 +625,17 @@ async def run_agent_retrieval_for_context(
         frozen_web_query = citation_query or str(search_query or request.question or "").strip()
 
         async def _agent_web_search():
+            paper_metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else {}
+            if not paper_metadata.get("title"):
+                try:
+                    from services.paper_metadata_service import ensure_paper_metadata
+
+                    paper_metadata = ensure_paper_metadata(doc)
+                except Exception:
+                    paper_metadata = {}
             kwargs = {
                 "query_override": frozen_web_query,
-                "doc_title": doc.get("filename", ""),
+                "doc_title": paper_metadata.get("title") or doc.get("filename", ""),
                 "selected_text": request.selected_text or "",
                 "doc_id": request.doc_id,
                 "vector_store_dir": vector_store_dir,
@@ -867,6 +875,16 @@ async def run_agent_retrieval_for_context(
 
     retrieval_meta["agent_detail"] = agent_detail
     retrieval_meta["agent_mode"] = True
+    # Agent tool results already carry a request-scoped provenance ledger.
+    # Do not run the ordinary prompt-context selector over them: that would
+    # either discard evidence the Agent actually read or manufacture fallback
+    # citations.  The shared post-generation claim gate still aligns only
+    # against this authorized set.
+    retrieval_meta.setdefault("diagnostics", {}).setdefault("evidence_selector", {
+        "enabled": False,
+        "mode": "agent_provenance",
+        "skipped_reason": "agent_tool_results_authorized",
+    })
     retrieval_meta["agent_gate"] = deps.annotate_agent_gate(
         retrieval_meta.get("agent_gate", agent_gate),
         use_agent=use_agent,

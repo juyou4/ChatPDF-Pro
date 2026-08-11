@@ -607,11 +607,19 @@ def _normalize_web_sources(raw_sources: Any) -> list[dict]:
         if url and not re.match(r"^https?://", url, re.IGNORECASE):
             url = ""
         snippet = _safe_web_result_text(item.get("snippet"), _WEB_SEARCH_SNIPPET_LIMIT)
+        evidence_type = _safe_web_result_text(item.get("evidence_type"), 40) or "search_snippet"
+        content_status = _safe_web_result_text(item.get("content_status"), 40)
         identity = f"{url.casefold()}\0{title.casefold()}\0{snippet[:160].casefold()}"
         if not identity.strip("\0") or identity in seen:
             continue
         seen.add(identity)
-        sources.append({"title": title, "url": url, "snippet": snippet})
+        sources.append({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "evidence_type": evidence_type,
+            "content_status": content_status,
+        })
         if len(sources) >= _MAX_WEB_SEARCH_RESULTS:
             break
     return sources
@@ -621,10 +629,17 @@ def _render_web_source_evidence(source: dict, index: int) -> str:
     title = _safe_web_result_text(source.get("title"), 300) or "未知标题"
     url = _safe_web_result_text(source.get("url"), 1200)
     snippet = _safe_web_result_text(source.get("snippet"), _WEB_SEARCH_SNIPPET_LIMIT)
+    evidence_type = _safe_web_result_text(source.get("evidence_type"), 40) or "search_snippet"
+    evidence_label = {
+        "academic_metadata": "学术元数据",
+        "provider_content": "搜索服务正文",
+        "webpage_excerpt": "网页正文摘录",
+    }.get(evidence_type, "搜索摘要")
     lines = [
         _UNTRUSTED_WEB_EVIDENCE_NOTICE,
-        f"[联网来源 {index}]",
+        f"[W{index}]",
         f"标题: {title}",
+        f"证据类型: {evidence_label}",
     ]
     if url:
         lines.append(f"URL: {url}")

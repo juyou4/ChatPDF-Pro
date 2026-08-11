@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   Loader2,
   MoreHorizontal,
   RotateCcw,
@@ -106,6 +107,42 @@ const TASK_STYLES = {
   },
 };
 
+const EVENT_STAGE_LABELS = {
+  queued: '排队',
+  upload: '上传',
+  submit_mineru: '提交 MinerU',
+  poll: '等待解析',
+  download: '下载结果',
+  normalize: '整理结构',
+  publish_block_index: '发布阅读块',
+  build_rag: '构建问答索引',
+  publish_visual_assets: '发布视觉资产',
+  downstream_ai: '下游 AI',
+  ready: '已就绪',
+  failed: '失败',
+  cancelled: '已取消',
+  restart_recovery: '重启恢复',
+};
+
+const SHORTFALL_LABELS = {
+  quality_gate_failed: '解析质量门未通过',
+  claim_support_shortfall: '部分结论缺少足够证据',
+  partial_quality: '部分章节未达到质量门',
+  degraded_result: '已返回降级结果',
+  worker_interrupted: '服务重启导致任务中断',
+  generation_failed: '生成阶段失败',
+};
+
+const formatEventTime = (value) => {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  try {
+    return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return '';
+  }
+};
+
 const BackgroundTaskPanel = ({
   items = [],
   autoEnabled,
@@ -118,6 +155,7 @@ const BackgroundTaskPanel = ({
   darkMode = false,
 }) => {
   const [showMaintenanceMenu, setShowMaintenanceMenu] = useState(false);
+  const [expandedTaskIds, setExpandedTaskIds] = useState(() => new Set());
   const summary = useMemo(() => getBackgroundTaskSummary(items), [items]);
 
   return (
@@ -227,6 +265,10 @@ const BackgroundTaskPanel = ({
           const showAction = item.actionLabel && (!item.busy || item.actionLabel === '取消');
           const taskProgress = getTaskProgress(item.progress);
           const showMinerUScanLoader = item.id === 'deep_parse' && item.state === 'running';
+          const events = Array.isArray(item.events) ? item.events : [];
+          const shortfallCode = String(item.shortfall?.code || '').trim();
+          const hasDetails = events.length > 0 || Boolean(shortfallCode);
+          const expanded = expandedTaskIds.has(item.id);
           return (
             <div key={item.id} className="flex items-start gap-3 py-3.5">
               {showMinerUScanLoader ? (
@@ -241,6 +283,23 @@ const BackgroundTaskPanel = ({
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-[12px] font-bold">{item.title}</span>
                   <span className={`shrink-0 text-[10px] font-semibold ${darkMode ? taskStyle.darkStatusClassName : taskStyle.lightStatusClassName}`}>{item.status}</span>
+                  {hasDetails && (
+                    <button
+                      type="button"
+                      onClick={() => setExpandedTaskIds((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(item.id)) next.delete(item.id);
+                        else next.add(item.id);
+                        return next;
+                      })}
+                      className={`ml-auto shrink-0 rounded-full p-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 ${darkMode ? 'text-gray-500 hover:bg-white/10 hover:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-700'}`}
+                      aria-expanded={expanded}
+                      aria-label={`${expanded ? '收起' : '展开'} ${item.title}处理详情`}
+                      title={expanded ? '收起处理详情' : '查看处理详情'}
+                    >
+                      <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`} />
+                    </button>
+                  )}
                 </div>
                 <div className={`mt-1 text-[10px] leading-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{item.desc}</div>
                 {taskProgress && (
@@ -263,6 +322,37 @@ const BackgroundTaskPanel = ({
                     <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${darkMode ? 'text-[#FFA07A]' : 'text-[#B85F47]'}`}>
                       {taskProgress.label}
                     </span>
+                  </div>
+                )}
+                {expanded && hasDetails && (
+                  <div className={`mt-2.5 space-y-1.5 rounded-[10px] border px-2.5 py-2 text-[10px] ${darkMode ? 'border-white/[0.08] bg-white/[0.03] text-gray-400' : 'border-[#eee8e3] bg-[#fbfaf8] text-gray-500'}`}>
+                    {shortfallCode && (
+                      <div className={`${darkMode ? 'text-amber-200' : 'text-amber-700'} font-semibold`}>
+                        {SHORTFALL_LABELS[shortfallCode] || shortfallCode}
+                        {Number.isFinite(Number(item.shortfall?.count)) && ` · ${item.shortfall.count} 项`}
+                      </div>
+                    )}
+                    {events.slice(-8).map((event) => {
+                      const stage = EVENT_STAGE_LABELS[event?.stage] || event?.stage || '处理中';
+                      const eventStatus = event?.status === 'failed'
+                        ? '失败'
+                        : event?.status === 'cancelled'
+                          ? '已取消'
+                          : event?.status === 'succeeded'
+                            ? '完成'
+                            : event?.status === 'partial' || event?.status === 'degraded'
+                              ? '降级'
+                              : '进行中';
+                      const timeLabel = formatEventTime(event?.timestamp);
+                      return (
+                        <div key={event?.event_id || `${event?.sequence}-${event?.stage}`} className="flex items-center gap-2">
+                          <span className="w-4 shrink-0 text-right tabular-nums opacity-60">{event?.sequence || ''}</span>
+                          <span className="min-w-0 flex-1 truncate">{stage}</span>
+                          <span className="shrink-0 font-medium">{eventStatus}</span>
+                          {timeLabel && <span className="shrink-0 tabular-nums opacity-60">{timeLabel}</span>}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

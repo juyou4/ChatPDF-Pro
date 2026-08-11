@@ -39,6 +39,7 @@ READING_OUTLINE_CONTRACT = "thematic-quick-study-v3"
 READING_OUTLINE_DETAIL_LEVEL = "thematic-quick-study"
 READING_OUTLINE_CHECKPOINT_VERSION = 1
 READING_OUTLINE_CLAIM_VERIFIER_VERSION = "reading-outline-claim-verifier-v1"
+READING_OUTLINE_CLAIM_REPAIR_VERSION = "reading-outline-claim-repair-v1"
 MAX_READING_OUTLINE_VERIFIER_CLAIMS = 8
 SECTION_BATCH_SIZE = 5
 SECTION_BATCH_CONCURRENCY = 2
@@ -552,9 +553,20 @@ async def get_or_create_reading_outline(
             quality_issues = _reading_outline_quality_issues(cached, block_index)
             blocking_quality_issues = _blocking_reading_outline_quality_issues(quality_issues)
             model_matches = _matches_ai_generation(cached, provider=provider, model=model)
-            if not blocking_quality_issues:
+            verifier_matches = _reading_outline_claim_verifier_cache_matches(
+                cached,
+                provider=provider,
+                model=model,
+                can_call_model=can_call_model,
+            )
+            if not blocking_quality_issues and verifier_matches:
                 healthy_cached = cached
-            if not blocking_quality_issues and (not can_call_model or (not force and model_matches)):
+            if (
+                not force
+                and not blocking_quality_issues
+                and verifier_matches
+                and (not can_call_model or model_matches)
+            ):
                 logger.info(
                     "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=%s",
                     doc_id,
@@ -565,9 +577,10 @@ async def get_or_create_reading_outline(
                 clear_reading_outline_checkpoint(data_dir, doc_id)
                 return cached
             logger.info(
-                "[ReadingOutline] Ignore AI cache doc=%s model_match=%s blocking_quality=%s partial_quality=%s",
+                "[ReadingOutline] Ignore AI cache doc=%s model_match=%s verifier_match=%s blocking_quality=%s partial_quality=%s",
                 doc_id,
                 model_matches,
+                verifier_matches,
                 blocking_quality_issues,
                 _partial_reading_outline_quality_issues(quality_issues),
             )
@@ -4606,9 +4619,278 @@ def _reading_outline_claim_verifier_enabled() -> bool:
     try:
         from config import settings
 
-        return bool(getattr(settings, "enable_reading_outline_claim_verifier", False))
+        return bool(getattr(settings, "enable_reading_outline_claim_verifier", True))
     except Exception:
+        return True
+
+
+def _reading_outline_claim_verifier_cache_matches(
+    cached: dict[str, Any] | None,
+    *,
+    provider: str,
+    model: str,
+    can_call_model: bool,
+) -> bool:
+    """Only reuse a generated summary after its verifier contract is current."""
+    if not _reading_outline_claim_verifier_enabled() or not can_call_model:
+        # Missing credentials is fail-open: a verified structural/AI cache is
+        # still preferable to forcing a network call that cannot succeed.
+        return True
+    meta = cached.get("meta") if isinstance(cached, dict) else {}
+    verifier = meta.get("claim_verifier") if isinstance(meta, dict) else {}
+    if not isinstance(verifier, dict):
         return False
+    return (
+        str(verifier.get("version") or "") == READING_OUTLINE_CLAIM_VERIFIER_VERSION
+        and str(verifier.get("repair_version") or "") == READING_OUTLINE_CLAIM_REPAIR_VERSION
+        and str(verifier.get("provider") or "").strip().lower() == str(provider or "").strip().lower()
+        and str(verifier.get("model") or "").strip() == str(model or "").strip()
+        and str(verifier.get("status") or "").strip().lower() in {"completed", "not_applicable"}
+    )
+
+
+def _claim_repair_evidence_text(candidate: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get("text") or "")
+        for item in candidate.get("evidence") or []
+        if isinstance(item, dict)
+    ).strip()
+
+
+def _find_outline_claim(
+    outline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
+    section_id = str(candidate.get("source_section_id") or "")
+    claim_id = str(candidate.get("claim_id") or "")
+    claim_kind = str(candidate.get("claim_kind") or "claim")
+    claim_text = str(candidate.get("claim_text") or "")
+    def walk(nodes: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
+        # Do not use _flatten_outline_items here: it intentionally returns
+        # shallow copies for diagnostics, while repairs must mutate the live
+        # outline tree that will be persisted and displayed.
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("source_section_id") or "") == section_id:
+                for field in ("metric_claims", "prose_claims"):
+                    claims = node.get(field)
+                    if not isinstance(claims, list):
+                        continue
+                    for claim in claims:
+                        if not isinstance(claim, dict):
+                            continue
+                        current_text = str(claim.get("claim_text") or "")
+                        current_kind = str(claim.get("claim_kind") or "claim")
+                        current_id = hashlib.sha1(
+                            f"{section_id}|{current_kind}|{current_text}".encode("utf-8")
+                        ).hexdigest()[:16]
+                        if current_id == claim_id or (
+                            current_kind == claim_kind
+                            and _normalized_match_text(current_text) == _normalized_match_text(claim_text)
+                        ):
+                            return node, field, claim
+            found = walk(node.get("children") or [])
+            if found[0] is not None:
+                return found
+        return None, "", None
+
+    return walk(outline.get("section_items") or outline.get("items") or [])
+
+
+def _replace_claim_sentence(summary: str, original: str, replacement: str) -> str:
+    source = str(summary or "")
+    if not source or not original or not replacement:
+        return source
+    if original in source:
+        return source.replace(original, replacement, 1)
+    original_key = _normalized_match_text(original)
+    if not original_key:
+        return source
+    parts = re.split(r"(?<=[。！？.!?])\s*", source)
+    for index, part in enumerate(parts):
+        if original_key in _normalized_match_text(part):
+            parts[index] = replacement
+            return "".join(parts)
+    return source
+
+
+def _update_outline_claim_views(
+    outline: dict[str, Any],
+    *,
+    candidate: dict[str, Any],
+    original: str,
+    replacement: str,
+) -> None:
+    """Keep persisted display projections in sync with a repaired claim."""
+    section_id = str(candidate.get("source_section_id") or "").strip()
+    if not section_id or not original or not replacement:
+        return
+
+    def visit(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            source_ids = {
+                str(value) for value in node.get("source_section_ids") or []
+                if str(value).strip()
+            }
+            belongs_to_claim = (
+                str(node.get("source_section_id") or "").strip() == section_id
+                or section_id in source_ids
+            )
+            if belongs_to_claim:
+                if isinstance(node.get("summary"), str):
+                    node["summary"] = _replace_claim_sentence(
+                        node.get("summary"), original, replacement
+                    )
+                study = node.get("study")
+                if isinstance(study, dict) and isinstance(study.get("findings"), list):
+                    study["findings"] = [
+                        _replace_claim_sentence(value, original, replacement)
+                        if isinstance(value, str) else value
+                        for value in study["findings"]
+                    ]
+            visit(node.get("children") or [])
+
+    # These are separate serialized projections. Updating all of them avoids
+    # a stale thematic view hiding a repaired section claim.
+    visit(outline.get("section_items") or [])
+    visit(outline.get("items") or [])
+    visit(outline.get("flat_items") or [])
+
+
+def _apply_outline_claim_repair(
+    outline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    action: str,
+    replacement: str,
+    verdict_status: str,
+    evidence_ids: list[str],
+) -> dict[str, Any]:
+    node, field, claim = _find_outline_claim(outline, candidate)
+    if node is None or claim is None:
+        return {"action": "shortfall", "reason": "claim_not_found"}
+    original = str(claim.get("claim_text") or candidate.get("claim_text") or "")
+    normalized_action = "replace" if action == "replace" and replacement else "remove"
+    if normalized_action == "replace":
+        claim["claim_text"] = replacement
+        if field == "metric_claims" and isinstance(claim.get("values"), list):
+            replacement_key = _normalized_match_text(replacement)
+            claim["values"] = [
+                value for value in claim.get("values") or []
+                if _normalized_match_text(value) in replacement_key
+            ]
+        claim["verifier_repair"] = {
+            "version": READING_OUTLINE_CLAIM_REPAIR_VERSION,
+            "action": "replace",
+            "initial_status": verdict_status,
+            "evidence_ids": list(evidence_ids),
+        }
+        node["summary"] = _replace_claim_sentence(node.get("summary"), original, replacement)
+        _update_outline_claim_views(
+            outline,
+            candidate=candidate,
+            original=original,
+            replacement=replacement,
+        )
+    else:
+        claims = node.get(field) if isinstance(node.get(field), list) else []
+        node[field] = [item for item in claims if item is not claim]
+        safe_message = (
+            "原文证据与该强断言不一致，未保留该结论。"
+            if verdict_status == "contradicted"
+            else "现有证据不足以支持该结论，未保留强断言。"
+        )
+        node["summary"] = _replace_claim_sentence(node.get("summary"), original, safe_message)
+        _update_outline_claim_views(
+            outline,
+            candidate=candidate,
+            original=original,
+            replacement=safe_message,
+        )
+        node.setdefault("claim_shortfalls", []).append({
+            "claim_id": str(candidate.get("claim_id") or ""),
+            "status": verdict_status,
+            "reason": "claim_removed_after_verifier",
+            "evidence_ids": list(evidence_ids),
+        })
+    node["repair_kind"] = "claim_verifier"
+    return {"action": normalized_action, "reason": "applied", "replacement": replacement}
+
+
+async def _request_outline_claim_repairs(
+    candidates: list[dict[str, Any]],
+    verdicts: list[dict[str, Any]],
+    *,
+    api_key: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+) -> dict[str, dict[str, str]]:
+    repair_inputs = []
+    verdict_by_id = {str(item.get("claim_id") or ""): item for item in verdicts}
+    for candidate in candidates:
+        verdict = verdict_by_id.get(str(candidate.get("claim_id") or "")) or {}
+        if str(verdict.get("status") or "uncertain") == "supported":
+            continue
+        repair_inputs.append({
+            "claim_id": str(candidate.get("claim_id") or ""),
+            "claim_text": str(candidate.get("claim_text") or ""),
+            "status": str(verdict.get("status") or "uncertain"),
+            "evidence": candidate.get("evidence") or [],
+        })
+    if not repair_inputs:
+        return {}
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是受限的学术摘要句子修复器。只能使用每条 claim 自带的 evidence，"
+                "不得新增事实、数字、主体、比较方向或引用 ID。对 unsupported、contradicted、"
+                "uncertain 的句子最多给出一个保守替换；无法安全替换就 action=remove。"
+                '只输出 JSON：{"repairs":[{"claim_id":"...","action":"replace|remove",'
+                '"replacement":"单句或空字符串"}]}。'
+            ),
+        },
+        {"role": "user", "content": json.dumps(repair_inputs, ensure_ascii=False)},
+    ]
+    try:
+        parsed = await _call_structured_reading_model(
+            messages=messages,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            max_tokens=900,
+            diagnostic_label="reading_outline_claim_repair",
+        )
+    except Exception as exc:
+        logger.warning("[ReadingOutline] Claim repair failed: %s", exc)
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    candidate_by_id = {str(item.get("claim_id") or ""): item for item in candidates}
+    for raw in parsed.get("repairs") or []:
+        if not isinstance(raw, dict):
+            continue
+        claim_id = str(raw.get("claim_id") or "").strip()
+        candidate = candidate_by_id.get(claim_id)
+        if not candidate or claim_id in result:
+            continue
+        action = str(raw.get("action") or "remove").strip().lower()
+        replacement = " ".join(str(raw.get("replacement") or "").split())[:360]
+        evidence_text = _claim_repair_evidence_text(candidate)
+        # Numeric tokens in a replacement must already exist in the attached
+        # evidence. This rejects the most dangerous form of repair drift.
+        if replacement and not (_numeric_tokens(replacement) - _numeric_tokens(evidence_text)):
+            result[claim_id] = {
+                "action": "replace" if action == "replace" else "remove",
+                "replacement": replacement if action == "replace" else "",
+            }
+        else:
+            result[claim_id] = {"action": "remove", "replacement": ""}
+    return result
 
 
 async def _maybe_verify_high_value_outline_claims(
@@ -4620,26 +4902,28 @@ async def _maybe_verify_high_value_outline_claims(
     provider: str,
     endpoint: str,
 ) -> dict[str, Any] | None:
-    """Run an optional diagnostic verifier without mutating summary content."""
+    """Verify high-risk claims and perform at most one evidence-bound repair."""
     if not _reading_outline_claim_verifier_enabled():
         return None
     candidates = _select_high_value_verifier_claims(outline, block_index)
     base = {
         "version": READING_OUTLINE_CLAIM_VERIFIER_VERSION,
+        "repair_version": READING_OUTLINE_CLAIM_REPAIR_VERSION,
         "provider": str(provider or ""),
         "model": str(model or ""),
         "selected_claim_ids": [str(item["claim_id"]) for item in candidates],
         "candidate_count": len(candidates),
+        "evidence_bound": True,
     }
     if not candidates:
-        return {**base, "status": "not_applicable", "verdicts": []}
+        return {**base, "status": "not_applicable", "verdicts": [], "repair_attempted_count": 0}
     if not api_key and str(provider or "").lower() not in {"local", "ollama"}:
         return {**base, "status": "unavailable", "reason": "missing_credentials", "verdicts": []}
 
     try:
         from services.answer_critic_service import critique_evidence_claims
 
-        result = await critique_evidence_claims(
+        initial_result = await critique_evidence_claims(
             candidates,
             api_key=api_key,
             model=model,
@@ -4648,34 +4932,170 @@ async def _maybe_verify_high_value_outline_claims(
         )
     except Exception as exc:
         logger.warning("[ReadingOutline] Claim verifier side pass failed: %s", exc)
-        result = None
-    if not isinstance(result, dict):
+        initial_result = None
+    if not isinstance(initial_result, dict):
         return {**base, "status": "unavailable", "reason": "verifier_failed", "verdicts": []}
 
     candidate_by_id = {str(item["claim_id"]): item for item in candidates}
-    verdicts = []
-    for verdict in result.get("verdicts") or []:
-        if not isinstance(verdict, dict):
+    verdicts: list[dict[str, Any]] = []
+    for raw in initial_result.get("verdicts") or []:
+        if not isinstance(raw, dict):
             continue
-        claim_id = str(verdict.get("claim_id") or "")
+        claim_id = str(raw.get("claim_id") or "")
         candidate = candidate_by_id.get(claim_id)
         if not candidate:
             continue
+        status = str(raw.get("status") or "uncertain").strip().lower()
+        if status not in {"supported", "unsupported", "contradicted", "uncertain"}:
+            status = "uncertain"
+        evidence_ids = [
+            str(value) for value in raw.get("evidence_ids") or []
+            if str(value) in {
+                str(item.get("evidence_id") or "")
+                for item in candidate.get("evidence") or []
+                if isinstance(item, dict)
+            }
+        ][:4]
         verdicts.append({
             "claim_id": claim_id,
             "source_section_id": str(candidate.get("source_section_id") or ""),
             "claim_kind": str(candidate.get("claim_kind") or "claim"),
-            "status": str(verdict.get("status") or "uncertain"),
-            "reason": str(verdict.get("reason") or "")[:240],
-            "evidence_ids": [str(value) for value in verdict.get("evidence_ids") or []],
+            "status": status,
+            "initial_status": status,
+            "reason": str(raw.get("reason") or "")[:240],
+            "evidence_ids": evidence_ids,
+            "repair_action": "none",
+            "final_status": status,
         })
+    for candidate in candidates:
+        if str(candidate.get("claim_id")) not in {item["claim_id"] for item in verdicts}:
+            verdicts.append({
+                "claim_id": str(candidate.get("claim_id") or ""),
+                "source_section_id": str(candidate.get("source_section_id") or ""),
+                "claim_kind": str(candidate.get("claim_kind") or "claim"),
+                "status": "uncertain",
+                "initial_status": "uncertain",
+                "reason": "verifier_omitted_claim",
+                "evidence_ids": [],
+                "repair_action": "none",
+                "final_status": "uncertain",
+            })
+
+    needs_repair = [item for item in verdicts if item["initial_status"] != "supported"]
+    repair_map = await _request_outline_claim_repairs(
+        candidates,
+        verdicts,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        endpoint=endpoint,
+    ) if needs_repair else {}
+
+    repaired_candidates: list[dict[str, Any]] = []
+    applied: dict[str, dict[str, Any]] = {}
+    for verdict in verdicts:
+        claim_id = verdict["claim_id"]
+        candidate = candidate_by_id.get(claim_id)
+        if not candidate or verdict["initial_status"] == "supported":
+            continue
+        repair = repair_map.get(claim_id) or {"action": "remove", "replacement": ""}
+        replacement = str(repair.get("replacement") or "")
+        outcome = _apply_outline_claim_repair(
+            outline,
+            candidate,
+            action=str(repair.get("action") or "remove"),
+            replacement=replacement,
+            verdict_status=verdict["initial_status"],
+            evidence_ids=verdict.get("evidence_ids") or [],
+        )
+        applied[claim_id] = outcome
+        verdict["repair_action"] = outcome.get("action") or "remove"
+        if outcome.get("action") == "replace" and replacement:
+            repaired_candidate = dict(candidate)
+            repaired_candidate["claim_text"] = replacement
+            repaired_candidates.append(repaired_candidate)
+
+    reverification: dict[str, dict[str, Any]] = {}
+    if repaired_candidates:
+        try:
+            from services.answer_critic_service import critique_evidence_claims
+
+            second_result = await critique_evidence_claims(
+                repaired_candidates,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                endpoint=endpoint,
+            )
+        except Exception as exc:
+            logger.warning("[ReadingOutline] Claim repair reverification failed: %s", exc)
+            second_result = None
+        if isinstance(second_result, dict):
+            reverification = {
+                str(item.get("claim_id") or ""): item
+                for item in second_result.get("verdicts") or []
+                if isinstance(item, dict)
+            }
+
+    removed_count = 0
+    for verdict in verdicts:
+        claim_id = verdict["claim_id"]
+        outcome = applied.get(claim_id)
+        if verdict["initial_status"] == "supported":
+            verdict["final_status"] = "supported"
+            continue
+        if outcome and outcome.get("action") == "replace":
+            second = reverification.get(claim_id) or {}
+            second_status = str(second.get("status") or "uncertain").strip().lower()
+            if second_status == "supported":
+                verdict["final_status"] = "supported"
+                verdict["reverification"] = "supported"
+                continue
+            candidate = candidate_by_id.get(claim_id)
+            if candidate:
+                # A replacement mutates the live claim text before the second
+                # pass. Locate that mutated claim by its replacement text when
+                # the reverification rejects it, rather than using the stale
+                # pre-repair candidate ID.
+                removal_candidate = dict(candidate)
+                replacement = str((outcome or {}).get("replacement") or "")
+                if replacement:
+                    removal_candidate["claim_text"] = replacement
+                _apply_outline_claim_repair(
+                    outline,
+                    removal_candidate,
+                    action="remove",
+                    replacement="",
+                    verdict_status=verdict["initial_status"],
+                    evidence_ids=verdict.get("evidence_ids") or [],
+                )
+            verdict["repair_action"] = "replace_then_remove"
+            verdict["reverification"] = second_status or "unavailable"
+        verdict["final_status"] = "removed"
+        removed_count += 1
+
     return {
         **base,
-        "status": str(result.get("status") or "completed"),
-        "supported_count": int(result.get("supported_count") or 0),
-        "unsupported_count": int(result.get("unsupported_count") or 0),
-        "uncertain_count": int(result.get("uncertain_count") or 0),
+        "status": "completed",
+        "supported_count": sum(1 for item in verdicts if item["initial_status"] == "supported"),
+        "unsupported_count": sum(1 for item in verdicts if item["initial_status"] == "unsupported"),
+        "contradicted_count": sum(1 for item in verdicts if item["initial_status"] == "contradicted"),
+        "uncertain_count": sum(1 for item in verdicts if item["initial_status"] == "uncertain"),
+        "repair_attempted_count": len(needs_repair),
+        "removed_count": removed_count,
+        "unresolved_count": sum(1 for item in verdicts if item["final_status"] not in {"supported", "removed"}),
         "verdicts": verdicts,
+        "shortfalls": [
+            {
+                "claim_id": item["claim_id"],
+                "source_section_id": item["source_section_id"],
+                "status": item["initial_status"],
+                "reason": "strong_assertion_removed_after_reverification",
+                "evidence_ids": item.get("evidence_ids") or [],
+            }
+            for item in verdicts
+            if item["final_status"] == "removed"
+        ],
     }
 
 

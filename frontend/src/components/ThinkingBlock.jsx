@@ -89,7 +89,13 @@ const ThinkingBlock = ({
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-    return lines[lines.length - 1] || '正在等待模型响应...'
+    const latestLine = lines[lines.length - 1] || ''
+    // “检索完成”是已经结束的阶段，不能继续作为“当前正在做什么”展示。
+    // 兼容旧文案中带有 total_ms 的情况，避免思考计时旁出现检索耗时。
+    if (/^检索完成(?:[，,：:]|\s|$)/.test(latestLine)) {
+      return '正在整理上下文...'
+    }
+    return latestLine || '正在等待模型响应...'
   }, [agentRunning, agentTrace?.taskStatus?.current, answerStarted, content, isStreaming, webSearchRunning])
 
   // 思考阶段是否已结束：流式中以「正文首 token 到达」为准（answerStarted），
@@ -181,7 +187,7 @@ const ThinkingBlock = ({
           thinkingMs={thinkingMs || 0}
           activityOnly={!hasThinkingContent && (hasAgentTrace || hasWebSearchActivity)}
         />
-        {activeStageText && (
+        {!expanded && activeStageText && (
           <>
             <span className={`h-3 w-px flex-shrink-0 ${darkMode ? 'bg-white/10' : 'bg-[#dedad7]'}`} aria-hidden="true" />
             <span

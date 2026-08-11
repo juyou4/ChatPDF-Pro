@@ -61,6 +61,42 @@ export const normalizeDocumentHighlightStyle = (value) => (
     : DOCUMENT_HIGHLIGHT_STYLES.HIGHLIGHT
 );
 
+const normalizeDocumentPageRects = (value, fallbackPage, fallbackRects = [], fallbackPageSize = null) => {
+  const source = Array.isArray(value) ? value : [];
+  const normalized = source
+    .map((item) => {
+      const page = Math.max(1, Math.floor(Number(item?.page) || 0));
+      if (!page) return null;
+      const rects = (Array.isArray(item?.rects) ? item.rects : [])
+        .map(normalizeDocumentHighlightRect)
+        .filter(Boolean);
+      const pageSize = Array.isArray(item?.page_size)
+        ? item.page_size.map((number) => Number(number)).filter((number) => Number.isFinite(number))
+        : null;
+      return {
+        page,
+        rects,
+        page_size: pageSize?.length === 2 ? pageSize : null,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.page - right.page);
+
+  if (normalized.length > 0) return normalized;
+  const page = Math.max(1, Math.floor(Number(fallbackPage) || 1));
+  const rects = (Array.isArray(fallbackRects) ? fallbackRects : [])
+    .map(normalizeDocumentHighlightRect)
+    .filter(Boolean);
+  if (rects.length === 0 && !fallbackPageSize) return [];
+  return [{
+    page,
+    rects,
+    page_size: Array.isArray(fallbackPageSize) && fallbackPageSize.length === 2
+      ? fallbackPageSize.map((number) => Number(number)).filter((number) => Number.isFinite(number))
+      : null,
+  }];
+};
+
 /** Map legacy saved colors onto the current highlighter palette. */
 const LEGACY_HIGHLIGHT_COLOR_MAP = {
   '#F2C15C': '#FFE066',
@@ -110,6 +146,13 @@ export const normalizeDocumentHighlight = (value, index = 0) => {
   const rects = (Array.isArray(value.rects) ? value.rects : [])
     .map(normalizeDocumentHighlightRect)
     .filter(Boolean);
+  const pageRects = normalizeDocumentPageRects(
+    value.page_rects,
+    page,
+    rects,
+    value.page_size,
+  );
+  const primaryPageRects = pageRects.find((item) => item.page === page) || pageRects[0] || null;
   const id = String(
     value.id
     || `legacy-${page}-${createdAt}-${stableTextHash(`${text}:${index}`)}`
@@ -118,8 +161,10 @@ export const normalizeDocumentHighlight = (value, index = 0) => {
   return {
     id,
     text,
-    page,
-    rects,
+    page: primaryPageRects?.page || page,
+    rects: rects.length > 0 ? rects : (primaryPageRects?.rects || []),
+    page_rects: pageRects,
+    page_size: primaryPageRects?.page_size || null,
     coordinate_space: 'pdf_top_left_points',
     color: normalizeDocumentHighlightColor(value.color),
     style: normalizeDocumentHighlightStyle(value.style),
@@ -157,6 +202,7 @@ export const createDocumentHighlight = ({
   text,
   page,
   rects = [],
+  pageRects = [],
   id,
   color = DEFAULT_DOCUMENT_HIGHLIGHT_COLOR,
   style = DOCUMENT_HIGHLIGHT_STYLES.HIGHLIGHT,
@@ -167,6 +213,7 @@ export const createDocumentHighlight = ({
     text,
     page,
     rects,
+    page_rects: pageRects,
     color: normalizeDocumentHighlightColor(color),
     style: normalizeDocumentHighlightStyle(style),
     created_at: now,
@@ -176,9 +223,11 @@ export const createDocumentHighlight = ({
 export const getDocumentHighlightFingerprint = (highlight) => {
   const normalized = normalizeDocumentHighlight(highlight);
   if (!normalized) return '';
-  const geometry = normalized.rects
-    .map((rect) => [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 10) / 10).join(','))
-    .join(';');
+  const geometry = (normalized.page_rects?.length ? normalized.page_rects : [{ page: normalized.page, rects: normalized.rects }])
+    .map((pageRects) => `${pageRects.page}:${pageRects.rects
+      .map((rect) => [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 10) / 10).join(','))
+      .join(';')}`)
+    .join('|');
   return `${normalized.page}:${normalized.text}:${geometry}`;
 };
 
@@ -194,6 +243,13 @@ export const normalizeDocumentNote = (value, index = 0) => {
   const rects = (Array.isArray(value.rects) ? value.rects : [])
     .map(normalizeDocumentHighlightRect)
     .filter(Boolean);
+  const pageRects = normalizeDocumentPageRects(
+    value.page_rects,
+    page,
+    rects,
+    value.page_size,
+  );
+  const primaryPageRects = pageRects.find((item) => item.page === page) || pageRects[0] || null;
   const hasSelectionAnchor = Boolean(text || rects.length > 0);
   const anchorType = value.anchor_type === DOCUMENT_NOTE_ANCHOR_TYPES.PAGE
     ? DOCUMENT_NOTE_ANCHOR_TYPES.PAGE
@@ -205,7 +261,9 @@ export const normalizeDocumentNote = (value, index = 0) => {
     text,
     note,
     page,
-    rects,
+    rects: rects.length > 0 ? rects : (primaryPageRects?.rects || []),
+    page_rects: pageRects,
+    page_size: primaryPageRects?.page_size || null,
     anchor_type: anchorType,
     coordinate_space: 'pdf_top_left_points',
     created_at: createdAt,
@@ -244,6 +302,7 @@ export const createDocumentNote = ({
   note,
   page,
   rects = [],
+  pageRects = [],
   anchorType,
   id,
   now = Date.now(),
@@ -254,6 +313,7 @@ export const createDocumentNote = ({
     note,
     page,
     rects,
+    page_rects: pageRects,
     anchor_type: anchorType,
     created_at: now,
     updated_at: now,

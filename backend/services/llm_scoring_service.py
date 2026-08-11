@@ -154,9 +154,15 @@ async def score_chunks(
 
     for i, score in enumerate(scores):
         if isinstance(score, (int, float)) and score is not None:
-            chunks[i]["llm_relevance_score"] = round(score, 2)
+            normalized = round(score, 2)
+            # Keep the historical field for callers/tests, but expose the
+            # semantic name used by citation alignment so query relevance and
+            # claim support are never conflated.
+            chunks[i]["llm_relevance_score"] = normalized
+            chunks[i]["query_relevance_score"] = normalized
         else:
             chunks[i]["llm_relevance_score"] = None
+            chunks[i]["query_relevance_score"] = None
 
     scored_count = sum(1 for s in scores if isinstance(s, (int, float)) and s is not None)
     logger.info(f"[LLMScoring] 评分完成: {scored_count}/{len(chunks)} 个 chunk")

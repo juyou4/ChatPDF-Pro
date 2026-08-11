@@ -32,6 +32,7 @@ const getAuditMessage = (audit) => {
   if (status === 'empty') return '没有找到足够可靠的网页来源，回答将仅使用现有文档证据。';
   if (status === 'failed') return '网页搜索未完成，回答已回退到当前可用证据。';
   if (audit?.reason === 'missing_topic') return '还需要更明确的主题才能执行网页搜索。';
+  if (audit?.reason === 'missing_paper_identity') return '未识别出当前论文题目，请提供论文标题后重试联网搜索。';
   if (audit?.reason === 'auto_policy_not_selected') return '当前问题未触发外部搜索，本轮仅使用文档与对话上下文。';
   if (status === 'skipped') return '本轮未执行网页搜索。';
   return '';
@@ -52,11 +53,18 @@ const WebSearchActivity = ({
         const safeUrl = getSafeHttpUrl(source?.url);
         const domain = getSourceDomain(safeUrl, source?.domain || source?.source);
         const title = normalizeText(source?.title || domain || `来源 ${index + 1}`, 180);
+        const evidenceType = normalizeText(source?.evidence_type, 40);
+        const evidenceLabel = {
+          academic_metadata: '元数据',
+          provider_content: '正文',
+          webpage_excerpt: '正文',
+        }[evidenceType] || '摘要';
         return {
           id: `${safeUrl || domain || title}-${index}`,
           title,
           domain,
           url: safeUrl,
+          evidenceLabel,
         };
       })
       .filter((source) => source.title)
@@ -71,6 +79,8 @@ const WebSearchActivity = ({
     Number.isFinite(Number(audit?.result_count)) ? Number(audit.result_count) : 0,
   );
   const completed = normalizedSources.length > 0 || auditStatus === 'completed';
+  const contentReadCount = Math.max(0, Number(audit?.content_read_count) || 0);
+  const contentReadFailed = Math.max(0, Number(audit?.content_read_failed) || 0);
   const requested = Boolean(status || normalizedSources.length > 0 || audit?.requested);
   const auditMessage = getAuditMessage(audit);
   const [expanded, setExpanded] = useState(() => (
@@ -94,7 +104,7 @@ const WebSearchActivity = ({
   const title = isSearching
     ? '正在搜索网页'
     : completed
-      ? `已检索 ${sourceCount || normalizedSources.length} 个网页`
+      ? `已检索 ${sourceCount || normalizedSources.length} 个来源${contentReadCount > 0 ? ` · 读取 ${contentReadCount} 篇正文` : ''}`
       : auditStatus === 'empty'
         ? '未找到可用网页来源'
         : auditStatus === 'failed'
@@ -176,6 +186,7 @@ const WebSearchActivity = ({
                     <Globe2 className={`h-3.5 w-3.5 flex-shrink-0 ${darkMode ? 'text-gray-400' : 'text-[#918983]'}`} strokeWidth={1.8} aria-hidden="true" />
                     <span className={`min-w-0 truncate ${darkMode ? 'text-gray-300' : 'text-[#67615d]'}`}>{source.title}</span>
                     {source.domain && <span className={`min-w-0 flex-shrink truncate text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-[#918983]'}`}>{source.domain}</span>}
+                    <span className={`flex-shrink-0 rounded-[4px] px-1 py-0.5 text-[10.5px] ${darkMode ? 'bg-white/[0.05] text-gray-500' : 'bg-[#f1eeeb] text-[#8b817b]'}`}>{source.evidenceLabel}</span>
                     {source.url && <ExternalLink className="ml-auto h-3.5 w-3.5 flex-shrink-0 opacity-0 transition-opacity group-hover/source:opacity-100" strokeWidth={1.8} aria-hidden="true" />}
                   </>
                 );
@@ -208,6 +219,11 @@ const WebSearchActivity = ({
                     : darkMode ? 'text-gray-500' : 'text-gray-500'
                 }`}>
                   {auditMessage}
+                </p>
+              )}
+              {!isSearching && completed && contentReadFailed > 0 && (
+                <p className={`px-2 py-1 text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                  {contentReadFailed} 个网页正文读取失败，已保留可用搜索摘要。
                 </p>
               )}
             </div>
@@ -293,6 +309,9 @@ const WebSearchActivity = ({
                         {source.domain}
                       </span>
                     )}
+                    <span className={`flex-shrink-0 rounded-[4px] px-1 py-0.5 text-[10px] ${darkMode ? 'bg-white/[0.05] text-gray-500' : 'bg-[#f1eeeb] text-[#8b817b]'}`}>
+                      {source.evidenceLabel}
+                    </span>
                     {source.url && (
                       <ExternalLink className="ml-auto h-3 w-3 flex-shrink-0 opacity-0 transition-opacity group-hover/source:opacity-100" strokeWidth={1.8} aria-hidden="true" />
                     )}
@@ -332,6 +351,11 @@ const WebSearchActivity = ({
                   : darkMode ? 'text-gray-500' : 'text-gray-500'
               }`}>
                 {auditMessage}
+              </p>
+            )}
+            {!isSearching && completed && contentReadFailed > 0 && (
+              <p className={`px-1.5 py-1 text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                {contentReadFailed} 个网页正文读取失败，已保留可用搜索摘要。
               </p>
             )}
           </div>

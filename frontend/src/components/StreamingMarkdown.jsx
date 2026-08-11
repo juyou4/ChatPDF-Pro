@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { replaceInlineCitationRefs } from '../utils/citationUtils';
+import { replaceInlineCitationRefs, replaceWebCitationRefs } from '../utils/citationUtils';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -217,13 +217,18 @@ export const processCitationRefs = (text, citations) => {
 };
 
 /**
- * 将联网搜索来源引用 [N] 转换为 <wsource data-idx="N"> 标签
- * 仅在 N 在 webSearchSources 范围内且未被 PDF citation 占用时生效。
+ * 将联网来源的 [Wn] 转换为独立标签；同时兼容没有 PDF 编号冲突的
+ * 历史回答 [n]。新回答必须使用 [Wn]。
  */
 export const processWebSearchCitationRefs = (text, webSearchSources) => {
   if (!text || !webSearchSources || webSearchSources.length === 0) return text;
   const max = webSearchSources.length;
-  return replaceInlineCitationRefs(text, (match, halfWidthRef, fullWidthRef, offset, source) => {
+  let processed = replaceWebCitationRefs(text, (match, halfWidthRef, fullWidthRef) => {
+    const n = parseInt(halfWidthRef ?? fullWidthRef, 10);
+    if (n < 1 || n > max) return match;
+    return `<wsource data-idx="${n}">[W${n}]</wsource>`;
+  });
+  processed = replaceInlineCitationRefs(processed, (match, halfWidthRef, fullWidthRef, offset, source) => {
     const n = parseInt(halfWidthRef ?? fullWidthRef, 10);
     if (n < 1 || n > max) return match;
     // 如果已被 processCitationRefs 替换为 <cite...> 则跳过
@@ -231,6 +236,7 @@ export const processWebSearchCitationRefs = (text, webSearchSources) => {
     if (before.includes('<cite')) return match;
     return `<wsource data-idx="${n}">[${n}]</wsource>`;
   });
+  return processed;
 };
 
 /**

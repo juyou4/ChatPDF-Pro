@@ -51,6 +51,10 @@ import {
     normalizePdfReaderRotation,
     rotatePdfReader,
 } from '../utils/pdfReaderLayoutUtils';
+import {
+    hasSelectionText,
+    normalizePdfSelection,
+} from '../utils/pdfSelectionUtils';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -205,6 +209,7 @@ const DeferredPdfPage = ({
     cachedImage,
     onLoadSuccess,
     onRenderSuccess,
+    renderTextLayer = isActive,
     children,
 }) => {
     const holderRef = useRef(null);
@@ -291,8 +296,9 @@ const DeferredPdfPage = ({
             data-pdf-page-number={pageNumber}
             data-pdf-passive-page={isActive ? undefined : 'true'}
             data-pdf-active-page={isActive ? 'true' : undefined}
-            data-pdf-source-width={isActive ? renderedWidth : undefined}
-            data-pdf-source-height={isActive ? renderedHeight : undefined}
+            data-pdf-source-width={renderedWidth}
+            data-pdf-source-height={renderedHeight}
+            data-pdf-scale={scale}
             className={`pdf-page-frame relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_2px_15px_rgba(0,0,0,0.06)] transition-shadow duration-200 ${
                 onActivate ? 'cursor-pointer hover:shadow-[0_8px_24px_rgba(62,42,30,0.14)] focus:outline-none focus:ring-2 focus:ring-[#dc8a69]/45' : ''
             } ${darkMode ? 'pdf-page-frame--dark' : ''}`}
@@ -342,7 +348,7 @@ const DeferredPdfPage = ({
                             pageNumber={pageNumber}
                             scale={scale}
                             devicePixelRatio={devicePixelRatio}
-                            renderTextLayer={isActive}
+                            renderTextLayer={renderTextLayer}
                             renderAnnotationLayer={isActive}
                             onLoadSuccess={handleLoadSuccess}
                             onRenderSuccess={handleRenderSuccess}
@@ -370,7 +376,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const [pageBaseSize, setPageBaseSize] = useState({ width: 0, height: 0 });
     // 防抖缩放值：实际 PDF 渲染使用防抖后的值（150ms），避免频繁重渲染
     const debouncedScale = useDebouncedValue(scale, 150);
-    const [selectedText, setSelectedText] = useState('');
     const [error, setError] = useState(null);
     const [hoveredBlockId, setHoveredBlockId] = useState(null);
     const [hoverTranslationBlockId, setHoverTranslationBlockId] = useState(null);
@@ -656,39 +661,127 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         return mergeClientRectsByLine(localRects, { left: 0, top: 0 }, padding);
     }, [getCurrentPageMetrics, normalizedPageRotation]);
 
+    const getSelectionPageContext = useCallback((pageElement) => {
+        const frame = pageElement?.closest?.('[data-pdf-page-number]') || pageElement;
+        const pageNumberValue = Number(frame?.dataset?.pdfPageNumber);
+        if (!frame || !Number.isFinite(pageNumberValue) || pageNumberValue < 1) return null;
+
+        const bounds = frame.getBoundingClientRect?.();
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null;
+        const safeScale = Math.max(0.01, Number(frame.dataset?.pdfScale) || debouncedScale || 1);
+        const renderedWidth = Math.max(
+            1,
+            Number(frame.dataset?.pdfSourceWidth)
+                || (pageNumberValue === pageNumber ? pageRenderedSize.width : 0)
+                || bounds.width,
+        );
+        const renderedHeight = Math.max(
+            1,
+            Number(frame.dataset?.pdfSourceHeight)
+                || (pageNumberValue === pageNumber ? pageRenderedSize.height : 0)
+                || bounds.height,
+        );
+
+        return {
+            pageNumber: pageNumberValue,
+            pageElement: frame,
+            pageData: getPageBlockData(blockIndex, pageNumberValue),
+            pageSize: [renderedWidth / safeScale, renderedHeight / safeScale],
+            mapClientRect: (clientRect) => {
+                if (!clientRect) return null;
+                const displayRect = mapPdfReaderDisplayRectToPage({
+                    left: Number(clientRect.left) - bounds.left,
+                    top: Number(clientRect.top) - bounds.top,
+                    width: Number(clientRect.width) || 0,
+                    height: Number(clientRect.height) || 0,
+                    pageWidth: renderedWidth,
+                    pageHeight: renderedHeight,
+                    rotation: normalizedPageRotation,
+                });
+                return {
+                    left: displayRect.left / safeScale,
+                    top: displayRect.top / safeScale,
+                    width: displayRect.width / safeScale,
+                    height: displayRect.height / safeScale,
+                };
+            },
+        };
+    }, [blockIndex, debouncedScale, normalizedPageRotation, pageNumber, pageRenderedSize.height, pageRenderedSize.width]);
+
+    const isArtifactSelectionFragment = useCallback(({ pageContext, clientRects }) => {
+        const blocks = Array.isArray(pageContext?.pageData?.blocks)
+            ? pageContext.pageData.blocks
+            : [];
+        if (blocks.length === 0) return false;
+
+        const artifactBlocks = blocks.filter((block) => {
+            const type = String(block?.type || block?.block_type || '').trim().toLowerCase();
+            const role = String(block?.role || block?.semantic_role || '').trim().toLowerCase();
+            return type === 'artifact'
+                || role === 'artifact'
+                || role === 'header'
+                || role === 'footer'
+                || block?.is_artifact === true;
+        });
+        if (artifactBlocks.length === 0) return false;
+
+        return (clientRects || []).some((clientRect) => {
+            const mapped = pageContext.mapClientRect?.(clientRect);
+            if (!mapped) return false;
+            const centerX = mapped.left + mapped.width / 2;
+            const centerY = mapped.top + mapped.height / 2;
+            return artifactBlocks.some((block) => {
+                const bbox = normalizeBlockBBox(block?.bbox);
+                if (!bbox) return false;
+                return centerX >= bbox[0]
+                    && centerX <= bbox[2]
+                    && centerY >= bbox[1]
+                    && centerY <= bbox[3];
+            });
+        });
+    }, []);
+
     const handleTextSelection = () => {
         const selection = window.getSelection();
-        const text = selection.toString().trim();
-        if (text) {
-            setSelectedText(text);
-            if (onTextSelect) {
-                let anchor = null;
-                const pageElement = pageRef.current;
-                if (selection.rangeCount > 0 && pageElement && debouncedScale > 0) {
-                    const range = selection.getRangeAt(0);
-                    const ancestor = range.commonAncestorContainer;
-                    const ancestorElement = ancestor?.nodeType === 1 ? ancestor : ancestor?.parentElement;
-                    if (ancestorElement && pageElement.contains(ancestorElement)) {
-                        const metrics = getCurrentPageMetrics(pageElement);
-                        const rects = clientRectsToPageLocal(range.getClientRects(), pageElement, 1).map((rect) => ({
-                            left: rect.left / debouncedScale,
-                            top: rect.top / debouncedScale,
-                            width: rect.width / debouncedScale,
-                            height: rect.height / debouncedScale,
-                        }));
-                        anchor = {
-                            page: pageNumber,
-                            rects,
-                            coordinate_space: 'pdf_top_left_points',
-                            page_size: metrics
-                                ? [metrics.width / debouncedScale, metrics.height / debouncedScale]
-                                : undefined,
-                        };
-                    }
-                }
-                onTextSelect(text, anchor);
-            }
+        if (!hasSelectionText(selection) || !onTextSelect) return;
+
+        let fallbackAnchor = null;
+        const pageElement = pageRef.current;
+        if (selection?.rangeCount > 0 && pageElement && debouncedScale > 0) {
+            const range = selection.getRangeAt(0);
+            const metrics = getCurrentPageMetrics(pageElement);
+            const rects = clientRectsToPageLocal(range.getClientRects(), pageElement, 1).map((rect) => ({
+                left: rect.left / debouncedScale,
+                top: rect.top / debouncedScale,
+                width: rect.width / debouncedScale,
+                height: rect.height / debouncedScale,
+            }));
+            fallbackAnchor = {
+                page: pageNumber,
+                rects,
+                page_rects: rects.length > 0 ? [{
+                    page: pageNumber,
+                    rects,
+                    page_size: metrics
+                        ? [metrics.width / debouncedScale, metrics.height / debouncedScale]
+                        : undefined,
+                }] : [],
+                coordinate_space: 'pdf_top_left_points',
+                page_size: metrics
+                    ? [metrics.width / debouncedScale, metrics.height / debouncedScale]
+                    : undefined,
+            };
         }
+
+        const normalized = normalizePdfSelection({
+            selection,
+            root: pdfScrollRef.current,
+            getPageContext: getSelectionPageContext,
+            isArtifact: isArtifactSelectionFragment,
+            fallbackPage: pageNumber,
+            fallbackAnchor,
+        });
+        if (normalized?.text) onTextSelect(normalized.text, normalized.anchor);
     };
 
     const scrollToReaderPage = useCallback((targetPage, behavior = 'smooth') => {
@@ -1088,8 +1181,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
     const handleBlockClick = useCallback((event) => {
         const selection = window.getSelection?.();
-        const selectionText = selection?.toString().trim() || '';
-        if (selectionText) return;
+        if (hasSelectionText(selection)) return;
         const savedHighlight = findSavedHighlightAtPoint(event.clientX, event.clientY);
         if (savedHighlight) {
             event.stopPropagation();
@@ -1466,7 +1558,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         }
 
         const pageHighlights = (Array.isArray(savedHighlights) ? savedHighlights : [])
-            .filter((item) => Number(item?.page) === Number(pageNumber));
+            .filter((item) => Number(item?.page) === Number(pageNumber)
+                || (Array.isArray(item?.page_rects)
+                    && item.page_rects.some((pageRects) => Number(pageRects?.page) === Number(pageNumber))));
         if (pageHighlights.length === 0) {
             setSavedHighlightRects([]);
             return;
@@ -1493,7 +1587,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
         const nextRects = [];
         pageHighlights.forEach((highlight) => {
-            const storedRects = (Array.isArray(highlight?.rects) ? highlight.rects : [])
+            const pageRects = Array.isArray(highlight?.page_rects)
+                ? highlight.page_rects.find((item) => Number(item?.page) === Number(pageNumber))
+                : null;
+            const storedRects = (Array.isArray(pageRects?.rects)
+                ? pageRects.rects
+                : (Number(highlight?.page) === Number(pageNumber) && Array.isArray(highlight?.rects)
+                    ? highlight.rects
+                    : []))
                 .map(normalizeDocumentHighlightRect)
                 .filter(Boolean);
             const renderedRects = storedRects.length > 0
@@ -2047,6 +2148,10 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         <div className={readerPageStackClassName}>
                         {displayPageNumbers.map((visiblePageNumber) => {
                             const isActivePage = visiblePageNumber === pageNumber;
+                            // 保留当前页和相邻页的 text layer，允许连续阅读时跨页选取，
+                            // 但不把整篇文档都变成可选 DOM，避免长文档的布局和内存成本。
+                            const renderTextLayer = isActivePage
+                                || Math.abs(visiblePageNumber - pageNumber) <= 1;
                             const isCoverPage = isContinuousReading
                                 && pageLayout === PDF_READER_LAYOUTS.COVER
                                 && visiblePageNumber === 1;
@@ -2070,6 +2175,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                     viewerRef={ref}
                                     pageInputRef={pageRef}
                                     cachedImage={isActivePage ? cachedImage : null}
+                                    renderTextLayer={renderTextLayer}
                                     onLoadSuccess={handleFirstPageLoad}
                                     onRenderSuccess={handlePageRenderSuccess}
                                 >

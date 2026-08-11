@@ -123,6 +123,9 @@ _numeric_table_override: ContextVar[Optional[bool]] = ContextVar(
 _answer_critic_override: ContextVar[Optional[bool]] = ContextVar(
     "chatpdf_answer_critic_override", default=None
 )
+_answer_claim_verifier_override: ContextVar[Optional[bool]] = ContextVar(
+    "chatpdf_answer_claim_verifier_override", default=None
+)
 _llm_query_rewrite_override: ContextVar[Optional[bool]] = ContextVar(
     "chatpdf_llm_query_rewrite_override", default=None
 )
@@ -141,6 +144,7 @@ def apply_request_overrides(
     *,
     numeric_table: Optional[bool] = None,
     answer_critic: Optional[bool] = None,
+    answer_claim_verifier: Optional[bool] = None,
     llm_query_rewrite: Optional[bool] = None,
     bm25_synonyms: Optional[bool] = None,
     jieba_bm25: Optional[bool] = None,
@@ -159,6 +163,8 @@ def apply_request_overrides(
         _set(_numeric_table_override, bool(numeric_table))
     if answer_critic is not None:
         _set(_answer_critic_override, bool(answer_critic))
+    if answer_claim_verifier is not None:
+        _set(_answer_claim_verifier_override, bool(answer_claim_verifier))
     if llm_query_rewrite is not None:
         _set(_llm_query_rewrite_override, bool(llm_query_rewrite))
     if bm25_synonyms is not None:
@@ -222,6 +228,18 @@ def should_enable_answer_critic() -> bool:
         return bool(getattr(settings, "enable_answer_critic", False))
     except Exception:
         return False
+
+
+def should_enable_answer_claim_verifier() -> bool:
+    """Enable the bounded high-risk claim verifier independently of full critic."""
+    override = _answer_claim_verifier_override.get()
+    if override is not None:
+        return override
+    try:
+        from config import settings
+        return bool(getattr(settings, "enable_answer_claim_verifier", True))
+    except Exception:
+        return True
 
 
 def should_enable_llm_query_rewrite() -> bool:

@@ -1,0 +1,76 @@
+name: ChatPDF RAGAS Evaluation
+
+on:
+  schedule:
+    - cron: "17 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "受保护的 RAGAS 配置路径（不提交文档、答案或密钥）"
+        required: false
+        default: "backend/tests/ragas_eval_config.json"
+      results_path:
+        description: "评测结果临时路径"
+        required: false
+        default: "backend/temp/ragas_ci_results.json"
+      baseline_path:
+        description: "可选基线 JSON；留空则只检查绝对门槛"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  ragas:
+    name: Optional real-document evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RAGAS_CONFIG_PATH: ${{ inputs.config_path || 'backend/tests/ragas_eval_config.json' }}
+      RAGAS_RESULTS_PATH: ${{ inputs.results_path || 'backend/temp/ragas_ci_results.json' }}
+      RAGAS_BASELINE_PATH: ${{ inputs.baseline_path || '' }}
+      RAGAS_API_KEY: ${{ secrets.CHATPDF_RAGAS_API_KEY }}
+      RAGAS_JUDGE_API_KEY: ${{ secrets.CHATPDF_RAGAS_JUDGE_API_KEY }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install evaluation dependencies
+        run: python -m pip install -r backend/requirements-core.txt pytest
+
+      - name: Skip when protected evaluation pack is absent
+        id: availability
+        shell: bash
+        run: |
+          if [[ ! -f "$RAGAS_CONFIG_PATH" ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No protected RAGAS config was supplied; this job is intentionally non-blocking."
+          elif [[ -z "$RAGAS_JUDGE_API_KEY" ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No judge secret is configured; skipping network evaluation."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run fixed-document RAGAS evaluation
+        if: steps.availability.outputs.available == 'true'
+        working-directory: backend
+        run: python -m tests.eval_ragas --config "../$RAGAS_CONFIG_PATH" --output "../$RAGAS_RESULTS_PATH"
+
+      - name: Check RAGAS gate
+        if: steps.availability.outputs.available == 'true'
+        run: |
+          baseline_arg=()
+          if [[ -n "$RAGAS_BASELINE_PATH" && -f "$RAGAS_BASELINE_PATH" ]]; then
+            baseline_arg=(--baseline "$RAGAS_BASELINE_PATH")
+          fi
+          python backend/scripts/check_ragas_gate.py \
+            --results "$RAGAS_RESULTS_PATH" \
+            --thresholds backend/benchmarks/ragas_gate.v1.json \
+            "${baseline_arg[@]}"

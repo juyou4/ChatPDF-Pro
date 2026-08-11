@@ -13281,6 +13281,9 @@ def _citation_anchor_metadata_from_result(item: dict) -> dict:
         return {}
 
     anchor: dict = {}
+    candidate_id = _citation_anchor_value(item, "candidate_id", "retrieval_candidate_id")
+    if candidate_id not in (None, ""):
+        anchor["candidate_id"] = str(candidate_id).strip()[:96]
     page_range = _citation_anchor_value(item, "page_range")
     page = _citation_anchor_value(item, "page")
     if page in (None, "") and isinstance(page_range, (list, tuple)) and page_range:
@@ -13667,6 +13670,7 @@ def search_document_chunks(
     embedding_model: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_api_host: Optional[str] = None,
+    retrieval_identity: Optional[dict] = None,
 ) -> Tuple[List[dict], dict]:
     """检索文档 chunk，返回检索结果和各阶段耗时。
 
@@ -13748,6 +13752,12 @@ def search_document_chunks(
 
     # 检索耗时记录（需求 10.1）
     timings = {}
+    # Candidate-level observability is deliberately request-local.  The
+    # snapshot never participates in ranking and only receives opaque ids,
+    # scores, locations and stage decisions.
+    from services.retrieval_decision_snapshot import RetrievalDecisionSnapshot
+
+    decision_snapshot = RetrievalDecisionSnapshot(doc_id, identity=retrieval_identity)
     t_total = time.perf_counter()
 
     index_path = os.path.join(vector_store_dir, f"{doc_id}.index")
@@ -13767,6 +13777,13 @@ def search_document_chunks(
         _index_cache.put_index(doc_id, index, data, index_path, chunks_path)
 
     data = _require_current_vector_index_schema(data, doc_id)
+    index_meta = data.get("index_meta") if isinstance(data, dict) else {}
+    if isinstance(index_meta, dict):
+        decision_snapshot.bind_identity({
+            "parser_route": index_meta.get("parser_route"),
+            "parse_generation": index_meta.get("parse_generation"),
+            "document_source_hash": index_meta.get("document_source_hash") or index_meta.get("source_hash"),
+        })
     verified_embedding = _resolve_verified_query_embedding_identity(
         data,
         api_key=api_key,
@@ -14110,6 +14127,7 @@ def search_document_chunks(
         evidence_need=evidence_need,
     )
     _mark_retrieval_source(primary_results, "hyde" if hyde_vector is not None else "vector")
+    decision_snapshot.record_candidates(primary_results, "vector_recall")
 
     # HyDE 双路 RRF 融合：合并 HyDE 路和原始查询路的结果
     if D_orig is not None and I_orig is not None:
@@ -14122,6 +14140,13 @@ def search_document_chunks(
         vector_results = _hybrid_search.reciprocal_rank_fusion(
             primary_results, orig_results,
             k=60, top_k=search_k, chunk_key='chunk'
+        )
+        decision_snapshot.record_transition(
+            primary_results,
+            vector_results,
+            "rrf",
+            included_reason="hyde_rrf_selected",
+            excluded_reason="hyde_rrf_not_selected",
         )
         logger.info(
             f"[{doc_id}] HyDE 双路 RRF 融合: "
@@ -14246,6 +14271,7 @@ def search_document_chunks(
                 evidence_need=evidence_need,
             )
             _mark_retrieval_source(bm25_results, "bm25")
+            decision_snapshot.record_candidates(bm25_results, "bm25_recall", score_keys=("bm25_score", "score"))
         except Exception as e:
             logger.warning(f"[{doc_id}] BM25 检索失败，跳过混合检索: {e}")
             bm25_results = []
@@ -14281,11 +14307,18 @@ def search_document_chunks(
                 logger.info(f"[{doc_id}] 向量召回不可用，使用 BM25-only 候选 {len(results)} 条")
     else:
         results = sorted(vector_results, key=lambda x: x.get("similarity", 0), reverse=True)
+    decision_snapshot.record_candidates(
+        results,
+        "rrf",
+        score_keys=("rrf_score", "combined_score", "similarity", "score"),
+        reason="hybrid_rrf_selected" if use_hybrid and bm25_results else "vector_ranked",
+    )
 
     # --- 意群级别检索 + RRF 融合（在纯向量/rerank 检索之后） ---
     # 意群检索计时开始
     t0 = time.perf_counter()
     _emit_retrieval_progress(progress_callback, "group_search_start", "正在融合语义意群结果...")
+    pre_group_results = list(results)
     if query_vector is not None:
         results = _merge_with_group_search(
             doc_id=doc_id,
@@ -14302,6 +14335,13 @@ def search_document_chunks(
         results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
     else:
         logger.info(f"[{doc_id}] 跳过意群级融合：查询向量不可用")
+    decision_snapshot.record_transition(
+        pre_group_results,
+        results,
+        "semantic_group",
+        included_reason="semantic_group_fusion",
+        excluded_reason="semantic_group_filter",
+    )
     # 意群检索计时结束（仅在实际执行时记录）
     group_search_elapsed = round((time.perf_counter() - t0) * 1000, 1)
     if group_search_elapsed > 0.1:
@@ -14343,11 +14383,19 @@ def search_document_chunks(
             post_clean_top_k,
             min(len(results), max(top_k * 4, 24)),
         )
+    pre_quality_results = list(results)
     results = _unified_post_clean(
         results,
         analysis_query,
         post_clean_top_k,
         evidence_need,
+    )
+    decision_snapshot.record_transition(
+        pre_quality_results,
+        results,
+        "threshold",
+        included_reason="quality_threshold_passed",
+        excluded_reason="quality_threshold_or_noise_filter",
     )
     results = _annotate_results_for_evidence_rerank(
         doc_id=doc_id,
@@ -14370,7 +14418,15 @@ def search_document_chunks(
     )
     results = _mark_numeric_table_support_chunks(results, analysis_query)
     results = _dedupe_numeric_table_evidence_units(results, analysis_query)
+    pre_type_results = list(results)
     results = _sanitize_by_chunk_type(results, analysis_query, decision)
+    decision_snapshot.record_transition(
+        pre_type_results,
+        results,
+        "dedupe",
+        included_reason="type_policy_passed",
+        excluded_reason="duplicate_or_type_policy",
+    )
     if use_rerank:
         results, pre_cap_stats = _apply_group_pre_cap(results)
         page_capped_results, page_pre_cap_stats = _apply_page_pre_cap(results)
@@ -14383,6 +14439,7 @@ def search_document_chunks(
                 "group": pre_cap_stats,
                 "page": page_pre_cap_stats,
             }
+    pre_rank_results = list(results)
     results = _finalize_with_optional_rerank(
         query=analysis_query,
         results=results,
@@ -14395,6 +14452,13 @@ def search_document_chunks(
         timings=timings,
         progress_callback=progress_callback,
         conditional_rerank_active=conditional_rerank_active,
+    )
+    decision_snapshot.record_transition(
+        pre_rank_results,
+        results,
+        "rerank" if use_rerank else "final_rank",
+        included_reason="rerank_or_final_rank_selected",
+        excluded_reason="rerank_floor_or_top_k",
     )
     results = _prioritize_numeric_table_results(results, analysis_query)
     results = _ensure_structured_table_row_shard_results(
@@ -14429,16 +14493,30 @@ def search_document_chunks(
     )
     if page_scope_ranges:
         page_scope_candidates = len(results)
+        pre_scope_results = list(results)
         results = _filter_results_to_intent_page_scope(results, page_scope_ranges)
+        decision_snapshot.record_transition(
+            pre_scope_results,
+            results,
+            "page_scope",
+            included_reason="intent_page_scope",
+            excluded_reason="outside_intent_page_scope",
+        )
         timings["page_scope_candidate_count"] = page_scope_candidates
         timings["page_scope_result_count"] = len(results)
+    for item in results:
+        if isinstance(item, dict):
+            item["retrieval_candidate_id"] = decision_snapshot.candidate_id(item)
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
+    timings["_decision_snapshot"] = decision_snapshot.to_dict()
     logger.info(f"[{doc_id}] 检索耗时: {timings}")
     _emit_retrieval_progress(
         progress_callback,
         "complete",
-        f"检索完成，共耗时 {timings['total_ms']}ms。",
+        # 检索耗时通过结构化 timings 传递给诊断和任务账本；不要把内部计时
+        # 拼进实时思考文案，否则用户会在模型仍在思考时看到“检索耗时”。
+        "检索完成，正在整理上下文...",
         timings=timings,
     )
 
@@ -14648,6 +14726,7 @@ def get_relevant_context(
     embedding_model: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_api_host: Optional[str] = None,
+    retrieval_identity: Optional[dict] = None,
 ) -> Tuple[str, dict]:
     """获取与查询相关的上下文文本和检索元数据
 
@@ -14711,6 +14790,7 @@ def get_relevant_context(
         embedding_model=embedding_model,
         embedding_provider=embedding_provider,
         embedding_api_host=embedding_api_host,
+        retrieval_identity=retrieval_identity,
     )
 
     config = _rag_config_singleton
@@ -14735,6 +14815,12 @@ def get_relevant_context(
             config.max_token_budget = dynamic_budget
 
     # 尝试使用语义意群增强检索
+    from services.retrieval_decision_snapshot import RetrievalDecisionSnapshot
+
+    decision_snapshot = RetrievalDecisionSnapshot.from_dict(
+        timings.pop("_decision_snapshot", None)
+    )
+
     if config.enable_semantic_groups and semantic_groups_current and not prefer_raw_chunk_context:
         try:
             context_str, retrieval_meta = _build_context_with_groups(
@@ -14757,6 +14843,14 @@ def get_relevant_context(
                 retrieval_meta["query_type"] = retrieval_meta.get("query_type") or query_type
                 retrieval_meta["evidence_need"] = list(evidence_need)
                 retrieval_meta["search_query"] = query
+                decision_snapshot.mark_context(
+                    retrieval_meta.get("_context_segments") or [],
+                    token_budget=int((retrieval_meta.get("diagnostics") or {}).get("context_assembly", {}).get("token_budget_limit") or 0),
+                    token_used=int((retrieval_meta.get("diagnostics") or {}).get("context_assembly", {}).get("token_budget_used") or 0),
+                )
+                retrieval_meta["retrieval_run_id"] = decision_snapshot.retrieval_run_id
+                retrieval_meta["decision_snapshot"] = decision_snapshot.to_dict()
+                retrieval_meta.setdefault("diagnostics", {})["decision_snapshot"] = decision_snapshot.summary()
                 return context_str, retrieval_meta
         except Exception as e:
             # 意群增强失败，回退到简单拼接
@@ -14989,6 +15083,7 @@ def get_relevant_context(
     retrieval_meta["_context_segments"] = [
         _copy_runtime_visual_provenance(entry["item"], {
             "ref": idx + 1,
+            "candidate_id": decision_snapshot.candidate_id(entry["item"]),
             "evidence_id": entry["item"].get("evidence_id") or f"{doc_id}:fallback:{idx + 1}",
             "doc_id": doc_id,
             "context_id": entry["item"].get("context_id", ""),
@@ -15018,6 +15113,15 @@ def get_relevant_context(
         })
         for idx, entry in enumerate(layered_entries)
     ]
+
+    decision_snapshot.mark_context(
+        retrieval_meta.get("_context_segments") or [],
+        token_budget=config.max_token_budget,
+        token_used=token_used,
+    )
+    retrieval_meta["retrieval_run_id"] = decision_snapshot.retrieval_run_id
+    retrieval_meta["decision_snapshot"] = decision_snapshot.to_dict()
+    retrieval_meta.setdefault("diagnostics", {})["decision_snapshot"] = decision_snapshot.summary()
 
     if page_scope_ranges:
         retrieval_meta["page_scope"] = {
@@ -15102,6 +15206,7 @@ def _build_fallback_citation_from_result(
 
     citation = _copy_runtime_visual_provenance(item, {
         "ref": ref,
+        "candidate_id": item.get("retrieval_candidate_id") or item.get("candidate_id", ""),
         "evidence_id": item.get("evidence_unit_id") or item.get("evidence_id") or f"chunk-{ref - 1}:{page}",
         "context_id": item.get("context_id", ""),
         "block_id": item.get("block_id", ""),
@@ -15556,6 +15661,7 @@ def _build_context_with_groups(
         text = str(citation.get("source_text") or getattr(group, text_attr, "") or "")
         segment = {
             "ref": idx + 1,
+            "candidate_id": citation.get("candidate_id", ""),
             "evidence_id": f"{doc_id}:group:{idx + 1}",
             "doc_id": doc_id,
             "chunk_id": None,
@@ -15699,6 +15805,7 @@ def _rank_groups_by_results(
         best_chunk_meta_out.clear()
         for group_id, item in group_best_results.items():
             metadata = _citation_anchor_metadata_from_result(item)
+            metadata["candidate_id"] = item.get("retrieval_candidate_id") or item.get("candidate_id", "")
             direct_context_text = (_build_context_text_for_result(item) or "").strip()
             if direct_context_text:
                 metadata["_direct_context_text"] = direct_context_text

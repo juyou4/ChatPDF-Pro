@@ -1,0 +1,37 @@
+{
+  "version": "ragas-gate-v1",
+  "description": "MinerU 主路线固定问题集的非联网评测结果门槛；不代表概率校准。",
+  "sample_policy": {
+    "min_total_samples": 1,
+    "min_ragas_evaluated_samples": 1,
+    "max_error_ratio": 0.1,
+    "max_nan_ratio": 0.0
+  },
+  "required_metrics": {
+    "faithfulness": {
+      "min": 0.8,
+      "min_valid_count": 1
+    },
+    "context_precision": {
+      "min": 0.8,
+      "min_valid_count": 1
+    },
+    "context_recall": {
+      "min": 0.8,
+      "min_valid_count": 1
+    },
+    "answer_correctness": {
+      "min": 0.7,
+      "min_valid_count": 1
+    }
+  },
+  "optional_metrics": [
+    "answer_relevancy"
+  ],
+  "allowed_regression": {
+    "faithfulness": 0.03,
+    "context_precision": 0.03,
+    "context_recall": 0.03,
+    "answer_correctness": 0.03
+  }
+}

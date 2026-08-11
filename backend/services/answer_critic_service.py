@@ -37,7 +37,7 @@ _ISSUE_TYPES = frozenset({
 _DEFAULT_ISSUE_TYPE = "other"
 _MAX_ISSUES = 5
 _MAX_CLAIM_VERIFIER_CANDIDATES = 8
-_CLAIM_VERDICTS = frozenset({"supported", "unsupported", "uncertain"})
+_CLAIM_VERDICTS = frozenset({"supported", "unsupported", "contradicted", "uncertain"})
 _ANSWER_CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 _ANSWER_NUMBER_RE = re.compile(r"(?<![\w])[-+]?\d+(?:\.\d+)?%?(?![\w])")
 _REPAIRABLE_ISSUE_TYPES = frozenset({
@@ -324,9 +324,10 @@ def _normalize_claim_verdicts(
         reason = " ".join(str(item.get("reason") or "").split())[:240]
         if not item:
             reason = "verifier_omitted_claim"
-        elif status == "supported" and not evidence_ids:
+        elif status in {"supported", "contradicted"} and not evidence_ids:
+            original_status = status
             status = "uncertain"
-            reason = "supported_without_authorized_evidence"
+            reason = f"{original_status}_without_authorized_evidence"
         verdicts.append({
             "claim_id": claim_id,
             "status": status,
@@ -347,8 +348,10 @@ async def critique_evidence_claims(
 ) -> Optional[dict[str, Any]]:
     """Independently check a small set of already-bound high-value claims.
 
-    This is a diagnostic side pass.  It returns verdicts only and has no API
-    for rewriting the summary that produced the claims.
+    This pass never retrieves new evidence and never authorizes an unknown
+    citation.  ``contradicted`` is intentionally distinct from ``unsupported``:
+    the former means an attached excerpt points in the opposite direction,
+    while the latter means the excerpt does not establish the claim.
     """
     candidates = _normalize_claim_verifier_candidates(claims)
     if (
@@ -362,10 +365,12 @@ async def critique_evidence_claims(
         "the evidence excerpts attached to that same claim. Preserve subjects, comparison "
         "direction, numbers, scope, uncertainty, negation, and limitation conditions. "
         "Do not use outside knowledge and do not rewrite any claim. Output ONLY JSON: "
-        '{"verdicts":[{"claim_id":"...","status":"supported|unsupported|uncertain",'
+        '{"verdicts":[{"claim_id":"...","status":"supported|unsupported|contradicted|uncertain",'
         '"reason":"short reason","evidence_ids":["IDs actually used"]}]}. '
-        "Return one verdict for every input claim. A supported verdict must cite at least "
-        "one evidence_id supplied with that claim."
+        "Return one verdict for every input claim. A supported or contradicted verdict must cite "
+        "at least one evidence_id supplied with that claim. Use contradicted only when the "
+        "attached evidence explicitly points in the opposite direction; use unsupported when "
+        "it simply does not establish the claim."
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -413,6 +418,7 @@ async def critique_evidence_claims(
             "candidate_count": len(candidates),
             "supported_count": counts["supported"],
             "unsupported_count": counts["unsupported"],
+            "contradicted_count": counts["contradicted"],
             "uncertain_count": counts["uncertain"],
             "verdicts": verdicts,
         }

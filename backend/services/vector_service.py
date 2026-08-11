@@ -451,6 +451,7 @@ async def vector_context(
     embedding_api_host: str = "",
     provider: str = "",
     api_host: str = "",
+    retrieval_identity: Optional[dict] = None,
 ) -> dict:
     """获取相关上下文的包装函数，支持中间件钩子
 
@@ -488,6 +489,7 @@ async def vector_context(
         "embedding_api_host": embedding_api_host,
         "provider": embedding_provider,
         "api_host": embedding_api_host,
+        "retrieval_identity": retrieval_identity,
     }
 
     payload = await apply_middlewares_before(payload, middlewares or [])
@@ -523,6 +525,7 @@ async def vector_context(
                 embedding_model=embedding_model,
                 embedding_provider=embedding_provider,
                 embedding_api_host=embedding_api_host,
+                retrieval_identity=retrieval_identity,
             ),
             timeout=60.0  # 60 秒超时
         )

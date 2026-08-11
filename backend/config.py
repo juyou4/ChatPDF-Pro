@@ -428,6 +428,14 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("enable_answer_critic", "CHATPDF_ENABLE_ANSWER_CRITIC"),
         description="是否启用答案自审（检测幻觉，增加延迟）"
     )
+    enable_answer_claim_verifier: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_answer_claim_verifier",
+            "CHATPDF_ENABLE_ANSWER_CLAIM_VERIFIER",
+        ),
+        description="是否对高风险回答陈述做选择性证据核验（无辅助模型时自动跳过）",
+    )
     enable_answer_critic_repair: bool = Field(
         default=True,
         validation_alias=AliasChoices(
@@ -437,12 +445,12 @@ class AppSettings(BaseSettings):
         description="答案自审发现高风险时，非流式模式是否使用同一证据做一次受控修复",
     )
     enable_reading_outline_claim_verifier: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices(
             "enable_reading_outline_claim_verifier",
             "CHATPDF_ENABLE_READING_OUTLINE_CLAIM_VERIFIER",
         ),
-        description="是否对阅读总结中的关键结果、强比较和限制条件做选择性语义核验",
+        description="是否对阅读总结中的关键结果、强比较和限制条件做选择性语义核验与受控单句修复",
     )
     enable_reading_outline_visual_preflight: bool = Field(
         default=True,
@@ -491,6 +499,30 @@ class AppSettings(BaseSettings):
             "CHATPDF_PAPER_METADATA_SEMANTIC_SCHOLAR_API_KEY",
         ),
         description="可选 Semantic Scholar API Key",
+    )
+    enable_paper_metadata_openalex: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "enable_paper_metadata_openalex",
+            "CHATPDF_ENABLE_PAPER_METADATA_OPENALEX",
+        ),
+        description="是否在基础元数据仍缺失时启用 OpenAlex；默认关闭",
+    )
+    enable_paper_metadata_arxiv: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "enable_paper_metadata_arxiv",
+            "CHATPDF_ENABLE_PAPER_METADATA_ARXIV",
+        ),
+        description="是否在基础元数据仍缺失时启用 arXiv；默认关闭",
+    )
+    enable_paper_metadata_openreview: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "enable_paper_metadata_openreview",
+            "CHATPDF_ENABLE_PAPER_METADATA_OPENREVIEW",
+        ),
+        description="是否在基础元数据仍缺失时启用 OpenReview；默认关闭",
     )
 
     # ==================== P3.6 引用增强（two-pass citation injection）====================

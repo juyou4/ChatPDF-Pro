@@ -9,6 +9,7 @@
  * 篡改数学表达式。
  */
 export const INLINE_CITATION_REGEX = /(?<!!)(?:\[(\d{1,3})\](?!\()|【(\d{1,3})】)/g;
+export const WEB_CITATION_REGEX = /(?:\[W(\d{1,3})\](?!\()|【W(\d{1,3})】)/gi;
 
 const looksProtectedByCodeOrMath = (text, offset) => {
   if (!text || offset <= 0) return false;
@@ -80,6 +81,18 @@ export const replaceInlineCitationRefs = (text = '', replacer) => {
   return source.replace(INLINE_CITATION_REGEX, (match, halfWidthRef, fullWidthRef, offset) => {
     const candidate = { 0: match, 1: halfWidthRef, 2: fullWidthRef, index: offset };
     if (!isInlineCitationMatch(source, candidate)) return match;
+    return replacer(match, halfWidthRef, fullWidthRef, offset, source);
+  });
+};
+
+/**
+ * 网页证据使用独立的 [Wn] 命名空间，避免与 PDF 的 [n] 引用冲突。
+ */
+export const replaceWebCitationRefs = (text = '', replacer) => {
+  const source = String(text);
+  if (typeof replacer !== 'function') return source;
+  return source.replace(WEB_CITATION_REGEX, (match, halfWidthRef, fullWidthRef, offset) => {
+    if (looksProtectedByCodeOrMath(source, offset)) return match;
     return replacer(match, halfWidthRef, fullWidthRef, offset, source);
   });
 };

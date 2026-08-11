@@ -20,6 +20,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import re
 from typing import Optional
 import xml.etree.ElementTree as ET
@@ -66,6 +67,11 @@ class SearchManager:
     _NOISY_DOMAIN_HINTS = (
         "instagram.com", "ameblo.jp", "weibo.com", "x.com", "twitter.com", "facebook.com",
     )
+    _MIN_RELEVANCE_SCORE = 0.08
+    _TITLE_ANCHOR_STOPWORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+        "is", "of", "on", "or", "the", "to", "via", "with",
+    }
 
     # 无需 API Key 的引擎
     _PROVIDERS_NO_KEY = {
@@ -149,23 +155,180 @@ class SearchManager:
 
     @staticmethod
     async def _auto_search(query: str, max_results: int = 5) -> list[dict]:
-        """自动搜索：先 Bing RSS，再回退到 DuckDuckGo"""
-        providers = (
+        """自动搜索：当前引擎必须产出相关结果，否则继续回退。"""
+        providers = []
+        if (
+            SearchManager._quoted_query_anchors(query)
+            and re.search(r"\b(?:venue|publication|journal|conference|doi|authors?)\b", query, re.IGNORECASE)
+        ):
+            providers.append(("academic_metadata", SearchManager._academic_metadata_search))
+        providers.extend((
             ("bing", SearchManager._bing_search),
             ("duckduckgo", SearchManager._ddg_search),
-        )
+        ))
         for name, method in providers:
             try:
                 results = await method(query, max_results=max_results)
             except Exception as e:
                 logger.warning("自动搜索 %s 失败: %s", name, _safe_search_error(e))
                 continue
-            if results:
-                logger.info(f"自动搜索命中 provider={name}, 结果数={len(results)}")
-                return results
-            logger.info(f"自动搜索 provider={name} 返回空结果，尝试下一个引擎")
+            if not results:
+                logger.info(f"自动搜索 provider={name} 返回空结果，尝试下一个引擎")
+                continue
+            relevant_results = SearchManager._rerank_and_filter_results(
+                query,
+                SearchManager._deduplicate_results(results),
+            )
+            if relevant_results:
+                logger.info(
+                    "自动搜索命中 provider=%s, 原始结果数=%s, 相关结果数=%s",
+                    name,
+                    len(results),
+                    len(relevant_results),
+                )
+                return relevant_results[:max_results]
+            logger.info(
+                "自动搜索 provider=%s 仅返回离题结果，尝试下一个引擎",
+                name,
+            )
         logger.warning("自动搜索未返回结果")
         return []
+
+    @staticmethod
+    async def _academic_metadata_search(query: str, max_results: int = 5) -> list[dict]:
+        """Resolve a quoted paper title through keyless academic metadata providers."""
+        anchors = SearchManager._quoted_query_anchors(query)
+        if not anchors:
+            return []
+        title = anchors[0]
+        try:
+            openalex_sources = await SearchManager._openalex_metadata_sources(
+                title,
+                anchors,
+                max_results=max_results,
+            )
+            if openalex_sources:
+                return openalex_sources
+        except Exception as exc:
+            logger.info("OpenAlex 论文元数据搜索失败: %s", type(exc).__name__)
+
+        try:
+            from services.paper_metadata_hydration_service import hydrate_paper_metadata
+
+            hydration = await hydrate_paper_metadata(
+                {"title": title},
+                timeout_seconds=6.0,
+                required_fields=("title", "venue"),
+                enabled_provider_names=("crossref",),
+            )
+        except Exception as exc:
+            logger.info("Crossref 论文元数据搜索失败: %s", type(exc).__name__)
+            return []
+
+        metadata = hydration.get("metadata") if isinstance(hydration, dict) else {}
+        if not isinstance(metadata, dict):
+            return []
+        resolved_title = str(metadata.get("title") or "").strip()
+        if not resolved_title:
+            return []
+        venue = str(metadata.get("venue") or "").strip()
+        year = str(metadata.get("year") or "").strip()
+        doi = str(metadata.get("doi") or "").strip()
+        url = str(metadata.get("url") or "").strip()
+        if not url and doi:
+            url = f"https://doi.org/{doi}"
+        provenance = hydration.get("field_provenance") if isinstance(hydration, dict) else {}
+        venue_provider = str((provenance or {}).get("venue") or "academic metadata").strip()
+        detail_parts = [f"Metadata provider: {venue_provider}."]
+        if venue:
+            detail_parts.append(f"Venue: {venue}.")
+        if year:
+            detail_parts.append(f"Publication year: {year}.")
+        if doi:
+            detail_parts.append(f"DOI: {doi}.")
+        result = {
+            "title": f"{resolved_title}{f' — {venue}' if venue else ''}",
+            "url": url,
+            "snippet": " ".join(detail_parts),
+        }
+        if not SearchManager._result_matches_quoted_anchor(result, anchors):
+            return []
+        return [result][:max_results]
+
+    @staticmethod
+    async def _openalex_metadata_sources(
+        title: str,
+        anchors: list[str],
+        *,
+        max_results: int,
+    ) -> list[dict]:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(6.0),
+            follow_redirects=True,
+            trust_env=False,
+            headers={"User-Agent": "ChatPDF/3 academic-web-search"},
+        ) as client:
+            response = await client.get(
+                "https://api.openalex.org/works",
+                params={"search": title, "per-page": min(8, max(3, max_results))},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        return SearchManager._openalex_payload_to_sources(
+            payload,
+            anchors,
+            max_results=max_results,
+        )
+
+    @staticmethod
+    def _openalex_payload_to_sources(
+        payload: dict,
+        anchors: list[str],
+        *,
+        max_results: int,
+    ) -> list[dict]:
+        records = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(records, list):
+            return []
+        sources: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            resolved_title = str(record.get("title") or "").strip()
+            location = record.get("primary_location") if isinstance(record.get("primary_location"), dict) else {}
+            venue_record = location.get("source") if isinstance(location.get("source"), dict) else {}
+            venue = str(venue_record.get("display_name") or "").strip()
+            year = str(record.get("publication_year") or "").strip()
+            doi = str(record.get("doi") or "").strip()
+            url = str(location.get("landing_page_url") or doi or record.get("id") or "").strip()
+            work_type = str(record.get("type") or "").strip()
+            if not resolved_title or not url:
+                continue
+            detail_parts = ["Metadata provider: OpenAlex."]
+            if venue:
+                detail_parts.append(f"Venue: {venue}.")
+            if work_type:
+                detail_parts.append(f"Work type: {work_type}.")
+            if year:
+                detail_parts.append(f"Publication year: {year}.")
+            if doi:
+                detail_parts.append(f"DOI: {doi.removeprefix('https://doi.org/')}.")
+            source = {
+                "title": f"{resolved_title}{f' - {venue}' if venue else ''}{f' ({year})' if year else ''}",
+                "url": url,
+                "snippet": " ".join(detail_parts),
+            }
+            if not SearchManager._result_matches_quoted_anchor(source, anchors):
+                continue
+            key = (url.casefold(), venue.casefold(), year)
+            if key in seen:
+                continue
+            seen.add(key)
+            sources.append(source)
+            if len(sources) >= max_results:
+                break
+        return sources
 
     @staticmethod
     def _postprocess_results(
@@ -283,9 +446,74 @@ class SearchManager:
         return score
 
     @staticmethod
+    def _quoted_query_anchors(query: str) -> list[str]:
+        return [
+            anchor.strip()
+            for anchor in re.findall(r'"([^"\r\n]{6,})"', str(query or ""))
+            if anchor.strip()
+        ]
+
+    @staticmethod
+    def _compact_anchor_text(text: str) -> str:
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(text or "").lower())
+
+    @staticmethod
+    def _result_matches_quoted_anchor(item: dict, anchors: list[str]) -> bool:
+        if not anchors:
+            return True
+        title = str(item.get("title") or "")
+        snippet = str(item.get("snippet") or "")
+        corpus_tokens = SearchManager._tokenize_for_relevance(f"{title} {snippet}")
+        title_compact = SearchManager._compact_anchor_text(title)
+        corpus_compact = SearchManager._compact_anchor_text(f"{title} {snippet}")
+
+        for anchor in anchors:
+            anchor_compact = SearchManager._compact_anchor_text(anchor)
+            if (
+                anchor_compact
+                and corpus_compact
+                and (
+                    anchor_compact in corpus_compact
+                    or title_compact in anchor_compact and len(title_compact) >= 24
+                    or (
+                        title_compact.startswith(anchor_compact[:24])
+                        and len(title_compact) >= 24
+                    )
+                )
+            ):
+                return True
+
+            anchor_tokens = {
+                token
+                for token in SearchManager._tokenize_for_relevance(anchor)
+                if token not in SearchManager._TITLE_ANCHOR_STOPWORDS
+            }
+            if not anchor_tokens:
+                continue
+            overlap_count = len(anchor_tokens & corpus_tokens)
+            # Quoted titles are identity anchors, not broad topical queries.
+            # Requiring high coverage prevents a different paper in the same
+            # topic (for example another diffusion detector) from being cited.
+            required = len(anchor_tokens) if len(anchor_tokens) <= 3 else math.ceil(len(anchor_tokens) * 0.75)
+            if overlap_count >= required:
+                return True
+        return False
+
+    @staticmethod
     def _rerank_and_filter_results(query: str, results: list[dict]) -> list[dict]:
         if not results:
             return []
+
+        quoted_anchors = SearchManager._quoted_query_anchors(query)
+        if quoted_anchors:
+            results = [
+                item
+                for item in results
+                if SearchManager._result_matches_quoted_anchor(item, quoted_anchors)
+            ]
+            if not results:
+                logger.debug("相关性重排：没有结果通过精确查询锚点，返回空")
+                return []
 
         scored = []
         for item in results:
@@ -294,21 +522,17 @@ class SearchManager:
         scored.sort(key=lambda x: x[0], reverse=True)
 
         max_score = scored[0][0] if scored else 0.0
-        if max_score <= 0.02:
+        if max_score < SearchManager._MIN_RELEVANCE_SCORE:
             logger.debug(f"相关性重排：所有结果得分过低(max={max_score:.3f})，返回空")
             return []
 
         # 自适应阈值：保留与最佳结果接近的项，过滤明显离题项
-        threshold = max(0.08, max_score * 0.35)
+        threshold = max(SearchManager._MIN_RELEVANCE_SCORE, max_score * 0.35)
         filtered = [item for score, item in scored if score >= threshold]
         logger.debug(
             f"相关性重排：共 {len(scored)} 条 → 过滤后 {len(filtered)} 条 "
             f"(max_score={max_score:.3f}, threshold={threshold:.3f})"
         )
-
-        # 至少保留 1 条最佳结果，避免全量过滤导致无来源
-        if not filtered:
-            filtered = [scored[0][1]]
 
         return filtered
 
@@ -638,22 +862,22 @@ class SearchManager:
 
 
 def format_search_results(results: list[dict]) -> str:
-    """将搜索结果格式化为编号列表，用于注入 system prompt
+    """将搜索结果格式化为独立的网页引用编号，用于注入证据消息。
 
     Args:
         results: SearchManager.search() 返回的结果列表
 
     Returns:
         格式化的字符串，如：
-        [1] 标题 - URL
+        [W1] 标题 - URL
         摘要内容...
 
-        [2] ...
+        [W2] ...
     """
     if not results:
         return ""
 
-    _SNIPPET_MAX_LEN = 400
+    _SNIPPET_MAX_LEN = 2400
 
     parts = []
     for i, item in enumerate(results, 1):
@@ -662,11 +886,17 @@ def format_search_results(results: list[dict]) -> str:
         snippet = item.get("snippet", "")
         if len(snippet) > _SNIPPET_MAX_LEN:
             snippet = snippet[:_SNIPPET_MAX_LEN] + "…"
-        entry = f"[{i}] {title}"
+        evidence_type = str(item.get("evidence_type") or "search_snippet")
+        evidence_label = {
+            "academic_metadata": "学术元数据",
+            "provider_content": "搜索服务正文",
+            "webpage_excerpt": "网页正文摘录",
+        }.get(evidence_type, "搜索摘要")
+        entry = f"[W{i}] {title}"
         if url:
             entry += f" - {url}"
         if snippet:
-            entry += f"\n{snippet}"
+            entry += f"\n证据类型：{evidence_label}\n{snippet}"
         parts.append(entry)
 
     return "\n\n".join(parts)

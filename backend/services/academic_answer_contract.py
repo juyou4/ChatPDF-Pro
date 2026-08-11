@@ -358,16 +358,26 @@ def build_academic_style_prompt(
     )
 
 
-def build_compact_academic_contract_prompt(*, agent_mode: bool = False) -> str:
+def build_compact_academic_contract_prompt(
+    *,
+    agent_mode: bool = False,
+    allow_web_evidence: bool = False,
+) -> str:
     """Compact contract for agent path (full handbook is skipped there)."""
     focus = (
         "你刚完成多跳检索。请只基于已提供的编号证据回答，不要复述检索过程。"
         if agent_mode
         else "请严格依据检索证据回答。"
     )
+    evidence_scope = "已提供的文档证据和联网证据" if allow_web_evidence else "已提供的文档证据"
+    citation_rule = (
+        "- 文档事实使用 [n]，联网事实使用 [Wn]；不得把网页编号冒充文档编号。\n"
+        if allow_web_evidence
+        else "- 每个含事实的句子末尾附 [n]；单句最多两个编号，如 [2][5]。\n"
+    )
     return (
         "【学术忠实性合同 · 精简版】\n"
-        f"- {focus}\n"
+        f"- {focus}允许使用的范围是{evidence_scope}。\n"
         "- 结构/架构/机制题先回答证据已给出的架构级拓扑或流程，再列缺失的逐层参数；"
         "不得把“层数、通道、投影或超参未给出”说成“没有结构”。\n"
         "- 复合问题逐项覆盖；任何“未给出”都要明确限定到具体字段。\n"
@@ -375,7 +385,7 @@ def build_compact_academic_contract_prompt(*, agent_mode: bool = False) -> str:
         f"- 证据不足时只输出：「{CANNOT_ANSWER_PHRASE_ZH}」+ 一句原因"
         f"（或英文 “{CANNOT_ANSWER_PHRASE_EN}”）。\n"
         "- 数值、方法名、数据集、指标名必须照抄证据，不得估算或改写。\n"
-        "- 每个含事实的句子末尾附 [n]；单句最多两个编号，如 [2][5]。\n"
+        f"{citation_rule}"
         "- 不要把多个独立事实塞进同一句再共用一个引用。\n"
         "- 不要使用预训练知识填补缺口。"
     )

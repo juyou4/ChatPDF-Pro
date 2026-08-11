@@ -86,6 +86,10 @@ import {
   openExternalHttpUrl,
   writePlainTextToClipboard,
 } from '../utils/selectionToolUtils';
+import {
+  hasSelectionText,
+  normalizePdfSelection,
+} from '../utils/pdfSelectionUtils';
 
 const isLoopbackApiHost = (value) => {
   const input = String(value || '').trim();
@@ -852,6 +856,49 @@ const isUsefulOutline = (items = [], source = '') => {
   return true;
 };
 
+const SETTINGS_SECTIONS = [
+  { id: 'common', label: '常用', description: '模型与主要工作配置', Icon: Settings },
+  { id: 'reading', label: '阅读', description: '翻译、速览与阅读行为', Icon: Type },
+  { id: 'retrieval', label: '检索', description: '召回、证据与代理策略', Icon: ListFilter },
+  { id: 'interface', label: '界面', description: '显示、动效与工具栏', Icon: SlidersHorizontal },
+  { id: 'storage', label: '存储', description: '文件位置与缓存管理', Icon: Database },
+];
+
+const SettingsSwitch = ({ checked, onChange, label, darkMode }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    aria-label={label}
+    onClick={() => onChange(!checked)}
+    className={`settings-toggle relative h-6 w-11 shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 ${
+      checked ? 'settings-toggle-active' : darkMode ? 'bg-white/15' : 'bg-gray-200'
+    }`}
+  >
+    <span className={`settings-toggle-thumb absolute left-0 top-1 h-4 w-4 rounded-full bg-white ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
+  </button>
+);
+
+const SettingsFeatureRow = ({ Icon, title, description, checked, onChange, statusLabel, statusTone = 'muted', darkMode }) => (
+  <div className="settings-feature-row grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3.5 px-5 py-4">
+    <div className={`settings-feature-icon flex h-10 w-10 items-center justify-center rounded-[12px] ${
+      checked
+        ? darkMode ? 'bg-[#D97A5D]/16 text-[#ffb49a]' : 'bg-[#fff0ea] text-[#B85F47]'
+        : darkMode ? 'bg-white/[0.055] text-gray-500' : 'bg-gray-100 text-gray-500'
+    }`}>
+      <Icon size={17} strokeWidth={2.1} />
+    </div>
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className={`text-[13px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{title}</h4>
+        {statusLabel ? <span className="settings-feature-status" data-tone={statusTone}>{statusLabel}</span> : null}
+      </div>
+      <p className={`mt-1 text-[11px] leading-[1.55] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{description}</p>
+    </div>
+    <SettingsSwitch checked={checked} onChange={onChange} label={title} darkMode={darkMode} />
+  </div>
+);
+
 const ChatPDF = () => {
   // ========== Context Hooks ==========
   const { getProviderById } = useProvider();
@@ -987,6 +1034,7 @@ const ChatPDF = () => {
   const [pretranslateError, setPretranslateError] = useState('');
   const [showAiProcessingPanel, setShowAiProcessingPanel] = useState(false);
   const [deepParseStatus, setDeepParseStatus] = useState(null);
+  const [downstreamTaskStatuses, setDownstreamTaskStatuses] = useState({});
   const [parseIdentityHydration, setParseIdentityHydration] = useState({
     docId: '',
     settled: true,
@@ -1835,6 +1883,7 @@ const ChatPDF = () => {
       setPretranslateProgress({ running: false, done: 0, total: 0 });
       setFailedTranslationBlockIds(new Set());
       setDeepParseStatus(null);
+      setDownstreamTaskStatuses({});
       setDeepParseNotice('');
       setRagIndexError('');
       setHoveredReadingBlockId(null);
@@ -1873,6 +1922,7 @@ const ChatPDF = () => {
     setPretranslateProgress({ running: false, done: 0, total: 0 });
     setFailedTranslationBlockIds(new Set());
     setDeepParseStatus(null);
+    setDownstreamTaskStatuses({});
     setDeepParseNotice('');
     setRagIndexStatus(null);
     setRagIndexNotice('');
@@ -2071,6 +2121,46 @@ const ChatPDF = () => {
     setRagIndexError(data?.status === 'failed' ? data.error || '问答索引处理失败' : '');
     return data;
   }, [docId, documentParseIdentity, isCurrentParseContext]);
+
+  const refreshDownstreamTaskStatuses = useCallback(async () => {
+    if (!docId) return {};
+    const requestContext = {
+      docId,
+      parseIdentity: documentParseIdentity,
+      epoch: parseContextRef.current.epoch,
+    };
+    const purposes = ['overview', 'reading_outline', 'section_outline'];
+    const responses = await Promise.all(purposes.map(async (purpose) => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/documents/${requestContext.docId}/ai-tasks/${purpose}?t=${Date.now()}`,
+          { cache: 'no-store' },
+        );
+        if (!response.ok) return [purpose, null];
+        return [purpose, await response.json().catch(() => null)];
+      } catch {
+        return [purpose, null];
+      }
+    }));
+    if (!isCurrentParseContext(requestContext)) return {};
+    const next = Object.fromEntries(responses.filter(([, value]) => value));
+    setDownstreamTaskStatuses(next);
+    return next;
+  }, [docId, documentParseIdentity, isCurrentParseContext]);
+
+  useEffect(() => {
+    if (!docId) return () => {};
+    let cancelled = false;
+    const refresh = () => {
+      if (!cancelled) refreshDownstreamTaskStatuses().catch(() => {});
+    };
+    refresh();
+    const timer = showAiProcessingPanel ? window.setInterval(refresh, 3000) : null;
+    return () => {
+      cancelled = true;
+      if (timer) window.clearInterval(timer);
+    };
+  }, [docId, refreshDownstreamTaskStatuses, showAiProcessingPanel]);
 
   const refreshReadingBlocksAfterDeepParse = useCallback(() => {
     // MinerU 发布后旧 block id 不再可信，先让所有旧翻译请求失效。
@@ -4077,15 +4167,19 @@ const ChatPDF = () => {
 
   const handleTextSelection = useCallback(() => {
     const selection = window.getSelection();
-    const text = selection.toString().trim();
-    if (text) {
-      if (queueAutoAnnotation(text)) return;
+    const normalized = normalizePdfSelection({
+      selection,
+      root: pdfContainerRef.current,
+      fallbackPage: currentPage,
+    });
+    if (normalized?.text) {
+      if (queueAutoAnnotation(normalized.text, normalized.anchor)) return;
       setSelectedSavedHighlightId('');
-      selectedPdfHighlightAnchorRef.current = null;
-      setSelectedText(text);
+      selectedPdfHighlightAnchorRef.current = normalized.anchor;
+      setSelectedText(normalized.text);
       setShowTextMenu(true);
     }
-  }, [queueAutoAnnotation, setSelectedText, setShowTextMenu]);
+  }, [currentPage, pdfContainerRef, queueAutoAnnotation, setSelectedText, setShowTextMenu]);
 
   const handleCloseToolbar = useCallback(() => {
     selectedPdfHighlightAnchorRef.current = null;
@@ -4129,6 +4223,7 @@ const ChatPDF = () => {
       text: selectedText,
       page: Number(anchor?.page) || currentPage,
       rects: anchor?.rects || [],
+      pageRects: anchor?.page_rects || [],
       color: resolvedColor,
       style: resolvedStyle,
     });
@@ -4189,6 +4284,7 @@ const ChatPDF = () => {
     selectedPdfHighlightAnchorRef.current = {
       page,
       rects: Array.isArray(highlight.rects) ? highlight.rects : [],
+      page_rects: Array.isArray(highlight.page_rects) ? highlight.page_rects : [],
       coordinate_space: 'pdf_top_left_points',
     };
     pendingAutoAnnotationRef.current = null;
@@ -4238,6 +4334,7 @@ const ChatPDF = () => {
       note: noteContent,
       page: Number(anchor?.page) || currentPage,
       rects: anchor?.rects || [],
+      pageRects: anchor?.page_rects || [],
     });
     if (!newNote) throw new Error('笔记内容不能为空');
 
@@ -4547,7 +4644,7 @@ const ChatPDF = () => {
   const handleRootClick = useCallback((e) => {
     if (!showTextMenu) return;
     const selection = window.getSelection();
-    const hasActiveSelection = selection && selection.toString().trim().length > 0;
+    const hasActiveSelection = hasSelectionText(selection);
     if (hasActiveSelection) return;
     if (!e.target.closest('.text-selection-toolbar-container')) {
       handleCloseToolbar();
@@ -4966,6 +5063,14 @@ const ChatPDF = () => {
   const activeRightPanelTabIndex = Math.max(0, rightPanelTabs.findIndex((item) => item.id === rightPanelMode));
   const aiProcessingItems = useMemo(() => {
     const suppressDependentTasks = isMinerUFullRoutePending;
+    const overviewTask = downstreamTaskStatuses.overview || {};
+    const summaryTask = downstreamTaskStatuses.reading_outline || {};
+    const outlineTask = downstreamTaskStatuses.section_outline || {};
+    const taskState = (task, fallback) => {
+      if (task.status === 'failed') return 'failed';
+      if (['partial', 'degraded', 'fallback'].includes(task.status)) return 'recommended';
+      return fallback;
+    };
     const summaryState = suppressDependentTasks
       ? 'idle'
       : readingOutlineLoading
@@ -4974,23 +5079,23 @@ const ChatPDF = () => {
           ? 'failed'
           : readingOutlineFallbackNotice
             ? 'recommended'
-            : 'idle';
+            : taskState(summaryTask, 'idle');
     const outlineState = suppressDependentTasks
       ? 'idle'
       : sectionOutlineLoading
-        ? 'running'
-        : sectionOutlineError
-          ? 'failed'
-          : sectionOutlineFallbackNotice
-            ? 'recommended'
-            : 'idle';
+          ? 'running'
+          : sectionOutlineError
+            ? 'failed'
+            : sectionOutlineFallbackNotice
+              ? 'recommended'
+              : taskState(outlineTask, 'idle');
     const overviewState = suppressDependentTasks
       ? 'idle'
-      : overviewLoading
-        ? 'running'
-        : overviewError
-          ? 'failed'
-          : 'idle';
+        : overviewLoading
+          ? 'running'
+          : overviewError
+            ? 'failed'
+          : taskState(overviewTask, 'idle');
     const translationState = suppressDependentTasks
       ? 'idle'
       : pretranslateProgress.running
@@ -5117,6 +5222,8 @@ const ChatPDF = () => {
                 : `用 MinerU 重建带坐标的阅读块、大纲和速览图表，手动触发才会上传 PDF${currentDeepParseStatus?.access_mode === 'direct' ? '到官方 API' : '到 Worker'}`,
         status: deepParseStatusText,
         progress: deepParseProgress,
+        events: currentDeepParseStatus?.events,
+        shortfall: currentDeepParseStatus?.shortfall,
         busy: deepParseRunning,
         actionLabel: deepParseRunning && canCancelDeepParse
           ? '取消'
@@ -5178,6 +5285,8 @@ const ChatPDF = () => {
         state: summaryState,
         desc: readingOutlineError || readingOutlineFallbackNotice || '左侧总结栏的结构化论文梳理',
         status: summaryState === 'failed' ? '生成失败' : summaryState === 'recommended' ? '已降级' : '生成中',
+        events: summaryTask.events,
+        shortfall: summaryTask.shortfall,
         busy: readingOutlineLoading,
         actionLabel: ['failed', 'recommended'].includes(summaryState) ? '重试' : null,
         onAction: handleRegenerateReadingOutline,
@@ -5189,6 +5298,8 @@ const ChatPDF = () => {
         state: outlineState,
         desc: sectionOutlineError || sectionOutlineFallbackNotice || '左侧大纲栏的原文章节树',
         status: outlineState === 'failed' ? '生成失败' : outlineState === 'recommended' ? '已降级' : '生成中',
+        events: outlineTask.events,
+        shortfall: outlineTask.shortfall,
         busy: sectionOutlineLoading,
         actionLabel: ['failed', 'recommended'].includes(outlineState) ? '重试' : null,
         onAction: handleRegenerateSectionOutline,
@@ -5200,6 +5311,8 @@ const ChatPDF = () => {
         state: overviewState,
         desc: overviewError || `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`,
         status: overviewState === 'failed' ? '生成失败' : '生成中',
+        events: overviewTask.events,
+        shortfall: overviewTask.shortfall,
         busy: overviewLoading,
         actionLabel: overviewState === 'failed' ? '重试' : null,
         onAction: handleRegenerateOverview,
@@ -5242,6 +5355,7 @@ const ChatPDF = () => {
     deepParseRunning,
     deepParseStage,
     deepParseStatusValue,
+    downstreamTaskStatuses,
     documentParseManifest?.error,
     documentParseManifest?.stage,
     currentDeepParseStatus?.active_mineru,
@@ -5260,6 +5374,8 @@ const ChatPDF = () => {
     currentDeepParseStatus?.poll_total,
     currentDeepParseStatus?.progress,
     currentDeepParseStatus?.remote_progress_percent,
+    currentDeepParseStatus?.events,
+    currentDeepParseStatus?.shortfall,
     currentDeepParseStatus?.stage,
     currentDeepParseStatus?.status,
     failedReadingBlockCount,
@@ -5354,6 +5470,25 @@ const ChatPDF = () => {
   const backgroundTaskPillLabel = backgroundTaskSummary.state === 'running'
     ? `任务 ${Math.max(1, backgroundTaskSummary.count || 0)}`
     : backgroundTaskSummary.label;
+  const activeSettingsSectionMeta = SETTINGS_SECTIONS.find((section) => section.id === settingsSection) || SETTINGS_SECTIONS[0];
+  const ActiveSettingsSectionIcon = activeSettingsSectionMeta.Icon;
+  const baseRetrievalEnabledCount = [enableVectorSearch, enableJiebaBM25].filter(Boolean).length;
+  const graphRagStatusLabel = !enableGraphRAG
+    ? '未启用'
+    : graphragStatus === 'built'
+      ? '已就绪'
+      : graphragStatus === 'building'
+        ? `构建中${graphragProgress?.progress > 0 ? ` ${graphragProgress.progress}%` : ''}`
+        : graphragStatus === 'error'
+          ? '需要处理'
+          : docId
+            ? '待构建'
+            : '等待文档';
+  const agentModeLabel = !enableAgentRetrieval
+    ? '未启用'
+    : forceAgentRetrieval
+      ? '全部问题'
+      : '按需触发';
 
   useEffect(() => {
     if (!showDocumentWorkspace) setShowAiProcessingPanel(false);
@@ -6273,17 +6408,17 @@ const ChatPDF = () => {
               animate={{ opacity: 1, y: 0, transition: { duration: 0.16, ease: [0.22, 1, 0.36, 1] } }}
               exit={{ opacity: 0, y: 6, transition: { duration: 0.09, ease: [0.4, 0, 1, 1] } }}
               onClick={(e) => e.stopPropagation()}
-              className={`settings-modal-surface settings-solid settings-shell w-[860px] max-w-[94vw] h-[min(700px,95vh)] overflow-hidden flex flex-col border ${darkMode ? 'settings-shell-dark bg-[#1d2026] border-[#353941]' : 'bg-[#f6f7f9] border-white/80 relative'}`}
+              className={`settings-modal-surface settings-solid settings-shell w-[1040px] max-w-[96vw] h-[min(760px,94vh)] overflow-hidden flex flex-col border ${darkMode ? 'settings-shell-dark bg-[#1d2026] border-[#353941]' : 'bg-[#f6f7f9] border-white/80 relative'}`}
             >
-              <div className="p-6 pb-3 flex-shrink-0 flex items-center justify-between mt-1 px-7">
+              <div className="flex flex-shrink-0 items-center justify-between px-7 py-5">
                 <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-[12px] border ${darkMode ? 'bg-[#292d35] border-[#3b4049]' : 'bg-white border-gray-200'}`}>
+                  <div className={`flex h-10 w-10 items-center justify-center rounded-[13px] border ${darkMode ? 'bg-[#292d35] border-[#3b4049]' : 'bg-white border-gray-200'}`}>
                     <Settings className="text-[#B85F47]" size={22} />
                   </div>
                   <div>
-                    <h2 className={`text-xl font-bold tracking-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>设置中心</h2>
+                    <h2 className={`text-[19px] font-bold ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>设置中心</h2>
                     <p className={`mt-0.5 text-[11px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                      查看当前配置，并调整阅读、检索与解析方式
+                      阅读器、模型与文档处理配置
                     </p>
                   </div>
                 </div>
@@ -6294,50 +6429,66 @@ const ChatPDF = () => {
                 </div>
               </div>
 
-              <div className="settings-segment relative grid grid-cols-5 mx-7 mb-5 max-w-[520px] p-1 rounded-[20px] flex-shrink-0" role="tablist" aria-label="设置分类">
-                <span
-                  aria-hidden="true"
-                  className="settings-segment-indicator absolute left-1 top-1 bottom-1 rounded-[16px] transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
-                  style={{
-                    width: 'calc((100% - 0.5rem) / 5)',
-                    transform: `translateX(${['common', 'reading', 'retrieval', 'interface', 'storage'].indexOf(settingsSection) * 100}%)`,
-                  }}
-                />
-                {[
-                  { id: 'common', label: '常用' },
-                  { id: 'reading', label: '阅读' },
-                  { id: 'retrieval', label: '检索' },
-                  { id: 'interface', label: '界面' },
-                  { id: 'storage', label: '存储' },
-                ].map((section) => (
-                  <button
-                    key={section.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={settingsSection === section.id}
-                    onClick={() => handleSettingsSectionChange(section.id)}
-                    className={`relative z-10 min-w-0 rounded-[16px] px-2 py-2 text-[12px] font-semibold transition-colors ${
-                      settingsSection === section.id
-                        ? darkMode
-                          ? 'text-white'
-                          : 'text-gray-900'
-                        : darkMode
-                          ? 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
-                          : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200/70'
-                    }`}
-                  >
-                    {section.label}
-                  </button>
-                ))}
-              </div>
+              <div className={`settings-workspace flex min-h-0 flex-1 border-t ${darkMode ? 'border-[#353941]' : 'border-gray-200/80'}`}>
+                <aside className={`settings-nav flex w-[218px] shrink-0 flex-col border-r px-3 py-4 ${darkMode ? 'border-[#353941]' : 'border-gray-200/80'}`}>
+                  <div className={`mb-2 px-2 text-[10px] font-bold ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>设置分类</div>
+                  <nav className="space-y-1.5" role="tablist" aria-label="设置分类">
+                    {SETTINGS_SECTIONS.map(({ id, label, description, Icon }) => {
+                      const isActive = settingsSection === id;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          role="tab"
+                          aria-selected={isActive}
+                          data-active={isActive}
+                          onClick={() => handleSettingsSectionChange(id)}
+                          className="settings-nav-item grid w-full grid-cols-[34px_minmax(0,1fr)] items-center gap-2.5 rounded-[12px] px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/30"
+                        >
+                          <span className="settings-nav-item-icon flex h-[34px] w-[34px] items-center justify-center rounded-[10px]">
+                            <Icon size={16} strokeWidth={2.1} />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-[12px] font-semibold leading-4">{label}</span>
+                            <span className="mt-0.5 block truncate text-[10px] leading-4">{description}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </nav>
+                  <div className="mt-auto px-2 pb-1 pt-5">
+                    <div className={`text-[10px] font-medium ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>当前配置</div>
+                    <div className={`mt-1 truncate text-[11px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-600'}`} title={defaultModelOverview.assistant.modelName}>
+                      {defaultModelOverview.assistant.modelName}
+                    </div>
+                  </div>
+                </aside>
 
-              <motion.div
-                key={settingsSection}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-                className="space-y-[18px] px-7 overflow-y-auto flex-1 pb-4 custom-scrollbar"
-              >
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <div className={`settings-content-heading flex flex-shrink-0 items-center justify-between gap-4 border-b px-6 py-4 ${darkMode ? 'border-[#353941]' : 'border-gray-200/75'}`}>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-white text-[#B85F47]'}`}>
+                        <ActiveSettingsSectionIcon size={17} strokeWidth={2.1} />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className={`text-[15px] font-semibold ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>{activeSettingsSectionMeta.label}</h3>
+                        <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{activeSettingsSectionMeta.description}</p>
+                      </div>
+                    </div>
+                    {settingsSection === 'retrieval' ? (
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold tabular-nums ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-white text-gray-500'}`}>
+                        基础检索 {baseRetrievalEnabledCount}/2
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <motion.div
+                    key={settingsSection}
+                    initial={{ opacity: 0, x: 8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                    className="custom-scrollbar flex-1 space-y-[18px] overflow-y-auto px-6 pb-6 pt-5"
+                  >
                 
                 {settingsSection === 'common' && (
                 <section className="px-1" aria-labelledby="current-models-heading">
@@ -6624,277 +6775,290 @@ const ChatPDF = () => {
                 </section>
                 )}
 
-                {/* Features Section - Glass Inner Panel */}
-                {(settingsSection === 'retrieval' || settingsSection === 'interface') && (
-                <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  
-                  {settingsSection === 'retrieval' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableVectorSearch ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableVectorSearch && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>向量检索</h4>
-                        <input type="checkbox" checked={enableVectorSearch} onChange={e => setEnableVectorSearch(e.target.checked)} className="hidden" />
-                      </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        基于向量的语义相似度检索，提供更准确的匹配
-                      </p>
-                    </div>
-                  </label>
-                  )}
-
-                  {settingsSection === 'interface' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableScreenshot ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableScreenshot && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>截图分析</h4>
-                        <input type="checkbox" checked={enableScreenshot} onChange={e => setEnableScreenshot(e.target.checked)} className="hidden" />
-                      </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        启用截图分析功能，理解视觉内容及图表
-                      </p>
-                    </div>
-                  </label>
-                  )}
-
-                  {settingsSection === 'retrieval' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableGraphRAG ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableGraphRAG && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>GraphRAG 知识图谱</h4>
-                        <input type="checkbox" checked={enableGraphRAG} onChange={e => setEnableGraphRAG(e.target.checked)} className="hidden" />
-                      </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        实体关系提取 + 社区聚类增强检索，提供全局视角
-                      </p>
-                    </div>
-                  </label>
-                  )}
-
-                  {/* GraphRAG 构建控制：仅在勾选 + 有活动文档时显示 */}
-                  {settingsSection === 'retrieval' && enableGraphRAG && docId && (
-                    <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-purple-500/10 border-purple-400/20' : 'bg-purple-50/80 border-purple-200'}`}>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="text-[12px] leading-relaxed flex-1 min-w-0">
-                          {isMinerUFullRoutePending ? (
-                            <span className={darkMode ? 'text-gray-400' : 'text-gray-600'}>{minerUParsePendingNotice}</span>
-                          ) : graphragStatus === 'built' && graphragStats ? (
-                            <span className={`inline-flex items-center gap-1.5 font-medium ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>
-                              <Check size={12} strokeWidth={3} className="shrink-0" />
-                              已构建：{graphragStats.num_nodes ?? 0} 实体 · {graphragStats.num_edges ?? 0} 关系 · {graphragStats.num_chunks ?? 0} 分块
-                            </span>
-                          ) : graphragStatus === 'building' ? (
-                            <span className={`inline-flex items-center gap-1.5 ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>
-                              <Loader2 size={12} className="animate-spin shrink-0" />
-                              {graphragProgress?.stage ? (
-                                <>
-                                  {graphragProgress.stage === 'chunking' && '分块中'}
-                                  {graphragProgress.stage === 'extracting' && '提取实体/关系中'}
-                                  {graphragProgress.stage === 'clustering' && '社区聚类中'}
-                                  {graphragProgress.stage === 'reporting' && '生成社区报告中'}
-                                  {graphragProgress.stage === 'persisting' && '持久化中'}
-                                  {graphragProgress.progress > 0 && ` (${graphragProgress.progress}%)`}
-                                </>
-                              ) : '正在构建知识图谱，请勿关闭页面...'}
-                            </span>
-                          ) : graphragStatus === 'error' ? (
-                            <span className="text-red-500">构建失败</span>
-                          ) : (
-                            <span className={darkMode ? 'text-gray-400' : 'text-gray-600'}>此文档尚未构建知识图谱</span>
-                          )}
+                {settingsSection === 'retrieval' && (
+                <>
+                  <section className="px-1" aria-label="检索状态总览">
+                    <div className={`settings-status-strip grid grid-cols-3 overflow-hidden rounded-[14px] border ${darkMode ? 'border-[#373b44]' : 'border-gray-200/90'}`}>
+                      <div className="settings-status-cell">
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-[10px] ${darkMode ? 'bg-white/[0.055] text-gray-400' : 'bg-white text-[#B85F47]'}`}>
+                          <ListFilter size={15} strokeWidth={2.1} />
                         </div>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBuildGraphRAG(); }}
-                          disabled={graphragStatus === 'building' || isMinerUFullRoutePending}
-                          className={`shrink-0 px-3 py-1 rounded-full text-[11px] font-semibold transition-colors ${
-                            graphragStatus === 'building' || isMinerUFullRoutePending
-                              ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                              : 'accent-surface shadow-[0_2px_8px_rgba(184,95,71,0.12)]'
-                          }`}
-                        >
-                          {isMinerUFullRoutePending ? '等待解析' : graphragStatus === 'built' ? '重新构建' : graphragStatus === 'building' ? '构建中' : '立即构建'}
-                        </button>
-                      </div>
-                      {graphragStatus === 'error' && graphragError && (
-                        <div className="mt-2 text-[11px] text-red-500 leading-relaxed break-words">
-                          {graphragError}
+                        <div className="min-w-0">
+                          <div className={`text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>基础召回</div>
+                          <div className={`mt-0.5 text-[12px] font-semibold tabular-nums ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{baseRetrievalEnabledCount}/2 已启用</div>
                         </div>
-                      )}
-                      {graphragStatus === 'idle' && !isMinerUFullRoutePending && (
-                        <p className={`mt-1.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-                          首次构建会调用对话模型逐块提取，通常耗时 30 秒至数分钟。构建后知识图谱会自动注入聊天上下文。
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 检索代理：多轮规划 + 工具集 */}
-                  {settingsSection === 'retrieval' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableAgentRetrieval ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableAgentRetrieval && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>检索代理 (Agentic RAG)</h4>
-                        <input type="checkbox" checked={enableAgentRetrieval} onChange={e => setEnableAgentRetrieval(e.target.checked)} className="hidden" />
                       </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        多轮规划 + 7 种检索工具，仅对综述/比较/章节解析等高价值题型触发
-                      </p>
+                      <div className="settings-status-cell">
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-[10px] ${darkMode ? 'bg-white/[0.055] text-gray-400' : 'bg-white text-[#B85F47]'}`}>
+                          <Brain size={15} strokeWidth={2.1} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className={`text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>知识图谱</div>
+                          <div className={`mt-0.5 truncate text-[12px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{graphRagStatusLabel}</div>
+                        </div>
+                      </div>
+                      <div className="settings-status-cell">
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-[10px] ${darkMode ? 'bg-white/[0.055] text-gray-400' : 'bg-white text-[#B85F47]'}`}>
+                          <Sparkles size={15} strokeWidth={2.1} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className={`text-[10px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Agent 模式</div>
+                          <div className={`mt-0.5 truncate text-[12px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{agentModeLabel}</div>
+                        </div>
+                      </div>
                     </div>
-                  </label>
-                  )}
+                  </section>
 
-                  {settingsSection === 'retrieval' && enableAgentRetrieval && (
-                    <div className={`ml-[34px] -mt-1 p-3 rounded-[16px] border ${darkMode ? 'bg-violet-500/10 border-violet-400/20' : 'bg-violet-50/80 border-violet-200'}`}>
-                      <p className={`text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                        启用后，对「综述全文 / 多角度比较 / 章节解读 / 文献元信息」等高价值问题会自动进入多轮代理：
-                        每轮 LLM 规划 → 调用 vector / BM25 / GREP / 正则 / 布尔 / 意群 fetch / 文档地图 等工具采集证据，
-                        最多 5 轮（可在后端 <code className="px-1 rounded bg-black/5">agent_max_rounds</code> 配置 1–10）。
-                        每条回答下方会展示完整执行轨迹。
-                      </p>
+                  <section className="px-1" aria-labelledby="retrieval-foundation-heading">
+                    <div className="mb-2.5 px-1">
+                      <h3 id="retrieval-foundation-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>基础召回</h3>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>语义召回与中文关键词召回共同参与排序</p>
                     </div>
-                  )}
-
-                  {settingsSection === 'retrieval' && enableAgentRetrieval && (
-                    <label className="ml-[34px] mt-1 flex items-center gap-2 text-[12px] text-gray-600 dark:text-gray-400 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={forceAgentRetrieval}
-                        onChange={e => setForceAgentRetrieval(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-gray-300 text-violet-500 focus:ring-violet-300"
+                    <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
+                      <SettingsFeatureRow
+                        Icon={ListFilter}
+                        title="向量检索"
+                        description="使用嵌入索引召回语义相近段落"
+                        checked={enableVectorSearch}
+                        onChange={setEnableVectorSearch}
+                        statusLabel={enableVectorSearch ? '工作中' : '已关闭'}
+                        statusTone={enableVectorSearch ? 'ready' : 'muted'}
+                        darkMode={darkMode}
                       />
-                      <span>强制启用 Agent</span>
-                      <span title="勾选后所有问题都将走 Agent 路径，绕过 query_type / evidence_needs 白名单门控。仅供调试与高价值题型评估。"
-                            className="text-gray-400 cursor-help">ⓘ</span>
-                    </label>
-                  )}
-
-                  {settingsSection === 'retrieval' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableJiebaBM25 ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableJiebaBM25 && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
+                      <SettingsFeatureRow
+                        Icon={Type}
+                        title="jieba 中文分词"
+                        description="改善 BM25 对中文术语和短语的关键词命中"
+                        checked={enableJiebaBM25}
+                        onChange={setEnableJiebaBM25}
+                        statusLabel={enableJiebaBM25 ? '工作中' : '已关闭'}
+                        statusTone={enableJiebaBM25 ? 'ready' : 'muted'}
+                        darkMode={darkMode}
+                      />
                     </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>jieba 中文分词</h4>
-                        <input type="checkbox" checked={enableJiebaBM25} onChange={e => setEnableJiebaBM25(e.target.checked)} className="hidden" />
-                      </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        使用结巴分词提升 BM25 中文关键词匹配精度
-                      </p>
+                  </section>
+
+                  <section className="px-1" aria-labelledby="retrieval-structure-heading">
+                    <div className="mb-2.5 px-1">
+                      <h3 id="retrieval-structure-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>结构增强</h3>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>复杂问题使用图谱上下文或多轮检索计划</p>
                     </div>
-                  </label>
-                  )}
+                    <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                      <SettingsFeatureRow
+                        Icon={Brain}
+                        title="GraphRAG 知识图谱"
+                        description="按文档提取实体关系和社区摘要，补充全局证据"
+                        checked={enableGraphRAG}
+                        onChange={setEnableGraphRAG}
+                        statusLabel={graphRagStatusLabel}
+                        statusTone={graphragStatus === 'built' ? 'ready' : graphragStatus === 'error' ? 'warning' : enableGraphRAG ? 'accent' : 'muted'}
+                        darkMode={darkMode}
+                      />
 
-                  {/* 检索增强调优：从「全局设置 > 高级」上移到这里，
-                      和上面的检索开关同域，不再分散到两处 tab */}
-                  {settingsSection === 'retrieval' && (
-                  <div className={`pt-2 mt-1 border-t ${darkMode ? 'border-white/10' : 'border-gray-100/70'}`}>
-                    <button onClick={() => setShowRetrievalTuning(!showRetrievalTuning)} className="settings-row w-full flex items-center justify-between text-left p-1 rounded-2xl">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${darkMode ? 'bg-violet-500/10 text-violet-300' : 'bg-violet-50 text-violet-500'}`}>
-                          <Sparkles className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>检索增强调优</h4>
-                          <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>对当前会话覆盖后端检索开关，不持久化到后端 config</p>
-                        </div>
-                      </div>
-                      <div className={`transform transition-transform text-gray-400 ${showRetrievalTuning ? 'rotate-180' : ''}`}>▼</div>
-                    </button>
-
-                    {showRetrievalTuning && (
-                      <div className={`mt-2 ml-[44px] pt-3 border-t space-y-1 ${darkMode ? 'border-white/10' : 'border-gray-100/50'}`}>
-                        <TriStateToggle
-                          title="numeric_table 专项增强"
-                          desc="表格数值比较类查询（如「第二好的方法」「Table 7 DiffuLT」）的专项检索增强"
-                          value={overrideNumericTable}
-                          onChange={setOverrideNumericTable}
-                        />
-                        <TriStateToggle
-                          title="BM25 同义词扩展"
-                          desc="查询时自动扩展同义词，提升召回率"
-                          value={overrideBM25Synonyms}
-                          onChange={setOverrideBM25Synonyms}
-                        />
-                        <TriStateToggle
-                          title="LLM 查询改写"
-                          desc="多轮对话中用 LLM 消解指代（代词/省略），长查询自动跳过"
-                          value={overrideLLMQueryRewrite}
-                          onChange={setOverrideLLMQueryRewrite}
-                        />
-                        <TriStateToggle
-                          title="答案自审"
-                          desc="回答结束后用 cheap model 检测幻觉；会增加 1-3s 延迟"
-                          value={overrideAnswerCritic}
-                          onChange={setOverrideAnswerCritic}
-                        />
-                        <VisualVerificationMode
-                          value={numericTableVisualVerification}
-                          onChange={setNumericTableVisualVerification}
-                        />
-
-                        {/* Cheap Model 配置 */}
-                        <div className={`p-3 rounded-[14px] border space-y-2 ${darkMode ? 'bg-[#1d2026] border-[#353941]' : 'bg-gray-50 border-gray-200'}`}>
-                          <div className="flex items-center justify-between px-1">
-                            <span className={`text-[12px] font-bold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>辅助模型（双模型策略）</span>
-                            <span className="text-[10px] text-gray-500">为空则跟随后端默认</span>
-                          </div>
-                          <p className="text-[11px] text-gray-500 px-1">
-                            用于非核心 LLM 任务（查询改写 / 追问建议 / 自动命名 / 答案自审）
-                          </p>
-                          <div className="grid grid-cols-2 gap-2">
-                            <input
-                              type="text"
-                              value={cheapModelProvider || ''}
-                              onChange={(e) => setCheapModelProvider(e.target.value)}
-                              placeholder="provider (如 openai)"
-                              className={`text-[12px] font-mono rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm border ${darkMode ? 'bg-black/20 border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}
-                            />
-                            <input
-                              type="text"
-                              value={cheapModel || ''}
-                              onChange={(e) => setCheapModel(e.target.value)}
-                              placeholder="model (如 gpt-4o-mini)"
-                              className={`text-[12px] font-mono rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-violet-500/20 shadow-sm border ${darkMode ? 'bg-black/20 border-white/10 text-gray-200' : 'bg-white border-gray-200'}`}
-                            />
+                      {enableGraphRAG && docId && (
+                        <div className={`settings-subpanel mx-5 mb-4 px-4 py-3 ${darkMode ? 'bg-[#20242a]' : 'bg-[#faf8f6]'}`}>
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="min-w-0 flex-1 text-[11px] leading-[1.55]">
+                              {isMinerUFullRoutePending ? (
+                                <span className={darkMode ? 'text-gray-400' : 'text-gray-600'}>{minerUParsePendingNotice}</span>
+                              ) : graphragStatus === 'built' && graphragStats ? (
+                                <span className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                                  <b className="font-semibold tabular-nums">{graphragStats.num_nodes ?? 0}</b> 实体 · <b className="font-semibold tabular-nums">{graphragStats.num_edges ?? 0}</b> 关系 · <b className="font-semibold tabular-nums">{graphragStats.num_chunks ?? 0}</b> 分块
+                                </span>
+                              ) : graphragStatus === 'building' ? (
+                                <span className={`inline-flex items-center gap-1.5 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                                  <Loader2 size={12} className="shrink-0 animate-spin" />
+                                  {graphRagStatusLabel}
+                                </span>
+                              ) : graphragStatus === 'error' ? (
+                                <span className="text-red-500">{graphragError || '构建失败，请重试'}</span>
+                              ) : (
+                                <span className={darkMode ? 'text-gray-500' : 'text-gray-500'}>当前文档尚未构建，预计需要 30 秒至数分钟</span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleBuildGraphRAG}
+                              disabled={graphragStatus === 'building' || isMinerUFullRoutePending}
+                              className={`shrink-0 rounded-[10px] px-3 py-1.5 text-[11px] font-semibold transition-all active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45 ${darkMode ? 'bg-white/10 text-gray-200 hover:bg-white/15' : 'bg-white text-[#A65B45] shadow-sm ring-1 ring-[#ead7cf] hover:bg-[#fff7f3]'}`}
+                            >
+                              {isMinerUFullRoutePending ? '等待解析' : graphragStatus === 'built' ? '重新构建' : graphragStatus === 'building' ? '构建中' : '立即构建'}
+                            </button>
                           </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                  )}
+                      )}
 
-                  {settingsSection === 'interface' && (
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableBlurReveal ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {enableBlurReveal && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>模糊渐显效果</h4>
-                        <input type="checkbox" checked={enableBlurReveal} onChange={e => setEnableBlurReveal(e.target.checked)} className="hidden" />
+                      <div className={`border-t ${darkMode ? 'border-[#373b44]' : 'border-gray-100'}`}>
+                        <SettingsFeatureRow
+                          Icon={Sparkles}
+                          title="检索代理 (Agentic RAG)"
+                          description="对综述、比较和章节解释等复杂问题组合多种检索工具"
+                          checked={enableAgentRetrieval}
+                          onChange={setEnableAgentRetrieval}
+                          statusLabel={agentModeLabel}
+                          statusTone={enableAgentRetrieval ? 'accent' : 'muted'}
+                          darkMode={darkMode}
+                        />
                       </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        流式输出时，新字符从模糊逐渐变得清晰
-                      </p>
+
+                      {enableAgentRetrieval && (
+                        <div className={`settings-subpanel mx-5 mb-4 px-4 py-3 ${darkMode ? 'bg-[#20242a]' : 'bg-[#faf8f6]'}`}>
+                          <div className="grid grid-cols-3 gap-3">
+                            {[
+                              ['触发策略', forceAgentRetrieval ? '全部问题' : '按需判断'],
+                              ['检索工具', '7 种'],
+                              ['默认上限', '5 轮'],
+                            ].map(([label, value]) => (
+                              <div key={label}>
+                                <div className={`text-[9px] font-medium ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>{label}</div>
+                                <div className={`mt-0.5 text-[11px] font-semibold tabular-nums ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className={`mt-3 flex items-center justify-between border-t pt-3 ${darkMode ? 'border-white/[0.07]' : 'border-[#ebe4df]'}`}>
+                            <div className="min-w-0 pr-4">
+                              <div className={`text-[11px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>全部问题使用 Agent</div>
+                              <div className={`mt-0.5 text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>用于专项评估，日常阅读建议保持按需触发</div>
+                            </div>
+                            <SettingsSwitch checked={forceAgentRetrieval} onChange={setForceAgentRetrieval} label="全部问题使用 Agent" darkMode={darkMode} />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </label>
-                  )}
-                </div>
+                  </section>
+
+                  <section className="px-1" aria-labelledby="retrieval-tuning-heading">
+                    <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                      <button
+                        type="button"
+                        aria-expanded={showRetrievalTuning}
+                        onClick={() => setShowRetrievalTuning(!showRetrievalTuning)}
+                        className="settings-entry-row flex w-full items-center justify-between gap-4 px-5 py-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#D97A5D]/25"
+                      >
+                        <div className="flex min-w-0 items-center gap-3.5">
+                          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] ${darkMode ? 'bg-white/[0.055] text-gray-400' : 'bg-gray-100 text-gray-500'}`}>
+                            <SlidersHorizontal size={17} strokeWidth={2.1} />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 id="retrieval-tuning-heading" className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>会话级检索调优</h3>
+                              <span className="settings-feature-status" data-tone="muted">高级</span>
+                            </div>
+                            <p className={`mt-1 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>仅覆盖当前会话，不改后端默认配置</p>
+                          </div>
+                        </div>
+                        <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 ${showRetrievalTuning ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      <AnimatePresence initial={false}>
+                        {showRetrievalTuning && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                            className="overflow-hidden"
+                          >
+                            <div className={`border-t px-5 pb-5 pt-3 ${darkMode ? 'border-[#373b44]' : 'border-gray-100'}`}>
+                              <TriStateToggle
+                                title="numeric_table 专项增强"
+                                desc="表格数值比较查询的专项检索增强"
+                                value={overrideNumericTable}
+                                onChange={setOverrideNumericTable}
+                                darkMode={darkMode}
+                              />
+                              <TriStateToggle
+                                title="BM25 同义词扩展"
+                                desc="扩展近义表达，减少术语表述差异造成的漏召回"
+                                value={overrideBM25Synonyms}
+                                onChange={setOverrideBM25Synonyms}
+                                darkMode={darkMode}
+                              />
+                              <TriStateToggle
+                                title="LLM 查询改写"
+                                desc="多轮对话中消解指代和省略"
+                                value={overrideLLMQueryRewrite}
+                                onChange={setOverrideLLMQueryRewrite}
+                                darkMode={darkMode}
+                              />
+                              <TriStateToggle
+                                title="答案自审"
+                                desc="回答完成后检查证据一致性"
+                                value={overrideAnswerCritic}
+                                onChange={setOverrideAnswerCritic}
+                                darkMode={darkMode}
+                              />
+                              <VisualVerificationMode
+                                value={numericTableVisualVerification}
+                                onChange={setNumericTableVisualVerification}
+                                darkMode={darkMode}
+                              />
+
+                              <div className={`settings-subpanel mt-3 px-4 py-3 ${darkMode ? 'bg-[#20242a]' : 'bg-[#faf8f6]'}`}>
+                                <div className="flex items-center justify-between gap-3">
+                                  <div>
+                                    <div className={`text-[11px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>辅助模型</div>
+                                    <div className={`mt-0.5 text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>查询改写、命名和自审使用</div>
+                                  </div>
+                                  <span className={`text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>留空跟随后端</span>
+                                </div>
+                                <div className="mt-3 grid grid-cols-2 gap-2.5">
+                                  <input
+                                    type="text"
+                                    value={cheapModelProvider || ''}
+                                    onChange={(event) => setCheapModelProvider(event.target.value)}
+                                    placeholder="provider，例如 openai"
+                                    className={`rounded-[10px] border px-3 py-2 text-[11px] font-mono outline-none transition-shadow focus:ring-2 focus:ring-[#D97A5D]/20 ${darkMode ? 'border-white/10 bg-black/20 text-gray-200' : 'border-[#e4ded9] bg-white text-gray-700'}`}
+                                  />
+                                  <input
+                                    type="text"
+                                    value={cheapModel || ''}
+                                    onChange={(event) => setCheapModel(event.target.value)}
+                                    placeholder="model，例如 gpt-4o-mini"
+                                    className={`rounded-[10px] border px-3 py-2 text-[11px] font-mono outline-none transition-shadow focus:ring-2 focus:ring-[#D97A5D]/20 ${darkMode ? 'border-white/10 bg-black/20 text-gray-200' : 'border-[#e4ded9] bg-white text-gray-700'}`}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </section>
+                </>
                 )}
 
+                {/* Interface feature toggles */}
+                {settingsSection === 'interface' && (
+                <section className="px-1" aria-labelledby="interface-effects-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="interface-effects-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>交互反馈</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>截图入口与回答呈现效果</p>
+                  </div>
+                  <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
+                    <SettingsFeatureRow
+                      Icon={Scan}
+                      title="截图分析"
+                      description="保留区域截图入口，并将视觉内容作为当前问题上下文"
+                      checked={enableScreenshot}
+                      onChange={setEnableScreenshot}
+                      statusLabel={enableScreenshot ? '已启用' : '已关闭'}
+                      statusTone={enableScreenshot ? 'ready' : 'muted'}
+                      darkMode={darkMode}
+                    />
+                    <SettingsFeatureRow
+                      Icon={Sparkles}
+                      title="模糊渐显效果"
+                      description="流式回答的新内容由模糊逐渐过渡为清晰"
+                      checked={enableBlurReveal}
+                      onChange={setEnableBlurReveal}
+                      statusLabel={enableBlurReveal ? '已启用' : '已关闭'}
+                      statusTone={enableBlurReveal ? 'accent' : 'muted'}
+                      darkMode={darkMode}
+                    />
+                  </div>
+                </section>
+                )}
                 {/* Toolbar and Storage Settings Area */}
                 {(settingsSection === 'interface' || settingsSection === 'storage') && (
                 <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
@@ -7168,15 +7332,18 @@ const ChatPDF = () => {
                   </div>
                 </section>
                 )}
-              </motion.div>
+                  </motion.div>
+                </div>
+              </div>
 
-              <div className={`settings-chrome px-7 py-4 flex-shrink-0 flex items-center justify-end gap-2.5 border-t ${darkMode ? 'border-[#353941]' : 'border-gray-200/80'}`}>
-                <button onClick={() => setShowSettings(false)} className={`px-5 py-2.5 rounded-[12px] text-[13px] font-semibold transition-colors ${darkMode ? 'text-gray-300 hover:bg-white/5' : 'text-gray-600 hover:bg-gray-100'}`}>
-                  取消
-                </button>
-                <button onClick={() => setShowSettings(false)} className="accent-cta text-[13px] font-semibold px-5 py-2.5 rounded-full flex items-center gap-1.5">
+              <div className={`settings-chrome flex flex-shrink-0 items-center justify-between gap-3 border-t px-7 py-3.5 ${darkMode ? 'border-[#353941]' : 'border-gray-200/80'}`}>
+                <div className={`flex items-center gap-1.5 text-[11px] font-medium ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                  <Check size={13} strokeWidth={2.5} />
+                  <span>更改已保存</span>
+                </div>
+                <button onClick={() => setShowSettings(false)} className="accent-cta flex items-center gap-1.5 rounded-full px-5 py-2.5 text-[13px] font-semibold">
                   <Check size={15} strokeWidth={2.5} />
-                  <span>保存设置</span>
+                  <span>完成</span>
                 </button>
               </div>
             </motion.div>
