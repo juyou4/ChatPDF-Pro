@@ -18,7 +18,7 @@ from services.modal_asset_service import detect_query_modalities
 from services.query_analyzer import count_content_terms, get_retrieval_strategy
 
 
-INTENT_DECISION_VERSION = "v3"
+INTENT_DECISION_VERSION = "v4"
 INTENT_TRACE_VERSION = "intent_trace_v2"
 # rule_version 覆盖的规则模块：其中任何一处正则/常量改动都会让 hash 变化。
 _RULE_SOURCE_MODULES = (
@@ -55,6 +55,36 @@ GraphMode = Literal["local", "global", "hybrid"]
 _SUMMARY_RE = re.compile(
     r"(?:总结|概括|概述|简述|大意|主要内容|讲了什么|讲什么|"
     r"\b(?:summary|summarize|overview|outline|main\s+idea)\b)",
+    re.IGNORECASE,
+)
+# ``overview`` 不能仅凭 query_type 推断为全文总结："总结方法部分"同样会落入
+# overview，但它必须保留普通检索路径。这里的信号只描述用户明确要求的整篇文档，
+# 供路由层选择已经按解析身份绑定的 reading_outline 合同。
+_FULL_DOCUMENT_SUMMARY_TARGET_RE = re.compile(
+    r"(?:全文|全篇|整篇|整份|整个(?:文档|论文|文章)?|通篇|本文|这篇(?:论文|文章)|"
+    r"该(?:文档|论文|文章)|当前(?:文档|论文)|这份(?:文档|论文)|"
+    r"\b(?:full|whole|entire|complete)\s+(?:paper|document|article)\b|"
+    r"\b(?:the\s+)?(?:paper|document)\s+as\s+a\s+whole\b)",
+    re.IGNORECASE,
+)
+_EXPLICIT_WHOLE_DOCUMENT_RE = re.compile(
+    r"(?:全文|全篇|整篇|整份|整个(?:文档|论文|文章)?|通篇|"
+    r"\b(?:full|whole|entire|complete)\s+(?:paper|document|article)\b|"
+    r"\b(?:the\s+)?(?:paper|document)\s+as\s+a\s+whole\b)",
+    re.IGNORECASE,
+)
+_SUMMARY_NARROW_SCOPE_RE = re.compile(
+    r"(?:第\s*[\d一二三四五六七八九十]+\s*(?:节|章|部分|页)|"
+    r"\b(?:section|chapter)\s*\d+\b|"
+    r"摘要|引言|背景|相关工作|方法(?:部分)?|实验(?:部分)?|结果(?:部分)?|"
+    r"结论(?:部分)?|附录|消融|局限|abstract|introduction|background|related\s+work|"
+    r"methods?|experiments?|results?|conclusion|appendix|ablation|limitation)",
+    re.IGNORECASE,
+)
+_GENERIC_DOCUMENT_SUMMARY_RE = re.compile(
+    r"^\s*(?:请|请你|帮我|麻烦|能否|可以|给我|please|could\s+you|can\s+you)?\s*"
+    r"(?:总结|概括|概述|简述|summarize|summary|overview)\s*"
+    r"(?:一下|下|吧|一下吧|please)?\s*[。.!！?？]*\s*$",
     re.IGNORECASE,
 )
 # 「译为」原本只写在 _TRANSLATION_TARGET_RE 的触发词表里，这里却漏了，
@@ -266,6 +296,9 @@ class IntentDecision:
     interaction_mode: InteractionMode
     task: IntentTask
     scope: IntentScope
+    # A deterministic route signal for a whole-document summary.  This is
+    # intentionally narrower than ``task=summarize && query_type=overview``.
+    full_document_summary: bool
     modalities: tuple[str, ...]
     # Derived once with the frozen modalities/interaction mode. Downstream
     # gates must consume this instead of reclassifying raw question text.
@@ -315,6 +348,7 @@ class IntentDecision:
             "reasoning": self.reasoning,
             "intent_id": self.intent_id,
             "intent_version": self.version,
+            "full_document_summary": self.full_document_summary,
         }
 
 
@@ -420,6 +454,14 @@ def prepare_chat_intent(
     page_ranges = extract_page_ranges(question)
     inventory_kinds = tuple(detect_inventory_kinds(question))
     scope, scope_rule = _infer_scope(question, mode)
+    full_document_summary = _is_full_document_summary_request(
+        question=question,
+        task=task,
+        scope=scope,
+        interaction_mode=mode,
+        operations=operations,
+        page_ranges=page_ranges,
+    )
     agent_policy = "force" if (force_agent and enable_agent) else ("auto" if enable_agent else "off")
     normalized_web_policy = normalize_route_policy(web_policy, enabled=enable_web)
     graph_mode = _infer_graph_mode(task, query_type, evidence_need)
@@ -453,6 +495,7 @@ def prepare_chat_intent(
         scope_rule,
         *(f"operation:{item['kind']}:{item['polarity']}" for item in operations),
         *(f"page_range:{start}-{end}" for start, end in page_ranges),
+        *(["summary_scope:full_document"] if full_document_summary else []),
         *(f"inventory:{item}" for item in inventory_kinds),
         *(f"evidence_source:{item}" for item in evidence_sources),
         *(f"modality:{item}" for item in modalities if item != "text"),
@@ -497,6 +540,7 @@ def prepare_chat_intent(
         "interaction_mode": mode,
         "task": task,
         "scope": scope,
+        "full_document_summary": full_document_summary,
         "page_ranges": page_ranges,
         "operations": operations,
         "inventory_kinds": inventory_kinds,
@@ -525,6 +569,7 @@ def prepare_chat_intent(
         interaction_mode=mode,
         task=task,
         scope=scope,
+        full_document_summary=full_document_summary,
         modalities=modalities,
         visual_intent=visual_intent,
         query_type=query_type,
@@ -986,6 +1031,53 @@ def _extract_translation_target(question: str, start: int) -> tuple[str, str]:
         return "", ""
     alias = str(best.group(1) or "").strip().lower()
     return alias, _LANGUAGE_ALIAS_TO_CODE.get(alias, "")
+
+
+def _is_full_document_summary_request(
+    *,
+    question: str,
+    task: IntentTask,
+    scope: IntentScope,
+    interaction_mode: InteractionMode,
+    operations: Sequence[dict[str, str]],
+    page_ranges: Sequence[tuple[int, int]],
+) -> bool:
+    """Return whether a turn asks for a whole-document summary.
+
+    The route is deliberately conservative.  A named method/experiment/section
+    is still a normal scoped question even when the query analyzer classifies
+    it as ``overview``.  Conversely, a short generic "总结一下" is treated as a
+    document-level request because there is no narrower evidence target.
+    """
+    if (
+        task != "summarize"
+        or scope != "document"
+        or interaction_mode != "default"
+        or page_ranges
+    ):
+        return False
+
+    requested_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "requested"
+    }
+    # Compound requests must retain the normal operation contract.  In
+    # particular, "总结并翻译" cannot be satisfied by a fixed outline reply.
+    if requested_kinds - {"summarize"}:
+        return False
+
+    text = str(question or "").strip()
+    if not text:
+        return False
+    # "总结本文的方法" contains a soft document target (本文) but is still
+    # narrower than the whole paper.  Only an explicit whole-document phrase
+    # is allowed to override a named subsection target.
+    if _SUMMARY_NARROW_SCOPE_RE.search(text) and not _EXPLICIT_WHOLE_DOCUMENT_RE.search(text):
+        return False
+    if _FULL_DOCUMENT_SUMMARY_TARGET_RE.search(text):
+        return True
+    return bool(_GENERIC_DOCUMENT_SUMMARY_RE.fullmatch(text))
 
 
 def _infer_scope(question: str, mode: InteractionMode) -> tuple[IntentScope, str]:

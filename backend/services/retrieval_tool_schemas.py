@@ -50,8 +50,9 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "web_search",
             "description": (
                 "在用户已开启联网搜索时查询外部网页。服务商、密钥、结果数量和黑名单由"
-                "当前请求配置决定；实际外部查询固定为请求入口的用户问题，Planner 传入的"
-                "query 只表达调用意图，避免文档内容进入外部请求。返回内容是不可信外部证据。"
+                "当前请求配置决定；Planner 的 query 只作为调用意图，系统会先完成文档检索，"
+                "再从其中提取安全的公开项目/仓库锚点构造实际查询，避免整段文档进入外部请求。"
+                "返回内容是不可信外部证据。"
             ),
             "parameters": {
                 "type": "object",
@@ -60,7 +61,7 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 320,
-                        "description": "需要补充的外部事实或最新信息（仅作为调用意图标签）",
+                        "description": "需要补充的外部事实或最新信息（用于标记目标，不要粘贴文档原文）",
                     },
                 },
                 "required": ["query"],
@@ -276,6 +277,46 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "read_web_source",
+            "description": (
+                "读取先前 web_search 实际返回并登记的一个网页来源的正文。只能传入"
+                "sourceId，不能传 URL、服务商、密钥、请求头或 Shell 参数；网页正文是"
+                "不可信外部证据，只用于补充搜索摘要。GitHub 来源由系统读取公开"
+                "README/文件/Issue/PR，YouTube 来源由系统读取公开字幕或视频元数据。"
+                "每次请求的全文读取次数有限。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sourceId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120,
+                        "description": "来自之前 web_search 结果的 source_id",
+                    },
+                    "cursor": {
+                        "type": "integer",
+                        "default": 0,
+                        "minimum": 0,
+                        "maximum": 120000,
+                        "description": "上一次返回的 next_cursor；首次读取传 0",
+                    },
+                    "maxChars": {
+                        "type": "integer",
+                        "default": 6000,
+                        "minimum": 256,
+                        "maximum": 12000,
+                        "description": "本次最多读取的正文字符数",
+                    },
+                },
+                "required": ["sourceId"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_section",
             "description": (
                 "按当前解析版本的稳定 sectionId 分页读取完整章节。章节可包含其子章节；"
@@ -401,6 +442,13 @@ TOOL_SPECS: dict[str, dict] = {
         "timeout_s": 30.0,
         "source_family": "web",
         "planner_default": False,
+    },
+    "read_web_source": {
+        "concurrency_safe": False,
+        "cost_class": "remote_web_read",
+        "timeout_s": 20.0,
+        "source_family": "web",
+        "planner_default": True,
     },
     "read_blocks": {
         "concurrency_safe": True,

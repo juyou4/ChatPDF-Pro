@@ -6,6 +6,8 @@
 import logging
 from typing import Optional
 
+from services.completion_outcome import require_publishable_completion
+
 logger = logging.getLogger(__name__)
 
 CONV_NAME_PROMPT = (
@@ -64,6 +66,7 @@ async def suggest_conversation_name(
         if isinstance(response, dict):
             if response.get("error"):
                 return None
+            require_publishable_completion(response, operation="conversation name")
             choices = response.get("choices", [])
             if choices:
                 content = choices[0].get("message", {}).get("content", "")

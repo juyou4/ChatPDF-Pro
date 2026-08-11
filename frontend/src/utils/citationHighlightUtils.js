@@ -16,6 +16,14 @@ export const normalizeCitationBBox = (value) => {
 
 const roundCoordinate = (value) => Math.round(Number(value) * 1000) / 1000;
 
+const resolveAxisPadding = (padding, axis) => Math.max(0, Number(
+  typeof padding === 'object'
+    ? (axis === 'x'
+      ? (padding.x ?? padding.horizontal ?? padding.inline)
+      : (padding.y ?? padding.vertical ?? padding.block))
+    : padding
+) || 0);
+
 const normalizePageSize = (value) => {
   if (Array.isArray(value) && value.length >= 2) {
     const width = Number(value[0]);
@@ -117,7 +125,8 @@ export const citationRectsToRendered = ({
     height: DEFAULT_PAGE_HEIGHT,
   };
   const effectiveScale = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1;
-  const safePadding = Math.max(0, Number(padding) || 0);
+  const horizontalPadding = resolveAxisPadding(padding, 'x');
+  const verticalPadding = resolveAxisPadding(padding, 'y');
 
   return candidates
     .map((candidate) => convertBBoxToPagePoints(candidate, {
@@ -127,10 +136,10 @@ export const citationRectsToRendered = ({
     }))
     .filter(Boolean)
     .map(([x0, y0, x1, y1]) => ({
-      left: roundCoordinate(Math.max(0, x0 * effectiveScale - safePadding)),
-      top: roundCoordinate(Math.max(0, y0 * effectiveScale - safePadding)),
-      width: roundCoordinate((x1 - x0) * effectiveScale + safePadding * 2),
-      height: roundCoordinate((y1 - y0) * effectiveScale + safePadding * 2),
+      left: roundCoordinate(Math.max(0, x0 * effectiveScale - horizontalPadding)),
+      top: roundCoordinate(Math.max(0, y0 * effectiveScale - verticalPadding)),
+      width: roundCoordinate((x1 - x0) * effectiveScale + horizontalPadding * 2),
+      height: roundCoordinate((y1 - y0) * effectiveScale + verticalPadding * 2),
     }));
 };
 
@@ -323,14 +332,15 @@ export const mergeClientRectsByLine = (rects, pageRect, padding = 3) => {
 
   const originLeft = Number(pageRect?.left) || 0;
   const originTop = Number(pageRect?.top) || 0;
-  const safePadding = Math.max(0, Number(padding) || 0);
+  const horizontalPadding = resolveAxisPadding(padding, 'x');
+  const verticalPadding = resolveAxisPadding(padding, 'y');
   return merged
     .sort((left, right) => left.top - right.top || left.left - right.left)
     .map((rect) => ({
-      left: Math.max(0, rect.left - originLeft - safePadding),
-      top: Math.max(0, rect.top - originTop - safePadding),
-      width: rect.width + safePadding * 2,
-      height: rect.height + safePadding * 2,
+      left: Math.max(0, rect.left - originLeft - horizontalPadding),
+      top: Math.max(0, rect.top - originTop - verticalPadding),
+      width: rect.width + horizontalPadding * 2,
+      height: rect.height + verticalPadding * 2,
     }));
 };
 

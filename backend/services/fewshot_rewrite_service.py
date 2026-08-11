@@ -127,6 +127,8 @@ class FewshotRewriteService:
 
         try:
             from services.chat_service import call_ai_api
+            from services.completion_outcome import require_publishable_completion
+            from services.intent_constraints import IntentConstraintSet
 
             similar = self._find_similar_examples(query, top_k=3)
             examples_text = "\n".join(
@@ -148,6 +150,7 @@ class FewshotRewriteService:
                 max_tokens=100,
                 temperature=0.3,
             )
+            require_publishable_completion(response, operation="few-shot query rewrite")
 
             content = ""
             if isinstance(response, dict):
@@ -158,7 +161,11 @@ class FewshotRewriteService:
                     content = choices[0].get("message", {}).get("content", "")
 
             rewritten = content.strip().strip('"\'')
-            if rewritten and len(rewritten) < len(query) * 3:
+            if (
+                rewritten
+                and len(rewritten) < len(query) * 3
+                and IntentConstraintSet.from_text(query).validate_rewrite(rewritten).allowed
+            ):
                 logger.info(f"[FewshotRewrite] '{query}' → '{rewritten}'")
                 return rewritten
 

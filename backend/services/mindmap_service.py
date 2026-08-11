@@ -108,6 +108,7 @@ async def generate_mindmap(
 
     try:
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
 
         prompt = MINDMAP_PROMPT.format(
             question=question,
@@ -123,6 +124,7 @@ async def generate_mindmap(
             max_tokens=800,
             temperature=0.3,
         )
+        require_publishable_completion(response, operation="mindmap")
 
         content = ""
         if isinstance(response, dict):
@@ -134,7 +136,11 @@ async def generate_mindmap(
                 content = choices[0].get("message", {}).get("content", "")
 
         content = content.strip()
-        if not content:
+        if (
+            not content
+            or "@startmindmap" not in content.lower()
+            or "@endmindmap" not in content.lower()
+        ):
             return None
 
         markdown = convert_uml_to_markdown(content)

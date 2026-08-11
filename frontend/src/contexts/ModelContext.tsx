@@ -21,6 +21,7 @@ interface ModelContextType {
     // 模型操作
     addModelToCollection: (model: Model) => void
     removeModelFromCollection: (modelId: string, providerId: string) => void
+    removeModelsByProvider: (providerId: string) => void
     updateModelInCollection: (modelId: string, providerId: string, updates: Partial<Model>) => void
     isModelInCollection: (modelId: string, providerId: string) => boolean
 
@@ -37,14 +38,58 @@ interface ModelContextType {
 
 const ModelContext = createContext<ModelContextType | undefined>(undefined)
 
-const CONFIG_VERSION = '4.1'
+const CONFIG_VERSION = '4.2'
 const STORAGE_KEY = 'userModels'
 const VERSION_KEY = 'userModelsVersion'
 const LAST_SYNC_KEY = 'modelsLastSync'
 
+// 这些是供应商已废弃的模型 ID 或临时别名。它们不应继续占用模型选择器，
+// 但 DefaultsContext 仍会保留别名映射，以便旧的默认选择安全迁移到新模型。
+const RETIRED_USER_MODELS_BY_PROVIDER: Record<string, ReadonlySet<string>> = {
+    deepseek: new Set([
+        'deepseek-chat',
+        'deepseek-reasoner',
+    ]),
+    moonshot: new Set([
+        'kimi-k2-0711-preview',
+        'kimi-k2-0905-preview',
+        'kimi-k2-thinking',
+        'kimi-k2-thinking-turbo',
+        'kimi-k2-turbo-preview',
+        'kimi-k2-turbo',
+        'kimi-k2.5',
+        'kimi-thinking-preview',
+        'kimi-latest',
+        'moonshot-v1-vision-preview',
+        'moonshot-v1-128k-vision-preview',
+        'moonshot-v1-32k-vision-preview',
+        'moonshot-v1-8k-vision-preview',
+        'moonshot-v1-auto',
+        'moonshot-v1-128k',
+        'moonshot-v1-32k',
+        'moonshot-v1-8k',
+    ]),
+}
+
+const RETIRED_DYNAMIC_MODEL_IDS = Array.from(
+    new Set(Object.values(RETIRED_USER_MODELS_BY_PROVIDER).flatMap(ids => Array.from(ids)))
+)
+
+function isRetiredUserModel(model: Partial<Model> | null | undefined): boolean {
+    const providerId = String(model?.providerId || '').trim().toLowerCase()
+    const modelId = String(model?.id || '').trim().toLowerCase()
+    return Boolean(modelId && RETIRED_USER_MODELS_BY_PROVIDER[providerId]?.has(modelId))
+}
+
+function isPersistedUserModel(model: unknown): model is Model {
+    if (!model || typeof model !== 'object') return false
+    const candidate = model as Model
+    return Boolean(candidate.isUserAdded || !candidate.isSystem) && !isRetiredUserModel(candidate)
+}
+
 /**
  * 版本迁移：从旧版本数据中保留用户手动添加的模型（isUserAdded 为 true），
- * 仅清除系统预设模型的缓存。
+ * 仅清除系统预设缓存和已废弃的官方模型别名。
  *
  * @param oldData - localStorage 中的旧版本 JSON 字符串
  * @returns 迁移后的用户模型数组，解析失败时返回 null（回退到空数组）
@@ -56,7 +101,7 @@ export function migrateUserModels(oldData: string): Model[] | null {
 
         // 仅保留用户手动添加的模型
         const userModels = parsed.filter(
-            (m: any) => m && typeof m === 'object' && m.isUserAdded === true
+            (m: unknown) => m && typeof m === 'object' && (m as Model).isUserAdded === true && !isRetiredUserModel(m as Model)
         ) as Model[]
 
         if (userModels.length === 0) return null
@@ -93,8 +138,8 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         if (saved && savedVersion === CONFIG_VERSION) {
             try {
                 const parsed = JSON.parse(saved) as Model[]
-                // 仅保留用户真正添加的模型，过滤掉之前缓存的系统模型
-                const filtered = parsed.filter(m => m.isUserAdded || !m.isSystem)
+                // 仅保留用户真正添加的模型，过滤掉之前缓存的系统模型和已废弃条目。
+                const filtered = parsed.filter(isPersistedUserModel)
                 return filtered
             } catch (error) {
                 console.warn('Failed to parse saved user models')
@@ -119,6 +164,21 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(userCollection))
     }, [userCollection])
 
+    // 历史模型也可能曾被同步到后端动态模型存储。删除请求是幂等的；
+    // 后端没有对应记录时直接返回成功，前端本地清理不依赖该请求结果。
+    useEffect(() => {
+        const controller = new AbortController()
+        RETIRED_DYNAMIC_MODEL_IDS.forEach(modelId => {
+            fetch(`/api/models/custom/${encodeURIComponent(modelId)}`, {
+                method: 'DELETE',
+                signal: controller.signal,
+            }).catch(() => {
+                // 后端暂不可用不影响本地模型列表；下次启动会再次收敛。
+            })
+        })
+        return () => controller.abort()
+    }, [])
+
     /**
      * 添加模型到用户collection
      * 确保 capabilities 和 tags 字段被正确持久化：
@@ -127,6 +187,10 @@ export function ModelProvider({ children }: { children: ReactNode }) {
      * - tags 字段直接透传保留
      */
     const addModelToCollection = (model: Model) => {
+        if (isRetiredUserModel(model)) {
+            return
+        }
+
         // 确保 capabilities 字段存在：若缺失则根据 type 自动生成
         const capabilities: ModelCapability[] = model.capabilities && model.capabilities.length > 0
             ? model.capabilities
@@ -152,9 +216,9 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         })
 
         // 副作用必须在 state updater 外部执行（updater 须为纯函数）
-        if (model.type === 'embedding' || model.type === 'rerank') {
-            _persistModelToBackend(model, capabilities, tags)
-        }
+        // 后端能力解析依赖动态模型元数据。聊天模型也必须持久化，否则
+        // reasoningOptions/reasoningMode 只存在于浏览器，实际请求无法读取。
+        _persistModelToBackend(model, capabilities, tags)
     }
 
     /**
@@ -163,6 +227,8 @@ export function ModelProvider({ children }: { children: ReactNode }) {
      * 满足需求 2.4：用户编辑已有模型的类型时，更新 capabilities 数组中对应条目的 isUserSelected 标志
      */
     const updateModelInCollection = (modelId: string, providerId: string, updates: Partial<Model>) => {
+        const existing = userCollection.find(m => m.id === modelId && m.providerId === providerId)
+        const updated = existing ? { ...existing, ...updates } : null
         setUserCollection(prev =>
             prev.map(m => {
                 if (m.id === modelId && m.providerId === providerId) {
@@ -171,6 +237,15 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 return m
             })
         )
+        if (updated) {
+            _persistModelToBackend(
+                updated,
+                updated.capabilities && updated.capabilities.length > 0
+                    ? updated.capabilities
+                    : [{ type: updated.type, isUserSelected: true }],
+                updated.tags || [],
+            )
+        }
     }
 
     /**
@@ -182,6 +257,23 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         setUserCollection(prev =>
             prev.filter(m => !(m.id === modelId && m.providerId === providerId))
         )
+    }
+
+    /**
+     * 删除 Provider 时同步清理桌面端的用户模型缓存。
+     * Provider 删除接口会负责清理后端动态模型记录，这里只更新前端集合，避免重复发起逐模型请求。
+     */
+    const removeModelsByProvider = (providerId: string) => {
+        setUserCollection(prev => prev.filter(model => model.providerId !== providerId))
+        try {
+            const lastSync = JSON.parse(localStorage.getItem(LAST_SYNC_KEY) || '{}')
+            if (lastSync && typeof lastSync === 'object' && providerId in lastSync) {
+                delete lastSync[providerId]
+                localStorage.setItem(LAST_SYNC_KEY, JSON.stringify(lastSync))
+            }
+        } catch {
+            localStorage.removeItem(LAST_SYNC_KEY)
+        }
     }
 
     /**
@@ -252,7 +344,9 @@ export function ModelProvider({ children }: { children: ReactNode }) {
         setFetchError(null)
 
         try {
-            const models = await fetchModelsFromProvider(provider)
+            const models = (await fetchModelsFromProvider(provider)).filter(
+                model => !isRetiredUserModel(model)
+            )
 
             // 可选：将获取到的模型添加到collection
             if (options?.autoAdd !== false) {
@@ -285,6 +379,7 @@ export function ModelProvider({ children }: { children: ReactNode }) {
                 systemModels,
                 addModelToCollection,
                 removeModelFromCollection,
+                removeModelsByProvider,
                 updateModelInCollection,
                 isModelInCollection,
                 getModelsByType,

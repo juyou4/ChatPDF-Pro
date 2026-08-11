@@ -27,6 +27,13 @@ const getSourceDomain = (url, fallback = '') => {
   }
 };
 
+const getAdapterLabel = (adapter) => {
+  const normalized = String(adapter || '').trim().toLowerCase();
+  if (normalized === 'github_public') return 'GitHub';
+  if (normalized === 'youtube_transcript') return 'YouTube';
+  return '';
+};
+
 const getAuditMessage = (audit) => {
   const status = String(audit?.status || '').trim().toLowerCase();
   if (status === 'empty') return '没有找到足够可靠的网页来源，回答将仅使用现有文档证据。';
@@ -34,12 +41,14 @@ const getAuditMessage = (audit) => {
   if (audit?.reason === 'missing_topic') return '还需要更明确的主题才能执行网页搜索。';
   if (audit?.reason === 'missing_paper_identity') return '未识别出当前论文题目，请提供论文标题后重试联网搜索。';
   if (audit?.reason === 'auto_policy_not_selected') return '当前问题未触发外部搜索，本轮仅使用文档与对话上下文。';
+  if (audit?.reason === 'agent_not_selected') return '模型判断本轮无需外部搜索，本轮仅使用文档与对话上下文。';
   if (status === 'skipped') return '本轮未执行网页搜索。';
   return '';
 };
 
 const WebSearchActivity = ({
   sources = [],
+  reads = [],
   status = null,
   audit = null,
   query = '',
@@ -61,14 +70,40 @@ const WebSearchActivity = ({
         }[evidenceType] || '摘要';
         return {
           id: `${safeUrl || domain || title}-${index}`,
+          sourceId: String(source?.source_id || source?.evidence_id || '').trim(),
+          url: safeUrl,
           title,
           domain,
-          url: safeUrl,
           evidenceLabel,
+          adapter: String(source?.adapter || '').trim(),
         };
       })
       .filter((source) => source.title)
   ), [sources]);
+
+  const normalizedReads = useMemo(() => (
+    (Array.isArray(reads) ? reads : [])
+      .map((read) => ({
+        sourceId: String(read?.source_id || '').trim(),
+        evidenceId: String(read?.evidence_id || '').trim(),
+        url: getSafeHttpUrl(read?.url),
+        status: String(read?.status || '').trim().toLowerCase(),
+        charCount: Number.isFinite(Number(read?.char_count)) ? Number(read.char_count) : 0,
+        truncated: Boolean(read?.truncated),
+        cached: Boolean(read?.cached),
+        adapter: String(read?.adapter || '').trim(),
+        contentKind: String(read?.content_kind || '').trim(),
+      }))
+      .filter((read) => read.sourceId || read.evidenceId)
+  ), [reads]);
+  const readBySource = useMemo(() => {
+    const map = new Map();
+    normalizedReads.forEach((read) => {
+      if (read.sourceId) map.set(`id:${read.sourceId}`, read);
+      if (read.url) map.set(`url:${read.url}`, read);
+    });
+    return map;
+  }, [normalizedReads]);
 
   const phase = String(status?.phase || '').trim().toLowerCase();
   const auditStatus = String(audit?.status || '').trim().toLowerCase();
@@ -78,10 +113,10 @@ const WebSearchActivity = ({
     Number.isFinite(Number(status?.count)) ? Number(status.count) : 0,
     Number.isFinite(Number(audit?.result_count)) ? Number(audit.result_count) : 0,
   );
-  const completed = normalizedSources.length > 0 || auditStatus === 'completed';
+  const completed = normalizedSources.length > 0 || normalizedReads.length > 0 || auditStatus === 'completed';
   const contentReadCount = Math.max(0, Number(audit?.content_read_count) || 0);
   const contentReadFailed = Math.max(0, Number(audit?.content_read_failed) || 0);
-  const requested = Boolean(status || normalizedSources.length > 0 || audit?.requested);
+  const requested = Boolean(status || normalizedSources.length > 0 || normalizedReads.length > 0 || audit?.requested);
   const auditMessage = getAuditMessage(audit);
   const [expanded, setExpanded] = useState(() => (
     isSearching || Boolean(auditMessage) || (!embedded && normalizedSources.length > 0)
@@ -115,6 +150,20 @@ const WebSearchActivity = ({
     : normalizedSources.slice(0, COLLAPSED_SOURCE_COUNT);
   const hiddenSourceCount = Math.max(0, normalizedSources.length - visibleSources.length);
   const displayQuery = normalizeText(query, 240);
+  const successfulReadCount = normalizedReads.filter((read) => read.status === 'completed').length;
+  const failedReadCount = normalizedReads.filter((read) => read.status && read.status !== 'completed').length;
+  const readLabel = (source) => {
+    const read = source?.sourceId
+      ? readBySource.get(`id:${source.sourceId}`)
+      : readBySource.get(`url:${source?.url || ''}`);
+    if (!read) return '';
+    if (read.status === 'completed') {
+      if (read.contentKind === 'youtube_metadata') return '已读取视频信息';
+      if (read.contentKind === 'rendered_web_page') return '已读取动态页面';
+      return read.charCount > 0 ? `已读取 ${read.charCount.toLocaleString()} 字` : '已读取全文';
+    }
+    return '全文读取失败，使用搜索摘要';
+  };
 
   if (embedded) {
     return (
@@ -185,8 +234,10 @@ const WebSearchActivity = ({
                   <>
                     <Globe2 className={`h-3.5 w-3.5 flex-shrink-0 ${darkMode ? 'text-gray-400' : 'text-[#918983]'}`} strokeWidth={1.8} aria-hidden="true" />
                     <span className={`min-w-0 truncate ${darkMode ? 'text-gray-300' : 'text-[#67615d]'}`}>{source.title}</span>
+                    {getAdapterLabel(source.adapter) && <span className={`flex-shrink-0 text-[10.5px] ${darkMode ? 'text-gray-500' : 'text-[#9a8f88]'}`}>{getAdapterLabel(source.adapter)}</span>}
                     {source.domain && <span className={`min-w-0 flex-shrink truncate text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-[#918983]'}`}>{source.domain}</span>}
                     <span className={`flex-shrink-0 rounded-[4px] px-1 py-0.5 text-[10.5px] ${darkMode ? 'bg-white/[0.05] text-gray-500' : 'bg-[#f1eeeb] text-[#8b817b]'}`}>{source.evidenceLabel}</span>
+                    {readLabel(source) && <span className={`ml-auto min-w-0 flex-shrink truncate text-[11px] ${readLabel(source).startsWith('已读取') ? (darkMode ? 'text-emerald-300/70' : 'text-emerald-700/75') : (darkMode ? 'text-amber-300/75' : 'text-amber-700/80')}`}>{readLabel(source)}</span>}
                     {source.url && <ExternalLink className="ml-auto h-3.5 w-3.5 flex-shrink-0 opacity-0 transition-opacity group-hover/source:opacity-100" strokeWidth={1.8} aria-hidden="true" />}
                   </>
                 );
@@ -211,6 +262,11 @@ const WebSearchActivity = ({
                 >
                   另外 {hiddenSourceCount} 个来源
                 </button>
+              )}
+              {normalizedReads.length > 0 && (
+                <p className={`px-2 py-1 text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                  {successfulReadCount > 0 ? `已读取 ${successfulReadCount} 个来源全文${failedReadCount > 0 ? `，${failedReadCount} 个来源读取失败` : ''}` : '未能读取来源全文，已使用搜索摘要'}
+                </p>
               )}
               {!isSearching && normalizedSources.length === 0 && auditMessage && (
                 <p className={`px-2 py-1.5 text-[12.5px] leading-5 ${
@@ -304,6 +360,11 @@ const WebSearchActivity = ({
                     <span className={`min-w-0 truncate font-medium ${darkMode ? 'text-gray-300' : 'text-[#4f4b48]'}`}>
                       {source.title}
                     </span>
+                    {getAdapterLabel(source.adapter) && (
+                      <span className={`flex-shrink-0 text-[10.5px] ${darkMode ? 'text-gray-500' : 'text-[#9a8f88]'}`}>
+                        {getAdapterLabel(source.adapter)}
+                      </span>
+                    )}
                     {source.domain && (
                       <span className={`min-w-0 flex-shrink truncate text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                         {source.domain}
@@ -312,6 +373,7 @@ const WebSearchActivity = ({
                     <span className={`flex-shrink-0 rounded-[4px] px-1 py-0.5 text-[10px] ${darkMode ? 'bg-white/[0.05] text-gray-500' : 'bg-[#f1eeeb] text-[#8b817b]'}`}>
                       {source.evidenceLabel}
                     </span>
+                    {readLabel(source) && <span className={`ml-auto min-w-0 flex-shrink truncate text-[11px] ${readLabel(source).startsWith('已读取') ? (darkMode ? 'text-emerald-300/70' : 'text-emerald-700/75') : (darkMode ? 'text-amber-300/75' : 'text-amber-700/80')}`}>{readLabel(source)}</span>}
                     {source.url && (
                       <ExternalLink className="ml-auto h-3 w-3 flex-shrink-0 opacity-0 transition-opacity group-hover/source:opacity-100" strokeWidth={1.8} aria-hidden="true" />
                     )}
@@ -342,6 +404,12 @@ const WebSearchActivity = ({
               >
                 另外 {hiddenSourceCount} 个来源
               </button>
+            )}
+
+            {normalizedReads.length > 0 && (
+              <p className={`px-1.5 py-1 text-[11.5px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                {successfulReadCount > 0 ? `已读取 ${successfulReadCount} 个来源全文${failedReadCount > 0 ? `，${failedReadCount} 个来源读取失败` : ''}` : '未能读取来源全文，已使用搜索摘要'}
+              </p>
             )}
 
             {!isSearching && normalizedSources.length === 0 && auditMessage && (

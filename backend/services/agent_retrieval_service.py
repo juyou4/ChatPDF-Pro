@@ -499,6 +499,7 @@ def _build_degraded_agent_result(
         "retrieval_diagnostics": partial_retrieval_diag,
         "web_search_sources": list(partial_state.get("web_search_sources") or []),
         "web_search_context": "\n\n".join(partial_state.get("web_search_context_parts") or []),
+        "web_search_reads": list(partial_state.get("web_search_reads") or []),
         "status": "degraded",
         "error_kind": error_kind,
         "degraded_to": degraded_to,
@@ -603,8 +604,8 @@ async def run_agent_retrieval_for_context(
         "sub_questions": len(sub_questions or []),
     }
 
-    # 路由层在检索前已完成一次 auto 判定。Agent 只接收冻结后的执行模式，
-    # 不再通过规划器启发式规则重复解释同一个请求。
+    # force/off 是路由层冻结的硬边界；auto 则保留给 Planner 自主决定是否
+    # 调用 web_search。无论哪种模式，执行器、查询改写和来源预算仍由系统控制。
     resolved_execution_mode = str(web_search_execution_mode or "").strip().lower()
     if resolved_execution_mode in {"off", "force"}:
         web_search_mode = resolved_execution_mode
@@ -618,13 +619,12 @@ async def run_agent_retrieval_for_context(
             else _resolve_effective_web_search_mode(request, request.question)
         )
     web_search_executor = None
+    frozen_web_query = citation_query or str(search_query or request.question or "").strip()
     if web_search_mode != "off" and deps.perform_web_search is not None:
         # Freeze the network query before the planner sees any untrusted PDF
         # evidence. Later planner rounds may decide whether to use the one-shot
         # tool, but document text can never become an outbound query.
-        frozen_web_query = citation_query or str(search_query or request.question or "").strip()
-
-        async def _agent_web_search():
+        async def _agent_web_search(effective_query: str = ""):
             paper_metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else {}
             if not paper_metadata.get("title"):
                 try:
@@ -634,7 +634,9 @@ async def run_agent_retrieval_for_context(
                 except Exception:
                     paper_metadata = {}
             kwargs = {
-                "query_override": frozen_web_query,
+                # retrieval_tools has already constrained this value to the
+                # frozen route query plus public document anchors.
+                "query_override": effective_query or frozen_web_query,
                 "doc_title": paper_metadata.get("title") or doc.get("filename", ""),
                 "selected_text": request.selected_text or "",
                 "doc_id": request.doc_id,
@@ -674,6 +676,9 @@ async def run_agent_retrieval_for_context(
         vector_store_dir,
         **context_kwargs,
     )
+    set_web_search_query = getattr(agent_doc_ctx, "set_web_search_request_query", None)
+    if callable(set_web_search_query):
+        set_web_search_query(frozen_web_query if web_search_mode != "off" else "")
     # Keep custom/test builders compatible while making the route-owned
     # decision available before any planner tool can run.
     if intent_decision is not None:
@@ -810,6 +815,16 @@ async def run_agent_retrieval_for_context(
         web_context = str(agent_result.get("web_search_context") or "").strip()
         if web_context:
             retrieval_meta["web_search_context"] = web_context
+        web_reads = agent_result.get("web_search_reads")
+        if isinstance(web_reads, list):
+            retrieval_meta["web_search_reads"] = [
+                dict(item) for item in web_reads if isinstance(item, dict)
+            ]
+            if retrieval_meta["web_search_reads"]:
+                await _emit_progress(emit_progress, {
+                    "type": "web_search_read",
+                    "reads": retrieval_meta["web_search_reads"],
+                })
         if agent_result.get("task_status"):
             retrieval_meta["task_status"] = agent_result.get("task_status")
         agent_retrieval_diagnostics = agent_result.get("retrieval_diagnostics")

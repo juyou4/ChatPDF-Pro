@@ -17,12 +17,13 @@ from typing import Any, Awaitable, Callable
 
 from services.ai_cache_state import LEGACY_AI_CACHE_GENERATION
 from services.chat_service import call_ai_api
+from services.completion_outcome import require_publishable_completion
 from services.glossary_service import build_glossary_prompt
 
 logger = logging.getLogger(__name__)
 
-TRANSLATION_CACHE_VERSION = 3
-TRANSLATION_PROMPT_VERSION = 6
+TRANSLATION_CACHE_VERSION = 4
+TRANSLATION_PROMPT_VERSION = 7
 MAX_BLOCKS_PER_REQUEST = 24
 MAX_BLOCK_CHARS = 1800
 TRANSLATION_CONCURRENCY = 8
@@ -996,6 +997,7 @@ async def _generate_block_summary(
         )
         if isinstance(response, dict) and response.get("error"):
             return ""
+        require_publishable_completion(response, operation="block summary")
         return _clean_summary_text(_extract_content(response))
     except Exception as exc:  # noqa: BLE001 - 要点是增强项，不能拖垮翻译
         logger.debug("[BlockTranslation] summary skipped: %s", exc)
@@ -1058,6 +1060,7 @@ async def _translate_source_segment(
     )
     if isinstance(response, dict) and response.get("error"):
         raise RuntimeError(response.get("error"))
+    require_publishable_completion(response, operation="block translation")
 
     content = _extract_content(response)
     if not content.strip():

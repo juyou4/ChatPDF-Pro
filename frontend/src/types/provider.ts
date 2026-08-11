@@ -17,10 +17,21 @@ export interface ProviderCapabilities {
  * Provider API配置
  */
 export interface ProviderApiConfig {
+  protocol?: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'custom'
   fetchModelsEndpoint?: string    // 获取模型列表的endpoint
   chatEndpoint?: string           // 对话endpoint
   embeddingEndpoint?: string      // embedding endpoint
   rerankEndpoint?: string         // rerank endpoint
+  supportsStreaming?: boolean     // Provider 是否支持 SSE 流式输出
+  supportsReasoning?: boolean     // 是否允许自动注入 thinking 参数
+  reasoningMode?: 'openai_effort' | 'anthropic_adaptive' | 'anthropic_budget' | 'gemini_level' | 'gemini_budget' | 'qwen_budget' | 'thinking_toggle' | 'ollama_think' | 'fixed'
+  reasoningOptions?: string[]
+  reasoningDefault?: string
+  reasoningAlwaysEnabled?: boolean
+  reasoningOffControl?: string
+  reasoningOnControl?: 'thinking_enabled' | 'thinking_adaptive' | 'enable_thinking_true' | 'reasoning_split_true' | 'provider_default'
+  apiKeyHeader?: string           // API Key 请求头名称，默认 Authorization
+  apiKeyPrefix?: string           // API Key 请求头前缀，默认 Bearer 空格
 }
 
 /**
@@ -47,6 +58,7 @@ export interface ProviderUpdate {
   apiKey?: string
   apiHost?: string
   enabled?: boolean
+  apiConfig?: ProviderApiConfig
 }
 
 /**
@@ -58,4 +70,6 @@ export interface ProviderTestResult {
   availableModels?: number
   error?: string
   latency?: number  // 延迟毫秒数，连接测试成功时返回
+  verifiedModel?: string
+  chatEndpoint?: string
 }

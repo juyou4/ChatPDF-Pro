@@ -1,9 +1,50 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { ArrowDown } from 'lucide-react';
 
 // 默认估算高度（未缓存消息的默认高度）
 const DEFAULT_ESTIMATED_HEIGHT = 120;
 // 默认缓冲区大小（上下各缓冲的消息数）
 const DEFAULT_BUFFER_SIZE = 5;
+// 只有用户明显离开最新内容时才显示回到底部按钮，避免在底部附近反复闪现。
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 50;
+const SCROLL_TO_LATEST_VISIBLE_THRESHOLD = 96;
+
+export function getDistanceToBottom(scrollTop, clientHeight, scrollHeight) {
+  return Math.max(0, scrollHeight - scrollTop - clientHeight);
+}
+
+export function shouldShowScrollToLatest({
+  scrollTop,
+  clientHeight,
+  scrollHeight,
+  hasMessages,
+}) {
+  return Boolean(hasMessages)
+    && getDistanceToBottom(scrollTop, clientHeight, scrollHeight) > SCROLL_TO_LATEST_VISIBLE_THRESHOLD;
+}
+
+// 旧会话中的 system/assistant 消息可能没有 id。虚拟列表不能直接用
+// undefined 作为 React key 或高度缓存键，否则多条历史消息会共享同一个
+// DOM 身份，加载会话后可能把正在流式的节点复用到错误消息上。
+export function getMessageListKey(message, index) {
+  const candidates = [
+    message?.id,
+    message?.messageId,
+    message?.message_id,
+  ];
+  const explicitId = candidates.find((value) => (
+    value !== null
+    && value !== undefined
+    && String(value).trim().length > 0
+  ));
+  if (explicitId !== undefined) return explicitId;
+
+  const timestamp = message?.createdAt || message?.created_at || message?.timestamp;
+  const type = String(message?.type || message?.role || 'message').trim() || 'message';
+  return timestamp
+    ? `legacy-${type}-${String(timestamp)}-${index}`
+    : `legacy-${type}-${index}`;
+}
 
 /**
  * 计算当前可视范围内的消息索引
@@ -33,7 +74,8 @@ export function calculateVisibleRange(
 
   // 遍历消息，找到可视区域的起始和结束索引
   for (let i = 0; i < messages.length; i++) {
-    const msgHeight = heightCache.get(messages[i].id) ?? estimatedHeight;
+    const messageKey = getMessageListKey(messages[i], i);
+    const msgHeight = heightCache.get(messageKey) ?? estimatedHeight;
     accumulatedHeight += msgHeight;
     // 累积高度超过 scrollTop 时，找到可视区域起始位置
     if (accumulatedHeight > scrollTop && visibleStart === -1) {
@@ -78,13 +120,15 @@ export function calculatePadding(
   // 计算顶部不可见区域的总高度
   let paddingTop = 0;
   for (let i = 0; i < visibleRange.start; i++) {
-    paddingTop += heightCache.get(messages[i].id) ?? estimatedHeight;
+    const messageKey = getMessageListKey(messages[i], i);
+    paddingTop += heightCache.get(messageKey) ?? estimatedHeight;
   }
 
   // 计算底部不可见区域的总高度
   let paddingBottom = 0;
   for (let i = visibleRange.end; i < messages.length; i++) {
-    paddingBottom += heightCache.get(messages[i].id) ?? estimatedHeight;
+    const messageKey = getMessageListKey(messages[i], i);
+    paddingBottom += heightCache.get(messageKey) ?? estimatedHeight;
   }
 
   return { paddingTop, paddingBottom };
@@ -102,6 +146,7 @@ export function calculatePadding(
  * @param {number} props.estimatedHeight - 未缓存消息的估算高度，默认 120px
  * @param {string} props.className - 外层容器的额外 CSS 类名
  * @param {string} props.itemClassName - 每条消息外层包裹的类名。
+ * @param {boolean} props.darkMode - 是否使用深色界面样式
  *   消息之间的间距必须写在这里而且只能用 padding：
  *   1) 在 className 上写 space-y-* 是无效的 —— 那只作用于滚动容器的直接子元素，
  *      而消息全都包在内层的 paddingTop/paddingBottom 占位 div 里；
@@ -116,6 +161,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
   estimatedHeight = DEFAULT_ESTIMATED_HEIGHT,
   className = '',
   itemClassName = '',
+  darkMode = false,
 }) {
   // 滚动容器 ref
   const scrollContainerRef = useRef(null);
@@ -135,6 +181,25 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     scrollTop: 0,
     containerHeight: 0,
   });
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
+
+  const syncScrollState = useCallback((container = scrollContainerRef.current) => {
+    if (!container) return;
+
+    const { scrollTop, clientHeight, scrollHeight } = container;
+    const distanceToBottom = getDistanceToBottom(scrollTop, clientHeight, scrollHeight);
+    shouldAutoScrollRef.current = distanceToBottom < AUTO_SCROLL_BOTTOM_THRESHOLD;
+    setShowScrollToLatest(shouldShowScrollToLatest({
+      scrollTop,
+      clientHeight,
+      scrollHeight,
+      hasMessages: messages.length > 0,
+    }));
+    setScrollState({
+      scrollTop,
+      containerHeight: clientHeight,
+    });
+  }, [messages.length]);
 
   // 计算可视范围
   const rawVisibleRange = useMemo(
@@ -197,13 +262,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
 
         // 高度变化时触发重新计算可视范围
         if (hasChanges) {
-          const container = scrollContainerRef.current;
-          if (container) {
-            setScrollState({
-              scrollTop: container.scrollTop,
-              containerHeight: container.clientHeight,
-            });
-          }
+          syncScrollState();
         }
       });
     } catch {
@@ -214,7 +273,7 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     return () => {
       resizeObserverRef.current?.disconnect();
     };
-  }, []);
+  }, [syncScrollState]);
 
   // 为可视消息元素注册/注销 ResizeObserver 观察
   const setItemRef = useCallback((messageId, element) => {
@@ -249,39 +308,21 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
 
   // 滚动事件处理
   const handleScroll = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const { scrollTop, clientHeight, scrollHeight } = container;
-
-    // 判断是否在底部附近（距底部 50px 以内视为在底部）
-    const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
-    shouldAutoScrollRef.current = isNearBottom;
-
-    setScrollState({
-      scrollTop,
-      containerHeight: clientHeight,
-    });
-  }, []);
+    syncScrollState();
+  }, [syncScrollState]);
 
   // 初始化容器高度测量
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    setScrollState({
-      scrollTop: container.scrollTop,
-      containerHeight: container.clientHeight,
-    });
+    syncScrollState(container);
 
     // 监听容器自身尺寸变化（如窗口缩放）
     let containerObserver;
     try {
       containerObserver = new ResizeObserver(() => {
-        setScrollState({
-          scrollTop: container.scrollTop,
-          containerHeight: container.clientHeight,
-        });
+        syncScrollState(container);
       });
       containerObserver.observe(container);
     } catch {
@@ -291,6 +332,20 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     return () => {
       containerObserver?.disconnect();
     };
+  }, [syncScrollState]);
+
+  const handleScrollToLatest = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    // 用户主动回到最新内容后，后续流式内容可以继续自然跟随。
+    shouldAutoScrollRef.current = true;
+    setShowScrollToLatest(false);
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
   }, []);
 
   // 新消息到达时自动滚动到底部
@@ -344,27 +399,55 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
 
   return (
     <div
-      ref={scrollContainerRef}
-      onScroll={handleScroll}
-      className={className}
-      style={{ overflow: 'auto' }}
+      className="relative flex-1 min-h-0"
     >
-      <div style={{ paddingTop, paddingBottom }}>
-        {visibleMessages.map((msg, idx) => {
-          const originalIndex = visibleRange.start + idx;
-          const messageId = msg.id;
-          return (
-            <div
-              key={messageId}
-              ref={(el) => setItemRef(messageId, el)}
-              data-message-id={messageId}
-              className={itemClassName}
-            >
-              {renderMessage(msg, originalIndex)}
-            </div>
-          );
-        })}
+      <div
+        ref={scrollContainerRef}
+        data-testid="virtual-message-list"
+        onScroll={handleScroll}
+        className={`${className} h-full`}
+        style={{ overflow: 'auto' }}
+      >
+        <div style={{ paddingTop, paddingBottom }}>
+          {visibleMessages.map((msg, idx) => {
+            const originalIndex = visibleRange.start + idx;
+            const messageId = getMessageListKey(msg, originalIndex);
+            return (
+              <div
+                key={messageId}
+                ref={(el) => setItemRef(messageId, el)}
+                data-message-id={messageId}
+                className={itemClassName}
+              >
+                {renderMessage(msg, originalIndex)}
+              </div>
+            );
+          })}
+        </div>
       </div>
+
+      {messages.length > 0 && (
+        <button
+          type="button"
+          data-testid="scroll-to-latest"
+          aria-label="回到最新内容"
+          aria-hidden={!showScrollToLatest}
+          tabIndex={showScrollToLatest ? 0 : -1}
+          title="回到最新内容"
+          onClick={handleScrollToLatest}
+          className={`absolute bottom-28 left-1/2 z-20 flex h-10 w-10 -translate-x-1/2 items-center justify-center rounded-full border backdrop-blur-md transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/45 active:scale-95 ${
+            showScrollToLatest
+              ? 'translate-y-0 opacity-100 pointer-events-auto'
+              : 'translate-y-2 opacity-0 pointer-events-none'
+          } ${
+            darkMode
+              ? 'border-white/[0.11] bg-[#2a2e35]/95 text-gray-200 shadow-[0_10px_24px_-12px_rgba(0,0,0,0.72)] hover:bg-[#353a43] hover:text-white hover:shadow-[0_14px_28px_-12px_rgba(0,0,0,0.82)]'
+              : 'border-[#e6e1dc]/90 bg-white/95 text-[#68635e] shadow-[0_10px_24px_-12px_rgba(72,63,54,0.36)] hover:-translate-y-0.5 hover:bg-[#fffefd] hover:text-[#B85F47] hover:shadow-[0_14px_28px_-12px_rgba(72,63,54,0.42)]'
+          }`}
+        >
+          <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 });

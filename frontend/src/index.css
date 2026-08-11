@@ -1253,10 +1253,37 @@ body,
     isolation: isolate;
 }
 
+.settings-shell button:focus {
+    outline: none;
+}
+
+.settings-shell button:focus-visible {
+    outline: 2px solid rgba(217, 122, 93, 0.52);
+    outline-offset: 2px;
+}
+
 /* 大尺寸设置弹窗只提升自身图层，避免内部每张交互卡片各占一个合成层。 */
 .settings-modal-surface {
     backface-visibility: hidden;
     will-change: transform, opacity;
+}
+
+.model-service-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow-y: auto;
+}
+
+@media (min-width: 1024px) {
+    .model-service-layout {
+        display: grid;
+        grid-template-columns:
+            clamp(240px, 23vw, 280px)
+            minmax(360px, 1fr)
+            clamp(300px, 28vw, 360px);
+        overflow: hidden;
+    }
 }
 
 .settings-chrome {
@@ -1299,40 +1326,31 @@ body,
 
 .settings-nav-item-icon {
     color: #8b929d;
-    background: rgba(255, 255, 255, 0.58);
-    border: 1px solid rgba(148, 163, 184, 0.12);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
     transition:
         color 180ms ease,
-        background-color 180ms ease,
-        border-color 180ms ease,
         transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .settings-nav-item[data-active="true"] {
     color: #272b33;
-    background: #ffffff;
-    border-color: rgba(100, 116, 139, 0.14);
-    box-shadow:
-        0 1px 2px rgba(30, 41, 59, 0.05),
-        0 8px 18px -12px rgba(30, 41, 59, 0.28);
 }
 
 .settings-nav-item[data-active="true"] .settings-nav-item-icon {
     color: #b85f47;
-    background: #fff1eb;
-    border-color: rgba(217, 122, 93, 0.18);
 }
 
 @media (hover: hover) {
     .settings-nav-item[data-active="false"]:hover {
         color: #374151;
-        background: rgba(255, 255, 255, 0.62);
-        border-color: rgba(148, 163, 184, 0.12);
+        background: transparent;
+        border-color: transparent;
     }
 
     .settings-nav-item[data-active="false"]:hover .settings-nav-item-icon {
         color: #6b7280;
-        background: rgba(255, 255, 255, 0.86);
         transform: translateY(-1px);
     }
 }
@@ -1379,11 +1397,18 @@ body,
 }
 
 .settings-feature-icon {
-    border: 1px solid rgba(100, 116, 139, 0.09);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
     transition:
         color 180ms ease,
-        background-color 180ms ease,
-        border-color 180ms ease;
+        transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (hover: hover) {
+    .settings-feature-row:hover .settings-feature-icon {
+        transform: translateY(-1px);
+    }
 }
 
 .settings-feature-status {
@@ -1469,28 +1494,24 @@ body,
 
 .settings-shell-dark .settings-nav-item-icon {
     color: #858c97;
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.045);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
 }
 
 .settings-shell-dark .settings-nav-item[data-active="true"] {
     color: #eef0f3;
-    background: #292e36;
-    border-color: rgba(255, 255, 255, 0.075);
-    box-shadow: 0 8px 18px -13px rgba(0, 0, 0, 0.82);
 }
 
 .settings-shell-dark .settings-nav-item[data-active="true"] .settings-nav-item-icon {
     color: #ffb49a;
-    background: rgba(217, 122, 93, 0.13);
-    border-color: rgba(255, 180, 154, 0.1);
 }
 
 @media (hover: hover) {
     .settings-shell-dark .settings-nav-item[data-active="false"]:hover {
         color: #d5d8dd;
-        background: rgba(255, 255, 255, 0.045);
-        border-color: rgba(255, 255, 255, 0.045);
+        background: transparent;
+        border-color: transparent;
     }
 
     .settings-shell-dark .settings-feature-row:hover {
@@ -2509,45 +2530,6 @@ body,
     background: rgba(255, 255, 255, 0.15);
 }
 
-/* 流式输出模糊渐显。字符动画结束后会移除 class，避免长期占用合成层。 */
-
-@keyframes blur-reveal-first {
-    0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0.15;
-        transform: translateY(1px);
-    }
-    100% {
-        filter: blur(0);
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.animate-blur-reveal {
-    animation: blur-reveal-first var(--blur-duration, 0.25s) ease-out forwards;
-}
-
-.blur-intensity-light {
-    --blur-distance: 1.5px;
-    --blur-duration: 0.18s;
-}
-
-.blur-intensity-medium {
-    --blur-distance: 3px;
-    --blur-duration: 0.25s;
-}
-
-.blur-intensity-strong {
-    --blur-distance: 5px;
-    --blur-duration: 0.35s;
-}
-
-.blur-reveal-animate {
-    animation: blur-reveal-smooth var(--blur-duration, 0.25s) ease-out forwards;
-    will-change: filter, opacity;
-}
-
 .settings-config-status {
     display: inline-flex;
     min-height: 18px;
@@ -2648,19 +2630,6 @@ body,
     box-shadow: none;
 }
 
-@keyframes blur-reveal-smooth {
-    0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0.15;
-        transform: translateY(1px);
-    }
-    100% {
-        filter: blur(0);
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
 /* --- Glass Button (Legacy/Fallback) --- */
 .glass-btn {
     position: relative;
@@ -2752,39 +2721,76 @@ body,
 }
 
 /* ============================================================
-   流式输出动画系统 - 统一的柔和淡入 + 打字光标效果
+   React Bits 风格的流式文字显现。只作用于本帧新增字符，完成后由 Hook
+   将 span 还原成普通文本节点，避免长回答持续保留 filter 合成层。
    ============================================================ */
 
-@keyframes blur-reveal {
+@keyframes blur-text-reveal {
     0% {
-        filter: blur(var(--blur-distance, 3px));
-        opacity: 0.15;
-        transform: translateY(1px);
+        filter: blur(var(--blur-distance, 6px));
+        opacity: 0;
+        transform: translate3d(0, var(--blur-shift, -7px), 0);
+    }
+    52% {
+        filter: blur(var(--blur-mid-distance, 2.3px));
+        opacity: 0.55;
+        transform: translate3d(0, var(--blur-overshoot, 1px), 0);
     }
     100% {
         filter: blur(0);
         opacity: 1;
-        transform: translateY(0);
+        transform: translate3d(0, 0, 0);
     }
 }
 
-.animate-blur-reveal {
-    animation: blur-reveal var(--blur-duration, 0.25s) ease-out forwards;
+.blur-reveal-animate {
+    display: inline-block;
+    vertical-align: baseline;
+    transform-origin: center bottom;
+    backface-visibility: hidden;
+    animation-name: blur-text-reveal;
+    animation-duration: var(--blur-duration, 0.44s);
+    animation-delay: calc(var(--blur-sequence-index, 0) * var(--blur-stagger, 16ms));
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    animation-fill-mode: both;
+    will-change: transform, filter, opacity;
 }
 
+.blur-stagger-0 { --blur-sequence-index: 0; }
+.blur-stagger-1 { --blur-sequence-index: 1; }
+.blur-stagger-2 { --blur-sequence-index: 2; }
+.blur-stagger-3 { --blur-sequence-index: 3; }
+.blur-stagger-4 { --blur-sequence-index: 4; }
+.blur-stagger-5 { --blur-sequence-index: 5; }
+.blur-stagger-6 { --blur-sequence-index: 6; }
+.blur-stagger-7 { --blur-sequence-index: 7; }
+.blur-stagger-8 { --blur-sequence-index: 8; }
+
 .blur-intensity-light {
-    --blur-distance: 1.5px;
-    --blur-duration: 0.18s;
+    --blur-distance: 3px;
+    --blur-mid-distance: 1px;
+    --blur-shift: -3.5px;
+    --blur-overshoot: 0.6px;
+    --blur-duration: 0.28s;
+    --blur-stagger: 10ms;
 }
 
 .blur-intensity-medium {
-    --blur-distance: 3px;
-    --blur-duration: 0.25s;
+    --blur-distance: 6px;
+    --blur-mid-distance: 2.3px;
+    --blur-shift: -7px;
+    --blur-overshoot: 1px;
+    --blur-duration: 0.44s;
+    --blur-stagger: 16ms;
 }
 
 .blur-intensity-strong {
-    --blur-distance: 5px;
-    --blur-duration: 0.35s;
+    --blur-distance: 9px;
+    --blur-mid-distance: 3.8px;
+    --blur-shift: -11px;
+    --blur-overshoot: 1.5px;
+    --blur-duration: 0.58s;
+    --blur-stagger: 22ms;
 }
 
 /* 流式输出容器级动画 */
@@ -2796,27 +2802,8 @@ body,
     animation: none;
 }
 
-/* 用户关闭模糊渐显时，禁用逐字动画并保持正文清晰。 */
-.streaming-active:not(.blur-reveal-enabled) .blur-reveal-animate {
-    animation: none !important;
-    filter: none !important;
-    opacity: 1 !important;
-}
-
-.streaming-active:not(.blur-reveal-enabled) .animate-blur-reveal {
-    animation: none !important;
-    filter: none !important;
-    opacity: 1 !important;
-}
-
-.streaming-active:not(.blur-reveal-enabled) .blur-reveal-char {
-    filter: none !important;
-    opacity: 1 !important;
-}
-
 @media (prefers-reduced-motion: reduce) {
-    .blur-reveal-animate,
-    .animate-blur-reveal {
+    .blur-reveal-animate {
         animation: none !important;
         filter: none !important;
         opacity: 1 !important;
@@ -3716,4 +3703,50 @@ body,
         animation: none;
         transform: translateY(calc((var(--mineru-scan-size) - 7px) / 2));
     }
+}
+/* 思考档位滑杆：拖动由浏览器原生处理，React 只在松手时提交档位。 */
+.reasoning-effort-range {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.reasoning-effort-range::-webkit-slider-runnable-track {
+  height: 8px;
+  background: transparent;
+  border: 0;
+}
+
+.reasoning-effort-range::-webkit-slider-thumb {
+  width: 26px;
+  height: 26px;
+  margin-top: -9px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.34), 0 1px 3px rgba(0, 0, 0, 0.14);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.reasoning-effort-range:hover::-webkit-slider-thumb {
+  box-shadow: 0 5px 14px -4px rgba(0, 0, 0, 0.38), 0 1px 4px rgba(0, 0, 0, 0.16);
+}
+
+.reasoning-effort-range:active::-webkit-slider-thumb {
+  border-color: rgba(0, 0, 0, 0.16);
+  box-shadow: 0 5px 15px -4px rgba(0, 0, 0, 0.42), 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.reasoning-effort-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.08), 0 5px 14px -4px rgba(0, 0, 0, 0.36);
+}
+
+.dark .reasoning-effort-range::-webkit-slider-thumb {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: #35383f;
+  box-shadow: 0 5px 14px -4px rgba(0, 0, 0, 0.72), 0 1px 3px rgba(0, 0, 0, 0.45);
 }

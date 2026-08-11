@@ -44,7 +44,7 @@ export const CHAT_PARAMS_DEFAULT_SETTINGS = {
     // 自定义参数
     customParams: [],           // [{name: string, value: string|number|boolean, type: 'string'|'number'|'boolean'}]
     // 深度思考力度
-    reasoningEffort: 'off',     // 'off' | 'low' | 'medium' | 'high'
+    reasoningEffort: 'off',     // off | minimal | low | medium | high | xhigh | max | ultra
     // 回答详细度
     answerDetailLevel: 'standard', // 'concise' | 'standard' | 'detailed'
     // 记忆功能

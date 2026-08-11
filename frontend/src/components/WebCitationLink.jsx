@@ -26,7 +26,7 @@ const WebCitationLink = React.memo(({ refNumber, source }) => {
         rel="noreferrer"
         title={displayTitle}
         aria-describedby={descriptionId}
-        className="mx-0.5 inline-flex min-w-[0.9em] items-center justify-center align-super text-[0.68em] font-semibold leading-none tabular-nums text-stone-400 transition-colors duration-150 hover:text-[#B85F47] focus-visible:rounded-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F5B49C]/70 dark:text-stone-500 dark:hover:text-[#F2B29A]"
+        className="mx-0.5 inline-flex min-w-[0.9em] items-center justify-center align-super text-[0.74em] font-semibold leading-none tabular-nums text-[#9A4B36] transition-colors duration-150 hover:text-[#743725] focus-visible:rounded-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E99A7D]/80 dark:text-[#F0A58A] dark:hover:text-[#FFD0BE]"
       >
         W{refNumber}
       </a>

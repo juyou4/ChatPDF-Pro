@@ -13,6 +13,7 @@ import logging
 import re
 from typing import Optional
 
+from services.completion_outcome import require_publishable_completion
 from services.intent_constraints import IntentConstraintSet
 
 logger = logging.getLogger(__name__)
@@ -372,11 +373,13 @@ async def decompose_question(
         if isinstance(response, dict):
             if response.get("error"):
                 return []
+            require_publishable_completion(response, operation="question decomposition")
             content = response.get("content", "")
             choices = response.get("choices", [])
             if not content and choices:
                 content = choices[0].get("message", {}).get("content", "")
         else:
+            require_publishable_completion(response, operation="question decomposition")
             content = str(response) if response else ""
 
         content = content.strip()

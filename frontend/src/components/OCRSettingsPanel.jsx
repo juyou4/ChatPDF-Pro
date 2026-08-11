@@ -501,8 +501,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json()
-      if (data.success) {
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.success) {
         setMineruSaveMessage('配置已保存')
         // 重新加载配置和状态
         fetchOnlineConfig()
@@ -513,7 +513,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         setMineruValidateStatus(null)
         setMineruValidateMessage('')
       } else {
-        setMineruSaveMessage(data.message || '保存失败')
+        setMineruSaveMessage(data.detail || data.message || `保存失败 (HTTP ${res.status})`)
       }
     } catch (err) {
       console.error('保存 MinerU 配置失败:', err)
@@ -709,7 +709,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all opacity-100"
+          aria-hidden={!isOpen}
+          className={`fixed inset-0 bg-slate-950/25 z-50 flex items-center justify-center p-4 transition-all opacity-100 ${isOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}
         >
           <motion.div
             initial={{ scale: 0.9, opacity: 0, y: 20 }}

@@ -490,6 +490,15 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     {
+        id: 'qwen3.7-flash',
+        name: 'Qwen3.7-Flash',
+        providerId: 'aliyun',
+        type: 'chat',
+        metadata: { description: '通义千问最新高速多模态模型，适合低延迟 Agent 与高吞吐任务' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'qwen3.7-plus',
         name: 'Qwen3.7-Plus',
         providerId: 'aliyun',
@@ -527,6 +536,24 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     // ── Moonshot (Kimi) ──
+    {
+        id: 'kimi-k3',
+        name: 'Kimi K3',
+        providerId: 'moonshot',
+        type: 'chat',
+        metadata: { description: 'Kimi 当前旗舰模型，1M 上下文，支持视觉理解、工具调用与 low/high/max 推理强度' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'kimi-k2.7-code',
+        name: 'Kimi K2.7 Code',
+        providerId: 'moonshot',
+        type: 'chat',
+        metadata: { description: 'Kimi 编程 Agent 模型，支持文本/图片/视频输入与思考模式' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     {
         id: 'kimi-k2.6',
         name: 'Kimi K2.6',
@@ -586,6 +613,15 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── Anthropic (Claude) ──
     {
+        id: 'claude-opus-5',
+        name: 'Claude Opus 5',
+        providerId: 'anthropic',
+        type: 'chat',
+        metadata: { description: 'Anthropic 面向复杂 Agent、编码与企业任务的最新旗舰模型' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'claude-fable-5',
         name: 'Claude Fable 5',
         providerId: 'anthropic',
@@ -622,6 +658,15 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     // ── Google (Gemini) ──
+    {
+        id: 'gemini-3.6-flash',
+        name: 'Gemini 3.6 Flash',
+        providerId: 'gemini',
+        type: 'chat',
+        metadata: { description: 'Google 当前最新稳定模型，兼顾速度、智能水平与 Agent/多模态任务' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     {
         id: 'gemini-3.5-flash',
         name: 'Gemini 3.5 Flash',
@@ -677,6 +722,15 @@ export const CHAT_MODELS: Model[] = [
         isSystem: true, isUserAdded: false
     },
     // ── xAI (Grok) ──
+    {
+        id: 'grok-4.5',
+        name: 'Grok 4.5',
+        providerId: 'grok',
+        type: 'chat',
+        metadata: { description: 'xAI 当前旗舰模型，适合通用对话、代码、工具调用与可配置推理' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     {
         id: 'grok-4.3',
         name: 'Grok 4.3',
@@ -762,6 +816,18 @@ export const ZHIPU_MODELS: Model[] = [
  */
 export const DOUBAO_MODELS: Model[] = [
     {
+        id: 'doubao-seed-evolving',
+        name: 'Doubao Seed Evolving',
+        providerId: 'doubao',
+        type: 'chat',
+        metadata: {
+            description: '豆包当前滚动更新的 Agent/Coding 模型，一个 ID 自动获得最新版本能力'
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true,
+        isUserAdded: false
+    },
+    {
         id: 'doubao-seed-2-1-pro-260628',
         name: 'Doubao Seed 2.1 Pro',
         providerId: 'doubao',
@@ -846,23 +912,42 @@ const LATEST_SYSTEM_MODEL_IDS = new Set([
     'gpt-5.6-luna',
     'qwen3.7-max',
     'qwen3.7-plus',
+    'qwen3.7-flash',
     'deepseek-v4-flash',
     'deepseek-v4-pro',
+    'kimi-k3',
+    'kimi-k2.7-code',
     'kimi-k2.6',
     'glm-5.2',
     'MiniMax-M3',
     'mimo-v2.5-pro',
     'mimo-v2.5',
+    'claude-opus-5',
     'claude-fable-5',
-    'claude-opus-4-8',
     'claude-sonnet-5',
-    'gemini-3.5-flash',
+    'gemini-3.6-flash',
     'gemini-3.1-pro-preview',
-    'grok-4.3',
-    'grok-build-0.1',
-    'doubao-seed-2-1-pro-260628',
-    'doubao-seed-2-1-turbo-260628',
+    'grok-4.5',
+    'doubao-seed-evolving',
 ])
+
+/**
+ * 各官方 Provider 当前推荐的默认聊天模型。
+ * 这是推荐目录元数据，不会覆盖用户已经保存的模型选择。
+ */
+export const LATEST_PROVIDER_DEFAULTS: Record<string, string> = {
+    openai: 'gpt-5.6',
+    aliyun: 'qwen3.7-max',
+    deepseek: 'deepseek-v4-pro',
+    moonshot: 'kimi-k3',
+    zhipu: 'glm-5.2',
+    minimax: 'MiniMax-M3',
+    xiaomi: 'mimo-v2.5-pro',
+    anthropic: 'claude-opus-5',
+    gemini: 'gemini-3.6-flash',
+    grok: 'grok-4.5',
+    doubao: 'doubao-seed-evolving',
+}
 
 function withSystemModelTags(model: Model): Model {
     const tags = new Set(model.tags || [])

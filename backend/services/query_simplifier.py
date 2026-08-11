@@ -109,6 +109,8 @@ async def simplify_query_llm(
 
     try:
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
+        from services.intent_constraints import IntentConstraintSet
         from models.provider_registry import PROVIDER_CONFIG
 
         if not model:
@@ -131,6 +133,7 @@ async def simplify_query_llm(
             max_tokens=120,
             temperature=0.0,
         )
+        require_publishable_completion(response, operation="query simplification")
 
         content = ""
         if isinstance(response, dict):
@@ -150,6 +153,8 @@ async def simplify_query_llm(
         if not simplified or len(simplified) < 3:
             return None
         if len(simplified) > len(query):
+            return None
+        if not IntentConstraintSet.from_text(query).validate_rewrite(simplified).allowed:
             return None
 
         logger.info(f"[QuerySimplify] LLM 简化: '{query[:40]}' → '{simplified[:40]}'")

@@ -29,6 +29,8 @@ _HAS_SENTENCE_TRANSFORMERS = importlib.util.find_spec("sentence_transformers") i
 _SENTENCE_TRANSFORMER_IMPORT_LOCK = threading.Lock()
 
 from models.api_key_selector import select_api_key
+from models.dynamic_store import load_dynamic_providers
+from services.provider_auth import build_api_key_headers, resolve_api_key_auth
 from models.model_detector import is_embedding_model, is_rerank_model, get_model_provider
 from models.model_id_resolver import PROVIDER_BASE_URL_HINTS, resolve_model_id, get_available_model_ids
 from models.model_registry import EMBEDDING_MODELS
@@ -195,6 +197,49 @@ def _normalize_remote_embedding_base_url(api_base: Optional[str]) -> str:
         path = "/v1"
 
     return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _join_embedding_endpoint(api_base: Optional[str], endpoint: Optional[str]) -> str:
+    """Resolve a provider embedding endpoint without duplicating version paths.
+
+    Dynamic providers store a base URL and a relative endpoint separately. A
+    provider may use ``host/v1 + /embeddings``, ``host + /v1/embeddings`` or
+    even paste the full endpoint as the API Host. Return one concrete URL for
+    the direct adapter or for deriving the OpenAI SDK base URL.
+    """
+    base = str(api_base or "").strip().rstrip("/")
+    path = str(endpoint or "").strip()
+    if not base:
+        return path
+    if not path:
+        return base
+
+    parsed_path = urlparse(path)
+    if parsed_path.scheme or parsed_path.netloc or path.startswith("//"):
+        raise ValueError("Embedding endpoint 必须是站内相对路径")
+    endpoint_path = "/" + (parsed_path.path or "").lstrip("/")
+    if endpoint_path == "/":
+        return base
+
+    parsed_base = urlparse(base)
+    if not parsed_base.scheme or not parsed_base.netloc:
+        raise ValueError("Embedding API 地址格式无效")
+    base_path = (parsed_base.path or "").rstrip("/")
+
+    if base_path and (base_path == endpoint_path or base_path.endswith(endpoint_path)):
+        return base
+    if base_path and (endpoint_path == base_path or endpoint_path.startswith(base_path + "/")):
+        return parsed_base._replace(path=endpoint_path).geturl().rstrip("/")
+    return f"{base}{endpoint_path}"
+
+
+def _embedding_sdk_base_url(full_endpoint: str) -> str:
+    """Strip the final standard ``/embeddings`` path for OpenAI SDK usage."""
+    parsed = urlparse(str(full_endpoint or "").strip().rstrip("/"))
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/embeddings"):
+        path = path[:-len("/embeddings")].rstrip("/")
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
 
 
 def _canonicalize_embedding_identity(
@@ -598,6 +643,54 @@ def _get_openai_client(api_key: str, api_base: str) -> "OpenAI":
     client = OpenAI(api_key=api_key, base_url=api_base)
     _openai_clients[cache_key] = client
     return client
+
+
+class _DirectEmbeddingResponse:
+    def __init__(self, vectors: list[list[float]]):
+        self.data = [type("EmbeddingItem", (), {"embedding": vector})() for vector in vectors]
+
+
+class _DirectEmbeddingClient:
+    """为非标准 embedding endpoint 提供与 OpenAI client 相同的最小接口。"""
+
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        *,
+        provider_type: str | None = None,
+        api_key_header: str | None = None,
+        api_key_prefix: str | None = None,
+    ):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.provider_type = provider_type
+        self.api_key_header = api_key_header
+        self.api_key_prefix = api_key_prefix
+        self.embeddings = self
+
+    def create(self, *, model: str, input: list[str]):
+        response = httpx.post(
+            self.endpoint,
+            headers=build_api_key_headers(
+                self.api_key,
+                provider_type=self.provider_type,
+                api_key_header=self.api_key_header,
+                api_key_prefix=self.api_key_prefix,
+            ),
+            json={"model": model, "input": input},
+            timeout=120.0,
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Embedding API 返回 HTTP {response.status_code}: {response.text[:500]}")
+        payload = response.json()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Embedding API 返回中缺少 data 数组")
+        vectors = [row.get("embedding") for row in rows if isinstance(row, dict)]
+        if len(vectors) != len(input) or any(not isinstance(vector, list) for vector in vectors):
+            raise ValueError("Embedding API 返回数量或向量格式异常")
+        return _DirectEmbeddingResponse(vectors)
 
 
 # ---- FAISS 索引 LRU 缓存 ----
@@ -1777,10 +1870,51 @@ def get_embedding_function(
         else:
             raise ValueError(f"模型 '{embedding_model_id}' 需要 API Key")
 
-    api_base = _normalize_remote_embedding_base_url(api_base)
+    configured_endpoint = str((config or {}).get("embedding_endpoint") or "").strip()
+    provider_id = str((config or {}).get("provider_id") or provider or "").strip()
+    dynamic_provider = load_dynamic_providers().get(provider_id) if provider_id else {}
+    dynamic_provider = dynamic_provider if isinstance(dynamic_provider, dict) else {}
+    provider_type = dynamic_provider.get("type") or (config or {}).get("provider") or provider
+    api_key_header = dynamic_provider.get("api_key_header")
+    api_key_prefix = dynamic_provider.get("api_key_prefix")
+    resolved_auth_header, resolved_auth_prefix = resolve_api_key_auth(
+        provider_type=provider_type,
+        api_key_header=api_key_header,
+        api_key_prefix=api_key_prefix,
+    )
+    resolved_embedding_endpoint = (
+        _join_embedding_endpoint(api_base, configured_endpoint)
+        if configured_endpoint
+        else ""
+    )
+    direct_embedding_endpoint = None
+    custom_auth = (
+        resolved_auth_header.lower() != "authorization"
+        or resolved_auth_prefix != "Bearer "
+    )
+    if (configured_endpoint and not configured_endpoint.rstrip("/").endswith("/embeddings")) or custom_auth:
+        # 自定义网关可能暴露 /embed、/v1/vectorize 等非标准路径，
+        # OpenAI SDK 会强行追加 /embeddings；自定义认证也需要直连，
+        # 以确保请求头不会被 SDK 重写。
+        direct_embedding_endpoint = resolved_embedding_endpoint or _join_embedding_endpoint(api_base, "/embeddings")
+    api_base = (
+        _embedding_sdk_base_url(resolved_embedding_endpoint)
+        if configured_endpoint and resolved_embedding_endpoint.endswith("/embeddings")
+        else _normalize_remote_embedding_base_url(api_base)
+    )
 
-    # 使用连接池复用 OpenAI client，避免每次创建新连接
-    client = _get_openai_client(actual_key, api_base)
+    # 使用连接池复用 OpenAI client，非标准 endpoint 使用直连适配器。
+    client = (
+        _DirectEmbeddingClient(
+            direct_embedding_endpoint,
+            actual_key,
+            provider_type=provider_type,
+            api_key_header=api_key_header,
+            api_key_prefix=api_key_prefix,
+        )
+        if direct_embedding_endpoint
+        else _get_openai_client(actual_key, api_base)
+    )
 
     # 远程 embedding 接口通常限制“单次请求总 token”，不是“单条文本 token”
     # 使用模型 max_tokens 的 90% 作为单请求预算，并自动分批请求。

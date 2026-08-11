@@ -235,6 +235,7 @@ async def build_document_graph(
         构建完成的 DocumentGraph
     """
     from services.chat_service import call_ai_api
+    from services.completion_outcome import require_publishable_completion
 
     graph = DocumentGraph(doc_id)
 
@@ -249,7 +250,7 @@ async def build_document_graph(
                 prompt = ENTITY_EXTRACTION_PROMPT.format(text=chunk_text[:1500])
 
                 # LLM 缓存：相同输入不重复调用（参考 LightRAG hash 缓存）
-                cache_key = hashlib.md5(prompt.encode()).hexdigest()
+                cache_key = hashlib.md5(f"completion-v2:{prompt}".encode()).hexdigest()
                 if cache_key in _llm_cache:
                     content = _llm_cache[cache_key]
                 else:
@@ -259,7 +260,15 @@ async def build_document_graph(
                         provider=provider, endpoint=endpoint,
                         max_tokens=500, temperature=0.0,
                     )
-                    content = response if isinstance(response, str) else ""
+                    require_publishable_completion(response, operation="document graph extraction")
+                    if isinstance(response, str):
+                        content = response
+                    elif isinstance(response, dict):
+                        choices = response.get("choices") or []
+                        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+                        content = str(message.get("content") or "") if isinstance(message, dict) else ""
+                    else:
+                        content = ""
                     if content:
                         _llm_cache[cache_key] = content
 

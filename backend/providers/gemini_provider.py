@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from typing import Dict, List, Optional
 
 from .base import BaseProvider
+from services.reasoning_effort_service import merge_request_body
 
 
 def _strip_additional_properties(schema: dict) -> dict:
@@ -114,7 +115,7 @@ class GeminiProvider(BaseProvider):
         # Gemini 不支持 reasoning_effort，忽略该参数
         # 合并自定义参数
         if custom_params:
-            body.update(custom_params)
+            merge_request_body(body, custom_params)
 
         async with httpx.AsyncClient(timeout=timeout or 120.0) as client:
             response = await client.post(
@@ -176,7 +177,11 @@ class GeminiProvider(BaseProvider):
         if tool_calls:
             message["tool_calls"] = tool_calls
 
-        normalized = {"choices": [{"message": message}]}
+        choice = {
+            "message": message,
+            "finish_reason": str(candidates[0].get("finishReason") or ""),
+        }
+        normalized = {"choices": [choice]}
         if result.get("usageMetadata"):
             normalized["usage"] = result.get("usageMetadata")
         return normalized

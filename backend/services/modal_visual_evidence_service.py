@@ -16,6 +16,7 @@ from typing import Any
 
 import fitz
 
+from services.completion_outcome import require_publishable_completion
 from services.figure_render import crop_figure_image
 from services.visual_enrichment_service import (
     VisualTaskBudgetExceeded,
@@ -331,6 +332,9 @@ def _response_content(response: Any) -> str:
 
 
 def _response_json(response: Any) -> dict[str, Any]:
+    # This caller normalizes the raw response before execute_visual_task sees it,
+    # so the completion boundary must be checked here while finish_reason exists.
+    require_publishable_completion(response, operation="modal visual evidence")
     content = _response_content(response)
     if not content:
         raise _ModalVisualEvidenceError("empty_model_response")

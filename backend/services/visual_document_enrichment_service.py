@@ -10,12 +10,14 @@ from typing import Any
 
 import fitz
 
+from services.completion_outcome import require_publishable_completion
 from services.document_parse_state import read_parse_manifest
 from services.figure_extraction import build_logical_figures_for_overview
 from services.figure_render import render_figure
 from services.figure_validation import validate_and_fallback
 from services.visual_enrichment_service import (
     VisualTaskPolicy,
+    VisualTaskInvalidResponseError,
     build_visual_task_id,
     execute_visual_task,
 )
@@ -78,6 +80,14 @@ def _response_content(response: Any) -> str:
 
 
 def _response_json(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict) and (
+        "choices" in response
+        or any(
+            key in response
+            for key in ("finish_reason", "stop_reason", "finishReason", "done_reason")
+        )
+    ):
+        require_publishable_completion(response, operation="visual enrichment")
     content = _response_content(response)
     if not content:
         return {}
@@ -88,7 +98,7 @@ def _response_json(response: Any) -> dict[str, Any]:
         value = json.loads(candidate)
         return value if isinstance(value, dict) else {}
     except (TypeError, ValueError, json.JSONDecodeError):
-        return {"text": content, "analysis": content, "confidence": 0.5}
+        return {}
 
 
 def _confidence(value: Any, fallback: float = 0.5) -> float:
@@ -209,13 +219,20 @@ async def _analyze_image(
     ]
 
     async def operation() -> Any:
-        return await call_visual_model(
+        raw_response = await call_visual_model(
             messages=messages,
             config=config,
             purpose=purpose,
             max_tokens=1200,
             temperature=0,
         )
+        parsed = _response_json(raw_response)
+        if not parsed:
+            raise VisualTaskInvalidResponseError(
+                "invalid_visual_json",
+                "visual model did not return one complete JSON object",
+            )
+        return parsed
 
     response = await execute_visual_task(
         task_id=build_visual_task_id({
@@ -245,7 +262,7 @@ async def _analyze_image(
             "prompt_version": prompt_version,
         },
     )
-    return _response_json(response)
+    return response if isinstance(response, dict) else {}
 
 
 async def recover_risky_local_pages(

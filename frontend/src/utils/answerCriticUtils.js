@@ -78,6 +78,38 @@ export const hasCitationRisk = (critic) => {
   return Number(critic?.citation_coverage?.uncited_factual_count || 0) > 0;
 };
 
+/**
+ * 全文总结的覆盖度来自后端 reading_outline 的解析身份绑定账本。
+ * 前端只做展示，不从回答文本或引用数量反推，以免把局部回答误标成“全文”。
+ */
+export const getFullDocumentSummaryCoverage = (certainty) => {
+  if (!certainty || typeof certainty !== 'object') return null;
+  const raw = certainty.full_document_summary || certainty.fullDocumentSummary;
+  if (!raw || typeof raw !== 'object') return null;
+
+  const toCount = (value) => {
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
+  };
+  const bodyExpected = toCount(raw.body_expected ?? raw.bodyExpected);
+  const bodySummarized = toCount(raw.body_summarized ?? raw.bodySummarized);
+  const appendixExpected = toCount(raw.appendix_expected ?? raw.appendixExpected);
+  const appendixSummarized = toCount(raw.appendix_summarized ?? raw.appendixSummarized);
+  const expected = bodyExpected + appendixExpected;
+  const summarized = Math.min(expected, bodySummarized + appendixSummarized);
+  if (expected <= 0) return null;
+
+  const complete = Boolean(raw.complete)
+    || (bodySummarized >= bodyExpected && appendixSummarized >= appendixExpected);
+  const parts = [`正文 ${bodySummarized}/${bodyExpected}`];
+  if (appendixExpected > 0) parts.push(`附录 ${appendixSummarized}/${appendixExpected}`);
+  return {
+    complete,
+    text: `全文覆盖 ${summarized}/${expected}`,
+    title: `${parts.join('，')}。${complete ? '当前解析版本的章节均已纳入。' : '部分章节尚未形成可验证提要。'}`,
+  };
+};
+
 // 分档与同一条消息上的 qaScore 徽章保持一致的三档语义，避免 40% 和 90% 看起来
 // 毫无区别。
 export const CRITIC_CONFIDENCE_TIERS = [

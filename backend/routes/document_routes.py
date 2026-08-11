@@ -2156,15 +2156,26 @@ def queue_stale_document_index_upgrades() -> dict:
         return {"status": "queued", "documents": candidates}
 
 
-def _mineru_configured() -> bool:
-    config = _load_online_ocr_config("mineru")
+def _mineru_configuration_error(config: dict | None = None) -> str:
+    """Return an actionable configuration error, or an empty string when ready."""
+    config = config if isinstance(config, dict) else _load_online_ocr_config("mineru")
     access_mode = str(config.get("access_mode") or "worker").strip().lower()
     worker_url = str(config.get("worker_url") or "").strip()
     token_mode = str(config.get("token_mode") or "frontend").strip().lower()
     token = str(config.get("token") or "").strip()
     if access_mode == "direct":
-        return bool(token)
-    return bool(worker_url and (token_mode == "worker" or token))
+        return "" if token else "当前后端实例的 MinerU 直连 Token 为空，请在 OCR 设置中重新填写并保存"
+    if access_mode != "worker":
+        return "MinerU 访问模式无效，请在 OCR 设置中重新选择直连或 Worker"
+    if not worker_url:
+        return "当前后端实例的 MinerU Worker URL 为空，请在 OCR 设置中填写并保存"
+    if token_mode == "frontend" and not token:
+        return "当前后端实例的 MinerU Token 为空，请在 OCR 设置中重新填写并保存"
+    return ""
+
+
+def _mineru_configured() -> bool:
+    return not _mineru_configuration_error()
 
 
 def _validate_mineru_access(config: dict) -> tuple[bool, str]:
@@ -5479,10 +5490,11 @@ def _start_mineru_full_route_upload(
     embedding_provider: Optional[str] = None,
 ) -> dict:
     """Persist a pending MinerU-first document and queue its atomic publication."""
-    if not _mineru_configured():
+    mineru_config_error = _mineru_configuration_error()
+    if mineru_config_error:
         raise HTTPException(
             status_code=400,
-            detail="已选择 MinerU 全程解析，但 MinerU 尚未配置或不可用",
+            detail=f"已选择 MinerU 全程解析，但{mineru_config_error}",
         )
 
     pending_data = _build_pending_mineru_document_data(pdf_bytes)
@@ -10203,14 +10215,6 @@ async def save_online_ocr_config(request: Request):
                 # might later be accidentally forwarded by another route.
                 token = ""
 
-        config: dict = {
-            "access_mode": access_mode,
-            "worker_url": worker_url,
-            "auth_key": auth_key,
-            "token_mode": token_mode,
-            "token": token,
-        }
-
         # MinerU 特有选项
         if provider == "mineru":
             base_url = body.get("base_url", "").strip() or existing_base_url or "https://mineru.net/api/v4"
@@ -10229,6 +10233,19 @@ async def save_online_ocr_config(request: Request):
                     saved_url=existing_base_url if existing_access_mode == "direct" else "",
                     credential_name="MinerU Token",
                 )
+        # Build the persisted payload only after all credential resolution.
+        # In direct mode the token can be restored from the existing config
+        # when the UI intentionally leaves the secret field blank. Constructing
+        # this dict before that resolution used to overwrite the valid token
+        # with an empty string on the next ordinary "保存" click.
+        config: dict = {
+            "access_mode": access_mode,
+            "worker_url": worker_url,
+            "auth_key": auth_key,
+            "token_mode": token_mode,
+            "token": token,
+        }
+        if provider == "mineru":
             config["base_url"] = base_url
             config["enable_ocr"] = body.get("enable_ocr", False)
             config["enable_formula"] = body.get("enable_formula", True)
@@ -10237,6 +10254,17 @@ async def save_online_ocr_config(request: Request):
             if model_version not in {"vlm", "pipeline"}:
                 raise HTTPException(status_code=400, detail="model_version 必须为 'vlm' 或 'pipeline'")
             config["model_version"] = model_version
+
+            if access_mode == "direct" and not token:
+                raise HTTPException(
+                    status_code=400,
+                    detail="MinerU 直连模式缺少 Token，请填写 Token 后再保存",
+                )
+            if access_mode == "worker" and token_mode == "frontend" and not token:
+                raise HTTPException(
+                    status_code=400,
+                    detail="MinerU Worker 的前端透传模式缺少 Token，请填写 Token 后再保存",
+                )
     else:
         # Mistral 等直接 API 调用模式
         api_key = body.get("api_key", "").strip()

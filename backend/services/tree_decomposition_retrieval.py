@@ -111,9 +111,11 @@ async def sufficiency_check(
         {"is_sufficient": bool, "missing_information": [str], "confidence": float, "error": str?}
     """
     default = {
-        "is_sufficient": True,  # 失败时默认充足，避免无限递归
-        "missing_information": [],
-        "confidence": 0.5,
+        # 最大深度已经提供硬停止条件。判定失败时不能反向宣称证据充足，
+        # 否则输出上限恰好会让证据最少的请求提前停止。
+        "is_sufficient": False,
+        "missing_information": [question] if question else [],
+        "confidence": 0.0,
         "error": "",
     }
     if not question or not context:
@@ -122,6 +124,7 @@ async def sufficiency_check(
 
     try:
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
 
         # 截断 context 避免 prompt 过长
         ctx_for_check = context[:8000] if len(context) > 8000 else context
@@ -141,6 +144,7 @@ async def sufficiency_check(
             ),
             timeout=timeout,
         )
+        require_publishable_completion(response, operation="tree sufficiency check")
 
         content = ""
         if isinstance(response, dict):
@@ -193,6 +197,8 @@ async def gen_sub_queries(
 
     try:
         from services.chat_service import call_ai_api
+        from services.completion_outcome import require_publishable_completion
+        from services.intent_constraints import IntentConstraintSet
 
         prompt = _MULTI_QUERIES_GEN_PROMPT.format(
             question=question,
@@ -211,6 +217,7 @@ async def gen_sub_queries(
             ),
             timeout=timeout,
         )
+        require_publishable_completion(response, operation="tree sub-query generation")
 
         content = ""
         if isinstance(response, dict):
@@ -232,7 +239,15 @@ async def gen_sub_queries(
             line = line.strip("\"'`")
             if line and len(line) > 3 and line != question:
                 sub_queries.append(line)
-        return sub_queries[:k]
+        sub_queries = sub_queries[:k]
+        validation = IntentConstraintSet.from_text(question).validate_subquestions(sub_queries)
+        if not validation.allowed:
+            logger.warning(
+                "[TreeDecompose] 子查询违反原始意图约束，已丢弃: %s",
+                validation.violations,
+            )
+            return []
+        return sub_queries
 
     except Exception as e:
         logger.warning(f"[TreeDecompose] sub-query 生成失败: {e}")

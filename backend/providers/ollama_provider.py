@@ -116,6 +116,7 @@ class OllamaProvider(BaseProvider):
         """将 Ollama 响应规范化为 OpenAI 风格 choices[0].message 结构"""
         msg = result.get("message", {})
         text_content = msg.get("content", "")
+        reasoning_content = msg.get("thinking", "") or msg.get("reasoning", "")
         tool_calls_raw = msg.get("tool_calls", [])
 
         tool_calls = []
@@ -134,7 +135,14 @@ class OllamaProvider(BaseProvider):
             "role": "assistant",
             "content": text_content,
         }
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         if tool_calls:
             message["tool_calls"] = tool_calls
 
-        return {"choices": [{"message": message}]}
+        return {
+            "choices": [{
+                "message": message,
+                "finish_reason": str(result.get("done_reason") or ""),
+            }]
+        }

@@ -435,6 +435,16 @@ class IntentConstraintSet:
                 allow_introduced_tasks=True,
                 allow_language_change=True,
             )
+            # A generic question such as "Explain the method" has no identity
+            # anchor to preserve. Planner terms then narrow retrieval rather
+            # than replace a named subject, so do not collapse every new word
+            # back to the root question and accidentally deduplicate retries.
+            if (
+                not validation.allowed
+                and set(validation.violations) == {"introduced_entity"}
+                and not self._has_hard_tool_identity_anchor()
+            ):
+                validation = ConstraintValidation(True)
             if not validation.allowed:
                 return validation
 
@@ -443,10 +453,27 @@ class IntentConstraintSet:
                 page = max(0, int(args.get("page") or 0))
             except (TypeError, ValueError):
                 page = 0
-            if page:
-                if not self.page_ranges or not any(start <= page <= end for start, end in self.page_ranges):
+            if page and self.page_ranges:
+                if not any(start <= page <= end for start, end in self.page_ranges):
                     return ConstraintValidation(False, ("introduced_page_scope",), introduced=(str(page),))
         return ConstraintValidation(True)
+
+    def _has_hard_tool_identity_anchor(self) -> bool:
+        """Whether a tool query must retain a user-specified identity.
+
+        Lowercase retrieval focus words are intentionally not sufficient here:
+        they are often generated from a generic question to broaden a search.
+        Explicit identifiers, references, numeric locators, and comparison
+        operands remain hard constraints.
+        """
+
+        return bool(
+            self.identifiers
+            or self.references
+            or self.numbers
+            or self.page_ranges
+            or self.comparison_objects
+        )
 
     def repair_tool_arguments(
         self,

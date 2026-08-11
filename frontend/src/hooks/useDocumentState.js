@@ -86,6 +86,7 @@ const CHAT_RELIABLE_TERMINAL_STATES = new Set([
   'recovered_retry',
   'evidence_fallback',
   'degraded',
+  'truncated',
   'failed',
   'interrupted',
 ]);

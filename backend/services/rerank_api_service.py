@@ -1,17 +1,26 @@
 import httpx
 import logging
 from typing import List, Optional
+from models.dynamic_store import load_dynamic_providers
+from services.provider_auth import build_api_key_headers
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_headers(provider: str, api_key: str) -> dict[str, str]:
+    config = load_dynamic_providers().get(str(provider or "").strip()) or {}
+    return build_api_key_headers(
+        api_key,
+        provider_type=config.get("type") if isinstance(config, dict) else None,
+        api_key_header=config.get("api_key_header") if isinstance(config, dict) else None,
+        api_key_prefix=config.get("api_key_prefix") if isinstance(config, dict) else None,
+    )
 
 
 def cohere_rerank(query: str, documents: List[str], model: str, api_key: str, endpoint: Optional[str] = None, timeout: float = 30.0):
     """调用 Cohere rerank API，返回 (index, score) 列表"""
     url = endpoint or "https://api.cohere.com/v1/rerank"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _provider_headers("cohere", api_key)
     payload = {
         "model": model or "rerank-multilingual-v3.0",
         "query": query,
@@ -33,10 +42,7 @@ def cohere_rerank(query: str, documents: List[str], model: str, api_key: str, en
 def jina_rerank(query: str, documents: List[str], model: str, api_key: str, endpoint: Optional[str] = None, timeout: float = 30.0):
     """调用 Jina rerank API，返回 (index, score) 列表"""
     url = endpoint or "https://api.jina.ai/v1/rerank"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _provider_headers("jina", api_key)
     payload = {
         "model": model or "jina-reranker-v2-base-multilingual",
         "query": query,
@@ -101,10 +107,7 @@ def openai_like_rerank(query: str, documents: List[str], model: str, api_key: st
         (index, score) 元组列表
     """
     url = _resolve_openai_like_rerank_endpoint(provider, endpoint)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _provider_headers(provider, api_key)
     payload = {
         "model": model,
         "query": query,

@@ -18,12 +18,19 @@ from typing import List, Optional, Tuple
 
 import httpx
 
+from services.completion_outcome import (
+    IncompleteCompletionError,
+    require_publishable_completion,
+)
+
 from services.document_context_sampling import sample_document_text
 
 logger = logging.getLogger(__name__)
 
 # 当前数据格式版本号，用于数据格式演进
 SCHEMA_VERSION = 1
+# 独立于数据 schema：只用于淘汰曾经未校验 finish_reason 的 LLM 摘要缓存。
+COMPLETION_CONTRACT_VERSION = 1
 
 
 def _normalize_chat_completions_endpoint(endpoint: str) -> str:
@@ -189,6 +196,7 @@ class SemanticGroupService:
         # 构建持久化数据结构
         data = {
             "schema_version": SCHEMA_VERSION,
+            "completion_contract_version": COMPLETION_CONTRACT_VERSION,
             "doc_id": doc_id,
             "doc_hash": doc_hash,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -258,6 +266,23 @@ class SemanticGroupService:
         if not isinstance(groups_data, list):
             logger.error(f"意群数据格式无效: groups 字段缺失或类型错误: {file_path}")
             return None
+
+        contract_version = data.get("completion_contract_version")
+        if contract_version != COMPLETION_CONTRACT_VERSION:
+            # 旧版真实生成结果始终带 llm_meta；测试/手工构造的确定性缓存通常不带。
+            # 只淘汰可能含静默截断摘要的旧 LLM 缓存，避免无关 schema 迁移。
+            has_unversioned_llm_summary = any(
+                isinstance(item, dict)
+                and isinstance(item.get("llm_meta"), dict)
+                and str(item.get("summary_status") or "ok") == "ok"
+                for item in groups_data
+            )
+            if has_unversioned_llm_summary:
+                logger.info(
+                    "意群 LLM 摘要缺少当前 completion contract，需重新生成: %s",
+                    file_path,
+                )
+                return None
 
         # 反序列化每个意群
         try:
@@ -520,6 +545,7 @@ class SemanticGroupService:
                     f"LLM API 调用失败: HTTP {response.status_code}, {response.text}"
                 )
             result = response.json()
+            require_publishable_completion(result, operation="semantic group summary")
             content = result["choices"][0]["message"]["content"]
             return content.strip()
 
@@ -533,6 +559,7 @@ class SemanticGroupService:
             "model": self.model,
             "temperature": self.temperature,
             "prompt_version": self.prompt_version,
+            "completion_contract_version": COMPLETION_CONTRACT_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -585,6 +612,9 @@ class SemanticGroupService:
 
             return result, "ok"
 
+        except IncompleteCompletionError as e:
+            logger.warning("LLM 摘要达到输出上限，降级为文档覆盖样本: %s", e)
+            return sample_document_text(text, max_chars=max_length), "truncated"
         except Exception as e:
             logger.warning(f"LLM 摘要生成失败，降级为文档覆盖样本: {e}")
             return sample_document_text(text, max_chars=max_length), "failed"
@@ -719,6 +749,8 @@ class SemanticGroupService:
             # summary_status 取 summary 和 digest 中较差的状态
             if summary_status == "failed" or digest_status == "failed":
                 final_status = "failed"
+            elif summary_status == "truncated" or digest_status == "truncated":
+                final_status = "truncated"
             else:
                 final_status = "ok"
 

@@ -12,6 +12,8 @@ import logging
 import asyncio
 from typing import Optional
 
+from services.completion_outcome import require_publishable_completion
+
 logger = logging.getLogger(__name__)
 
 SCORING_SYSTEM_PROMPT = """你是一个专业的文档检索相关性评估专家。请根据以下标准对检索片段与用户问题的相关性进行 0-10 分评分：
@@ -101,6 +103,7 @@ async def score_single_chunk(
         if isinstance(response, dict):
             if response.get("error"):
                 return None
+            require_publishable_completion(response, operation="LLM relevance score")
             choices = response.get("choices", [])
             if choices:
                 content = choices[0].get("message", {}).get("content", "")

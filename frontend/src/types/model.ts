@@ -26,6 +26,12 @@ export interface ModelMetadata {
   contextWindow?: number      // 上下文窗口
   description?: string        // 描述
   languages?: string[]        // 支持的语言
+  reasoningMode?: 'openai_effort' | 'anthropic_adaptive' | 'anthropic_budget' | 'gemini_level' | 'gemini_budget' | 'qwen_budget' | 'thinking_toggle' | 'ollama_think' | 'fixed'
+  reasoningOptions?: Array<'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'>
+  reasoningDefault?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+  reasoningAlwaysEnabled?: boolean
+  reasoningOffControl?: 'reasoning_effort_none' | 'thinking_disabled' | 'enable_thinking_false' | 'gemini_budget_zero' | 'ollama_think_false'
+  reasoningOnControl?: 'thinking_enabled' | 'thinking_adaptive' | 'enable_thinking_true' | 'reasoning_split_true' | 'provider_default'
 }
 
 /**

@@ -34,7 +34,12 @@ export const TriStateToggle = ({ title, desc, value, onChange, darkMode = false 
     );
 };
 
-export const VisualVerificationMode = ({ value, onChange, darkMode = false }) => {
+export const VisualVerificationMode = ({
+    value,
+    onChange,
+    darkMode = false,
+    visualModelSummary = '',
+}) => {
     const normalized = ['auto', 'off', 'always'].includes(value) ? value : 'auto';
     const options = [
         { value: 'auto', label: '自动' },
@@ -48,6 +53,11 @@ export const VisualVerificationMode = ({ value, onChange, darkMode = false }) =>
                 <div className={`mt-0.5 text-[10px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
                     数值证据存在风险时复核原 PDF 表格
                 </div>
+                {visualModelSummary && (
+                    <div className={`mt-1 text-[10px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-[#9a6a58]'}`}>
+                        使用：{visualModelSummary}
+                    </div>
+                )}
             </div>
             <SettingsSegmentedControl
                 ariaLabel="表格视觉校验切换"

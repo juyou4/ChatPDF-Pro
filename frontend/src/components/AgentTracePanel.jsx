@@ -155,6 +155,14 @@ const operationDetailText = (operation) => {
   return normalizeText(operation.resultMessage || operation.message, 280) || getToolMeta(operation.tool).label;
 };
 
+const isSkippedOperation = (operation) => {
+  if (!operation || typeof operation !== 'object') return false;
+  if (operation.status === 'skipped') return true;
+  const message = String(operation.resultMessage || operation.message || '').trim();
+  // 兼容已经写入消息历史的旧 trace：旧后端把跳过事件伪装成 tool_result。
+  return /^跳过重复检索\s*[:：]/.test(message);
+};
+
 const buildActivities = (rounds, searchHistory) => {
   const history = Array.isArray(searchHistory) ? searchHistory.filter((item) => item && typeof item === 'object') : [];
   let historyCursor = 0;
@@ -172,7 +180,9 @@ const buildActivities = (rounds, searchHistory) => {
   const activities = [];
   rounds.forEach((roundData, roundIndex) => {
     const round = roundData.round;
-    const operations = (Array.isArray(roundData.operations) ? roundData.operations : []).map((operation) => {
+    const operations = (Array.isArray(roundData.operations) ? roundData.operations : [])
+      .filter((operation) => !isSkippedOperation(operation))
+      .map((operation) => {
       const historyItem = consumeHistory(operation?.tool);
       return {
         ...operation,
@@ -183,7 +193,7 @@ const buildActivities = (rounds, searchHistory) => {
             ? Number(historyItem.resultCount)
             : null,
       };
-    });
+      });
 
     if (roundData.planningMessage || roundData.message || operations.length === 0) {
       activities.push({

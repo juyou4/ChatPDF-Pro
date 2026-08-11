@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from services.chat_service import call_ai_api
+from services.completion_outcome import (
+    IncompleteCompletionError,
+    require_publishable_completion,
+)
 from services.document_block_roles import (
     FRONT_MATTER_ROLES,
     ROLE_KEYWORDS,
@@ -34,7 +38,7 @@ logger = logging.getLogger(__name__)
 _fallback_keyword_extractor = KeywordExtractor()
 
 READING_OUTLINE_VERSION = 4
-READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.15"
+READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.16"
 READING_OUTLINE_CONTRACT = "thematic-quick-study-v3"
 READING_OUTLINE_DETAIL_LEVEL = "thematic-quick-study"
 READING_OUTLINE_CHECKPOINT_VERSION = 1
@@ -1500,6 +1504,23 @@ def _section_result_is_usable(item: dict[str, Any] | None) -> bool:
     )
 
 
+def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -> bool:
+    """Whether a structured-output failure was caused by completion truncation.
+
+    Providers expose this through slightly different diagnostic spellings.  The
+    check intentionally stays narrow: a generic JSON error should keep the
+    normal local fallback, while an explicit ``finish_reason=length`` gets the
+    existing map/reduce recovery path.
+    """
+    text = str(exc or "").lower()
+    if not text:
+        return False
+    return bool(re.search(
+        r"(?:finish[_\s-]*reason|completion[_\s-]*reason)[^a-z0-9]{0,24}['\"]?length\b",
+        text,
+    ))
+
+
 async def _generate_segmented_section_review(
     *,
     doc_id: str,
@@ -1792,6 +1813,7 @@ async def _generate_ai_outline(
     payloads = _prepare_section_payloads(skeleton, block_index, structured_table_bundles)
     if not skeleton or not any(payload.get("blocks") for payload in payloads.values()):
         return {}
+    block_map_all = _flatten_blocks(block_index)
     finalized_cached_results = _cached_section_results(
         cached_outline,
         provider=provider,
@@ -1841,10 +1863,12 @@ async def _generate_ai_outline(
             logger.warning("[ReadingOutline] Checkpoint callback failed: %s", exc)
 
     semaphore = asyncio.Semaphore(SECTION_BATCH_CONCURRENCY)
+    segmented_length_recovery_meta: dict[str, dict[str, Any]] = {}
 
     async def generate_batch(batch: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
         async with semaphore:
             warnings: list[str] = []
+            batch_error: Exception | None = None
             try:
                 raw = await _generate_section_batch(
                     doc_id=doc_id,
@@ -1856,6 +1880,7 @@ async def _generate_ai_outline(
                     endpoint=endpoint,
                 )
             except Exception as exc:
+                batch_error = exc
                 titles = ", ".join(str(item.get("title") or item.get("source_section_id")) for item in batch)
                 warnings.append(f"章节批次生成失败（{titles}）：{exc}")
                 raw = {"sections": []}
@@ -1878,6 +1903,7 @@ async def _generate_ai_outline(
             missing = [item for item in batch if str(item.get("source_section_id")) not in generated]
             for section in missing:
                 section_id = str(section.get("source_section_id"))
+                single_error: Exception | None = None
                 try:
                     single = await _generate_section_batch(
                         doc_id=doc_id,
@@ -1905,7 +1931,53 @@ async def _generate_ai_outline(
                         )
                         continue
                 except Exception as exc:
-                    warnings.append(f"章节 {section.get('title') or section_id} 单独重试失败：{exc}")
+                    single_error = exc
+
+                if _structured_output_hit_length_limit(single_error) or _structured_output_hit_length_limit(batch_error):
+                    try:
+                        segmented_candidate, segment_meta = await _generate_segmented_section_review(
+                            doc_id=doc_id,
+                            doc=doc,
+                            payload=section,
+                            block_map=block_map_all,
+                            api_key=api_key,
+                            model=model,
+                            provider=provider,
+                            endpoint=endpoint,
+                        )
+                        recovery_meta = {
+                            **segment_meta,
+                            "reason": "length_limit_recovery",
+                            "recovered": bool(segmented_candidate),
+                        }
+                        segmented_length_recovery_meta[section_id] = recovery_meta
+                        if segmented_candidate:
+                            segmented_candidate["repair_kind"] = "segmented_length_recovery"
+                            generated[section_id] = segmented_candidate
+                            section["coverage_ledger"] = {
+                                **(
+                                    section.get("coverage_ledger")
+                                    if isinstance(section.get("coverage_ledger"), dict)
+                                    else {}
+                                ),
+                                "segmented_length_recovery": recovery_meta,
+                            }
+                            warnings.append(
+                                f"章节 {section.get('title') or section_id} 输出长度截断，已按段恢复"
+                            )
+                            continue
+                    except Exception as exc:
+                        segmented_length_recovery_meta[section_id] = {
+                            "source_section_id": section_id,
+                            "reason": "length_limit_recovery_exception",
+                            "recovered": False,
+                            "error": type(exc).__name__,
+                        }
+                        warnings.append(
+                            f"章节 {section.get('title') or section_id} 长度截断分段恢复失败：{exc}"
+                        )
+                if single_error is not None:
+                    warnings.append(f"章节 {section.get('title') or section_id} 单独重试失败：{single_error}")
                 warnings.append(f"章节 {section.get('title') or section_id} 未返回有效结果，已局部回退")
             return generated, warnings
 
@@ -1926,7 +1998,6 @@ async def _generate_ai_outline(
         reason = warnings[0] if warnings else "模型未返回任何可用章节总结"
         raise RuntimeError(reason)
 
-    block_map_all = _flatten_blocks(block_index)
     initial_sampling_stats = _build_section_sampling_stats(
         payloads=payloads,
         results=results,
@@ -2320,6 +2391,20 @@ async def _generate_ai_outline(
             or not bool(meta.get("coverage_complete"))
         ],
         "sections": list(segmented_review_meta.values()),
+    }
+    raw["sampling_stats"]["segmented_length_recovery"] = {
+        "attempted_sections": list(segmented_length_recovery_meta),
+        "recovered_sections": [
+            section_id
+            for section_id, meta in segmented_length_recovery_meta.items()
+            if bool(meta.get("recovered"))
+        ],
+        "fallback_sections": [
+            section_id
+            for section_id, meta in segmented_length_recovery_meta.items()
+            if not bool(meta.get("recovered"))
+        ],
+        "sections": list(segmented_length_recovery_meta.values()),
     }
     raw["numeric_repair_stats"] = {
         "suspect_sections": len(numeric_feedback),
@@ -3938,8 +4023,9 @@ async def _call_structured_reading_model(
     content = _extract_content(response)
     initial_diagnostic: dict[str, Any] = {}
     try:
+        require_publishable_completion(response, operation=f"{diagnostic_label} structured output")
         return parse_json_object(content, allow_partial=False)
-    except StructuredJSONError as exc:
+    except (StructuredJSONError, IncompleteCompletionError) as exc:
         initial_diagnostic = _structured_response_diagnostic(
             response,
             content=content,
@@ -3976,8 +4062,9 @@ async def _call_structured_reading_model(
         raise RuntimeError(retry.get("error"))
     retry_content = _extract_content(retry)
     try:
+        require_publishable_completion(retry, operation=f"{diagnostic_label} structured repair")
         return parse_json_object(retry_content, allow_partial=False)
-    except StructuredJSONError as exc:
+    except (StructuredJSONError, IncompleteCompletionError) as exc:
         retry_diagnostic = _structured_response_diagnostic(
             retry,
             content=retry_content,

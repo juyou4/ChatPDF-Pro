@@ -25,7 +25,9 @@ export async function fetchModelsFromProvider(
                 apiKey: provider.apiKey,
                 apiHost: provider.apiHost,
                 fetchModelsEndpoint: provider.apiConfig?.fetchModelsEndpoint,
-                providerType: provider.id  // 传递 provider 类型，后端用于判断是否支持模型列表拉取
+                providerType: provider.apiConfig?.protocol || provider.id,
+                apiKeyHeader: provider.apiConfig?.apiKeyHeader,
+                apiKeyPrefix: provider.apiConfig?.apiKeyPrefix,
             })
         })
 
@@ -97,7 +99,7 @@ export function detectModelTags(modelId: string, modelType?: ModelType): string[
         /gemini/.test(id) ||
         /grok-[34]/.test(id) ||
         /grok-build/.test(id) ||
-        /kimi-(latest|k2)/.test(id) ||
+        /kimi-(latest|k2|k3)/.test(id) ||
         /doubao-seed/.test(id) ||
         /moonshot-v1/.test(id) ||
         /qwen3\.[567]/.test(id) ||
@@ -119,7 +121,7 @@ export function detectModelTags(modelId: string, modelType?: ModelType): string[
         /glm-[45]\.\d|glm-5/.test(id) ||
         /doubao-seed-2/.test(id) ||
         /kimi-thinking-preview/.test(id) ||
-        /kimi-k2(\.\d+)?|k2\.\d+/.test(id) ||
+        /kimi-k(?:2|3)(\.\d+)?|k2\.\d+/.test(id) ||
         /qwen3(\.\d+)?/.test(id) ||
         /minimax-m[23]/.test(id) ||
         /^mimo-v2\.5(?:-pro)?$/.test(id)

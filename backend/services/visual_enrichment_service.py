@@ -16,6 +16,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TypeVar
 
+from services.completion_outcome import resolve_completion_outcome
+
 
 T = TypeVar("T")
 _MAX_TASK_RECORDS = 1024
@@ -403,6 +405,23 @@ def _visual_response_failure(result: Any) -> dict[str, str] | None:
         }
 
     if isinstance(result, dict):
+        if "choices" in result or any(
+            key in result
+            for key in ("finish_reason", "stop_reason", "finishReason", "done_reason")
+        ):
+            outcome = resolve_completion_outcome(result)
+            if not outcome.publishable:
+                return {
+                    "code": (
+                        "visual_output_truncated"
+                        if outcome.truncated
+                        else "visual_output_incomplete"
+                    ),
+                    "message": (
+                        "visual model output is incomplete "
+                        f"(finish_reason={outcome.finish_reason or outcome.status.value})"
+                    ),
+                }
         if not result:
             return {
                 "code": "invalid_visual_schema",

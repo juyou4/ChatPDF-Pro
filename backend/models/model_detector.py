@@ -163,8 +163,8 @@ def infer_model_tags(model_id: str, model_type: str | None = None) -> list[str]:
     elif re.search(r'^moonshot-v1', lower_id):
         # Moonshot moonshot-v1 系列支持图片输入
         tags.append("vision")
-    elif re.search(r'kimi-(latest|k2)', lower_id):
-        # Kimi 最新系 / K2 系列支持视觉输入
+    elif re.search(r'kimi-(latest|k2|k3)', lower_id):
+        # Kimi 最新系 / K2 / K3 系列支持视觉输入
         tags.append("vision")
     elif re.search(r'^minimax-m3', lower_id):
         # MiniMax M3 多模态旗舰
@@ -213,8 +213,8 @@ def infer_model_tags(model_id: str, model_type: str | None = None) -> list[str]:
     elif re.search(r'kimi-thinking-preview', lower_id):
         # Kimi Thinking Preview 支持 Thinking 推理模式
         tags.append("reasoning")
-    elif re.search(r'kimi-k2(\.\d+)?', lower_id):
-        # Kimi K2 系列支持思考/推理
+    elif re.search(r'kimi-k[23](?:\.\d+)?', lower_id):
+        # Kimi K2/K3 系列支持思考/推理
         tags.append("reasoning")
     elif re.search(r'qwen3(\.\d+)?', lower_id):
         # Qwen3 / Qwen3.x 系列支持推理

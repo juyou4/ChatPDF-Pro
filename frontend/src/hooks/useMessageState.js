@@ -8,6 +8,7 @@ import {
 } from '../utils/citationUtils';
 import { buildChatHistory, isFailedChatHistoryAssistant } from '../utils/chatContextUsageUtils';
 import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
+import { requiresPreservedReasoning } from '../services/reasoningEffortService';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -25,12 +26,14 @@ const TABLE_VISUAL_VERIFICATION_POLL_INTERVAL_MS = 2000;
 const TABLE_VISUAL_VERIFICATION_POLL_MAX_ATTEMPTS = 60;
 
 const TABLE_VISUAL_PENDING_STATES = new Set(['queued', 'running', 'pending']);
-const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed', 'stale']);
+// skipped 是可观测的终态：请求进入核验器，但按策略没有向模型发送图片。
+const TABLE_VISUAL_TERMINAL_STATES = new Set(['confirmed', 'conflict', 'indeterminate', 'failed', 'stale', 'skipped']);
 const CHAT_TURN_STATUSES = new Set([
   'completed',
   'recovered_retry',
   'evidence_fallback',
   'degraded',
+  'truncated',
   'failed',
   'interrupted',
 ]);
@@ -252,8 +255,53 @@ export const STREAM_FINAL_FLUSH_GRACE_MS = 3000;
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
 
-const formatThinkingStageEvent = (payload) => {
+// 这些 phase 由 AgentTracePanel 作为唯一展示入口。把它们同时写入
+// thinking 文本会让同一条 SSE 进度在思考区和工具时间线各出现一次。
+const AGENT_PHASES = new Set([
+  'agent_start',
+  'round_start',
+  'planning',
+  'planner_error',
+  'executing',
+  'tool_result',
+  'tool_skipped',
+  'complete',
+  'agent_mode',
+]);
+
+const AGENT_ONLY_PHASES = new Set([
+  'agent_start',
+  'round_start',
+  'planning',
+  'planner_error',
+  'executing',
+  'tool_result',
+  'tool_skipped',
+  'agent_mode',
+]);
+
+const isAgentTraceProgressEvent = (payload, { agentTraceEnabled = false } = {}) => {
+  if (payload?.type !== 'retrieval_progress') return false;
+  const phase = String(payload.phase || '');
+  return AGENT_ONLY_PHASES.has(phase)
+    // `complete` is also used by the regular retrieval path. It belongs to
+    // AgentTracePanel only after this request has actually entered Agent mode.
+    || (agentTraceEnabled && phase === 'complete');
+};
+
+const isSkippedAgentToolEvent = (payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.phase === 'tool_skipped' || payload.skipped === true) return true;
+
+  // 兼容旧后端：它曾把“跳过重复检索”错误标为 tool_result。
+  return payload.phase === 'tool_result'
+    && /^跳过重复检索\s*[:：]/.test(String(payload.message || '').trim());
+};
+
+export const formatThinkingStageEvent = (payload, options = {}) => {
   if (!payload || typeof payload !== 'object') return null;
+
+  if (isAgentTraceProgressEvent(payload, options)) return null;
 
   if (payload.type === 'retrieval_progress') {
     const rawMessage = typeof payload.message === 'string' && payload.message.trim()
@@ -598,19 +646,8 @@ export const createInitialAgentTrace = () => ({
   fallbackReason: '',
   diagnostics: null,
   evidenceState: null,
+  skippedToolCount: 0,
 });
-
-// 后端 retrieval_agent 会发出的 phase
-const AGENT_PHASES = new Set([
-  'agent_start',
-  'round_start',
-  'planning',
-  'planner_error',
-  'executing',
-  'tool_result',
-  'complete',
-  'agent_mode',
-]);
 
 // 在 trace 中找到指定轮次，没有就创建并 push
 const normalizeTraceRound = (value) => {
@@ -656,6 +693,12 @@ export const applyAgentTraceEvent = (trace, payload) => {
   }
 
   trace.enabled = true;
+  if (isSkippedAgentToolEvent(payload)) {
+    // 被重复检索保护拦下的请求没有真正执行，不能被算作工具结果。
+    trace.skippedToolCount = (Number(trace.skippedToolCount) || 0) + 1;
+    return trace;
+  }
+
   const fallbackRound = trace.rounds.length > 0
     ? trace.rounds[trace.rounds.length - 1].round
     : 1;
@@ -804,6 +847,27 @@ export const mergeAgentMetaIntoTrace = (trace, meta) => {
   return trace;
 };
 
+export const getEffectiveWebSearchQuery = (meta) => {
+  const history = Array.isArray(meta?.agent_search_history)
+    ? meta.agent_search_history
+    : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    if (String(item?.tool || '').trim().toLowerCase() !== 'web_search') continue;
+    const query = String(item?.query || '').replace(/\s+/g, ' ').trim();
+    if (query) return query.slice(0, 240);
+  }
+  const directQuery = meta?.web_search_query
+    || meta?.web_search_query_meta?.effective_query
+    || meta?.web_search_audit?.effective_query;
+  if (directQuery) {
+    return String(directQuery).replace(/\s+/g, ' ').trim().slice(0, 240);
+  }
+  const diagnosticQuery = meta?.diagnostics?.agent?.web_search?.effective_query
+    || meta?.diagnostics?.web_search?.effective_query;
+  return String(diagnosticQuery || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+};
+
 export const finalizeThinkingDurationMs = ({
   thinkingStartTime,
   thinkingLastUpdateTime,
@@ -917,8 +981,10 @@ export function useMessageState({
   const streamAnswerCriticRef = useRef(null);
   const streamAnswerCertaintyRef = useRef(null);
   const streamWebSearchRef = useRef(null);
+  const streamWebSearchQueryRef = useRef('');
   const streamWebSearchAuditRef = useRef(null);
   const streamWebSearchStatusRef = useRef(null);
+  const streamWebSearchReadsRef = useRef([]);
   const streamMemoryHitsRef = useRef(null);
   const streamMemoryMetaRef = useRef(null);
   const streamAgentTraceRef = useRef(null);
@@ -927,6 +993,7 @@ export function useMessageState({
   const streamVisualVerificationRef = useRef(null);
   const streamIntentDecisionRef = useRef(null);
   const streamVisualAttachmentsRef = useRef(null);
+  const streamReasoningResolutionRef = useRef(null);
   const activeStreamMsgIdRef = useRef(null);
   const textareaRef = useRef(null);
   const visualVerificationPollersRef = useRef(new Map());
@@ -1289,7 +1356,14 @@ export function useMessageState({
     setIsLoading(true);
 
     // 构建聊天历史
-    const chatHistory = buildChatHistory(identityBoundHistory, contextCount).map((message) => ({
+    const chatHistory = buildChatHistory(identityBoundHistory, contextCount, {
+      preserveReasoning: requiresPreservedReasoning({
+        providerId: chatProvider,
+        modelId: chatModel,
+      }),
+      providerId: chatProvider,
+      modelId: chatModel,
+    }).map((message) => ({
       ...message,
       ...requestIdentityFields,
     }));
@@ -1332,8 +1406,11 @@ export function useMessageState({
     const embeddingApiHost = activeEmbeddingConfig?.isValid
       ? activeEmbeddingConfig.provider?.apiHost || ''
       : '';
+    // 上传、局部搜索和 RAG 重建都使用 provider:model 的复合身份。
+    // 聊天也必须发送同一身份；只发裸 modelId 会让动态 Provider/同名模型
+    // 在后端被解析成另一份索引，从而触发 409 embedding identity conflict。
     const embeddingModelId = activeEmbeddingConfig?.isValid
-      ? activeEmbeddingConfig.modelId || ''
+      ? activeEmbeddingConfig.compositeKey || activeEmbeddingConfig.modelId || ''
       : '';
 
     // 构建请求体
@@ -1352,8 +1429,10 @@ export function useMessageState({
       selected_text: selectedText || null,
       image_base64_list: screenshots.map(s => s.dataUrl.split(',')[1]),
       image_base64: screenshots[0]?.dataUrl ? screenshots[0].dataUrl.split(',')[1] : null,
+      // off 也是一个需要后端按厂商协议显式序列化的请求值，不能用 null
+      // 代替；否则推理优先模型会回到厂商默认并继续思考。
       enable_thinking: reasoningEffort !== 'off',
-      reasoning_effort: reasoningEffort !== 'off' ? reasoningEffort : null,
+      reasoning_effort: reasoningEffort,
       answer_detail: answerDetailLevel || 'standard',
       max_tokens: enableMaxTokens ? maxTokens : null,
       temperature: enableTemperature ? temperature : null,
@@ -1412,16 +1491,19 @@ export function useMessageState({
     streamAnswerCriticRef.current = null;
     streamAnswerCertaintyRef.current = null;
     streamWebSearchRef.current = null;
+    streamWebSearchQueryRef.current = '';
     streamWebSearchAuditRef.current = null;
     streamWebSearchStatusRef.current = null;
+    streamWebSearchReadsRef.current = [];
     streamMemoryHitsRef.current = null;
     streamMemoryMetaRef.current = null;
     streamAgentTraceRef.current = null;
     streamUsageRef.current = null;
     streamCallInfoRef.current = null;
-    streamVisualVerificationRef.current = null;
-    streamIntentDecisionRef.current = null;
-    streamVisualAttachmentsRef.current = null;
+  streamVisualVerificationRef.current = null;
+  streamIntentDecisionRef.current = null;
+  streamVisualAttachmentsRef.current = null;
+  streamReasoningResolutionRef.current = null;
 
     // 创建临时助手消息
     const tempMsgId = Date.now();
@@ -1507,6 +1589,7 @@ export function useMessageState({
         let currentText = '';
         let currentThinking = '';
         let hasRealThinking = false;
+        let hasPublishedRealThinking = false;
         let lastThinkingStageKey = null;
         let thinkingStartTime = null;
         let thinkingLastUpdateTime = null;
@@ -1516,6 +1599,9 @@ export function useMessageState({
         let streamTerminalFailed = false;
         let streamTerminalReceived = false;
         let streamServerTurnStatus = '';
+        let streamFinishReason = '';
+        let streamCompletionStatus = '';
+        let streamWasTruncated = false;
         let streamResponseIdentityMismatch = false;
         let streamTerminalIdentityVerified = !hasCompleteChatParseIdentity(requestParseIdentity);
 
@@ -1547,6 +1633,11 @@ export function useMessageState({
           if (currentThinking) {
             currentThinking = '';
             thinkingStream.replace('');
+            setMessages(prev => prev.map(m =>
+              m.id === tempMsgId
+                ? { ...m, thinking: '' }
+                : m
+            ));
           }
         };
 
@@ -1557,13 +1648,16 @@ export function useMessageState({
           markThinkingActivity();
           currentThinking += text;
           thinkingStream.addChunk(text);
-          // 真实思考过程不能落后于正文流式队列；replace 会清空上面的临时队列并即时同步完整内容。
-          thinkingStream.replace(currentThinking);
-          setMessages(prev => prev.map(m =>
-            m.id === tempMsgId
-              ? { ...m, thinking: currentThinking }
-              : m
-          ));
+          // 流式阶段由 ref 增量写入 DOM；完整文本只在终态一次性同步到 React。
+          // 避免每个 reasoning token 都覆盖整段 DOM 并重渲染完整消息列表。
+          if (!hasPublishedRealThinking) {
+            hasPublishedRealThinking = true;
+            setMessages(prev => prev.map(m =>
+              m.id === tempMsgId
+                ? { ...m, thinking: currentThinking }
+                : m
+            ));
+          }
         };
 
         const markAnswerStarted = ({ generating = false } = {}) => {
@@ -1661,7 +1755,20 @@ export function useMessageState({
               p.turn_status || p.answer_status
             );
             if (payloadTurnStatus) streamServerTurnStatus = payloadTurnStatus;
-            if (isTerminalPayload) streamTerminalReceived = true;
+            if (isTerminalPayload) {
+              streamTerminalReceived = true;
+              streamFinishReason = String(
+                p.finish_reason || p.choices?.[0]?.finish_reason || streamFinishReason || ''
+              );
+              streamCompletionStatus = String(p.completion_status || streamCompletionStatus || '');
+              streamWasTruncated = Boolean(
+                p.truncated || streamCompletionStatus === 'truncated' || streamServerTurnStatus === 'truncated'
+              );
+            }
+            const reasoningResolution = p.reasoning_resolution || p.retrieval_meta?.reasoning;
+            if (reasoningResolution && typeof reasoningResolution === 'object') {
+              streamReasoningResolutionRef.current = reasoningResolution;
+            }
             const visualVerification = getNumericTableVisualVerification(p.retrieval_meta);
             if (visualVerification) streamVisualVerificationRef.current = visualVerification;
             const intentDecision = p.retrieval_meta?.intent_decision || p.intent_decision;
@@ -1682,11 +1789,30 @@ export function useMessageState({
               sseDone = true;
               return;
             }
-            const thinkingStageEvent = formatThinkingStageEvent(p);
-            if (thinkingStageEvent) {
-              appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
-            }
             if (p.type === 'retrieval_progress') {
+              // Agent 进度先进入结构化 trace，再决定是否保留为普通思考阶段文本。
+              // 这样 Agent 模式下“完成”等共用 phase 不会和时间线重复展示。
+              if (!streamAgentTraceRef.current) {
+                streamAgentTraceRef.current = createInitialAgentTrace();
+              }
+              applyAgentTraceEvent(streamAgentTraceRef.current, p);
+              if (
+                p.phase === 'tool_result'
+                && String(p.tool || '').trim().toLowerCase() === 'web_search'
+                && String(p.query || '').trim()
+              ) {
+                streamWebSearchQueryRef.current = String(p.query).replace(/\s+/g, ' ').trim().slice(0, 240);
+                setMessages(prev => prev.map(m => (
+                  m.id === tempMsgId
+                    ? { ...m, webSearchQuery: streamWebSearchQueryRef.current }
+                    : m
+                )));
+              }
+              const agentTraceEnabled = Boolean(streamAgentTraceRef.current.enabled);
+              const thinkingStageEvent = formatThinkingStageEvent(p, { agentTraceEnabled });
+              if (thinkingStageEvent) {
+                appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
+              }
               // 思考已结束、正文可能仍在结构化引文阶段：立刻结束“思考中”UI。
               if (
                 p.phase === 'answer_generating'
@@ -1698,11 +1824,6 @@ export function useMessageState({
                     : '思考完成，正在生成回答...'
                 );
               }
-              // 聚合到 agentTrace（只对 agent 相关 phase 生效）
-              if (!streamAgentTraceRef.current) {
-                streamAgentTraceRef.current = createInitialAgentTrace();
-              }
-              applyAgentTraceEvent(streamAgentTraceRef.current, p);
               // 实时把 trace 快照推给正在流式的消息，让检索轨迹面板边执行边更新。
               // 传入新的顶层对象引用（并浅拷贝 rounds/operations）以触发 React 重渲染。
               if (streamAgentTraceRef.current.enabled) {
@@ -1719,6 +1840,10 @@ export function useMessageState({
               }
               return;
             }
+            const thinkingStageEvent = formatThinkingStageEvent(p);
+            if (thinkingStageEvent) {
+              appendThinkingStage(thinkingStageEvent.text, thinkingStageEvent.key);
+            }
             if (p.type === 'web_search_status') {
               if (p.audit && typeof p.audit === 'object') {
                 streamWebSearchAuditRef.current = p.audit;
@@ -1726,6 +1851,9 @@ export function useMessageState({
               const executedWebQuery = typeof p.query === 'string'
                 ? p.query.replace(/\s+/g, ' ').trim().slice(0, 260)
                 : '';
+              if (executedWebQuery) {
+                streamWebSearchQueryRef.current = executedWebQuery;
+              }
               streamWebSearchStatusRef.current = {
                 phase: p.phase,
                 count: p.count ?? null,
@@ -1736,8 +1864,8 @@ export function useMessageState({
                   ? {
                     ...m,
                     webSearchStatus: streamWebSearchStatusRef.current,
+                    webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '',
                     webSearchAudit: streamWebSearchAuditRef.current,
-                    webSearchQuery: executedWebQuery || m.webSearchQuery,
                   }
                   : m
               ));
@@ -1748,6 +1876,15 @@ export function useMessageState({
               setMessages(prev => prev.map(m =>
                 m.id === tempMsgId
                   ? { ...m, webSearchSources: streamWebSearchRef.current }
+                  : m
+              ));
+              return;
+            }
+            if (p.type === 'web_search_read') {
+              streamWebSearchReadsRef.current = Array.isArray(p.reads) ? p.reads : [];
+              setMessages(prev => prev.map(m =>
+                m.id === tempMsgId
+                  ? { ...m, webSearchReads: streamWebSearchReadsRef.current }
                   : m
               ));
               return;
@@ -1842,10 +1979,13 @@ export function useMessageState({
                   streamAgentTraceRef.current = createInitialAgentTrace();
                 }
                 mergeAgentMetaIntoTrace(streamAgentTraceRef.current, p.retrieval_meta);
+                const effectiveWebQuery = getEffectiveWebSearchQuery(p.retrieval_meta);
+                if (effectiveWebQuery) streamWebSearchQueryRef.current = effectiveWebQuery;
                 if (!streamAgentTraceRef.current.endedAt) streamAgentTraceRef.current.endedAt = Date.now();
               }
               if (p.qa_score !== undefined) streamQaScoreRef.current = p.qa_score;
               if (p.web_search_sources) streamWebSearchRef.current = p.web_search_sources;
+              if (Array.isArray(p.web_search_reads)) streamWebSearchReadsRef.current = p.web_search_reads;
               if (Object.prototype.hasOwnProperty.call(p, 'web_search_audit')) {
                 streamWebSearchAuditRef.current = p.web_search_audit || null;
               } else if (p.retrieval_meta?.web_search_audit) {
@@ -1980,6 +2120,14 @@ export function useMessageState({
         if (!thinkingStream.isFlushComplete()) {
           thinkingStream.flushNow?.(currentThinking);
         }
+        // 直写模式下最后一批字符已经进入 DOM，但其模糊渐显仍在播放。
+        // 先等待动画尾巴，再切换到最终 Markdown，避免用户只看到整段跳出。
+        const revealShouldContinue = () => isRequestCurrent();
+        await Promise.all([
+          contentStream.waitForRevealComplete?.(revealShouldContinue),
+          thinkingStream.waitForRevealComplete?.(revealShouldContinue),
+        ]);
+        if (!isRequestCurrent()) return;
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
           thinkingLastUpdateTime,
@@ -2002,8 +2150,8 @@ export function useMessageState({
           });
         }
         setMessages(prev => prev.map(m =>
-          m.id === tempMsgId
-            ? { ...m, content: finalContent, thinking: currentThinking, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchAudit: streamWebSearchAuditRef.current || null, webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+           m.id === tempMsgId
+             ? { ...m, content: finalContent, thinking: currentThinking, reasoningContent: hasRealThinking ? currentThinking : '', isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(
@@ -2068,6 +2216,7 @@ export function useMessageState({
             : null
         );
         const nonStreamIntentDecision = data.retrieval_meta?.intent_decision || data.intent_decision || null;
+        const nonStreamReasoningResolution = data.reasoning_resolution || data.retrieval_meta?.reasoning || null;
         const nonStreamVisualAttachments = normalizeChatVisualAttachments(
           data.visual_attachments,
           requestParseIdentity,
@@ -2082,10 +2231,12 @@ export function useMessageState({
             data.retrieval_meta.agent_gate?.requested_enabled
           );
         }
+        const nonStreamWebSearchQuery = getEffectiveWebSearchQuery(data.retrieval_meta)
+          || String(data.web_search_query || '').replace(/\s+/g, ' ').trim().slice(0, 240);
         setLastCallInfo({ provider: data.used_provider, model: data.used_model, fallback: data.fallback_used, usage: data.usage_meta || data.usage || null });
         setMessages(prev => prev.map(m =>
           m.id === tempMsgId
-            ? { ...m, provider: data.used_provider || m.provider || chatProvider, model: data.used_model || m.model || chatModel, content: finalContent, thinking: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, citations: finalCitations, citationBindings: data.retrieval_meta?.citation_bindings || null, visualAttachments: nonStreamVisualAttachments, webSearchSources: data.web_search_sources || null, webSearchAudit: data.web_search_audit || data.retrieval_meta?.web_search_audit || null, webSearchQuery: data.web_search_query || m.webSearchQuery, memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
+             ? { ...m, provider: data.used_provider || m.provider || chatProvider, model: data.used_model || m.model || chatModel, content: finalContent, thinking: data.reasoning_content || '', reasoningContent: data.reasoning_content || '', isStreaming: false, turnStatus: nonStreamTurnStatus, finishReason: data.finish_reason || '', completionStatus: data.completion_status || '', truncated: Boolean(data.truncated || nonStreamTurnStatus === 'truncated'), citations: finalCitations, citationBindings: data.retrieval_meta?.citation_bindings || null, visualAttachments: nonStreamVisualAttachments, webSearchSources: data.web_search_sources || null, webSearchReads: Array.isArray(data.web_search_reads) ? data.web_search_reads : (Array.isArray(data.retrieval_meta?.web_search_reads) ? data.retrieval_meta.web_search_reads : []), webSearchAudit: data.web_search_audit || data.retrieval_meta?.web_search_audit || null, webSearchQuery: nonStreamWebSearchQuery || m.webSearchQuery || '', memoryHits: data.memory_hits || null, memoryMeta: data.memory_meta || null, agentTrace: nonStreamAgentTrace, usage: data.usage_meta || data.usage || null, intentDecision: nonStreamIntentDecision, reasoningResolution: nonStreamReasoningResolution, clarificationRequired: Boolean(data.clarification_required || nonStreamIntentDecision?.is_ambiguous), answerCertainty: data.answer_certainty || data.retrieval_meta?.answer_certainty || null, answerCritic: data.answer_critic || null, ...(nonStreamVisualVerification ? { visualVerification: nonStreamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(

@@ -227,6 +227,7 @@ async def _chatpdf_llm_complete(
 ) -> str:
     """通过 Chatpdf 的 call_ai_api 调用 LLM"""
     from services.chat_service import call_ai_api
+    from services.completion_outcome import resolve_completion_outcome
     from services.llm_cache_service import get_llm_cache
 
     messages = []
@@ -239,7 +240,9 @@ async def _chatpdf_llm_complete(
     # 检查 LLM 缓存
     if hashing_kv is not None:
         from ._utils import compute_args_hash
-        args_hash = compute_args_hash(model, messages)
+        # v2 invalidates legacy entries that did not record/validate finish_reason
+        # and may therefore contain a token-truncated extraction.
+        args_hash = compute_args_hash(f"{model}:completion-v2", messages)
         cached = await hashing_kv.get_by_id(args_hash)
         if cached is not None:
             return cached["return"]
@@ -257,6 +260,20 @@ async def _chatpdf_llm_complete(
         temperature=temperature,
     )
 
+    outcome = resolve_completion_outcome(
+        response,
+        transport_complete=not bool(
+            isinstance(response, dict) and response.get("error")
+        ),
+    )
+    if not outcome.publishable:
+        logger.warning(
+            "[GraphRAG] 拒绝缓存未完整生成的结果: status=%s finish_reason=%s",
+            outcome.status.value,
+            outcome.finish_reason or "unknown",
+        )
+        return ""
+
     content = ""
     if isinstance(response, dict) and not response.get("error"):
         choices = response.get("choices", [])
@@ -271,7 +288,14 @@ async def _chatpdf_llm_complete(
     # 写入缓存
     if hashing_kv is not None and content:
         await hashing_kv.upsert(
-            {args_hash: {"return": content, "model": model}}
+            {
+                args_hash: {
+                    "return": content,
+                    "model": model,
+                    "completion_status": outcome.status.value,
+                    "finish_reason": outcome.finish_reason,
+                }
+            }
         )
 
     return content
