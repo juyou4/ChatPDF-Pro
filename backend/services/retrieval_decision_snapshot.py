@@ -97,9 +97,11 @@ def _candidate_key(item: Mapping[str, Any]) -> dict[str, Any]:
     page_range = _page_range(item)
     return {
         "page_range": page_range,
-        "chunk_id": item.get("chunk_id"),
-        "child_chunk_id": item.get("child_chunk_id"),
-        "parent_id": item.get("parent_id"),
+        # FAISS 返回的是 NumPy 标量索引。在这里统一转换身份字段，避免生成
+        # 不透明候选 ID 时让诊断快照破坏主检索流程。
+        "chunk_id": _text(item.get("chunk_id")),
+        "child_chunk_id": _text(item.get("child_chunk_id")),
+        "parent_id": _text(item.get("parent_id")),
         "block_id": _text(item.get("block_id")),
         "evidence_id": _text(item.get("evidence_id")),
         "context_id": _text(item.get("context_id")),
@@ -144,8 +146,13 @@ def _candidate_identity_fields(item: Mapping[str, Any]) -> dict[str, Any]:
         value = item.get(key)
         if key == "group_id" and not value:
             value = item.get("semantic_group_id")
-        if value not in (None, "", [], {}):
-            fields[key] = _text(value) if key not in {"chunk_id", "child_chunk_id", "parent_id"} else value
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple, set, dict)) and not value:
+            continue
+        fields[key] = _text(value)
     section = _text(item.get("section_path") or item.get("chunk_heading"), _MAX_SECTION_LENGTH)
     if section:
         fields["section_path"] = section
