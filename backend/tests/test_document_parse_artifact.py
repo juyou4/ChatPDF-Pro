@@ -1,4 +1,5 @@
 from services.document_parse_artifact import (
+    DOCUMENT_PARSE_ARTIFACT_VERSION,
     artifact_reference,
     build_document_parse_artifact,
     derive_table_geometry_capabilities,
@@ -22,7 +23,8 @@ def test_parse_artifact_is_versioned_and_atomically_persisted(tmp_path):
     assert path.exists()
     assert not path.with_suffix(".tmp").exists()
     assert artifact_reference(tmp_path, path).startswith("parse_artifacts/doc-1/mineru/")
-    assert artifact["schema_version"] == 1
+    # 断言随常量走：这条测试守的是「产物带版本号」，不是钉死某个具体版本值。
+    assert artifact["schema_version"] == DOCUMENT_PARSE_ARTIFACT_VERSION
     assert artifact["capabilities"]["structured_tables"] is True
 
 

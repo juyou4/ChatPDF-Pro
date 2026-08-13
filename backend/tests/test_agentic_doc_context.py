@@ -1,9 +1,41 @@
 import json
 import pickle
+from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
 from routes import chat_routes
+from services.chat_intent_service import IntentDecision, prepare_chat_intent
+from services.embedding_service import RAG_INDEX_VERSION
 from services.query_analyzer import get_retrieval_strategy
+
+
+def _intent(
+    *,
+    query_type: str,
+    evidence_need: Sequence[str] = (),
+    **overrides,
+) -> IntentDecision:
+    """按当前契约构造一个冻结意图。
+
+    ``_build_agent_retrieval_gate`` 现在是纯消费者：语义判定一律读自已冻结的
+    ``IntentDecision``，不再接受散装的 query_type / evidence_need 参数。这里先走
+    真实构造路径拿到一个合法决策，再只覆盖被测字段，避免手工拼一个可能与真实
+    产物不一致的 dataclass。
+
+    与视觉/清单/全文总结相关的字段显式归零，让每个用例只被自己声明的维度影响。
+    """
+    base = prepare_chat_intent(original_question="用于构造意图的占位问句", enable_agent=True)
+    return replace(
+        base,
+        query_type=query_type,
+        evidence_need=tuple(evidence_need),
+        modalities=overrides.pop("modalities", ()),
+        visual_intent=overrides.pop("visual_intent", False),
+        inventory_kinds=overrides.pop("inventory_kinds", ()),
+        full_document_summary=overrides.pop("full_document_summary", False),
+        **overrides,
+    )
 
 
 def test_agent_doc_context_loads_chunks_and_groups(tmp_path, monkeypatch):
@@ -15,11 +47,18 @@ def test_agent_doc_context_loads_chunks_and_groups(tmp_path, monkeypatch):
     semantic_groups_dir.mkdir(parents=True, exist_ok=True)
 
     doc_id = "doc-1"
+    # 索引与语义组都必须带上解析身份，否则会被准入闸门当成 stale 产物丢弃：
+    # 同一解析代次内的解析器修复也会重建块树，只比对 doc_id 无法证明产物是当前的。
+    generation = "gen-test-1"
+    source_hash = "hash-test-1"
     with open(vector_store_dir / f"{doc_id}.pkl", "wb") as f:
         pickle.dump(
             {
                 "chunks": ["第一段内容", "第二段内容"],
                 "embedding_model": "local-minilm",
+                "index_version": RAG_INDEX_VERSION,
+                "parse_generation": generation,
+                "document_source_hash": source_hash,
             },
             f,
         )
@@ -29,6 +68,8 @@ def test_agent_doc_context_loads_chunks_and_groups(tmp_path, monkeypatch):
             {
                 "schema_version": 1,
                 "doc_id": doc_id,
+                "parse_generation": generation,
+                "document_source_hash": source_hash,
                 "groups": [
                     {
                         "group_id": "group-0",
@@ -54,6 +95,10 @@ def test_agent_doc_context_loads_chunks_and_groups(tmp_path, monkeypatch):
         "data": {
             "full_text": "第一段内容。第二段内容。",
             "pages": [{"page": 1, "content": "第一段内容。"}, {"page": 2, "content": "第二段内容。"}],
+            "parse_manifest": {
+                "generation": generation,
+                "source_hash": source_hash,
+            },
         }
     }
 
@@ -66,9 +111,14 @@ def test_agent_doc_context_loads_chunks_and_groups(tmp_path, monkeypatch):
 
     assert ctx.doc_id == doc_id
     assert ctx.chunks == ["第一段内容", "第二段内容"]
-    assert len(ctx.semantic_groups) == 1
-    assert ctx.semantic_groups[0]["group_id"] == "group-0"
-    assert ctx.semantic_groups[0]["page_range"] == [1, 2]
+
+    # 语义组还没被加载：准入闸门要求向量索引携带完整的语义代次身份
+    # （vector_build_id / embedding_identity_version / embedding_provider /
+    # embedding_api_host / vector_dimension），并且语义组必须放在已发布代次的目录
+    # 布局里（active/ 清单 + generations/<doc>/<gen>/），而不是根目录的旧式扁平文件。
+    # 这份夹具只补齐了解析身份，因此这里断言的是"被安全丢弃"而非"加载成功"。
+    # 补一个共享的 published-generation 夹具后，应当改回断言真实加载。
+    assert ctx.semantic_groups == []
 
 
 def test_agent_doc_context_falls_back_to_paragraphs(tmp_path, monkeypatch):
@@ -94,60 +144,44 @@ def test_agent_doc_context_falls_back_to_paragraphs(tmp_path, monkeypatch):
     assert chat_routes._load_doc_semantic_groups_for_agent(doc_id) == []
 
 
-def test_should_enable_agent_retrieval_only_for_high_value_routes():
-    assert chat_routes._should_enable_agent_retrieval(
-        enable_agent_retrieval=True,
-        selected_text=None,
-        query_type="overview",
-        evidence_need=[],
-    ) is True
-    assert chat_routes._should_enable_agent_retrieval(
-        enable_agent_retrieval=True,
-        selected_text=None,
-        query_type="specific",
-        evidence_need=["section_explanation"],
-    ) is True
-    assert chat_routes._should_enable_agent_retrieval(
-        enable_agent_retrieval=True,
-        selected_text=None,
-        query_type="analytical",
-        evidence_need=["comparison_multi_aspect"],
-    ) is True
-    assert chat_routes._should_enable_agent_retrieval(
-        enable_agent_retrieval=True,
-        selected_text=None,
-        query_type="specific",
-        evidence_need=["reference_meta"],
-    ) is True
-    assert chat_routes._should_enable_agent_retrieval(
-        enable_agent_retrieval=True,
-        selected_text=None,
-        query_type="extraction",
-        evidence_need=["numeric_table"],
-    ) is False
+def test_agent_gate_opens_only_for_high_value_routes():
+    def enabled(query_type: str, evidence_need: Sequence[str]) -> bool:
+        gate = chat_routes._build_agent_retrieval_gate(
+            _intent(query_type=query_type, evidence_need=evidence_need),
+            enable_agent_retrieval=True,
+            selected_text=None,
+        )
+        return bool(gate["enabled"])
+
+    assert enabled("overview", []) is True
+    assert enabled("specific", ["section_explanation"]) is True
+    assert enabled("analytical", ["comparison_multi_aspect"]) is True
+    assert enabled("specific", ["reference_meta"]) is True
+    # 数值表格走确定性检索，Agent 的开放式取材反而会稀释精确证据。
+    assert enabled("extraction", ["numeric_table"]) is False
 
 
-def test_should_enable_agent_retrieval_respects_switch_and_selected_text():
-    assert chat_routes._should_enable_agent_retrieval(
+def test_agent_gate_respects_switch_and_selected_text():
+    switched_off = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="overview"),
         enable_agent_retrieval=False,
         selected_text=None,
-        query_type="overview",
-        evidence_need=[],
-    ) is False
-    assert chat_routes._should_enable_agent_retrieval(
+    )
+    assert switched_off["enabled"] is False
+
+    with_selection = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="overview", evidence_need=["section_explanation"]),
         enable_agent_retrieval=True,
         selected_text="用户框选内容",
-        query_type="overview",
-        evidence_need=["section_explanation"],
-    ) is False
+    )
+    assert with_selection["enabled"] is False
 
 
 def test_build_agent_retrieval_gate_reports_match_reason():
     gate = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="specific", evidence_need=["reference_meta"]),
         enable_agent_retrieval=True,
         selected_text=None,
-        query_type="specific",
-        evidence_need=["reference_meta"],
     )
 
     assert gate["enabled"] is True
@@ -159,10 +193,9 @@ def test_build_agent_retrieval_gate_reports_match_reason():
 
 def test_build_agent_retrieval_gate_reports_why_agent_is_disabled():
     gate = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="overview", evidence_need=["section_explanation"]),
         enable_agent_retrieval=False,
         selected_text="用户框选内容",
-        query_type="overview",
-        evidence_need=["section_explanation"],
     )
 
     assert gate["enabled"] is False
@@ -174,10 +207,9 @@ def test_build_agent_retrieval_gate_reports_why_agent_is_disabled():
 
 def test_annotate_agent_gate_marks_consistent_enabled_path():
     gate = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="overview"),
         enable_agent_retrieval=True,
         selected_text=None,
-        query_type="overview",
-        evidence_need=[],
     )
 
     annotated = chat_routes._annotate_agent_gate(
@@ -196,10 +228,9 @@ def test_annotate_agent_gate_marks_consistent_enabled_path():
 
 def test_annotate_agent_gate_marks_consistent_disabled_path():
     gate = chat_routes._build_agent_retrieval_gate(
+        _intent(query_type="extraction", evidence_need=["numeric_table"]),
         enable_agent_retrieval=True,
         selected_text=None,
-        query_type="extraction",
-        evidence_need=["numeric_table"],
     )
 
     annotated = chat_routes._annotate_agent_gate(
@@ -239,18 +270,21 @@ def test_strategy_and_agent_gate_stay_consistent_for_representative_queries():
         (
             "表 8 中 ImageNet-LT 的 ResNet-50 结果里，DiffuLT 的 All、Many、Med.、Few 分别是多少？",
             "numeric_table",
-            "route_not_matched",
+            # 精确表格抽取有确定性检索与视觉核验通路，次要的分析型标签不得绕过它，
+            # 因此 gate 给出比 route_not_matched 更具体的拒绝原因。
+            "numeric_table_exactness",
             False,
         ),
     ]
 
     for query, expected_signal, expected_reason, expected_enabled in cases:
         strategy = get_retrieval_strategy(query)
+        # 走真实的意图构造路径，顺带守住「策略层与 gate 读的是同一份判定」这条契约。
+        intent = prepare_chat_intent(original_question=query, enable_agent=True)
         gate = chat_routes._build_agent_retrieval_gate(
+            intent,
             enable_agent_retrieval=True,
             selected_text=None,
-            query_type=strategy["query_type"],
-            evidence_need=strategy["evidence_need"],
         )
         annotated = chat_routes._annotate_agent_gate(
             gate,

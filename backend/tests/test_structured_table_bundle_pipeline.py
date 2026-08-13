@@ -606,6 +606,9 @@ def test_build_vector_index_appends_structured_table_bundle_chunks(tmp_path, mon
         text="正文段落",
         vector_store_dir=str(tmp_path),
         embedding_model_id="local-minilm",
+        # provider 不再从模型 ID 推断：推断不出来时会落到 openai，再因为缺
+        # embedding_api_host 直接报错。索引身份必须显式声明。
+        embedding_provider="local",
         pages=[{"page": 1, "text": "正文段落"}],
         structured_table_bundles=[
             {
@@ -677,6 +680,8 @@ def test_search_document_chunks_hydrates_structured_table_bundle_metadata(tmp_pa
                     "[Structured Table Bundle]\n\nTable 7: Main results\n\n[Body]\n| Method | All |\n| --- | --- |\n| Ours | 55.5 |"
                 ],
                 "embedding_model": "local-minilm",
+                # 检索入口会拒绝早于当前检索契约的持久化产物（409）。
+                "index_version": embedding_service.RAG_INDEX_VERSION,
                 "chunk_headings": ["Table 7: Main results"],
                 "chunk_pages": [2],
                 "chunk_types": ["table"],

@@ -6,6 +6,32 @@
 - 规范化查询返回原始内容
 - 支持中英文混合查询
 - 指示代词替换为选中文本关键内容
+
+## 已知失败：中文查询扩展被意图约束全量拦截（2026-08-13 定位）
+
+`TestColloquialRewrite` 与 `TestEvidenceNeedTemplates` 下的若干用例当前失败。这**不是
+测试陈旧**，是它们正确地报出了一个真实回归，不要通过削弱断言来"修复"。
+
+根因链路：
+
+1. `QueryRewriter.rewrite`（`services/query_rewriter.py:190`）先用**原始查询**构建
+   `IntentConstraintSet`，再依次做代词解析、口语改写、证据模板扩展。
+2. 第 214 行用 `constraints.validate_enrichment(rewritten)` 校验，任何一项违规就
+   **整体丢弃改写、回退原始查询**。
+3. `validate_enrichment` 的 docstring 声明"扩展可以追加通用检索任务词"，豁免通过
+   `intent_constraints._GENERIC_RETRIEVAL_TOKENS`（`intent_constraints.py:590`）实现。
+4. 但 `_GENERIC_RETRIEVAL_TOKENS`（`intent_constraints.py:92`）**全部是英文词**
+   （method / table / accuracy ...），没有任何中文条目；而中文扩展词会被
+   `_CJK_ENTITY_RE`（`:57`）提取成实体，于是必然落进 `introduced_entity`。
+5. `Table 8` 这类还会触发 `introduced_reference` / `introduced_identifier`，
+   而 references 与 identifiers 根本没有豁免通道。
+
+净效果：在中文查询上，口语改写与数值表格检索模板**跑了但必被丢弃**，等同死代码。
+这是中文优先的产品配了一份只认英文的豁免名单。
+
+修复需要逐条裁决哪些中文词属于"通用检索词汇"，并决定同一引用的跨语言写法
+（`表 8` ↔ `Table 8`）是否算引入新引用。这有检索质量影响，应当配合评测单独做，
+不要顺手改。
 """
 import sys
 import os

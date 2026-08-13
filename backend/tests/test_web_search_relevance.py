@@ -40,24 +40,42 @@ def test_web_search_rerank_returns_empty_when_all_results_irrelevant():
     assert filtered == []
 
 
-def test_build_web_search_query_uses_rewritten_query_and_doc_title():
+def test_build_web_search_query_keeps_outbound_query_bare_by_default():
+    """隐私默认：未显式允许时，文档标题与划词内容都不得进入外发查询。"""
     query = _build_web_search_query(
         base_query="这个方法有什么创新",
         original_question="这个方法有什么创新",
         doc_title="OPDR_paper.pdf",
         selected_text="本文提出OPDR，通过全局光照建模提升物理鲁棒性。",
     )
-    assert "OPDR_paper" in query
+    assert query == "这个方法有什么创新"
+
+
+def test_build_web_search_query_uses_rewritten_query_and_doc_title():
+    # 标题/划词拼接现在是显式 opt-in（README：联网搜索只有显式允许时才附带
+    # 文档上下文），本测试守的是开启后的拼接行为。
+    query = _build_web_search_query(
+        base_query="这个方法有什么创新",
+        original_question="这个方法有什么创新",
+        doc_title="OPDR_paper.pdf",
+        selected_text="本文提出OPDR，通过全局光照建模提升物理鲁棒性。",
+        include_document_context=True,
+    )
+    # 标题规范化会去掉 .pdf 并把下划线还原为空格（文件名不是检索词）。
+    assert "OPDR paper" in query
     assert ".pdf" not in query.lower()
     assert "OPDR" in query
 
 
 def test_build_web_search_query_skips_reference_like_selected_text():
+    # 必须开启 opt-in 才会走到划词注入分支；不开开关这条测试会空转通过，
+    # 根本没有练到「参考文献风格文本不得注入」的过滤逻辑。
     query = _build_web_search_query(
         base_query="这个方法是什么",
         original_question="这个方法是什么",
         doc_title="robust_method.pdf",
         selected_text="[1] Momoko Kikuchi. 2021. Example paper. [2] Another Author. 2022.",
+        include_document_context=True,
     )
     # 不应把参考文献人名注入联网检索 query
     assert "Momoko" not in query

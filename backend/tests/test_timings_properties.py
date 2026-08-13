@@ -21,7 +21,7 @@ from hypothesis import given, strategies as st, settings
 # 将 backend 目录添加到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.embedding_service import search_document_chunks
+from services.embedding_service import RAG_INDEX_VERSION, search_document_chunks
 
 
 # ============================================================
@@ -54,6 +54,9 @@ def vector_store_dir():
             "embedding_model": "local-minilm",
             "parent_chunks": [],
             "child_to_parent": {},
+            # 检索入口会拒绝早于当前检索契约的持久化产物（409），缺这一项整份索引
+            # 会被判为过期格式。
+            "index_version": RAG_INDEX_VERSION,
         }
         with open(os.path.join(tmpdir, f"{doc_id}.pkl"), "wb") as f:
             pickle.dump(data, f)
@@ -155,8 +158,12 @@ class TestP1TimingsCompleteness:
                 f"timings 缺少 total_ms 字段，当前 timings={timings}"
             )
 
-            # 断言 2：所有值为非负数值（int 或 float）
+            # 断言 2：所有计时项为非负数值（int 或 float）。
+            # 下划线前缀的键是搭车返回的诊断负载（如 _decision_snapshot 的检索决策
+            # 快照），不是耗时，按约定跳过。
             for key, value in timings.items():
+                if key.startswith("_"):
+                    continue
                 assert isinstance(value, (int, float)), (
                     f"timings['{key}'] 应为数值类型，实际为 {type(value).__name__}: {value}"
                 )

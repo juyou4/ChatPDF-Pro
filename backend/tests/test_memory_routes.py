@@ -33,6 +33,9 @@ def mock_service():
     svc = MagicMock()
     # 默认 store 也是 mock
     svc.store = MagicMock()
+    # 路由现在先经 svc.validate_doc_id 归一化 doc_id 再往下传。MagicMock 默认会返回
+    # 一个新的 mock 对象，让所有下游断言都对不上真实 doc_id，这里改成原样透传。
+    svc.validate_doc_id.side_effect = lambda doc_id: doc_id
     return svc
 
 
@@ -91,23 +94,33 @@ class TestGetSession:
 
 class TestListEntries:
     def test_returns_filtered_entries(self, client, mock_service):
-        mock_service.list_entries.return_value = [
-            {
-                "id": "mem-1",
-                "content": "用户偏好中文回答",
-                "memory_kind": "profile",
-            }
-        ]
+        # 接口已改为分页实现 list_entries_page；对外仍保留 entries 键兼容老前端。
+        mock_service.list_entries_page.return_value = {
+            "items": [
+                {
+                    "id": "mem-1",
+                    "content": "用户偏好中文回答",
+                    "memory_kind": "profile",
+                }
+            ],
+            "total": 1,
+            "offset": 0,
+            "limit": None,
+        }
 
         resp = client.get("/api/memory/entries?memory_scope=profile&status=active")
         assert resp.status_code == 200
         data = resp.json()
         assert data["entries"][0]["id"] == "mem-1"
-        mock_service.list_entries.assert_called_once_with(
+        assert data["total"] == 1
+        mock_service.list_entries_page.assert_called_once_with(
             doc_id=None,
             memory_kind=None,
             memory_scope="profile",
             status="active",
+            lifecycle=None,
+            limit=None,
+            offset=0,
         )
 
 

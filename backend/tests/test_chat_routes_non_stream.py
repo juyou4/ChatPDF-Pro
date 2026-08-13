@@ -1,6 +1,7 @@
 """非流式 /chat 路由的错误处理回归测试。"""
 
 import os
+import re
 import sys
 
 import pytest
@@ -25,6 +26,22 @@ def _build_request(**overrides):
     }
     payload.update(overrides)
     return chat_routes.ChatRequest(**payload)
+
+
+def _capture_prompt_view(captured: dict, messages: list[dict]) -> None:
+    """记录发给模型的完整提示词视图。
+
+    当前消息合同把检索证据放在最终问题之前的独立「不可信证据」消息里，
+    system 消息只保留规则与引用协议。这些回归关心的是“哪些证据进入了
+    提示词”，因此断言目标是 system + 证据消息的合并视图，而不是只看
+    ``messages[0]``。
+    """
+    captured["system_prompt"] = str(messages[0].get("content") or "")
+    captured["prompt"] = "\n\n".join(
+        str(message.get("content") or "")
+        for message in messages
+        if isinstance(message, dict) and message.get("role") in {"system", "user"}
+    )
 
 
 def _install_minimal_doc_store(monkeypatch):
@@ -231,7 +248,7 @@ async def test_chat_with_pdf_evidence_selector_prunes_low_relevance_prompt_conte
         return scored
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "核心方法证据已筛选。"}}],
             "_used_provider": "openai",
@@ -250,13 +267,17 @@ async def test_chat_with_pdf_evidence_selector_prunes_low_relevance_prompt_conte
             question="What evidence explains the proposed method?",
             selected_text="",
             enable_vector_search=True,
+            # 显式 LLM 打分需要显式配置的辅助模型；静默回退主模型会隐藏
+            # 凭证缺失并抬高每次回答的成本，属于有意的行为收紧。
+            cheap_model="aux-test-model",
+            cheap_model_provider="openai",
             custom_params={"enable_evidence_selector": True, "evidence_selector_min_score": 0.35},
         )
     )
 
-    assert "Relevant method evidence" in captured["system_prompt"]
-    assert "Supporting experiment evidence" in captured["system_prompt"]
-    assert "Unrelated appendix note" not in captured["system_prompt"]
+    assert "Relevant method evidence" in captured["prompt"]
+    assert "Supporting experiment evidence" in captured["prompt"]
+    assert "Unrelated appendix note" not in captured["prompt"]
     selector_diag = response["retrieval_meta"]["diagnostics"]["evidence_selector"]
     assert selector_diag["enabled"] is True
     assert selector_diag["removed_count"] >= 1
@@ -293,7 +314,7 @@ async def test_chat_with_pdf_evidence_selector_summarizes_kept_long_segments(mon
         return "The key numerical result is Accuracy 91.2 on the target benchmark."
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "Accuracy 是 91.2。"}}],
             "_used_provider": "openai",
@@ -314,12 +335,14 @@ async def test_chat_with_pdf_evidence_selector_summarizes_kept_long_segments(mon
             question="What accuracy does the method reach?",
             selected_text="",
             enable_vector_search=True,
+            cheap_model="aux-test-model",
+            cheap_model_provider="openai",
             custom_params={"enable_evidence_selector": True},
         )
     )
 
-    assert "Accuracy 91.2 on the target benchmark" in captured["system_prompt"]
-    assert "logging and UI are repeated" not in captured["system_prompt"]
+    assert "Accuracy 91.2 on the target benchmark" in captured["prompt"]
+    assert "logging and UI are repeated" not in captured["prompt"]
     selector_diag = response["retrieval_meta"]["diagnostics"]["evidence_selector"]
     assert selector_diag["summary_enabled"] is True
     assert selector_diag["summary_compressed_count"] == 1
@@ -366,7 +389,7 @@ async def test_chat_with_pdf_evidence_selector_protects_exact_table_rows(monkeyp
         return scored
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "Ours 的 Accuracy 是 55.5。"}}],
             "_used_provider": "openai",
@@ -385,11 +408,13 @@ async def test_chat_with_pdf_evidence_selector_protects_exact_table_rows(monkeyp
             question="表 1 中 Ours 的 Accuracy 是多少？",
             selected_text="",
             enable_vector_search=True,
+            cheap_model="aux-test-model",
+            cheap_model_provider="openai",
             custom_params={"enable_evidence_selector": True, "evidence_selector_min_score": 0.35},
         )
     )
 
-    assert "Method: Ours; Accuracy: 55.5; FID: 4.7" in captured["system_prompt"]
+    assert "Method: Ours; Accuracy: 55.5; FID: 4.7" in captured["prompt"]
     selector_diag = response["retrieval_meta"]["diagnostics"]["evidence_selector"]
     assert selector_diag["protected_count"] >= 1
     assert selector_diag["enabled"] is True
@@ -438,7 +463,7 @@ async def test_chat_with_pdf_numeric_regex_locator_augments_prompt(monkeypatch):
         )
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "LVIS minival 的 AP50 是 52.4。"}}],
             "_used_provider": "openai",
@@ -458,7 +483,7 @@ async def test_chat_with_pdf_numeric_regex_locator_augments_prompt(monkeypatch):
         )
     )
 
-    assert "Dataset: LVIS minival; AP: 33.5; AP50: 52.4" in captured["system_prompt"]
+    assert "Dataset: LVIS minival; AP: 33.5; AP50: 52.4" in captured["prompt"]
     locator_diag = response["retrieval_meta"]["diagnostics"]["numeric_regex_locator"]
     assert locator_diag["attempted"] is True
     assert locator_diag["added_count"] >= 1
@@ -624,7 +649,7 @@ async def test_chat_with_pdf_numeric_regex_locator_prefers_target_row_shard(monk
         )
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "DiffuLT 的 overall 是 51.5。"}}],
             "_used_provider": "openai",
@@ -644,7 +669,7 @@ async def test_chat_with_pdf_numeric_regex_locator_prefers_target_row_shard(monk
         )
     )
 
-    assert "Method: DiffuLT; CIFAR100-LT overall: 51.5" in captured["system_prompt"]
+    assert "Method: DiffuLT; CIFAR100-LT overall: 51.5" in captured["prompt"]
     locator_diag = response["retrieval_meta"]["diagnostics"]["numeric_regex_locator"]
     assert locator_diag["attempted"] is True
     assert locator_diag["candidate_count"] >= 3
@@ -782,7 +807,7 @@ async def test_chat_with_pdf_structured_citation_prompt_omits_synthetic_when_ori
         }
 
     async def _fake_call_ai_api(messages, *args, **kwargs):
-        captured["system_prompt"] = messages[0]["content"]
+        _capture_prompt_view(captured, messages)
         return {
             "choices": [{"message": {"content": "FINAL ANSWER\n图 2 显示性能随样本数增加而提升[1]。"}}],
             "_used_provider": "openai",
@@ -801,10 +826,14 @@ async def test_chat_with_pdf_structured_citation_prompt_omits_synthetic_when_ori
         )
     )
 
-    prompt = captured["system_prompt"]
-    citation_sources = prompt.split("可用的引用来源：", 1)[1]
-    assert "figure-2-caption" in citation_sources
-    assert "figure-2-synthetic" not in citation_sources
+    # 结构化引用列表不再往 system prompt 里重复来源正文（include_source_details=False），
+    # 合成/原生的取舍从可用编号上断言：合成描述是 ref=1、原生 caption 是 ref=2，
+    # 过滤后模型只被授权引用 [2]。
+    citation_sources = captured["system_prompt"].split("可用的引用来源：", 1)[1]
+    allowed_refs = re.findall(r"^\[(\d+)\]$", citation_sources, flags=re.MULTILINE)
+    assert allowed_refs == ["2"]
+    # 证据消息里保留的是原生 caption 文本，而不是合成描述。
+    assert "Figure 2: Performance increases as the number of examples grows." in captured["prompt"]
 
 
 def test_build_response_context_segments_prefers_numeric_table_citations():

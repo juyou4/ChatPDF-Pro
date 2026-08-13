@@ -73,6 +73,11 @@ def test_normalize_mineru_content_list_without_middle_json_filters_artifacts():
 def test_table_html_generates_markdown_bundle_and_evidence_units():
     payload = {
         "content_list_json": [
+            # 质量门要求页数已知且 1..N 每页都有可消费内容：页数未知直接
+            # expected_page_count_unknown，缺页则 page_parse_failed。表格在第 3 页，
+            # 因此前两页要有占位正文，且下面显式声明总页数。
+            {"type": "text", "text": "第一页正文。", "page_idx": 0},
+            {"type": "text", "text": "第二页正文。", "page_idx": 1},
             {
                 "type": "table",
                 "page_idx": 2,
@@ -90,7 +95,7 @@ def test_table_html_generates_markdown_bundle_and_evidence_units():
         ]
     }
 
-    normalized = normalize_mineru_for_rag(payload)
+    normalized = normalize_mineru_for_rag(payload, expected_page_count=3)
     assert len(normalized["structured_table_bundles"]) == 1
 
     bundle = normalized["structured_table_bundles"][0]
@@ -129,6 +134,67 @@ def test_table_html_generates_markdown_bundle_and_evidence_units():
 
     ok, failures = validate_mineru_rag_data(normalized, original_full_text="x" * 50)
     assert ok, failures
+
+
+def test_table_header_depth_is_read_from_th_markup_beyond_two_levels():
+    """``<th>`` 标记直接给出表头行数，不再受启发式的 2 层上限限制。
+
+    三层表头下，若只取前两层，四个数值列会塌缩成 ``ImageNet val`` 与
+    ``ImageNet test`` 两组，top1/top5 无法区分，数值必然归错列。
+    """
+    payload = {
+        "content_list_json": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [100, 200, 900, 420],
+                "table_caption": "Table 2: ImageNet",
+                "table_body": """
+                    <table>
+                      <tr><th rowspan="3">Method</th><th colspan="4">ImageNet</th></tr>
+                      <tr><th colspan="2">val</th><th colspan="2">test</th></tr>
+                      <tr><th>top1</th><th>top5</th><th>top1</th><th>top5</th></tr>
+                      <tr><td>A</td><td>76.1</td><td>92.9</td><td>75.8</td><td>92.4</td></tr>
+                    </table>
+                """,
+            }
+        ]
+    }
+
+    bundle = normalize_mineru_for_rag(payload)["structured_table_bundles"][0]
+    units = bundle["evidence_units"]
+    assert [unit["is_header_row"] for unit in units] == [True, True, True, False]
+
+    data_cells = units[3]["cell_evidence_units"]
+    assert [cell["header_path"] for cell in data_cells] == [
+        "Method",
+        "ImageNet val top1",
+        "ImageNet val top5",
+        "ImageNet test top1",
+        "ImageNet test top5",
+    ]
+
+
+def test_table_header_depth_ignores_row_label_th_in_body_rows():
+    """正文行的行首 ``<th>`` 是行标签，不应把表头深度撑大。"""
+    payload = {
+        "content_list_json": [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [100, 200, 900, 420],
+                "table_body": """
+                    <table>
+                      <tr><th>Model</th><th>Acc</th></tr>
+                      <tr><th>A</th><td>90</td></tr>
+                    </table>
+                """,
+            }
+        ]
+    }
+
+    units = normalize_mineru_for_rag(payload)["structured_table_bundles"][0]["evidence_units"]
+    assert [unit["is_header_row"] for unit in units] == [True, False]
 
 
 def test_mineru_uses_explicit_cell_geometry_and_refuses_table_bbox_as_row_crop():
@@ -291,7 +357,8 @@ def test_table_quality_gate_allows_escaped_pipe_inside_cells():
         ]
     }
 
-    normalized = normalize_mineru_for_rag(payload)
+    # 质量门要求页数已知；载荷只有第 1 页，显式声明即可。
+    normalized = normalize_mineru_for_rag(payload, expected_page_count=1)
     body = normalized["structured_table_bundles"][0]["table_body_markdown"]
 
     assert "\\|Zero-Shot" in body

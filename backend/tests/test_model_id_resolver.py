@@ -19,10 +19,10 @@ def test_normalize_deprecated_model_id_plain_key():
         normalize_deprecated_model_id("text-embedding-ada-002")
         == "text-embedding-3-small"
     )
-    assert (
-        normalize_deprecated_model_id("embo-01")
-        == "minimax-embedding-v2"
-    )
+    # 映射方向：minimax-embedding-v2 是 MiniMax 旧目录里的错误 ID，
+    # embo-01 才是注册表里的官方条目，因此规范化是前者归并到后者。
+    assert normalize_deprecated_model_id("minimax-embedding-v2") == "embo-01"
+    assert normalize_deprecated_model_id("embo-01") == "embo-01"
 
 
 def test_normalize_deprecated_model_id_composite_key():
@@ -35,8 +35,8 @@ def test_normalize_deprecated_model_id_composite_key():
         == "openai:text-embedding-3-small"
     )
     assert (
-        normalize_deprecated_model_id("minimax:embo-01")
-        == "minimax:minimax-embedding-v2"
+        normalize_deprecated_model_id("minimax:minimax-embedding-v2")
+        == "minimax:embo-01"
     )
 
 
@@ -55,8 +55,8 @@ def test_resolve_model_id_maps_deprecated_openai_key():
 
 
 def test_resolve_model_id_maps_deprecated_minimax_key():
-    registry_key, config = resolve_model_id("minimax:embo-01")
-    assert registry_key == "minimax-embedding-v2"
+    registry_key, config = resolve_model_id("minimax:minimax-embedding-v2")
+    assert registry_key == "embo-01"
     assert isinstance(config, dict)
     assert "minimax" in (config.get("base_url") or "")
 

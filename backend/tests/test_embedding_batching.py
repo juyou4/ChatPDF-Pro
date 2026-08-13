@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 # 将 backend 目录加入导入路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -238,7 +239,11 @@ def test_remote_embedding_fallback_when_model_not_found(monkeypatch):
         lambda _api_base, _api_key: ["Qwen/Qwen-Embedding-8B", "BAAI/bge-reranker-v2-m3"],
     )
 
-    embed_fn = get_embedding_function("silicon:BAAI/bge-m3", api_key="sk-user")
+    # 自动换模型默认关闭：静默切换嵌入模型会让同一个索引里混进两个向量空间。
+    # 这几个用例考的正是回退机制本身，必须显式开启。
+    embed_fn = get_embedding_function(
+        "silicon:BAAI/bge-m3", api_key="sk-user", allow_model_fallback=True
+    )
     vectors = embed_fn(["test"])
 
     assert vectors.shape[0] == 1
@@ -272,7 +277,9 @@ def test_remote_embedding_fallback_skips_failed_deprecated_model(monkeypatch):
         lambda _api_base, _api_key: ["Qwen/Qwen-Embedding-8B", "Qwen/Qwen3-Embedding-8B"],
     )
 
-    embed_fn = get_embedding_function("silicon:Qwen/Qwen-Embedding-8B", api_key="sk-user")
+    embed_fn = get_embedding_function(
+        "silicon:Qwen/Qwen-Embedding-8B", api_key="sk-user", allow_model_fallback=True
+    )
     vectors = embed_fn(["test"])
 
     assert vectors.shape[0] == 1
@@ -306,13 +313,55 @@ def test_remote_embedding_fallback_alias_for_legacy_openai_model(monkeypatch):
         lambda _api_base, _api_key: ["text-embedding-ada-002", "text-embedding-3-small"],
     )
 
-    embed_fn = get_embedding_function("openai:text-embedding-ada-002", api_key="sk-user")
+    embed_fn = get_embedding_function(
+        "openai:text-embedding-ada-002", api_key="sk-user", allow_model_fallback=True
+    )
     vectors = embed_fn(["test"])
 
     assert vectors.shape[0] == 1
     assert len(fake_client.calls) == 2
     assert fake_client.calls[0]["model"] == "text-embedding-ada-002"
     assert fake_client.calls[1]["model"] == "text-embedding-3-small"
+
+
+def test_remote_embedding_without_opt_in_fails_loudly_instead_of_switching(monkeypatch):
+    """默认不得自动换模型，而要抛出可操作的提示。
+
+    静默回退到另一个嵌入模型会让同一个索引里混进两个向量空间，这比直接报错严重
+    得多。默认关闭后，用户拿到的必须是「去模型服务同步后重选」这类能照做的提示，
+    而不是裸的 provider 异常。
+    """
+    fake_client = _FailThenSuccessClient(fail_model="BAAI/bge-m3")
+
+    monkeypatch.setattr(
+        embedding_service_module,
+        "resolve_model_id",
+        lambda _model_id: (
+            "BAAI/bge-m3",
+            {
+                "provider": "openai",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "model_name": "BAAI/bge-m3",
+                "max_tokens": 8192,
+            },
+        ),
+    )
+    monkeypatch.setattr(embedding_service_module, "select_api_key", lambda _k: "sk-test")
+    monkeypatch.setattr(embedding_service_module, "_get_openai_client", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(
+        embedding_service_module,
+        "_fetch_available_model_ids",
+        lambda _api_base, _api_key: ["BAAI/bge-m3", "Qwen/Qwen3-Embedding-8B"],
+    )
+
+    embed_fn = get_embedding_function("silicon:BAAI/bge-m3", api_key="sk-user")
+
+    with pytest.raises(ValueError) as excinfo:
+        embed_fn(["test"])
+
+    assert "不存在或未开通" in str(excinfo.value)
+    # 只应尝试用户选定的那个模型，绝不能偷偷换成候选列表里的另一个。
+    assert [call["model"] for call in fake_client.calls] == ["BAAI/bge-m3"]
 
 
 def test_model_not_found_detection_with_structured_error(monkeypatch):

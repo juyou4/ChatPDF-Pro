@@ -14,7 +14,10 @@ import pytest
 # 将 backend 目录添加到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.selected_text_locator import locate_selected_text
+from services.selected_text_locator import (
+    locate_selected_text,
+    selected_page_is_resolved,
+)
 
 
 # ---- 测试数据 ----
@@ -33,17 +36,17 @@ class TestExactMatch:
     def test_match_on_first_page(self):
         """匹配第一页内容"""
         result = locate_selected_text("机器学习的基本概念", SAMPLE_PAGES)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "exact"}
 
     def test_match_on_middle_page(self):
         """匹配中间页内容"""
         result = locate_selected_text("线性回归是最基础的监督学习算法", SAMPLE_PAGES)
-        assert result == {"page_start": 2, "page_end": 2}
+        assert result == {"page_start": 2, "page_end": 2, "match": "exact"}
 
     def test_match_on_last_page(self):
         """匹配最后一页内容"""
         result = locate_selected_text("主要方法进行了综述", SAMPLE_PAGES)
-        assert result == {"page_start": 4, "page_end": 4}
+        assert result == {"page_start": 4, "page_end": 4, "match": "exact"}
 
     def test_match_full_page_content(self):
         """匹配整页内容"""
@@ -51,7 +54,7 @@ class TestExactMatch:
             "第二章 线性回归。线性回归是最基础的监督学习算法之一。",
             SAMPLE_PAGES,
         )
-        assert result == {"page_start": 2, "page_end": 2}
+        assert result == {"page_start": 2, "page_end": 2, "match": "exact"}
 
 
 class TestCrossPageMatch:
@@ -65,7 +68,7 @@ class TestCrossPageMatch:
             {"page": 2, "content": "机器学习包括监督学习和无监督学习"},
         ]
         result = locate_selected_text("机器学习", pages)
-        assert result == {"page_start": 1, "page_end": 2}
+        assert result == {"page_start": 1, "page_end": 2, "match": "exact"}
 
     def test_text_spans_multiple_pages(self):
         """文本跨越多页时返回最小和最大页码"""
@@ -76,7 +79,7 @@ class TestCrossPageMatch:
             {"page": 5, "content": "深度学习总结"},
         ]
         result = locate_selected_text("深度学习", pages)
-        assert result == {"page_start": 1, "page_end": 5}
+        assert result == {"page_start": 1, "page_end": 5, "match": "exact"}
 
 
 class TestFuzzyMatch:
@@ -98,7 +101,7 @@ class TestFuzzyMatch:
         # 前 80 字符完全在 page2_content 中，但后面追加了不存在的内容
         long_text = page2_content[:90] + "这部分内容不在任何页面中" * 5
         result = locate_selected_text(long_text, pages)
-        assert result == {"page_start": 2, "page_end": 2}
+        assert result == {"page_start": 2, "page_end": 2, "match": "prefix"}
 
 
 class TestFallback:
@@ -107,7 +110,7 @@ class TestFallback:
     def test_no_match_returns_default(self):
         """无法匹配时返回默认页码 1"""
         result = locate_selected_text("完全不存在的文本内容", SAMPLE_PAGES)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "none"}
 
     def test_no_match_logs_warning(self, caplog):
         """无法匹配时记录警告日志"""
@@ -118,22 +121,22 @@ class TestFallback:
     def test_empty_selected_text(self):
         """空 selected_text 返回默认页码"""
         result = locate_selected_text("", SAMPLE_PAGES)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "none"}
 
     def test_whitespace_selected_text(self):
         """纯空白 selected_text 返回默认页码"""
         result = locate_selected_text("   ", SAMPLE_PAGES)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "none"}
 
     def test_empty_pages(self):
         """空页面列表返回默认页码"""
         result = locate_selected_text("一些文本", [])
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "none"}
 
     def test_none_pages(self):
         """None 页面列表返回默认页码"""
         result = locate_selected_text("一些文本", None)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "none"}
 
 
 class TestEdgeCases:
@@ -146,7 +149,7 @@ class TestEdgeCases:
             {"page": 2, "content": "有内容的页面"},
         ]
         result = locate_selected_text("有内容的页面", pages)
-        assert result == {"page_start": 2, "page_end": 2}
+        assert result == {"page_start": 2, "page_end": 2, "match": "exact"}
 
     def test_page_missing_content_key(self):
         """页面缺少 content 键时不报错"""
@@ -155,7 +158,7 @@ class TestEdgeCases:
             {"page": 2, "content": "正常内容"},
         ]
         result = locate_selected_text("正常内容", pages)
-        assert result == {"page_start": 2, "page_end": 2}
+        assert result == {"page_start": 2, "page_end": 2, "match": "exact"}
 
     def test_page_missing_page_key(self):
         """页面缺少 page 键时使用默认值 1"""
@@ -163,10 +166,37 @@ class TestEdgeCases:
             {"content": "测试内容"},
         ]
         result = locate_selected_text("测试内容", pages)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "exact"}
 
     def test_single_page(self):
         """单页文档"""
         pages = [{"page": 1, "content": "唯一的页面内容"}]
         result = locate_selected_text("唯一的页面", pages)
-        assert result == {"page_start": 1, "page_end": 1}
+        assert result == {"page_start": 1, "page_end": 1, "match": "exact"}
+
+
+class TestMatchQualitySignal:
+    """``match`` 字段必须让回退与真实命中可区分。
+
+    回退同样返回第 1 页。调用方若只看 page_start，就会把「没找到」当成「在第 1 页」，
+    向模型断言一个错误页码，并把用户跳到错误的位置。
+    """
+
+    def test_fallback_and_genuine_first_page_hit_are_distinguishable(self):
+        pages = [{"page": 1, "content": "唯一的页面内容"}]
+        genuine = locate_selected_text("唯一的页面", pages)
+        fallback = locate_selected_text("页面里没有的文本", pages)
+
+        assert genuine["page_start"] == fallback["page_start"] == 1
+        assert genuine["match"] == "exact"
+        assert fallback["match"] == "none"
+
+    def test_selected_page_is_resolved_reads_the_signal(self):
+        pages = [{"page": 1, "content": "唯一的页面内容"}]
+        assert selected_page_is_resolved(locate_selected_text("唯一的页面", pages)) is True
+        assert selected_page_is_resolved(locate_selected_text("不存在", pages)) is False
+
+    def test_legacy_result_without_match_is_treated_as_resolved(self):
+        # 旧缓存产物没有 match 字段，不应该因此突然丢掉页码标签。
+        assert selected_page_is_resolved({"page_start": 3, "page_end": 3}) is True
+        assert selected_page_is_resolved(None) is False

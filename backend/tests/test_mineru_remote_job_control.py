@@ -29,22 +29,24 @@ def test_startup_resumes_only_remote_job_with_batch_id(monkeypatch, isolated_job
     )
     captured = {}
 
-    class ImmediateThread:
-        def __init__(self, *, target, args, **_kwargs):
-            captured["target"] = target
-            captured["args"] = args
+    # 深度解析已从「每任务直启线程」改为固定 worker 池 + 队列，Thread 不再携带
+    # 任务参数。恢复的观察点因此移到入队接缝：只有 _enqueue_mineru_deep_parse
+    # 返回 True，任务才算恢复成功。
+    def fake_enqueue(doc_id, cancel_event, remote_job, parse_generation, full_route_options):
+        captured["doc_id"] = doc_id
+        captured["remote_job"] = remote_job
+        captured["parse_generation"] = parse_generation
+        return True
 
-        def start(self):
-            captured["started"] = True
-
-    monkeypatch.setattr(document_routes.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(document_routes, "_enqueue_mineru_deep_parse", fake_enqueue)
 
     resumed = document_routes.resume_pending_mineru_deep_parse_jobs()
 
     assert resumed == [{"doc_id": "doc-1", "batch_id": "batch-1"}]
-    assert captured["started"] is True
-    assert captured["args"][0] == "doc-1"
-    assert captured["args"][2]["data_id"] == "data-1"
+    assert captured["doc_id"] == "doc-1"
+    # 远端身份（batch/data id）必须原样带回队列，轮询才接得上原任务。
+    assert captured["remote_job"]["batch_id"] == "batch-1"
+    assert captured["remote_job"]["data_id"] == "data-1"
 
 
 def test_cancel_sends_remote_cancel_and_persists_result(monkeypatch, isolated_jobs):

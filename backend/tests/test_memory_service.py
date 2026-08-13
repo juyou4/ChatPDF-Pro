@@ -316,30 +316,38 @@ class TestCompressionAndHits:
 
         hits = service.retrieve_memories_raw("偏好", doc_id=None, filter_by_doc=False)
 
-        assert hits == [
-            {
-                "id": entry.id,
-                "entry_id": entry.id,
-                "content": "用户偏好中文回答",
-                "source_type": "manual",
-                "doc_id": None,
-                "score": 0.83,
-                "rrf_score": 0.83,
-                "importance": 1.0,
-                "memory_tier": "short_term",
-                "memory_kind": "profile",
-                "memory_scope": "profile",
-                "status": "active",
-                "title": "用户偏好中文回答",
-                "summary": "用户偏好中文回答",
-                "created_at": entry.created_at,
-                "tags": entry.tags,
-                "source_ref": {},
-                "derived_from": [],
-                "trace": {"kind": "manual_add", "query": "偏好"},
-                "last_used_query": "偏好",
-            }
-        ]
+        assert len(hits) == 1
+        hit = hits[0]
+        # 只断言本测试关心的富化字段，不做整字典相等：命中结构还携带双时态
+        # 生命周期字段（valid_at / invalid_at / disabled_at），其值是动态时间戳，
+        # 全等断言会在每次扩展命中结构时误报。
+        expected = {
+            "id": entry.id,
+            "entry_id": entry.id,
+            "content": "用户偏好中文回答",
+            "source_type": "manual",
+            "doc_id": None,
+            "score": 0.83,
+            "rrf_score": 0.83,
+            "importance": 1.0,
+            "memory_tier": "short_term",
+            "memory_kind": "profile",
+            "memory_scope": "profile",
+            "status": "active",
+            "title": "用户偏好中文回答",
+            "summary": "用户偏好中文回答",
+            "created_at": entry.created_at,
+            "tags": entry.tags,
+            "source_ref": {},
+            "derived_from": [],
+            "trace": {"kind": "manual_add", "query": "偏好"},
+            "last_used_query": "偏好",
+        }
+        assert {key: hit.get(key) for key in expected} == expected
+        # 双时态生命周期字段必须随命中透出：活动条目 valid_at 非空、未失效未禁用。
+        assert hit["valid_at"]
+        assert not hit.get("invalid_at")
+        assert not hit.get("disabled_at")
 
     def test_retrieve_memories_raw_includes_working_and_graph_hits(self, service):
         fact = MemoryEntry(
@@ -367,6 +375,27 @@ class TestCompressionAndHits:
         kinds = [hit["memory_kind"] for hit in hits]
         assert "working" in kinds
         assert "graph" in kinds
+
+    def test_graph_hits_dropped_when_no_entity_matches_query(self, service, monkeypatch):
+        """关键词门很宽，实体对不上时应放弃这一路，而不是回退成注入任意节点。"""
+        monkeypatch.setattr(
+            service,
+            "get_graph_summary",
+            lambda doc_id, parse_identity=None: {
+                "nodes": [
+                    {"id": "n1", "type": "method", "label": "BEVFormer"},
+                    {"id": "n2", "type": "dataset", "label": "nuScenes"},
+                ],
+                "edges": [],
+            },
+        )
+
+        # "结论" 命中关键词门，但没有任何节点标签出现在问题里。
+        assert service._detect_graph_memory_needed("本文的结论是什么") is True
+        assert service._build_graph_memory_hits("doc-1", "本文的结论是什么") == []
+
+        # 实体确实对得上时仍要正常返回。
+        assert service._build_graph_memory_hits("doc-1", "BEVFormer 的表现如何")
 
 
 # ==================== update_keywords 测试 ====================

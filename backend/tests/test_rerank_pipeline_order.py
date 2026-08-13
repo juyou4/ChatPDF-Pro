@@ -1,4 +1,4 @@
-"""rerank 管线顺序回归测试"""
+﻿"""rerank 管线顺序回归测试"""
 
 import os
 import re
@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.embedding_service import (
+    RAG_INDEX_VERSION,
     _apply_page_provenance,
     _apply_numeric_table_same_bundle_hard_gate,
     _apply_query_intent_boost,
@@ -57,6 +58,8 @@ def vector_store_dir():
         faiss.write_index(index, os.path.join(tmpdir, f"{doc_id}.index"))
 
         data = {
+            # 检索合同要求持久化索引携带当前格式版本，否则会被 409 拒绝并要求重建。
+            "index_version": RAG_INDEX_VERSION,
             "chunks": [
                 "这是第一段测试文本。",
                 "这是第二段测试文本。",
@@ -132,7 +135,7 @@ def test_rerank_runs_after_candidate_augmentation(vector_store_dir, use_hybrid):
         order.append("table")
         return results + [_make_result("table extra chunk", 0.73)]
 
-    def fake_clean(results, _query, _top_k):
+    def fake_clean(results, _query, _top_k, *_args, **_kwargs):
         order.append("clean")
         return results
 
@@ -2473,7 +2476,7 @@ def test_numeric_table_slot_reservation_applies_after_rerank():
     ]
 
     with patch("services.embedding_service._apply_rerank", return_value=reranked), \
-         patch("services.embedding_service._apply_evidence_gate", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._apply_evidence_gate", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._apply_group_post_cap", side_effect=lambda results, top_k: (results, None)), \
          patch.object(
              _finalize_with_optional_rerank.__globals__["_rag_config_singleton"],
@@ -3727,8 +3730,8 @@ def test_search_document_chunks_preserves_low_rank_table_for_numeric_table_expan
          patch("services.embedding_service._query_vector_cache") as mock_cache, \
          patch("services.embedding_service._merge_with_group_search", side_effect=lambda **kwargs: kwargs["chunk_results"]), \
          patch("services.embedding_service._augment_with_table_chunks", side_effect=lambda *_args, **_kwargs: synthetic_candidates), \
-         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._filter_reference_pollution", side_effect=lambda results, _query, evidence_need=None: results), \
          patch("services.chunk_expander.expand_context_chunks", side_effect=lambda results, *_args, **_kwargs: results):
 
@@ -3754,6 +3757,8 @@ def test_search_document_chunks_numeric_table_uses_wider_candidate_pool(vector_s
 
     class FakeIndex:
         ntotal = 64
+        # 检索入口会校验查询向量维度与索引维度一致，fake 索引必须声明维度。
+        d = EMBED_DIM
         metric_type = faiss.METRIC_INNER_PRODUCT
 
         def search(self, _vectors, k):
@@ -3763,6 +3768,7 @@ def test_search_document_chunks_numeric_table_uses_wider_candidate_pool(vector_s
             return distances, indices
 
     fake_data = {
+        "index_version": RAG_INDEX_VERSION,
         "chunks": [
             "Figure 3 narrative block.",
             "Appendix note.",
@@ -3783,15 +3789,15 @@ def test_search_document_chunks_numeric_table_uses_wider_candidate_pool(vector_s
          patch.object(search_document_chunks.__globals__["_query_vector_cache"], "put", return_value=None), \
          patch("services.embedding_service._merge_with_group_search", side_effect=lambda **kwargs: kwargs["chunk_results"]), \
          patch("services.embedding_service._augment_with_table_chunks", side_effect=lambda results, *_args, **_kwargs: results), \
-         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._filter_reference_pollution", side_effect=lambda results, _query, evidence_need=None: results), \
-         patch("services.embedding_service._unified_post_clean", side_effect=lambda results, _query, _top_k: results), \
+         patch("services.embedding_service._unified_post_clean", side_effect=lambda results, _query, _top_k, *_args, **_kwargs: results), \
          patch("services.embedding_service._annotate_results_for_evidence_rerank", side_effect=lambda **kwargs: kwargs["results"]), \
          patch("services.embedding_service._expand_numeric_table_evidence_units", side_effect=lambda results, *_args, **_kwargs: results), \
-         patch("services.embedding_service._mark_numeric_table_support_chunks", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._dedupe_numeric_table_evidence_units", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._sanitize_by_chunk_type", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._mark_numeric_table_support_chunks", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._dedupe_numeric_table_evidence_units", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._sanitize_by_chunk_type", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._finalize_with_optional_rerank", side_effect=lambda **kwargs: kwargs["results"][: kwargs["top_k"]]), \
          patch("services.chunk_expander.expand_context_chunks", side_effect=lambda results, *_args, **_kwargs: results):
 
@@ -4343,8 +4349,8 @@ def test_search_document_chunks_non_rerank_same_bundle_gate(vector_store_dir):
              patch("services.embedding_service._query_vector_cache") as mock_cache, \
              patch("services.embedding_service._merge_with_group_search", side_effect=fake_merge_with_group_search), \
              patch("services.embedding_service._augment_with_table_chunks", side_effect=lambda results, *_args, **_kwargs: results), \
-             patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query: results), \
-             patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query: results), \
+             patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+             patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
              patch("services.embedding_service._filter_reference_pollution", side_effect=lambda results, _query, evidence_need=None: results), \
              patch("services.embedding_service._unified_post_clean", side_effect=lambda results, *_args, **_kwargs: results), \
              patch("services.chunk_expander.expand_context_chunks", side_effect=lambda results, *_args, **_kwargs: results), \
@@ -5219,8 +5225,8 @@ def test_search_document_chunks_recovers_runtime_structured_bundle_from_pages(ve
     with patch("services.embedding_service.get_embedding_function", return_value=_make_mock_embed_fn()), \
          patch("services.embedding_service._query_vector_cache") as mock_cache, \
          patch("services.embedding_service._merge_with_group_search", side_effect=fake_merge_with_group_search), \
-         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._filter_reference_pollution", side_effect=lambda results, _query, evidence_need=None: results), \
          patch("services.embedding_service._unified_post_clean", side_effect=lambda results, *_args, **_kwargs: results), \
          patch("services.chunk_expander.expand_context_chunks", side_effect=lambda results, *_args, **_kwargs: results), \
@@ -5292,8 +5298,8 @@ def test_search_document_chunks_recovers_runtime_table3_bundle_from_side_by_side
     with patch("services.embedding_service.get_embedding_function", return_value=_make_mock_embed_fn()), \
          patch("services.embedding_service._query_vector_cache") as mock_cache, \
          patch("services.embedding_service._merge_with_group_search", side_effect=fake_merge_with_group_search), \
-         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query: results), \
-         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query: results), \
+         patch("services.embedding_service._apply_query_intent_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
+         patch("services.embedding_service._apply_numeric_table_boost", side_effect=lambda results, _query, *_args, **_kwargs: results), \
          patch("services.embedding_service._filter_reference_pollution", side_effect=lambda results, _query, evidence_need=None: results), \
          patch("services.embedding_service._unified_post_clean", side_effect=lambda results, *_args, **_kwargs: results), \
          patch("services.chunk_expander.expand_context_chunks", side_effect=lambda results, *_args, **_kwargs: results), \

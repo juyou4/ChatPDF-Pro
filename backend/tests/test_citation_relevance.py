@@ -21,6 +21,7 @@ from routes.chat_routes import (
     _build_selected_text_fallback_citations,
     _extract_inline_citation_refs,
     _align_citations_with_answer,
+    _mark_conflicting_table_citations,
     _prepare_answer_and_citations_for_display,
     _extract_streaming_final_answer,
     _should_use_fast_overview_context,
@@ -287,18 +288,76 @@ class TestCitationAlignment:
         assert aligned == []
 
 
+class TestTableVisualConflictMarking:
+    """视觉核验判为冲突的表格引用必须带上标记，且只影响该表格。"""
+
+    _DIAG = {
+        "verdict": "conflict",
+        "table_instance_id": "table-abc123",
+        "rejected_reason": "视觉读数 74.3 与结构化单元格 76.1 不一致",
+    }
+
+    def test_marks_only_the_conflicting_table_citation(self):
+        meta = {
+            "citations": [
+                {"ref": 1, "table_instance_id": "table-abc123", "highlight_text": "Acc 76.1"},
+                {"ref": 2, "table_instance_id": "table-other", "highlight_text": "mAP 42.0"},
+                {"ref": 3, "highlight_text": "一段普通正文证据"},
+            ]
+        }
+        diag = dict(self._DIAG)
+
+        assert _mark_conflicting_table_citations(meta, diag) == 1
+
+        marked, untouched_table, plain = meta["citations"]
+        assert marked["visual_verdict"] == "conflict"
+        assert "74.3" in marked["visual_conflict_reason"]
+        # 引用本身必须保留：误判冲突不应该静默删掉证据。
+        assert marked["highlight_text"] == "Acc 76.1"
+        assert "visual_verdict" not in untouched_table
+        assert "visual_verdict" not in plain
+        assert diag["conflict_marked_citation_count"] == 1
+
+    def test_no_marking_when_no_table_identity_matches(self):
+        meta = {"citations": [{"ref": 1, "table_instance_id": "table-zzz"}]}
+        assert _mark_conflicting_table_citations(meta, dict(self._DIAG)) == 0
+        assert "visual_verdict" not in meta["citations"][0]
+
+    def test_no_marking_when_diagnostics_lack_table_identity(self):
+        meta = {"citations": [{"ref": 1, "table_instance_id": "table-abc123"}]}
+        assert _mark_conflicting_table_citations(meta, {"verdict": "conflict"}) == 0
+        assert "visual_verdict" not in meta["citations"][0]
+
+
 class TestCitationDisplayPreparation:
 
     def test_prepare_answer_repairs_and_remaps_display_refs(self):
-        answer = "结论见[ID: 5]，补充见ref 2。"
+        # 夹具要点有二：
+        # 1. highlight_text 必须与所在句子有实质词面重合，否则会被弱引用剪枝
+        #    （_prune_weak_inline_citations，阈值 0.24）正当剪掉——这条测试考的是
+        #    格式修复与展示重映射，不是剪枝。
+        # 2. 两个事实放在两个独立句子里。同句内逗号分隔的多引用会被按整句
+        #    打分并统一回贴句尾（分句折叠，已另案记录为产品缺陷），放同一句
+        #    会让本测试与那个缺陷纠缠。
+        answer = "本文结论见第五节的分析[ID: 5]。数据集补充说明见附录ref 2。"
         citations = [
-            {"ref": 2, "group_id": "group-2", "page_range": [2, 2], "highlight_text": "B"},
-            {"ref": 5, "group_id": "group-5", "page_range": [5, 5], "highlight_text": "E"},
+            {
+                "ref": 2,
+                "group_id": "group-2",
+                "page_range": [2, 2],
+                "highlight_text": "数据集补充说明见附录 B，包含全部预处理细节",
+            },
+            {
+                "ref": 5,
+                "group_id": "group-5",
+                "page_range": [5, 5],
+                "highlight_text": "本文结论见第五节的分析与讨论",
+            },
         ]
 
         rewritten, projected = _prepare_answer_and_citations_for_display(answer, citations)
 
-        assert rewritten == "结论见[1]，补充见[2]。"
+        assert rewritten == "本文结论见第五节的分析[1]。数据集补充说明见附录[2]。"
         assert [c["ref"] for c in projected] == [1, 2]
         assert [c["source_ref"] for c in projected] == [5, 2]
         assert [c["display_ref"] for c in projected] == [1, 2]

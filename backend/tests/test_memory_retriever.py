@@ -193,7 +193,13 @@ class TestHybridRetrieval:
         assert "doc-other" not in doc_ids
         assert doc_ids.issubset({"doc-current", None})
 
-    def test_archived_raw_entries_are_excluded(self, retriever, memory_store, memory_index):
+    def test_archived_raw_entries_are_excluded_when_recall_disabled(
+        self, retriever, memory_store, memory_index, monkeypatch
+    ):
+        """归档条目不参与普通检索——除非归档回捞（page fault）明确开启。"""
+        from services import memory_retriever as memory_retriever_module
+
+        monkeypatch.setattr(memory_retriever_module, "_archive_recall_enabled", lambda: False)
         active = _make_entry("当前有效记忆", doc_id="doc-1")
         archived = _make_entry("已归档的旧摘要", doc_id="doc-1")
         archived.status = "archived_raw"
@@ -203,6 +209,24 @@ class TestHybridRetrieval:
 
         entry_ids = {item["entry_id"] for item in results}
         assert archived.id not in entry_ids
+
+    def test_archived_raw_entries_can_be_recalled_when_enabled(
+        self, retriever, memory_store, memory_index
+    ):
+        """归档回捞按默认配置开启：与查询强重叠的归档条目允许被召回。
+
+        这是有意的 page-fault 设计——压缩归档不等于永久遗忘。若默认配置改为
+        关闭，这条测试应当跟着配置调整而不是回退召回逻辑。
+        """
+        active = _make_entry("当前有效记忆", doc_id="doc-1")
+        archived = _make_entry("已归档的旧摘要", doc_id="doc-1")
+        archived.status = "archived_raw"
+        self._add_entries(memory_store, memory_index, [active, archived])
+
+        results = retriever.retrieve("摘要", top_k=5, doc_id="doc-1", filter_by_doc=True)
+
+        entry_ids = {item["entry_id"] for item in results}
+        assert archived.id in entry_ids
 
     def test_active_pool_can_answer_before_index(self, memory_store, memory_index):
         """热缓存命中时，即使索引为空也应返回结果。"""

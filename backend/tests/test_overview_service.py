@@ -197,7 +197,19 @@ def test_enrich_figures_with_pdf_geometry_for_legacy_documents(monkeypatch):
 def test_get_cache_key_uses_cache_version_prefix():
     cache_key = _get_cache_key("doc-123", "standard")
 
-    assert cache_key == f"{OVERVIEW_CACHE_VERSION}_doc-123_standard"
+    # 缓存键现在绑定解析代次 / 源文件哈希 / 文本与视觉模型身份，尾部是多段
+    # 身份 token。钉死完整格式会在每次扩展身份时误报，这里守两件真正要紧的事：
+    # 版本前缀 + 文档 + 深度的定位段，以及「身份变了键必须变」的失效属性。
+    assert cache_key.startswith(f"{OVERVIEW_CACHE_VERSION}_doc-123_standard_")
+
+    reparsed = _get_cache_key(
+        "doc-123",
+        "standard",
+        parse_generation="gen-2",
+        document_source_hash="hash-2",
+    )
+    assert reparsed.startswith(f"{OVERVIEW_CACHE_VERSION}_doc-123_standard_")
+    assert reparsed != cache_key
 
 
 def test_build_document_excerpt_limits_chars_and_keeps_multiple_sections():

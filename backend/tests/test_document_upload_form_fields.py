@@ -1,4 +1,4 @@
-"""上传路由参数解析回归测试
+﻿"""上传路由参数解析回归测试
 
 验证 multipart/form-data 中的 embedding 配置字段会被后端正确读取，
 避免 FastAPI 回退到默认 local-minilm 导致桌面版误判为本地模型。
@@ -18,6 +18,29 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from routes.document_routes import router
 import routes.document_routes as document_routes_module
+from tests.vector_index_fixtures import write_published_vector_index
+
+
+def _persist_captured_index(doc_id, full_text, vector_store_dir, embedding_model, kwargs, *, api_host=""):
+    """后台索引质量门会验证 create_index 的真实产物，替身必须照做。
+
+    持久化的 embedding 身份必须与请求身份一致，否则语义组构建会因
+    「Embedding 配置与文档索引不一致」被 409 拒绝。
+    """
+    # create_index 现在收到的是去 provider 前缀的裸模型名，provider 经
+    # 独立 kwarg 传入；持久化身份必须按这套拆分，否则语义组构建 409。
+    model = str(embedding_model or "")
+    provider = str(kwargs.get("embedding_provider") or "local")
+    write_published_vector_index(
+        Path(vector_store_dir),
+        doc_id,
+        chunks=[full_text or "chunk"],
+        index_source=str(kwargs.get("index_source") or "pdf_native"),
+        index_meta=kwargs.get("index_meta") or {},
+        embedding_model=model,
+        embedding_provider=provider,
+        embedding_api_host="" if provider == "local" else str(api_host or ""),
+    )
 
 
 @pytest.fixture
@@ -30,13 +53,18 @@ def client():
 
 @pytest.fixture
 def isolated_storage(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
     docs_dir = tmp_path / "docs"
     vectors_dir = tmp_path / "vectors"
     uploads_dir = tmp_path / "uploads"
+    data_dir.mkdir()
     docs_dir.mkdir()
     vectors_dir.mkdir()
     uploads_dir.mkdir()
 
+    # DATA_DIR 不隔离时，上传会把解析清单/任务账本写进真实数据目录，
+    # 同一 doc_id 的下一个测试就会撞上陈旧身份而 400。
+    monkeypatch.setattr(document_routes_module, "DATA_DIR", data_dir)
     monkeypatch.setattr(document_routes_module, "DOCS_DIR", docs_dir)
     monkeypatch.setattr(document_routes_module, "VECTOR_STORE_DIR", vectors_dir)
     monkeypatch.setattr(document_routes_module, "UPLOAD_DIR", uploads_dir)
@@ -100,6 +128,7 @@ def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_s
         captured["pages"] = pages
         captured["structured_table_bundles"] = structured_table_bundles
         captured["summary_api_key"] = summary_api_key
+        _persist_captured_index(doc_id, full_text, vector_store_dir, embedding_model, kwargs, api_host=api_host)
 
     monkeypatch.setattr(document_routes_module, "create_index", fake_create_index)
 
@@ -108,8 +137,14 @@ def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_s
         files={"file": ("sample.pdf", b"%PDF-1.4 mock", "application/pdf")},
         data={
             "embedding_model": "silicon:BAAI/bge-m3",
+            # 索引构建要求完整、由用户显式选定的 embedding 身份：索引只在其构建时
+            # 的向量空间里有意义，provider 不允许被推断。
+            "embedding_provider": "silicon",
             "embedding_api_key": "sk-test-123",
             "embedding_api_host": "https://api.siliconflow.cn",
+            # MinerU 现在是 PDF 的缺省主解析路线，这些用例考的是本地解析链路，
+            # 必须显式声明，否则会走进异步的 waiting_for_mineru 分支。
+            "parse_route": "local",
             "enable_ocr": "never",
         },
     )
@@ -119,12 +154,20 @@ def test_upload_reads_embedding_fields_from_form(client, monkeypatch, isolated_s
     assert body["doc_id"] == "doc-form-ok"
 
     assert captured["doc_id"] == "doc-form-ok"
-    assert captured["embedding_model"] == "silicon:BAAI/bge-m3"
+    # 索引构建入口现在接收去 provider 前缀的裸模型名，provider 单独传递，
+    # api_host 会被规范化补上 /v1 版本路径。
+    assert captured["embedding_model"] == "BAAI/bge-m3"
     assert captured["api_key"] == "sk-test-123"
-    assert captured["api_host"] == "https://api.siliconflow.cn"
-    assert captured["pages"] == [{"page_num": 1, "text": "hello world", "content": "hello world"}]
+    assert captured["api_host"] == "https://api.siliconflow.cn/v1"
+    # 上传链路会把页面统一成规范化 schema（page/page_index/source 等字段），
+    # 这里只锁定对检索有意义的内容字段。
+    assert captured["pages"][0]["page"] == 1
+    assert captured["pages"][0]["text"] == "hello world"
+    assert captured["pages"][0]["content"] == "hello world"
     assert captured["structured_table_bundles"] is None
-    assert captured["summary_api_key"] == "sk-test-123"
+    # embedding key 不再被静默复用为意群摘要 key：embedding 专用凭证往往无法
+    # 调用 chat completions，未显式提供 api_key 时改走确定性截断。
+    assert captured["summary_api_key"] is None
 
 
 def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, isolated_storage):
@@ -161,6 +204,7 @@ def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, 
         captured["api_key"] = api_key
         captured["structured_table_bundles"] = structured_table_bundles
         captured["summary_api_key"] = summary_api_key
+        _persist_captured_index(doc_id, full_text, vector_store_dir, embedding_model, kwargs, api_host=api_host)
 
     monkeypatch.setattr(document_routes_module, "create_index", fake_create_index)
 
@@ -169,8 +213,15 @@ def test_upload_prefers_api_key_for_semantic_group_summary(client, monkeypatch, 
         files={"file": ("sample.pdf", b"%PDF-1.4 mock", "application/pdf")},
         data={
             "embedding_model": "silicon:BAAI/bge-m3",
+            "embedding_provider": "silicon",
             "embedding_api_key": "sk-embed-123",
+            # 远程 embedding provider 现在要求完整显式身份（含 api_host），
+            # 缺失会在上传入口被 400 拒绝而不是静默回退。
+            "embedding_api_host": "https://api.siliconflow.cn",
             "api_key": "sk-chat-456",
+            # MinerU 现在是 PDF 的缺省主解析路线，这些用例考的是本地解析链路，
+            # 必须显式声明，否则会走进异步的 waiting_for_mineru 分支。
+            "parse_route": "local",
             "enable_ocr": "never",
         },
     )
@@ -367,6 +418,7 @@ def test_upload_passes_odl_structured_table_bundles_to_index(client, monkeypatch
         captured["pages"] = pages
         captured["structured_table_bundles"] = structured_table_bundles
         captured["summary_api_key"] = summary_api_key
+        _persist_captured_index(doc_id, full_text, vector_store_dir, embedding_model, kwargs, api_host=api_host)
 
     monkeypatch.setattr(document_routes_module, "create_index", fake_create_index)
 
@@ -377,6 +429,10 @@ def test_upload_passes_odl_structured_table_bundles_to_index(client, monkeypatch
             "embedding_model": "silicon:BAAI/bge-m3",
             "embedding_api_key": "sk-test-123",
             "embedding_api_host": "https://api.siliconflow.cn",
+            "embedding_provider": "silicon",
+            # MinerU 现在是 PDF 的缺省主解析路线，这些用例考的是本地解析链路，
+            # 必须显式声明，否则会走进异步的 waiting_for_mineru 分支。
+            "parse_route": "local",
             "enable_ocr": "never",
         },
     )
@@ -390,9 +446,8 @@ def test_upload_passes_odl_structured_table_bundles_to_index(client, monkeypatch
     assert captured["doc_id"] == "doc-odl-bundle"
     assert captured["full_text"] == "clean odl text"
     assert captured["pages"][0]["text"] == "clean odl text"
-    assert captured["pages"][0]["table_bundles"][0]["table_id"] == "Table 7"
-    assert captured["pages"][0]["table_bundles"][0]["evidence_units"][0]["content"] == "Method | All"
-    assert captured["pages"][0]["table_bundles"][0]["evidence_units"][0]["cell_evidence_units"][0]["content"] == "Method"
+    # 结构化表格保持在独立 bundle 合同里透传，不再内嵌进规范化页面对象；
+    # 这防止可见文档、检索与下游概览退化成三份各自展开的表格文本。
     assert captured["structured_table_bundles"][0]["table_id"] == "Table 7"
     assert captured["structured_table_bundles"][0]["table_caption"] == "Table 7: Main results"
     assert captured["structured_table_bundles"][0]["evidence_units"][0]["content"] == "Method | All"
@@ -411,7 +466,10 @@ def test_upload_blocks_local_embedding_in_desktop_mode(client, monkeypatch, isol
     resp = client.post(
         "/upload",
         files={"file": ("sample.pdf", b"%PDF-1.4 mock", "application/pdf")},
-        data={"embedding_model": "local:all-MiniLM-L6-v2"},
+        data={
+            "embedding_model": "local:all-MiniLM-L6-v2",
+            "embedding_provider": "local",
+        },
     )
 
     assert resp.status_code == 400
@@ -449,6 +507,10 @@ def test_upload_returns_400_when_embedding_model_is_invalid(client, monkeypatch,
             "embedding_model": "silicon:BAAI/bge-m3",
             "embedding_api_key": "sk-test-123",
             "embedding_api_host": "https://api.siliconflow.cn",
+            "embedding_provider": "silicon",
+            # MinerU 现在是 PDF 的缺省主解析路线，这些用例考的是本地解析链路，
+            # 必须显式声明，否则会走进异步的 waiting_for_mineru 分支。
+            "parse_route": "local",
             "enable_ocr": "never",
         },
     )

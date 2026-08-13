@@ -63,7 +63,13 @@ def test_visual_gate_triggers_on_ambiguous_header_for_vision_model():
     assert "overpacked_metric_cell" in reasons
 
 
-def test_visual_gate_always_bypasses_vision_model_guess():
+def test_visual_gate_requires_vision_capability_even_in_always_mode():
+    """视觉能力是硬前提：纯文本模型收不了图片，强制模式不能越过物理限制。
+
+    「名字不认识但确实有视觉能力」的逃生口不在 mode 上，而在 capability_hint 上
+    ——桌面端查过模型元数据（含自定义 provider 的 vision 标记）后传来的提示是
+    权威判定，优先于名字猜测。
+    """
     should_verify, reasons = should_verify_numeric_table_visual(
         query="Table 1 的最高值是多少？",
         segments=[{"text": "Table 1 row A 1.0"}],
@@ -71,7 +77,18 @@ def test_visual_gate_always_bypasses_vision_model_guess():
         provider="deepseek",
         model="deepseek-chat",
     )
-    assert should_verify
+    assert should_verify is False
+    assert reasons == ["model_not_vision_capable"]
+
+    should_verify, reasons = should_verify_numeric_table_visual(
+        query="Table 1 的最高值是多少？",
+        segments=[{"text": "Table 1 row A 1.0"}],
+        mode="always",
+        provider="deepseek",
+        model="deepseek-chat",
+        capability_hint=True,
+    )
+    assert should_verify is True
     assert reasons == ["mode_always"]
 
 
