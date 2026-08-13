@@ -904,9 +904,10 @@ def _build_table_bundle(
     bundle_id = f"mineru:p{page_num}:table:{item_index + 1}"
 
     matrix: list[list[str]] = []
+    header_depth = 0
     if html_table:
         try:
-            matrix = _html_table_to_matrix(html_table)
+            matrix, header_depth = _html_table_to_matrix_with_header_depth(html_table)
         except Exception as exc:
             warnings.append(f"table_html_parse_failed:p{page_num}:i{item_index}:{exc}")
 
@@ -933,6 +934,7 @@ def _build_table_bundle(
         page_size=page_size,
         cell_bboxes=cell_bboxes,
         row_bboxes=row_bboxes,
+        header_depth=header_depth,
     )
     table_pages = _table_pages_for_item(item, page_num)
     bundle = {
@@ -1069,10 +1071,35 @@ def _resolve_table_caption(table_html: str, *, explicit_caption: str = "") -> st
 
 
 def _html_table_to_matrix(table_html: str) -> list[list[str]]:
+    matrix, _ = _html_table_to_matrix_with_header_depth(table_html)
+    return matrix
+
+
+def _html_table_to_matrix_with_header_depth(table_html: str) -> tuple[list[list[str]], int]:
+    """展开表格矩阵，并顺带给出由 ``<th>`` 标记读出的表头行数。
+
+    表头行数为 0 表示源 HTML 没有 ``<th>`` 标记，调用方应回落到自己的启发式。
+    """
     parser = _TableHTMLParser()
     parser.feed(table_html or "")
     parser.close()
-    return _expand_spans(parser.rows)
+    return _expand_spans(parser.rows), _header_depth_from_tags(parser.rows)
+
+
+def _header_depth_from_tags(rows: list[list[dict[str, Any]]]) -> int:
+    """数出开头连续的全 ``<th>`` 行。
+
+    MinerU 输出的表格 HTML 带真实 ``<th>``，表头深度可以直接读而不必猜。只统计
+    整行都是表头单元格的情况，避免正文行里的行首 ``<th>`` 标签把深度撑大。
+    """
+    depth = 0
+    for row in rows:
+        if not row:
+            break
+        if not all(str(cell.get("tag") or "").lower() == "th" for cell in row):
+            break
+        depth += 1
+    return depth
 
 
 def _expand_spans(rows: list[list[dict[str, Any]]]) -> list[list[str]]:
@@ -1170,10 +1197,23 @@ def _build_header_bound_row_text(header_cells: list[str], row: list[str]) -> str
     return "; ".join(parts).strip() or " | ".join(fallback_parts).strip()
 
 
-def _mineru_column_header_paths(matrix: list[list[str]]) -> list[str]:
+def _mineru_column_header_paths(matrix: list[list[str]], header_depth: int = 0) -> list[str]:
     if not matrix:
         return []
-    header_depth = 1
+    return _column_header_paths_at_depth(matrix, resolve_table_header_depth(matrix, header_depth))
+
+
+def resolve_table_header_depth(matrix: list[list[str]], header_depth: int = 0) -> int:
+    """确定表头占几行：优先用 ``<th>`` 读出的值，没有才回落到启发式。
+
+    ``header_depth`` 为 0 表示源 HTML 没有 ``<th>`` 标记。启发式只能分辨 1 层和
+    2 层，读标记则没有这个上限。
+    """
+    if not matrix:
+        return 0
+    if header_depth > 0:
+        # 至少留一行正文，否则整表都会被当成表头。
+        return min(header_depth, max(1, len(matrix) - 1))
     if len(matrix) >= 2:
         first = [_clean_cell_text(cell) for cell in matrix[0]]
         second = [_clean_cell_text(cell) for cell in matrix[1]]
@@ -1184,8 +1224,11 @@ def _mineru_column_header_paths(matrix: list[list[str]]) -> list[str]:
             numeric_count = sum(1 for cell in second_values if re.fullmatch(r"[-+−]?\d+(?:[.,]\d+)?%?", cell))
             second_numeric_ratio = numeric_count / len(second_values)
         if first_has_merged_hint and second_values and second_numeric_ratio < 0.45:
-            header_depth = 2
+            return 2
+    return 1
 
+
+def _column_header_paths_at_depth(matrix: list[list[str]], header_depth: int) -> list[str]:
     header_rows = matrix[:header_depth]
     max_cols = max(len(row) for row in matrix)
     paths: list[str] = []
@@ -1211,6 +1254,7 @@ def _build_table_evidence_units(
     page_size: list[float],
     cell_bboxes: dict[tuple[int, int], list[float]] | None = None,
     row_bboxes: dict[int, list[float]] | None = None,
+    header_depth: int = 0,
 ) -> list[dict[str, Any]]:
     evidence_units: list[dict[str, Any]] = []
     geometry = visual_geometry(
@@ -1219,11 +1263,13 @@ def _build_table_evidence_units(
         page_size=page_size,
     )
     header_cells = matrix[0] if matrix else []
-    header_paths = _mineru_column_header_paths(matrix)
+    # 表头行数只解析一次，供列头路径与 is_header_row 共用，避免两者对多层表头判断不一致。
+    resolved_header_depth = resolve_table_header_depth(matrix, header_depth)
+    header_paths = _column_header_paths_at_depth(matrix, resolved_header_depth) if matrix else []
     cell_bboxes = cell_bboxes or {}
     row_bboxes = row_bboxes or {}
     for row_idx, row in enumerate(matrix, start=1):
-        is_header = row_idx == 1
+        is_header = row_idx <= resolved_header_depth
         cell_units: list[dict[str, Any]] = []
         for col_idx, cell_text in enumerate(row, start=1):
             header_path = header_paths[col_idx - 1] if col_idx - 1 < len(header_paths) else f"Column {col_idx}"

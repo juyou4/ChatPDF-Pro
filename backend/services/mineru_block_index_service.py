@@ -1041,7 +1041,12 @@ def _map_mineru_type(raw_type: str, item: dict[str, Any]) -> str:
         return "paragraph"
     if raw_type in {"table", "table_body"}:
         return "table"
-    if raw_type in {"table_caption", "image_caption", "chart_caption", "caption"}:
+    if raw_type in {
+        "table_caption", "image_caption", "chart_caption", "caption",
+        # 表格脚注（"* p<0.05"、单位换算、样本量说明）以前会落到兜底的 paragraph，
+        # 与正文同池检索。它属于表格的附属说明，按 caption 归到 ROLE_CAPTION。
+        "table_footnote",
+    }:
         return "caption"
     if raw_type in {"image", "figure", "chart", "image_body", "chart_body"}:
         return "figure"
