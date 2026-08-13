@@ -9773,6 +9773,13 @@ _PUBLIC_AGENT_DIAGNOSTIC_KEYS = {
     "compression_count",
     "compressed_context_chars",
     "final_transition_reason",
+    # v2 能力观测（不含密钥/原文）：激活工具、反思闸门、程序记忆、外部检索计数
+    "active_tools",
+    "evidence_reflection",
+    "procedural_memory_hint",
+    "procedural_memory_recorded",
+    "academic_search",
+    "web_search",
 }
 _PUBLIC_CITATION_KEYS = {
     "ref",
