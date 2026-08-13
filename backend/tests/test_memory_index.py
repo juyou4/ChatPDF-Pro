@@ -25,12 +25,22 @@ from services.memory_store import MemoryEntry
 
 
 def _fake_embed_fn(texts, api_key=None, **kwargs):
-    """模拟 embedding 函数，返回固定维度的确定性向量"""
-    # 基于文本哈希生成确定性向量，维度为 8
+    """模拟 embedding 函数，返回跨进程稳定的确定性向量。
+
+    早先用 ``hash(text)`` 播种——Python 字符串哈希带每进程随机盐，向量
+    只在单个进程内确定；相似度断言（要求严格为正）因此逐进程掷骰子，
+    是本文件间歇性失败的根源。改用内容哈希播种，并叠加公共正偏置，
+    使任意两条假向量的余弦必为正——与真实文本嵌入几乎总落在同一
+    半球的性质一致。
+    """
+    import hashlib
+
     result = []
     for text in texts:
-        np.random.seed(hash(text) % (2**31))
-        result.append(np.random.randn(8).astype(np.float32))
+        seed = int(hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:8], 16)
+        rng = np.random.RandomState(seed)
+        vector = rng.randn(8).astype(np.float32) + np.float32(3.0)
+        result.append(vector)
     return np.array(result, dtype=np.float32)
 
 
